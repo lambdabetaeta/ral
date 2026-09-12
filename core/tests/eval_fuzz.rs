@@ -2484,9 +2484,9 @@ fn interpolation_renders_unit_as_its_literal() {
     );
 }
 
-// ── §8 source circular detection ────────────────────────────────────────
+// ── §8 module circular detection ────────────────────────────────────────
 
-// (circular source requires files; tested via script tests)
+// (circular `use` requires files; tested via script tests)
 
 // ── §11.4  audit: capability-check recording ─────────────────────────────
 //
@@ -3226,7 +3226,6 @@ fn elaborator_never_wraps_exec_in_redirect() {
         for phrase in &top.phrases {
             let comp: &ral_core::ir::Comp = match &phrase.item {
                 ral_core::ir::Phrase::Define { comp, .. } | ral_core::ir::Phrase::Run(comp) => comp,
-                ral_core::ir::Phrase::Source { path } => path,
             };
             walk(comp, &mut saw);
         }

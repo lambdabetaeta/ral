@@ -465,8 +465,7 @@ called inside the block see the active overrides, even if defined elsewhere.
     let strings = use 'lib/strings.ral'
     $strings[trim] '  hello  '
 
-Bindings beginning with `_` stay private. `source 'config.ral'` evaluates into
-the current scope and includes every binding. Paths are relative to the
+Bindings beginning with `_` stay private. Paths are relative to the
 containing file; `RAL_PATH` adds search directories.
 
 ## 8  Failure and audit

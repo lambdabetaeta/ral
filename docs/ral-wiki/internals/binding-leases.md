@@ -1,7 +1,7 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
-anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS, renew_one]
+verified_at_commit: c1bb993b
+verified_at_date: 2026-09-12
+anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -37,13 +37,15 @@ per `ral` tool call. No wall clock anywhere: a quiet weekend ages nothing.
 Use is read off the program text, never off the running lookup path. When a
 run compiles, an exhaustive walk over its typed IR (`ir::referenced_names`)
 collects every variable occurrence and command-head name and renews those
-entries; the same harvest runs when `source`/`use` compile code mid-run, and
-a dispatch-time touch (`classify_command`'s `Resolution::Env` arm,
-`BindingLedger::renew_one`) catches command heads that resolve to a binding
-at runtime. Writing a name is also using it — a rebind restamps at the
-chokepoint. A run that fails to parse or typecheck ticks the clock but
-renews nothing: failed runs age your scratch. Listing (`/resources`, any
-enumeration) renews nothing either — enumeration is not observation.
+entries; the same harvest runs when `use` (or a host loader) compiles code
+mid-run. Nothing renews at dispatch: a bare head can only resolve to a
+binding the elaborator already saw — prelude, session, and lexical names are
+all in its bound set, and nothing installs into a running environment behind
+its back — so the harvest is complete by construction. Writing a name is
+also using it — a rebind restamps at the chokepoint. A run that fails to
+parse or typecheck ticks the clock but renews nothing: failed runs age your
+scratch. Listing (`/resources`, any enumeration) renews nothing either —
+enumeration is not observation.
 
 ## What pruning does — and deliberately does not do
 
@@ -94,14 +96,12 @@ or is rebound and the capture drops. That residency is exactly what the
 large-binding warning exists to head off — bind a file path, not five
 megabytes of captured text.
 
-One asymmetry is observable and blessed: **command-position use inside a
-running body renews; value-position use does not.** The dispatch-time touch
-is name-keyed and fires while a closure body runs (a thunk body shares the
-shell's host-local state by identity), so if `big` is a block invoked as
-`big args` inside hot `f`, every call renews the live entry — while `$big`
-resolves through the captured chain and touches nothing. A false renewal
-only ever lengthens a lease; the harvest over-approximates in the safe
-direction throughout.
+There is no command-position exception: `big args` inside hot `f` compiles
+to an application of the bound variable, exactly like `$big`, resolves
+through the captured chain, and touches nothing. What a stored body mentions
+is harvested once, on the run that compiled it. A false renewal only ever
+lengthens a lease; the harvest over-approximates in the safe direction
+throughout.
 
 ## Where it sits in the decay ladder
 

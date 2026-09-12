@@ -415,7 +415,7 @@ fn block_grant_cd_persists() {
     );
 }
 
-// ── (6b) run phrases, ambient routing, block-local `source` ─────────────
+// ── (6b) run phrases, ambient routing ────────────────────────────────────
 //
 // The Toplevel/Phrase/`Mode` machinery `run_phrases` (`evaluator.rs`) is
 // the run door's own route now — `compile`/`compile_and_typecheck` produce
@@ -533,69 +533,6 @@ fn let_wildcard_discards_the_rhs_and_prints_only_what_follows() {
         "done\n",
         "`let _ = echo secret` must not print `secret`"
     );
-}
-
-/// `source` inside a block scopes its `Define`s over the rest of the
-/// block — today's install-into-ambient-scope made structural, kept by
-/// `CompKind::Source`'s frame (§3.3).
-#[test]
-fn source_in_a_block_scopes_over_the_rest_of_the_block() {
-    let mut shell = fresh_shell();
-    let path = module_loader_fixture(
-        "top_level_vs_block_source_scope.ral",
-        "let scoped_from_file = 99",
-    );
-    let result = top_level(
-        &mut shell,
-        &format!(
-            "!{{ source '{}'; return $scoped_from_file }}",
-            path.display()
-        ),
-    );
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(
-        result.expect("sourced name must be visible to the rest of the block"),
-        Value::Int(99)
-    );
-}
-
-/// A block-local `source` leases nothing (`Mode::Local`): the run's own
-/// `Define`s are session leases, a nested `source`'s are not.
-#[test]
-fn block_local_source_leases_nothing() {
-    let mut shell = fresh_shell();
-    let before = ral_core::test_access::leased_binding_count(&shell);
-    let path = module_loader_fixture(
-        "top_level_vs_block_source_no_lease.ral",
-        "let leased_from_file = 1",
-    );
-    let _ = top_level(&mut shell, &format!("!{{ source '{}' }}", path.display()));
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(
-        ral_core::test_access::leased_binding_count(&shell),
-        before,
-        "a block-local `source` must not add to the binding-lease ledger"
-    );
-}
-
-/// `source` is a definition form: its own value is `()`, like a block
-/// ending in `let` (S12).
-#[test]
-fn source_is_unit() {
-    let mut shell = fresh_shell();
-    let path = module_loader_fixture("top_level_vs_block_source_unit.ral", "let sourced_n = 1");
-    let result = top_level(&mut shell, &format!("source '{}'", path.display()));
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(result.expect("source must succeed"), Value::Unit);
-}
-
-/// Write `contents` to a fresh temp `.ral` file under `name` and return its
-/// path — the `source`-form tests' fixture, mirroring `module_loader.rs`'s
-/// `write_module`.
-fn module_loader_fixture(name: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(name);
-    std::fs::write(&path, contents).expect("write temp module");
-    path
 }
 
 // ── (7) Sandbox parity ──────────────────────────────────────────────────

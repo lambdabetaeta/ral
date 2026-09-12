@@ -171,9 +171,6 @@ pub enum Phrase {
         comp: Arc<Comp>,
         schemes: Vec<(String, Arc<crate::typecheck::Scheme>)>,
     },
-    /// `source path` at the top level: run the file's phrases as the session's own.
-    /// `path : F String` — a `~` or `$CWD` in it is a hoist inside the computation.
-    Source { path: Arc<Comp> },
     /// Any other statement.
     Run(Arc<Comp>),
 }
@@ -200,7 +197,6 @@ fn walk_phrase<'a>(phrase: &'a Phrase, out: &mut Vec<&'a str>) {
             walk_pattern_defaults(pattern, out);
             walk_comp(comp, out);
         }
-        Phrase::Source { path } => walk_comp(path, out),
         Phrase::Run(comp) => walk_comp(comp, out),
     }
 }
@@ -321,10 +317,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             for (_name, m) in group.iter() {
                 walk_comp(m, out);
             }
-        }
-        CompKind::Source { path, rest } => {
-            walk_comp(path, out);
-            walk_comp(rest, out);
         }
         // No `Register` variant carries a name reference: the five
         // pseudo-variables are computed, and a `~`-path names no variable.
@@ -521,8 +513,6 @@ pub enum CompKind {
         group: Arc<[(String, Arc<Comp>)]>,
         index: usize,
     },
-    /// `source path` in a block: the file's definitions scope over `rest`; `path : F String`.
-    Source { path: Arc<Comp>, rest: Arc<Comp> },
     /// A read of the store, in computation position: what `$CWD` and `~/x` are.
     Observe(Register),
     /// `if V then M else N` with `V : Bool` and `M, N : C`; the chosen
@@ -795,10 +785,6 @@ mod tests {
             group: rec_group,
             index: 0,
         });
-        let source = Spanned::synthetic(CompKind::Source {
-            path: ret("r_source_path"),
-            rest: ret("r_source_rest"),
-        });
         let observe = Spanned::synthetic(CompKind::Observe(Register::Tilde(TildePath {
             user: None,
             suffix: None,
@@ -894,7 +880,6 @@ mod tests {
             Arc::new(index),
             Arc::new(interpolation),
             Arc::new(rec),
-            Arc::new(source),
             Arc::new(observe),
             Arc::new(if_),
             Arc::new(case),
@@ -941,8 +926,6 @@ mod tests {
             "r_interp_a",
             "r_interp_b",
             "r_rec_member",
-            "r_source_path",
-            "r_source_rest",
             "r_if_cond",
             "r_if_then",
             "r_if_else",

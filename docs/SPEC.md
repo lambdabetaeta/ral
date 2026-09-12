@@ -2040,7 +2040,7 @@ ral -s                     # read a program from standard input
 ral                        # start the REPL when stdin is a terminal
 ```
 
-A script is parsed and typechecked before it starts. Runtime-loaded files are parsed and typechecked when `source` or `use` reaches them.
+A script is parsed and typechecked before it starts. Runtime-loaded files are parsed and typechecked when `use` reaches them.
 
 ### 10.1. Program arguments and identity
 
@@ -2106,26 +2106,7 @@ Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, home 
 
 A function call carries its `cd` result back to its caller. A forced block is a local computation boundary: its bindings and working-directory changes are discarded when it finishes; only its value remains.
 
-### 10.3. Loading a file with `source`
-
-`source path` evaluates another ral file in the caller’s current scope:
-
-```ral
-source 'shared/settings.ral'
-echo $project_name
-```
-
-Bindings created by the file, including names beginning with `_`, become caller
-bindings, installed as each is reached. `source`’s own value is `()`: it is a
-definition form, not an expression that returns the file’s last value. If the
-file halts, the halt propagates to the caller, after the definitions that
-preceded it have already been installed.
-
-A relative path inside a script or module is resolved from the directory containing that file. A relative path at the REPL or in source with no file identity is resolved from `$CWD`.
-
-`source` is not transactional, the same law §5.6 states for a top-level run. If a loaded file creates bindings and later fails, the earlier changes have already happened. The failure keeps its original status and is reported with a `source:` prefix. Its diagnostic points into the loaded file.
-
-### 10.4. Importing a module with `use`
+### 10.3. Importing a module with `use`
 
 `use path` evaluates a file in a fresh top-level scope and returns its public bindings as a map:
 
@@ -2146,11 +2127,9 @@ The module’s final expression is evaluated, but `use` returns the binding map 
 
 `use` first resolves a path relative to the containing file, or relative to `$CWD` when there is no containing file. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
 
-`source` does not search `RAL_PATH`. It always treats its argument as a file path.
+### 10.4. Module freshness, cycles, and errors
 
-### 10.5. Module freshness, cycles, and errors
-
-ral does not cache loaded modules. Every `source` and every `use` reads, compiles, and evaluates the file again:
+ral does not cache loaded modules. Every `use` reads, compiles, and evaluates the file again:
 
 ```ral
 let first = use 'config.ral'
@@ -2168,9 +2147,9 @@ use: circular dependency: a.ral -> b.ral -> a.ral
 
 The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
 
-Both loaders check filesystem read authority before reading. A denied load fails before the module body runs. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `source:` or `use:`.
+`use` checks filesystem read authority before reading. A denied load fails before the module body runs. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `use:`.
 
-### 10.6. Persistent sessions
+### 10.5. Persistent sessions
 
 A batch invocation owns one fresh shell and ends with the process. A REPL or embedding host may submit many top-level runs to one session.
 
@@ -2851,10 +2830,11 @@ ambient root, rather than flattened into one composite policy — the ceiling
 they form is whatever the ordinary per-check fold of that stack decides. Later
 inline grants may narrow that ceiling but cannot widen it.
 
-`source 'profile.ral'` instead returns the profile’s value, which can be used dynamically:
+`use 'profile.ral'` instead returns the file’s bindings as a map, so a profile computed inline can feed `grant` directly — with `profile.ral` defining `let policy = [...]`:
 
 ```ral
-grant !{source 'profile.ral'} {
+let p = use 'profile.ral'
+grant $p[policy] {
     …
 }
 ```
@@ -3568,7 +3548,7 @@ JSON value per line.
 ### 14.6. Failure, session control, and concurrency
 
 The core session family includes `fail`, `exit` and `quit`, `cd`, `alias` and
-`unalias`, `source` and `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
+`unalias`, `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
 `reset`, `help`, and `explain`. All of them are builtins except `echo`, which is a base
 handler: it takes an argument list, writes each argument's text conversion
 separated by single spaces, and ends with one newline.
@@ -4820,10 +4800,7 @@ is Levy's `rec f. M`.
 A `Define` at the top level — `let x = v` outside any block — extends the
 *session* environment, not a frame's: it is installed as it is reached, so a
 later top-level phrase, or a `use` inside one, sees it, and a run that halts
-has installed exactly the `Define`s that ran before the halt. `source` is
-this same form read from a file: its own value is `()`, and its `Define`s
-scope over whatever follows it, in the file or, at the top level, in the
-caller (§10.3).
+has installed exactly the `Define`s that ran before the halt.
 
 The stack is capped: a rule that would push a frame first checks `|κ| <
 stack_limit` (`session.stack_limit`, default 100 000, the `--recursion-limit` /

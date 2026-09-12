@@ -114,7 +114,7 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx) -> Comp {
 }
 
 /// `annotate_demand`, but for a position that reads its child's *value* —
-/// a `Bind`/`Define`/`Source` RHS, or the toplevel's own tail `Run` — under
+/// a `Bind`/`Define` RHS, or the toplevel's own tail `Run` — under
 /// `demand`, so that S3's η-expansion (`eta_expand_arrow`) can apply after
 /// the ordinary rebuild, keyed by the *original* `rhs`'s address in
 /// `ctx.rhs_arrow_arity`.  `Bind` never generalises a scheme — that lives on
@@ -132,8 +132,8 @@ fn annotate_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool, demand: Demand) 
     }
 }
 
-/// [`annotate_rhs`] at `Demand::Value` — a `Bind`/`Define`/`Source` RHS
-/// bound to a name, or the toplevel's own tail `Run`.
+/// [`annotate_rhs`] at `Demand::Value` — a `Bind`/`Define` RHS bound to a
+/// name, or the toplevel's own tail `Run`.
 fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
     annotate_rhs(rhs, ctx, eta, Demand::Value)
 }
@@ -188,13 +188,6 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
             let item = CompKind::Bind {
                 comp: annotate_rhs(rhs, ctx, eta, rhs_demand),
                 pattern: Arc::new(annotate_pattern(pattern, ctx)),
-                rest: Arc::new(annotate_demand(rest, ctx, eta, demand)),
-            };
-            return Spanned::with_span(comp.span, item);
-        }
-        CompKind::Source { path, rest } => {
-            let item = CompKind::Source {
-                path: annotate_rhs(path, ctx, eta, Demand::Value),
                 rest: Arc::new(annotate_demand(rest, ctx, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
@@ -343,7 +336,6 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         CompKind::Capture(_)
         | CompKind::Decode(_)
         | CompKind::Bind { .. }
-        | CompKind::Source { .. }
         | CompKind::If { .. }
         | CompKind::Case { .. }
         | CompKind::Try { .. }
@@ -558,8 +550,8 @@ fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
 }
 
 /// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
-/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS and a
-/// `Source`'s path are read at `Value` demand; every `Run`, tail included,
+/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS is read
+/// at `Value` demand; every `Run`, tail included,
 /// is `Demand::Discard` — a `Run`'s bytes are never captured into its own
 /// reported value, only its arrow arity read for η-expansion.  `schemes`,
 /// parallel to `top.phrases`, is
@@ -586,9 +578,6 @@ pub(super) fn annotate_toplevel(
                         .into_iter()
                         .map(|(name, scheme)| (name, Arc::new(scheme)))
                         .collect(),
-                },
-                Phrase::Source { path } => Phrase::Source {
-                    path: annotate_value_rhs(path, ctx, true),
                 },
                 // The tail's value is reported (η-expanded if it resolved
                 // to `Fun`), but never byte-captured: nothing downstream

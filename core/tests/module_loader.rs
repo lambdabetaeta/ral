@@ -1,17 +1,16 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Behaviour of the `use` / `source` module loader.
+//! Behaviour of the `use` module loader.
 //!
-//! Both verbs route through `evaluate_source`, the shared guarded
-//! parse + elaborate + evaluate core; they differ only in scope and
-//! return shape.  These tests pin the observable contract at the public
-//! evaluator API:
+//! `use` routes through `evaluate_source`, the shared guarded parse +
+//! elaborate + evaluate core.  These tests pin the observable contract at
+//! the public evaluator API:
 //!
-//! - a file that loads itself is rejected as a circular dependency, for
-//!   both verbs — nothing else keeps re-evaluation terminating.
-//! - a module's failure reaches the caller with its own status, named once
-//!   by the verb that loaded it.
-//! - `use` projects the loaded scope into a Map; `source` leaks the
+//! - a file that loads itself is rejected as a circular dependency —
+//!   nothing else keeps re-evaluation terminating.
+//! - a module's failure reaches the caller with its own status, named
+//!   once by the `use:` prefix.
+//! - `use` projects the loaded scope into a Map without leaking the
 //!   file's bindings into the caller's scope.
 //!
 //! The harness mirrors `top_level_vs_block.rs`: bootstrap a `Shell` with
@@ -108,64 +107,24 @@ fn use_self_reference_is_a_cycle() {
     std::fs::remove_file(&path).ok();
 }
 
-/// A module that `source`s itself is likewise a cycle — both verbs share
-/// the same guard in `evaluate_source`.
-#[test]
-fn source_self_reference_is_a_cycle() {
-    let path = write_module("ral_source_cycle.ral", "return ()\n");
-    let p = path.to_string_lossy().into_owned();
-    std::fs::write(&path, format!("source '{p}'\n")).unwrap();
-
-    let mut shell = fresh_shell();
-    let err = top_level(&mut shell, &format!("source '{p}'")).unwrap_err();
-    match err {
-        Break::Error(e) => assert!(
-            e.message.contains("circular dependency"),
-            "expected circular dependency, got: {}",
-            e.message
-        ),
-        other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
-    }
-
-    std::fs::remove_file(&path).ok();
-}
-
 // ── Failure propagation ─────────────────────────────────────────────────
 
 /// The loader names itself on a module's failure without rewriting it: the
-/// status the module chose survives, and two nested loads do not stack the
-/// prefix.  Re-signalling (`sig(format!("source: {e}"))`) would flatten the
-/// 7 to a 1 and read `source: source: boom`.
+/// status the module chose survives, tagged once with the `use:` prefix.
 #[test]
-fn a_sourced_failure_keeps_its_status_and_is_tagged_once() {
+fn a_used_failure_keeps_its_status_and_is_tagged_once() {
     let inner = write_module("ral_fail_inner.ral", "fail [status: 7, message: 'boom']\n");
     let i = inner.to_string_lossy().into_owned();
-    let outer = write_module("ral_fail_outer.ral", &format!("source '{i}'\n"));
-    let o = outer.to_string_lossy().into_owned();
 
     let mut shell = fresh_shell();
-    let e = match top_level(&mut shell, &format!("source '{o}'")) {
-        Err(Break::Error(e)) => e,
-        other => panic!("expected the module's failure, got {other:?}"),
-    };
-    assert_eq!(e.status, Status::Code(7), "the module's status survives");
-    assert_eq!(e.message, "source: boom");
-    assert_eq!(
-        e.message.matches("source: ").count(),
-        1,
-        "two nested loads must not stack the prefix"
-    );
-
-    // `use` tags with its own verb, from the same guard.
     let e = match top_level(&mut shell, &format!("use '{i}'")) {
         Err(Break::Error(e)) => e,
         other => panic!("expected the module's failure, got {other:?}"),
     };
-    assert_eq!(e.status, Status::Code(7));
+    assert_eq!(e.status, Status::Code(7), "the module's status survives");
     assert_eq!(e.message, "use: boom");
 
     std::fs::remove_file(&inner).ok();
-    std::fs::remove_file(&outer).ok();
 }
 
 // ── Scope / return semantics ────────────────────────────────────────────
@@ -187,51 +146,6 @@ fn use_returns_a_map_and_does_not_leak() {
         other => panic!("expected Map, got {other:?}"),
     }
     assert!(shell.scope_lookup("x").is_none(), "`use` must not leak `x`");
-
-    std::fs::remove_file(&path).ok();
-}
-
-/// `source` leaks the file's bindings into the caller's scope.
-#[test]
-fn source_leaks_bindings_into_caller_scope() {
-    let path = write_module("ral_source_leak.ral", "let leaked = 5\n");
-    let p = path.to_string_lossy();
-    let mut shell = fresh_shell();
-
-    top_level(&mut shell, &format!("source '{p}'")).expect("source");
-    assert_eq!(
-        shell.scope_lookup("leaked"),
-        Some(&Value::Int(5)),
-        "`source` must leak `leaked` into the caller's scope"
-    );
-
-    std::fs::remove_file(&path).ok();
-}
-
-/// A name a `source` installs is unknown to the check of the very run that
-/// sources it, so its call is typed as an external command and the byte route
-/// that implies is a promise the run then falsifies.  Both places that promise
-/// is cashed — a capture and a pipeline's yield — must say so, never assume it.
-#[test]
-fn calling_a_name_the_same_run_sources_is_refused_not_assumed() {
-    let path = write_module("ral_source_then_call.ral", "let sourced-answer = { 42 }\n");
-    let p = path.to_string_lossy();
-
-    for call in [
-        "let got = sourced-answer",
-        "let got = echo hi | sourced-answer",
-    ] {
-        let mut shell = fresh_shell();
-        let err = match top_level(&mut shell, &format!("source '{p}'\n{call}")) {
-            Err(Break::Error(e)) => e,
-            other => panic!("expected a runtime error from {call:?}, got {other:?}"),
-        };
-        assert!(
-            err.message.contains("returned Int"),
-            "the broken byte promise must name what came back instead: {}",
-            err.message
-        );
-    }
 
     std::fs::remove_file(&path).ok();
 }
@@ -362,7 +276,7 @@ fn a_ral_path_find_still_answers_to_the_fs_read_grant() {
 
 // ── Cross-source diagnostics ─────────────────────────────────────────────
 
-/// A runtime error raised inside a `source`d module renders its caret into
+/// A runtime error raised inside a `use`d module renders its caret into
 /// the module's own bytes, not the top-level script's.
 ///
 /// The error's location carries the module's source identity; the renderer
@@ -371,18 +285,18 @@ fn a_ral_path_find_still_answers_to_the_fs_read_grant() {
 /// caret drawn against the top-level text (the dead-guard regression) would
 /// land at unrelated bytes — this test pins that it lands in the module.
 #[test]
-fn sourced_module_runtime_error_points_into_module() {
+fn used_module_runtime_error_points_into_module() {
     // The error is on line 3 of the module: a runtime division by zero,
     // which carries a source location (unlike a bare `fail`).  Line 3 has
-    // no counterpart in the one-line top-level run that sources it.
+    // no counterpart in the one-line top-level run that loads it.
     let path = write_module(
-        "ral_source_runtime_err.ral",
+        "ral_use_runtime_err.ral",
         "let a = 1\nlet z = 0\nreturn $[$a / $z]\n",
     );
     let p = path.to_string_lossy().into_owned();
     let mut shell = fresh_shell();
 
-    let err = match top_level(&mut shell, &format!("source '{p}'")) {
+    let err = match top_level(&mut shell, &format!("use '{p}'")) {
         Err(Break::Error(e)) => e,
         other => panic!("expected a runtime error from the module, got {other:?}"),
     };
@@ -394,7 +308,7 @@ fn sourced_module_runtime_error_points_into_module() {
 
     let rendered = diagnostic::format_runtime_error_auto(shell.sources(), &err, None);
     assert!(
-        rendered.contains("ral_source_runtime_err.ral"),
+        rendered.contains("ral_use_runtime_err.ral"),
         "the caret must be drawn against the module's source:\n{rendered}"
     );
     assert!(
@@ -403,53 +317,21 @@ fn sourced_module_runtime_error_points_into_module() {
     );
     // The caret must land on the module's failing line — line 3, where the
     // division lives. We pin it via the rendered location header
-    // (`…ral_source_runtime_err.ral:3:…`) rather than the snippet text, which
+    // (`…ral_use_runtime_err.ral:3:…`) rather than the snippet text, which
     // ariadne lays out from the span and is sensitive to caret width.
     assert!(
-        rendered.contains("ral_source_runtime_err.ral:3"),
+        rendered.contains("ral_use_runtime_err.ral:3"),
         "the caret must point at the module's failing line (line 3):\n{rendered}"
     );
 
     std::fs::remove_file(&path).ok();
 }
 
-// ── `Phrase::Source`/`Ran` semantics ─────────────────────────────────────
+// ── `Ran` semantics ────────────────────────────────────────────────────
 //
 // `run_phrases`, `Ran`, and `Mode` (`evaluator.rs`) are the run door's own
-// route for `source`/`use` now; `evaluate_source`, the single-`Comp` path
-// the rest of this file pins, still serves every other loader (rc, plugin,
-// capability).
-
-/// A `source`d file that fails partway keeps the `Define`s it made before
-/// the failure — `Ran::env` threads them even though `Ran::outcome` is the
-/// file's own error (S12: `source` is not transactional) — and that halt
-/// halts the run that sourced it, with the same status.
-#[test]
-fn a_sourced_failure_keeps_the_defines_before_it() {
-    let path = write_module(
-        "ral_source_partial_defines.ral",
-        "let before_fail = 1\nfail [status: 3, message: 'boom']\nlet after_fail = 2\n",
-    );
-    let p = path.to_string_lossy().into_owned();
-    let mut shell = fresh_shell();
-
-    let e = match top_level(&mut shell, &format!("source '{p}'")) {
-        Err(Break::Error(e)) => e,
-        other => panic!("expected the module's failure, got {other:?}"),
-    };
-    assert_eq!(e.status, Status::Code(3));
-    assert_eq!(
-        shell.scope_lookup("before_fail"),
-        Some(&Value::Int(1)),
-        "a `Define` before the file's halt must still be threaded into the caller"
-    );
-    assert!(
-        shell.scope_lookup("after_fail").is_none(),
-        "a `Define` after the file's halt never ran"
-    );
-
-    std::fs::remove_file(&path).ok();
-}
+// route for `use` now; `evaluate_source`, the single-`Comp` path the rest of
+// this file pins, still serves every other loader (rc, plugin, capability).
 
 /// `use` runs the module under the session as extended by this run's
 /// earlier `Define`s — not under the caller's block-local `let`s — and

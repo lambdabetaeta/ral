@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -311,9 +311,9 @@ propagation, through the one constructor `captured_string`, which builds
 — with the captured node's span on both the bind and the decode, so no name
 is resolved and the binder is invisible where the checker composes them
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
-A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`/
-`Phrase::Source`'s right-hand side, each arm of an `If`, `Try`, or
-`Case`, and the body of a force of a syntactic thunk.
+A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`'s
+right-hand side, each arm of an `If`, `Try`, or `Case`, and the body of a
+force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
 `annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
 decides how a join arm is rebuilt; `Wrap` is the subsumption instance, wrapping

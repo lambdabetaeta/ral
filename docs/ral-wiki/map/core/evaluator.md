@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -16,7 +16,7 @@ crate-private.** Two reach outside the module:
   `Closure { comp, env }` over the empty stack and step until it is empty.
   `run_phrases` (`evaluator.rs`) is the phrase-level verb a tool call, a
   REPL run, or a script line settles through: it threads a `Toplevel`'s
-  `Phrase::{Define, Source, Run}` sequence over a local `E` starting from
+  `Phrase::{Define, Run}` sequence over a local `E` starting from
   `env`, running each phrase as its own closed machine, and — under
   `Mode::Session` alone — writing each landed `Define` straight into
   `shell.env` as it lands, not as a post-run install

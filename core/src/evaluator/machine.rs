@@ -69,11 +69,6 @@ enum Frame {
         buf: io::ByteBuffer,
         span: Option<Span>,
     },
-    Source {
-        rest: Arc<Comp>,
-        env: Env,
-        span: Option<Span>,
-    },
     Redirect(Box<RedirectState>),
     Unmask {
         frame: Box<HandlerFrame>,
@@ -698,24 +693,6 @@ impl Machine {
                 }
             }
 
-            CompKind::Source { path, rest } => 'arm: {
-                if let Err(b) = crate::process::check(mooring) {
-                    break 'arm Focus::Halt(b);
-                }
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
-                }
-                self.push(Frame::Source {
-                    rest: Arc::clone(rest),
-                    env: env.clone(),
-                    span: comp.span,
-                });
-                Focus::Eval(Closure {
-                    comp: Arc::clone(path),
-                    env,
-                })
-            }
-
             CompKind::Redirect { body, redirects } => 'arm: {
                 let redirs = match close_redirects(redirects, &env) {
                     Ok(r) => r,
@@ -1008,44 +985,6 @@ impl Machine {
                 Focus::Return(Terminal::Value(Value::Bytes(bytes)))
             }
 
-            Frame::Source { rest, env, span } => {
-                let v = match as_value(t) {
-                    Ok(v) => v,
-                    Err(b) => return Focus::Halt(stamp(b, span)),
-                };
-                let Value::String(p) = v else {
-                    return Focus::Halt(stamp(
-                        Break::Error(
-                            Error::new(
-                                format!("source: expected String, got {}", v.type_name()),
-                                1,
-                            )
-                            .with_hint(
-                                "the path to `source` must be a computation of type F String",
-                            ),
-                        ),
-                        span,
-                    ));
-                };
-                match crate::builtins::modules::source(
-                    &p,
-                    env,
-                    super::Mode::Local,
-                    span,
-                    mooring,
-                    shell,
-                ) {
-                    Ok(ran) => match ran.outcome {
-                        Ok(_) => Focus::Eval(Closure {
-                            comp: rest,
-                            env: ran.env,
-                        }),
-                        Err(s) => Focus::Halt(s),
-                    },
-                    Err(b) => Focus::Halt(stamp(b, span)),
-                }
-            }
-
             Frame::Redirect(state) => {
                 let mut state = *state;
                 state.tear_down(shell);
@@ -1131,7 +1070,7 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Apply { .. } | Frame::Source { .. } | Frame::Cleanup { .. } => Focus::Halt(s),
+            Frame::Apply { .. } | Frame::Cleanup { .. } => Focus::Halt(s),
 
             Frame::Redirect(state) => {
                 let mut state = *state;
@@ -1194,7 +1133,7 @@ impl Frame {
     /// `Redirect` as its own rule; `Unmask` restores; `Audit`
     /// `audit.close(scope)` then `set_capture(saved)`, discarding the trail
     /// no one is left to read; `Within` applies its undo; `Grant` pops.
-    /// `Apply`, `Source`, `Try`, `Guard`, `Cleanup` do nothing.
+    /// `Apply`, `Try`, `Guard`, `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::To { prev_stdout, .. }
@@ -1213,11 +1152,7 @@ impl Frame {
             Self::Grant => {
                 shell.context.grants.pop();
             }
-            Self::Apply { .. }
-            | Self::Source { .. }
-            | Self::Try { .. }
-            | Self::Guard { .. }
-            | Self::Cleanup { .. } => {}
+            Self::Apply { .. } | Self::Try { .. } | Self::Guard { .. } | Self::Cleanup { .. } => {}
         }
     }
 }
@@ -1356,10 +1291,6 @@ pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding for the sourced-file-halt test"
-)]
 mod tests {
     use super::*;
     use crate::evaluator::with_capture;
@@ -1413,7 +1344,6 @@ mod tests {
                     env = pattern::bind_pattern(pattern, &v, &[], env, mooring, shell)?;
                     value = Ok(Value::Unit);
                 }
-                Phrase::Source { .. } => unreachable!("no test source uses top-level `source`"),
             }
         }
         shell.env = env;
@@ -1560,25 +1490,6 @@ mod tests {
             matches!(out, Value::Bool(true)),
             "expected true, got {out:?}"
         );
-    }
-
-    /// A `source`d file's halt halts the block that sourced it.
-    #[test]
-    fn sourced_files_halt_halts_the_block() {
-        let dir = std::env::temp_dir().join(format!("ral-machine-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("halts.ral");
-        std::fs::write(&path, "let before = 1\nexit 9\n").expect("write");
-        let mut shell = new_shell();
-        // A block-local `source` (as opposed to a top-level phrase) so the
-        // program elaborates through `CompKind::Source`/`Frame::Source`
-        // rather than `Phrase::Source`, which `run_phrases` — not the
-        // machine — owns.
-        let src = format!("!{{ source '{}'; return 1 }}", path.display());
-        let out = run(&src, &mut shell);
-        assert!(out.is_err(), "the sourced file's exit must halt the block");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     /// The stack cap: its error text, and a refused push leaves

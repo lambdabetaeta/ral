@@ -1,7 +1,7 @@
 //! A runtime error says where it happened, even when the value that raised
 //! it was compiled by an earlier run.
 //!
-//! An alias, a `source`d function, a lambda bound at the prompt: each is a
+//! An alias, a `use`d function, a lambda bound at the prompt: each is a
 //! live value in the next run, carrying spans the run before it minted.  The
 //! source registry only grows, so those spans still resolve — and the caret
 //! is drawn wherever they point, which is the whole answer when the text is
@@ -59,11 +59,11 @@ fn an_rc_alias_faults_against_the_rc_file() {
     );
 }
 
-/// A `source`d file's function, called at the prompt, names that file — not
+/// A `use`d file's function, called at the prompt, names that file — not
 /// the prompt line, and not nothing.
 #[test]
-fn a_sourced_function_faults_against_its_own_file() {
-    let dir = common::fresh_tmp_path("ral_sourced_fault", "d");
+fn a_used_function_faults_against_its_own_file() {
+    let dir = common::fresh_tmp_path("ral_used_fault", "d");
     std::fs::create_dir_all(&dir).unwrap();
     let module = dir.join("mod.ral");
     std::fs::write(&module, "let boom = { |x| $undefined_name }\n").unwrap();
@@ -71,12 +71,12 @@ fn a_sourced_function_faults_against_its_own_file() {
     let stderr = repl_stderr(
         &dir,
         &["--norc"],
-        &format!("source '{}'\n$boom 1\n", module.display()),
+        &format!("let m = use '{}'\n$m[boom] 1\n", module.display()),
     );
     std::fs::remove_dir_all(&dir).ok();
     assert!(
         stderr.contains("mod.ral:1:") && stderr.contains("$undefined_name }"),
-        "the caret must name the sourced file; stderr was:\n{stderr}"
+        "the caret must name the loaded file; stderr was:\n{stderr}"
     );
 }
 

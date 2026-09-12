@@ -1,36 +1,32 @@
-//! `source` and `use` — load and evaluate `.ral` files.
+//! `use` — load and evaluate a `.ral` module.
 //!
-//! Both go through [`evaluate_source`] and differ only in scope and path
-//! policy: `source` runs the file in the caller's scope and yields its
-//! terminal value; `use` runs it under the session environment (S7) —
-//! every `Define` of the current run already landed, none of the caller's
-//! own block-local names — and returns its bindings as a Map.  Nothing is
-//! cached, so the cycle and depth guards in [`evaluate_checked`] are what
-//! keep repeated loads terminating.
+//! `use` (§10.4) runs a file under the session environment — every `Define`
+//! of the current run already landed, none of the caller's own block-local
+//! names — and returns its bindings as a Map.  It is [`builtin_use`], below,
+//! which drives [`module_phrases`]'s own cycle-detection stack and depth
+//! guard: nothing is cached, so those are what keep repeated loads
+//! terminating.
 //!
-//! Every runtime source load funnels through here: the plugin loader and
+//! [`evaluate_checked`]/[`evaluate_source`] are the sibling door for every
+//! *other* runtime load: the plugin loader and
 //! [`crate::capability::load_capabilities_from_str`] call
 //! [`evaluate_source`]; the REPL's rc loader, which renders type errors
 //! itself, calls [`evaluate_checked`] with an already-checked `Toplevel`.
-//! `source`/`use` themselves (§3.3) are [`builtin_source`]/[`builtin_use`],
-//! below — `source` is a binder form now (S2), so [`evaluate_checked`] and
-//! friends serve every *other* loader (rc, plugin, capability) alone.
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
-use crate::source::Span;
-use crate::types::{Break, CommandOrigin, Env, Mooring, Settled, Shell, Value, sig};
+use crate::types::{Break, Env, Mooring, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
 /// Evaluate an already-checked `top` under the cycle-detection stack and
-/// depth guard, registering `source` under `virtual_path`, in the caller's
-/// own scope.
+/// depth guard, registering its `source` text under `virtual_path`, in the
+/// caller's own scope.
 ///
 /// Errors come back raw; each caller prefixes its own surface name
-/// (`source:`, `use:`, `capability file <path>:`).
+/// (`use:`, `capability file <path>:`).
 ///
 /// # Errors
 /// Returns `Err` if `virtual_path` is already on the module stack (a
@@ -67,12 +63,12 @@ pub fn evaluate_checked(
     let ran =
         crate::evaluator::run_phrases(&top.phrases, shell.env.clone(), Mode::Local, mooring, shell);
     shell.context.modules.stack.pop();
-    // Unlike a nested `source`/`use`, this loader's whole point is to install
-    // its defines into the running session — rc, a plugin, a capability
-    // file, exarch's agent library — so its own `Ran::env` lands in
-    // `shell.env` here, the one write-back `Mode::Local` itself skips (no
-    // lease, no PATH-shadow check: this is host-installed library code, not
-    // an interactive `let`).
+    // Unlike a nested `use`, this loader's whole point is to install its
+    // defines into the running session — rc, a plugin, a capability file,
+    // exarch's agent library — so its own `Ran::env` lands in `shell.env`
+    // here, the one write-back `Mode::Local` itself skips (no lease, no
+    // PATH-shadow check: this is host-installed library code, not an
+    // interactive `let`).
     shell.env = ran.env;
     ran.outcome
 }
@@ -95,51 +91,11 @@ pub fn evaluate_source(
     evaluate_checked(mooring, shell, &top, source, virtual_path)
 }
 
-// ── Phrases (§3.3) ──────────────────────────────────────────────────────
-
-/// Load `path`'s text, compile it to a [`Toplevel`], and run its phrases
-/// under `mode` — the `source` half of §3.3, mirroring [`evaluate_source`]'s
-/// resolution but over phrases rather than one `Comp`.
-///
-/// # Errors
-/// A load refusal — cycle, depth limit, read failure, compile failure —
-/// stops before any phrase runs; see [`source_phrases`].
-pub(crate) fn source(
-    path: &str,
-    env: Env,
-    mode: Mode,
-    span: Option<Span>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Ran> {
-    let resolved = resolve_relative_to_current_script(path, shell);
-    let abs_path = shell
-        .resolve(&resolved.to_string_lossy())
-        .canonicalise_strict()
-        .map_or_else(
-            |_| resolved.to_string_lossy().into_owned(),
-            |p| p.to_string_lossy().into_owned(),
-        );
-    let text = read_and_normalize(&abs_path, "source", shell)?;
-    let top =
-        compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
-    let load = ModuleLoad {
-        top: &top,
-        virtual_path: &abs_path,
-        source_text: &text,
-        span,
-    };
-    let ran = source_phrases(load, env, mode, mooring, shell)
-        .map_err(|e| tag_loader_error("source", e))?;
-    Ok(Ran {
-        outcome: ran.outcome.map_err(|e| tag_loader_error("source", e)),
-        ..ran
-    })
-}
+// ── Phrases (§10.4) ─────────────────────────────────────────────────────
 
 /// Elaborate and typecheck `source_text` into a [`Toplevel`], seeded from
 /// the live session's schemes.  The `FileId` is peeked, not minted, on the
-/// same promise [`check_source`] relies on: [`source_phrases`]'s
+/// same promise [`check_source`] relies on: [`module_phrases`]'s
 /// `install_script_context` call, a moment later, is the one registration
 /// in between.  Also the binding-lease harvest seam, mirroring
 /// [`check_source`]: every name the file references counts as a real use.
@@ -168,26 +124,25 @@ fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) ->
     Ok(top)
 }
 
-/// Run `top`'s phrases under `mode`, guarded by the same cycle/depth checks
-/// and module-stack bookkeeping [`evaluate_checked`] applies; the call is
-/// recorded in the audit trail as a native's is
-/// ([`crate::evaluator::audit::frame_call`]), `span` standing in for the
-/// call site a form has no argument list to carry.
-///
-/// # Errors
-/// A circular dependency or a depth-limit refusal — before any phrase runs.
-/// A phrase that halts is `Ran::outcome`, not this `Err`: `source` is not
-/// transactional (S12), so every caller threads `Ran::env` before it
-/// propagates `Ran::outcome`.
+/// A compiled module ready to run: `use`'s own input to [`module_phrases`].
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleLoad<'a> {
     pub(crate) top: &'a Toplevel,
     pub(crate) virtual_path: &'a str,
     pub(crate) source_text: &'a str,
-    pub span: Option<Span>,
 }
 
-pub(crate) fn source_phrases(
+/// Run `load`'s phrases under `mode`, guarded by the same cycle/depth checks
+/// and module-stack bookkeeping [`evaluate_checked`] applies.  `use` is a
+/// native, so [`command_call::run_host_thunk`](crate::runtime::command_call)
+/// already records its own audit frame; this records nothing further.
+///
+/// # Errors
+/// A circular dependency or a depth-limit refusal — before any phrase runs.
+/// A phrase that halts is `Ran::outcome`, not this `Err`: a module is not
+/// transactional (`docs/SPEC.md` §5.6), so every caller threads `Ran::env`
+/// before it propagates `Ran::outcome`.
+pub(crate) fn module_phrases(
     load: ModuleLoad<'_>,
     env: Env,
     mode: Mode,
@@ -198,7 +153,6 @@ pub(crate) fn source_phrases(
         top,
         virtual_path,
         source_text,
-        span,
     } = load;
     let key = virtual_path.to_string();
     if shell.context.modules.stack.contains(&key) {
@@ -220,30 +174,13 @@ pub(crate) fn source_phrases(
         )));
     }
     shell.install_script_context(&key, source_text);
-    shell.local.audit.call_site = span;
     let frame = ModuleStackFrame::enter(shell, key);
-    let mut ran_slot = None;
-    let _ = crate::evaluator::audit::frame_call(
-        "source",
-        &[Value::String(virtual_path.to_string())],
-        CommandOrigin::Builtin,
-        mooring,
-        frame.shell,
-        |shell, _frame| {
-            let ran = crate::evaluator::run_phrases(&top.phrases, env, mode, mooring, shell);
-            let outcome = match &ran.outcome {
-                Ok(_) => Ok(Value::Unit),
-                Err(e) => Err(e.clone()),
-            };
-            ran_slot = Some(ran);
-            outcome
-        },
-    );
+    let ran = crate::evaluator::run_phrases(&top.phrases, env, mode, mooring, frame.shell);
     drop(frame);
-    Ok(ran_slot.expect("frame_call always invokes its body exactly once"))
+    Ok(ran)
 }
 
-/// Pops the module stack on `Drop`, panic included — the guard [`source_phrases`] promised.
+/// Pops the module stack on `Drop`, panic included — the guard [`module_phrases`] promised.
 struct ModuleStackFrame<'a> {
     shell: &'a mut Shell,
 }
@@ -289,36 +226,36 @@ fn check_source(
 }
 
 /// Read and normalise a module's text, located and authorised as one walk
-/// (`abs_path`, the path as the caller resolved it); `who` names the verb.
+/// (`abs_path`, the path as the caller resolved it).
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:module-load] `source`/`use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
+    reason = "[silent:module-load] `use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
-fn read_and_normalize(abs_path: &str, who: &str, shell: &mut Shell) -> Settled<String> {
+fn read_and_normalize(abs_path: &str, shell: &mut Shell) -> Settled<String> {
     let rp = shell.resolve(abs_path);
     let located = shell.locate(&rp, &crate::capability::FsOp::Read)?;
     let mut file = located.read().map_err(|e| {
         sig(match e.kind() {
-            std::io::ErrorKind::NotFound => format!("{who}: {abs_path}: not found"),
-            std::io::ErrorKind::PermissionDenied => format!("{who}: {abs_path}: permission denied"),
-            _ => format!("{who}: {abs_path}: {e}"),
+            std::io::ErrorKind::NotFound => format!("use: {abs_path}: not found"),
+            std::io::ErrorKind::PermissionDenied => format!("use: {abs_path}: permission denied"),
+            _ => format!("use: {abs_path}: {e}"),
         })
     })?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source)
-        .map_err(|e| sig(format!("{who}: {abs_path}: {e}")))?;
+        .map_err(|e| sig(format!("use: {abs_path}: {e}")))?;
     Ok(crate::source::normalize_source_text(source))
 }
 
-/// Prefix `who` onto a loader failure while keeping its status: a sourced
-/// `fail [status: 7]` must reach the caller's handler as 7, not the `1` a
-/// fresh `sig` imposes.  Idempotent, so `source` in `source` does not stack.
-fn tag_loader_error(who: &str, e: Break) -> Break {
+/// Prefix `use:` onto a loader failure while keeping its status: a `fail
+/// [status: 7]` inside a used module must reach the caller's handler as 7,
+/// not the `1` a fresh `sig` imposes.  Idempotent, so a nested `use` does not
+/// stack the prefix.
+fn tag_loader_error(e: Break) -> Break {
     match e {
         Break::Error(mut err) => {
-            let prefix = format!("{who}: ");
-            if !err.message.starts_with(&prefix) {
-                err.message = format!("{prefix}{}", err.message);
+            if !err.message.starts_with("use: ") {
+                err.message = format!("use: {}", err.message);
             }
             Break::Error(err)
         }
@@ -326,22 +263,7 @@ fn tag_loader_error(who: &str, e: Break) -> Break {
     }
 }
 
-/// `source` is a form, elaborated straight to `Phrase::Source`/`CompKind::Source`
-/// from a bare unbound `source path` — one argument, no redirects (S2).  Any
-/// other call shape reaches this table entry instead, which stays only for
-/// `help` and typing: a native has no lexical environment to extend, so it
-/// cannot itself define anything.
-pub(super) fn builtin_source(
-    _args: &[Value],
-    _mooring: &Mooring,
-    _shell: &mut Shell,
-) -> Settled<Value> {
-    Err(sig(
-        "`source` is a form, not a function: write `source path` as its own statement",
-    ))
-}
-
-/// `use` stays a native (§3.3, S7): it returns a map and binds nothing, so it
+/// `use` stays a native (§10.4, S7): it returns a map and binds nothing, so it
 /// needs only *an* environment to run the module's phrases under — the
 /// session environment, `Mode::Module`, never the caller's own block-local
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
@@ -349,7 +271,7 @@ pub(super) fn builtin_source(
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
-    // Unlike `source`, `use` falls back to a RAL_PATH search for a bare name.
+    // `use` falls back to a RAL_PATH search for a bare name.
     let abs_path = shell
         .resolve(&resolved.to_string_lossy())
         .canonicalise_strict()
@@ -357,23 +279,21 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
-    let source = read_and_normalize(&abs_path, "use", shell)?;
-    let top =
-        compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
+    let source = read_and_normalize(&abs_path, shell)?;
+    let top = compile_toplevel(&source, &abs_path, shell).map_err(tag_loader_error)?;
 
     let env = shell.env.clone();
     let load = ModuleLoad {
         top: &top,
         virtual_path: &abs_path,
         source_text: &source,
-        span: None,
     };
     // `Mode::Module` never writes `shell.env` (only `Session` does, §3.2),
     // so the module's own top-level names die with `env` here — no save or
     // restore needed to keep them from leaking into the caller.
-    let ran = source_phrases(load, env, Mode::Module, mooring, shell);
+    let ran = module_phrases(load, env, Mode::Module, mooring, shell);
 
-    let ran = ran.map_err(|e| tag_loader_error("use", e))?;
+    let ran = ran.map_err(tag_loader_error)?;
     ran.outcome
         .map(|_| {
             let bindings: Vec<(String, Value)> = ran
@@ -385,7 +305,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
                 .collect();
             Value::map(bindings)
         })
-        .map_err(|e| tag_loader_error("use", e))
+        .map_err(tag_loader_error)
 }
 
 /// Resolve `path` against the directory of the innermost load in flight —
@@ -403,61 +323,4 @@ fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::P
         String::as_str,
     );
     crate::path::resolve_relative_to_script(path, script)
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
-mod tests {
-    use super::*;
-
-    /// Write `contents` to a fresh temp `.ral` file and return its path —
-    /// the caller removes it; mirrors `core/tests/module_loader.rs`'s
-    /// `write_module` for these crate-internal, direct-API tests.
-    fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, contents).expect("write temp module");
-        path
-    }
-
-    /// [`source`] end to end: `compile_toplevel` through the real
-    /// `elaborate`/`typecheck`, `run_phrases` over the result.
-    #[test]
-    fn source_runs_a_files_defines_and_reports_unit() {
-        let path = write_temp("ral_w1d_source_ok.ral", "let sourced_ok = 5");
-        let p = path.to_string_lossy().into_owned();
-        let mut shell = Shell::default();
-        let env = shell.env.clone();
-        let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
-            .expect("a well-formed file must load");
-        assert!(
-            matches!(ran.outcome, Ok(Value::Unit)),
-            "`source`'s own value is Unit (S12)"
-        );
-        assert_eq!(ran.defined, vec!["sourced_ok".to_string()]);
-        assert_eq!(ran.env.get("sourced_ok"), Some(&Value::Int(5)));
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// A file that halts midway is `Ran::outcome`, not the door's `Err`
-    /// (S12): the `Define`s before the halt are still in `Ran::env`.
-    #[test]
-    fn source_halting_midway_keeps_the_defines_before_the_halt() {
-        let path = write_temp(
-            "ral_w1d_source_halt.ral",
-            "let sourced_before = 1\nexit 9\nlet sourced_after = 2",
-        );
-        let p = path.to_string_lossy().into_owned();
-        let mut shell = Shell::default();
-        let env = shell.env.clone();
-        let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
-            .expect("a load refusal is a different Err; the file itself loaded fine");
-        assert!(ran.outcome.is_err(), "the file's own halt is Ran::outcome");
-        assert_eq!(ran.defined, vec!["sourced_before".to_string()]);
-        assert_eq!(ran.env.get("sourced_before"), Some(&Value::Int(1)));
-        assert!(ran.env.get("sourced_after").is_none());
-        std::fs::remove_file(&path).ok();
-    }
 }

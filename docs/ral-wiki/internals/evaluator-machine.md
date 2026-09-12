@@ -1,6 +1,6 @@
 ---
-verified_at_commit: c8af3823
-verified_at_date: 2026-09-02
+verified_at_commit: c1bb993b
+verified_at_date: 2026-09-12
 anchors: [Machine, step_eval, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
@@ -23,7 +23,7 @@ the stack. A terminal has two shapes, `Terminal::Value(v)` and
 value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
 `Within`, `Grant`, `Try`) passes it through, a value-holed frame
-(`To`, `Capture`, `Source`, `Guard`, `Cleanup`, `Audit`) halts with the
+(`To`, `Capture`, `Guard`, `Cleanup`, `Audit`) halts with the
 bare-lambda error — unreachable for a checked program, since the checker
 η-expands every arrow-typed computation into a thunked λ (SPEC §17.8, S3).
 `Decode` has no frame: the kernel's `decode` takes a value, so it closes and
@@ -50,8 +50,8 @@ stamps the span of the node that pushed the frame.
 **Frames hold environments, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M
 returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
-scopes over `N` and nothing else whatever M did. `Apply`, `Source`,
-`Try` and `Guard` likewise carry the `Env` they resume under. `Cleanup` is
+scopes over `N` and nothing else whatever M did. `Apply`, `Try` and `Guard`
+likewise carry the `Env` they resume under. `Cleanup` is
 the kernel's `to _` with a settled rest: it drops the cleanup's value and
 resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
@@ -77,8 +77,8 @@ refused push leaks nothing; `push` itself cannot fail.
 name to the thunk of its own projection and runs the chosen member; a
 recursive reference forces its name, which re-enters `Rec` and re-extends
 from the outer environment. Bodies are never rewritten; a group of one is
-Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`,
-`Source` advance and β, so `let f = { !f }; !f` is interruptible.
+Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`
+advance and β, so `let f = { !f }; !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
 (`core/src/types/env.rs`) is three tiers — the language natives, the frozen
@@ -91,16 +91,13 @@ command dispatch and changed only by frames holding their own undo; it is
 never part of a closure ([[map/core/shell-state|shell-state]]).
 
 **The top level is a sequence of phrases** (`core/src/evaluator.rs`,
-`run_phrases`). A `Toplevel` is `Phrase::{Define, Source, Run}`; each phrase
+`run_phrases`). A `Toplevel` is `Phrase::{Define, Run}`; each phrase
 is a closed computation over the session environment `shell.env`, and a
 `Define` extends that environment *for every phrase after it, in this run
 and every later one* — installed as it lands, so a `use` in the next phrase
 sees it, and a run that halts has installed exactly the `Define`s that ran.
 A block is a right-nested `Bind` chain, `a; b` being `a to _. b`, so a `let`
-inside a block scopes over the rest of the block by structure. `source` is
-a form: `Phrase::Source` at the top level, `CompKind::Source { path, rest }`
-in a block, its `Define`s scoping over `rest`; a file that halts halts its
-caller after the definitions before the halt are installed. `run_phrases`
+inside a block scopes over the rest of the block by structure. `run_phrases`
 takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
 decides leases and the PATH-shadow check.
 

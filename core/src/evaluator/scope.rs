@@ -384,7 +384,7 @@ mod tests {
     /// the top of the run: `env` and `context` (cwd included) read exactly as
     /// they did before the run started, even though the panicking phrase's
     /// own `let` and `cd` ran first.  Only a panic restores this way — an
-    /// ordinary error leaves whatever `let`s landed before it (S12).
+    /// ordinary error leaves whatever `let`s landed before it (`docs/SPEC.md` §5.6).
     #[test]
     fn panic_mid_run_restores_the_pre_run_checkpoint() {
         let mut shell = Shell::new(crate::io::TerminalState::default());

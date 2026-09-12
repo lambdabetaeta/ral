@@ -66,8 +66,7 @@ pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell)
 
 /// Resolution plus head admission: `Err` is the grant refusing the head before
 /// any argument evaluates.  Grants govern exec alone, so the other arms pass
-/// unconditionally.  An `Env` hit also renews that name's binding lease, a cost
-/// dispatch can carry and the pure `Env::get` lookup cannot.
+/// unconditionally.
 pub(crate) fn classify_command(
     head: &CommandWord,
     env: &Env,
@@ -75,11 +74,6 @@ pub(crate) fn classify_command(
     shell: &mut Shell,
 ) -> Settled<Resolution> {
     let r = resolve_command_word(head, env, shell);
-    if let Resolution::Env(_) = &r
-        && let Some(name) = head.name().bare()
-    {
-        shell.local.bindings.renew_one(name);
-    }
     if let Resolution::External(id) = &r
         && !crate::capability::admits_head(&shell.context, id)
     {

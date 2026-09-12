@@ -2250,26 +2250,13 @@ return !{{length $hits}}"
         );
     }
 
-    /// Code loading is not turn-time data I/O: `source` and `use` read through
-    /// `std::fs` below the redirect frame, so they raise no io card.  Only the
-    /// loaded file's own effects would surface, and this one is pure bindings.
+    /// Code loading is not turn-time data I/O: `use` reads through `std::fs`
+    /// below the redirect frame, so it raises no io card.  Only the loaded
+    /// file's own effects would surface, and this one is pure bindings.
     #[test]
-    fn sourcing_a_ral_file_raises_no_io_card() {
+    fn using_a_ral_file_raises_no_io_card() {
         let mut shell = fresh_shell();
-        let (_dir, path) = scratch_file("cov-source", "lib.ral", "let answer = 42\n");
-
-        let (sr, source_records) = run_capturing(&mut shell, &format!("source '{path}'"));
-        assert_eq!(
-            sr.exit,
-            0,
-            "source must load the file; stderr was {:?}",
-            String::from_utf8_lossy(&sr.stderr)
-        );
-        assert!(
-            observations(&source_records).is_empty(),
-            "code loading is not data I/O — source raises no io card, got {:?}",
-            observations(&source_records)
-        );
+        let (_dir, path) = scratch_file("cov-use", "lib.ral", "let answer = 42\n");
 
         let (ur, use_records) = run_capturing(&mut shell, &format!("use '{path}'"));
         assert_eq!(

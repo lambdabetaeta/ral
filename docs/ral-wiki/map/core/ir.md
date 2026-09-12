@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -12,10 +12,10 @@ to the [[map/core/evaluator|evaluator]].
 
 A whole program is a `Toplevel { phrases: Vec<Spanned<Phrase>> }`: each
 `Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
-pattern binds), `Source` (a top-level `source path`), or `Run` (anything
-else) — runs in order, extending the session environment the next phrase
-sees. `Toplevel::referenced_names` is the phrase-level analogue of the
-`Comp`-level walk below, for the same lease ledger.
+pattern binds) or `Run` (anything else) — runs in order, extending the
+session environment the next phrase sees. `Toplevel::referenced_names` is
+the phrase-level analogue of the `Comp`-level walk below, for the same lease
+ledger.
 
 The two categories:
 

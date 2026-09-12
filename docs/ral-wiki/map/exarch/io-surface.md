@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
@@ -108,7 +108,7 @@ dispatch, builtins included.
   evaluation.
 
 Capability checks are different again. An *allowed* check stays off the rail:
-it is the wrong granularity — it over-fires on `source`/`use`/`exists`/
+it is the wrong granularity — it over-fires on `use`/`exists`/
 `list-dir` and under-fires on bundled coreutils' internal reads. A *denied*
 check is the exception: it is the highest-signal line in a provenance record,
 so a head admission reaches the rail whether or not a trail is open — see
@@ -264,9 +264,9 @@ frame:
   **no** ral helper does internal I/O and no suppression mechanism exists
   anywhere.
 
-The residual on the record: `source` / `use` read ral *code* via `read_to_string`
+The residual on the record: `use` reads ral *code* via `read_to_string`
 outside the redirect frame — code-loading, visible as its own statement, not
-turn-time data I/O — and surface nothing by design.
+turn-time data I/O — and surfaces nothing by design.
 
 ## Machine log
 

@@ -18,7 +18,7 @@ irreducibility:
 
 - **It reaches outside the value language** — a syscall or structured OS query
   (the filesystem family), or the shell's own runtime state a spawned process
-  could never touch (`cd`, the `spawn` family, `source` / `use`, `surface`,
+  could never touch (`cd`, the `spawn` family, `use`, `surface`,
   `warn`, `ask`). The query case is *a syscall bridge, not text parsing*: records and
   lists in place of a shell-out to `stat` / `ls` / `dirname` and a re-parse, so
   the bytes→text→structured round-trip never arises.
@@ -69,7 +69,7 @@ The core entries group by what they compute:
   message up. ral has no redirect pointing standard output at standard error,
   and this verb is what stands where the bash idiom did
   ([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
-- **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
+- **Session & terminal** — `cd` `cwd` `alias` / `unalias` `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probe `_ansi-ok`.
 

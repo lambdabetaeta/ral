@@ -12,8 +12,7 @@
 //!   * the RAL-owned **write** edge (stdout/append redirect — there is no
 //!     structured `write-file` builtin; cp/mkdir/mv/rm are bundled tools
 //!     and are *child-owned*, so they are not exercised here);
-//!   * **module loading** (`source` / `use`) of a `.ral` file outside the
-//!     read set;
+//!   * **module loading** (`use`) of a `.ral` file outside the read set;
 //!   * the **stdin (`<`)** and **stderr (`2>`)** redirect opens (the
 //!     `>` stdout case is already `grant_fs_write_denies_external_redirect`);
 //!   * the **pipeline helper transport** — a ral pipeline stage runs in a
@@ -172,45 +171,13 @@ fn grant_fs_write_denies_append_redirect() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ── 2. Module / source loading ───────────────────────────────────────────
+// ── 2. Module loading ─────────────────────────────────────────────────────
 //
-// `source <file>` and `use <file>` read the `.ral` text through
-// `modules::read_and_normalize` → `check_fs_read`.  A load of a file outside
-// the read set must fail at that gate, before the bytes are read or the
-// module body runs.  (The `RAL_PATH`-discovered path answers to the same
-// gate; `module_loader.rs` pins that leg, where the walk itself lives.)
-
-/// `source` of a `.ral` file outside the read set is denied at `check_fs_read`.
-/// The sourced file performs a side effect (a redirect into a writable temp)
-/// so that, if the gate were bypassed, the effect would be observable on
-/// disk; the assertion that the effect file is absent proves the body never
-/// ran.
-#[test]
-fn grant_fs_read_denies_source_outside_set() {
-    let dir = scratch("source");
-    let allowed = dir.join("allowed");
-    std::fs::create_dir_all(&allowed).unwrap();
-    let module = dir.join("mod.ral");
-    let witness = dir.join("witness.txt");
-    // If the module body ever runs it would write `witness.txt`; it must not.
-    std::fs::write(
-        &module,
-        format!("to-string 'ran' > '{}'\n", witness.display()),
-    )
-    .unwrap();
-    let script = format!(
-        "grant [fs: [read: ['{}'], write: ['{}']]] {{ source '{}' }}",
-        allowed.display(),
-        dir.display(),
-        module.display()
-    );
-    must_deny(&script);
-    assert!(
-        !witness.exists(),
-        "denied source must not run its body (no witness file)"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
+// `use <file>` reads the `.ral` text through `modules::read_and_normalize` →
+// `check_fs_read`.  A load of a file outside the read set must fail at that
+// gate, before the bytes are read or the module body runs.  (The
+// `RAL_PATH`-discovered path answers to the same gate; `module_loader.rs`
+// pins that leg, where the walk itself lives.)
 
 /// `use` of a `.ral` module outside the read set is denied at the same gate.
 #[test]
@@ -229,12 +196,12 @@ fn grant_fs_read_denies_use_outside_set() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Positive control for module loading: `source` of a file *inside* the read
+/// Positive control for module loading: `use` of a file *inside* the read
 /// set runs, and its body effect lands inside the write set.  This proves the
-/// denials above gate on the region, not on `source`/`use` per se.
+/// denial above gates on the region, not on `use` per se.
 #[test]
-fn grant_fs_read_allows_source_inside_set() {
-    let dir = scratch("sourceok");
+fn grant_fs_read_allows_use_inside_set() {
+    let dir = scratch("useok");
     let module = dir.join("mod.ral");
     let witness = dir.join("witness.txt");
     std::fs::write(
@@ -243,7 +210,7 @@ fn grant_fs_read_allows_source_inside_set() {
     )
     .unwrap();
     let script = format!(
-        "grant [fs: [read: ['{}'], write: ['{}']]] {{ source '{}' }}",
+        "grant [fs: [read: ['{}'], write: ['{}']]] {{ use '{}' }}",
         dir.display(),
         dir.display(),
         module.display()
@@ -252,7 +219,7 @@ fn grant_fs_read_allows_source_inside_set() {
     assert_eq!(
         std::fs::read_to_string(&witness).unwrap(),
         "ran",
-        "granted source body must run and its effect must land"
+        "granted use body must run and its effect must land"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

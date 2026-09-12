@@ -234,7 +234,7 @@ impl Source {
 
 /// Every source text the session has loaded, keyed by [`FileId`].
 ///
-/// The renderer resolves a span's id here, so a `source`d module's error
+/// The renderer resolves a span's id here, so a `use`d module's error
 /// draws its caret into the module's own bytes rather than the top-level
 /// script's.
 ///

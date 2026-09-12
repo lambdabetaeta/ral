@@ -113,8 +113,8 @@ pub struct SessionState {
     pub(crate) sources: SourceDb,
     /// The current run's root source.  [`FileId::DUMMY`] between runs, and in
     /// a spawned stage or worker thread, which roots no run of its own: its
-    /// `source` / `use` fallback therefore resolves through a missing entry
-    /// to `""`, i.e. cwd-relative.
+    /// `use` fallback therefore resolves through a missing entry to `""`,
+    /// i.e. cwd-relative.
     pub(crate) root_file: FileId,
     pub(crate) exit_hints: crate::exit_hints::ExitHints,
     /// Builtin bodies are Rust fn pointers or captured host closures, hence

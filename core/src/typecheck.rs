@@ -143,7 +143,7 @@ fn harvest_schemes(top: &Toplevel) -> Vec<(String, Scheme)> {
                 .iter()
                 .map(|(name, scheme)| (name.clone(), (**scheme).clone()))
                 .collect(),
-            Phrase::Source { .. } | Phrase::Run(_) => Vec::new(),
+            Phrase::Run(_) => Vec::new(),
         })
         .collect()
 }

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -10,8 +10,8 @@ covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 sole public function is
 `elaborate(ast, bindings, name) -> Result<Toplevel, ParseError>`: each `let`
 becomes a `Phrase::Define`, a `let`-knot becomes one `Define` per member
-sharing a `Rec` group, an unbound bare `source path` becomes a `Source`, and
-everything else a `Run` ([[map/core/ir|`Toplevel`/`Phrase`]]).
+sharing a `Rec` group, and everything else a `Run`
+([[map/core/ir|`Toplevel`/`Phrase`]]).
 
 This is the one phase that knows about surface sugar: it enforces the
 value/computation split by binding effectful sub-expressions to fresh temporaries

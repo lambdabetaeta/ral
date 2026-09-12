@@ -79,10 +79,6 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             .iter()
             .for_each(|arm| sub(ral_core::test_access::case_arm_comp(arm))),
         CompKind::Rec { group, .. } => group.iter().for_each(|(_, m)| sub(m)),
-        CompKind::Source { path, rest } => {
-            sub(path);
-            sub(rest);
-        }
         CompKind::Force(Val::Thunk(c))
         | CompKind::Return(Val::Thunk(c))
         | CompKind::Capture(c)

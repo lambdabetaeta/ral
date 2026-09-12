@@ -647,12 +647,10 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
 }
 
 /// The first pipeline in `top`, if any — the phrase being composed
-/// elaborates to a bare `Pipeline`, or one under a `let` bind or a `source`
-/// path.
+/// elaborates to a bare `Pipeline`, or one under a `let` bind.
 fn find_pipeline(top: &Toplevel) -> Option<&Comp> {
     top.phrases.iter().find_map(|phrase| match &phrase.item {
         Phrase::Define { comp, .. } | Phrase::Run(comp) => find_pipeline_in(comp),
-        Phrase::Source { path } => find_pipeline_in(path),
     })
 }
 
@@ -662,9 +660,6 @@ fn find_pipeline_in(comp: &Comp) -> Option<&Comp> {
         CompKind::Bind {
             comp: bound, rest, ..
         } => find_pipeline_in(bound).or_else(|| find_pipeline_in(rest)),
-        CompKind::Source { path, rest } => {
-            find_pipeline_in(path).or_else(|| find_pipeline_in(rest))
-        }
         _ => None,
     }
 }

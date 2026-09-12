@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -41,7 +41,7 @@ before the source they name is itself in the db. Hosts read the db after a
 run returns to render.
 
 This is the structural fix for the cross-source caret: a runtime error raised
-inside a `source`d module carries the module's `FileId`, so the renderer
+inside a `use`d module carries the module's `FileId`, so the renderer
 resolves the **module's** text and draws the caret into the module's bytes —
 not the top-level script's. An id the renderer cannot resolve (the placeholder
 `FileId::DUMMY`, or an unregistered source) renders messageless rather than
@@ -83,7 +83,7 @@ came from, not what the input looked like: it takes `compact_root:
 Option<FileId>` — `Some(root)` when the input compiled to a single command,
 carrying that input's own id — and renders compact only when the error's span
 is absent or names `root`. A single command that dispatches into an rc alias,
-a `source`d function or a lambda from an earlier run faults in text the user
+a `use`d function or a lambda from an earlier run faults in text the user
 cannot see, so it gets the caret.
 
 **The raw ingredients of a span underline are exposed so an external renderer

@@ -117,7 +117,6 @@ fn validate_prelude_shape(top: &Toplevel) {
 fn describe_phrase(phrase: &Phrase) -> &'static str {
     match phrase {
         Phrase::Define { .. } => "a `Define`",
-        Phrase::Source { .. } => "a `source`",
         Phrase::Run(_) => "a bare statement",
     }
 }

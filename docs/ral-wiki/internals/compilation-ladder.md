@@ -1,6 +1,6 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
+verified_at_commit: c1bb993b
+verified_at_date: 2026-09-12
 anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---
 
@@ -25,8 +25,8 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   runs `group_stmts` first to find mutually recursive binding groups, which
   lower to an n-ary `Rec` with a projection per member. A statement sequence
   `a; b` is itself a binder — `a to _. b` — so a block is a right-nested chain
-  of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Source` /
-  `Run`). What it emits carries no parser syntax
+  of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Run`). What
+  it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp` tree
   ([[design/types|types]]). The checker is a transformation, `annotate`. It

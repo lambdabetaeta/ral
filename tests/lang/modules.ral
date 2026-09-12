@@ -1,4 +1,4 @@
-# Test: use and source (§8)
+# Test: use (§8)
 
 # Create a module
 let tmpdir = temp-dir
@@ -14,20 +14,13 @@ echo $m[version]
 let m2 = use "$tmpdir/lib.ral"
 echo !{equal $m $m2}
 
-# source merges into current scope (including _ names)
-source "$tmpdir/lib.ral"
-echo $version
-
 # caller-file-relative module loading
 mkdir -p "$tmpdir/sub"
 echo "let x = 9" > "$tmpdir/sub/inner.ral"
 echo #'let m = !{use 'sub/inner.ral'}
-let via_use = $m[x]
-source 'sub/inner.ral'
-let via_source = $x'# > "$tmpdir/entry.ral"
+let via_use = $m[x]'# > "$tmpdir/entry.ral"
 let entry = use "$tmpdir/entry.ral"
 if $[not !{equal $entry[via_use] 9}] { fail [status: 1] }
-if $[not !{equal $entry[via_source] 9}] { fail [status: 1] }
 
 # use is cacheless: each call re-reads the file, so rewriting a module
 # between two `use` calls surfaces the new bindings.

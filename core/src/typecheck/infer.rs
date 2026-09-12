@@ -82,7 +82,7 @@ fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
     let redirects = match &stage.item {
         CompKind::Exec(exec) => &exec.redirects,
         CompKind::Redirect { redirects, .. } => redirects,
-        CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
+        CompKind::Bind { rest, .. } => {
             return stage_root_stdin_feed(rest);
         }
         _ => return None,
@@ -142,9 +142,9 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
 }
 
 /// Type-check a whole [`Toplevel`]: infer each phrase in order, extending
-/// `TyEnv` at each `Define` — a `Source` binds nothing statically — and
-/// binding/unbinding an `alias`/`unalias` `Run` phrase's handler scheme for
-/// the phrases after it, as `Bind` on `Wildcard` does for a nested discarded
+/// `TyEnv` at each `Define`, and binding/unbinding an `alias`/`unalias` `Run`
+/// phrase's handler scheme for the phrases after it, as `Bind` on `Wildcard`
+/// does for a nested discarded
 /// statement (§3.5).  Returns each `Define` phrase's generalised per-name
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
@@ -379,12 +379,11 @@ impl Inferencer<'_> {
     }
 
     /// The statement whose type `comp`'s own type actually is: a `Bind`'s
-    /// type is its `rest`'s and a `Source`'s is its `rest`'s, all the way
-    /// down, so `let a = 1; let b = 2; cd`'s discarded value is `cd`'s, not
-    /// the outermost node's.
+    /// type is its `rest`'s, all the way down, so `let a = 1; let b = 2;
+    /// cd`'s discarded value is `cd`'s, not the outermost node's.
     fn discard_tail(comp: &Comp) -> &Comp {
         match &comp.item {
-            CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => Self::discard_tail(rest),
+            CompKind::Bind { rest, .. } => Self::discard_tail(rest),
             _ => comp,
         }
     }
@@ -1081,13 +1080,6 @@ impl Inferencer<'_> {
                     })
                     .collect()
             }
-            // The path is a computation, inferred for the errors inside it;
-            // its own names arrive at run time, so the phrase binds nothing
-            // statically here (§3.5).
-            Phrase::Source { path } => {
-                let _ = self.infer_comp(path);
-                Vec::new()
-            }
             Phrase::Run(comp) => {
                 let mut alias_already_typed = false;
                 match alias_statement_shape(comp) {
@@ -1752,7 +1744,6 @@ impl Inferencer<'_> {
             }
             CompKind::Index { target, keys } => self.infer_index(target, keys),
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
-            CompKind::Source { rest, .. } => self.infer_comp(rest),
             CompKind::Observe(reg) => CompTy::pure(match reg {
                 Register::Cwd | Register::User | Register::Tilde(_) => Ty::String,
                 Register::Args => Ty::List(Box::new(Ty::String)),

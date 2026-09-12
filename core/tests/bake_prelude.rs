@@ -27,7 +27,6 @@ fn rebake() -> (Toplevel, Vec<(String, ral_core::Scheme)>) {
 fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&ral_core::ir::Comp)) {
     for phrase in &top.phrases {
         match &phrase.item {
-            Phrase::Source { path } => common::walk_comp(path, visit),
             Phrase::Define { comp, .. } | Phrase::Run(comp) => common::walk_comp(comp, visit),
         }
     }
@@ -43,7 +42,7 @@ fn schemes_on_defines(top: &Toplevel) -> Vec<(String, String)> {
                 .iter()
                 .map(|(name, scheme)| (name.clone(), fmt_scheme(scheme)))
                 .collect(),
-            Phrase::Source { .. } | Phrase::Run(_) => Vec::new(),
+            Phrase::Run(_) => Vec::new(),
         })
         .collect()
 }

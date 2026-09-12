@@ -774,8 +774,6 @@ pub mod scheme {
 
     scheme!(ask: [Ty::String] -> Ty::String);
 
-    scheme!(source_op<av>: [Ty::String] -> Ty::Var(av));
-
     scheme!(use_op<av>: [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
 
     // ── Terminal, help & encoders ────────────────────────────────────────

@@ -473,9 +473,9 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
             return Err(format!("{path}: skipped due to type errors"));
         }
     };
-    // Evaluate under the same guarded pipeline `source`/`use`/plugin loading
-    // share: `evaluate_checked` owns the cycle and depth guards, and registers
-    // the text under the id compiled against just above, so a runtime error
+    // Evaluate under the same guarded pipeline `use`/plugin loading share:
+    // `evaluate_checked` owns the cycle and depth guards, and registers the
+    // text under the id compiled against just above, so a runtime error
     // inside the file is located against it.
     match ral_core::builtins::modules::evaluate_checked(
         &ral_core::types::Mooring::adrift(),

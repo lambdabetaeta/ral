@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -162,13 +162,15 @@ Bodies are grouped by concern, one submodule each:
   *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)
   rather than a generic failure
   ([[internals/capability-enforcement|capability-enforcement]]);
-- `modules.rs` — the cacheless `use` / `source` loader. `evaluate_source` is
-  the shared parse + elaborate + evaluate core — `check_source` compiles
-  against the live session, peeking the `FileId` its own registration will
-  mint so the module's spans carry its real identity, and `evaluate_checked`
-  holds the cycle stack and depth bound; `use` is a scope-projecting wrapper over it,
-  `source` evaluates into the caller's scope. Module loads carry no cache, so
-  the guards keep re-evaluation terminating — see
+- `modules.rs` — the cacheless `use` loader, and the host loading door every
+  runtime script load shares. `evaluate_source` is the shared parse +
+  elaborate + evaluate core — `check_source` compiles against the live
+  session, peeking the `FileId` its own registration will mint so the
+  module's spans carry its real identity, and `evaluate_checked` holds the
+  cycle stack and depth bound; `use` (`module_phrases`) is a
+  scope-projecting sibling of that door, running under the session
+  environment rather than the caller's own block-local scope. Module loads
+  carry no cache, so the guards keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
 - `misc.rs` — including `surface`, which forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;

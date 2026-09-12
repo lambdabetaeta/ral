@@ -121,15 +121,6 @@ impl BindingLedger {
         }
     }
 
-    /// [`Self::renew`]'s single-name sibling, for `classify_command`'s touch
-    /// of a runtime-resolved command head rather than a batch harvest.
-    pub(crate) fn renew_one(&mut self, name: &str) {
-        let Some(armed) = &mut self.0 else { return };
-        if let Some(last) = armed.last_used.get_mut(name) {
-            *last = armed.epoch;
-        }
-    }
-
     /// Names idle past the lease's bound with the epochs each has been idle,
     /// in sorted name order so a prune pass is deterministic.
     pub(crate) fn expired(&self) -> Vec<(String, u64)> {
@@ -216,7 +207,6 @@ mod tests {
         ledger.tick();
         ledger.note_install("x");
         ledger.renew(["x"]);
-        ledger.renew_one("x");
         assert!(!ledger.armed(), "an unarmed ledger stays unarmed");
     }
 
@@ -306,11 +296,11 @@ mod tests {
 /// Run-level tests for the install chokepoint and the use-observation
 /// harvest: every persistent top-level install routes through
 /// `Shell::install_scope_binding` and gets leased while deeper-scope writes
-/// are recorded nowhere, and a committed run's referenced names renew at all
-/// three harvest seams — `run`'s own compiled program, `check_source`'s
-/// runtime-compiled loads, `classify_command`'s `Resolution::Env` dispatch
-/// touch. Driven through the public `run` door, no exarch involved: the same
-/// harness shape as `core/tests/top_level_vs_block.rs`.
+/// are recorded nowhere, and a committed run's referenced names renew at both
+/// harvest seams — `run`'s own compiled program, and `check_source`'s /
+/// `compile_toplevel`'s runtime-compiled loads. Driven through the public
+/// `run` door, no exarch involved: the same harness shape as
+/// `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -721,60 +711,31 @@ mod chokepoint_tests {
         assert!(shell.has_hook(&HookName::session("startup")));
     }
 
-    /// A `source`d file's reference to a caller-scope name the outer run's
-    /// own program never mentions still renews — the `check_source` seam,
-    /// not the run's-own-program seam, catches this one.
+    /// A `use`d file's reference to a caller-scope name the outer run's own
+    /// program never mentions still renews — the `compile_toplevel` harvest
+    /// seam, not the run's-own-program seam, catches this one.
     #[test]
-    fn sourced_module_reference_renews() {
+    fn used_module_reference_renews() {
         let mut shell = armed_shell(64);
-        top_level(&mut shell, "let sourced_ref_x = 1").expect("define");
+        top_level(&mut shell, "let used_ref_x = 1").expect("define");
         idle_spin(&mut shell, 3);
-        let stale = last_used_of(&shell, "sourced_ref_x");
-        assert!(stale < epoch(&shell), "must be stale before the source");
+        let stale = last_used_of(&shell, "used_ref_x");
+        assert!(stale < epoch(&shell), "must be stale before the use");
 
         let path = std::env::temp_dir().join(format!(
-            "ral_binding_lease_source_test_{}.ral",
+            "ral_binding_lease_use_test_{}.ral",
             std::process::id()
         ));
-        std::fs::write(&path, "let sourced_helper = $sourced_ref_x\n").expect("write temp module");
+        std::fs::write(&path, "let used_helper = $used_ref_x\n").expect("write temp module");
         let p = path.to_string_lossy().into_owned();
-        let result = top_level(&mut shell, &format!("source '{p}'"));
+        let result = top_level(&mut shell, &format!("use '{p}'"));
         std::fs::remove_file(&path).ok();
-        result.expect("source");
+        result.expect("use");
 
         assert_eq!(
-            last_used_of(&shell, "sourced_ref_x"),
+            last_used_of(&shell, "used_ref_x"),
             epoch(&shell),
-            "a sourced file's own reference must renew via check_source"
-        );
-    }
-
-    /// A name installed where the elaborator cannot see it — here by `source`
-    /// — compiles its later bare-word reference as an `Exec`, not an `App`,
-    /// so only `classify_command`'s `Resolution::Env` arm can renew it.
-    #[test]
-    fn env_resolved_command_head_renews() {
-        let mut shell = armed_shell(64);
-        let path = std::env::temp_dir().join(format!(
-            "ral_binding_lease_env_resolved_test_{}.ral",
-            std::process::id()
-        ));
-        std::fs::write(&path, "let env_resolved_fn = { |x| $[$x + 1] }\n")
-            .expect("write temp module");
-        let p = path.to_string_lossy().into_owned();
-        top_level(&mut shell, &format!("source '{p}'")).expect("source");
-        idle_spin(&mut shell, 3);
-        let stale = last_used_of(&shell, "env_resolved_fn");
-        assert!(stale < epoch(&shell), "must be stale before the call");
-
-        let result = top_level(&mut shell, "env_resolved_fn 41");
-        std::fs::remove_file(&path).ok();
-        result.expect("call the sourced function by bare command head");
-
-        assert_eq!(
-            last_used_of(&shell, "env_resolved_fn"),
-            epoch(&shell),
-            "the Resolution::Env dispatch touch must renew the resolved name"
+            "a used file's own reference must renew via compile_toplevel's harvest"
         );
     }
 

@@ -97,9 +97,10 @@ pub enum CompileOutcome {
 }
 
 impl CompileOutcome {
-    /// Collapse to the toplevel or one rendered message — the shape the
-    /// `source` / `use` / plugin loaders want, reporting a failed load as a
-    /// single fatal error rather than per-error ariadne output.
+    /// Collapse to the toplevel or one rendered message — the shape
+    /// `evaluate_source`'s callers (the plugin and capability loaders) want,
+    /// reporting a failed load as a single fatal error rather than
+    /// per-error ariadne output.
     ///
     /// # Errors
     /// The rendered parse error, or the newline-joined type errors.

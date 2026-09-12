@@ -1,6 +1,5 @@
 //! CBPV evaluation: the machine (`machine::evaluate`), and the phrase-level
-//! verbs (`run_phrases`) that thread a session, a `source`, or a `use` over
-//! it.
+//! verb (`run_phrases`) that threads a session or a `use` body over it.
 
 pub(crate) mod audit;
 pub(crate) mod capture;
@@ -14,7 +13,7 @@ pub(crate) mod val;
 
 use crate::ir::{Comp, Phrase};
 use crate::source::Spanned;
-use crate::types::{Break, Env, Error, Mooring, Settled, Shell, Value};
+use crate::types::{Break, Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
@@ -34,10 +33,11 @@ pub(crate) struct Ran {
 }
 
 /// Whose phrases these are.  Leases and the PATH-shadow check belong to
-/// `Session` alone; a block-local `source` and a `use` body run under a mode
-/// that leases nothing.  Only `Session` writes each landed `Define` back
-/// into `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run threads
-/// its own `E` and never touches the session environment at all.
+/// `Session` alone; the host loading door (`evaluate_checked` — rc, a
+/// plugin, a capability file) and a `use` body run under a mode that leases
+/// nothing.  Only `Session` writes each landed `Define` back into
+/// `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run
+/// threads its own `E` and never touches the session environment at all.
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
     Session,
@@ -79,15 +79,6 @@ pub(crate) fn run_phrases(
                     comp,
                     schemes,
                 },
-                mode,
-                &mut env,
-                mooring,
-                shell,
-                &mut defined,
-            ),
-            Phrase::Source { path } => run_phrase_source(
-                path,
-                phrase.span,
                 mode,
                 &mut env,
                 mooring,
@@ -197,42 +188,6 @@ fn run_phrase_define(
         shell.env = env.clone();
     }
     Ok(Value::Unit)
-}
-
-/// `Source { path }`: load and run `path`'s phrases in *this* run's own
-/// `mode` — a session's top-level `source` defines session names, with
-/// leases; one nested inside a `use` body defines nothing.  A load refusal
-/// stops the run before any of the file's phrases do; the file's own halt
-/// (`ran.outcome`) stops it after its `Define`s are threaded (S12).  A
-/// `Session` load's own `shell.env` writes happen transitively, one per
-/// `Define` its (recursive) `run_phrases` call lands — nothing extra to
-/// write back here.
-fn run_phrase_source(
-    path: &Arc<Comp>,
-    span: Option<crate::source::Span>,
-    mode: Mode,
-    env: &mut Env,
-    mooring: &Mooring,
-    shell: &mut Shell,
-    defined: &mut Vec<String>,
-) -> Settled<Value> {
-    let closure = crate::types::Closure {
-        comp: Arc::clone(path),
-        env: env.clone(),
-    };
-    let path_val = machine::evaluate(closure, mooring, shell)?;
-    let Value::String(p) = path_val else {
-        return Err(Error::new(
-            format!("source: expected String, got {}", path_val.type_name()),
-            1,
-        )
-        .with_hint("the path to `source` must be a computation of type F String")
-        .into());
-    };
-    let ran = crate::builtins::modules::source(&p, env.clone(), mode, span, mooring, shell)?;
-    *env = ran.env;
-    defined.extend(ran.defined);
-    ran.outcome.map(|_| Value::Unit)
 }
 
 #[cfg(test)]

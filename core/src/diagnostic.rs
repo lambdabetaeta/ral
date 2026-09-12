@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn runtime_error_in_module_draws_into_module_source() {
         let mut db = SourceDb::default();
-        let _top = db.register(Source::from_text("main.ral", "source 'mod.ral'\n"));
+        let _top = db.register(Source::from_text("main.ral", "use 'mod.ral'\n"));
         let module = db.register(Source::from_text(
             "mod.ral",
             "let a = 1\nfail [status: 1, message: 'kaboom']\n",

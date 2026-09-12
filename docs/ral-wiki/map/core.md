@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c1bb993b
+generated_at_date: 2026-09-12
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -16,7 +16,7 @@ binaries, `ral` and [[map/exarch|exarch]], embed it.
 flat AST → CBPV IR → typed IR*, bundled as `compile_and_typecheck` (parse →
 elaborate → typecheck → `CompileOutcome`) and, crate-privately, `compile`
 (the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
-(`Define`/`Source`/`Run`) run by `evaluator::run_phrases`, which replaced the
+(`Define`/`Run`) run by `evaluator::run_phrases`, which replaced the
 flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,
 `elaborate`, and `Toplevel` are crate-private, reached by the owning module path
 when a host deliberately steps past the seam
