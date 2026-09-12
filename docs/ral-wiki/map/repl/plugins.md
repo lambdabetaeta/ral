@@ -61,10 +61,12 @@ context, so a `Break::Error` reads against the right `FileId`.
 - **The fault is rendered inside `call_plugin_hook`, while that run's source
   registry is still live.** The next framed run resets `shell.sources()`, so a
   deferred raw `Error` would resolve against the wrong registry. The finished
-  string rides out on `HookResult.rendered_error`, deferred through
-  `defer_plugin_message` past the readline line-erase escape and flushed by
-  `flush_pending_messages` ([[map/repl/frontend|frontend]]). Lifecycle hooks,
-  rendered in-frame, defer nothing and report via `errfmt::plugin_error`.
+  string rides out on `HookResult.rendered_error`, on either framing path, and
+  names its plugin and hook by `Error::context` before rendering, so every
+  plugin fault prints one shape. A hook inside the readline loop defers through
+  `defer_plugin_message` past the line-erase escape, flushed by
+  `flush_pending_messages` ([[map/repl/frontend|frontend]]); a lifecycle hook
+  prints immediately, that drain being the editor's and no escape pending.
 - **A buffer-change hook fires on every keystroke, so a slow or faulting one is
   braked.** `HookHealth` (per plugin, in `plugin.rs`) is a circuit breaker:
   `BUFFER_CHANGE_FAULT_LIMIT` consecutive faults, or any run overrunning the

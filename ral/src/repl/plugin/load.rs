@@ -80,7 +80,7 @@ pub(crate) fn load_plugin(
     // point rolls back the whole plugin namespace, so nothing dispatchable
     // survives a failed load.
     if let Err(e) = register_plugin_hooks(&plugin.name, &handlers, shell)
-        .and_then(|()| install_bindings(&handlers.aliases, shell))
+        .and_then(|()| install_bindings(&handlers.aliases, &plugin.name, shell))
     {
         shell.remove_plugin_hooks(&plugin.name);
         return Err(Break::Error(e));
@@ -213,13 +213,19 @@ fn check_no_binding_conflicts(
     Ok(())
 }
 
-fn install_bindings(bindings: &[(String, Value)], shell: &mut Shell) -> Result<(), Error> {
+fn install_bindings(
+    bindings: &[(String, Value)],
+    plugin_name: &str,
+    shell: &mut Shell,
+) -> Result<(), Error> {
     for (name, value) in bindings {
         shell
             .install_alias(name.clone(), value.clone())
             .map_err(|e| match e {
-                Break::Error(err) => load_err(err.message),
-                Break::Escape(_) => load_err("alias installation escaped"),
+                Break::Error(err) => err.context(format!("plugin '{plugin_name}' alias '{name}'")),
+                Break::Escape(_) => load_err(format!(
+                    "plugin '{plugin_name}' alias '{name}' installation escaped"
+                )),
             })?;
     }
     Ok(())

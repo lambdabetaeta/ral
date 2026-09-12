@@ -8,7 +8,7 @@
 //! rejected with an error naming the key, while the rest of the map still
 //! applies.
 
-use ral_core::types::{DefaultPolicy, HookName, HookSig, Map, Mooring};
+use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
 
 use super::frontend::Surface;
@@ -129,8 +129,11 @@ pub(crate) fn apply_rc_config(
     let mut settings = RcSettings::default();
     let mut startup: Option<Value> = None;
     for (key, val) in pairs {
-        if let Err(msg) = apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup) {
-            ral_core::diagnostic::cmd_error("ral", &msg);
+        if let Err(err) = apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup) {
+            eprint!(
+                "{}",
+                ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
+            );
         }
     }
     (settings, startup)
@@ -147,11 +150,14 @@ fn apply_rc_key(
     runtime: &Arc<Mutex<PluginRuntime>>,
     settings: &mut RcSettings,
     startup: &mut Option<Value>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     match key {
         "env" => {
             let Value::Map(m) = val else {
-                return Err(format!("rc 'env' must be a map; got {}", val.type_name()));
+                return Err(Error::new(
+                    format!("rc 'env' must be a map; got {}", val.type_name()),
+                    1,
+                ));
             };
             for (k, v) in m {
                 // PWD / OLDPWD are shell-cwd-derived: they live on
@@ -169,50 +175,46 @@ fn apply_rc_key(
         }
         "prompt" => {
             let origin = ral_core::source::Span::synthetic();
-            if let Err(e) = shell.register_hook(
-                HookName::session("prompt"),
-                val,
-                HookSig::Prompt,
-                DefaultPolicy::denied_capture(),
-                origin,
-            ) {
-                eprintln!("ralrc: {e}");
-            }
-            Ok(())
+            shell
+                .register_hook(
+                    HookName::session("prompt"),
+                    val,
+                    HookSig::Prompt,
+                    DefaultPolicy::denied_capture(),
+                    origin,
+                )
+                .map_err(|e| Error::new(e.to_string(), 1))
         }
         "aliases" => {
             let Value::Map(m) = val else {
-                return Err(format!(
-                    "rc 'aliases' must be a map; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!("rc 'aliases' must be a map; got {}", val.type_name()),
+                    1,
                 ));
             };
             // A function installs as an argv-handler alias; any other
             // value falls through to a plain scope binding so the key
             // still lands somewhere usable.
-            for (name, value) in m {
+            m.into_iter().try_for_each(|(name, value)| {
                 if matches!(value, Value::Thunk(_)) {
-                    if let Err(err) = shell.install_alias(name, value) {
-                        match err {
-                            ral_core::types::Break::Error(e) => {
-                                eprintln!("ralrc: {}", e.message);
-                            }
-                            ral_core::types::Break::Escape(_) => {
-                                eprintln!("ralrc: alias installation escaped");
-                            }
+                    let alias = name.clone();
+                    shell.install_alias(name, value).map_err(|err| match err {
+                        Break::Error(e) => e.context(format!("ralrc alias '{alias}'")),
+                        Break::Escape(_) => {
+                            Error::new(format!("ralrc alias '{alias}' installation escaped"), 1)
                         }
-                    }
+                    })
                 } else {
                     shell.set_var(name, value);
+                    Ok(())
                 }
-            }
-            Ok(())
+            })
         }
         "bindings" => {
             let Value::Map(m) = val else {
-                return Err(format!(
-                    "rc 'bindings' must be a map; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!("rc 'bindings' must be a map; got {}", val.type_name()),
+                    1,
                 ));
             };
             // Every value installs as a lexical scope binding,
@@ -225,23 +227,29 @@ fn apply_rc_key(
         }
         "edit_mode" => {
             let Value::String(s) = val else {
-                return Err(format!(
-                    "rc 'edit_mode' must be a string; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!("rc 'edit_mode' must be a string; got {}", val.type_name()),
+                    1,
                 ));
             };
             match s.to_ascii_lowercase().as_str() {
                 "vi" => settings.edit_mode = EditMode::Vi,
                 "emacs" => settings.edit_mode = EditMode::Emacs,
                 _ => {
-                    return Err(format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'"));
+                    return Err(Error::new(
+                        format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'"),
+                        1,
+                    ));
                 }
             }
             Ok(())
         }
         "bell" => {
             let Value::Bool(b) = val else {
-                return Err(format!("rc 'bell' must be a bool; got {}", val.type_name()));
+                return Err(Error::new(
+                    format!("rc 'bell' must be a bool; got {}", val.type_name()),
+                    1,
+                ));
             };
             settings.bell = if b {
                 BellStyle::Audible
@@ -252,9 +260,9 @@ fn apply_rc_key(
         }
         "surface" => {
             let Value::String(s) = val else {
-                return Err(format!(
-                    "rc 'surface' must be a string; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!("rc 'surface' must be a string; got {}", val.type_name()),
+                    1,
                 ));
             };
             match <Surface as clap::ValueEnum>::from_str(&s, true) {
@@ -262,20 +270,27 @@ fn apply_rc_key(
                     settings.surface = surface;
                     Ok(())
                 }
-                Err(_) => Err(format!(
-                    "rc 'surface' must be minimal, readline, or structural; got '{s}'"
+                Err(_) => Err(Error::new(
+                    format!("rc 'surface' must be minimal, readline, or structural; got '{s}'"),
+                    1,
                 )),
             }
         }
         "recursion_limit" => {
             let Some(n) = val.as_int() else {
-                return Err(format!(
-                    "rc 'recursion_limit' must be a positive int; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!(
+                        "rc 'recursion_limit' must be a positive int; got {}",
+                        val.type_name()
+                    ),
+                    1,
                 ));
             };
             if n <= 0 {
-                return Err(format!("rc 'recursion_limit' must be positive; got {n}"));
+                return Err(Error::new(
+                    format!("rc 'recursion_limit' must be positive; got {n}"),
+                    1,
+                ));
             }
             #[allow(
                 clippy::cast_possible_truncation,
@@ -288,9 +303,12 @@ fn apply_rc_key(
         }
         "plugins" => {
             let Value::List(entries) = val else {
-                return Err(format!(
-                    "rc 'plugins' must be a list of plugin entries; got {}",
-                    val.type_name()
+                return Err(Error::new(
+                    format!(
+                        "rc 'plugins' must be a list of plugin entries; got {}",
+                        val.type_name()
+                    ),
+                    1,
                 ));
             };
             for entry in entries {
@@ -304,13 +322,13 @@ fn apply_rc_key(
         }
         "theme" => match val {
             Value::Map(pairs) => {
-                let theme = OutputTheme::from_map(&pairs)?;
+                let theme = OutputTheme::from_map(&pairs).map_err(|msg| Error::new(msg, 1))?;
                 set_output_theme(theme);
                 Ok(())
             }
-            other => Err(format!(
-                "rc 'theme' must be a map; got {}",
-                other.type_name()
+            other => Err(Error::new(
+                format!("rc 'theme' must be a map; got {}", other.type_name()),
+                1,
             )),
         },
         _ => Ok(()),
@@ -323,24 +341,29 @@ fn apply_rc_key(
 /// keys are warned and ignored so future extensions (enabled, when, …) can
 /// slot in without breaking parsers.
 fn load_rc_plugin(entry: Value, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) {
-    if let Err(msg) = parse_and_load_rc_plugin(entry, shell, runtime) {
-        ral_core::diagnostic::cmd_error("ral", &msg);
+    if let Err(err) = parse_and_load_rc_plugin(entry, shell, runtime) {
+        eprint!(
+            "{}",
+            ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
+        );
     }
 }
 
 /// Shape-check an rc plugin entry, dispatch to the plugin loader, and
-/// return the load error (if any) as a formatted string — the Result lets
-/// each field check short-circuit with `?` instead of repeating the
-/// `cmd_error` boilerplate per key.
+/// return the load error (if any) — the Result lets each field check
+/// short-circuit with `?` instead of repeating the render boilerplate per key.
 fn parse_and_load_rc_plugin(
     entry: Value,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let Value::Map(pairs) = entry else {
-        return Err(format!(
-            "plugin entry must be a map [plugin: 'name', options: [...]]; got {}",
-            entry.type_name()
+        return Err(Error::new(
+            format!(
+                "plugin entry must be a map [plugin: 'name', options: [...]]; got {}",
+                entry.type_name()
+            ),
+            1,
         ));
     };
     let mut name: Option<String> = None;
@@ -349,16 +372,22 @@ fn parse_and_load_rc_plugin(
         match (k.as_str(), v) {
             ("plugin", Value::String(s)) => name = Some(s),
             ("plugin", v) => {
-                return Err(format!(
-                    "plugin entry 'plugin' must be a string; got {}",
-                    v.type_name()
+                return Err(Error::new(
+                    format!(
+                        "plugin entry 'plugin' must be a string; got {}",
+                        v.type_name()
+                    ),
+                    1,
                 ));
             }
             ("options", v @ Value::Map(_)) => options = Some(v),
             ("options", v) => {
-                return Err(format!(
-                    "plugin entry 'options' must be a map; got {}",
-                    v.type_name()
+                return Err(Error::new(
+                    format!(
+                        "plugin entry 'options' must be a map; got {}",
+                        v.type_name()
+                    ),
+                    1,
                 ));
             }
             (other, _) => ral_core::diagnostic::shell_warning(&format!(
@@ -367,9 +396,11 @@ fn parse_and_load_rc_plugin(
         }
     }
     let name = name.ok_or_else(|| {
-        "plugin entry missing required 'plugin' key; \
-         expected [plugin: 'name', options: [...]]"
-            .to_string()
+        Error::new(
+            "plugin entry missing required 'plugin' key; \
+             expected [plugin: 'name', options: [...]]",
+            1,
+        )
     })?;
     // rc loading runs at session bring-up, with no run in hand, so the
     // plugin file evaluates moored adrift.
@@ -380,7 +411,7 @@ fn parse_and_load_rc_plugin(
         shell,
         runtime,
     ) {
-        Err(ral_core::types::Break::Error(e)) => Err(format!("plugin '{name}': {}", e.message)),
+        Err(Break::Error(e)) => Err(e.context(format!("plugin '{name}'"))),
         _ => Ok(()),
     }
 }

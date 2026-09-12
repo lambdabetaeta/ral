@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use self::editor::{EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs};
 use self::manifest::LoadedPlugin;
-use super::errfmt::{format_plugin_disabled, plugin_error};
+use super::errfmt::format_plugin_disabled;
 use super::frontend::EditBuffer;
 use ral_core::text::byte_to_char;
 // Anchored to the crate root: a bare `rustyline::` path here would resolve
@@ -175,13 +175,9 @@ pub(crate) struct PluginRuntime {
 /// Buffer an already-rendered plugin diagnostic for the REPL loop to flush
 /// after readline returns.
 ///
-/// Use this from inside the readline loop (keybinding dispatch, buffer-change
-/// hooks), where the REPL is about to emit a line-erase escape that would
-/// clobber an immediate `eprintln!`.  The messages are the source-mapped hook
-/// fault produced by [`call_plugin_hook`] and the circuit-breaker's disable
-/// notice — both already finished strings.  One-shot lifecycle paths, where no
-/// escape is pending, call [`errfmt::plugin_error`](super::errfmt::plugin_error)
-/// directly instead.
+/// The messages are the source-mapped hook fault produced by
+/// [`call_plugin_hook`] and the circuit-breaker's disable notice — both
+/// already finished strings.
 pub(super) fn defer_plugin_message(runtime: &Arc<Mutex<PluginRuntime>>, message: String) {
     lock(runtime).diagnostics.messages.push(message);
 }
@@ -237,11 +233,9 @@ pub(super) struct HookFor<'a> {
 /// handler raised, produced *inside the helper* while the hook run's source
 /// registry is still the live one — the next framed run resets it, so a
 /// deferred raw `Error` would later resolve its `FileId` against the wrong
-/// registry. It is `Some` only on the [`HookFraming::Framed`] path (where the
-/// helper owns the source context); the in-frame path leaves rendering to the
-/// caller against the command's own frame. `timed_out` reports whether the
-/// run's wall fired — the circuit-breaker's signal that a hook overran its
-/// budget.
+/// registry. `Some` exactly when `result` is `Err(Break::Error(_))`, on
+/// either framing path. `timed_out` reports whether the run's wall fired —
+/// the circuit-breaker's signal that a hook overran its budget.
 pub(super) struct HookResult {
     pub(super) result: Settled<Value>,
     pub(super) ctx: Option<PluginContext>,
@@ -375,6 +369,8 @@ pub(super) fn call_plugin_hook(
     if let Some(ctx) = ctx_in {
         shell.repl_mut().plugin_context = Some(Box::new(ctx));
     }
+    // Named once so both framing paths render an identical shape.
+    let ctx_label = format!("plugin '{}' hook '{}'", plugin.name, hook.name);
     let (result, rendered_error, timed_out) = match framing {
         HookFraming::InFrame(mooring) => {
             // Lifecycle hook: resolve the hook from the table and
@@ -386,8 +382,19 @@ pub(super) fn call_plugin_hook(
                     format!("hook '{hook}' is not registered"),
                     1,
                 ))),
+            }
+            .map_err(|brk| add_hook_context(brk, &ctx_label));
+            // Render here, while `shell.sources()` still holds this
+            // command frame's registry.
+            let rendered_error = match &result {
+                Err(Break::Error(e)) => Some(
+                    diagnostic::format_runtime_error_auto(shell.sources(), e, None)
+                        .trim_end()
+                        .to_string(),
+                ),
+                _ => None,
             };
-            (result, None, false)
+            (result, rendered_error, false)
         }
         HookFraming::Framed(FramedHook {
             terminal,
@@ -440,6 +447,7 @@ pub(super) fn call_plugin_hook(
                     )
                 }
             };
+            let result = result.map_err(|brk| add_hook_context(brk, &ctx_label));
             // Render the fault here, while `shell.sources()` still holds this
             // run's registry.
             let rendered_error = match &result {
@@ -464,6 +472,14 @@ pub(super) fn call_plugin_hook(
         ctx,
         rendered_error,
         timed_out,
+    }
+}
+
+/// Name the plugin and hook on a fault, leaving span, hint, and status intact.
+fn add_hook_context(brk: Break, ctx: &str) -> Break {
+    match brk {
+        Break::Error(e) => Break::Error(e.context(ctx)),
+        escape @ Break::Escape(_) => escape,
     }
 }
 
@@ -799,7 +815,6 @@ pub(crate) fn run_lifecycle_hook(
     args: &[Value],
 ) {
     fold_hook(runtime, shell, hook_name, (), |shell, plugin, hook, ()| {
-        let plugin_name = plugin.name.to_string();
         let hr = call_plugin_hook(
             shell,
             plugin,
@@ -808,8 +823,12 @@ pub(crate) fn run_lifecycle_hook(
             None,
             HookFraming::InFrame(mooring),
         );
-        if let Err(Break::Error(e)) = &hr.result {
-            plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
+        // Printed, not deferred: the drain is the editor's, and a lifecycle
+        // hook runs with the terminal already stable — a deferred message
+        // would wait for a next prompt that the last command before exit,
+        // and every non-interactive host, never reaches.
+        if let Some(rendered) = &hr.rendered_error {
+            eprintln!("{rendered}");
         }
     });
 }

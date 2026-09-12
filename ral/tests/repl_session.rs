@@ -100,7 +100,7 @@ fn rc_bad_key_is_reported_and_the_rest_still_applies() {
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
         out.stderr
-            .contains("ral: rc 'edit_mode' must be a string; got Int"),
+            .contains("rc 'edit_mode' must be a string; got Int"),
         "the bad key must name itself: {}",
         out.stderr
     );
@@ -154,7 +154,7 @@ fn an_alias_ending_in_cd_installs_with_no_trailing_write() {
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("ralrc: alias"),
+        !out.stderr.contains("ralrc alias"),
         "an alias ending in `cd` must install; stderr was:\n{}",
         out.stderr
     );
@@ -177,7 +177,7 @@ fn an_alias_whose_if_join_is_all_value_still_installs() {
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("ralrc: alias"),
+        !out.stderr.contains("ralrc alias"),
         "an if/else of two `cd`s must install; stderr was:\n{}",
         out.stderr
     );
@@ -196,7 +196,7 @@ fn an_alias_returning_a_string_is_still_rejected() {
     let (_dir, env) = rc_home("return [aliases: [greet: { |args| \"hi\" }]]");
     let out = repl(&["-i"], &env, "echo ok\n");
     assert!(
-        out.stderr.contains("ralrc:")
+        out.stderr.contains("ralrc alias")
             && out.stderr.contains("greet")
             && out.stderr.contains("String"),
         "a value-returning arm over a fresh name must still fail; stderr was:\n{}",

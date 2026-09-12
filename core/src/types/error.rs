@@ -91,6 +91,12 @@ impl Error {
         self
     }
 
+    /// Prefixes `message` with `ctx`, preserving span, hint, status and command.
+    pub fn context(mut self, ctx: impl std::fmt::Display) -> Self {
+        self.message = format!("{ctx}: {}", self.message);
+        self
+    }
+
     /// Numeric exit code for process exit and `$status`.
     pub fn exit_code(&self) -> i32 {
         match &self.status {
