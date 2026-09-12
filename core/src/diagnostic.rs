@@ -359,6 +359,11 @@ pub(crate) fn format_runtime_error_ariadne(
 ///
 /// Shape alone will not do: `boom` at the prompt is one command, but as an
 /// alias its error lives in the rc, where only a caret can point.
+///
+/// Always ends in `\n`. A caller that hands it straight to a sink expecting
+/// a trailing newline (`eprint!`, `write_all`, a wire payload) keeps it as
+/// is; one that stores it for a later `println!`/`eprintln!` must
+/// `trim_end()` first, or that newline doubles.
 pub fn format_runtime_error_auto(
     db: &SourceDb,
     err: &crate::types::Error,
