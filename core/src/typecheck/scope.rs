@@ -84,14 +84,10 @@ impl Inferencer<'_> {
                         let cty = this.infer_catch_all(comp);
                         let arm_return = this.alias_arm_body(&cty);
                         let (value, route) = this.extract_return(&arm_return);
-                        if !this.ctx.unifier.bytes_subsumes(route, &value) {
-                            let actual = this.ctx.unifier.apply_ty(&value);
+                        if let Err(actual) = this.check_bytes_route(route, &value) {
                             let kind = TypeErrorKind::CompTyMismatch {
                                 expected: CompTy::bytes(),
-                                actual: CompTy::Return(
-                                    PayloadRoute::Bytes,
-                                    Box::new(actual.clone()),
-                                ),
+                                actual: CompTy::Return(PayloadRoute::Bytes, Box::new(actual.clone())),
                                 diffs: vec![CompDiff::ReturnType {
                                     expected: Ty::Unit,
                                     actual,

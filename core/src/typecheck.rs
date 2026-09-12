@@ -104,6 +104,46 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     }
 }
 
+/// Build a fresh `(InferCtx, TyEnv)` pair seeded from `schemes` — the common
+/// core of every inference session, `typecheck` included.
+fn seeded_session(schemes: SessionSchemes) -> (InferCtx, TyEnv) {
+    let mut ctx = InferCtx::new();
+    let mut env = TyEnv::new();
+    seed_env(&mut env, schemes, &mut ctx.unifier);
+    (ctx, env)
+}
+
+/// Run `f` inside a fresh one-shot inference session over `schemes` — closed
+/// against its own unifier, and dropped when `f` returns so its variable ids
+/// cannot alias a later run's.
+fn one_shot_inference<R>(
+    schemes: SessionSchemes,
+    f: impl FnOnce(&mut infer::Inferencer) -> R,
+) -> R {
+    let (mut ctx, mut env) = seeded_session(schemes);
+    let mut inferencer = infer::Inferencer {
+        ctx: &mut ctx,
+        env: &mut env,
+    };
+    f(&mut inferencer)
+}
+
+/// Close `cty` into a session-independent `Thunk` scheme: solve the session,
+/// generalize, and assert nothing escaped. Shared by [`alias_arm_scheme`] and
+/// [`binding_value_scheme`] — the only two entry points that persist a scheme
+/// past their one-shot session.
+fn close_thunk_scheme(
+    inferencer: &mut infer::Inferencer,
+    cty: CompTy,
+    invariant: &'static str,
+) -> Scheme {
+    let thunk_ty = Ty::Thunk(Box::new(cty));
+    inferencer.ctx.solve_and_finalize();
+    let scheme = generalize(&mut inferencer.ctx.unifier, &TyEnv::new(), &thunk_ty);
+    self::generalize::debug_assert_scheme_closed(&mut inferencer.ctx.unifier, &scheme, invariant);
+    scheme
+}
+
 /// Type-check `top` (§3.5), seeding from the live session.
 ///
 /// Infer each phrase in order, extending `TyEnv` at each `Define`, then
@@ -118,9 +158,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
 /// Inference alone judges; the write-back pass runs only on a program it
 /// accepted, and places the coercions that verdict implies.
 pub fn typecheck(top: &Toplevel, schemes: SessionSchemes) -> Result<Toplevel, Vec<TypeError>> {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
+    let (mut ctx, mut env) = seeded_session(schemes);
 
     let phrase_schemes = infer::infer_toplevel(&mut ctx, &mut env, top);
     ctx.solve_and_finalize();
@@ -191,24 +229,15 @@ pub(crate) fn alias_arm_scheme(
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Result<Scheme, PinFailure> {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
-    let mut inferencer = infer::Inferencer {
-        ctx: &mut ctx,
-        env: &mut env,
-    };
-    let cty = inferencer.infer_alias_arm(Some(param), body);
-    inferencer.pin_arm_to_head(head, &cty)?;
-    let thunk_ty = Ty::Thunk(Box::new(cty));
-    ctx.solve_and_finalize();
-    let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
-    self::generalize::debug_assert_scheme_closed(
-        &mut ctx.unifier,
-        &scheme,
-        "alias-arm scheme must leave no variable free",
-    );
-    Ok(scheme)
+    one_shot_inference(schemes, |inferencer| {
+        let cty = inferencer.infer_alias_arm(Some(param), body);
+        inferencer.pin_arm_to_head(head, &cty)?;
+        Ok(close_thunk_scheme(
+            inferencer,
+            cty,
+            "alias-arm scheme must leave no variable free",
+        ))
+    })
 }
 
 /// The computed catch-all's route vet — `within [handler: $k]`, where the
@@ -220,21 +249,12 @@ pub(crate) fn alias_arm_scheme(
 /// # Errors
 /// It still returns a value; `Err` carries that value's type.
 pub(crate) fn catch_all_emits_bytes(body: &Comp, schemes: SessionSchemes) -> Result<(), Ty> {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
-    let mut inferencer = infer::Inferencer {
-        ctx: &mut ctx,
-        env: &mut env,
-    };
-    let cty = inferencer.infer_catch_all(body);
-    let arm_body = inferencer.alias_arm_body(&cty);
-    let (value, route) = inferencer.extract_return(&arm_body);
-    if inferencer.ctx.unifier.bytes_subsumes(route, &value) {
-        Ok(())
-    } else {
-        Err(inferencer.ctx.unifier.apply_ty(&value))
-    }
+    one_shot_inference(schemes, |inferencer| {
+        let cty = inferencer.infer_catch_all(body);
+        let arm_body = inferencer.alias_arm_body(&cty);
+        let (value, route) = inferencer.extract_return(&arm_body);
+        inferencer.check_bytes_route(route, &value)
+    })
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),
@@ -249,21 +269,12 @@ pub(crate) fn binding_value_scheme(
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Scheme {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
-    let mut inferencer = infer::Inferencer {
-        ctx: &mut ctx,
-        env: &mut env,
-    };
-    let cty = inferencer.infer_binding_value(param, body);
-    let thunk_ty = Ty::Thunk(Box::new(cty));
-    ctx.solve_and_finalize();
-    let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
-    self::generalize::debug_assert_scheme_closed(
-        &mut ctx.unifier,
-        &scheme,
-        "binding-value scheme must leave no variable free",
-    );
-    scheme
+    one_shot_inference(schemes, |inferencer| {
+        let cty = inferencer.infer_binding_value(param, body);
+        close_thunk_scheme(
+            inferencer,
+            cty,
+            "binding-value scheme must leave no variable free",
+        )
+    })
 }

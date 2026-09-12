@@ -804,6 +804,17 @@ impl Inferencer<'_> {
         }
     }
 
+    /// The byte-route check every arm/handler that may pin to `Bytes` shares:
+    /// `Value Unit ⊑ Bytes` ([`Unifier::bytes_subsumes`]), or the arm's own
+    /// type, apply-typed, for the caller's diagnostic.
+    pub(super) fn check_bytes_route(&mut self, route: PayloadRoute, value: &Ty) -> Result<(), Ty> {
+        if self.ctx.unifier.bytes_subsumes(route, value) {
+            Ok(())
+        } else {
+            Err(self.ctx.unifier.apply_ty(value))
+        }
+    }
+
     /// Unify the arm's payload route against head `name`'s.  A pin that
     /// lands on the byte side lands on [`CompTy::bytes`] — WF-2 admits no
     /// other byte-routed computation — so the arm's value unifies with
@@ -821,14 +832,9 @@ impl Inferencer<'_> {
         let (value, route) = self.extract_return(&body);
         let (head, reinterprets) = self.head_pipe_route(name);
         if matches!(self.ctx.unifier.resolve_route(head), PayloadRoute::Bytes) {
-            return if self.ctx.unifier.bytes_subsumes(route, &value) {
-                Ok(())
-            } else {
-                Err(PinFailure::ByteHeadReturnsValue {
-                    actual: self.ctx.unifier.apply_ty(&value),
-                    reinterprets,
-                })
-            };
+            return self
+                .check_bytes_route(route, &value)
+                .map_err(|actual| PinFailure::ByteHeadReturnsValue { actual, reinterprets });
         }
         self.ctx
             .unifier
