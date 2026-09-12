@@ -1295,9 +1295,17 @@ fn computed_value_catch_all_is_refused_at_install() {
         .expect_err("a value-returning computed catch-all is refused");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("payload lives"),
-        "expected the route-clash wording, got: {msg}"
+        msg.contains("no separate value to return") && msg.contains("String"),
+        "expected the byte-side wording, got: {msg}"
     );
+}
+
+/// WF-2's subsumption, `Value Unit ⊑ Bytes`, on the computed catch-all's own
+/// vet (`catch_all_emits_bytes`): a `Value`-routed body that returns `Unit`
+/// (`cd` produces `Unit`) installs, symmetric with the static case above.
+#[test]
+fn computed_value_unit_catch_all_is_accepted_at_install() {
+    must_succeed("let h = { |name args| cd ~ }\nwithin [handler: $h] { echo hi }");
 }
 
 /// A-8's own invariant, pinned: the checker and the runtime agree on `^name`.

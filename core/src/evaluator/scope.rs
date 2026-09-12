@@ -161,26 +161,16 @@ impl WithinScope {
                         aliases: shell.context.handlers.alias_schemes(),
                         builtins: shell.session.builtins.clone(),
                     };
-                    crate::typecheck::catch_all_route_ok(&closure.comp, schemes).map_err(
-                        |failure| {
-                            use crate::typecheck::{PinFailure, fmt_route, fmt_ty};
-                            match failure {
-                                PinFailure::Route(m) => sig(format!(
-                                    "within handler: catch-all's body and the external \
-                                     commands it reinterprets disagree about where their \
-                                     payload lives — the body's is {}, an external's is {}; \
-                                     a catch-all must emit bytes, not return a value",
-                                    fmt_route(&m.left),
-                                    fmt_route(&m.right),
-                                )),
-                                PinFailure::ByteHeadReturnsValue { actual, .. } => sig(format!(
-                                    "within handler: catch-all reinterprets every external \
-                                     command, whose payload is its stdout, so its body has \
-                                     no separate value to return; its return type must be \
-                                     Unit, and the body returns {}",
-                                    fmt_ty(&actual),
-                                )),
-                            }
+                    crate::typecheck::catch_all_emits_bytes(&closure.comp, schemes).map_err(
+                        |actual| {
+                            use crate::typecheck::fmt_ty;
+                            sig(format!(
+                                "within handler: catch-all reinterprets every external \
+                                 command, whose payload is its stdout, so its body has \
+                                 no separate value to return; its return type must be \
+                                 Unit, and the body returns {}",
+                                fmt_ty(&actual),
+                            ))
                         },
                     )?;
                     catch_all = Some(v.clone());

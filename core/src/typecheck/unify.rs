@@ -1052,8 +1052,10 @@ impl Unifier {
     /// else — `Var` or already `Bytes` — must unify with `Bytes` outright,
     /// and having landed there, its value must be `Unit` too.
     ///
-    /// Shared by the head pin (`pin_arm_to_head`) and the arm-result join's
-    /// byte side (`conclude_byte_side`) — one judgement, two call sites.
+    /// The one judgement every site that lands on the byte side goes through:
+    /// the head pin (`pin_arm_to_head`), the arm-result join's byte side
+    /// (`conclude_byte_side`), and the catch-all's static and install vets
+    /// (`infer_within_opts`, `catch_all_emits_bytes`).
     pub(crate) fn bytes_subsumes(&mut self, route: PayloadRoute, value: &Ty) -> bool {
         if matches!(self.resolve_route(route), PayloadRoute::Value) {
             return self.unify_ty(value, &Ty::Unit).is_ok();

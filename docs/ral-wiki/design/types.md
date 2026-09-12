@@ -95,7 +95,10 @@ structural step — never writing a bare route:
   non-subsumed arm with `CompTy::bytes()`;
 - the alias/handler arm pin (`pin_arm_to_head`) demands the arm's value be
   `Unit` in the same breath as the pin that lands on bytes — subsumed or not,
-  by the same judgment as the join (§"One subsumption instance, two sites").
+  by the same judgment as the join (§"One subsumption instance, and where it
+  fires");
+- the catch-all `handler:` vet answers to that same judgment, its head being
+  `Bytes` for every external name in its extent.
 
 No live code unifies a route against a detached `Bytes`, so a new decision
 site cannot forget the pairing — it has no way to spell half of it
@@ -139,7 +142,7 @@ forwarding half of a `(route, value)` pair is exactly the shape WF-2 cannot
 police. `fail` is the one free route that is safe by construction: it never
 returns, so no boundary observes it.
 
-## One subsumption instance, two sites
+## One subsumption instance, and where it fires
 
 `F[Value] Unit` is also `F[Bytes] Unit`. The instance fires at the top of a
 computation type only — it does not descend through `Thunk`, `Fun`, or rows —
@@ -153,7 +156,13 @@ ground `Value Unit` may stand for `Bytes`:
 - **the head pin** (`pin_arm_to_head`) — an alias or `within [handlers: …]`
   arm installed under a head whose route is `Bytes` (a fresh name, or an
   existing handler that is itself byte-routed) need not have written a byte
-  itself, so long as its value is `Unit`.
+  itself, so long as its value is `Unit`;
+- **the catch-all** (`infer_within_opts`, `catch_all_emits_bytes`) — `within
+  [handler: …]` reinterprets every external name in its extent, so its head is
+  `Bytes` and a route clash is unreachable there: the only failure is a body
+  that still returns a value. It is vetted twice because a computed handler,
+  `within [handler: $k]`, reaches the installer with no literal thunk for the
+  checker to have pinned.
 
 The judgment itself:
 

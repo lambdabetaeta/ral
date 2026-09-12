@@ -1329,6 +1329,15 @@ fn catch_all_diverging_or_byte_bodies_are_accepted() {
     ok(r"within [handler: { |n a| echo caught }] { zzz }");
 }
 
+/// WF-2's subsumption, `Value Unit ⊑ Bytes`, on the catch-all's own pin: a
+/// `Value`-routed body that never actually returns anything (`cd` produces
+/// `Unit`) stands for `Bytes` without moving, exactly as a per-name arm's
+/// does via `pin_arm_to_head`.
+#[test]
+fn catch_all_value_unit_body_is_accepted() {
+    ok(r"within [handler: { |name args| cd ~ }] { echo hi }");
+}
+
 /// Uniform A has no native carve-out: a value arm over a native's spelling is
 /// refused exactly as one over any other unseen name is, `^` not being
 /// involved at all here (the bare head installs the arm; A-1 forces `Bytes`

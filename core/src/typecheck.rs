@@ -218,8 +218,8 @@ pub(crate) fn alias_arm_scheme(
 /// catch-all frame not outliving its run.
 ///
 /// # Errors
-/// The body's route disagrees with `Bytes`, or it still returns a value.
-pub(crate) fn catch_all_route_ok(body: &Comp, schemes: SessionSchemes) -> Result<(), PinFailure> {
+/// It still returns a value; `Err` carries that value's type.
+pub(crate) fn catch_all_emits_bytes(body: &Comp, schemes: SessionSchemes) -> Result<(), Ty> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
     seed_env(&mut env, schemes, &mut ctx.unifier);
@@ -230,22 +230,11 @@ pub(crate) fn catch_all_route_ok(body: &Comp, schemes: SessionSchemes) -> Result
     let cty = inferencer.infer_catch_all(body);
     let arm_body = inferencer.alias_arm_body(&cty);
     let (value, route) = inferencer.extract_return(&arm_body);
-    inferencer
-        .ctx
-        .unifier
-        .unify_route(route, PayloadRoute::Bytes)
-        .map_err(PinFailure::Route)?;
-    if matches!(
-        inferencer.ctx.unifier.resolve_route(route),
-        PayloadRoute::Bytes
-    ) && inferencer.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
-    {
-        return Err(PinFailure::ByteHeadReturnsValue {
-            actual: inferencer.ctx.unifier.apply_ty(&value),
-            reinterprets: true,
-        });
+    if inferencer.ctx.unifier.bytes_subsumes(route, &value) {
+        Ok(())
+    } else {
+        Err(inferencer.ctx.unifier.apply_ty(&value))
     }
-    Ok(())
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),

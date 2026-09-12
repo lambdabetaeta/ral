@@ -10,7 +10,7 @@
 //! its caller to compose into `CompTy::Return(sig.route, Box::new(sig.value))`.
 
 use super::builtins::{FieldSchema, audit_record, try_error_record};
-use super::error::Reason;
+use super::error::{CompDiff, Reason, TypeErrorKind};
 use super::infer::Inferencer;
 use super::route::PayloadRoute;
 use super::scheme::Scheme;
@@ -83,11 +83,22 @@ impl Inferencer<'_> {
                     self.with_span(value.span, |this| {
                         let cty = this.infer_catch_all(comp);
                         let arm_return = this.alias_arm_body(&cty);
-                        this.ctx.unify_comp_ty(
-                            &CompTy::bytes(),
-                            &arm_return,
-                            Reason::CatchAllRoutePin,
-                        );
+                        let (value, route) = this.extract_return(&arm_return);
+                        if !this.ctx.unifier.bytes_subsumes(route, &value) {
+                            let actual = this.ctx.unifier.apply_ty(&value);
+                            let kind = TypeErrorKind::CompTyMismatch {
+                                expected: CompTy::bytes(),
+                                actual: CompTy::Return(
+                                    PayloadRoute::Bytes,
+                                    Box::new(actual.clone()),
+                                ),
+                                diffs: vec![CompDiff::ReturnType {
+                                    expected: Ty::Unit,
+                                    actual,
+                                }],
+                            };
+                            this.ctx.report(kind, Reason::CatchAllRoutePin);
+                        }
                     });
                 }
 
