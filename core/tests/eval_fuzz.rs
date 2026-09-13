@@ -502,22 +502,17 @@ fn marked_record_with_explicit_entry_and_spread() {
 }
 
 #[test]
-fn marked_record_merge_over_open_row_in_lambda() {
-    // The real target: a record merge inside a lambda, over a parameter
-    // whose row is open — the classifier alone must make this typecheck.
+fn marked_record_merge_destructures_to_each_winner() {
+    // A merge is assembled where the records are known; the pattern then reads
+    // the winner of each field — the given value where it has one, the default
+    // where it does not.
     let v = must_succeed(
         "let dflt = [host: 'local', port: 80]\n\
-         let f = { |g| let [host: hn, port: pn] = [:, ...$g, ...$dflt]; return $pn }\n\
-         return !{f [host: prod]}",
+         let given = [host: 'prod']\n\
+         let [host: hn, port: pn] = [:, ...$given, ...$dflt]\n\
+         return [h: $hn, p: $pn]",
     );
-    assert_eq!(v, Value::Int(80));
-
-    let v = must_succeed(
-        "let dflt = [host: 'local', port: 80]\n\
-         let f = { |g| let [host: hn, port: pn] = [:, ...$g, ...$dflt]; return $pn }\n\
-         return !{f [host: prod, port: 9000]}",
-    );
-    assert_eq!(v, Value::Int(9000));
+    assert_eq!(v, must_succeed("return [h: 'prod', p: 80]"));
 }
 
 #[test]

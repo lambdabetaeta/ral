@@ -186,6 +186,19 @@ pub enum TypeErrorKind {
     RowMissingField {
         label: String,
     },
+    /// The same label written twice in one record literal.  Every other
+    /// precedence rule in a literal is first-wins; this one alone was
+    /// last-wins, so it is refused rather than given a direction.
+    DuplicateField {
+        label: String,
+    },
+    /// A spread whose row is still open, with lower-precedence entries behind
+    /// it.  A row has one open end, so nothing can be placed after an unknown
+    /// remainder — and the spread would win on any field it happened to carry,
+    /// which is why `unreachable` can never be read.
+    OpenSpreadNotLast {
+        unreachable: Vec<String>,
+    },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     /// The flag marks a head/args shape suggesting a string split by a stray quote.
     CommandNotFunction {
@@ -282,6 +295,8 @@ impl TypeErrorKind {
             Self::RouteMismatch { .. } => "T0012",
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
+            Self::DuplicateField { .. } => "T0022",
+            Self::OpenSpreadNotLast { .. } => "T0023",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",

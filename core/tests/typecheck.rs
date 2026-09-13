@@ -2666,15 +2666,15 @@ fn caret_echo_is_exec_gated_like_any_path_binary() {
     has_error(r"let f = { |x| return $x }; ^echo $f", "cannot pass");
 }
 
-// ─── Row termination and duplicate-key semantics ──────────────────────────────
+// ─── Row termination, precedence, and duplicate keys ──────────────────────────
 //
-// These pin three row-subsystem repairs: row unification must terminate with
-// an infinite-row error, rather than looping forever, when a row cycle has no
+// These pin four row-subsystem repairs: row unification must terminate with an
+// infinite-row error, rather than looping forever, when a row cycle has no
 // finite or rational solution — whether the cycle sits at the row spine or is
-// reached through a field type — and duplicate keys in a record or case
-// literal must resolve last-wins, matching the runtime, rather than
-// first-wins.  Before the fix, the first two overflowed the host stack during
-// `--check`; the third disagreed with the runtime on duplicate keys.
+// reached through a field type; a record literal's row must stay constrained by
+// every spread it is built from, in precedence order; and a label written twice
+// in one literal, record or case, must be refused rather than resolved.  Before
+// the fix, the first two overflowed the host stack during `--check`.
 
 /// Both branches spread the *same* parameter row, so `merge_branches`
 /// unifies `{x: Int | ρ}` against `{y: Int | ρ}` over one shared tail ρ.  The
@@ -2705,24 +2705,65 @@ fn row_cycle_through_field_type_is_recursive_row_error() {
     );
 }
 
-/// A duplicate explicit key resolves last-wins, matching the runtime
-/// `Value::map`.  Here the last `x` is a String, so reading `$m[x]` in Int
-/// arithmetic is a static type error — the same shape the runtime rejects.
+/// Several spreads in one literal each keep constraining the result: the row
+/// is their concatenation in precedence order, not a fresh variable that
+/// believes whatever it is later asked to.  Reading a known field at the wrong
+/// type is an error, and a field no spread supplies does not exist.
 #[test]
-fn duplicate_key_last_wins_string_then_arith_is_error() {
+fn multiple_spreads_keep_constraining_the_result() {
     has_error(
-        "let m = [x: 1, x: \"two\"]\nlet y = $[$m[x] + 1]\nreturn $y",
+        "let r = [dummy: 0, ...[flag: 1], ...[other: 2]]\nreturn $[$r[flag] + true]",
+        "couldn't match",
+    );
+    has_error(
+        "let r = [dummy: 0, ...[flag: 1], ...[other: 2]]\nreturn $r[nope]",
+        "no field named 'nope'",
+    );
+}
+
+/// Precedence is chain position: the earlier spread wins, so its field type is
+/// the one the result reports.
+#[test]
+fn first_spread_wins_in_the_type() {
+    ok("let r = [:, ...[p: 1], ...[p: \"s\"]]\nreturn $[$r[p] + 1]");
+    has_error(
+        "let r = [:, ...[p: \"s\"], ...[p: 1]]\nreturn $[$r[p] + 1]",
         "couldn't match",
     );
 }
 
-/// The complementary direction: the last `x` is an Int, so reading it in
-/// Int arithmetic typechecks.  Under the old first-wins checker this was a
-/// String-vs-Int error; last-wins makes it well-typed, consistent with the
-/// runtime which would compute `2`.
+/// A row has one open end, so a spread whose fields are not known here can have
+/// nothing placed behind it — and since such a spread wins on any field it
+/// turns out to carry, those entries could never be read.  This is why defaults
+/// cannot be merged behind an unknown record: absence is a variant's job
+/// (`optionality-via-variants`), not a record's.  The mirror order, where the
+/// known record takes precedence, is exact and stays legal.
 #[test]
-fn duplicate_key_last_wins_int_then_arith_ok() {
-    ok("let m = [x: \"two\", x: 1]\nreturn $[$m[x] + 1]");
+fn an_open_spread_must_come_last() {
+    has_error(
+        "let dflt = [host: 'local', port: 80]\n\
+         let f = { |g| return [:, ...$g, ...$dflt] }\n\
+         return $f",
+        "must come last",
+    );
+    has_error(
+        "let f = { |a b| return [:, ...$a, ...$b] }\nreturn $f",
+        "must come last",
+    );
+    ok("let f = { |g| return [:, ...[tag: 1], ...$g] }\nreturn $f");
+    ok("let dflt = [host: 'local', port: 80]\n\
+        let given = [host: 'prod']\n\
+        let r = [:, ...$given, ...$dflt]\n\
+        return $[$r[port] + 1]");
+}
+
+/// A field written twice in one literal is refused, in either order: every
+/// other precedence rule in a literal is first-wins, and rather than carry one
+/// last-wins exception the checker declines to pick a direction at all.
+#[test]
+fn duplicate_key_is_refused() {
+    has_error("let m = [x: 1, x: \"two\"]\nreturn $m", "writes the field 'x' twice");
+    has_error("let m = [x: \"two\", x: 1]\nreturn $m", "writes the field 'x' twice");
 }
 
 /// A `case` arm is *not* a record entry, so the last-wins rule stops at the

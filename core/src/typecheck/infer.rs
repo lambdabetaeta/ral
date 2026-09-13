@@ -34,23 +34,41 @@ enum ArgvBoundary<'a> {
 }
 
 /// Labels of a *resolved* row spine in first-appearance order, stopping at the
-/// first non-`Extend`.  A repeated label keeps the deepest payload — last-wins,
-/// as `Value::map` is at runtime.
+/// first non-`Extend`.  A repeated label keeps the head payload, as selection
+/// and `unify_row` both do.
 fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
     let mut out: Vec<(String, Ty)> = Vec::new();
     let mut cur = row;
     loop {
         match cur {
             Row::Extend(l, ty, rest) => {
-                match out.iter_mut().find(|(k, _)| k == l) {
-                    Some(slot) => slot.1 = (**ty).clone(),
-                    None => out.push((l.clone(), (**ty).clone())),
+                if !out.iter().any(|(k, _)| k == l) {
+                    out.push((l.clone(), (**ty).clone()));
                 }
                 cur = rest;
             }
             _ => return out,
         }
     }
+}
+
+/// A record literal's entries: every key is a literal label, so a computed key
+/// cannot be one.  `None` is a literal with a computed key somewhere, which is
+/// a map rather than a record and keeps none of the shape below.
+enum RecordPart<'a> {
+    Field(&'a String, &'a Spanned<Val>),
+    Spread(&'a Spanned<Val>),
+}
+
+fn record_parts(entries: &[ValMapEntry]) -> Option<Vec<RecordPart<'_>>> {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            ValMapEntry::Entry(Val::String(key), value) => Some(RecordPart::Field(key, value)),
+            ValMapEntry::Spread(value) => Some(RecordPart::Spread(value)),
+            ValMapEntry::Entry(_, _) => None,
+        })
+        .collect()
 }
 
 /// Heuristic: did the lexer close a `"…"` on an unescaped inner quote?  The
@@ -1158,61 +1176,50 @@ impl Inferencer<'_> {
     /// `contract`'s schema expects of that key.  `None` is the ordinary map:
     /// no form speaks about its keys.
     fn infer_map_val(&mut self, entries: &[ValMapEntry], contract: Option<ReturnContract>) -> Ty {
-        let all_literal_keys = entries.iter().all(|entry| match entry {
-            ValMapEntry::Entry(Val::String(_), _) | ValMapEntry::Spread(_) => true,
-            ValMapEntry::Entry(_, _) => false,
-        });
-
-        if all_literal_keys && !entries.is_empty() {
-            let mut spread_rows = Vec::new();
-            let mut field_entries = Vec::new();
-            for entry in entries {
-                match entry {
-                    ValMapEntry::Entry(Val::String(key), value) => {
+        if let Some(parts) = record_parts(entries)
+            && !parts.is_empty()
+        {
+            let mut fields: Vec<(String, Ty)> = Vec::new();
+            let mut spreads: Vec<(Option<Span>, Row)> = Vec::new();
+            for part in parts {
+                match part {
+                    RecordPart::Field(key, value) => {
                         let ty = self.with_span(value.span, |this| {
+                            if fields.iter().any(|(seen, _)| seen == key) {
+                                this.ctx
+                                    .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
+                            }
                             let ty = this.infer_val(&value.item);
                             this.pin_field(contract, key, &ty);
                             ty
                         });
-                        field_entries.push((key.clone(), ty));
+                        fields.push((key.clone(), ty));
                     }
-                    ValMapEntry::Spread(value) => {
-                        let row_var = self.with_span(value.span, |this| {
+                    RecordPart::Spread(value) => {
+                        let row = self.with_span(value.span, |this| {
                             let spread_ty = this.infer_val(&value.item);
-                            let row_var = this.ctx.unifier.fresh_row_var();
-                            this.ctx.unify_ty(
-                                &spread_ty,
-                                &Ty::Record(Row::Var(row_var)),
-                                Reason::MapSpread,
-                            );
-                            row_var
+                            let row = Row::Var(this.ctx.unifier.fresh_row_var());
+                            this.ctx
+                                .unify_ty(&spread_ty, &Ty::Record(row.clone()), Reason::MapSpread);
+                            row
                         });
-                        spread_rows.push(row_var);
-                    }
-                    ValMapEntry::Entry(_, _) => {
-                        unreachable!("all_literal_keys guarantees every Entry has a String key")
+                        spreads.push((value.span, row));
                     }
                 }
             }
 
-            // Last-wins on a duplicate key, as `Value::map` is at runtime;
-            // first-appearance order only fixes the row spine's shape.
-            let mut deduped: Vec<(String, Ty)> = Vec::new();
-            for (key, value_ty) in field_entries {
-                match deduped.iter_mut().find(|(k, _)| *k == key) {
-                    Some(slot) => slot.1 = value_ty,
-                    None => deduped.push((key, value_ty)),
-                }
-            }
-
-            let mut row = match spread_rows.len() {
-                0 => Row::Empty,
-                1 => Row::Var(spread_rows[0]),
-                _ => Row::Var(self.ctx.unifier.fresh_row_var()),
-            };
-            for (key, value_ty) in deduped.into_iter().rev() {
-                row = Row::Extend(key, Box::new(value_ty), Box::new(row));
-            }
+            // Chain order is precedence order: an explicit entry beats every
+            // spread and an earlier spread a later one, which is the runtime's
+            // own two passes, and selection-takes-first does the shadowing.  So
+            // build from the low-precedence end, splicing each spread's row in
+            // whole — a literal's row is the concatenation of its parts, and
+            // nothing here may forget what a part already knows.
+            let row = spreads.into_iter().rev().fold(Row::Empty, |rest, (span, spread)| {
+                self.with_span(span, |this| this.splice(&spread, rest))
+            });
+            let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
+                Row::Extend(key, Box::new(ty), Box::new(rest))
+            });
             Ty::Record(row)
         } else {
             // A dynamic-key map is `Map<elem>` with one `elem` shared by every
@@ -1248,6 +1255,42 @@ impl Inferencer<'_> {
             }
             Ty::Map(Box::new(elem))
         }
+    }
+
+    /// One spread's row in front of `rest`, everything the literal holds of
+    /// lower precedence.  A spread whose fields are known contributes exactly
+    /// them.  One whose row is still open can have nothing placed behind it —
+    /// a row has one open end — and since such a spread wins on any field it
+    /// turns out to carry, `rest` could never be read: the literal is refused
+    /// rather than given a tail the row algebra cannot honour.
+    fn splice(&mut self, spread: &Row, rest: Row) -> Row {
+        let rest_is_empty = matches!(rest, Row::Empty);
+        let mut known = Vec::new();
+        let mut cur = self.ctx.unifier.resolve_row(spread);
+        let tail = loop {
+            match cur {
+                Row::Extend(label, ty, next) => {
+                    known.push((label, ty));
+                    cur = self.ctx.unifier.resolve_row(&next);
+                }
+                Row::Empty => break rest,
+                Row::Var(v) if rest_is_empty => break Row::Var(v),
+                // Recovery mints a tail of its own rather than reusing the
+                // spread's: the literal is already refused, and binding this
+                // record to whatever the reader goes on to demand would report
+                // the same fault a second time against an innocent caller.
+                Row::Var(_) => {
+                    let unreachable = collect_extends(&rest).into_iter().map(|(l, _)| l).collect();
+                    self.ctx
+                        .diagnose(TypeErrorKind::OpenSpreadNotLast { unreachable });
+                    break Row::Var(self.ctx.unifier.fresh_row_var());
+                }
+            }
+        };
+        known
+            .into_iter()
+            .rev()
+            .fold(tail, |row, (label, ty)| Row::Extend(label, ty, Box::new(row)))
     }
 
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {

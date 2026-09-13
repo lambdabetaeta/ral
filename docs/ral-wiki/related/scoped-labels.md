@@ -16,8 +16,11 @@ divergence below traces to that cut.
 
 ## What ral takes whole
 
-- **Scoped labels.** Duplicates are permitted and *retained*, in the value and
-  in the type; selection takes the first. This is Leijen's defining move against
+- **Scoped labels.** Duplicates are permitted and *retained in the type*;
+  selection takes the first. ral diverges on the value, where a merge keeps only
+  the winner and the result's keys are unique (`docs/SPEC.md` §4.5) — what the
+  type retains is the shadowing, not a duplicated field. This is Leijen's
+  defining move against
   the earlier free-extension systems (Wand, Rémy), where extension *overwrites*
   — the ambiguity that made Wand's system incomplete, and that Rémy's
   presence/absence flags (`pre`/`abs`) repair at the price of flags in every
@@ -57,9 +60,12 @@ divergence below traces to that cut.
 - **Two label alphabets.** Leijen runs records and variants over one label
   namespace; ral splits bare labels (records) from backtick labels (variants),
   and the two never unify.
-- **Multi-spread is imprecise.** Leijen types iterated extension exactly; ral
-  threads a *single* spread's field types precisely, while several spreads in
-  one literal yield an open but imprecise result (`docs/SPEC.md` §4.5).
+- **Concatenation is refused, not approximated.** Leijen's calculus has no
+  record concatenation, and neither has ral's: a literal's row is built by
+  iterated extension, so a spread whose row is still open can have nothing
+  placed behind it and such a literal is rejected
+  ([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
+  Every literal ral accepts it types exactly.
 
 ## What ral could borrow
 

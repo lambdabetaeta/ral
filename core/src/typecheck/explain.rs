@@ -44,6 +44,12 @@ impl TypeErrorKind {
             Self::RowMissingField { label } => {
                 format!("this record is missing a field named '{label}'")
             }
+            Self::DuplicateField { label } => {
+                format!("this record literal writes the field '{label}' twice")
+            }
+            Self::OpenSpreadNotLast { .. } => {
+                "a spread of a record whose fields aren't known here must come last".into()
+            }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -159,6 +165,8 @@ impl TypeErrorKind {
             Self::RouteMismatch { .. } => "these disagree about where their payload lives".into(),
             Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
+            Self::DuplicateField { label } => format!("'{label}' was already given above"),
+            Self::OpenSpreadNotLast { .. } => "what this record holds isn't known here".into(),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -336,6 +344,24 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::RowExtraField { known, .. } if !known.is_empty() => Some(format!(
             "available: {} — did you mean one of those?",
             known.join(", ")
+        )),
+        // The rule is the row's own shape, so the remedy is to make the unknown
+        // part the last one — or to stop asking a record to carry absence.
+        TypeErrorKind::OpenSpreadNotLast { unreachable } => Some(format!(
+            "this spread wins on any field it happens to carry, and nothing here can say \
+             which, so {} could never be read — put it last, assemble defaults where the \
+             record is a literal and its fields are known, or have absence travel as a \
+             variant instead",
+            match unreachable.as_slice() {
+                [] => "whatever is behind it".to_string(),
+                [only] => format!("'{only}'"),
+                many => format!("'{}'", many.join("', '")),
+            }
+        )),
+        TypeErrorKind::DuplicateField { label } => Some(format!(
+            "a record has one value per field, so keep whichever '{label}' you meant; \
+             to override a field a spread supplies, write it out once and it wins \
+             wherever it sits, as in `[...$m, {label}: …]`"
         )),
         // The remedy is the shape's own, and the shape's own is where the
         // spawn-time refusal reads it too.

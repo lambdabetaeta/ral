@@ -674,8 +674,16 @@ let merged = [:, ...$given, ...$defaults]
 ```
 
 Every explicit entry wins over every spread entry, regardless of position. If
-spread entries conflict with each other, the first spread entry wins. A
-duplicate explicit key produces a warning; the last explicit entry wins.
+spread entries conflict with each other, the first spread entry wins. Writing
+the same static key twice in one literal is an error, so within a literal the
+earlier entry always wins; a duplicate arising from computed keys, which the
+checker cannot see, produces a warning and the last entry wins.
+
+A record's fields are read in the order just given, so a spread whose own
+fields are not known where the literal is written must be the last entry: it
+would win on any field it turns out to carry, leaving anything behind it
+unreadable. Defaults are therefore merged where both records are known;
+absence over an unknown record travels as a variant.
 
 Spreading a value that is not a record or map is an error. Spreading does not
 change the source value.

@@ -38,11 +38,19 @@ reverse work for open rows needs a presence flag per field (Rémy-style
 `Pre`/`Abs`) — exactly the restriction operator the bullet above says ral does
 not have.
 
-This costs nothing: what a `Pre`/`Abs` flag would buy — "the spread's value
-here, or this default if it lacks one" — is already a second spread,
-`[...$cfg, ...[port: 8080]]`. Spread-versus-spread prepends one whole chain
-onto another, so a duplicate label survives and selection-takes-first
-resolves it. Scoped labels already do that job.
+**The same argument binds spread against spread, and that is what the missing
+flag costs.** `[...$cfg, ...[port: 8080]]` prepends one whole chain onto
+another, so a duplicate label survives and selection-takes-first resolves it —
+but only while `$cfg`'s chain ends in `Empty`. If it ends in `Var(ρ)` there is
+again no position after the remainder, and a spread that wins on any field it
+turns out to carry would make the defaults behind it unreadable, so the literal
+is refused
+([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
+So a `Pre`/`Abs` flag buys exactly one thing scoped labels cannot: "the
+spread's value here, or this default if it lacks one" over a record whose
+fields are *not* known here. ral declines to buy it — over an unknown record,
+absence travels as a variant
+([[invariants/optionality-via-variants|optionality-via-variants]]).
 
 **A `case` closes a variant row, and the syntax is what lets it.** The arms are
 written out at the `case`, so the label set is known when the rule fires: the
@@ -53,8 +61,9 @@ An *open* scrutinee row absorbs an arm label it has not been seen to construct
 principal row inference and not a gap in the proof: the row records what the
 program has shown, and the `case` is one more such showing.
 
-Scoped labels and spread shadowing are how ral expresses optionality and
-defaults at the level of data rather than argument lists — see
+Scoped labels and spread shadowing are how ral expresses defaults at the level
+of data rather than argument lists, wherever the records in hand are known;
+where they are not, optionality is a variant's job — see
 [[invariants/optionality-via-variants|optionality-via-variants]] and [[invariants/fixed-arity|fixed-arity]].
 Rows type data only, never effects — that refusal is argued against the
 literature in [[related/rows-and-handlers|rows-and-handlers]].

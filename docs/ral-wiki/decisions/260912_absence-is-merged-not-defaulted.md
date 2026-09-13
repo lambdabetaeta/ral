@@ -90,6 +90,12 @@ would win unconditionally instead of only on absence. Spelling the default as
 a second spread keeps it subject to the same first-spread-wins rule as
 `$cfg`'s own fields.
 
+This migration holds where `$cfg`'s own fields are known where the merge is
+written. Where they are not — `$cfg` a row-polymorphic parameter — no spelling
+of a default works, a map-pattern default no more than a second spread; that
+limit is the row algebra's, not this decision's, and is recorded in
+[[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]].
+
 ### A soundness hole leaves with it
 
 The removed implementation had a live gap worth recording, not as
@@ -101,6 +107,13 @@ failed at runtime with a type mismatch, and an ill-typed default such as
 field was absent at run time, never checked against the field's inferred
 type. Merging plain records has no such gap: every field in `[:, ...$given,
 ...$dflt]` is checked at the type the record literal already gives it.
+
+That last sentence held only for known records, and at the time it was written
+a second hole hid the difference: a literal with two or more spreads discarded
+both rows for a free row variable, so the merge appeared to typecheck over an
+open `$given` too. Closing it showed that neither mechanism can default a field
+of a record whose fields are unknown — so this decision's *replacement* claim
+was too broad, while the deletion it argues for stands on its own.
 
 ## See also
 
