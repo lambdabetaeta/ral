@@ -111,6 +111,7 @@ impl Shell {
         let library_docs = self.session.library_docs.clone();
         let guest_jail = self.session.guest_jail.clone();
         let sources = self.session.sources.clone();
+        let root_file = self.session.root_file;
         let workers = self.local.workers.clone();
         let detach = self.local.detach.clone();
         let worker_cancel = mooring.cancel.as_scope().clone();
@@ -128,6 +129,10 @@ impl Shell {
                 child.session.library_docs = library_docs;
                 child.session.guest_jail = guest_jail;
                 child.session.sources = sources;
+                // Rides with `sources`: without it, an unqualified `source`/`use`
+                // in a worker with no load in flight resolves against the cwd
+                // instead of falling back to the run's own root.
+                child.session.root_file = root_file;
                 child.local.workers = workers;
                 child.local.detach = detach;
                 // Shared, not owned: this worker's shell dropping must not cancel
@@ -219,6 +224,30 @@ mod tests {
         assert!(
             rendered.contains("worker.ral"),
             "the worker's error must resolve against the parent's source: {rendered}"
+        );
+    }
+
+    /// `session.root_file` must ride into a spawned worker's shell alongside
+    /// `sources`, else a bare `source`/`use` in a `defer`/`spawn` body or a
+    /// pipeline stage — which starts no load of its own — falls back through
+    /// a missing registry entry to cwd-relative resolution instead of the
+    /// run's own root, and can silently load the wrong file.
+    #[test]
+    fn spawned_worker_inherits_the_root_file() {
+        let mut parent = Shell::default();
+        parent.install_root_context("main.ral", "");
+        let root_file = parent.session.root_file;
+        let scopes = Arc::new(parent.env.clone());
+        let (join, _cancel) = parent
+            .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
+                child.session.root_file
+            })
+            .expect("spawn_thread");
+
+        let child_root_file = join.join().expect("worker thread");
+        assert_eq!(
+            child_root_file, root_file,
+            "the worker must inherit the parent's root file, not FileId::DUMMY"
         );
     }
 }
