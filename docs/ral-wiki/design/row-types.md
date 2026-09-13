@@ -50,7 +50,10 @@ So a `Pre`/`Abs` flag buys exactly one thing scoped labels cannot: "the
 spread's value here, or this default if it lacks one" over a record whose
 fields are *not* known here. ral declines to buy it — over an unknown record,
 absence travels as a variant
-([[invariants/optionality-via-variants|optionality-via-variants]]).
+([[invariants/optionality-via-variants|optionality-via-variants]]). Reversing the
+precedence convention buys nothing either: it moves the open spread to the front,
+and the unknown operand still sits at the open end, which is still the end every
+other entry beats.
 
 **A `case` closes a variant row, and the syntax is what lets it.** The arms are
 written out at the `case`, so the label set is known when the rule fires: the
@@ -64,7 +67,8 @@ program has shown, and the `case` is one more such showing.
 Scoped labels and spread shadowing are how ral expresses defaults at the level
 of data rather than argument lists, wherever the records in hand are known;
 where they are not, optionality is a variant's job — see
-[[invariants/optionality-via-variants|optionality-via-variants]] and [[invariants/fixed-arity|fixed-arity]].
+[[invariants/optionality-via-variants|optionality-via-variants]],
+[[invariants/fields-are-reached-by-name|fields-are-reached-by-name]] and [[invariants/fixed-arity|fixed-arity]].
 Rows type data only, never effects — that refusal is argued against the
 literature in [[related/rows-and-handlers|rows-and-handlers]].
 

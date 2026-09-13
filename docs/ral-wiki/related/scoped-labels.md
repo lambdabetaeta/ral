@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a2d120d2
-verified_at_date: 2026-09-11
-against: [design/row-types, internals/type-inference, design/scoping]
+verified_at_commit: a2f49715
+verified_at_date: 2026-09-13
+against: [design/row-types, internals/type-inference, design/scoping, decisions/260913_an-open-spread-must-come-last]
 ---
 
 # Scoped labels — the record calculus ral implements
@@ -60,12 +60,19 @@ divergence below traces to that cut.
 - **Two label alphabets.** Leijen runs records and variants over one label
   namespace; ral splits bare labels (records) from backtick labels (variants),
   and the two never unify.
+- **A literal may not write one label twice.** Leijen permits duplicates in a
+  record term; ral refuses the ones an author wrote into a single literal
+  (`T0022`), where they can only be a mistake — the record-side mirror of the
+  parser's refusal of a repeated `case` arm. A duplicate two *spreads* compose
+  stays legal and resolves by position, which is what the merge idiom needs.
 - **Concatenation is refused, not approximated.** Leijen's calculus has no
   record concatenation, and neither has ral's: a literal's row is built by
   iterated extension, so a spread whose row is still open can have nothing
   placed behind it and such a literal is rejected
   ([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
-  Every literal ral accepts it types exactly.
+  Every literal ral accepts it types exactly. The prices the other record
+  calculi pay to have the operation are read in
+  [[related/record-concatenation|record-concatenation]].
 
 ## What ral could borrow
 
@@ -75,7 +82,9 @@ divergence below traces to that cut.
   the idiom ral deliberately routes through `within` instead.
 - **The shadow warning.** For a record of *fixed* type carrying duplicate
   labels, Leijen suggests a shadowed-variable-style warning — a warning, not an
-  error, since a program with duplicates cannot go wrong. A cheap checker lint.
+  error, since a program with duplicates cannot go wrong. Its locus in ral is the
+  duplicate a merge composes, a literal's own repeated label being refused
+  outright (`T0022`). A cheap checker lint.
 - **The implementation menu.** Labeled vectors with compiler-folded offsets
   give constant-time selection even on open rows; extension predicates `l|r`
   are always solvable (unlike *lacks*), so they never surface in types. Worth a

@@ -22,6 +22,12 @@ revisit.
   Plotkin–Pretnar 2009: the founding handler calculus, on CBPV, with shell
   redirection as its own example; ral is its tail-resumptive fragment, and the
   pipe they could not express is ral's primitive.
+- [[related/record-concatenation|record-concatenation]] — Wand 1991,
+  Harper–Pierce 1991, Rémy 1992, Gaster–Jones 1996: the record operation ral
+  declined. Concatenation has no principal type, and each published way of
+  typing it charges a price — compatibility constraints, `lacks` predicates,
+  presence flags — that ral has already refused; a literal's row is iterated
+  extension, exact where the parts are known and refused where they are not.
 - [[related/rows-and-handlers|rows-and-handlers]] — Hillerström–Lindley 2016:
   the effect typing ral declined — the same row machinery, extended to every
   arrow; nearly ral's runtime, the inverse of ral's wild/handleable split.

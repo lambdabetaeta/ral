@@ -38,10 +38,14 @@ being special cases and become instances.
 
 **An open spread with anything behind it is refused.** A row is a chain with
 one open end ([[design/row-types|row-types]]), so nothing can be appended after
-an unknown remainder. The only sound alternative is to bind that row to the
-fields behind it — which forces every caller to supply them, and so proves
-those entries dead. Refusing therefore loses no program that could have run,
-and the error can name the fields that would have been unreachable:
+an unknown remainder. Under every sound typing those entries are dead: the only
+one available binds that row to the fields behind it, which forces every caller
+to supply them, so a default among them can never win. What refusal costs is
+therefore precisely the programs whose only type is the concatenation type — a
+merge behind an open spread, followed by a read of one of the defaults, does run
+and is refused because no row ral can write describes its result
+([[related/record-concatenation|record-concatenation]]). The error names the
+fields that would have been unreachable:
 
 ```
 [T0023] a spread of a record whose fields aren't known here must come last
@@ -52,9 +56,19 @@ and the error can name the fields that would have been unreachable:
 The mirror order stays legal and exact: `[:, ...[tag: 1], ...$g]` places the
 known chain first and lets `$g` be the open tail.
 
-**A label written twice in one literal is refused** (`T0022`). The runtime was
-last-wins there and first-wins everywhere else in the same literal; rather than
-carry one exception, position now means one thing throughout. Computed keys
+**Reversing the precedence convention would not help.** Under last-wins the open
+spread would have to come *first* instead — still at the row's open tail, still
+the entry every other one beats. Either convention seats the unknown operand at
+the low-precedence end, while a default needs the unknown operand to win: the
+idiom is foreclosed by the row's single open end, not by the direction
+precedence happens to run.
+
+**A label written twice in one literal is refused** (`T0022`). A duplicate two
+spreads bring together is *composition*, and resolving it by position is the
+merge idiom's whole point; a duplicate one author writes twice in one literal can
+only be a mistake, and refusing it is the record-side mirror of a rule ral
+already keeps — a repeated `case` arm is refused by the parser, which needs no
+types to see it. Position therefore means one thing throughout. Computed keys
 keep the runtime warning, since the checker cannot see them.
 
 ## Consequences
@@ -73,6 +87,13 @@ record travels as a variant
 at `∀ρ. [ρ] → [ρ] → [ρ]`, a contract no caller wants; it is now refused at the
 literal instead of blaming an argument.
 
+**Refusal is the reversible direction.** Every program ral accepts stays accepted
+if presence flags are ever adopted, so the restriction lifts without breaking a
+program, while a weaker typing could only be withdrawn. What would unsettle the
+cost argument is not a new type feature but a new *observation* — an operation
+reading fields an open row does not name
+([[invariants/fields-are-reached-by-name|fields-are-reached-by-name]]).
+
 **Rejected: presence polymorphism** (Rémy `Pre`/`Abs`), which would type the
 idiom. It is not additive here: flags pay off only on total, unordered rows,
 where `[l: θ τ | ρ]` is the one slot for `l`. On a duplicate-retaining ordered
@@ -81,13 +102,20 @@ scoped-labels calculus with Rémy's — a new variable sort, the row half of
 `unify.rs`, every row construction in `builtins.rs`, `generalize`, `fmt`, and
 `Scheme` with its serde — to buy one idiom. **Rejected: a concatenation
 constraint**, which has no most general unifier (`ρ ++ [l: Int]` against
-`[l: α | ρ']` has two incomparable solutions), so row unification would stop
-being unitary and schemes would need a predicate slot — the Gaster–Jones tax
-[[related/scoped-labels|scoped-labels]] says ral bought its way out of.
+`[l: α | ρ']` has two incomparable solutions) — Wand's result, not an accident of
+this unifier ([[related/record-concatenation|record-concatenation]]) — so row
+unification would stop being unitary and schemes would need a predicate slot:
+the Gaster–Jones tax [[related/scoped-labels|scoped-labels]] says ral bought its
+way out of, and one that a `Scheme` would carry into the persisted format
+([[invariants/schemes-leave-closed|schemes-leave-closed]]).
 
 ## See also
 
 [[design/row-types|row-types]] (the chain argument this generalises),
+[[related/record-concatenation|record-concatenation]] (the published prices for
+typing the operation ral declined),
+[[invariants/fields-are-reached-by-name|fields-are-reached-by-name]] (what the
+cost argument rests on),
 [[related/scoped-labels|scoped-labels]] (Leijen has no concatenation either),
 [[invariants/optionality-via-variants|optionality-via-variants]],
 [[internals/type-inference|type-inference]], `docs/SPEC.md` §4.5.
