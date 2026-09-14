@@ -570,6 +570,7 @@ impl Inferencer<'_> {
             return (self.peel_curry_spine(cty), Vec::new());
         };
         let mut applied = Vec::with_capacity(positional.len().min(cap));
+        let mut bodies = Vec::new();
         for (i, arg) in positional.into_iter().enumerate() {
             if i >= cap {
                 let _ = self.infer_val(arg);
@@ -579,7 +580,14 @@ impl Inferencer<'_> {
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
             let (result, arg_ty) = self.with_span(args[i].slot().span, |this| {
-                let arg_ty = this.infer_val(arg);
+                let arg_ty = match arg {
+                    Val::Thunk(body) => {
+                        let body_ty = this.ctx.unifier.fresh_comp_ty();
+                        bodies.push((body.clone(), body_ty.clone(), this.ctx.pos));
+                        Ty::Thunk(Box::new(body_ty))
+                    }
+                    _ => this.infer_val(arg),
+                };
                 let result = this.ctx.unifier.fresh_comp_ty();
                 let expected = CompTy::Fun(Box::new(arg_ty.clone()), Box::new(result.clone()));
                 this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
@@ -587,6 +595,17 @@ impl Inferencer<'_> {
             });
             cty = result;
             applied.push(arg_ty);
+        }
+        // A block argument's body is inferred once the whole spine is unified,
+        // so a parameter a *later* argument determines — the element type in
+        // `map { |x| … } $xs` — is known by the time the body reads it.
+        for (body, body_ty, pos) in bodies {
+            self.with_span(pos, |this| {
+                let inferred = this.without_command_head_reason(|this| {
+                    this.with_scope(|this| this.check_comp(&body, &body_ty))
+                });
+                this.ctx.unify_comp_ty(&inferred, &body_ty, Reason::Argument);
+            });
         }
         (cty, applied)
     }
@@ -918,6 +937,23 @@ impl Inferencer<'_> {
                 CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
             }
             None => self.with_scope(|this| this.infer_comp(body)),
+        }
+    }
+
+    /// `comp` against a type already known: a block whose parameter the
+    /// expectation names binds *that* type rather than a fresh one, so the
+    /// body reads a parameter its own call site determined.  Anything else has
+    /// nothing to push inwards and is inferred as ever, the caller unifying.
+    fn check_comp(&mut self, comp: &Comp, expected: &CompTy) -> CompTy {
+        match (&comp.item, self.ctx.unifier.resolve_comp_ty(expected)) {
+            (CompKind::Lam { param, body }, CompTy::Fun(param_ty, result)) => {
+                let body_ty = self.with_scope(|this| {
+                    this.bind_pattern(param, &param_ty, BindMode::Param);
+                    this.check_comp(body, &result)
+                });
+                CompTy::Fun(param_ty, Box::new(body_ty))
+            }
+            _ => self.infer_comp(comp),
         }
     }
 

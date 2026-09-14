@@ -22,6 +22,19 @@ arity at all: their schemes are seeded into the checker's env at boot, so a base
 frame is looked up as a handler is
 ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
+**A block argument is checked last, and against its own call.** `apply_args_capped`
+unifies the arrow spine from the arguments in source order, but a `Val::Thunk`
+argument contributes only `Thunk(α)` on that pass; its body is inferred after
+the loop, against the `α` the spine has since ground. `check_comp` then pushes
+that expectation inwards: a `Lam` met with a known `Fun` binds the parameter to
+the type the expectation names instead of a fresh variable. Synthesis in source
+order would check the body of `map { |x| … } $xs` while the element type was
+still free, which is a difference the body can *observe* — a spread of `$x`
+decides then whether its row is open
+([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
+Everything else has nothing to push inwards and is inferred as ever, the caller
+unifying.
+
 **The Unifier solves three sorts at once** (`unify.rs`):
 
 - *Value and computation types* are equi-recursive — unified with **no** occurs

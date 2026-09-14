@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 930b77d5
+generated_at_commit: 07b87759
 ---
 
 # An open spread must come last
@@ -87,6 +87,16 @@ that a merge *replaces* them was too broad, and held only for known records.
 Defaults are assembled where the records are known; absence over an unknown
 record travels as a variant
 ([[invariants/optionality-via-variants|optionality-via-variants]]).
+
+**What counts as open is settled by the call, not by source order.** A block's
+parameter is bound by the call the block appears in, so `map { |x| [...$x, …] }
+$xs` spreads a record whose fields the list literal knows. The inferencer used
+to check that body while the element type was still free and refuse it; it now
+checks a block argument after the spine is unified and pushes the expectation
+inwards ([[internals/type-inference|type-inference]]). The rule below is
+unchanged — it simply stopped firing on programs whose rows were never open.
+What remains refused is the row that no call can close: a parameter nothing
+determines, as in `{|a b| [:, ...$a, ...$b]}`.
 
 **Two open spreads no longer unify.** `{|a b| [:, ...$a, ...$b]}` was inferred
 at `∀ρ. [ρ] → [ρ] → [ρ]`, a contract no caller wants; it is now refused at the

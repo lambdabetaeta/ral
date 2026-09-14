@@ -2757,6 +2757,24 @@ fn an_open_spread_must_come_last() {
         return $[$r[port] + 1]");
 }
 
+/// A block's parameter is not open when the call determines it: the body is
+/// checked after the spine is unified, so `map`'s element type is known before
+/// the literal inside decides whether its spreads are open.  Two spreads of
+/// such a parameter therefore compose exactly, as two known records do.
+#[test]
+fn a_block_parameter_is_known_from_its_call() {
+    ok("let vs = [[w: 'n', b: 'b']]\n\
+        let ps = [[a: 'P', k: false]]\n\
+        let o = flat-map { |v| map { |p| [...$v, ...$p, n: \"x\"] } $ps } $vs\n\
+        return $o[0][a]");
+    // The element type reaches the body, so a field the list has not got is
+    // still refused there.
+    has_error(
+        "let vs = [[w: 'n']]\nlet o = map { |v| [...$v, n: \"x\"] } $vs\nreturn $o[0][nope]",
+        "no field named 'nope'",
+    );
+}
+
 /// A field written twice in one literal is refused, in either order: every
 /// other precedence rule in a literal is first-wins, and rather than carry one
 /// last-wins exception the checker declines to pick a direction at all.
