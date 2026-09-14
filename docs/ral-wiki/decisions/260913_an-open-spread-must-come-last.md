@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: e7975e20
+generated_at_commit: 930b77d5
 ---
 
 # An open spread must come last
@@ -48,10 +48,15 @@ and is refused because no row ral can write describes its result
 fields that would have been unreachable:
 
 ```
-[T0023] a spread of a record whose fields aren't known here must come last
-   Help: this spread wins on any field it happens to carry, and nothing here
-   can say which, so 'host', 'port' could never be read — …
+[T0023] this spread has to come last, because nothing here says what fields it has
+   Help: Nothing here says which fields this record has. If it has 'host' or
+   'port' — written after it — this spread wins, and what you wrote there is
+   never read. Move the spread to the end, or write out the fields you need
+   from it.
 ```
+
+Where the entries behind end in a *second* open spread, no order exists and the
+help says so instead, naming the fields as the only way through.
 
 The mirror order stays legal and exact: `[:, ...[tag: 1], ...$g]` places the
 known chain first and lets `$g` be the open tail.

@@ -2744,11 +2744,11 @@ fn an_open_spread_must_come_last() {
         "let dflt = [host: 'local', port: 80]\n\
          let f = { |g| return [:, ...$g, ...$dflt] }\n\
          return $f",
-        "must come last",
+        "has to come last",
     );
     has_error(
         "let f = { |a b| return [:, ...$a, ...$b] }\nreturn $f",
-        "must come last",
+        "has to come last",
     );
     ok("let f = { |g| return [:, ...[tag: 1], ...$g] }\nreturn $f");
     ok("let dflt = [host: 'local', port: 80]\n\

@@ -1281,8 +1281,14 @@ impl Inferencer<'_> {
                 // the same fault a second time against an innocent caller.
                 Row::Var(_) => {
                     let unreachable = collect_extends(&rest).into_iter().map(|(l, _)| l).collect();
-                    self.ctx
-                        .diagnose(TypeErrorKind::OpenSpreadNotLast { unreachable });
+                    let mut tail = self.ctx.unifier.resolve_row(&rest);
+                    while let Row::Extend(_, _, next) = tail {
+                        tail = self.ctx.unifier.resolve_row(&next);
+                    }
+                    self.ctx.diagnose(TypeErrorKind::OpenSpreadNotLast {
+                        unreachable,
+                        rest_open: matches!(tail, Row::Var(_)),
+                    });
                     break Row::Var(self.ctx.unifier.fresh_row_var());
                 }
             }

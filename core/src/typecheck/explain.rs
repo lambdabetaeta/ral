@@ -48,7 +48,8 @@ impl TypeErrorKind {
                 format!("this record literal writes the field '{label}' twice")
             }
             Self::OpenSpreadNotLast { .. } => {
-                "a spread of a record whose fields aren't known here must come last".into()
+                "this spread has to come last, because nothing here says what fields it has"
+                    .into()
             }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -166,7 +167,7 @@ impl TypeErrorKind {
             Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
-            Self::OpenSpreadNotLast { .. } => "what this record holds isn't known here".into(),
+            Self::OpenSpreadNotLast { .. } => "fields not known here".into(),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -345,19 +346,36 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             "available: {} — did you mean one of those?",
             known.join(", ")
         )),
-        // The rule is the row's own shape, so the remedy is to make the unknown
-        // part the last one — or to stop asking a record to carry absence.
-        TypeErrorKind::OpenSpreadNotLast { unreachable } => Some(format!(
-            "this spread wins on any field it happens to carry, and nothing here can say \
-             which, so {} could never be read — put it last, assemble defaults where the \
-             record is a literal and its fields are known, or have absence travel as a \
-             variant instead",
-            match unreachable.as_slice() {
-                [] => "whatever is behind it".to_string(),
+        // A row has one open end, so the remedy is to move the unknown part to
+        // it — unless the remainder is open too, when no order exists and the
+        // fields have to be named.
+        TypeErrorKind::OpenSpreadNotLast {
+            unreachable,
+            rest_open,
+        } => {
+            const NAME_THEM: &str = "Only one of them can come last, so reordering cannot \
+                                     help: write out the fields you need from each, or give \
+                                     each record a field of its own.";
+            let behind = match unreachable.as_slice() {
+                [] => String::new(),
                 [only] => format!("'{only}'"),
-                many => format!("'{}'", many.join("', '")),
-            }
-        )),
+                [rest @ .., last] => format!("'{}' or '{last}'", rest.join("', '")),
+            };
+            Some(if behind.is_empty() {
+                format!("Two records here, and nothing says which fields either one has. {NAME_THEM}")
+            } else {
+                format!(
+                    "Nothing here says which fields this record has. If it has {behind} — written \
+                     after it — this spread wins, and what you wrote there is never read. {}",
+                    if *rest_open {
+                        format!("Another record here has unknown fields too. {NAME_THEM}")
+                    } else {
+                        "Move the spread to the end, or write out the fields you need from it."
+                            .to_string()
+                    }
+                )
+            })
+        }
         TypeErrorKind::DuplicateField { label } => Some(format!(
             "a record has one value per field, so keep whichever '{label}' you meant; \
              to override a field a spread supplies, write it out once and it wins \
