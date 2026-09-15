@@ -229,11 +229,12 @@ pub fn frontend_rows(
     ]
 }
 
-/// The shared 3-tier `h/m/s` formatter — `2h05m` / `41m09s` / `12s` — with
-/// `sep` between the two units of the multi-unit forms: `terse_duration`
-/// passes `""`, the TUI's rate-limit readout `" "`.
+/// The shared 4-tier `d/h/m/s` formatter — `3d 04h` / `2h 05m` / `41m 09s` /
+/// `12s` — with `sep` between the two units of the multi-unit forms.
 pub fn hms(secs: u64, sep: &str) -> String {
-    if secs >= 3600 {
+    if secs >= 86400 {
+        format!("{}d{sep}{:02}h", secs / 86400, (secs % 86400) / 3600)
+    } else if secs >= 3600 {
         format!("{}h{sep}{:02}m", secs / 3600, (secs % 3600) / 60)
     } else if secs >= 60 {
         format!("{}m{sep}{:02}s", secs / 60, secs % 60)
@@ -656,6 +657,17 @@ mod tests {
         assert_eq!(terse_duration(Duration::from_secs(12)), "12s");
         assert_eq!(terse_duration(Duration::from_secs(69)), "1m09s");
         assert_eq!(terse_duration(Duration::from_mins(125)), "2h05m");
+    }
+
+    #[test]
+    fn hms_adds_a_day_tier_above_the_existing_arms() {
+        assert_eq!(hms(3 * 86400 + 4 * 3600, " "), "3d 04h");
+        assert_eq!(hms(86400, ""), "1d00h");
+        assert_eq!(hms(7 * 86400, " "), "7d 00h");
+        // The pre-existing arms hold exactly as before.
+        assert_eq!(hms(12, ""), "12s");
+        assert_eq!(hms(69, " "), "1m 09s");
+        assert_eq!(hms(7500, ""), "2h05m");
     }
 
     /// A missing directory reads zero rather than failing the fold.

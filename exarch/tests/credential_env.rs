@@ -365,6 +365,7 @@ fn declared_service_resolves_and_scrubs_its_key() {
         auth: Auth::Env("LOCAL_LLAMA_KEY".into()),
         billing: Billing::Metered,
         routes: false,
+        meter: None,
     };
     with_env(
         &[
@@ -411,6 +412,7 @@ fn keyless_declared_service_resolves_to_placeholder() {
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
+        meter: None,
     };
     with_env(
         &[

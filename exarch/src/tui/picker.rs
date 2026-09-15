@@ -1078,6 +1078,7 @@ mod tests {
             auth: identity::Auth::Env(format!("{}_KEY", name.to_uppercase())),
             billing: identity::Billing::Metered,
             routes: false,
+            meter: None,
         })
     }
 

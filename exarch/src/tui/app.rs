@@ -341,6 +341,7 @@ impl App {
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
+            Transient::Limits { card } => self.push_chrome(id, Chrome::Framed(card)),
             other => self.with_scrollback(id, |sb| sb.transient(&other)),
         }
     }

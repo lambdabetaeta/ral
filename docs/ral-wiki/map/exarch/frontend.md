@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2d120d2
-generated_at_date: 2026-09-11
+generated_at_commit: 7f1b5097
+generated_at_date: 2026-09-15
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -382,8 +382,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/login`, `/thinking`, `/close`, `/focus`) run on the UI
- thread; session commands (`/branch`, `/context`, `/resources`, `/clear`,
+ `/export`, `/model`, `/login`, `/limits`, `/thinking`, `/close`, `/focus`) run
+ on the UI thread; session commands (`/branch`, `/context`, `/resources`, `/clear`,
  `/evict`, `/rewind`, `/quit`) enter the focused
  agent's inbox as `Command` items and run in `ReplControl`; the registry's
  `rewrites` field is what says which of those is a barrier in the queue and

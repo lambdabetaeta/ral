@@ -6,6 +6,7 @@
 //! module.
 
 pub mod accounts;
+pub mod allowance;
 pub mod bureau;
 pub mod credential;
 mod error;
@@ -29,7 +30,7 @@ mod wire;
 pub use bureau::Bureau;
 pub use error::{CutShort, ProviderError};
 pub(crate) use error::{error_object, extract_url, transient_label};
-pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
+pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
 pub use stream::{Delta, StepOut};

@@ -116,6 +116,23 @@ pub struct Service {
     /// pins — true for `OpenRouter` alone, and the reason no code below compares
     /// a service name against the string "openrouter".
     pub routes: bool,
+    /// `None` for a service that publishes nothing — every key-bearing vendor
+    /// that simply bills what you use.
+    pub meter: Option<Meter>,
+}
+
+/// Where this service publishes what is left of its ration, if anything.
+///
+/// Plain data, so a declared service carries one exactly as a built-in row
+/// does, and the one `match` that turns it into a request lives in
+/// `allowance::meters`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Meter {
+    /// The Codex backend's rate-limit readout: a 5-hour and a weekly window,
+    /// each a used-percentage.
+    Codex,
+    /// `GET /api/v1/key`: credits spent against the key's cap, in dollars.
+    OpenRouterCredits,
 }
 
 /// What a *declaration* knows about a request's bearer token. Not where the
@@ -236,6 +253,7 @@ pub fn built_in_services() -> Vec<Service> {
             auth: Auth::Env(String::from(env)),
             billing,
             routes: false,
+            meter: None,
         };
     vec![
         keyed(
@@ -256,6 +274,7 @@ pub fn built_in_services() -> Vec<Service> {
         ),
         Service {
             routes: true,
+            meter: Some(Meter::OpenRouterCredits),
             ..keyed(
                 "openrouter",
                 Some("https://openrouter.ai/api/v1/"),
@@ -335,6 +354,7 @@ pub fn chatgpt_service() -> Service {
         auth: Auth::OAuth,
         billing: Billing::FlatRate,
         routes: false,
+        meter: Some(Meter::Codex),
     }
 }
 
@@ -349,6 +369,7 @@ pub fn scripted_service() -> Service {
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
+        meter: None,
     }
 }
 
@@ -379,6 +400,21 @@ mod tests {
 
     fn service(name: &str) -> Service {
         built_in(&ServiceName::declared(name).unwrap()).unwrap()
+    }
+
+    /// A new built-in row must declare a meter deliberately: this asserts the
+    /// full table rather than a sample, so an addition cannot slip through
+    /// with an implicit `None`.
+    #[test]
+    fn only_chatgpt_and_openrouter_meter_anything() {
+        for service in built_in_services() {
+            let expected = match service.name.as_str() {
+                "chatgpt" => Some(Meter::Codex),
+                "openrouter" => Some(Meter::OpenRouterCredits),
+                _ => None,
+            };
+            assert_eq!(service.meter, expected, "{}", service.name);
+        }
     }
 
     fn login(handle: &str, issued: &str) -> Account {

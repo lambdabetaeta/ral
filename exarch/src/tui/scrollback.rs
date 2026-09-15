@@ -1116,9 +1116,10 @@ impl Scrollback {
     /// instead — a mirror never mints a [`record::Block`] of its own — and
     /// grows the block it belongs to.
     ///
-    /// [`Transient::Born`], [`Transient::Died`], and [`Transient::Resources`]
-    /// reach no-ops here: they need the tabs a bare `Scrollback` cannot see, so
-    /// `App::transient` intercepts and answers them itself, ahead of this call.
+    /// [`Transient::Born`], [`Transient::Died`], [`Transient::Resources`], and
+    /// [`Transient::Limits`] reach no-ops here: each needs either the tabs a
+    /// bare `Scrollback` cannot see or routing by id, so `App::transient`
+    /// intercepts and answers them itself, ahead of this call.
     pub(super) fn transient(&mut self, t: &Transient) {
         match t {
             // Prose ends the thinking run, on this side exactly as on the
@@ -1153,7 +1154,10 @@ impl Scrollback {
                 self.answer.clear();
                 self.thinking_line.clear();
             }
-            Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
+            Transient::Born { .. }
+            | Transient::Died
+            | Transient::Resources { .. }
+            | Transient::Limits { .. } => {}
         }
     }
 

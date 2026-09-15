@@ -320,7 +320,7 @@ impl CredentialStore {
 /// store at one instant — the form a background thread can hold.
 ///
 /// OAuth cells stay shared, so a token refreshed anywhere is visible here.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Roster {
     accounts: Vec<Account>,
     credentials: BTreeMap<AccountId, Credential>,
@@ -414,6 +414,7 @@ mod tests {
             auth: Auth::Unnamed,
             billing: Billing::Metered,
             routes: false,
+            meter: None,
         })
     }
 

@@ -64,6 +64,7 @@ pub fn declare_endpoint(
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
+        meter: None,
     })
 }
 
@@ -174,6 +175,7 @@ mod tests {
             auth: Auth::Unnamed,
             billing: Billing::Metered,
             routes: false,
+            meter: None,
         })
     }
 

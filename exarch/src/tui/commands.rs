@@ -108,6 +108,14 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Sign in with ChatGPT — adds a plan-backed provider.",
     },
     SlashCommand {
+        name: "/limits",
+        aliases: &[],
+        arg: None,
+        rewrites: false,
+        any_tab: false,
+        help: "Show what is left of each subscription's ration.",
+    },
+    SlashCommand {
         name: "/branch",
         aliases: &[],
         arg: Some("[name]"),
@@ -366,6 +374,25 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str) {
     }
 }
 
+/// Survey every account's ration on a background thread, so the card lands
+/// whole or not at all — a per-account failure is already a row on it.
+pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
+    let id = app.tabs.root();
+    match ctx.bureau.survey_allowances() {
+        None => app.push_error(
+            id,
+            "this session replays a scripted provider and surveys no accounts",
+        ),
+        Some(survey) => {
+            let recorder = ctx.recorder.clone();
+            std::thread::spawn(move || {
+                let card = survey.settle();
+                recorder.transient(crate::record::Transient::Limits { card });
+            });
+        }
+    }
+}
+
 impl SlashCommand {
     /// The typed `line` as an inbox post, under the boundary this command
     /// declares.
@@ -380,7 +407,7 @@ impl SlashCommand {
 
 /// The one submit path for every tab: parse once, then act on the parse and the
 /// focused tab.  A view command (`/help`, `/legend`, `/copy`, `/export`,
-/// `/model`, `/login`, `/thinking`) touches only the App, clipboard, file, or picker, so it
+/// `/model`, `/login`, `/limits`, `/thinking`) touches only the App, clipboard, file, or picker, so it
 /// runs here on the UI thread; the rest ride the session inbox to the worker's
 /// `ReplControl`, which owns the trunk's context.  A command typed on a sub-agent
 /// tab is therefore refused rather than misfired — a sub-agent attends under
@@ -433,6 +460,7 @@ pub(super) fn route_submit(
                 pick_model(tui, ctx);
             }
             "/login" => login::login(tui, ctx),
+            "/limits" => cmd_limits(&mut tui.app, ctx),
             // Cancel before blanking: tokens already in flight would otherwise
             // paint into the cleared scrollback until the worker's next poll, and
             // what the bus still holds `App::handle`'s clear-drain drops.

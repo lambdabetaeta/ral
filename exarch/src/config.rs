@@ -266,6 +266,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
         auth: key_env.map_or(Auth::Unnamed, Auth::Env),
         billing: Billing::Metered,
         routes: false,
+        meter: None,
     })
 }
 
@@ -389,6 +390,7 @@ mod tests {
                 auth: Auth::Env("HOUSE_LLM_KEY".into()),
                 billing: Billing::Metered,
                 routes: false,
+                meter: None,
             },
             Service {
                 name: ServiceName::declared("ollama").unwrap(),
@@ -398,6 +400,7 @@ mod tests {
                 auth: Auth::Unnamed,
                 billing: Billing::Metered,
                 routes: false,
+                meter: None,
             },
         ];
         save_declared(&path, &written, LABEL).expect("write");
@@ -430,6 +433,7 @@ mod tests {
                 auth: Auth::Unnamed,
                 billing: Billing::Metered,
                 routes: false,
+                meter: None,
             }],
             LABEL,
         )

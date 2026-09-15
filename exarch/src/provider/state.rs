@@ -178,6 +178,7 @@ mod tests {
             auth: crate::provider::identity::Auth::Env("LOCAL_LLAMA_KEY".into()),
             billing: crate::provider::identity::Billing::Metered,
             routes: false,
+            meter: None,
         });
         let available = [llama.clone()];
         let state = State::new(&llama, &available, "llama-3", &Tuning::default(), None);

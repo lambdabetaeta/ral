@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use ral_core::sync::LockExt;
 
+use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{LiveSource, ModelCatalog};
 use super::{Account, Engine, Provider, Tuning, identity, oauth};
@@ -170,6 +171,19 @@ impl Bureau {
             Self::Live { catalog, .. } => Some(f(&mut catalog.lock_ignore_poison())),
             Self::Scripted => None,
         }
+    }
+
+    /// Open a survey over every available account. `None` when the bureau is
+    /// scripted and has no store — the command then says so rather than
+    /// drawing an empty card.
+    pub fn survey_allowances(&self) -> Option<Survey> {
+        let Self::Live { store, .. } = self else {
+            return None;
+        };
+        // Locked only long enough to clone the roster out; the fetches
+        // `Survey::open` spawns run with the lock long released.
+        let roster = store.lock_ignore_poison().roster();
+        Some(Survey::open(&roster, &LiveMeters::new(roster.clone())))
     }
 }
 

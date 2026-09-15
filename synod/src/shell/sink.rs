@@ -481,7 +481,9 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
         Transient::StopReason(reason) => Some(SynodEvent::StopReason {
             reason: reason.clone(),
         }),
-        Transient::Resources { card, .. } => process_card(Some(card.clone())),
+        Transient::Resources { card, .. } | Transient::Limits { card } => {
+            process_card(Some(card.clone()))
+        }
         // A seam append failure or a channel elision marker: the plumbing's
         // own diagnostic, with nowhere durable to go, so the window is the
         // one place left to lose it.
@@ -509,7 +511,9 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
 #[allow(clippy::match_same_arms)]
 fn project_transient_helper(t: &Transient) -> Option<SynodEvent> {
     match t {
-        Transient::Resources { card, .. } => process_card(Some(card.clone())),
+        Transient::Resources { card, .. } | Transient::Limits { card } => {
+            process_card(Some(card.clone()))
+        }
         Transient::Fault { text } => Some(SynodEvent::Error {
             message: text.clone(),
         }),
@@ -590,6 +594,7 @@ impl Router {
             | Transient::StopReason(_)
             | Transient::Cleared
             | Transient::Resources { .. }
+            | Transient::Limits { .. }
             | Transient::Pin { .. }
             | Transient::Unpin { .. }
             | Transient::Fault { .. } => {}

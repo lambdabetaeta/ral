@@ -231,7 +231,7 @@ impl Sink for Headless<'_> {
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
-            Transient::Resources { card, .. } => {
+            Transient::Resources { card, .. } | Transient::Limits { card } => {
                 for line in card_stderr(card) {
                     let _ = writeln!(self.err, "{line}");
                 }

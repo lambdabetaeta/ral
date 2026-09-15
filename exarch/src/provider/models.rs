@@ -582,6 +582,7 @@ mod tests {
             auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
             billing: Billing::Metered,
             routes: false,
+            meter: None,
         })
     }
 

@@ -410,6 +410,10 @@ pub enum Transient {
         rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
+    /// Drawn, not recorded.
+    Limits {
+        card: Card,
+    },
     /// The live register's copy of a pin — [`Forensic::Pin`] is the durable
     /// breadcrumb, this is the rendered card the process is holding, which a
     /// resume does not restore.

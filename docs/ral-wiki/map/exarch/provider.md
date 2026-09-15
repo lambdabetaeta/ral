@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2d120d2
-generated_at_date: 2026-09-11
+generated_at_commit: 7f1b5097
+generated_at_date: 2026-09-15
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -110,6 +110,33 @@ chatgpt and opencode Go are both `FlatRate`; a subscription turn reports
 tokens and never a cost. The fact was previously derivable two ways that could
 disagree, and the second derivation would have reported a future *metered*
 OAuth service as free.
+
+`Service::meter` answers a different question, and is deliberately not derived
+from `billing`. `Billing` says *does this turn cost money*; `Meter` says *does
+this account publish what is left*. The two are orthogonal and the table says
+both: OpenRouter is `Metered` and publishes a credit balance, a declared local
+endpoint is `Metered` and publishes nothing, chatgpt is `FlatRate` and
+publishes two rolling windows. A derivation either way would have to guess at
+one of those rows.
+
+What a meter reports is one value type, `provider/allowance.rs`'s `Allowance`:
+a quantity of entitlement, consumed against a bound, renewing over a span. Its
+window is a `Duration` and never a vendor's name for one, so the label is
+derived here and no provider can inject a display string into exarch's chrome;
+its `Consumption` keeps a disclosed proportion and a disclosed count apart,
+because flattening them would either discard a purse's only figures or invent a
+denominator a provider never stated. Normalisation happens once, at render.
+
+Reading one mirrors `ModelSource` deliberately, so a reader who knows the model
+path knows this one: `MeterSource` is the single seam the network sits behind,
+`LiveMeters` its live implementation over a `Roster`, and `Survey` the
+`Fetches` pump that reads every account concurrently — the same pump `Listing`
+uses, unchanged. The one `match` from `Meter` to a request lives in
+`LiveMeters::read`, and it is the whole extension point: another vendor is one
+`Meter` variant, one arm, one `allowance::meters` module, and one `meter:`
+field in the table row. Nothing else moves. There is no cache and no TTL: a
+ration is an instantaneous fact about a rolling window, and a stale figure
+would be wrong in exactly the situation that prompted the question.
 
 On disk the login store is persisted through one door, `write_private`
 (`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm
