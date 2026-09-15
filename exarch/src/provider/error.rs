@@ -127,10 +127,7 @@ impl ProviderError {
                 body,
             },
             Fault::Transport(detail) => Self::Transient {
-                cause: match detail {
-                    Some(detail) => format!("{msg}: {detail}"),
-                    None => msg,
-                },
+                cause: detail.unwrap_or(msg),
                 attempts: 1,
                 body: None,
                 status: None,
@@ -158,9 +155,9 @@ enum Fault<'a> {
     /// A `reqwest` fault that never reached a status — connect, timeout, a
     /// body that dropped or would not decode.  Retryable.
     ///
-    /// The payload is [`source_chain`]: reqwest maps *every* mid-stream body
+    /// The payload is [`root_cause`]: reqwest maps *every* mid-stream body
     /// failure through one `Display` string ("error decoding response body"),
-    /// so without the chain under it a reset peer, an h2 `GOAWAY` and this
+    /// so without the leaf under it a reset peer, an h2 `GOAWAY` and this
     /// client's own read timeout are one indistinguishable message.
     Transport(Option<String>),
     /// Neither status nor transport: a request built wrong, an auth gap, a 2xx
@@ -226,7 +223,7 @@ impl<'a> Fault<'a> {
             || err.is_body()
             || err.is_decode()
         {
-            Fault::Transport(source_chain(err))
+            Fault::Transport(root_cause(err))
         } else {
             Fault::Terminal(None)
         }
@@ -241,17 +238,17 @@ impl<'a> Fault<'a> {
     }
 }
 
-/// The `source` chain under an error, joined — its own `Display` excluded,
-/// since the message it is appended to already carries that.  `None` when the
-/// error is its own root.
-fn source_chain(err: &(dyn std::error::Error + 'static)) -> Option<String> {
-    let mut links = Vec::new();
+/// The deepest `source` under an error: the one link that names what actually
+/// went wrong, every wrapper above it being generic.  `None` when the error is
+/// its own root.
+fn root_cause(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut leaf = None;
     let mut source = err.source();
     while let Some(link) = source {
-        links.push(link.to_string());
+        leaf = Some(link.to_string());
         source = link.source();
     }
-    (!links.is_empty()).then(|| links.join(": "))
+    leaf
 }
 
 /// The error-detail object inside a provider JSON body.  Providers wrap

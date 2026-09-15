@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d9abfb52
-verified_at_date: 2026-09-11
-anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, CutShort, stall_cause, source_chain, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+verified_at_commit: c50c419f
+verified_at_date: 2026-09-15
+anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, CutShort, stall_cause, root_cause, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -124,13 +124,14 @@ falling back to `parse_retry_after` scraping the cause text only when it is not.
 (`parse_retry_after` slices the *lowercased* copy it searches, so a
 length-changing lowercase like `İ` can never land mid-character and panic.)
 
-A transport leaf carries its `source` chain (`source_chain`) as `detail`,
-appended to the cause. Without it the whole class is mute: reqwest maps *every*
-mid-stream body failure — a reset peer, an h2 `GOAWAY`, a truncated chunk, this
-client's own read timeout — through the single `Display` string "error decoding
-response body", and only the chain beneath it says which happened. The
-classifier already walked to that leaf for the verdict; the message now keeps
-what it found there.
+A transport leaf carries its deepest `source` (`root_cause`) as `detail`, and
+that becomes the cause outright — genai's wrapper text above it is discarded,
+as it already is for `Terminal`. Without the leaf the whole class is mute:
+reqwest maps *every* mid-stream body failure — a reset peer, an h2 `GOAWAY`, a
+truncated chunk, this client's own read timeout — through the single `Display`
+string "error decoding response body", and only the root beneath it says which
+happened. The intermediate links are as generic as the wrapper, so the reader
+is shown the one line that names the fault.
 
 Every retryable and 4xx variant carries the provider's parsed JSON body as
 `Option<Value>` to the boundary, so [[map/exarch/cards|the renderer]] can print

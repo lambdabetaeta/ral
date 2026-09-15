@@ -1110,10 +1110,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'s
 pub(super) fn stalled(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default(), headline("stream stalled")];
     let mut fields = error_fields(e);
-    fields.push(text_field(
-        "continuing",
-        "the partial reply above is kept; the turn resumes from it",
-    ));
+    fields.push(text_field("continuing", "partial reply kept"));
     ls.extend(render_field_rows(&fields, width.into()));
     ls
 }
