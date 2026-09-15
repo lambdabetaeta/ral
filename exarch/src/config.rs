@@ -17,7 +17,7 @@
 use crate::provider::{Auth, Billing, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
-use ral_core::types::{Break, Capabilities, Mooring, Value};
+use ral_core::types::{Break, Capabilities, Escape, Mooring, Value};
 
 const CONFIG_FILE: &str = "config.ral";
 
@@ -205,7 +205,11 @@ pub(crate) fn evaluate_no_authority(
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("{label} {display}: {}", err.message),
-            other @ Break::Escape(_) => format!("{label} {display}: {other:?}"),
+            Break::Escape(Escape::Exit(code)) => format!(
+                "{label} {display}: the config called exit {code}, but a config file is \
+                 read for its declarations, not run to completion — is that really what it \
+                 should do?"
+            ),
         })
 }
 

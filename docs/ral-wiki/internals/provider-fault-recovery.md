@@ -1,7 +1,7 @@
 ---
-verified_at_commit: c50c419f
+verified_at_commit: 745c5233
 verified_at_date: 2026-09-15
-anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, CutShort, stall_cause, root_cause, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -137,6 +137,23 @@ Every retryable and 4xx variant carries the provider's parsed JSON body as
 `Option<Value>` to the boundary, so [[map/exarch/cards|the renderer]] can print
 a structured, labelled error rather than scraping cause text. A non-JSON body
 (an HTML 5xx page) leaves it `None` and the cause string stands in.
+
+A failure has exactly one reading at each of its two widths. The flat one is
+`summary()`, which `Display` now delegates to outright: a failure crossing an
+agent boundary, printed by an error chain, or interpolated by a caller who
+reaches for `{e}` all get the same sentence, and genai's multi-line
+`Cause:`/`Status:`/`Body:` framing reaches none of them. The structured one is
+`record::fault::Readout` — a headline and ordered `(label, value)` fields,
+neutral about presentation — which the [[map/exarch/cards|TUI block]] styles
+and the headless printer writes as `  label: value` lines. Neither surface
+describes a failure itself, so neither can disagree with the other about what
+one is.
+
+Where a raw response body must still appear in a message — a sign-in failure,
+a model listing — it passes through `body_detail`, which prefers the body's own
+JSON message, names an HTML error page rather than spilling it, and caps every
+shape alike: a proxy's page can reflect request context, and the string reaches
+both the screen and the log.
 
 Two more `ProviderError` variants never come from `from_genai`:
 

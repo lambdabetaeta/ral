@@ -297,6 +297,69 @@ impl CredentialStore {
             .unwrap_or(self.all.len());
         self.all.insert(pos, account);
     }
+
+    /// This store's accounts and credentials as a [`Roster`].
+    pub fn roster(&self) -> Roster {
+        let accounts = self.available();
+        let credentials = accounts
+            .iter()
+            .filter_map(|account| {
+                self.get(&account.id)
+                    .cloned()
+                    .map(|credential| (account.id.clone(), credential))
+            })
+            .collect();
+        Roster {
+            accounts,
+            credentials,
+        }
+    }
+}
+
+/// Every available account and its resolved credential, cloned out of the
+/// store at one instant — the form a background thread can hold.
+///
+/// OAuth cells stay shared, so a token refreshed anywhere is visible here.
+#[derive(Clone)]
+pub struct Roster {
+    accounts: Vec<Account>,
+    credentials: BTreeMap<AccountId, Credential>,
+}
+
+impl Roster {
+    pub fn account(&self, id: &AccountId) -> Option<&Account> {
+        self.accounts.iter().find(|account| &account.id == id)
+    }
+
+    pub fn credential(&self, id: &AccountId) -> Option<&Credential> {
+        self.credentials.get(id)
+    }
+
+    /// The one place a label naming an account in an error has the full set to
+    /// disambiguate against.
+    pub fn label(&self, account: &Account) -> String {
+        identity::label(account, &self.accounts)
+    }
+
+    pub fn accounts(&self) -> &[Account] {
+        &self.accounts
+    }
+
+    /// Admit a credential resolved after startup — a sign-in this session, say
+    /// — so a roster taken before it reads what the store now holds, with no
+    /// rebuild. A re-admission replaces the account record too, so a re-login
+    /// that learned a fresh handle is renamed here as it is in the store.
+    pub fn admit(&mut self, account: Account, credential: Credential) {
+        self.credentials.insert(account.id.clone(), credential);
+        match self
+            .accounts
+            .iter_mut()
+            .find(|known| known.id == account.id)
+        {
+            Some(known) => *known = account,
+            None => self.accounts.push(account),
+        }
+    }
 }
 
 /// The state of an account's key environment variable, from a single read.

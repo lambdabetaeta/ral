@@ -333,12 +333,8 @@ impl Headless<'_> {
             K::SystemNote { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
-            K::ProviderError { error } => {
-                let _ = writeln!(self.err, "provider error: {error:?}");
-            }
-            K::Stalled { error } => {
-                let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
-            }
+            K::ProviderError { error } => self.print_readout(&record::fault::Readout::fatal(error)),
+            K::Stalled { error } => self.print_readout(&record::fault::Readout::stall(error)),
             K::Observation { value } => self.print_observation(value.clone()),
             K::Card { card } => self.print_card(card),
             K::Done { outcome } => {
@@ -401,6 +397,28 @@ impl Headless<'_> {
     fn print_card(&mut self, card: &Card) {
         for line in card_stderr(card) {
             let _ = writeln!(self.err, "{line}");
+        }
+    }
+
+    /// A provider failure's [`record::fault::Readout`] as plain stderr lines,
+    /// following [`card_stderr`]'s `Mark::Fields` convention (`  label: value`).
+    /// A multi-line value (`prettify` can produce one) keeps its two-space
+    /// indent on continuation lines, so it never reads as a new field.
+    fn print_readout(&mut self, readout: &record::fault::Readout) {
+        let _ = writeln!(self.err, "error: {}", readout.headline);
+        for f in &readout.fields {
+            let value = match &f.datum {
+                record::fault::Datum::Text(text) => text.clone(),
+                record::fault::Datum::Seconds(secs) => crate::agent::resources::hms(*secs, " "),
+            };
+            let mut lines = value.split('\n');
+            let first = lines.next().unwrap_or("");
+            let _ = writeln!(self.err, "  {}: {first}", f.label);
+            // Deeper than a label line: a `key: value` continuation from a
+            // pretty-printed body must not read as the next field.
+            for line in lines {
+                let _ = writeln!(self.err, "    {line}");
+            }
         }
     }
 

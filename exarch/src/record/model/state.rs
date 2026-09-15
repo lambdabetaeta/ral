@@ -64,17 +64,19 @@ impl Context {
         }
     }
 
-    /// A human-readable stand-in for `{:?}` on the private [`State`] — used
-    /// only in refusal messages, never matched on.
-    pub(crate) fn state_description(&self) -> String {
+    /// What the session is waiting for, in the user's vocabulary — used only
+    /// in refusal messages, never matched on. Each phrase completes "the
+    /// session is …".
+    pub(crate) fn waiting_for(&self) -> String {
         match &self.state {
-            State::ReadyForUser => "ReadyForUser".to_string(),
-            State::AwaitingAssistantAfterUser => "AwaitingAssistantAfterUser".to_string(),
-            State::AwaitingToolResults { pending_ids } => {
-                format!("AwaitingToolResults {{ pending_ids: {pending_ids:?} }}")
-            }
+            State::ReadyForUser => "ready for your next prompt".to_string(),
+            State::AwaitingAssistantAfterUser => "waiting for the model's reply".to_string(),
+            State::AwaitingToolResults { pending_ids } => match pending_ids.len() {
+                1 => "waiting for 1 tool result".to_string(),
+                n => format!("waiting for {n} tool results"),
+            },
             State::AwaitingAssistantAfterToolResults => {
-                "AwaitingAssistantAfterToolResults".to_string()
+                "waiting for the model to read the tool results".to_string()
             }
         }
     }

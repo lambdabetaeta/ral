@@ -14,6 +14,7 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 pub(crate) mod commit;
+pub(crate) mod fault;
 mod log;
 pub(crate) mod model;
 mod replay;

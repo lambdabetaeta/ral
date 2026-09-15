@@ -10,7 +10,7 @@
 
 use crate::agent::event::{
     AgentLog, ContextOp, ContextSurvey, EditAuthority, GrepAnswer, TranscriptExchange,
-    TranscriptMessage, TranscriptPart,
+    TranscriptMessage, TranscriptPart, role_label,
 };
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
@@ -19,7 +19,6 @@ use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::provider::Provider;
 use crate::shell_eval::{self, PinDigests, Surface};
-use genai::chat::ChatRole;
 use ral_core::Value as RalValue;
 use ral_core::protocol::{EnquiryError, Host};
 use ral_core::serial::FOValue;
@@ -1982,17 +1981,6 @@ fn transcript_exchange_value(read: TranscriptExchange) -> FOValue {
                 },
             ),
         ],
-    }
-}
-
-/// The four spellings a role crosses under, whether as a message's tag or as
-/// a grep hit's `Str`.
-fn role_label(role: &ChatRole) -> &'static str {
-    match role {
-        ChatRole::System => "system",
-        ChatRole::User => "user",
-        ChatRole::Assistant => "assistant",
-        ChatRole::Tool => "tool",
     }
 }
 

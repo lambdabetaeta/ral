@@ -10,7 +10,8 @@
 //! and `tests/model_cache.rs` drives the disk cache and its staleness path
 //! against a real `XDG_CACHE_HOME`.
 
-use crate::provider::credential::{Credential, CredentialStore};
+use crate::provider::credential::{Credential, CredentialStore, Roster};
+use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::oauth;
 use genai::Client;
@@ -63,12 +64,7 @@ pub trait ModelSource {
 /// background fetch thread without sharing the catalog's caches.
 #[derive(Clone)]
 pub struct LiveSource {
-    /// Cloned out of the store so a listing thread needs neither the store nor
-    /// the UI thread — the one place a label naming an account in an error
-    /// message has the full set to disambiguate against.
-    accounts: Vec<Account>,
-    /// OAuth cells stay shared, so a refreshed token is visible.
-    credentials: BTreeMap<AccountId, Credential>,
+    roster: Roster,
     /// One client for every account's listing call — the endpoint and key ride
     /// the per-call `ProviderConfig`.
     client: Client,
@@ -78,19 +74,8 @@ impl LiveSource {
     /// # Panics
     /// Never: `with_reqwest` supplies the client, so genai's `build()` cannot fail.
     pub fn new(store: &CredentialStore) -> Self {
-        let accounts = store.available();
-        let credentials = accounts
-            .iter()
-            .filter_map(|account| {
-                store
-                    .get(&account.id)
-                    .cloned()
-                    .map(|credential| (account.id.clone(), credential))
-            })
-            .collect();
         Self {
-            accounts,
-            credentials,
+            roster: store.roster(),
             client: Client::builder()
                 .with_reqwest(crate::provider::tls::client())
                 .build()
@@ -98,28 +83,8 @@ impl LiveSource {
         }
     }
 
-    /// Admit a credential resolved after startup — a sign-in this session, say
-    /// — so its listing reads what the store now holds, with no rebuild. A
-    /// re-admission replaces the account record too, so a re-login that
-    /// learned a fresh handle is renamed here as it is in the store.
     pub fn add_credential(&mut self, account: Account, credential: Credential) {
-        self.credentials.insert(account.id.clone(), credential);
-        match self
-            .accounts
-            .iter_mut()
-            .find(|known| known.id == account.id)
-        {
-            Some(known) => *known = account,
-            None => self.accounts.push(account),
-        }
-    }
-
-    fn account(&self, id: &AccountId) -> Option<&Account> {
-        self.accounts.iter().find(|account| &account.id == id)
-    }
-
-    fn label(&self, account: &Account) -> String {
-        identity::label(account, &self.accounts)
+        self.roster.admit(account, credential);
     }
 }
 
@@ -136,12 +101,13 @@ pub(super) fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, St
 impl ModelSource for LiveSource {
     fn list(&self, id: &AccountId) -> Result<Vec<String>, String> {
         let account = self
+            .roster
             .account(id)
             .ok_or_else(|| format!("{id} is not a known account"))?;
         let credential = self
-            .credentials
-            .get(id)
-            .ok_or_else(|| format!("{} has no resolved credential", self.label(account)))?;
+            .roster
+            .credential(id)
+            .ok_or_else(|| format!("{} has no resolved credential", self.roster.label(account)))?;
         match credential {
             Credential::ApiKey(key) => self.list_api_key(account, key),
             Credential::OAuth(cell) => self.list_chatgpt(account, cell),
@@ -151,10 +117,11 @@ impl ModelSource for LiveSource {
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
         let key = self
-            .accounts
+            .roster
+            .accounts()
             .iter()
             .find(|account| account.service.routes)
-            .and_then(|account| match self.credentials.get(&account.id) {
+            .and_then(|account| match self.roster.credential(&account.id) {
                 Some(Credential::ApiKey(key)) => Some(key.clone()),
                 _ => None,
             });
@@ -201,7 +168,7 @@ impl LiveSource {
                 self.client
                     .all_model_names(account.service.adapter, provider_config),
             )
-            .map_err(|e| format!("list models for {}: {e}", self.label(account)))
+            .map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))
     }
 
     /// The subscription catalog. `client_version` must be a real Codex CLI
@@ -218,7 +185,7 @@ impl LiveSource {
         runtime.block_on(async {
             oauth::refresh_cell_if_stale(cell)
                 .await
-                .map_err(|e| format!("refresh login for {}: {e}", self.label(account)))?;
+                .map_err(|e| format!("refresh login for {}: {e}", self.roster.label(account)))?;
             let token = cell.lock_ignore_poison().clone();
             let url = format!(
                 "{CHATGPT_MODELS_URL}?client_version={}",
@@ -232,29 +199,20 @@ impl LiveSource {
             let response = request
                 .send()
                 .await
-                .map_err(|e| format!("list models for {}: {e}", self.label(account)))?;
+                .map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
-                // Capped, not echoed whole: an error page from a proxy or WAF
-                // can reflect request context, and this string reaches logs
-                // and the screen — never the bearer token itself, but no
-                // reason to trust an arbitrary backend's page past a snippet.
-                const CAP: usize = 200;
-                let body = if body.chars().count() > CAP {
-                    format!("{}…", body.chars().take(CAP).collect::<String>())
-                } else {
-                    body
-                };
                 return Err(format!(
-                    "list models for {}: Codex backend returned HTTP {status}: {body}",
-                    self.label(account)
+                    "list models for {}: Codex backend returned HTTP {status}: {}",
+                    self.roster.label(account),
+                    body_detail(&body)
                 ));
             }
             let body: CodexModelsResponse = response
                 .json()
                 .await
-                .map_err(|e| format!("parse models for {}: {e}", self.label(account)))?;
+                .map_err(|e| format!("parse models for {}: {e}", self.roster.label(account)))?;
             Ok(body.models.into_iter().map(|model| model.slug).collect())
         })
     }

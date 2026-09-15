@@ -1,7 +1,7 @@
 ---
-generated_at_commit: a2d120d2
-generated_at_date: 2026-09-11
-covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
+generated_at_commit: 745c5233
+generated_at_date: 2026-09-15
+covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -132,7 +132,11 @@ calls the generalised `size_bar`/`progress_bar` through `measure_value_spans`,
 `diff` calls the patch body (`diff_body`), and `fields` plus `provider_error`
 both feed the shared `render_field_rows`/`push_field` matrix primitive — so
 `provider_error` is one internal caller of the `fields` path, not a duplicate
-label-column. The diff header label reads `diff`.
+label-column. The diff header label reads `diff`. What `provider_error` lays
+out it does not compose: the headline and fields come from
+`record::fault::Readout` ([[internals/provider-fault-recovery|provider faults]]),
+which the headless printer renders too, so the two surfaces differ in
+presentation and in nothing else.
 
 `render_card_unframed` opens with the single leading blank every block wears; the
 data-encoding rail span is prepended by the [[map/exarch/frontend|block]] to the

@@ -10,18 +10,17 @@ use super::palette::{
     CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
 };
 use super::row::Row;
-use crate::agent::event::{CutShortRecord, ProviderErrorRecord};
+use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row as DiffRow, Seg,
     Span as CardSpan,
 };
 use crate::provider;
+use crate::record::fault::{Datum, Field as FaultField, Readout};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use serde_json::Value;
-use std::borrow::Cow;
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -1082,127 +1081,44 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>, width: u16) -> 
 
 // ── Provider-error rendering ────────────────────────────────────────────────
 
-/// Body keys carrying the retry-after wait as a second count, in precedence
-/// order — read by [`wait_from_body`], then suppressed from the body dump
-/// (along with the absolute `resets_at` twin) once the wait field renders them.
-const RETRY_SECS_KEYS: &[&str] = &["resets_in_seconds", "retry_after_seconds", "retry_after"];
-
 /// A [`ProviderErrorRecord`] as a block: the `error: <kind>` headline, then an
-/// ordered field list in one shared column.  A parsed `body` supplies the
-/// fields ([`body_fields`]); without one the free-text `cause`/`message` is
-/// shown honestly rather than dressed as structure.
+/// ordered field list in one shared column — [`Readout::fatal`]'s description,
+/// laid out here.
 pub(super) fn provider_error(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    // Cancellation folds its site into the headline and carries no body.
-    if let ProviderErrorRecord::Cancelled { where_ } = e {
-        ls.push(headline(&format!("cancelled ({where_})")));
-        return ls;
-    }
-    ls.push(headline(error_kind(e)));
-    ls.extend(render_field_rows(&error_fields(e), width.into()));
-    ls
+    render_readout(Readout::fatal(e), width)
 }
 
 /// A stall as a block: the same weight and the same field list a fatal failure
-/// gets, under a headline that says the exchange survived it.  The `continuing`
-/// field is the whole distinction — without it the block would read as the end
-/// of the run, which is precisely what a stall is not.
+/// gets, under a headline that says the exchange survived it —
+/// [`Readout::stall`]'s description, laid out here.
 pub(super) fn stalled(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![Line::default(), headline("stream stalled")];
-    let mut fields = error_fields(e);
-    fields.push(text_field("continuing", "partial reply kept"));
-    ls.extend(render_field_rows(&fields, width.into()));
+    render_readout(Readout::stall(e), width)
+}
+
+/// Lay a [`Readout`] out as the headline row, then its fields in one shared
+/// column.  An empty field list (cancellation's) draws no rows at all:
+/// [`render_field_rows`] returns nothing for an empty slice.
+fn render_readout(readout: Readout, width: u16) -> Vec<Line<'static>> {
+    let mut ls: Vec<Line<'static>> = vec![Line::default(), headline(&readout.headline)];
+    let rows: Vec<FieldRow> = readout.fields.into_iter().map(field_row).collect();
+    ls.extend(render_field_rows(&rows, width.into()));
     ls
 }
 
-/// The ordered field list under either headline.  `Cancelled` never reaches
-/// here: [`provider_error`] returns before the call, and a cancel never commits
-/// as a stall — `Engine::complete` exempts it by name.
-fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
-    match e {
-        ProviderErrorRecord::Cancelled { .. } => unreachable!("cancellation carries no fields"),
-        ProviderErrorRecord::RateLimited {
-            retry_after_secs,
-            cause,
-            body,
-        } => {
-            let mut fs = Vec::new();
-            let wait = retry_after_secs.or_else(|| body.as_ref().and_then(wait_from_body));
-            if let Some(secs) = wait {
-                fs.push(wait_field(secs));
-            }
-            match body {
-                // Suppress the raw keys the wait field already subsumes.
-                Some(b) => {
-                    let consumed: Vec<&str> = RETRY_SECS_KEYS
-                        .iter()
-                        .copied()
-                        .chain(["resets_at"])
-                        .collect();
-                    fs.extend(body_fields(b, &consumed));
-                }
-                None => fs.push(text_field("cause", prettify(cause))),
-            }
-            fs
-        }
-        ProviderErrorRecord::Transient {
-            cause,
-            attempts,
-            body,
-            status,
-        } => {
-            let mut fs = vec![text_field("attempts", attempts.to_string())];
-            if let Some(s) = status {
-                fs.push(text_field("status", s.to_string()));
-            }
-            match body {
-                Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(text_field("cause", prettify(cause))),
-            }
-            fs
-        }
-        ProviderErrorRecord::Api {
-            status,
-            model,
-            message,
-            body,
-        } => {
-            let mut fs = Vec::new();
-            if let Some(s) = status {
-                fs.push(text_field("status", s.to_string()));
-            }
-            fs.push(text_field("model", model.clone()));
-            if let Some(u) = provider::extract_url(message) {
-                fs.push(text_field("url", u));
-            }
-            match body {
-                Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(text_field("message", message.clone())),
-            }
-            fs
-        }
-        // A stall's fields are its cause's: `record::view` routes one to
-        // [`stalled`] with the cause already unwrapped, so the delegation here
-        // is what keeps this match total rather than a path the TUI walks.
-        ProviderErrorRecord::Truncated { cause } => match cause {
-            CutShortRecord::OutputCap { stop_reason } => vec![
-                text_field("stop_reason", stop_reason.clone()),
-                text_field(
-                    "remedy",
-                    "raise `--max-tokens N` or split the turn into smaller writes",
-                ),
-            ],
-            CutShortRecord::Stalled { error } => error_fields(error),
-        },
-        ProviderErrorRecord::Other { cause } => vec![text_field("cause", prettify(cause))],
+/// A [`FaultField`] laid out: text wraps under the shared column, a wait
+/// renders through [`wait_field`]'s human duration plus [`size_bar`].
+fn field_row(f: FaultField) -> FieldRow {
+    match f.datum {
+        Datum::Text(text) => text_field(f.label, text),
+        Datum::Seconds(secs) => wait_field(f.label, secs),
     }
 }
 
 /// The rate-limit wait as an aligned field: a human duration plus a
 /// [`size_bar`] of the seconds.
-fn wait_field(secs: u64) -> FieldRow {
+fn wait_field(label: String, secs: u64) -> FieldRow {
     FieldRow {
-        label: "retry-after".into(),
+        label,
         value: FieldValue::Inline(vec![
             Span::raw(format!("{}  ", crate::agent::resources::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
@@ -1220,18 +1136,6 @@ fn headline(kind: &str) -> Line<'static> {
         ),
         bold(kind.into(), RED),
     ])
-}
-
-/// Short human label for the error headline.
-fn error_kind(e: &ProviderErrorRecord) -> &'static str {
-    match e {
-        ProviderErrorRecord::Cancelled { .. } => "cancelled",
-        ProviderErrorRecord::Transient { status, .. } => provider::transient_label(*status),
-        ProviderErrorRecord::RateLimited { .. } => "rate limited",
-        ProviderErrorRecord::Api { .. } => "api error",
-        ProviderErrorRecord::Truncated { .. } => "truncated",
-        ProviderErrorRecord::Other { .. } => "provider error",
-    }
 }
 
 /// Append one labelled text field, wrapped to `width` so long URLs fold rather
@@ -1254,88 +1158,6 @@ fn push_field(
         };
         Line::from(vec![lead, Span::styled(chunk, value_style)])
     });
-}
-
-/// Owned-`String` form of [`prettify_embedded_json`].
-fn prettify(s: &str) -> String {
-    prettify_embedded_json(s).into_owned()
-}
-
-/// The retry-after wait carried by a parsed `body`: the first
-/// [`RETRY_SECS_KEYS`] entry reading as a number.  Consulted only when the
-/// response header did not already supply the wait.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "float->int cast saturates: a negative or absurd retry-seconds pins to 0 / u64::MAX, both acceptable for a wait readout"
-)]
-fn wait_from_body(body: &Value) -> Option<u64> {
-    let obj = provider::error_object(body)?;
-    RETRY_SECS_KEYS.iter().find_map(|k| {
-        obj.get(*k)
-            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-    })
-}
-
-/// One JSON value as the text a field row shows, syntax stripped.  `Null`
-/// carries no action, so it renders as nothing and the field is dropped.
-fn value_display(v: &Value) -> Option<String> {
-    match v {
-        Value::Null => None,
-        Value::String(s) => Some(s.clone()),
-        Value::Bool(_) | Value::Number(_) => Some(v.to_string()),
-        Value::Array(_) | Value::Object(_) => Some(serde_json::to_string(v).unwrap_or_default()),
-    }
-}
-
-/// Flatten a parsed error `body` into ordered fields: `type`/`code` leads as
-/// the machine-readable class, then the rest in the `Map`'s sorted order,
-/// skipping nulls and anything already `consumed` by a dedicated field, with
-/// `message` last because it is the one that wraps.
-fn body_fields(body: &Value, consumed: &[&str]) -> Vec<FieldRow> {
-    let Some(obj) = provider::error_object(body) else {
-        return vec![];
-    };
-    let mut fs = Vec::new();
-    if let Some(v) = obj
-        .get("type")
-        .or_else(|| obj.get("code"))
-        .and_then(value_display)
-    {
-        fs.push(text_field("type", v));
-    }
-    for (k, v) in obj {
-        if matches!(k.as_str(), "type" | "code" | "message") || consumed.contains(&k.as_str()) {
-            continue;
-        }
-        if let Some(v) = value_display(v) {
-            fs.push(text_field(k.clone(), v));
-        }
-    }
-    if let Some(v) = obj.get("message").and_then(value_display) {
-        fs.push(text_field("message", v));
-    }
-    fs
-}
-
-/// Re-indent the first embedded JSON object or array in `s`, leaving the
-/// surrounding text intact: providers splice a single-line body into a
-/// free-text `cause`, and pretty-printing turns that wall into a nested block
-/// whose newlines the wrapper honours as hard breaks.
-fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
-    let Some(start) = s.find(['{', '[']) else {
-        return Cow::Borrowed(s);
-    };
-    let mut stream =
-        serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
-    let Some(Ok(value)) = stream.next() else {
-        return Cow::Borrowed(s);
-    };
-    let Ok(pretty) = serde_json::to_string_pretty(&value) else {
-        return Cow::Borrowed(s);
-    };
-    let end = start + stream.byte_offset();
-    Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
 }
 
 /// Fold one logical line into visual rows no wider than `width`, word-aware and

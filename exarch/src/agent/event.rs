@@ -692,8 +692,8 @@ impl AgentLog {
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
         if !self.context.is_awaiting_assistant() {
             return Err(format!(
-                "cannot render request while session is in state {}",
-                self.context.state_description()
+                "cannot render request while the session is {}",
+                self.context.waiting_for()
             ));
         }
         Ok(self.context.rendered())
@@ -769,8 +769,8 @@ impl AgentLog {
             return Ok(());
         }
         Err(format!(
-            "cannot import context while session is in state {}",
-            self.context.state_description()
+            "cannot import context while the session is {}",
+            self.context.waiting_for()
         ))
     }
 
@@ -783,8 +783,8 @@ impl AgentLog {
     pub fn append_user(&mut self, text: String, continues: Option<u64>) -> Result<(), String> {
         if !self.context.is_ready() {
             return Err(format!(
-                "cannot accept a new user prompt while session is in state {}",
-                self.context.state_description()
+                "cannot accept a new user prompt while the session is {}",
+                self.context.waiting_for()
             ));
         }
         // A prompt continues `id` iff `id` is the exchange in hand *and* that
@@ -809,8 +809,8 @@ impl AgentLog {
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
         if !self.context.is_awaiting_steering() {
             return Err(format!(
-                "tool results must be complete before accepting a steering prompt; session is in state {}",
-                self.context.state_description()
+                "tool results must be complete before accepting a steering prompt; the session is {}",
+                self.context.waiting_for()
             ));
         }
         let Some(exchange) = self.context.current_exchange() else {
@@ -834,14 +834,14 @@ impl AgentLog {
     ) -> Result<(), String> {
         if !self.context.is_awaiting_assistant() {
             return Err(format!(
-                "assistant message is not expected while session is in state {}",
-                self.context.state_description()
+                "assistant message is not expected while the session is {}",
+                self.context.waiting_for()
             ));
         }
         if message.role != ChatRole::Assistant {
             return Err(format!(
-                "assistant message has role {:?}; expected Assistant",
-                message.role,
+                "a {} message arrived where the assistant's reply was expected",
+                role_label(&message.role)
             ));
         }
         let turn = self.context.next_id();
@@ -862,8 +862,8 @@ impl AgentLog {
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
         let Some(pending_ids) = self.context.pending_tool_results() else {
             return Err(format!(
-                "tool results are not expected while session is in state {}",
-                self.context.state_description()
+                "tool results are not expected while the session is {}",
+                self.context.waiting_for()
             ));
         };
         validate_result_ids(&pending_ids, &results)?;
@@ -1185,6 +1185,17 @@ fn rotation_path(path: &Path, n: u64) -> PathBuf {
         |name| name.to_string_lossy().into_owned(),
     );
     path.with_file_name(format!("{name}.{n}"))
+}
+
+/// The four spellings a role crosses under, whether as a message's tag, a
+/// grep hit's `Str`, or the subject of a refusal.
+pub(crate) fn role_label(role: &ChatRole) -> &'static str {
+    match role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    }
 }
 
 pub(crate) fn validate_result_ids(

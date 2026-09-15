@@ -13,6 +13,7 @@
 mod browser;
 mod device;
 
+use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::secret_file::write_private;
 use base64::Engine;
@@ -626,7 +627,10 @@ pub(super) async fn json_or_error<T: DeserializeOwned>(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("{action} failed ({status}): {body}"));
+        return Err(format!(
+            "{action} failed ({status}): {}",
+            body_detail(&body)
+        ));
     }
     resp.json()
         .await

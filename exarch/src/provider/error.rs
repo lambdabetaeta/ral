@@ -418,42 +418,55 @@ fn body_message(body: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Long enough to identify the problem, short enough not to wall-of-text a
+/// sign-in or model-list error.
+const BODY_DETAIL_CAP: usize = 200;
+
+/// The readable detail inside a raw response body: the provider's own JSON
+/// error message when there is one, else the body's first line.  A body that
+/// is neither — an HTML error page — says so rather than spilling.
+///
+/// Every shape is capped on the way out, the parsed message included: an error
+/// page from a proxy or WAF can reflect request context, and this string
+/// reaches both the screen and the log, so no backend's prose is trusted past
+/// a snippet.
+pub(crate) fn body_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    let detail = match serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(body_message)
+    {
+        Some(message) => message,
+        None if trimmed.starts_with('<') => {
+            "the endpoint returned a web page, not an error message".to_string()
+        }
+        None => match trimmed.lines().find(|l| !l.trim().is_empty()) {
+            Some(line) => line.trim().to_string(),
+            None => "the endpoint sent no detail".to_string(),
+        },
+    };
+    if detail.chars().count() > BODY_DETAIL_CAP {
+        format!(
+            "{}…",
+            detail.chars().take(BODY_DETAIL_CAP).collect::<String>()
+        )
+    } else {
+        detail
+    }
+}
+
 /// The trailing lines a multi-line cause carries are genai's
 /// `Cause:`/`Status:`/`Body:` framing, which the summary deliberately drops.
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s).trim_end()
 }
 
+/// The flat [`Self::summary`] is the only rendering; the structured block is
+/// the renderer's, not this impl's.
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cancelled(where_) => write!(f, "cancelled {where_}"),
-            Self::Transient {
-                cause, attempts, ..
-            } => {
-                if *attempts > 1 {
-                    write!(f, "transient error after {attempts} attempts: {cause}")
-                } else {
-                    write!(f, "transient error: {cause}")
-                }
-            }
-            Self::RateLimited { cause, .. } => {
-                write!(f, "rate limited: {cause}")
-            }
-            Self::Api {
-                status,
-                model,
-                message,
-                ..
-            } => match status {
-                Some(s) => write!(f, "api error {s} ({model}): {message}"),
-                None => write!(f, "api error ({model}): {message}"),
-            },
-            Self::Truncated { cause } => {
-                write!(f, "reply cut off before completion: {}", cause.summary())
-            }
-            Self::Other(s) => f.write_str(s),
-        }
+        f.write_str(&self.summary())
     }
 }
 
@@ -753,5 +766,58 @@ mod tests {
             parse_retry_after("İ retry-after: 9 seconds"),
             Some(Duration::from_secs(9))
         );
+    }
+
+    #[test]
+    fn body_detail_reads_nested_json_error() {
+        let body = r#"{"error":{"message":"invalid api key"}}"#;
+        assert_eq!(body_detail(body), "invalid api key");
+    }
+
+    #[test]
+    fn body_detail_reads_flat_json_error() {
+        let body = r#"{"message":"model not found"}"#;
+        assert_eq!(body_detail(body), "model not found");
+    }
+
+    #[test]
+    fn body_detail_caps_a_json_message_too() {
+        let long = "x".repeat(BODY_DETAIL_CAP + 50);
+        let body = serde_json::json!({ "error": { "message": long } }).to_string();
+        let out = body_detail(&body);
+        assert_eq!(out.chars().count(), BODY_DETAIL_CAP + 1);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn body_detail_names_an_html_page_instead_of_spilling_it() {
+        let body = "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>";
+        assert_eq!(
+            body_detail(body),
+            "the endpoint returned a web page, not an error message"
+        );
+    }
+
+    #[test]
+    fn body_detail_falls_back_to_first_line_of_plain_text() {
+        let body =
+            "\nupstream connect error or disconnect/reset before headers\nsome more detail\n";
+        assert_eq!(
+            body_detail(body),
+            "upstream connect error or disconnect/reset before headers"
+        );
+    }
+
+    #[test]
+    fn body_detail_caps_a_long_first_line() {
+        let line = "x".repeat(BODY_DETAIL_CAP + 50);
+        let expected = format!("{}…", "x".repeat(BODY_DETAIL_CAP));
+        assert_eq!(body_detail(&line), expected);
+    }
+
+    #[test]
+    fn body_detail_names_an_empty_body() {
+        assert_eq!(body_detail(""), "the endpoint sent no detail");
+        assert_eq!(body_detail("   \n  "), "the endpoint sent no detail");
     }
 }
