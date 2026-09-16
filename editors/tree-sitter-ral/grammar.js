@@ -31,18 +31,18 @@
 // colon-joined stems.  The `word` rule's regex is constructed so that pure
 // IDENT shapes never match — every branch contains at least one non-IDENT
 // character, so the lexer can pick `identifier` unambiguously.
-const CONT        = /[^ \t\n\r|{}\[\]$!~<>"'`():;&?\\]/;     // bare-word continuation: ',' and '#' both fine
-const CONT_NC     = /[^ \t\n\r|{}\[\]$!~<>"'`():;&?,\\]/;    // …inside a list/map literal: no ','
+const CONT        = /[^ \t\n\r|{}\[\]$^!~<>"'`():;&?\\]/;     // bare-word continuation: ',' and '#' both fine
+const CONT_NC     = /[^ \t\n\r|{}\[\]$^!~<>"'`():;&?,\\]/;    // …inside a list/map literal: no ','
 // The char right after an identifier-shaped run that disqualifies it from
 // being a pure `identifier` (e.g. the '.' in "foo.bar"): must exclude
 // ident-continuation chars themselves, or "grant" would match by treating
 // its own last letter as the disqualifier. Not the token's overall first
 // character, so — unlike LEAD_SYM below — '#' is still fine here.
-const DISQ        = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$!~<>"'`():;&?\\]/;
-const DISQ_NC     = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$!~<>"'`():;&?,\\]/;
-const LEAD_SYM    = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$!~<>"'`():;&?#\\]/;   // leading symbol char: no '#'
-const LEAD_SYM_NC = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$!~<>"'`():;&?#,\\]/;  // …inside a list/map literal: no ',' either
-const BARE_STEM_NODIGIT = seq(/[^ \t\n\r|{}\[\]$!~<>"'`():;&?\\0-9]/, repeat(CONT));
+const DISQ        = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$^!~<>"'`():;&?\\]/;
+const DISQ_NC     = /[^a-zA-Z0-9_\- \t\n\r|{}\[\]$^!~<>"'`():;&?,\\]/;
+const LEAD_SYM    = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$^!~<>"'`():;&?#\\]/;   // leading symbol char: no '#'
+const LEAD_SYM_NC = /[^a-zA-Z_0-9 \t\n\r|{}\[\]$^!~<>"'`():;&?#,\\]/;  // …inside a list/map literal: no ',' either
+const BARE_STEM_NODIGIT = seq(/[^ \t\n\r|{}\[\]$^!~<>"'`():;&?\\0-9]/, repeat(CONT));
 
 // The four shapes of `word` (see below), built over a continuation class,
 // a disqualifying-char class, and a leading-symbol class so the

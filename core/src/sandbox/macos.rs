@@ -150,6 +150,10 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Res
     Ok(())
 }
 
+/// Seatbelt carries the exec allow-list into the kernel via the
+/// `process-exec` clause [`emit_exec_rules`] renders below.
+pub(crate) const RENDERS_EXEC: bool = true;
+
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard, so an
 /// fs-only grant does not attenuate exec here.  `Restricted` folds the grant's
 /// admits, the `Exec` system paths and ral's own binary into one

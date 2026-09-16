@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 /// regardless, so nothing is stranded either way.
 pub(crate) fn pins_running_work(v: &Value) -> bool {
     match v {
-        Value::Handle(h) => *h.state.lock_ignore_poison() == HandleState::Running,
+        Value::Handle(h) => h.is_running(),
         Value::List(items) => items.iter().any(pins_running_work),
         Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(v)),
         Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),
@@ -71,6 +71,11 @@ pub struct HandleInner {
     /// Filled once, when the block completes and the buffers drain into it;
     /// every later observation reads it instead of the channel.
     pub cached: Arc<Mutex<Option<CompletedHandle>>>,
+    /// Lock order: the worker registry lock may take this lock (a brief read
+    /// in `WorkerRegistry::reserve` and `WorkerRegistry::sweep_retention`),
+    /// never the reverse. Every lock on this field elsewhere drops its guard
+    /// before any registry call — [`HandleInner::is_running`] does so itself,
+    /// rather than leaving the caller to.
     pub state: Arc<Mutex<HandleState>>,
     /// Buffered stdout, drained into `cached` on completion.  Empty for a
     /// watched handle, whose bytes flow live through `Sink::LineFramed`.
@@ -100,5 +105,13 @@ pub struct HandleInner {
 impl PartialEq for HandleInner {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.result, &other.result)
+    }
+}
+
+impl HandleInner {
+    /// Locks, reads, and releases `state` in one step, so a caller never
+    /// holds the guard past this call — see `state`'s own doc for why.
+    pub(crate) fn is_running(&self) -> bool {
+        *self.state.lock_ignore_poison() == HandleState::Running
     }
 }

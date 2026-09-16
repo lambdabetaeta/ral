@@ -15,6 +15,15 @@
 //! [`path_within`](super::lex::path_within).  There is no `From<&str>`
 //! sugar: a `From` impl cannot consult the disk oracle `resolved` needs,
 //! so it would be a door for fabricating one.
+//!
+//! A prefix's two forms are not a normal form and a spelling of it: each
+//! is the form one authority is judged on — fs over *objects*, on
+//! `resolved`; exec over *names*, on `surface`
+//! (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`).
+//! Hence the two containment doors,
+//! [`covers`](super::prefix_set::covers) and
+//! [`NormalizedPrefix::covers_name`], and no third one: `surface` leaves
+//! the type only as a `String`, for rendering.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -180,10 +189,15 @@ impl NormalizedPrefix {
         }
     }
 
-    /// The surface form as a `Path` — the author's spelling, never the form
-    /// containment is judged on; the gate matches [`Self::resolved_path`].
-    /// Private, so that is not merely documented: no other module can ask a
-    /// containment question of the wrong form.
+    /// The surface form as a `Path` — the author's spelling.
+    ///
+    /// Private, and staying so: the surface *is* the form exec authority is
+    /// judged on ([`covers_name`](Self::covers_name)), the resolved form the
+    /// one fs authority is judged on ([`resolved_path`](Self::resolved_path)),
+    /// so the choice of form belongs to the authority asking and is made here
+    /// — never by a caller holding a `&Path`.  The `xdg:` freeze guard made
+    /// that choice for itself once, and read a symlink out of `$HOME` as
+    /// contained.
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
@@ -197,30 +211,45 @@ impl NormalizedPrefix {
         &self.surface
     }
 
+    /// True iff the absolute candidate `name` lies within this prefix as
+    /// *written* — the exec gate's containment question
+    /// (`capability::exec::longest_dir_match`), asked on the surface because
+    /// exec authority is over names: what command did the user name?  Its fs
+    /// counterpart, over objects, is [`covers`](super::prefix_set::covers) on
+    /// the resolved form.  A symlink is not laundered past this, because the
+    /// broadening happens on the *candidate* side: a deny dir is offered the
+    /// canonical spelling too (`runtime::command::identity`).
+    ///
+    /// `docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`.
+    pub(crate) fn covers_name(&self, name: &str) -> bool {
+        super::lex::path_within_str(name, &self.surface)
+    }
+
     /// The symlink-followed form as a `Path`, for containment matching
     /// against an access path that has itself been canonicalised.
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a resolved form already in normal form — no I/O behind it"
     )]
-    pub(crate) fn resolved_path(&self) -> &Path {
+    pub(super) fn resolved_path(&self) -> &Path {
         Path::new(&self.resolved)
     }
 
     /// The symlink-followed form, for composition overlap.
-    pub(crate) fn resolved(&self) -> &str {
+    pub(super) fn resolved(&self) -> &str {
         &self.resolved
     }
 
     /// Which namespace `resolved` was resolved in.
-    pub(crate) fn namespace(&self) -> Namespace {
+    pub(super) fn namespace(&self) -> Namespace {
         self.namespace
     }
 
     /// True iff the enforcement gate (`capability::exec::longest_dir_match`)
-    /// would treat `self` and `other` as one directory: mutual containment
-    /// under [`path_within_str`](super::lex::path_within_str), plus a
-    /// matching namespace.
+    /// would treat `self` and `other` as one directory: mutual
+    /// [`covers_name`](Self::covers_name), plus a matching namespace.  On the
+    /// surface, therefore, because that gate is — deliberately, exec
+    /// authority being over names.
     ///
     /// Not byte equality.  That containment rule folds macOS firmlink
     /// aliases (`/tmp` ↔ `/private/tmp`) and, under Windows identity, case,
@@ -231,8 +260,8 @@ impl NormalizedPrefix {
     /// the same dir" needs this, not the derived `Eq`/`Ord`.
     pub(crate) fn same_gate_dir(&self, other: &Self) -> bool {
         self.namespace == other.namespace
-            && super::lex::path_within_str(&self.surface, &other.surface)
-            && super::lex::path_within_str(&other.surface, &self.surface)
+            && self.covers_name(&other.surface)
+            && other.covers_name(&self.surface)
     }
 
     /// Consume into the owned surface `String`, for the wire and render

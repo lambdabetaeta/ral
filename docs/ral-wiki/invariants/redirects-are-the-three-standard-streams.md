@@ -23,10 +23,10 @@ different answers to one question rather than an inconsistency:
 - `1< f` means something in bash that ral cannot do at all, so it is a parse
   error rather than a silent write door.
 
-**Refusal is at construction, not at three gates.** `Redirect`'s fields are
-private and `Redirect::new` is its only constructor, so every `RedirectV` in
-the IR and every `EvalRedirectV` at the machine descends from an admitted
-form. The two places downstream that must know the model — the in-process
+**Refusal is at construction — at the surface.** `Redirect`'s fields are
+private and `Redirect::new` is its only constructor, so every `RedirectV` a
+ral program's own source can produce descends from an admitted form. The two
+places downstream that trust the model at that layer — the in-process
 redirect frame (`core/src/evaluator/redirect.rs`) and the write observation an
 audit trail carries (`core/src/types/observation.rs`) — then *state* it
 instead of re-deriving it. That is the difference this rule exists to keep: a
@@ -40,10 +40,24 @@ way to give, and fd ≥ 3 earns the sentence naming the three streams. Those are
 better diagnostics for the same rule, not a second gate — the constructor
 still states the model whole.
 
+**The IR is not closed the same way, and that is why one runtime check
+stays.** `ir::RedirectV` re-widens the surface's closed type back to a raw
+`{ fd: u32, mode, target }` product and derives `Deserialize`; `Comp` — the
+thunk value a `RedirectV` lives inside — crosses the wire (`core/src/serial.rs`),
+so a peer can hand this process a `RedirectV` that never passed through
+`Redirect::new` at all. `core/src/runtime/command/stdio.rs`'s
+`unmodeled_redirect` (fd ≥ 3, or a `fd>&fd` dup other than `2>&1`) is the only
+gate on that arrival — not a second check on the set `Redirect::new` already
+closed, but the one check on the set it *didn't*, because it never saw that
+value. Turning it into an `unreachable!` would turn a malformed peer redirect
+into a peer-triggered panic instead of a refused command.
+
 This is a hard rule, not a stylistic preference. Do not widen the admitted set
-without giving the new form plumbing that means something; do not add an fd
-check to the runtime, the elaborator or the checker; and do not make
-`Redirect`'s fields public again — the point is that the bug is unspellable.
+`Redirect::new` grants without giving the new form plumbing that means
+something, and do not make `Redirect`'s fields public again — the point is
+that the surface bug is unspellable. The runtime's wire-arrival check is not
+part of that point and must stay: nothing upstream of it can vouch for a value
+that crossed a `Deserialize` boundary instead of the constructor.
 
 See [[internals/surface-syntax|surface-syntax]] for where redirects are lexed
 and parsed, [[design/capture|capture]] for why a redirect moves `ambient` with

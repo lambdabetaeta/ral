@@ -5,7 +5,7 @@
 //! prefix.  Literal beats dir, deeper dir beats shallower, and a tie
 //! resolves to deny.
 
-use crate::path;
+use crate::path::{self, NormalizedPrefix};
 use crate::types::{ExecMap, ExecPolicy, GrantStack, Meet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -225,26 +225,32 @@ fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
 /// path, and a symlink planted under an allowed dir cannot launder a
 /// binary out of a denied one.  Bare basenames in the broad set fall to
 /// the `is_absolute` filter — a directory covers no bare name.
+///
+/// [`covers_name`](NormalizedPrefix::covers_name) is the surface-form
+/// containment door, not an oversight: exec authority is over names
+/// (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`).
 fn longest_dir_match(exec: &ExecMap, names: ExecNames) -> Option<bool> {
     let mut best: Option<(usize, bool)> = None;
-    let mut consider = |dir: &str, allow: bool, wins_tie: bool, candidates: &[&str]| {
-        let matches_any = candidates
-            .iter()
-            .any(|n| path::is_absolute(n) && path::path_within_str(n, dir));
-        if !matches_any {
-            return;
-        }
-        let depth = path::lex::identity_depth(dir, cfg!(windows));
-        match best {
-            Some((best_depth, _)) if best_depth > depth || (best_depth == depth && !wins_tie) => {}
-            _ => best = Some((depth, allow)),
-        }
-    };
+    let mut consider =
+        |dir: &NormalizedPrefix, allow: bool, wins_tie: bool, candidates: &[&str]| {
+            let matches_any = candidates
+                .iter()
+                .any(|n| path::is_absolute(n) && dir.covers_name(n));
+            if !matches_any {
+                return;
+            }
+            let depth = path::lex::identity_depth(dir.as_str(), cfg!(windows));
+            match best {
+                Some((best_depth, _))
+                    if best_depth > depth || (best_depth == depth && !wins_tie) => {}
+                _ => best = Some((depth, allow)),
+            }
+        };
     for dir in &exec.allow_dirs {
-        consider(dir.as_str(), true, false, names.allow);
+        consider(dir, true, false, names.allow);
     }
     for dir in &exec.deny_dirs {
-        consider(dir.as_str(), false, true, names.deny);
+        consider(dir, false, true, names.deny);
     }
     best.map(|(_, allow)| allow)
 }

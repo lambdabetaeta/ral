@@ -215,8 +215,9 @@ fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
 /// otherwise an attacker-set `XDG_DATA_HOME=/etc` would silently widen an
 /// `xdg:data` grant to `/etc`.
 ///
-/// The question is asked exactly as the runtime gate asks it — [`path_within`]
-/// over the symlink-followed forms — so guard and gate cannot disagree.  Both
+/// The question is asked exactly as the runtime *fs* gate asks it —
+/// [`path_within`] over the symlink-followed forms, fs authority being over
+/// objects — so guard and gate cannot disagree.  Both
 /// sides are folded and canonicalised: `xdg:config/../../etc` collapses to
 /// `/etc` rather than stepping over the guard and collapsing at match time, a
 /// `$XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a

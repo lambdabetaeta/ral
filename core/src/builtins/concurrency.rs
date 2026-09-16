@@ -310,9 +310,7 @@ where
         && let Some(lease) = mooring.deferred_lease
     {
         let chain = LeaseChain {
-            scope: handle.cancel.clone(),
-            state: handle.state.clone(),
-            last_observed: handle.last_observed.clone(),
+            handle: handle.clone(),
             started: std::time::Instant::now(),
             lease,
             registry: shell.local.workers.clone(),
@@ -324,13 +322,13 @@ where
 }
 
 /// Everything one firing of a worker's lease chain needs, cloned forward into
-/// each re-arm.  Shared cells and `Copy` facts, never a `Shell`: cheap to clone
-/// and cheap to run on the reaper daemon thread.
+/// each re-arm.  The whole handle, not its picked-apart cells: cheap to clone
+/// (all `Arc`s and a `Copy` scope) and cheap to run on the reaper daemon
+/// thread, and it is what lets [`lease_fire`] ask [`HandleInner::is_running`]
+/// rather than lock `state` itself.
 #[derive(Clone)]
 struct LeaseChain {
-    scope: crate::process::CancelScope,
-    state: Arc<Mutex<HandleState>>,
-    last_observed: Arc<Mutex<std::time::Instant>>,
+    handle: HandleInner,
     /// The backstop's clock; the registry entry's `SystemTime` is display-only.
     started: std::time::Instant,
     lease: WorkerLease,
@@ -348,17 +346,23 @@ struct LeaseChain {
 /// the handle attached: the body settles as an error, so a later `poll`/`await`
 /// still observes the partial output and the failure.
 fn lease_fire(chain: &LeaseChain) {
-    if *chain.state.lock_ignore_poison() != HandleState::Running {
+    if !chain.handle.is_running() {
         return;
     }
     let age = chain.started.elapsed();
-    let idle = chain.last_observed.lock_ignore_poison().elapsed();
+    let idle = chain.handle.last_observed.lock_ignore_poison().elapsed();
     if age >= chain.lease.backstop {
         chain.registry.reap(chain.id, ReapCause::Backstop);
-        chain.scope.cancel(crate::process::CancelCause::Deadline);
+        chain
+            .handle
+            .cancel
+            .cancel(crate::process::CancelCause::Deadline);
     } else if idle >= chain.lease.idle {
         chain.registry.reap(chain.id, ReapCause::Idle);
-        chain.scope.cancel(crate::process::CancelCause::Deadline);
+        chain
+            .handle
+            .cancel
+            .cancel(crate::process::CancelCause::Deadline);
     } else {
         let next = std::cmp::min(
             chain.lease.idle.saturating_sub(idle),

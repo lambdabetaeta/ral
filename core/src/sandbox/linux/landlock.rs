@@ -99,6 +99,10 @@ impl fmt::Display for Landlock {
     }
 }
 
+/// Landlock carries the exec allow-list into the kernel via the `Execute`
+/// ruleset [`Layer::enter`] renders below.
+pub(crate) const RENDERS_EXEC: bool = true;
+
 /// The rendered ruleset as a value, so it can be tested on any host and
 /// printed in the profile dump without touching the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]

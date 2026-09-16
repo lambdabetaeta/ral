@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e4d859c3
+generated_at_commit: a5b0a525
 generated_at_date: 2026-09-16
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -99,8 +99,8 @@ plus `which.rs` for PATH search.
   directory handle, the leaf, and the symlink-free `real` path — whose every
   operation is handle-relative with `FollowSymlinks::No` (`cap-primitives`
   supplies the `*at` calls on Unix and Windows);
-- match — `lex::path_within`, which folds `starts_with_identity` over the
-  alias pairs; under Windows path semantics that comparison unifies case,
+- match — `lex::path_within`, the form-blind containment kernel, which folds
+  `starts_with_identity` over the alias pairs; under Windows path semantics that comparison unifies case,
   `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
   prefix-set matchers all inherit one notion of path identity;
 - name a device — `lex::is_discard_device`, behind
@@ -136,20 +136,25 @@ from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
   `Resolver::search_cwd`, so the OS profile and the in-ral gate name the same
   binary.
 
-A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical —
-what the OS profile emits, since the sandbox matcher works lexically), its
-`resolved` form (symlinks followed — what containment and intersection are
-judged on), and its `Namespace`, all fixed by one disk consultation at the
-freeze door. The duality is load-bearing, not redundant: enforce the ceiling
-on the resolved form, emit the surface form the sandboxed body will actually
-open. Which is which is enforced rather than documented: the surface form
-leaves the type only as a *string* (`as_str`, `into_string`) for rendering,
-never as a `Path` a caller could hand to a containment predicate — the `xdg:`
-freeze guard once did exactly that, and read a symlink out of `$HOME` as
-contained.
+A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical — what
+the author wrote, and what the OS profile emits, since the sandbox matcher works
+lexically), its `resolved` form (symlinks followed), and its `Namespace`, all
+fixed by one disk consultation at the freeze door. The duality is load-bearing,
+not redundant, and **neither form is the real one**:
+[[invariants/fs-judges-objects-exec-judges-names|fs authority is over objects
+and is judged on `resolved`; exec authority is over names and is judged on
+`surface`]]. So the type offers exactly two containment doors, one per
+authority — `covers` (below) and `NormalizedPrefix::covers_name`, the exec
+gate's — and no third: `lex::path_within` and its string twin are `pub(super)`,
+so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
+private to `resolved.rs`, and outside the module the surface leaves the type
+only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
+rather than documented because the `xdg:` freeze guard once chose the form for
+itself — asking on the surface while the gate it guarded matched the resolved
+form — and read a symlink out of `$HOME` as contained.
 
 `prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
-disk-free: `covers` is the one containment judgment, keyed on
+disk-free: `covers` is the one *fs* containment judgment, keyed on
 `(namespace, resolved)` so prefixes in different namespaces never overlap and
 a cross-namespace meet is the empty, fail-closed intersection; `meet_prefixes`
 is the kernel `PrefixSet::meet`, `ExecMap::join` and the deputy fold share;

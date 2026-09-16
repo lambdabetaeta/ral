@@ -92,15 +92,23 @@ whether or not later composition would keep that path. A `restrict` profile that
 mentions an escaping `xdg:data` is rejected even if a `meet` would have
 intersected it away.
 
-The guard asks its containment question on the form the *gate* matches — the
-symlink-followed one — with `path_within`, the same alias-aware predicate
-`covers` and `covering` use, and with `$HOME` canonicalised on the other side.
-Asking it of the surface spelling instead read `XDG_DATA_HOME=$HOME/link`, with
-`link → /etc`, as contained: the surface stayed under `$HOME` while the frozen
-`resolved` form — the only one enforcement ever sees — was `/etc`. A guard and a
-gate that judge different forms of the same prefix do not guard it, so
-`NormalizedPrefix` no longer lets anything outside its own file ask for the
-surface form at all.
+The guard asks its containment question on the form the *gate* matches. That
+gate is the `fs` one, which authorises objects, so the form is the
+symlink-followed `resolved` one, asked with `path_within` — the same alias-aware
+predicate `covers` and `covering` use — and with `$HOME` canonicalised on the
+other side. Asking it of the surface spelling instead read
+`XDG_DATA_HOME=$HOME/link`, with `link → /etc`, as contained: the surface stayed
+under `$HOME` while the frozen `resolved` form — the only one `fs` enforcement
+ever sees — was `/etc`.
+
+A guard and a gate that judge different forms of the same prefix do not guard
+it. The general rule is
+[[invariants/fs-judges-objects-exec-judges-names|fs judges objects, exec judges
+names]]: *which* form is per-authority, not universal — the `exec` gate matches
+on the surface, and rightly, since it asks what command the user named — so the
+choice is made once inside `core/src/path/`, where the containment kernel now
+stays, and each authority reaches it through its own door. No caller elsewhere
+holds two paths and picks.
 
 This is *fail-closed*: the honest reading for a defence-in-depth control is that
 the offending input is refused at the door, not that its rejection depends on

@@ -18,7 +18,7 @@
 //! / `child_of` / `inherit_from` do not, and a sub-agent fork starts empty.
 
 use crate::sync::LockExt as _;
-use crate::types::{HandleInner, HandleState, Resident};
+use crate::types::{HandleInner, Resident};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -146,8 +146,7 @@ impl Resident for WorkerEntry {
     }
 
     fn state_label(&self) -> String {
-        let running = *self.handle.state.lock_ignore_poison() == HandleState::Running;
-        if running {
+        if self.handle.is_running() {
             "running (worker)".to_string()
         } else {
             "done (worker)".to_string()
@@ -220,15 +219,15 @@ impl WorkerRegistry {
     /// Measure admission and hold a seat in one locked step, so a birth that
     /// registers only later — after a thread spawn and a handle construction —
     /// cannot be raced by a sibling reading the same free seat. The measure is
-    /// running entries (each `state` briefly locked under the registry lock,
-    /// the order [`Self::sweep_retention`] documents) plus seats reserved.
+    /// running entries (each `state` briefly locked under the registry lock —
+    /// see [`HandleInner::state`]'s doc for the order) plus seats reserved.
     pub(crate) fn reserve(&self, cap: Option<usize>) -> Result<Reservation, CapReached> {
         let mut inner = self.0.lock_ignore_poison();
         if let Some(cap) = cap {
             let running = inner
                 .entries
                 .iter()
-                .filter(|entry| *entry.handle.state.lock_ignore_poison() == HandleState::Running)
+                .filter(|entry| entry.handle.is_running())
                 .count();
             if running + inner.reserved >= cap {
                 return Err(CapReached(cap));
@@ -298,10 +297,6 @@ impl WorkerRegistry {
     /// never runs retroactively over a quiet period. The eliminators already
     /// take an entry the moment its result is observed; this catches the rest.
     ///
-    /// Lock order: the registry lock may take an entry's `state` lock (the
-    /// brief read here and in [`Self::reserve`]), never the reverse. Every
-    /// `state` lock outside this module drops its guard before any registry
-    /// call.
     pub(crate) fn sweep_retention(&self) {
         let mut inner = self.0.lock_ignore_poison();
         let Some(retention) = inner.retention else {
@@ -310,8 +305,7 @@ impl WorkerRegistry {
         let epoch = inner.epoch;
         let mut i = 0;
         while i < inner.entries.len() {
-            let running =
-                *inner.entries[i].handle.state.lock_ignore_poison() == HandleState::Running;
+            let running = inner.entries[i].handle.is_running();
             match (running, inner.entries[i].settled_epoch) {
                 (false, None) => {
                     inner.entries[i].settled_epoch = Some(epoch);
@@ -409,6 +403,7 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::HandleState;
 
     fn fake_entry(id: u64, cmd: &str, class: LeaseClass, running: bool) -> WorkerEntry {
         let state = if running {

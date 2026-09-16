@@ -196,6 +196,8 @@ impl BuiltinEntry {
         // The declared scheme is the authority on what a row settles to, so a
         // body cannot put an inhabitant of another type under `F Unit` — which
         // a body and its scheme agreeing only by hand otherwise allows.
+        // Asserted in debug; coerced to `Unit` in release regardless of what
+        // the body answered, since the scheme, not the body, is authoritative.
         if self.settles_at_unit() {
             debug_assert!(
                 matches!(value, Value::Unit),
@@ -210,12 +212,8 @@ impl BuiltinEntry {
 }
 
 impl Clone for BuiltinEntry {
-    /// Carries an already-computed arity cache forward.
+    /// Carries an already-computed arity/unit cache forward.
     fn clone(&self) -> Self {
-        let arity_cache = OnceLock::new();
-        if let Some(a) = self.arity_cache.get() {
-            let _ = arity_cache.set(*a);
-        }
         Self {
             name: self.name.clone(),
             convention: self.convention,
@@ -223,7 +221,7 @@ impl Clone for BuiltinEntry {
             doc: self.doc,
             diagnostic: self.diagnostic,
             body: self.body.clone(),
-            arity_cache,
+            arity_cache: self.arity_cache.clone(),
             unit_cache: self.unit_cache.clone(),
         }
     }

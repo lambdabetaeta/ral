@@ -27,7 +27,14 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 ///
 /// The runtime grant gate (`capability::enforce`) and the prefix intersector
 /// (`super::prefix_set`) both decide containment through it.
-pub(crate) fn path_within(path: &Path, prefix: &Path) -> bool {
+///
+/// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
+/// forms a containment question is asked of is authority-specific
+/// (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`), so
+/// it is settled inside `path` — by [`super::prefix_set::covers`] for fs and
+/// [`NormalizedPrefix::covers_name`](super::resolved::NormalizedPrefix::covers_name)
+/// for exec — and never by a caller holding two bare paths.
+pub(super) fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
     if cfg!(windows) {
@@ -256,9 +263,9 @@ pub fn resolve_str(cwd: Option<&str>, path: &str) -> PathBuf {
     resolve_path(cwd.map(Path::new), path)
 }
 
-/// [`path_within`] on strings.
+/// [`path_within`] on strings, and `pub(super)` for the same reason.
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn path_within_str(path: &str, prefix: &str) -> bool {
+pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
     path_within(Path::new(path), Path::new(prefix))
 }
 

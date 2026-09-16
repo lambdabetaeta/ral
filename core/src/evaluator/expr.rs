@@ -117,13 +117,6 @@ fn not_numeric(val: &Value) -> Error {
     .with_hint("use int or float to convert")
 }
 
-fn require_numeric(val: &Value) -> Result<(), Error> {
-    match val {
-        Value::Int(_) | Value::Float(_) => Ok(()),
-        _ => Err(not_numeric(val)),
-    }
-}
-
 /// `==`/`!=` share `values_equal` with the `equal` builtin, so comparing a pair
 /// of closures errors on both surfaces instead of answering a non-reflexive
 /// `false`.
@@ -154,44 +147,46 @@ fn compare(l: &Value, op: CompareOp, r: &Value) -> Settled<Value> {
 fn arithmetic(l: &Value, op: ArithOp, r: &Value) -> Result<Value, Error> {
     let div_zero = || Error::new("division by zero", 1);
     let mod_zero = || Error::new("modulo by zero", 1);
-    require_numeric(l)?;
-    require_numeric(r)?;
-    if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        let overflow = || Error::new(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
-        Ok(match op {
-            ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
-            ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,
-            ArithOp::Mul => a.checked_mul(*b).map(Value::Int).ok_or_else(overflow)?,
-            ArithOp::Div if *b == 0 => return Err(div_zero()),
-            ArithOp::Div => a.checked_div(*b).map(Value::Int).ok_or_else(overflow)?,
-            ArithOp::Mod if *b == 0 => return Err(mod_zero()),
-            ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
-        })
-    } else {
-        // Both operands cleared `require_numeric`, so `as_float` cannot fail.
-        let a = l.as_float().unwrap();
-        let b = r.as_float().unwrap();
-        let v = match op {
-            ArithOp::Add => a + b,
-            ArithOp::Sub => a - b,
-            ArithOp::Mul => a * b,
-            ArithOp::Div if b == 0.0 => return Err(div_zero()),
-            ArithOp::Div => a / b,
-            ArithOp::Mod => {
-                return Err(
-                    Error::new("% requires Int operands", 1).with_hint("use int to convert")
-                );
-            }
-        };
-        // Finite operands with a nonzero divisor can still overflow to ±∞,
-        // and a Float is finite by construction.
-        if v.is_finite() {
-            Ok(Value::Float(v))
-        } else {
-            Err(Error::new(
-                format!("float overflow: {a} and {b} exceed f64 range"),
-                1,
-            ))
+    match (l, r) {
+        (Value::Int(a), Value::Int(b)) => {
+            let overflow =
+                || Error::new(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
+            Ok(match op {
+                ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
+                ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,
+                ArithOp::Mul => a.checked_mul(*b).map(Value::Int).ok_or_else(overflow)?,
+                ArithOp::Div if *b == 0 => return Err(div_zero()),
+                ArithOp::Div => a.checked_div(*b).map(Value::Int).ok_or_else(overflow)?,
+                ArithOp::Mod if *b == 0 => return Err(mod_zero()),
+                ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
+            })
         }
+        _ => match (l.as_float(), r.as_float()) {
+            (Some(a), Some(b)) => {
+                let v = match op {
+                    ArithOp::Add => a + b,
+                    ArithOp::Sub => a - b,
+                    ArithOp::Mul => a * b,
+                    ArithOp::Div if b == 0.0 => return Err(div_zero()),
+                    ArithOp::Div => a / b,
+                    ArithOp::Mod => {
+                        return Err(Error::new("% requires Int operands", 1)
+                            .with_hint("use int to convert"));
+                    }
+                };
+                // Finite operands with a nonzero divisor can still overflow to
+                // ±∞, and a Float is finite by construction.
+                if v.is_finite() {
+                    Ok(Value::Float(v))
+                } else {
+                    Err(Error::new(
+                        format!("float overflow: {a} and {b} exceed f64 range"),
+                        1,
+                    ))
+                }
+            }
+            (None, _) => Err(not_numeric(l)),
+            (_, None) => Err(not_numeric(r)),
+        },
     }
 }

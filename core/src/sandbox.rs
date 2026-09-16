@@ -65,18 +65,24 @@ pub(crate) use diag::{augment_failure, sample_descendants};
 /// network capability SID, which cannot open a socket.
 const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
-/// Whether this platform's backend carries the exec allow-list into the
-/// kernel, per the rendering named in this module's header: Seatbelt's
-/// `process-exec` clause, Landlock's `Execute` ruleset.  Windows has no
-/// counterpart, so an exec opinion there is the in-process gate's alone.
-///
-/// `capability::sandbox::sandbox_projection` reads this to decide whether an
-/// exec-only grant is worth an OS sandbox at all, so a backend that gains
-/// exec rendering switches the trigger on here, beside the law it renders,
-/// rather than in a second `cfg` that can be forgotten.  Landlock absent from
-/// a running kernel is *not* an exception: the envelope is still built and
-/// `linux::landlock::enter` simply has nothing to enter.
-pub(crate) const EXEC_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+// Whether this platform's backend carries the exec allow-list into the
+// kernel, per the rendering named in this module's header: Seatbelt's
+// `process-exec` clause, Landlock's `Execute` ruleset.  Windows has no
+// counterpart, so an exec opinion there is the in-process gate's alone.
+//
+// `capability::sandbox::sandbox_projection` reads this to decide whether an
+// exec-only grant is worth an OS sandbox at all.  Each backend declares its
+// own `RENDERS_EXEC` beside the code that renders it, so a backend gaining
+// exec rendering switches the trigger on there, rather than in a second list
+// here that can be forgotten.  Landlock absent from a running kernel is
+// *not* an exception: the envelope is still built and
+// `linux::landlock::enter` simply has nothing to enter.
+#[cfg(target_os = "linux")]
+pub(crate) use linux::landlock::RENDERS_EXEC as EXEC_ENFORCED;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) const EXEC_ENFORCED: bool = false;
 
 /// The one refusal for "this host cannot establish the confinement the active
 /// grant asks for".  Whether it is an axis no backend here enforces, an

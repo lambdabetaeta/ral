@@ -10,6 +10,13 @@
 //! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
 //! [`NormalizedPrefix`] through the same folding kernel, so an access-side
 //! path and a grant-side prefix compare like-for-like.
+//!
+//! `lex::path_within` and its string twin are `pub(super)` here, so the
+//! containment kernel does not leave this module: a prefix carries two
+//! forms, and *which* one an authority is judged on is that authority's
+//! rule, not a caller's — fs on the object (`prefix_set::covers`), exec on
+//! the name (`NormalizedPrefix::covers_name`).  See
+//! `docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`.
 
 pub mod basedir;
 pub(crate) mod canon;
@@ -37,10 +44,6 @@ pub use lex::{
     PathShape, basename, exists, is_absolute, is_dir, resolve_path, resolve_relative_to_script,
     resolve_str, shape,
 };
-// The containment kernel stays crate-private: outside core the only fs
-// containment question is `GrantStack::admits_fs`, so no caller can re-derive
-// a matcher over surface forms as exarch's skill gate once did.
-pub(crate) use lex::path_within_str;
 pub(crate) use prefix_set::{PrefixSet, covers, meet_prefixes};
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
