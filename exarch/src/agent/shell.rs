@@ -9,7 +9,7 @@
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
-use crate::agent::seat::engine_gone;
+use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
@@ -162,7 +162,7 @@ impl Avatar {
             Err(s) => {
                 return SessionToolResult {
                     id,
-                    content: engine_gone(&s),
+                    content: EngineLost::running(&s, self.agent.run_dir()).to_string(),
                 };
             }
         };
@@ -211,10 +211,12 @@ impl Avatar {
                         exit,
                     })
                 }
-                Err(s) => engine_gone(&s),
+                Err(s) => EngineLost::running(&s, self.agent.run_dir()).to_string(),
             },
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
-            shell_eval::Outcome::Severed(s) => engine_gone(&s),
+            shell_eval::Outcome::Severed(s) => {
+                EngineLost::running(&s, self.agent.run_dir()).to_string()
+            }
         };
         // `if let`, not an unconditional overwrite: last-wins is a property of
         // the batch, so a later call that stages nothing must leave an earlier

@@ -415,8 +415,18 @@ impl App {
 
     /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
     /// pid keeps two runs launched in the same second and project apart.  Holds
-    /// `stderr.log` and `sessions/<id>/{record.jsonl,user.log}`,
-    /// durably, unlike the disposable [`Scratch`].
+    /// `sessions/<id>/{record.jsonl,record.log,user.log}` durably, unlike the
+    /// disposable [`Scratch`].
+    ///
+    /// What sits *beside* `sessions/` is the front-end's, not this function's,
+    /// and the two front-ends differ because their engines do.  The TUI's
+    /// engine is this process, so `TerminalGuard::enter` redirects file
+    /// descriptor 2 into `stderr.log` here and everything the engine says
+    /// outside the protocol lands in it.  synod's engine is inside a virtual
+    /// machine and has no descriptor this process could redirect, so it writes
+    /// `engine.log` instead — the guest's own console, fetched from the
+    /// machine layer when a conversation fails.  Neither file is promised: a
+    /// run that ends well may leave only its records.
     ///
     /// # Errors
     /// Returns `Err` if creating the directory fails.

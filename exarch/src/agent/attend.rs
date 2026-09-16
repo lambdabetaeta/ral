@@ -8,7 +8,7 @@
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
-use crate::agent::seat::engine_gone;
+use crate::agent::seat::EngineLost;
 use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
@@ -124,7 +124,7 @@ impl Avatar {
                 break;
             }
         }
-        // A park that quiesced on severance must report `engine_gone`, not
+        // A park that quiesced on severance must report `EngineLost`, not
         // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
         if let Some(s) = self.seat.severed() {
             self.severed(&s, &mut final_outcome);
@@ -173,7 +173,7 @@ impl Avatar {
                 break;
             }
         }
-        // A park that quiesced on severance must report `engine_gone`, not
+        // A park that quiesced on severance must report `EngineLost`, not
         // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
         if let Some(s) = self.seat.severed() {
             self.severed(&s, &mut final_outcome);
@@ -255,7 +255,7 @@ impl Avatar {
         {
             self.agent.deposit_reply(v.clone());
         }
-        *final_outcome = agent_outcome(&outcome);
+        *final_outcome = agent_outcome(&outcome, self.agent.run_dir());
         // Before any nudge decision, and whether or not one follows: a chat
         // trunk keeps no registry, and its failures must still reach the human.
         if let Err(e) = &outcome
@@ -438,8 +438,12 @@ impl Avatar {
     /// severed: record the sentence, fail the outcome, quiesce the log if a
     /// deliberation left it mid-protocol, and stop the loop that called this.
     fn severed(&self, s: &Severed, final_outcome: &mut (AgentOutcome, Option<FOValue>)) -> Flow {
-        self.note_error(engine_gone(s));
-        *final_outcome = (AgentOutcome::Failed(engine_gone(s)), None);
+        let lost = EngineLost::running(s, self.agent.run_dir());
+        // Two renderings of one failure, and the difference is the point: the
+        // durable note keeps the engine's own account of itself, while the
+        // outcome the loop settles on is the plain sentence a person reads.
+        self.note_error(lost.logged());
+        *final_outcome = (AgentOutcome::Failed(lost.to_string()), None);
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
@@ -544,6 +548,7 @@ const NO_REPLY_REASON: &str = "ended without calling `reply`";
 
 fn agent_outcome(
     r: &Result<deliberate::Outcome, ProviderError>,
+    run_dir: Option<&std::path::Path>,
 ) -> (AgentOutcome, Option<FOValue>) {
     match r {
         // The headless root's own `reply` reaches the epilogue directly — a
@@ -559,7 +564,10 @@ fn agent_outcome(
         }
         Ok(deliberate::Outcome::Cancelled) => (AgentOutcome::Cancelled, None),
         Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("turn cap reached".into()), None),
-        Ok(deliberate::Outcome::Severed(s)) => (AgentOutcome::Failed(engine_gone(s)), None),
+        Ok(deliberate::Outcome::Severed(s)) => (
+            AgentOutcome::Failed(EngineLost::running(s, run_dir).to_string()),
+            None,
+        ),
         Err(e) => (AgentOutcome::Failed(e.summary()), None),
     }
 }

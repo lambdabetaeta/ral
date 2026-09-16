@@ -179,6 +179,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/record/log.rs", "silent:record-file-create"),
     ("exarch/src/record/log.rs", "silent:record-file-read"),
     ("exarch/src/record/log.rs", "silent:record-file-rotate"),
+    ("exarch/src/record/log.rs", "silent:record-readable-mirror"),
     (
         "exarch/src/record/model/resume.rs",
         "silent:model-fold-crash-quarantine",

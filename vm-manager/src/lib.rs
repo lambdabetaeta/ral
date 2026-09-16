@@ -330,6 +330,34 @@ pub type AgentDial = std::os::fd::OwnedFd;
 #[cfg(windows)]
 pub type AgentDial = std::os::windows::io::OwnedSocket;
 
+/// What a guest said on its console, so far as the host can still reach it.
+///
+/// This is the only diagnostic channel a host has into a guest that will not
+/// talk to it.  `ral-daemon` gives the engine the daemon's own standard
+/// descriptors, which the kernel has connected to `/dev/console`, so anything
+/// the engine writes outside the protocol — a panic, a refusal, a failed
+/// mount — lands on the guest's console beside the daemon's own lines and
+/// nowhere else.  When the protocol then closes with no explanation, this is
+/// the explanation.
+///
+/// Both halves may be empty, and an empty one is a finding rather than a
+/// failure: no `log` means this backend keeps nothing on disk for a host to
+/// open, and an empty `tail` means the guest genuinely said nothing.  Callers
+/// must say which of those they saw rather than writing an empty file and
+/// letting a reader assume the guest was silent.
+#[derive(Debug, Default, Clone)]
+pub struct GuestConsole {
+    /// The whole console on disk, if this backend kept it somewhere the host
+    /// can name.  Naming it is worth doing even when it cannot be read from
+    /// here — under the broker it belongs to a `LocalSystem` service — since
+    /// a path an administrator can open beats no path at all.
+    pub log: Option<PathBuf>,
+    /// The guest's last lines, oldest first, as a boot failure already quotes
+    /// them.  A handful, not a dump: the point is to be quotable inside a
+    /// failure a person is already reading.
+    pub tail: Vec<String>,
+}
+
 /// A running machine holding one workspace, walled off in a virtual
 /// machine.
 ///
@@ -373,6 +401,19 @@ pub trait Machine: Send {
             "this backend cannot dial into its guest — it can only accept the connections a \
              guest opens, so a port bound inside the guest is unreachable from here",
         ))
+    }
+
+    /// What the guest has said on its console — see [`GuestConsole`] for why
+    /// this is the one thing worth asking a machine whose engine has gone.
+    ///
+    /// Defaulted to nothing, because "nothing" is the honest answer for a
+    /// backend that hands its guest's console straight to this process's
+    /// standard output and keeps no copy: there is no handle to read it back
+    /// from, and pretending otherwise would have a caller write an empty file
+    /// that reads as a silent guest.  A backend that *does* keep a copy
+    /// overrides this.
+    fn console(&self) -> GuestConsole {
+        GuestConsole::default()
     }
 
     /// Stop the machine and release what it holds.

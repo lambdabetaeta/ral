@@ -97,7 +97,7 @@ independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
 becomes `Outcome::Severed` instead, folded by every attend-loop caller into
-`agent::seat::engine_gone` ([[map/exarch/agent|agent]]). A detached `spawn`ed
+`agent::seat::EngineLost` ([[map/exarch/agent|agent]]). A detached `spawn`ed
 worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
 of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run

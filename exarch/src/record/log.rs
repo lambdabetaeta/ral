@@ -13,6 +13,18 @@
 //! built before the first frontend and survives every per-exchange bus a
 //! headless run mints.
 //!
+//! Beside the machine record sits a second, human one.  `record.jsonl` is the
+//! session's authority and is meant to be replayed, not read: a person who has
+//! just been told the assistant would not start opens it and finds one enormous
+//! line of JSON per fact, timestamps in milliseconds since 1970, and no way to
+//! see at a glance where the session stopped.  So [`Log::append`] also writes
+//! `record.log` in the same directory — one line per fact, the moment rendered
+//! as a date a human reads, the class and kind named, and as much of the rest
+//! as fits on a line.  It is derived entirely from the record that was just
+//! written and is never read back by anything here, which is the point: it may
+//! be truncated, tailed, grepped or deleted without any consequence for
+//! resume.
+//!
 //! The seam therefore delivers every record to the sink exactly once,
 //! whenever the sink arrives: records appended before the first attach are
 //! kept and published, in order, by [`Log::attach`].  A publish onto a *dead*
@@ -71,6 +83,11 @@ struct Inner {
     /// `None` for the store-less log tests build: facts still stamp and
     /// publish, they just have no durable form.
     writer: Option<BufWriter<File>>,
+    /// The readable mirror described in the module docs.  `None` both where
+    /// there is no `writer` at all and where the mirror could not be opened —
+    /// a diagnostic that cannot be written is not a reason to fail a session
+    /// whose real record is going down fine.
+    plain: Option<BufWriter<File>>,
     sink: Option<FleetSink>,
     /// What was appended before any sink attached — a session's bookend, a
     /// fork's inherited context — held so the first sink to arrive is not
@@ -94,7 +111,12 @@ impl Log {
     )]
     pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
-        Ok(Self::over(Some(BufWriter::new(file)), 0, 0))
+        Ok(Self::over(
+            Some(BufWriter::new(file)),
+            plain_writer(path, false),
+            0,
+            0,
+        ))
     }
 
     /// Reopen `path` for append — resume — seeding the sequence and cursor
@@ -131,19 +153,30 @@ impl Log {
             Err(error) => return Err(error),
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self::over(Some(BufWriter::new(file)), seq, pos))
+        Ok(Self::over(
+            Some(BufWriter::new(file)),
+            plain_writer(path, true),
+            seq,
+            pos,
+        ))
     }
 
     /// A log with no file, for tests: it still stamps and publishes.
     #[cfg(test)]
     pub(crate) fn none() -> Self {
-        Self::over(None, 0, 0)
+        Self::over(None, None, 0, 0)
     }
 
-    fn over(writer: Option<BufWriter<File>>, seq: u64, pos: u64) -> Self {
+    fn over(
+        writer: Option<BufWriter<File>>,
+        plain: Option<BufWriter<File>>,
+        seq: u64,
+        pos: u64,
+    ) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 writer,
+                plain,
                 sink: None,
                 pending: Vec::new(),
                 seq,
@@ -173,11 +206,17 @@ impl Log {
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
         let writer = path.map(File::create).transpose()?.map(BufWriter::new);
+        // The readable mirror rotates with the file it mirrors, and for the
+        // same reason `/clear` rotates at all: a segment's lines belong to the
+        // segment, and a mirror left pointing at the old one would narrate a
+        // context that no longer exists.
+        let plain = path.and_then(|path| plain_writer(path, false));
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| io::Error::other("record log lock poisoned"))?;
         inner.writer = writer;
+        inner.plain = plain;
         // Undelivered records of the segment being left behind: the new
         // numbering starts at zero, so publishing them past this point would
         // hand a fold two records claiming one `Seq`.
@@ -226,6 +265,19 @@ impl Log {
         if let Some(writer) = inner.writer.as_mut() {
             writer.write_all(&line)?;
             writer.flush()?;
+        }
+        // After the authoritative write and never instead of it: a mirror that
+        // cannot be written is dropped silently, because the session's record
+        // is already safe and failing the append here would turn a cosmetic
+        // problem into a lost turn.
+        if let Some(plain) = inner.plain.as_mut() {
+            let rendered = headline(&line);
+            if writeln!(plain, "{rendered}")
+                .and_then(|()| plain.flush())
+                .is_err()
+            {
+                inner.plain = None;
+            }
         }
         let end = start + line.len() as u64;
         inner.pos = end;
@@ -302,6 +354,126 @@ impl Log {
     }
 }
 
+/// How much of one fact's own fields the readable line carries before it is
+/// cut short.
+///
+/// A record can be a whole assistant turn, and a mirror that reproduced it
+/// would be no more readable than the JSON it exists to replace — the reader
+/// would be back to scrolling.  What a person scanning this file wants is the
+/// shape of the session: what happened, in what order, and where it stopped.
+/// Two hundred characters is enough to tell one tool call from another and
+/// short enough that a hundred facts still fit on a screen; the whole of
+/// anything is a `record.jsonl` line away.
+const HEADLINE_WIDTH: usize = 200;
+
+/// Open the readable mirror beside `record_path`, or give up quietly.
+///
+/// `append` follows the authoritative file: a resumed session reopens its
+/// record for append, and truncating the mirror there would throw away the
+/// narration of everything the session did before it was resumed — which is
+/// exactly the part a reader is most likely to have come for.
+///
+/// Every failure here returns `None`.  There is no error to propagate,
+/// because there is no caller for whom this file failing is worse than the
+/// session failing: a read-only directory, a name already taken by something
+/// that is not a file, a descriptor limit — none of them is a reason to
+/// refuse to record.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:record-readable-mirror] opens the session's readable record.log beside record.jsonl; a derived diagnostic, not turn-time data I/O"
+)]
+fn plain_writer(record_path: &Path, append: bool) -> Option<BufWriter<File>> {
+    let path = record_path.with_extension("log");
+    let file = if append {
+        OpenOptions::new().create(true).append(true).open(path)
+    } else {
+        File::create(path)
+    };
+    file.ok().map(BufWriter::new)
+}
+
+/// One appended record, as one line a person can read.
+///
+/// Rendered from the JSON that was just written rather than from the typed
+/// [`Record`], and deliberately so: the record classes are wide and still
+/// growing, and a hand-written match over them would acquire a stale arm the
+/// first time a variant was added — the mirror would then quietly stop
+/// narrating whichever fact was newest, which is the fact a debugger is most
+/// often chasing.  Reading the envelope's own tags costs one parse of a line
+/// already in memory and cannot fall behind the type.
+///
+/// The shape is `<when>  <class>/<kind>  <fields>`: the moment as a date
+/// rather than as milliseconds since 1970, the class and kind from the two
+/// tags the envelope already carries, and whatever else the fact holds,
+/// flattened onto the one line and cut at [`HEADLINE_WIDTH`].
+fn headline(line: &[u8]) -> String {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        // Unreachable in practice — these bytes were produced by
+        // `serde_json::to_vec` three statements ago — but a mirror is not
+        // worth a panic, so it says what it saw and carries on.
+        return "?  a record that does not parse as its own JSON".to_string();
+    };
+    let at_unix_ms = value
+        .get("at_unix_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let when = i64::try_from(at_unix_ms)
+        .ok()
+        .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+        .map_or_else(
+            || format!("+{at_unix_ms}ms"),
+            |stamp| stamp.strftime("%Y-%m-%d %H:%M:%S%.3fZ").to_string(),
+        );
+    // `Record` tags itself by variant name and each class tags itself by
+    // `kind`, so the two together already name the fact; see the `Record`
+    // docs on why there is no single flattened tag to read instead.
+    let body = value.get("record").and_then(|r| r.as_object());
+    let (class, fields) = body
+        .and_then(|outer| outer.iter().next())
+        .map_or(("record", None), |(name, inner)| {
+            (name.as_str(), inner.as_object())
+        });
+    let kind = fields
+        .and_then(|f| f.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let rest = fields.map_or_else(String::new, |f| {
+        f.iter()
+            .filter(|(name, _)| name.as_str() != "kind")
+            .map(|(name, value)| format!("{name}={}", flattened(value)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let rest = clip(&rest, HEADLINE_WIDTH);
+    format!("{when}  {}/{kind}  {rest}", class.to_lowercase())
+        .trim_end()
+        .to_string()
+}
+
+/// One field's value with every line break spent, so a multi-line prompt or a
+/// captured stderr cannot turn one record into twenty lines of a file whose
+/// whole promise is one line per record.
+fn flattened(value: &serde_json::Value) -> String {
+    // Strings unquoted — a message reads better as itself than as a JSON
+    // literal — and everything else in the JSON spelling it already has.
+    let raw = value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_string);
+    raw.replace(['\n', '\r'], "\u{23ce}")
+}
+
+/// Cut `text` to `width` characters — characters, not bytes, so a cut never
+/// lands inside a multi-byte one — and say that it was cut, since a reader
+/// who cannot tell a short field from a truncated one will read the wrong
+/// thing off it.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(width).collect();
+    format!("{kept}…")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +485,62 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    /// The readable mirror is the file a person opens after being told a
+    /// session would not start, so what matters is that it exists beside the
+    /// machine record, that it holds one line per fact, and that the line
+    /// says when, what and something of the detail — without a timestamp
+    /// anyone has to convert in their head.
+    #[test]
+    fn every_record_gets_one_readable_line_beside_the_jsonl() {
+        let path = temp_path("readable-mirror");
+        let log = Log::create(&path).expect("temp record log");
+        for text in ["first", "second"] {
+            let _locus = log
+                .append(Record::Forensic(Forensic::Error { text: text.into() }))
+                .expect("append");
+        }
+
+        let mirror = path.with_extension("log");
+        let read = std::fs::read_to_string(&mirror).expect("the mirror sits beside record.jsonl");
+        let lines: Vec<_> = read.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per record, got {read:?}");
+        for (line, text) in lines.iter().zip(["first", "second"]) {
+            assert!(
+                line.contains("forensic/error"),
+                "the class and kind name the fact: {line}"
+            );
+            assert!(
+                line.contains(text),
+                "the fact's own detail survives: {line}"
+            );
+            assert!(
+                line.starts_with("20") && line.contains('-') && line.contains(':'),
+                "the moment is a date a person reads, not milliseconds: {line}"
+            );
+        }
+    }
+
+    /// A record carrying a whole transcript must still be one line, or the
+    /// file's one promise — a fact per line — is worth nothing on exactly the
+    /// records a debugger cares about.
+    #[test]
+    fn a_multi_line_fact_is_still_one_line_in_the_mirror() {
+        let path = temp_path("readable-flattened");
+        let log = Log::create(&path).expect("temp record log");
+        let _locus = log
+            .append(Record::Forensic(Forensic::Error {
+                text: "a stack trace\nwith several lines\nin it".to_string(),
+            }))
+            .expect("append");
+
+        let read = std::fs::read_to_string(path.with_extension("log")).expect("the mirror");
+        assert_eq!(
+            read.lines().count(),
+            1,
+            "a record with newlines in it is still one line: {read:?}"
+        );
     }
 
     #[test]

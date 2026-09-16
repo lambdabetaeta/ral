@@ -41,12 +41,204 @@ pub(crate) enum Seat {
     },
 }
 
-/// The one sentence every edge tells about a severed engine.
-pub(crate) fn engine_gone(s: &Severed) -> String {
-    format!(
-        "the engine behind this session is gone — {s}. Nothing further can run here; start a \
-         new session."
-    )
+/// When in a session's life its engine was lost, which is the whole of what
+/// decides what a person should do next.
+///
+/// The distinction used to be missing, and the cost of missing it was a
+/// failure that told a user to "start a new session" about a session that had
+/// never started — advice for a conversation that had already produced
+/// something, offered to someone staring at an empty window.  A start failure
+/// is a thing to retry; a mid-session death is a thing to abandon.  Nothing
+/// else about the two cases differs, which is why this is a two-variant enum
+/// and not a description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnginePhase {
+    /// The engine went before the session ever took a turn — the attach was
+    /// refused, or the engine died between being spawned and answering it.
+    Starting,
+    /// The engine went with a session already under way, taking the
+    /// conversation's whole state with it.
+    Running,
+}
+
+/// The one thing every edge says about a severed engine, said once.
+///
+/// Before this existed the same fact was dressed four times on its way to a
+/// user: the transport named the stream that closed, [`Severed`]'s `Display`
+/// wrapped that in "the connection to the engine closed", the seat wrapped
+/// *that* in "the engine behind this session is gone", and the front-end
+/// wrapped the lot in "could not start the assistant".  Four layers, one
+/// fact, and the reader learnt nothing from any of them — least of all where
+/// to go and look.  So the sentence is now short and fixed, and everything a
+/// debugger actually wants rides beside it rather than inside it: a stable
+/// [`Severed::code`] to quote, and the run's log directory to open.
+///
+/// The engine's own words are deliberately *not* in the sentence.  For a
+/// clean EOF there are none worth having, and for a refusal or a protocol
+/// fault they are a paragraph of machinery — so they go to the log, which is
+/// what [`Self::logged`] is for and why the sentence names the log's path.
+///
+/// It is an [`Error`](std::error::Error) so that the one edge that has to
+/// cross an [`io::Error`](std::io::Error) — `Avatar::root`, whose other
+/// failures are ordinary filesystem ones — can carry it whole rather than
+/// flattened to a string.  A front-end downcasts to tell a severance from a
+/// log directory it could not create, and so knows whether it has a guest
+/// console worth capturing before it tears the machine down.
+#[derive(Debug)]
+pub struct EngineLost {
+    phase: EnginePhase,
+    cause: Severed,
+    /// The run directory, not the session's: a start failure has no session
+    /// worth naming, and the engine's captured output is a property of the
+    /// run.  `None` where the caller genuinely has no log to point at, in
+    /// which case the sentence simply omits the invitation rather than
+    /// sending the reader somewhere that does not exist.
+    log_dir: Option<std::path::PathBuf>,
+}
+
+impl EngineLost {
+    /// The engine went before the session ever took a turn.
+    pub fn starting(cause: &Severed, log_dir: Option<&std::path::Path>) -> Self {
+        Self {
+            phase: EnginePhase::Starting,
+            cause: cause.clone(),
+            log_dir: log_dir.map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// The engine went with a session already under way.
+    pub fn running(cause: &Severed, log_dir: Option<&std::path::Path>) -> Self {
+        Self {
+            phase: EnginePhase::Running,
+            cause: cause.clone(),
+            log_dir: log_dir.map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// The run directory this failure invites a reader into, if there is one.
+    #[must_use]
+    pub fn log_dir(&self) -> Option<&std::path::Path> {
+        self.log_dir.as_deref()
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> EnginePhase {
+        self.phase
+    }
+
+    /// Why the transport says the engine is gone, in its own words — the
+    /// paragraph kept out of the user's sentence.  Written into files and
+    /// durable records; never shown as the whole of a failure.
+    #[must_use]
+    pub fn cause(&self) -> &Severed {
+        &self.cause
+    }
+
+    /// The form that belongs in a log rather than in a window: the sentence a
+    /// user is shown, with the engine's own account of itself appended, so
+    /// the durable record keeps what the sentence dropped.
+    #[must_use]
+    pub fn logged(&self) -> String {
+        format!("{self}\n\n{}", self.cause)
+    }
+}
+
+impl std::error::Error for EngineLost {}
+
+/// One plain sentence, then a bracket for whoever needs more than a sentence.
+///
+/// Read it aloud and it says only what a person can act on; the bracket is
+/// skippable by anyone who does not want it and exact for anyone who does.
+impl std::fmt::Display for EngineLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sentence = match self.phase {
+            EnginePhase::Starting => "The assistant could not be started — try again.",
+            EnginePhase::Running => {
+                "The assistant stopped, so this conversation cannot go on — start a new one."
+            }
+        };
+        f.write_str(sentence)?;
+        match &self.log_dir {
+            Some(dir) => write!(f, " ({}; details in {})", self.cause.code(), dir.display()),
+            None => write!(f, " ({})", self.cause.code()),
+        }
+    }
+}
+
+/// The sentence is the product here, so it is the thing under test: that it
+/// stays one sentence, that it tells a start apart from a death, and that the
+/// two things a debugger needs are both in it.  Platform-independent, unlike
+/// the wire fixtures at the foot of this file, because nothing below spawns an
+/// engine.
+#[cfg(test)]
+mod lost {
+    use super::{EngineLost, EnginePhase};
+    use ral_core::protocol::Severed;
+
+    fn closed() -> Severed {
+        Severed::Closed("the engine closed the connection".into())
+    }
+
+    /// The bug this replaced: a session that never started was told to start
+    /// a new one.  The two phases must not read alike.
+    #[test]
+    fn a_start_failure_and_a_death_give_different_advice() {
+        let starting = EngineLost::starting(&closed(), None).to_string();
+        let running = EngineLost::running(&closed(), None).to_string();
+        assert_ne!(starting, running);
+        assert!(
+            !starting.contains("start a new"),
+            "a session that never began cannot be told to begin another: {starting}"
+        );
+        assert!(
+            running.contains("start a new"),
+            "a session whose state is gone is worth abandoning: {running}"
+        );
+    }
+
+    /// One sentence for the user, and beside it the two things anyone who
+    /// wants to dig has to have: something exact to quote, and somewhere to
+    /// go.  The engine's own words stay out of it.
+    #[test]
+    fn the_sentence_carries_a_code_and_a_path_and_nothing_else() {
+        let dir = std::path::PathBuf::from("/state/synod/proj/2026-09-16-170235-26184");
+        let shown = EngineLost::starting(&closed(), Some(&dir)).to_string();
+        assert!(shown.contains("engine-closed"), "{shown}");
+        assert!(shown.contains("2026-09-16-170235-26184"), "{shown}");
+        assert!(
+            !shown.contains("the engine closed the connection"),
+            "the transport's own restatement is what this replaced: {shown}"
+        );
+        assert_eq!(
+            shown.lines().count(),
+            1,
+            "what the user is shown is one line: {shown}"
+        );
+    }
+
+    /// With nowhere to send a reader the invitation is simply absent — never
+    /// a dangling "details in" with nothing after it.
+    #[test]
+    fn a_failure_with_no_log_still_carries_its_code() {
+        let shown = EngineLost::running(&Severed::Faulted("junk frame".into()), None).to_string();
+        assert!(shown.contains("engine-faulted"), "{shown}");
+        assert!(!shown.contains("details in"), "{shown}");
+    }
+
+    /// What goes into a record keeps the engine's own account of itself; what
+    /// goes into a window does not.  The split is the whole design.
+    #[test]
+    fn the_logged_form_keeps_what_the_sentence_drops() {
+        let lost = EngineLost::running(&Severed::Refused("protocol version 9".into()), None);
+        let logged = lost.logged();
+        assert!(logged.starts_with(&lost.to_string()), "{logged}");
+        assert!(
+            logged.contains("protocol version 9"),
+            "the engine's own refusal is worth keeping somewhere: {logged}"
+        );
+        assert_eq!(lost.phase(), EnginePhase::Running);
+        assert_eq!(lost.cause().code(), "engine-refused");
+    }
 }
 
 impl Seat {

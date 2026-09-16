@@ -451,8 +451,16 @@ impl Avatar {
                 transport,
                 cwd,
                 home,
-            } => Seat::wire(*transport, cwd, home)
-                .map_err(|s| io::Error::other(seat::engine_gone(&s)))?,
+            } => Seat::wire(*transport, cwd, home).map_err(|s| {
+                // A trunk's attach: nothing has run here yet, so this is a
+                // start failure and says so, and it names the run directory
+                // it has just made — which is where the engine's own output
+                // was captured, if anything was.
+                // Carried whole, not flattened: synod downcasts this to tell
+                // a dead engine from a log directory it could not make, and
+                // only the former has a guest console worth saving.
+                io::Error::other(seat::EngineLost::starting(&s, Some(root_dir)))
+            })?,
         };
         // This seat is rebuilt in place under a standing root, so a raw reach
         // captured now would go stale — see `EvalReach::interrupt_only`.

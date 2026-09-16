@@ -125,6 +125,21 @@ pub enum Request {
     /// only then does the broker let go — of both, in one statement, for the
     /// same reason [`crate::hcs::Guest`]'s own wires are dropped together.
     Adopted,
+    /// What has the guest said on its console?
+    ///
+    /// The one question a client asks about a machine that has stopped
+    /// answering it.  The console lives in the service's own cache, which a
+    /// `LocalSystem` service can write and an unprivileged synod generally
+    /// cannot read, so the guest's last words have to cross the pipe rather
+    /// than be fetched from the path — the path crosses too, for whoever can
+    /// open it.
+    ///
+    /// Asking carries no risk to a live machine even if the two sides have
+    /// somehow skewed: a service that does not know this variant cannot have
+    /// answered the `Boot` that a mismatched version is refused at, so there
+    /// is no machine on such a connection to lose.  In practice it is only
+    /// ever asked once the engine has already gone.
+    Console,
     /// Stop the machine this connection owns, and report whether it stopped
     /// cleanly. Dropping the connection stops it too; this exists so a caller
     /// that wants to *report* a failed shutdown can have one.
@@ -152,6 +167,16 @@ pub enum Reply {
     /// The machine stopped; `Err` carries the sentence explaining what was not
     /// clean about it.
     Stopped(Result<(), String>),
+    /// What the guest said on its console — the two halves of
+    /// [`crate::GuestConsole`], which this does not name directly only
+    /// because the wire types in this module are plain data with no bearing on
+    /// the machine layer's own vocabulary.
+    Console {
+        /// The service's path to the whole console log, if it kept one.
+        log: Option<std::path::PathBuf>,
+        /// The guest's last lines, oldest first.
+        tail: Vec<String>,
+    },
     /// The request was refused, in words fit to show the person who granted the
     /// folder.
     Refused(String),

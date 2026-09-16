@@ -10,7 +10,7 @@
 
 use crate::agent::Avatar;
 use crate::agent::digest::{EVICT_THRESHOLD, eviction_trigger};
-use crate::agent::seat::engine_gone;
+use crate::agent::seat::EngineLost;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::AGENT_LEASE_IDLE;
 use crate::shell_eval;
@@ -526,7 +526,10 @@ impl Avatar {
         let rows = match self.resource_rows() {
             Ok(rows) => rows,
             Err(s) => {
-                Self::note(engine_gone(&s), self);
+                Self::note(
+                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
+                    self,
+                );
                 return;
             }
         };

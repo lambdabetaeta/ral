@@ -1065,6 +1065,11 @@ impl ExarchDesk {
                 1,
             )
         })?;
+        // Bound out here because the closure below rebinds `s` to the
+        // severance.  A hatched helper has no run directory of its own — its
+        // logs live under the run that hatched it — so this is the one the
+        // refusal invites a reader into.
+        let hatching_run_dir = s.agent.run_dir();
         // The same two paths synod's own trunk seat uses.
         let seat = crate::agent::seat::Seat::wire(
             transport,
@@ -1075,7 +1080,7 @@ impl ExarchDesk {
             Error::new(
                 format!(
                     "`agents `start` refused: {}",
-                    crate::agent::seat::engine_gone(&s)
+                    crate::agent::seat::EngineLost::starting(&s, hatching_run_dir)
                 ),
                 1,
             )

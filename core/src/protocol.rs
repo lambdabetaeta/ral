@@ -567,6 +567,28 @@ pub enum Severed {
     Faulted(String),
 }
 
+impl Severed {
+    /// A short, stable name for *why* the engine went, meant to be shown to a
+    /// person and quoted back — in a bug report, in a support mail, in a
+    /// search of this tree.  The variant's own [`Display`](std::fmt::Display)
+    /// is a sentence written for a log; this is the handle a reader holds on
+    /// to when the sentence has scrolled away.
+    ///
+    /// Stability is the whole point: these strings are part of what a
+    /// front-end shows, so renaming one silently reclassifies every failure a
+    /// user has already learnt to recognise.  Add a variant and add a name;
+    /// never repurpose a name that has shipped.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Refused(_) => "engine-refused",
+            Self::Closed(_) => "engine-closed",
+            Self::Silent(_) => "engine-silent",
+            Self::Faulted(_) => "engine-faulted",
+        }
+    }
+}
+
 impl std::fmt::Display for Severed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2998,5 +3020,36 @@ mod wire_liveness_tests {
             }
             other => panic!("expected the dispatch's Report, got {other:?}"),
         }
+    }
+}
+
+/// The severance codes are load-bearing text: a front-end prints them beside
+/// its one-sentence failure so that a person who cannot read a log still has
+/// something exact to quote.  These assertions exist to make a rename a
+/// deliberate act with a failing test attached, rather than a tidy-up nobody
+/// notices until a support thread stops matching.
+#[cfg(test)]
+mod severance_codes {
+    use super::Severed;
+    use std::time::Duration;
+
+    #[test]
+    fn every_severance_has_its_own_settled_code() {
+        let codes = [
+            (Severed::Refused("v9".into()).code(), "engine-refused"),
+            (Severed::Closed("eof".into()).code(), "engine-closed"),
+            (
+                Severed::Silent(Duration::from_secs(30)).code(),
+                "engine-silent",
+            ),
+            (Severed::Faulted("junk".into()).code(), "engine-faulted"),
+        ];
+        for (got, want) in codes {
+            assert_eq!(got, want, "a severance code may not be renamed in place");
+        }
+        let mut distinct: Vec<_> = codes.iter().map(|(got, _)| *got).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), codes.len(), "two severances share a code");
     }
 }

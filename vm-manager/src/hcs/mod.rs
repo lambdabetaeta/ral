@@ -616,6 +616,26 @@ impl Machine for Guest {
             .expect("a machine's two wires are taken at most once")
     }
 
+    /// The guest's own words, from the console pump this backend has been
+    /// running since before the machine started.
+    ///
+    /// Answerable at any point in a machine's life, and deliberately so: the
+    /// boot failure that quotes [`console_says`] is only the first question
+    /// worth asking a console, and the second — why did the engine stop
+    /// talking mid-session — is asked long after a boot succeeded.  The ring
+    /// is bounded and the log is capped, so asking late costs no more than
+    /// asking early.
+    fn console(&self) -> crate::GuestConsole {
+        self.console
+            .as_ref()
+            .map_or_else(crate::GuestConsole::default, |console| {
+                crate::GuestConsole {
+                    log: console.log().map(std::path::Path::to_path_buf),
+                    tail: console.tail(),
+                }
+            })
+    }
+
     /// Close the wire, let the guest power itself off, and release the machine.
     ///
     /// # Errors

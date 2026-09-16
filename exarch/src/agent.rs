@@ -59,6 +59,7 @@ pub(crate) use build::{Build, fresh_id};
 pub use build::{RecordedAccount, RootConfig, RootSeat};
 pub use dial::Dial;
 pub(crate) use probe::ProbedWorker;
+pub use seat::{EngineLost, EnginePhase};
 pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::cancel::EvalReach;
@@ -372,6 +373,22 @@ impl Agent {
         &self.log_dir
     }
 
+    /// The whole run's directory — the one a session's `sessions/<id>/` hangs
+    /// under, and so the one that holds everything a failed start left behind:
+    /// the engine's captured output, the readable log, the lock.  It is what a
+    /// failure invites a reader into, because a start that never reached a
+    /// first turn has nothing in its session directory worth opening.
+    ///
+    /// Derived rather than stored: the layout is `<run>/sessions/<id>`, fixed
+    /// by [`App::log_run_dir`](crate::bootstrap::App::log_run_dir) and by
+    /// [`AgentLog`](crate::agent::event::AgentLog) between them, and a second
+    /// copy of the path would be a second thing to keep true.  `None` only
+    /// for a log rooted somewhere shallower than that shape, which is the
+    /// test fixtures' business and not a run's.
+    pub(crate) fn run_dir(&self) -> Option<&Path> {
+        self.log_dir.parent()?.parent()
+    }
+
     pub(crate) fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
@@ -645,6 +662,30 @@ impl Avatar {
     /// siblings sit directly inside.
     pub fn log_dir(&self) -> std::path::PathBuf {
         self.agent.log_dir().to_path_buf()
+    }
+
+    /// The whole run's directory — the parent of the `sessions/` this agent's
+    /// own log lives under, and where a front-end puts anything that belongs
+    /// to the run rather than to one session: the engine's captured output,
+    /// the lock.  See [`Agent::run_dir`] on why it is derived and when it is
+    /// `None`.
+    pub fn run_dir(&self) -> Option<std::path::PathBuf> {
+        self.agent.run_dir().map(std::path::Path::to_path_buf)
+    }
+
+    /// Why no further frame will cross this agent's seat, if that has already
+    /// happened.  Named for the noun rather than the verb because
+    /// [`Avatar::severed`](attend) — the attend loop's own private edge — is
+    /// the act of *declaring* one, and the two must not be confused.
+    ///
+    /// A front-end asks after an exchange that failed, because a severed
+    /// engine is the one failure whose explanation is not in this process at
+    /// all — it is wherever the engine was — and the front-end is the only
+    /// party that knows how to go and fetch it while the corpse is still
+    /// warm.  synod reaches its guest's console this way; an exchange that
+    /// merely went badly answers `None` and nothing is fetched.
+    pub fn severance(&self) -> Option<ral_core::protocol::Severed> {
+        self.seat.severed()
     }
 
     pub(crate) fn is_resumed(&self) -> bool {

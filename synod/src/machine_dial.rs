@@ -34,6 +34,19 @@ impl MachineDial {
         }
     }
 
+    /// What the guest has said on its console — the host's one diagnostic
+    /// reach into a guest whose engine has stopped talking to it, and the
+    /// whole of what [`crate::session`]'s `engine_log` has to write down.
+    ///
+    /// It lives here rather than beside the machine because by the time a
+    /// conversation has failed, the dialler is the only thing still holding
+    /// the machine: `seat_machine` moves it in before the agent is built, so
+    /// a start that fails has no other handle to ask through.
+    #[must_use]
+    pub fn console(&self) -> vm_manager::GuestConsole {
+        self.machine.lock_ignore_poison().console()
+    }
+
     /// Hand the machine back, ending the dialler.
     #[must_use]
     pub fn into_machine(self) -> Box<dyn Machine> {

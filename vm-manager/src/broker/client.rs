@@ -144,6 +144,28 @@ impl Machine for BrokeredGuest {
             .expect("a machine's two wires are taken at most once")
     }
 
+    /// Ask the service what the guest has said on its console.
+    ///
+    /// The console is pumped in the service's process and kept in the
+    /// service's cache, so this is the only way synod can see it at all.  A
+    /// service that has gone, a pipe that will not carry the question, an
+    /// answer that is not the one asked for: each of them yields an empty
+    /// console rather than an error, because the caller is already reporting
+    /// a failure and has nothing useful to do with a second one — it writes
+    /// down that there were no words to be had, which is true either way.
+    fn console(&self) -> crate::GuestConsole {
+        let Some(mut pipe) = self.pipe.as_ref().and_then(|pipe| pipe.try_clone().ok()) else {
+            return crate::GuestConsole::default();
+        };
+        if frame::write(&mut pipe, &Request::Console).is_err() {
+            return crate::GuestConsole::default();
+        }
+        match frame::read(&mut pipe) {
+            Ok(Some(Reply::Console { log, tail })) => crate::GuestConsole { log, tail },
+            Ok(Some(_) | None) | Err(_) => crate::GuestConsole::default(),
+        }
+    }
+
     /// Ask the service to stop the machine, and wait for its answer.
     ///
     /// Both wires are closed first, for the same reason the direct backend

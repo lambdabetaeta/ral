@@ -265,6 +265,20 @@ fn serve_client(pipe: OwnedHandle) {
                 drop(wires.take());
                 continue;
             }
+            Request::Console => {
+                // Asked of a machine that has usually already died, so
+                // "there is no machine" is an ordinary answer here and not a
+                // refusal: an empty console is what the client will write
+                // down, and it says so in its own words.
+                let console = machine
+                    .as_ref()
+                    .map(|machine| machine.console())
+                    .unwrap_or_default();
+                Reply::Console {
+                    log: console.log,
+                    tail: console.tail,
+                }
+            }
             Request::Stop => {
                 // The broker's own handles go first if the client never
                 // adopted them, so the guest sees both wires close either way.

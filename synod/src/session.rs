@@ -26,6 +26,7 @@
 //! a machine boot.
 
 mod baseline;
+mod engine_log;
 mod menu;
 mod opening;
 mod signin;
@@ -125,6 +126,10 @@ pub struct Conversation {
     /// The guest's whole network, running on its own threads since before
     /// the first exchange — see [`net_seat`].
     net: guest_net::Session<NetWire>,
+    /// Whether the engine's death has already been written down.  A severed
+    /// seat stays severed, so without this every later exchange would append
+    /// the same epitaph again to a file whose whole value is that it is short.
+    engine_captured: bool,
 }
 
 impl Conversation {
@@ -293,6 +298,7 @@ impl Conversation {
                 agent,
                 baseline,
                 net,
+                engine_captured: false,
             },
             Opening {
                 label,
@@ -336,7 +342,35 @@ impl Conversation {
         let after = history
             .map(|history| history.capture(self.grant.root(), workspace::Moment::After))
             .transpose();
+        // After the checkpoint, before either result is reported: a dead
+        // engine must be written down while its machine is still up, and the
+        // checkpoint has to be taken whether the engine survived or not.
+        self.capture_a_dead_engine();
         outcome.and_then(|()| after.map(drop))
+    }
+
+    /// Write down what the guest said, if this exchange is the one the engine
+    /// did not survive.
+    ///
+    /// Asked after every exchange and answered by doing nothing after almost
+    /// all of them: only a severed seat has an engine whose last words are
+    /// worth fetching, and it can only be severed once.  The timing is the
+    /// whole point — the guest's console is swept when its machine goes, so
+    /// the moment to read it is now, while the conversation is still standing
+    /// and long before [`Self::end`] tears the machine down.
+    fn capture_a_dead_engine(&mut self) {
+        if self.engine_captured {
+            return;
+        }
+        let Some(cause) = self.agent.severance() else {
+            return;
+        };
+        self.engine_captured = true;
+        let Some(run_dir) = self.agent.run_dir() else {
+            return;
+        };
+        let lost = exarch::agent::EngineLost::running(&cause, Some(&run_dir));
+        engine_log::capture(&run_dir, &lost.logged(), &self.dial.console());
     }
 
     /// Shut the machine down, ending the conversation — and, its store
@@ -429,9 +463,43 @@ pub fn seat_machine(
     let root_seat = control_seat(wires.control, workspace)?;
     let dial = Arc::new(crate::machine_dial::MachineDial::new(machine));
     config.dial = Some(dial.clone());
-    let agent = Avatar::root(config, root_seat, provider)
-        .map_err(|e| format!("could not start the assistant: {e}"))?;
+    let agent = match Avatar::root(config, root_seat, provider) {
+        Ok(agent) => agent,
+        Err(e) => return Err(start_failed(&dial, &e)),
+    };
     Ok((dial, agent, wires.net.into()))
+}
+
+/// Turn a refused [`Avatar::root`] into the sentence the window shows, saving
+/// whatever the guest had to say for itself on the way past.
+///
+/// Two failures arrive here and they are not alike.  One is an
+/// [`exarch::agent::EngineLost`] — the engine attached to nothing, or died
+/// between being spawned and answering — and it already carries the whole
+/// message: a plain sentence, a stable code, and the run directory to read.
+/// Adding a prefix to it is precisely the layering this replaced, so nothing
+/// is added; what happens instead is that the guest's console is captured into
+/// that same run directory *before* the machine is torn down and its console
+/// log swept, so the invitation the sentence extends leads somewhere.
+///
+/// The other is an ordinary filesystem failure — the run directory could not
+/// be made, the record could not be opened — which says nothing about where it
+/// happened, and so does get a clause naming what was being attempted.  There
+/// is no engine to have a console in that case and nothing to capture.
+fn start_failed(dial: &crate::machine_dial::MachineDial, why: &std::io::Error) -> String {
+    let Some(lost) = why
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<exarch::agent::EngineLost>())
+    else {
+        return format!("the assistant could not be set up: {why}");
+    };
+    let sentence = lost.to_string();
+    if let Some(run_dir) = lost.log_dir() {
+        // `logged`, not the sentence: the file is where the engine's own
+        // account of itself belongs, having been kept out of the window's.
+        engine_log::capture(run_dir, &lost.logged(), &dial.console());
+    }
+    sentence
 }
 
 /// Recover `agent`'s machine from `dial`, ending the agent first.
