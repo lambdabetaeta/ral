@@ -2,6 +2,17 @@
 const TAURI = window.__TAURI__;
 export const invoke = TAURI ? TAURI.core.invoke : async () => { throw new Error("not running in the app"); };
 export const listen = TAURI ? TAURI.event.listen : async () => () => {};
+// The plugin's confirm, not the window's: WebView2 disables native script
+// dialogs, so `window.confirm` there answers `undefined` — and a caller
+// reading that as "the user declined" makes its own button do nothing at
+// all, silently.  This one returns a real `Promise<boolean>`, so `await` it.
+// Optional-chained rather than gated on `TAURI` alone: the plugin's global
+// is injected separately from the core one, and reaching through a missing
+// `dialog` at module load would take the whole window down over a
+// confirmation.  Answering `true` is the safe absence — this dialog guards
+// an act that undoes nothing, so a missing plugin should leave the button
+// working, not dead.
+export const confirmDialog = TAURI?.dialog?.confirm ?? (async () => true);
 
 // Every id passed here is written in index.html's own markup, so the element
 // is present or the window is broken beyond a null check's help.  The cast

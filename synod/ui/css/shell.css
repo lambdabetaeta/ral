@@ -20,6 +20,10 @@
       line-height: 1;
       white-space: pre;
       overflow-x: auto;
+      /* overflow-x alone computes overflow-y to auto, and the glow'd
+         block letters clear the line box by a hair — enough for a
+         vertical bar to sit beside the wordmark. */
+      overflow-y: hidden;
       text-align: center;
       user-select: none;
       background: linear-gradient(175deg, var(--ink) 15%, var(--accent) 115%);

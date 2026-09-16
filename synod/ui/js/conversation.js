@@ -1,4 +1,4 @@
-import { $, invoke, listen, state, show } from "./core.js";
+import { $, invoke, listen, state, show, confirmDialog } from "./core.js";
 import {
   addUserMessage,
   addSystemMessage,
@@ -146,8 +146,8 @@ $("message").addEventListener("keydown", (e) => {
 });
 
 $("start-again").addEventListener("click", async () => {
-  if (!confirm("Start again? This begins a fresh conversation; nothing already " +
-    "changed in your folder is undone by this.")) return;
+  if (!await confirmDialog("This begins a fresh conversation; nothing already " +
+    "changed in your folder is undone by this.", { title: "Start again?", kind: "warning" })) return;
   /** @type {HTMLButtonElement} */ ($("start-again")).disabled = true;
   // Restarting is the same act as starting: `start_conversation`
   // supersedes whatever is running, over the selection this conversation
