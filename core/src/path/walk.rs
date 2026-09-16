@@ -256,13 +256,15 @@ fn final_path(f: &File) -> Option<PathBuf> {
     // Called for a length, then for the name: the first call returns the
     // count *without* the terminator, the second the count written, so a
     // second answer that did not shrink means the name changed underneath.
-    let needed = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, FILE_NAME_NORMALIZED) };
+    let needed =
+        unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, FILE_NAME_NORMALIZED) };
     if needed == 0 {
         return None;
     }
     let mut buf = vec![0u16; needed as usize];
-    let written =
-        unsafe { GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), needed, FILE_NAME_NORMALIZED) };
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), needed, FILE_NAME_NORMALIZED)
+    };
     if written == 0 || written >= needed {
         return None;
     }

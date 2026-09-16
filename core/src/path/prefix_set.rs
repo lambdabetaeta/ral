@@ -50,7 +50,17 @@ impl PrefixSet {
         let mut set: Vec<NormalizedPrefix> = prefixes
             .iter()
             .map(|prefix| {
-                NormalizedPrefix::from_surface(resolver.resolve(prefix.as_ref()).as_path())
+                // The root is minted, never resolved.  `Resolver::resolve`
+                // anchors a driveless path to a cwd — the *process's* own
+                // under a shell-less resolver — so a re-freeze turned the
+                // ceiling into the root of whichever drive happened to be
+                // current, which is how an already-universal prefix came
+                // back naming one volume.
+                let surface = prefix.as_ref();
+                if super::lex::is_bare_root(surface) {
+                    return NormalizedPrefix::root();
+                }
+                NormalizedPrefix::from_surface(resolver.resolve(surface).as_path())
             })
             .collect();
         set.sort();
@@ -328,5 +338,29 @@ mod tests {
             !result.surface().is_empty(),
             "a grant on C:\\work must admit \\\\?\\C:\\work\\sub through the composed meet"
         );
+    }
+
+    /// Regression: the ceiling survives a re-freeze without shrinking to a
+    /// drive.
+    ///
+    /// `PrefixSet::resolve` re-freezes from the surface spelling, and
+    /// `Resolver::resolve` anchors a driveless path to a cwd — the process's
+    /// own under `shell_less`.  So the universal root came back as the root
+    /// of whichever drive the process happened to be running from, and a
+    /// policy composed against it denied every other volume: a session
+    /// launched from `D:` lost a `%TEMP%` on `C:` entirely, which is the
+    /// shape GitHub's Windows runners have and the shape a `subst` drive
+    /// reproduces.
+    #[test]
+    fn the_root_survives_a_re_freeze_as_the_universal_prefix() {
+        let set = PrefixSet::resolve(&Resolver::shell_less(), &["/"]);
+        let root = set.0.first().expect("the root freezes to one prefix");
+        assert_eq!(root.resolved(), "/", "got {root:?}");
+        for path in [r"C:\Users\someone\Temp\x", r"D:\a\repo\y", "/etc/hosts"] {
+            assert!(
+                covers(root, &NormalizedPrefix::from_surface(path)),
+                "the re-frozen ceiling must still cover {path}"
+            );
+        }
     }
 }

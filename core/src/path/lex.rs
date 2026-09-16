@@ -205,6 +205,25 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
 /// cannot pop survives only on a *relative* path; on a rooted one it is
 /// dropped, since `/` has no parent (`/a/../../x` folds to `/x`).  The kernel
 /// [`resolve_path`] and [`super::canon::canonicalise_lenient`] share.
+/// True iff `path` is the filesystem root and names no drive: `/` on either
+/// host, and `\` as [`fold_dots`] re-renders it on Windows.
+///
+/// Windows has no one root.  `\` there is *drive-relative*, so resolving or
+/// canonicalising it anchors it to whichever drive the process happens to be
+/// running from — while a grant prefix naming the root means "everywhere",
+/// the ceiling a policy attenuates down from.  The two readings part company
+/// on exactly this path and nowhere else, so the doors that must not anchor
+/// it ask here rather than matching a root apiece.
+///
+/// String logic, as [`is_windows_absolute`] and [`is_foreign_rooted`] are,
+/// and exact rather than "all separators": `\\` opens a UNC name and `X:\`
+/// carries a prefix component, and neither is universal.  A drive root must
+/// keep anchoring as it always did, or a grant over one volume would widen
+/// to all of them.
+pub(crate) fn is_bare_root(path: &str) -> bool {
+    matches!(path.as_bytes(), [b'/' | b'\\'])
+}
+
 pub(crate) fn fold_dots(path: &Path) -> PathBuf {
     let rooted = path.has_root();
     let mut normalized = PathBuf::new();

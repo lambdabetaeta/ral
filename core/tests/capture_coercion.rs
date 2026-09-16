@@ -95,7 +95,10 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
         "alias __decode-captured { |_| echo 42 }\nreturn ()",
     );
     assert_eq!(
-        ok(&mut shell, "let intercepted = __decode-captured anything\nreturn $intercepted"),
+        ok(
+            &mut shell,
+            "let intercepted = __decode-captured anything\nreturn $intercepted"
+        ),
         Value::String("42".into()),
         "the alias must really be installed and dispatchable, or this test proves nothing"
     );
@@ -129,7 +132,9 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
     assert_eq!(
         ok(
             &mut shell,
-            &format!("{frame} {{ let intercepted = __decode-captured anything\n return $intercepted }}")
+            &format!(
+                "{frame} {{ let intercepted = __decode-captured anything\n return $intercepted }}"
+            )
         ),
         Value::String("42".into()),
         "the frame must really intercept the name, or this test proves nothing"

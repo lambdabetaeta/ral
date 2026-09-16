@@ -145,6 +145,20 @@ impl NormalizedPrefix {
     /// grant-side door is the freeze pass in [`super::sigil`].
     pub(super) fn freeze(path: &Path) -> Self {
         let folded = super::lex::fold_dots(path);
+        // The root is the one path `realpath` must not be asked about.  It
+        // answers with a *drive* on Windows — the process's own — so a
+        // ceiling frozen here covered one volume and denied every other,
+        // and the universal prefix stopped being universal the moment a
+        // session ran from a drive its data was not on.  Folded to zero
+        // components it matches everything, which is what naming the root
+        // in a grant has always meant.
+        if super::lex::is_bare_root(&folded.to_string_lossy()) {
+            return Self {
+                surface: "/".into(),
+                resolved: "/".into(),
+                namespace: Namespace::Host,
+            };
+        }
         let resolved = super::canon::canonicalise_lenient(&folded);
         Self {
             surface: folded.to_string_lossy().into_owned(),
@@ -176,11 +190,7 @@ impl NormalizedPrefix {
     /// universal prefix on either platform, which is what a ceiling means.
     #[must_use]
     pub fn root() -> Self {
-        Self {
-            surface: "/".into(),
-            resolved: "/".into(),
-            namespace: Namespace::Host,
-        }
+        Self::from_surface("/")
     }
 
     /// Mint a prefix naming a path inside the Linux guest, whichever host
