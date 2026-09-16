@@ -122,7 +122,10 @@ fn read_interruptible(fd: &mut Fd, wake: &Wake, buf: &mut [u8]) -> io::Result<us
     match fd.read(buf) {
         // `CancelSynchronousIo` (from `ThreadStage::interrupt`) aborts
         // whatever `ReadFile` was in flight; only a wake-caused abort is EOF.
-        Err(e) if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) && wake.is_fired() => {
+        Err(e)
+            if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED.cast_signed())
+                && wake.is_fired() =>
+        {
             wake.acknowledge();
             Ok(0)
         }

@@ -535,20 +535,30 @@ fn join_exec_widens_policies_and_unions_names() {
 
 /// The stack keeps a one-sided `Subcommands` restriction that
 /// `Capabilities::meet` used to discard: layer A restricts `git` to
-/// `status` over an allowed `/usr/bin`, layer B repeats only the directory
-/// allow.  Flattening the two (the old `ExecMap::meet`) dropped A's literal
+/// `status` over an allowed binary directory, layer B repeats only the
+/// directory allow.  Flattening the two (the old `ExecMap::meet`) dropped A's literal
 /// restriction the moment B's map had no `git` key; the stack's per-layer
 /// fold (`evaluate_exec`) never flattens, so the restriction survives
 /// whichever layer sits on top.
 #[test]
 fn stack_keeps_a_one_sided_subcommand_restriction() {
+    // `longest_dir_match` only considers an absolute candidate, and what
+    // counts as absolute is the host's own answer: a leading `/` roots a
+    // path on Unix and is merely drive-relative on Windows.  So the pair is
+    // spelled for the host running the test, as the gate's own dir-match
+    // tests are.
+    let (bin_dir, git_path) = if cfg!(windows) {
+        (r"C:\bin", r"C:\bin\git")
+    } else {
+        ("/usr/bin", "/usr/bin/git")
+    };
     let restricting = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([(
                 "git".into(),
                 ExecPolicy::Subcommands(BTreeSet::from(["status".into()])),
             )]),
-            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            allow_dirs: BTreeSet::from([nprefix(bin_dir)]),
             deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
@@ -556,7 +566,7 @@ fn stack_keeps_a_one_sided_subcommand_restriction() {
     let silent = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
+            allow_dirs: BTreeSet::from([nprefix(bin_dir)]),
             deny_dirs: BTreeSet::new(),
         }),
         ..Default::default()
@@ -565,9 +575,9 @@ fn stack_keeps_a_one_sided_subcommand_restriction() {
         let mut shell = crate::types::Shell::default();
         shell.with_capabilities(first, |sh| {
             sh.with_capabilities(second, |sh| {
-                sh.check_exec_args("git", &["git", "/usr/bin/git"], &["push".to_string()])
+                sh.check_exec_args("git", &["git", git_path], &["push".to_string()])
                     .expect_err("A's restriction must survive whichever layer sits on top");
-                sh.check_exec_args("git", &["git", "/usr/bin/git"], &["status".to_string()])
+                sh.check_exec_args("git", &["git", git_path], &["status".to_string()])
                     .expect("the admitted subcommand must still be allowed");
             });
         });

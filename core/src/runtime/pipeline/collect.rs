@@ -639,14 +639,25 @@ mod tests {
         drop(group);
     }
 
-    /// An external that exits with `code`.  `/bin/sh` because `true` and
-    /// `false` are not in `/bin` on macOS.
+    /// An external that exits with `code`: the host's shell, asked for
+    /// nothing but an exit status.
+    ///
+    /// `/bin/sh` on Unix rather than `true`/`false`, which are not in `/bin`
+    /// on macOS; `cmd.exe` on Windows, where neither `/bin` nor those two
+    /// exist at all.  What the test needs is a real child that settles with
+    /// the code it was given, and both spell that.
+    #[cfg(unix)]
+    const EXIT_SHELL: (&str, &str) = ("/bin/sh", "-c");
+    #[cfg(windows)]
+    const EXIT_SHELL: (&str, &str) = ("cmd.exe", "/c");
+
+    /// See [`EXIT_SHELL`].
     fn spawn_exiting(code: u8) -> crate::process::ChildHandle {
-        let name = format!("exit {code}");
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", &name])
+        let (shell, flag) = EXIT_SHELL;
+        let child = std::process::Command::new(shell)
+            .args([flag, &format!("exit {code}")])
             .spawn()
-            .unwrap_or_else(|e| panic!("spawn /bin/sh: {e}"));
+            .unwrap_or_else(|e| panic!("spawn {shell}: {e}"));
         crate::process::ChildHandle::from_std(child)
     }
 

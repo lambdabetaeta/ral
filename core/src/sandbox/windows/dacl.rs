@@ -2068,7 +2068,7 @@ mod tests {
         assert!(canonical_bucket(0x01, false) < canonical_bucket(0x00, false));
         assert!(canonical_bucket(0x00, false) < canonical_bucket(0x02, false));
         assert!(canonical_bucket(0x02, false) < canonical_bucket(0x00, true));
-        assert!(canonical_bucket(0x01, true) == canonical_bucket(0x00, true));
+        assert_eq!(canonical_bucket(0x01, true), canonical_bucket(0x00, true));
     }
 
     #[test]

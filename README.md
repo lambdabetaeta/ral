@@ -241,8 +241,9 @@ the Windows guest. On macOS a bare `cargo build` product cannot boot a machine:
 the virtualization entitlement arrives with the bundle's signature, or, for a
 development binary, from `dev/scripts/sign-virtualization.sh`. On Windows nothing
 needs signing and synod stays unprivileged, but Hyper-V must be there to ask —
-Windows Pro, Education, or Enterprise with the Virtual Machine Platform feature
-installed — and the account must be an administrator or a member of the
+the Virtual Machine Platform feature installed, which is what puts
+`computecore.dll` on the machine — and the account must be an administrator or a
+member of the
 computer's local Hyper-V Administrators group, which is empty by default. That
 group membership is the one deployment step, and synod checks it and names it
 before a folder is granted rather than failing halfway into a session.

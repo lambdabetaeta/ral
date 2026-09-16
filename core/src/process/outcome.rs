@@ -98,6 +98,7 @@ impl Signal {
         }
         #[cfg(not(unix))]
         {
+            let _ = self;
             false
         }
     }
@@ -111,6 +112,7 @@ impl Signal {
         }
         #[cfg(not(unix))]
         {
+            let _ = self;
             false
         }
     }
@@ -122,6 +124,7 @@ impl Signal {
         }
         #[cfg(not(unix))]
         {
+            let _ = self;
             false
         }
     }

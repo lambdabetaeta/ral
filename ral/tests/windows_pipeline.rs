@@ -257,12 +257,12 @@ fn a_firehose_into_a_non_reading_consumer_terminates() {
         .to_string_lossy()
         .replace('\\', "/");
     let script = format!(
-        r#"
+        r"
         let n = !{{ within [env: [{FIREHOSE_ENV}: yes]] {{
             {helper} --exact firehose_writer_helper --nocapture
         }} | !{{ return 5 }} }}
         echo $n
-        "#,
+        ",
     );
     let out = run_with_timeout("win_pipe_firehose", &[], &script, Duration::from_secs(20))
         .expect("firehose hung — the consumer's read end outlived the consumer");

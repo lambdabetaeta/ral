@@ -29,6 +29,10 @@ pub struct Wake {
 impl Wake {
     /// # Errors
     /// Unix: the self-pipe could not be created.
+    // Windows makes no pipe and so cannot fail, but the `Result` is the Unix
+    // arm's and every caller is written against it: dropping it here would
+    // fork the signature by platform for no gain.
+    #[cfg_attr(windows, allow(clippy::unnecessary_wraps))]
     pub fn new() -> std::io::Result<Arc<Self>> {
         #[cfg(unix)]
         {
@@ -50,6 +54,9 @@ impl Wake {
 
     /// Idempotent: only the first call touches the pipe, so a wake fired
     /// twice never blocks on a full one-byte buffer.
+    // The early return guards the Unix arm's write below, which is compiled
+    // out on Windows — leaving a `return` that is last only on this platform.
+    #[cfg_attr(windows, allow(clippy::needless_return))]
     pub(crate) fn fire(&self) {
         if self.fired.swap(true, Ordering::SeqCst) {
             return;

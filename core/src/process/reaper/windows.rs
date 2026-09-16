@@ -41,7 +41,7 @@ unsafe extern "system" fn wait_callback<E: Send + 'static>(
 ) {
     let ctx = unsafe { Box::from_raw(context.cast::<CallbackCtx<E>>()) };
     let mut code: u32 = 0;
-    unsafe { GetExitCodeProcess(ctx.handle, &mut code) };
+    unsafe { GetExitCodeProcess(ctx.handle, &raw mut code) };
     let outcome =
         WaitOutcome::from_exit_status(std::os::windows::process::ExitStatusExt::from_raw(code));
     let _ = ctx.tx.send((ctx.f)(outcome));
@@ -73,7 +73,7 @@ pub(crate) fn watch<E: Send + 'static>(
     let mut wait_handle: HANDLE = std::ptr::null_mut();
     let ok = unsafe {
         RegisterWaitForSingleObject(
-            &mut wait_handle,
+            &raw mut wait_handle,
             handle,
             Some(wait_callback::<E>),
             ctx.cast(),
@@ -142,7 +142,11 @@ fn block_until_exit(handle: HANDLE) -> io::Result<()> {
 impl Drop for Watch {
     fn drop(&mut self) {
         let _ = block_until_exit(self.handle);
-        if let Some(wh) = self.wait_handle.lock_ignore_poison().take() {
+        // Taken before the `if let` rather than in its scrutinee: a guard
+        // there would hold the lock across the whole body, including the
+        // `UnregisterWaitEx` that waits a callback out.
+        let wait_handle = self.wait_handle.lock_ignore_poison().take();
+        if let Some(wh) = wait_handle {
             // `INVALID_HANDLE_VALUE` is the sentinel that makes this call
             // block until any in-flight callback finishes, rather than
             // taking a completion-event HANDLE. The wait having already

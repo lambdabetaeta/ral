@@ -169,7 +169,10 @@ fn write_interruptible(
     match (&*w).write_all(bytes) {
         // `CancelSynchronousIo` (from `ThreadStage::interrupt`) aborts the
         // `WriteFile` in flight; only a wake-caused abort is success.
-        Err(e) if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) && wake.is_fired() => {
+        Err(e)
+            if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED.cast_signed())
+                && wake.is_fired() =>
+        {
             wake.acknowledge();
             Ok(())
         }

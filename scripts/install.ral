@@ -12,7 +12,17 @@ if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
 
 cargo +stable install --force --locked --path ral
 cargo +stable install --force --locked --path exarch
-cargo +stable install --force --locked --path ral-sh
+
+# ral-sh only where there is a POSIX shell for it to be the bridge to.  It is
+# a login-shell dispatcher: registered in /etc/shells, chosen with chsh, and
+# every path it takes either execs ral or forwards to /bin/sh.  Windows has
+# none of those, so a copy installed there answers every invocation with
+# `exec /bin/sh: The system cannot find the path specified`.  The gate is the
+# binary's own precondition rather than a kernel name, which on Windows
+# answers only because some POSIX environment happened to put `uname` on PATH.
+if $[!{is-file '/bin/sh'}] {
+    cargo +stable install --force --locked --path ral-sh
+}
 
 let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "$ENV[HOME]/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"

@@ -131,6 +131,9 @@ impl AnchorProcess {
     /// Spawn the anchor and start its witness in one act: the report reader
     /// and the reaper's `Watch` on the anchor's pid are both live on `tx`
     /// before the pgid is handed to any stage.
+    // Taken by value because the Unix arm below moves it into the watch; the
+    // Windows arm has no reader thread to give it to.
+    #[cfg_attr(windows, allow(clippy::needless_pass_by_value))]
     fn spawn(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;

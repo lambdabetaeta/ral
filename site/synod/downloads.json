@@ -1,0 +1,13 @@
+{
+  "release_repo": "lambdabetaeta/ral",
+  "targets": [
+    {
+      "os": "Windows x86_64",
+      "installer": "synod-windows.msi"
+    },
+    {
+      "os": "macOS arm64",
+      "installer": "synod-macos-arm64.dmg"
+    }
+  ]
+}

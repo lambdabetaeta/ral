@@ -185,6 +185,7 @@ impl Launch {
     pub(crate) fn confinement(&self) -> Option<&'static str> {
         #[cfg(windows)]
         {
+            let _ = self;
             None
         }
         #[cfg(not(windows))]

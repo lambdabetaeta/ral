@@ -94,6 +94,21 @@ impl TestAgentSpec {
 /// enrolled, adopted, leased — so the caller holds the only strong reference
 /// and dropping it settles the agent.
 ///
+/// The log directory a test agent names: one no `create_dir_all` can make,
+/// so a test that unexpectedly writes a log fails loudly rather than
+/// quietly leaving a directory behind on the machine that ran it.
+///
+/// Unix has `/nonexistent`, under a root the test user cannot write.
+/// Windows has no such root: a leading `/` is drive-relative, so the same
+/// spelling resolves to `C:\nonexistent`, which an ordinary user
+/// creates without trouble — and did, littering the filesystem root.  Its
+/// twin names a path beneath the null device, under which no directory
+/// can exist at all.
+#[cfg(unix)]
+const UNWRITABLE_LOG_DIR: &str = "/nonexistent/test-agent";
+#[cfg(windows)]
+const UNWRITABLE_LOG_DIR: &str = r"\\.\NUL\test-agent";
+
 /// # Errors
 /// Whatever [`Fleet::enrol`] refuses.
 pub(crate) fn test_agent(
@@ -124,7 +139,7 @@ pub(crate) fn test_agent(
     let agent = Arc::new(Agent {
         id,
         name,
-        log_dir: PathBuf::from("/nonexistent/test-agent"),
+        log_dir: PathBuf::from(UNWRITABLE_LOG_DIR),
         started: std::time::Instant::now()
             .checked_sub(idle)
             .expect("a test's backdated birth stays inside the monotonic clock"),

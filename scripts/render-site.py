@@ -21,7 +21,8 @@ pages open straight from the filesystem with no server.
   exarch/profiles.html  exarch/PROFILES.md rendered to HTML (single source of
                         truth, so the page can't drift from the docs)
 
-  synod/index.html      the synod landing — shared menubar injected into
+  synod/index.html      the synod landing — shared menubar and the installers
+                        from synod/downloads.json injected into
                         synod-index.template.html
 
 Every ral listing is highlighted through the project's own tree-sitter
@@ -286,9 +287,15 @@ def ensure_tree_sitter() -> None:
 
 
 def run(cmd: list[str], what: str) -> subprocess.CompletedProcess[str]:
+    # `encoding` rather than a bare `text=True`: that decodes with the locale
+    # encoding, which is cp1252 on a stock Windows box, and the grammar's HTML
+    # is UTF-8.  The mis-decode raises inside subprocess's reader thread, where
+    # it is swallowed — `stdout` comes back None and the failure surfaces much
+    # later as a TypeError on a match.  Naming the encoding is also simply true:
+    # every file here is UTF-8 on every host.
     try:
         return subprocess.run(cmd, cwd=GRAMMAR_DIR, check=True, timeout=60,
-                              capture_output=True, text=True,
+                              capture_output=True, encoding="utf-8",
                               env={**os.environ, "TREE_SITTER_DIR": str(TS_CONFIG_DIR)})
     except (FileNotFoundError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired, OSError) as exc:
@@ -813,18 +820,44 @@ def render_exarch() -> None:
 
 # ── synod sub-site ──────────────────────────────────────────────────────────
 
+def render_synod_downloads(downloads: dict) -> str:
+    """Per-OS installer buttons for the synod landing.
+
+    Synod ships as an installer rather than a binary — it carries a guest image
+    and, on Windows, registers a system service — so every target here names an
+    `installer` rather than exarch's bare `artifact`.  The names are the ones
+    build-binaries.yml renames its bundles to, which carry no version, so a
+    release bumps nothing here."""
+    base = f'https://github.com/{downloads["release_repo"]}/releases/download/latest'
+    lines: list[str] = []
+    for target in downloads["targets"]:
+        os_name = html.escape(target["os"])
+        installer = html.escape(target["installer"])
+        lines.extend(
+            [
+                "",
+                f'          <a class="link-btn" href="{base}/{installer}" download>',
+                f'            {os_name} &middot; {installer}</a>',
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_synod() -> None:
     """Build the synod sub-site under site/synod/.
 
     One bespoke landing, taking the shared menubar and footer.  Nothing here is
-    generated from a document and nothing is offered for download: synod is not
-    packaged yet, and the page says so rather than linking a file that does not
-    exist.
+    generated from a document; the installers come from site/synod/downloads.json,
+    the same shape exarch's do.
     """
     template = (ROOT / "scripts" / "synod-index.template.html").read_text(
         encoding="utf-8")
+    downloads = json.loads(
+        (SYNOD_SITE / "downloads.json").read_text(encoding="utf-8"))
     for placeholder, value in [
         ("{{MENUBAR}}", product_menubar(SYNOD_NAV, "index", "synod")),
+        ("{{SYNOD_DOWNLOADS}}", render_synod_downloads(downloads)),
         ("{{FOOTER}}", PRODUCT_FOOTER),
     ]:
         if placeholder not in template:

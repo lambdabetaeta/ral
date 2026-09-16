@@ -96,6 +96,7 @@ impl Pinned {
         }
         #[cfg(windows)]
         {
+            let _ = self;
             false
         }
     }

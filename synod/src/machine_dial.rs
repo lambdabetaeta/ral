@@ -51,19 +51,48 @@ impl Dial for MachineDial {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
     use std::sync::Arc;
 
-    /// A fake `Machine` whose `connect_guest` hands back one end of a
-    /// socketpair, parking the guest's end where the test can play the
-    /// guest — no real vsock needed to see that the seam carries bytes.
+    // `GuestEnd` is the end of a local pair the test plays the guest on — the
+    // twin of `vm_manager::AgentDial`, which the fake machine hands back as
+    // the host's end.  A socketpair on Unix; on Windows, where there is none,
+    // the loopback connection `ral_core::wire` uses for the same job.
+    #[cfg(windows)]
+    use std::net::TcpStream as GuestEnd;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream as GuestEnd;
+
+    /// One connection, both ends owned here: the guest's for the test to
+    /// speak through, the host's in the shape `connect_guest` returns.
+    #[cfg(unix)]
+    fn local_pair() -> std::io::Result<(GuestEnd, vm_manager::AgentDial)> {
+        let (guest, host) = ral_core::process::cloexec_socketpair()?;
+        Ok((guest, std::os::fd::OwnedFd::from(host)))
+    }
+
+    /// See the Unix twin above.  Bind-connect-accept on an ephemeral
+    /// loopback port, because Windows has no `socketpair(2)`.
+    #[cfg(windows)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:wire-pair-windows] the same in-process loopback pair `ral_core::wire::WireChannel::pair` stands on, here so a test can hold both ends: the port is ephemeral and the peer is this process, so no outside name is reached."
+    )]
+    fn local_pair() -> std::io::Result<(GuestEnd, vm_manager::AgentDial)> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let host = std::net::TcpStream::connect(listener.local_addr()?)?;
+        let (guest, _peer) = listener.accept()?;
+        Ok((guest, std::os::windows::io::OwnedSocket::from(host)))
+    }
+
+    /// A fake `Machine` whose `connect_guest` hands back one end of a local
+    /// pair, parking the guest's end where the test can play the guest — no
+    /// real vsock needed to see that the seam carries bytes.
     struct FakeMachine {
-        guest_ends: Arc<Mutex<Vec<(u32, UnixStream)>>>,
+        guest_ends: Arc<Mutex<Vec<(u32, GuestEnd)>>>,
     }
 
     impl vm_manager::Machine for FakeMachine {
@@ -74,9 +103,9 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
         fn connect_guest(&self, port: u32) -> std::io::Result<vm_manager::AgentDial> {
-            let (guest, host) = ral_core::process::cloexec_socketpair()?;
+            let (guest, host) = local_pair()?;
             self.guest_ends.lock_ignore_poison().push((port, guest));
-            Ok(OwnedFd::from(host))
+            Ok(host)
         }
         fn shutdown(self: Box<Self>) -> Result<(), vm_manager::Error> {
             Ok(())

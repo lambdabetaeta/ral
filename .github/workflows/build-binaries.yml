@@ -9,6 +9,14 @@ name: Build Binaries
 # and on Windows an installer instead — `packaging/wix/ral.wxs` argues why a
 # copied .exe is the wrong shape there.  The Windows build still happens, but
 # it is the MSI's payload rather than an asset of its own.
+#
+# Synod is a third shape again: not an executable at all but an application
+# carrying a guest operating system, so it ships only as an installer, and the
+# installer cannot be built where the executables are.  The guest image must be
+# built on a host of the guest's OWN architecture (vm-image/README.md: the
+# build executes guest binaries under chroot), while the bundle must be built
+# on the platform it installs onto.  Hence a Linux job per architecture that
+# builds the image, and a bundle job per platform that consumes it.
 on:
   push:
     tags:
@@ -227,12 +235,128 @@ jobs:
           path: ral-windows.msi
           if-no-files-found: error
 
+  # Synod's guest: the office userland and the boot media it runs.  An
+  # intermediate, like the Windows ral build — it exists to be bundled.
+  #
+  # Native, never cross-built, and that is not a preference: build.sh runs
+  # `fc-cache` and its chroot spot-checks by EXECUTING guest binaries, and
+  # build-boot.sh's first check refuses a container that is not $ARCH rather
+  # than let qemu-user emulation appear halfway through.  So amd64 is built on
+  # the x86_64 runner and arm64 on the arm64 one, and podman — which both
+  # scripts drive, and which the Ubuntu runner images carry — pulls the base
+  # image for the host it is on.
+  #
+  # Only the four files `synod/tauri.conf.json` lists as resources are kept.
+  # The uncompressed rootfs.img is gigabytes and no bundle reads it: what ships
+  # is the zstd-compressed image and the checksum of what it decompresses to.
+  guest-image:
+    name: synod-guest-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the office rootfs and the boot media
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          bash vm-image/build.sh
+          bash vm-image/build-boot.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: |
+            vm-image/out/boot/kernel
+            vm-image/out/boot/initramfs.img
+            vm-image/out/rootfs.img.zst
+            vm-image/out/rootfs.img.sha256
+          if-no-files-found: error
+
+  # The synod installers, one per platform, each wrapping the guest image built
+  # for the architecture that platform runs.
+  #
+  # Renamed before upload for the reason the `build` matrix renames: tauri
+  # spells a bundle with the version and a locale in it
+  # (`Synod_0.6.0_x64_en-US.msi`), and a download link that has to be edited
+  # every release is a link that will one day not be.  The version is inside
+  # the installer, where an upgrade path reads it, and in the release tag.
+  #
+  # macOS is signed ad hoc (`signingIdentity: "-"` in tauri.conf.json), which
+  # is what carries the virtualization entitlement — a bare `cargo build`
+  # product cannot boot a machine at all.  It is NOT notarized: Gatekeeper
+  # will hold the first launch until the user opens it from the context menu.
+  # Notarizing needs an Apple Developer ID in secrets, which this repo has not
+  # got, so that is a deliberate gap rather than an oversight.
+  synod-bundle:
+    name: ${{ matrix.out }}
+    needs: guest-image
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - out: synod-windows.msi
+            os: windows-latest
+            arch: amd64
+            bundle: msi
+          - out: synod-macos-arm64.dmg
+            os: macos-latest
+            arch: arm64
+            bundle: dmg
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: vm-image/out
+      # Pinned to the CLI major the app is built against.  `--locked` so a
+      # fresh transitive release cannot change what bundles a release.
+      - name: Install the Tauri CLI
+        shell: bash
+        run: cargo install tauri-cli --version "^2" --locked
+      # Windows only: the broker is a separate binary the installer registers
+      # as a service, and it has to exist before the bundle is assembled.
+      - name: Build the machine broker
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: cargo build --release -p vm-manager --bin synod-machine-broker
+      - name: Bundle
+        shell: bash
+        working-directory: synod
+        run: cargo tauri build
+      - name: Name the artifact
+        shell: bash
+        run: |
+          # One file, whatever tauri called it; `mv` of a glob that matched
+          # more than one would silently pick a winner, so the count is
+          # checked before anything is moved.
+          shopt -s nullglob
+          built=(target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.bundle }})
+          if [ ${#built[@]} -ne 1 ]; then
+            echo "expected exactly one .${{ matrix.bundle }}, found ${#built[@]}: ${built[*]}" >&2
+            exit 1
+          fi
+          mv "${built[0]}" "${{ matrix.out }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.out }}
+          path: ${{ matrix.out }}
+          if-no-files-found: error
+
   # One publish job for both triggers: they differ only in the tag they write
   # and whether it is a prerelease.  Collecting `release-*` into one directory
   # is what lets this job name no individual file — an artifact is published
   # because it was built to be, not because it was also listed here.
   release:
-    needs: [build, msi]
+    needs: [build, msi, synod-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write
