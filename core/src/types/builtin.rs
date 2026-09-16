@@ -16,7 +16,7 @@ use super::env::Env;
 use super::flow::Settled;
 use super::value::Value;
 use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule, scheme_curry_depth};
-use crate::typecheck::{Scheme, Unifier};
+use crate::typecheck::{CompTy, PayloadRoute, Scheme, Ty, Unifier};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
@@ -86,6 +86,9 @@ pub struct BuiltinEntry {
     /// [`Unifier`] to derive its curry depth, so this spares every
     /// application step of a native that re-derivation.
     arity_cache: OnceLock<usize>,
+    /// [`Self::settles_at_unit`]'s cache, derived the same way and for the
+    /// same reason.
+    unit_cache: OnceLock<bool>,
 }
 
 impl BuiltinEntry {
@@ -104,6 +107,7 @@ impl BuiltinEntry {
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
+            unit_cache: OnceLock::new(),
         }
     }
 
@@ -124,6 +128,7 @@ impl BuiltinEntry {
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
+            unit_cache: OnceLock::new(),
         }
     }
 
@@ -147,6 +152,27 @@ impl BuiltinEntry {
             .get_or_init(|| scheme_curry_depth(self.type_rule))
     }
 
+    /// Whether this row's declared scheme settles at `Unit` — `F Unit`, the
+    /// value route, as read off the type rule's curry spine and cached like
+    /// [`Self::fixed_arity`].  A byte-routed `F[bytes] Unit` is not this: its
+    /// payload comes from stdout, not from the body's answer.
+    fn settles_at_unit(&self) -> bool {
+        *self.unit_cache.get_or_init(|| {
+            fn settled(ct: &CompTy) -> Option<(&PayloadRoute, &Ty)> {
+                match ct {
+                    CompTy::Fun(_, body) => settled(body),
+                    CompTy::Return(route, ty) => Some((route, ty)),
+                    CompTy::Var(_) => None,
+                }
+            }
+            let scheme = (self.type_rule)(&mut Unifier::new());
+            let Ty::Thunk(inner) = &scheme.ty else {
+                return false;
+            };
+            matches!(settled(inner), Some((PayloadRoute::Value, Ty::Unit)))
+        })
+    }
+
     /// Invoke the body — reachable only with a proof that a
     /// [`crate::evaluator::audit::frame_call`] is already open around it.
     /// `env` is the lexical environment at the call; only a `Scoped` body
@@ -162,11 +188,24 @@ impl BuiltinEntry {
         mooring: &crate::types::Mooring,
         shell: &mut crate::types::Shell,
     ) -> Settled<Value> {
-        match &self.body {
+        let value = match &self.body {
             BuiltinBody::Static(f) => f(args, mooring, shell),
             BuiltinBody::Captured(f) => f(args, mooring, shell),
             BuiltinBody::Scoped(f) => f(args, env, mooring, shell),
+        }?;
+        // The declared scheme is the authority on what a row settles to, so a
+        // body cannot put an inhabitant of another type under `F Unit` — which
+        // a body and its scheme agreeing only by hand otherwise allows.
+        if self.settles_at_unit() {
+            debug_assert!(
+                matches!(value, Value::Unit),
+                "{}: typed `F Unit` but answered a {}",
+                self.name,
+                value.type_name()
+            );
+            return Ok(Value::Unit);
         }
+        Ok(value)
     }
 }
 
@@ -185,6 +224,7 @@ impl Clone for BuiltinEntry {
             diagnostic: self.diagnostic,
             body: self.body.clone(),
             arity_cache,
+            unit_cache: self.unit_cache.clone(),
         }
     }
 }

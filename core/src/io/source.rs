@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn a_blocked_read_returns_eof_within_100ms_of_fire() {
-        let (r, _w) = os_pipe::pipe().expect("data pipe");
+        let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         let wake = Wake::new().expect("wake");
         let mut reader = SourceReader::pipe(r).interruptible(wake.clone());
 
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn data_written_before_the_wake_is_still_delivered() {
-        let (r, mut w) = os_pipe::pipe().expect("data pipe");
+        let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
         let wake = Wake::new().expect("wake");
         let mut reader = SourceReader::pipe(r).interruptible(wake.clone());
 
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn reader_borrows_rather_than_takes_a_pipe_source() {
         use std::io::Write;
-        let (r, mut w) = os_pipe::pipe().expect("data pipe");
+        let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
         let source = Source::Reader(SourceReader::pipe(r));
         let mut first = source.reader().expect("reader").expect("some reader");
         let mut second = source.reader().expect("reader").expect("some reader");

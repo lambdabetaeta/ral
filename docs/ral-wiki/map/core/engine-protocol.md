@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/protocol.rs, core/src/engine.rs, core/src/wire.rs, core/src/hatch.rs]
 ---
 
@@ -29,12 +29,18 @@ is a wire-seat child's spawn machinery.** The why is
   (a detached worker's batch).
 - `EnquiryError` — message plus status, the wire shape of a refused enquiry;
   `no_desk()` is the fixed wording for a host with nothing to answer.
-- `Control` / `Winsize` / `TerminalEndpoint` — the out-of-band control frame
-  and the attach-time terminal conveyance (`TerminalEndpoint.lease` is
-  `#[serde(skip)]`).
-- `Report` / `Ending` — the terminal frame: `Static { rendered, status }` or
-  `Ran { ending, captured, trail }`; `Ending` has no stop arm — ral does not
-  suspend, so every ending is `Settled`/`Raised`/`Walled`/`Exited`.
+- `Control` / `TerminalEndpoint` — the out-of-band control frame and the
+  attach-time terminal conveyance (`TerminalEndpoint.lease` is
+  `#[serde(skip)]`). `Control` carries `Cancel` alone; it stays an enum
+  because the tag is the wire encoding, so a second verb can arrive without
+  changing how `Cancel` encodes.
+- `Report` / `Ending` / `FailureStatus` — the terminal frame:
+  `Static { rendered, status }` or `Ran { ending, captured, trail }`; `Ending`
+  has no stop arm — ral does not suspend, so every ending is
+  `Settled`/`Raised`/`Walled`/`Exited`. The two failing arms carry a
+  `FailureStatus`, never a bare `i32`: it clamps into `1..=255` on the way in
+  and on the way back off the wire, so no ending that failed can be reported
+  with the code that means success.
   `Report::host_fault` is the engine's own refusal (a panicked worker, a busy
   engine) shaped as a `Static`, so a host never has to tell it from a run's
   own failure.
@@ -61,9 +67,9 @@ is a wire-seat child's spawn machinery.** The why is
 - `answer_probe` — the one probe-reading decoder both transports share
   (`worker-count`, `binding-count`, `leased-binding-count`, `env-var`, `cwd`,
   `grant-depth`, `largest-binding-bytes`, `workers`).
-- `ControlSender` — out-of-band `Cancel`/`Suspend`/`Resume`/`Resize`; `new`
-  trips the identity transport's own foreground scope, `new_wire` writes a
-  `Control` frame through the severance cell.
+- `ControlSender` — the out-of-band `Cancel`; `new` trips the identity
+  transport's own foreground scope, `new_wire` writes a `Control` frame
+  through the severance cell.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.
@@ -85,9 +91,9 @@ is a wire-seat child's spawn machinery.** The why is
   dropping `event_tx`, on every exit path; the heartbeat pings on
   `Liveness::interval`, severs `Silent` past `Liveness::deadline`, and never
   takes the write lock on that path.
-- `write_through` — the one write door `WireTransport::write` and
-  `ControlSender`'s wire arm both share: on error, severs and shuts the
-  channel down before the lock releases.
+- `write_through` — the front-end door `WireTransport::write` and
+  `ControlSender`'s wire arm both share: `wire::write_or_sever` recording a
+  `Severed` cause.
 
 ## `core/src/engine.rs`
 
@@ -98,6 +104,11 @@ is a wire-seat child's spawn machinery.** The why is
 - `engine_session` — the engine's whole protocol life: read `Attach`,
   `resolve_installer`, boot, apply a hatch seed if any, write
   `Attached`/`Refused`, then the reader loop; returns the process exit code.
+  The loop breaks on a `SessionEnd` — `Requested` (a `Detach` or the
+  front-end's EOF) or `Corrupt` (a read error, a dead worker, silence past the
+  deadline) — rather than on a digit, so corruption cannot be reported as an
+  end the front-end asked for; a wire fault demotes even a `Requested` end
+  to `1`.
 - `resolve_installer` — the version check plus the installer-table lookup, a
   `Result` so the refusal path is testable without exiting.
 - `WireDesk` — the wire engine's `EnquiryDesk`: writes `Event::Enquiry`, then
@@ -132,6 +143,11 @@ is a wire-seat child's spawn machinery.** The why is
 - `set_write_deadline` — bounds every `write_frame` on every clone of the
   channel (`SO_SNDTIMEO` lives on the shared file description), turning a
   stalled write into the same fatal error a severed pipe already gives.
+- `write_or_sever` — the severance law itself, enforced once for both doors
+  (`protocol::write_through`, `engine::engine_write`, which differ only in
+  what they record): a failed write is recorded *and* the channel shut down
+  before the lock is released, so nothing appends a frame after a truncated
+  one and no window leaves the record calling an already-shut socket healthy.
 
 ## `core/src/hatch.rs`
 

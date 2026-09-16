@@ -13,24 +13,19 @@ use crate::types::Shell;
 /// Restores `shell.io.stdout` on `Drop`, panic included.
 struct StdoutScope<'a> {
     shell: &'a mut Shell,
-    saved: Option<Sink>,
+    saved: Sink,
 }
 
 impl<'a> StdoutScope<'a> {
     fn enter(shell: &'a mut Shell, stdout: Sink) -> Self {
         let saved = std::mem::replace(&mut shell.io.stdout, stdout);
-        Self {
-            shell,
-            saved: Some(saved),
-        }
+        Self { shell, saved }
     }
 }
 
 impl Drop for StdoutScope<'_> {
     fn drop(&mut self) {
-        if let Some(prev) = self.saved.take() {
-            self.shell.io.stdout = prev;
-        }
+        std::mem::swap(&mut self.shell.io.stdout, &mut self.saved);
     }
 }
 
@@ -67,46 +62,34 @@ where
     F: FnOnce(&mut Shell) -> R,
 {
     let saved = shell.io.swap_ambient_stdout();
-    let scope = StdoutScope {
-        shell,
-        saved: Some(saved),
-    };
+    let scope = StdoutScope { shell, saved };
     f(scope.shell)
 }
 
 /// Restores all three sinks on `Drop`, panic included.
 struct AuditCaptureScope<'a> {
     shell: &'a mut Shell,
-    saved_stdout: Option<Sink>,
-    saved_ambient: Option<Sink>,
-    saved_stderr: Option<Sink>,
+    saved_stdout: Sink,
+    saved_ambient: Sink,
+    saved_stderr: Sink,
 }
 
 impl<'a> AuditCaptureScope<'a> {
     fn enter(shell: &'a mut Shell, out_sink: Sink, amb_sink: Sink, err_sink: Sink) -> Self {
-        let saved_stdout = std::mem::replace(&mut shell.io.stdout, out_sink);
-        let saved_ambient = std::mem::replace(&mut shell.io.ambient, amb_sink);
-        let saved_stderr = std::mem::replace(&mut shell.io.stderr, err_sink);
         Self {
+            saved_stdout: std::mem::replace(&mut shell.io.stdout, out_sink),
+            saved_ambient: std::mem::replace(&mut shell.io.ambient, amb_sink),
+            saved_stderr: std::mem::replace(&mut shell.io.stderr, err_sink),
             shell,
-            saved_stdout: Some(saved_stdout),
-            saved_ambient: Some(saved_ambient),
-            saved_stderr: Some(saved_stderr),
         }
     }
 }
 
 impl Drop for AuditCaptureScope<'_> {
     fn drop(&mut self) {
-        if let Some(prev) = self.saved_stdout.take() {
-            self.shell.io.stdout = prev;
-        }
-        if let Some(prev) = self.saved_ambient.take() {
-            self.shell.io.ambient = prev;
-        }
-        if let Some(prev) = self.saved_stderr.take() {
-            self.shell.io.stderr = prev;
-        }
+        std::mem::swap(&mut self.shell.io.stdout, &mut self.saved_stdout);
+        std::mem::swap(&mut self.shell.io.ambient, &mut self.saved_ambient);
+        std::mem::swap(&mut self.shell.io.stderr, &mut self.saved_stderr);
     }
 }
 

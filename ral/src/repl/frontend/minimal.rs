@@ -58,7 +58,7 @@ impl Frontend for MinimalFrontend {
 
         // Continuation: while `parser::needs_continuation` (driven by
         // `join_continuation`) reports the buffer incomplete — an unclosed
-        // lexeme or an Incompleteness class awaiting more input — prompt for
+        // lexeme, or an operator awaiting what it demands — prompt for
         // and fold in the next line.  An EOF / read error, or a leading
         // end-of-transmission (NUL) or Ctrl-C byte, abandons the partial
         // buffer; both abort bytes are read off the raw first byte.

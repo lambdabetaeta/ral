@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs]
 ---
 
@@ -130,6 +130,12 @@ serialisable fragment and
 followed by the `serde_json` body). One codec carries the wire-seat hatch's
 one-shot `EngineSeed` frame and the engine protocol's front-end⇄engine
 `WireChannel` frames (`core/src/wire.rs`).
+
+`fuse` is the frame fuse both doors judge a body by — `MAX_FRAME_LEN`, 256
+MiB, checked on the read side before the body is allocated and on the write
+side before anything reaches the wire. One enforcement point, so an oversized
+frame fails locally with a sentence instead of being written happily and then
+killing the peer mid-stream.
 
 This layer is the mechanism behind the mobile/local split — `env` /
 `context` cross a re-exec boundary, `io` / `session` / `local`

@@ -43,37 +43,17 @@ pub struct EngineInstaller {
     pub narrow: crate::hatch::GrantNarrower,
 }
 
-/// The engine's one write door: locks `writer`, writes `frame`, and on error
-/// severs the connection under the guard and raises `fault` — the flag the
-/// reader loop consults on exit so a front-end that stopped reading is never
-/// mistaken for one that cleanly detached.
+/// The engine's half of the severance law: [`crate::wire::write_or_sever`]
+/// recording into `fault` — the flag the reader loop consults on exit so a
+/// front-end that stopped reading is never mistaken for one that cleanly
+/// detached.
 ///
 /// Every engine-side write crosses here: a surface emit, a deferred batch, an
 /// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
 /// stalled write becomes exactly the same fatal, non-blocking event a severed
 /// pipe already is.
-///
-/// `writer`'s poison is never recovered, unlike [`WireDesk::parked`] below: a
-/// panic between `write_frame` and `shutdown` can leave a partial frame
-/// already on the socket with `fault` unset, and resuming writes into that
-/// torn stream is worse than the panic propagating.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the engine-side wire writer: a partial frame already on the socket with fault unset is what a recovered guard would append the next frame onto"
-)]
 fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
-    let outcome = {
-        let mut guard = writer.lock().unwrap();
-        let outcome = guard.write_frame(frame);
-        if outcome.is_err() {
-            guard.shutdown();
-        }
-        outcome
-    };
-    if outcome.is_err() {
-        fault.store(true, Ordering::SeqCst);
-    }
-    outcome
+    crate::wire::write_or_sever(writer, frame, |_| fault.store(true, Ordering::SeqCst))
 }
 
 /// Writes `Event::Surface` frames as values are produced, stamped at emit time
@@ -344,12 +324,12 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
 /// handshake, worker rendezvous, reader loop, teardown settle.
 ///
 /// Returns the process exit code — `0` for a clean detach or EOF, `1` for a
-/// protocol fault, a read error, silence past the deadline, or a write that
-/// stalled past `patience.write_stall`: a front-end that stops reading is,
-/// within that bound, treated exactly as one that has gone silent. An
-/// unrecognised installer tag refuses as loudly as a version mismatch: an
-/// engine speaking the wrong builtins is exactly the incoherence this rail
-/// rules out.
+/// protocol fault, a read error, a dead worker, silence past the deadline, or
+/// a write that stalled past `patience.write_stall`: a front-end that stops
+/// reading is, within that bound, treated exactly as one that has gone
+/// silent. An unrecognised installer tag refuses as loudly as a version
+/// mismatch: an engine speaking the wrong builtins is exactly the incoherence
+/// this rail rules out.
 ///
 /// # Panics
 /// Panics if the wire channel cannot be cloned for the writer.
@@ -568,7 +548,7 @@ fn engine_session(
                             rendered: message,
                             command_exit: false,
                             single_command: false,
-                            status: 1,
+                            status: 1.into(),
                         },
                         captured: None,
                         trail: Vec::new(),
@@ -612,8 +592,15 @@ fn engine_session(
     };
 
     // ── Reader loop (this thread) ──────────────────────────────────
-    // The exit code is how the parent tells a session that ended on request
-    // from one that ended on corruption.
+    /// How the reader loop ended — the distinction the parent needs, named
+    /// rather than spelled as an exit code, so no break site can report a
+    /// corrupted session as one that ended on request.
+    enum SessionEnd {
+        /// `Detach`, or the front-end's EOF.
+        Requested,
+        Corrupt,
+    }
+
     let mut armed = false;
     let mut last_frame = Instant::now();
     // The dispatch a `Cancel` may name and the scope that stops it. Replaced,
@@ -625,7 +612,7 @@ fn engine_session(
     // window crosses first; it waits here for the `Dispatch` that claims it.
     let mut foretold: Option<DispatchId> = None;
 
-    let exit_code = loop {
+    let end = loop {
         // Armed, park on a `TICK` so silence past the deadline is noticed;
         // unarmed, block in `read_frame`, that front-end's death being EOF.
         let read = if armed {
@@ -639,7 +626,7 @@ fn engine_session(
                             silent.as_secs(),
                             patience.silence.as_secs()
                         );
-                        break 1;
+                        break SessionEnd::Corrupt;
                     }
                     continue;
                 }
@@ -651,10 +638,10 @@ fn engine_session(
 
         let frame = match read {
             Ok(Some(frame)) => frame,
-            Ok(None) => break 0, // EOF: gone, but cleanly
+            Ok(None) => break SessionEnd::Requested, // EOF: gone, but cleanly
             Err(e) => {
                 eprintln!("engine: read error: {e}");
-                break 1;
+                break SessionEnd::Corrupt;
             }
         };
         // Any frame at all is proof of life, not just a `Ping`.
@@ -671,12 +658,14 @@ fn engine_session(
                 match claim(id, WorkItem::Run(run, scope.clone())) {
                     Claimed::Took => cancellable = Some((id, scope)),
                     Claimed::Busy => {}
-                    Claimed::WorkerGone => break 0,
+                    // The worker thread is gone: nothing will report this
+                    // dispatch, which is corruption, not a requested end.
+                    Claimed::WorkerGone => break SessionEnd::Corrupt,
                 }
             }
             Frame::Probe(id, reading) => match claim(id, WorkItem::Probe(reading)) {
                 Claimed::Took | Claimed::Busy => {}
-                Claimed::WorkerGone => break 0,
+                Claimed::WorkerGone => break SessionEnd::Corrupt,
             },
             Frame::Answer(eid, answer) => {
                 desk.fill(eid, answer);
@@ -693,9 +682,6 @@ fn engine_session(
                     _ => foretold = Some(did),
                 }
             }
-            Frame::Control(Control::Resize(_winsize)) => {
-                // No terminal fds reach the engine, so it has nothing to resize.
-            }
             Frame::Ping(seq) => {
                 armed = true;
                 let _ = engine_write(&writer, &wire_fault, &Frame::Pong(seq));
@@ -706,7 +692,7 @@ fn engine_session(
             Frame::Attach { .. } => {
                 eprintln!("engine: unexpected second Attach");
             }
-            Frame::Detach => break 0,
+            Frame::Detach => break SessionEnd::Requested,
             Frame::Event(..) => {
                 eprintln!("engine: unexpected Event frame");
             }
@@ -729,13 +715,12 @@ fn engine_session(
     while settling() && Instant::now() < settle_by {
         std::thread::sleep(SETTLE_POLL);
     }
-    // A severed wire is never the clean detach the EOF arm's `0` reports: a
-    // front-end that stopped reading loses its in-flight run exactly as one
-    // that fell silent does, and the exit code must say so.
-    if exit_code == 0 && wire_fault.load(Ordering::SeqCst) {
-        1
-    } else {
-        exit_code
+    // A severed wire is never the requested end it may look like: a front-end
+    // that stopped reading loses its in-flight run exactly as one that fell
+    // silent does, and the exit code must say so.
+    match end {
+        SessionEnd::Requested if !wire_fault.load(Ordering::SeqCst) => 0,
+        _ => 1,
     }
 }
 

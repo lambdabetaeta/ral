@@ -21,8 +21,9 @@ use std::collections::BTreeSet;
 /// Meet-fold the stack's fs, net, and exec dimensions into the
 /// OS-renderable projection, with literal exec keys resolved under
 /// `path_env`, the shell's `PATH` override.  `None` when no layer
-/// restricts fs or net — nor, on macOS, exec — so the caller can skip
-/// OS sandbox setup entirely.
+/// restricts fs or net — nor exec, where the host's backend renders it
+/// ([`crate::sandbox::EXEC_ENFORCED`]) — so the caller can skip OS sandbox
+/// setup entirely.
 pub(crate) fn sandbox_projection(
     grants: &GrantStack,
     resolver: &Resolver,
@@ -51,13 +52,13 @@ pub(crate) fn sandbox_projection(
     }
 
     let exec = reduce_exec(grants, resolver, path_env);
-    // Attenuated exec is worth an OS sandbox only where the backend can
-    // filter exec: Seatbelt renders a path rule, bwrap has none.  The
-    // in-ral exec gate runs on every platform regardless.
-    #[cfg(target_os = "macos")]
-    let exec_triggers_sandbox = !matches!(exec, ExecProjection::Unrestricted);
-    #[cfg(not(target_os = "macos"))]
-    let exec_triggers_sandbox = false;
+    // Attenuated exec is worth an OS sandbox exactly where a backend carries
+    // the allow-list into the kernel, which is the backends' fact to state and
+    // `sandbox::EXEC_ENFORCED`'s to answer.  The in-ral exec gate runs on
+    // every platform regardless; the kernel layer is what sees the re-execs it
+    // cannot (`sh -c`).
+    let exec_triggers_sandbox =
+        crate::sandbox::EXEC_ENFORCED && !matches!(exec, ExecProjection::Unrestricted);
 
     if regions.is_none() && (!saw_net || net_allowed) && !exec_triggers_sandbox {
         crate::dbg_trace!(
@@ -68,20 +69,11 @@ pub(crate) fn sandbox_projection(
         return None;
     }
 
-    // The projection is lexical: `resolved`/`namespace` have no reader below
-    // this fold, so each prefix flattens to its surface spelling here, once,
-    // and every backend widens that into its own name class at render time.
-    let surface_strings = |set: PrefixSet| -> Vec<String> {
-        set.surface()
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-            .collect()
-    };
     let fs = match regions {
         Some((read, write)) => FsProjection::Restricted(FsRules {
-            read_prefixes: surface_strings(read),
-            write_prefixes: surface_strings(write),
-            deny_paths: surface_strings(deny),
+            read_prefixes: surface_strings(&read),
+            write_prefixes: surface_strings(&write),
+            deny_paths: surface_strings(&deny),
             pinned_dirs: Vec::new(),
         }),
         None => FsProjection::Unrestricted,
@@ -93,6 +85,16 @@ pub(crate) fn sandbox_projection(
     };
     crate::dbg_trace!("sandbox-proj", "fold restricted in {:?}", t_fold.elapsed());
     Some(projection)
+}
+
+/// The projection is lexical: `resolved`/`namespace` have no reader below this
+/// fold, so each prefix flattens to its surface spelling here, once, and every
+/// backend widens that into its own name class at render time.
+fn surface_strings(set: &PrefixSet) -> Vec<String> {
+    set.surface()
+        .into_iter()
+        .map(NormalizedPrefix::into_string)
+        .collect()
 }
 
 /// Reduce the exec component of the stack into an [`ExecProjection`],
@@ -122,12 +124,6 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
     if !saw {
         return ExecProjection::Unrestricted;
     }
-    let surface_strings = |set: PrefixSet| -> Vec<String> {
-        set.surface()
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-            .collect()
-    };
     let mut deny_paths = Vec::new();
     let mut deny_basenames = Vec::new();
     for name in &denied_names {
@@ -139,9 +135,9 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
     }
     ExecProjection::Restricted {
         allow_paths: admitted_literal_paths(grants, &literal_names, resolver, path_env),
-        allow_dirs: surface_strings(subpath_allow.unwrap_or_default()),
+        allow_dirs: surface_strings(&subpath_allow.unwrap_or_default()),
         deny_paths,
-        deny_dirs: surface_strings(subpath_deny),
+        deny_dirs: surface_strings(&subpath_deny),
         deny_basenames,
     }
 }

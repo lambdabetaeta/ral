@@ -10,7 +10,6 @@
 use crate::ir::Register;
 use crate::path::tilde::{Unexpandable, expand_tilde_path};
 use crate::types::{Error, Shell, Value};
-use std::collections::HashMap;
 
 /// A read of the store: the five pseudo-variables, and a `~`-path awaiting
 /// `HOME`.  `$SCRIPT` is not among them: the elaborator bakes it to a
@@ -27,18 +26,9 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
                 .map(Value::String)
                 .collect(),
         )),
-        Register::Nproc => Ok(Value::Int(std::thread::available_parallelism().map_or(
-            1,
-            |n| {
-                #[allow(
-                    clippy::cast_possible_wrap,
-                    reason = "CPU count from available_parallelism is tiny"
-                )]
-                {
-                    n.get() as i64
-                }
-            },
-        ))),
+        Register::Nproc => Ok(Value::Int(
+            std::thread::available_parallelism().map_or(1, |n| i64::try_from(n.get()).unwrap_or(1)),
+        )),
         Register::Cwd => Ok(Value::String(cwd_string(shell))),
         Register::User => Ok(Value::String(
             crate::path::user_name(shell.env_overrides()).unwrap_or_else(|| "?".into()),
@@ -71,21 +61,17 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
 /// The host's `PWD` / `OLDPWD` are stale the moment ral `cd`s — the live
 /// pair is `context.cwd` — so they are dropped at the source.
 fn env_map(shell: &Shell) -> Value {
-    let mut merged: HashMap<String, String> = std::env::vars()
-        .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
-        .collect();
-    merged.extend(
-        shell
-            .context
-            .env_overrides
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone())),
-    );
-    Value::map(
-        merged
-            .into_iter()
+    let host = std::env::vars().filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"));
+    let overrides = shell
+        .context
+        .env_overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()));
+    // `Map`'s `FromIterator` is last-wins, so the overrides come second.
+    Value::Map(
+        host.chain(overrides)
             .map(|(k, v)| (k, Value::String(v)))
-            .collect::<Vec<_>>(),
+            .collect(),
     )
 }
 

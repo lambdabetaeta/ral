@@ -141,11 +141,7 @@ pub(super) fn wire_stdin(shell: &Shell) -> Settled<StdinRoute> {
     if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return Ok(StdinRoute::Null);
     }
-    let reader = shell
-        .io
-        .stdin
-        .reader()
-        .map_err(|e| Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1)))?;
+    let reader = shell.io.stdin.reader().map_err(stdin_error)?;
     if let Some(r) = reader {
         return Ok(StdinRoute::Reader(r));
     }
@@ -155,6 +151,12 @@ pub(super) fn wire_stdin(shell: &Shell) -> Settled<StdinRoute> {
         TtyInputPermit::for_non_tty_stdin()
     };
     Ok(StdinRoute::Inherit(permit))
+}
+
+/// Shared by every door that duplicates the shell's stdin — here and
+/// `pipeline::launch::route_parent_stdin`.
+pub(crate) fn stdin_error(e: impl std::fmt::Display) -> Break {
+    Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
 }
 
 /// Wire the child's stdout to the plan's redirect file, if any.
@@ -331,7 +333,7 @@ mod tests {
         use crate::process::Wake;
 
         let mut shell = Shell::default();
-        let (r, _w) = os_pipe::pipe().expect("data pipe");
+        let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         let wake = Wake::new().expect("wake");
         shell.io.stdin = Source::Reader(SourceReader::pipe(r).interruptible(wake));
 

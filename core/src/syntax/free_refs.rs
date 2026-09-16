@@ -191,7 +191,7 @@ impl Redirect {
         scopes: &mut Vec<HashSet<String>>,
         out: &mut HashSet<String>,
     ) {
-        if let RedirectTarget::File(ast) = &self.target {
+        if let RedirectTarget::File(ast) = self.target() {
             ast.collect_free_refs(candidates, scopes, out);
         }
     }

@@ -93,102 +93,26 @@ impl WithinScope {
 
         for (k, v) in opts {
             match k.as_str() {
-                "env" => {
-                    let overrides = as_map(v, "within env")?;
-                    for k in overrides.keys() {
-                        if matches!(k.as_str(), "PWD" | "OLDPWD") {
-                            return Err(sig(format!(
-                                "within env: `{k}` is derived from the shell's working \
-                                 directory and cannot be set here; use `cd` to change the \
-                                 directory"
-                            )));
-                        }
-                    }
-                    let map = overrides
-                        .into_iter()
-                        .map(|(ek, ev)| {
-                            let sv = match ev {
-                                Value::String(s) => s,
-                                Value::Int(n) => n.to_string(),
-                                Value::Float(n) => crate::types::fmt_float(n),
-                                Value::Bool(b) => b.to_string(),
-                                other => {
-                                    return Err(sig(format!(
-                                        "within env: value for '{ek}' must be a scalar (string, int, float, or bool), got {}",
-                                        other.type_name()
-                                    )));
-                                }
-                            };
-                            Ok((ek, sv))
-                        })
-                        .collect::<Settled<HashMap<String, String>>>()?;
-                    env_overrides = Some(map);
-                }
-                "dir" => {
-                    let path = v.to_string();
-                    if path.is_empty() {
-                        return Err(sig("within dir: path cannot be empty"));
-                    }
-                    let rp = shell.resolve(&path);
-                    shell.check_fs_read(&rp)?;
-                    if !rp.as_path().is_dir() {
-                        return Err(sig(format!("within dir: {path}: not a directory")));
-                    }
-                    cwd = Some(rp.into_inner());
-                }
+                "env" => env_overrides = Some(parse_env(v)?),
+                "dir" => cwd = Some(parse_dir(v, shell)?),
+                // `handlers` and `handler` are independent: naming either
+                // installs a frame, naming neither leaves the stack alone.
                 "handlers" => {
-                    let map = as_map(v, "within handlers")?;
-                    let schemes = crate::typecheck::SessionSchemes {
-                        bindings: env.binding_schemes(),
-                        aliases: shell.context.handlers.alias_schemes(),
-                        builtins: shell.session.builtins.clone(),
-                    };
-                    entries = map
-                        .into_iter()
-                        .map(|(cmd, thunk_val)| {
-                            HandlerEntry::vet(cmd, thunk_val, schemes.clone(), HandlerRole::Scoped)
-                        })
-                        .collect::<Settled<Vec<HandlerEntry>>>()?;
+                    entries = parse_handlers(v, env, shell)?;
                     saw_handlers = true;
                 }
                 "handler" => {
-                    validate_handler_arity(v, 2, "within handler: catch-all")?;
-                    let Value::Thunk(closure) = v else {
-                        unreachable!("validate_handler_arity guarantees a lambda");
-                    };
-                    let schemes = crate::typecheck::SessionSchemes {
-                        bindings: env.binding_schemes(),
-                        aliases: shell.context.handlers.alias_schemes(),
-                        builtins: shell.session.builtins.clone(),
-                    };
-                    crate::typecheck::catch_all_emits_bytes(&closure.comp, schemes).map_err(
-                        |actual| {
-                            use crate::typecheck::fmt_ty;
-                            sig(format!(
-                                "within handler: catch-all reinterprets every external \
-                                 command, whose payload is its stdout, so its body has \
-                                 no separate value to return; its return type must be \
-                                 Unit, and the body returns {}",
-                                fmt_ty(&actual),
-                            ))
-                        },
-                    )?;
-                    catch_all = Some(v.clone());
+                    catch_all = Some(parse_catch_all(v, env, shell)?);
                     saw_handlers = true;
                 }
                 _ => return Err(sig(format!("within: unknown key '{k}'"))),
             }
         }
 
-        let handlers = if saw_handlers {
-            Some((entries, catch_all))
-        } else {
-            None
-        };
         Ok(Self {
             env_overrides,
             cwd,
-            handlers,
+            handlers: saw_handlers.then_some((entries, catch_all)),
         })
     }
 
@@ -217,6 +141,94 @@ impl WithinScope {
             handlers,
         }
     }
+}
+
+/// `env:` — a map of scalar overrides. `PWD`/`OLDPWD` are derived from the
+/// working directory, so setting them here would make the two disagree.
+fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
+    let overrides = as_map(v, "within env")?;
+    for k in overrides.keys() {
+        if matches!(k.as_str(), "PWD" | "OLDPWD") {
+            return Err(sig(format!(
+                "within env: `{k}` is derived from the shell's working directory and cannot be \
+                 set here; use `cd` to change the directory"
+            )));
+        }
+    }
+    overrides
+        .into_iter()
+        .map(|(name, value)| {
+            let text = match value {
+                Value::String(s) => s,
+                Value::Int(n) => n.to_string(),
+                Value::Float(n) => crate::types::fmt_float(n),
+                Value::Bool(b) => b.to_string(),
+                other => {
+                    return Err(sig(format!(
+                        "within env: value for '{name}' must be a scalar (string, int, float, or \
+                         bool), got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            Ok((name, text))
+        })
+        .collect()
+}
+
+/// `dir:` — resolved, permission-checked, and required to exist as a
+/// directory before the body runs rather than at the first command.
+fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<PathBuf> {
+    let path = v.to_string();
+    if path.is_empty() {
+        return Err(sig("within dir: path cannot be empty"));
+    }
+    let rp = shell.resolve(&path);
+    shell.check_fs_read(&rp)?;
+    if !rp.as_path().is_dir() {
+        return Err(sig(format!("within dir: {path}: not a directory")));
+    }
+    Ok(rp.into_inner())
+}
+
+/// What a handler body is typechecked against: the `within`'s own lexical
+/// environment, the aliases already in scope, and the session's builtins.
+fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes {
+    crate::typecheck::SessionSchemes {
+        bindings: env.binding_schemes(),
+        aliases: shell.context.handlers.alias_schemes(),
+        builtins: shell.session.builtins.clone(),
+    }
+}
+
+/// `handlers:` — one named handler per entry, each vetted against its
+/// command's scheme.
+fn parse_handlers(v: &Value, env: &Env, shell: &Shell) -> Settled<Vec<HandlerEntry>> {
+    let schemes = handler_schemes(env, shell);
+    as_map(v, "within handlers")?
+        .into_iter()
+        .map(|(cmd, thunk)| HandlerEntry::vet(cmd, thunk, schemes.clone(), HandlerRole::Scoped))
+        .collect()
+}
+
+/// `handler:` — the catch-all, which stands in for *every* external command
+/// and so must emit bytes rather than return a value.
+fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
+    validate_handler_arity(v, 2, "within handler: catch-all")?;
+    let Value::Thunk(closure) = v else {
+        unreachable!("validate_handler_arity guarantees a lambda");
+    };
+    crate::typecheck::catch_all_emits_bytes(&closure.comp, handler_schemes(env, shell)).map_err(
+        |actual| {
+            sig(format!(
+                "within handler: catch-all reinterprets every external command, whose payload is \
+                 its stdout, so its body has no separate value to return; its return type must be \
+                 Unit, and the body returns {}",
+                crate::typecheck::fmt_ty(&actual),
+            ))
+        },
+    )?;
+    Ok(v.clone())
 }
 
 /// A `within [dir: …]` override, distinguishing "this scope left `dir`

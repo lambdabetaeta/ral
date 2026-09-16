@@ -182,11 +182,13 @@ impl NormalizedPrefix {
 
     /// The surface form as a `Path` — the author's spelling, never the form
     /// containment is judged on; the gate matches [`Self::resolved_path`].
+    /// Private, so that is not merely documented: no other module can ask a
+    /// containment question of the wrong form.
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
     )]
-    pub(crate) fn surface_path(&self) -> &Path {
+    fn surface_path(&self) -> &Path {
         Path::new(&self.surface)
     }
 

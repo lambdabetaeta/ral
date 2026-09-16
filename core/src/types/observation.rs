@@ -182,14 +182,15 @@ impl WriteOutcome {
     }
 }
 
-/// Write modes only: a stdin door never settles as a write.
+/// Write modes only: `Redirect::new` builds no stdin door on fd 1 or 2, so
+/// no read mode ever reaches a write observation.
 fn mode_str(mode: RedirectMode) -> &'static str {
     match mode {
         RedirectMode::Write => "write",
         RedirectMode::Append => "append",
         RedirectMode::StreamWrite => "stream",
         RedirectMode::Read | RedirectMode::HereString => {
-            unreachable!("stdin doors never produce write observations")
+            unreachable!("`Redirect::new` admits a read mode only on fd 0")
         }
     }
 }

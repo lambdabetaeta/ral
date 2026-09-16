@@ -77,8 +77,9 @@ pub(crate) fn build_command(
 
 /// Spawn a standalone external child, then apply any active grant's post-spawn
 /// child limits.  Pipeline stages take the parallel path through
-/// `spawn_into_group` in `runtime/pipeline/launch.rs`: they join the group's
-/// pgid rather than lead their own, and their limits ride the group's job.
+/// `spawn_stage` / `launch_external_stage_direct` in `runtime/pipeline/launch.rs`:
+/// they join the group's pgid rather than lead their own, and their limits
+/// ride the group's job.
 pub(crate) fn spawn(
     cmd: &mut crate::process::Launch,
     pgid: crate::process::PgidPolicy,

@@ -10,7 +10,7 @@ mod source;
 mod terminal;
 
 pub(crate) use edge::{DeadEdge, Edge};
-pub use sink::{ByteBuffer, CapturedBytes, ChildStdioPlan, ExternalWrite, Sink};
+pub use sink::{ByteBuffer, CapturedBytes, ExternalWrite, Sink};
 pub(crate) use sink::{
     SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, str_strip_one_terminator,
     strip_trailing_newline, take_buffer, tee_into, tee_with_buffer,

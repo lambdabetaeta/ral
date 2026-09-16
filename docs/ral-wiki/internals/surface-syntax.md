@@ -54,7 +54,12 @@ quoted ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]). Both th
 parser (skipping the `Call` wrapper for a value head) and elaboration (through
 `Val::from_word`) read that one answer. Its dual is `quote.rs`'s
 `is_bare_word`: whatever the numeral grammar claims cannot be emitted bare, or
-printed text would come back as a value. The remaining literals are
+printed text would come back as a value. `is_bare_word` *lexes* rather than
+scanning characters, so it inherits `is_bare_char` and the positional splits
+together — which is why a metacharacter added to `is_bare_char` also starts
+being quoted on the way out, and why `&` (added when `echo hi&` was found to
+lex as one word ending in `&`) makes `http://h/?a=1&b=2` an emitted `'…'`.
+The remaining literals are
 *punctuation*, not words — `()` for unit beside `[]` and `[:]` — so no
 spelling of a name can collide with them.
 
@@ -72,6 +77,20 @@ refuses `$[x + 1]` asking whether `$x` was meant — the old sublanguage's best
 diagnostic, kept without its leaf grammar. The five operator forms —
 `Binary`, `Negate`, `Not`, `And`, `Or` — are `Ast` variants like any other;
 there is no `Expr` type, and `$[…]` leaves no node behind.
+
+**Newlines bend around a continuation, on both sides of it.** A trailing `|`
+or `?` promises a stage or a branch, so the parser skips the newlines after it
+and the REPL's continuation prompt is telling the truth when it asks for the
+next line (`needs_continuation` runs the real parser and reads the `ParseError`'s
+own `incomplete` verdict; `join_continuation` folds lines in with `'\n'`). A
+newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
+both parse. A `;` never continues anything.
+
+**Redirects are the three standard streams.** `parse_redirect` hands its fd,
+mode and target to `Redirect::new`, the AST type's only constructor, which
+admits exactly the forms ral has plumbing for and refuses the rest with a
+message — so no unmodelled fd shape exists anywhere downstream
+([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]).
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat
 enums ([[decisions/260530_ast-stays-flat|ast-stays-flat]]); no desugaring happens

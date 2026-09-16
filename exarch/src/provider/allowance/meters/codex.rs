@@ -34,9 +34,10 @@ pub(in crate::provider::allowance) fn read(
         let token = cell.lock_ignore_poison().clone();
         let request = oauth::request_headers(&token, "application/json")
             .into_iter()
-            .fold(crate::provider::tls::client().get(USAGE_URL), |r, (k, v)| {
-                r.header(k, v)
-            });
+            .fold(
+                crate::provider::tls::client().get(USAGE_URL),
+                |r, (k, v)| r.header(k, v),
+            );
         let response = request
             .send()
             .await

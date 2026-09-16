@@ -241,7 +241,7 @@ impl RunningChild {
                     self.name,
                     pid
                 );
-                self.sent = self.sent.max(Some(cause));
+                self.sent = Some(cause);
                 match self.terminate(&watch, cause) {
                     Some(o) => o,
                     None => loop {

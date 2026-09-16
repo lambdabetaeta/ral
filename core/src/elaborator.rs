@@ -96,7 +96,7 @@ impl Elaborator {
                 .into(),
             span: self.current_span,
             lex_kind: None,
-            incompleteness: None,
+            incomplete: false,
         });
         Val::Unit
     }
@@ -137,7 +137,7 @@ impl Elaborator {
                         ),
                         span: self.current_span,
                         lex_kind: None,
-                        incompleteness: None,
+                        incomplete: false,
                     });
                 }
                 IrPattern::Name(n.clone())
@@ -519,11 +519,11 @@ impl Elaborator {
                     .map(|a| match &a.item {
                         Ast::Spread(inner) => ValListElem::Spread(Spanned::with_span(
                             a.span,
-                            self.to_val(&inner.item, binds),
+                            self.with_span(a.span, |this| this.to_val(&inner.item, binds)),
                         )),
                         other => ValListElem::Single(Spanned::with_span(
                             a.span,
-                            self.to_val(other, binds),
+                            self.with_span(a.span, |this| this.to_val(other, binds)),
                         )),
                     })
                     .collect();
@@ -1007,13 +1007,13 @@ impl Elaborator {
         redirects
             .iter()
             .map(|r| {
-                let target = match &r.target {
+                let target = match r.target() {
                     RedirectTarget::File(a) => ValRedirectTarget::File(self.to_val(a, binds)),
                     RedirectTarget::Fd(n) => ValRedirectTarget::Fd(*n),
                 };
                 RedirectV {
-                    fd: r.fd,
-                    mode: r.mode,
+                    fd: r.fd(),
+                    mode: r.mode(),
                     target,
                 }
             })
@@ -1438,6 +1438,28 @@ mod tests {
             matches!(comp.item, CompKind::Try { .. }),
             "chain arm hoist leaked into the caller: expected a bare Try, got {:?}",
             comp.item
+        );
+    }
+
+    /// A sub-expression hoisted out of a command argument is emitted under
+    /// that argument's span, not the enclosing call's, so a runtime error in
+    /// it underlines the argument.
+    #[test]
+    fn a_hoisted_argument_keeps_its_own_span() {
+        let src = "echo $xs[9]";
+        let ast = parse(src).expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        let CompKind::Bind { comp: rhs, .. } = &comp.item else {
+            panic!(
+                "expected the index to hoist into a Bind, got {:?}",
+                comp.item
+            );
+        };
+        let span = rhs.span.expect("a hoisted argument must carry a span");
+        assert_eq!(
+            &src[span.start as usize..span.end as usize],
+            "$xs[9]",
+            "the hoist carried the whole call's span"
         );
     }
 

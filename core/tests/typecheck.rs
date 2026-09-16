@@ -2780,8 +2780,14 @@ fn a_block_parameter_is_known_from_its_call() {
 /// last-wins exception the checker declines to pick a direction at all.
 #[test]
 fn duplicate_key_is_refused() {
-    has_error("let m = [x: 1, x: \"two\"]\nreturn $m", "writes the field 'x' twice");
-    has_error("let m = [x: \"two\", x: 1]\nreturn $m", "writes the field 'x' twice");
+    has_error(
+        "let m = [x: 1, x: \"two\"]\nreturn $m",
+        "writes the field 'x' twice",
+    );
+    has_error(
+        "let m = [x: \"two\", x: 1]\nreturn $m",
+        "writes the field 'x' twice",
+    );
 }
 
 /// A `case` arm is *not* a record entry, so the last-wins rule stops at the

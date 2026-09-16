@@ -8,10 +8,25 @@ use std::io::{self, Read, Write};
 /// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
+/// The frame fuse, stated once and judged by both doors: a writer that would
+/// exceed it fails here, with a sentence, instead of putting a frame on the
+/// wire that the reader can only answer by severing mid-stream.
+fn fuse(len: usize) -> io::Result<u32> {
+    match u32::try_from(len) {
+        Ok(len) if len <= MAX_FRAME_LEN => Ok(len),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "subprocess: a frame of {len} bytes exceeds the maximum frame length of \
+                 {MAX_FRAME_LEN} bytes"
+            ),
+        )),
+    }
+}
+
 pub(crate) fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| io::Error::other("subprocess: frame exceeds 4 GiB"))?;
+    let len = fuse(bytes.len())?;
     let _no_sigpipe = sigpipe::Suppress::install();
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&bytes)?;
@@ -115,13 +130,7 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
             Ok(n) => got += n,
         }
     }
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_LEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("subprocess: frame length {len} exceeds max {MAX_FRAME_LEN}"),
-        ));
-    }
+    let len = fuse(u32::from_le_bytes(len_buf) as usize)?;
     let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body)?;
     Ok(Some(body))
@@ -219,7 +228,20 @@ mod tests {
         let err = read_frame::<_, String>(&mut reader).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            err.to_string().contains("exceeds max"),
+            err.to_string().contains("exceeds the maximum frame length"),
+            "unexpected diagnostic: {err}"
+        );
+    }
+
+    /// Both doors judge a body by the one fuse, so an oversized frame fails
+    /// at the writer rather than killing the peer that reads it.
+    #[test]
+    fn the_fuse_is_the_same_on_both_doors() {
+        assert_eq!(fuse(MAX_FRAME_LEN as usize).unwrap(), MAX_FRAME_LEN);
+        let err = fuse(MAX_FRAME_LEN as usize + 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("exceeds the maximum frame length"),
             "unexpected diagnostic: {err}"
         );
     }

@@ -146,18 +146,7 @@ impl Shell {
     /// sees a type and the name is applyable at the prompt.  Other values
     /// carry no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
-        let arm = match &value {
-            Value::Thunk(closure) => match closure.comp.arrow() {
-                Some((param, body)) => Some((Some(param), body)),
-                None => Some((None, &closure.comp)),
-            },
-            _ => None,
-        };
-        let scheme = arm
-            .map(|(param, body)| {
-                crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
-            })
-            .map(std::sync::Arc::new);
+        let scheme = self.value_scheme(&value);
         self.env.bind(name, Binding { value, scheme });
     }
 

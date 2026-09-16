@@ -25,19 +25,6 @@ use std::fmt;
 
 // ── Parse Error ──────────────────────────────────────────────────────────
 
-/// Why a parse failed because the input *stopped short* rather than being
-/// malformed — the REPL reads another line instead of reporting an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Incompleteness {
-    /// A string, balanced `{}` / `[]`, or `$(…)` ran past end of input —
-    /// exactly the kinds [`LexErrorKind::is_incomplete`] admits.
-    UnclosedLexeme,
-    BinderAwaitingRhs,
-    /// A `|`, `?`, `if`, `elsif`, or `else` was consumed and the input ran
-    /// out before the stage, branch, or body it demands.
-    AwaitingContinuation,
-}
-
 #[derive(Debug)]
 pub struct ParseError {
     pub message: String,
@@ -46,8 +33,11 @@ pub struct ParseError {
     /// Set for a lexer-originating failure; carries the structure the
     /// diagnostic layer needs to draw more than one label.
     pub(crate) lex_kind: Option<LexErrorKind>,
-    /// Set when the input merely ran short; drives REPL line continuation.
-    pub(crate) incompleteness: Option<Incompleteness>,
+    /// The parse failed because the input *stopped short* rather than being
+    /// malformed — an unclosed lexeme, a `let` still awaiting its right-hand
+    /// side, or a consumed `|` / `?` / `if` / `elsif` / `else` whose stage,
+    /// branch, or body never arrived.  Drives REPL line continuation.
+    pub(crate) incomplete: bool,
 }
 
 impl fmt::Display for ParseError {
@@ -66,15 +56,11 @@ impl From<ParseError> for types::Error {
 
 impl From<LexError> for ParseError {
     fn from(e: LexError) -> Self {
-        let incompleteness = e
-            .kind
-            .is_incomplete()
-            .then_some(Incompleteness::UnclosedLexeme);
         Self {
             message: e.kind.message(),
             span: Some(e.span),
+            incomplete: e.kind.is_incomplete(),
             lex_kind: Some(e.kind),
-            incompleteness,
         }
     }
 }
@@ -92,13 +78,13 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
 /// Returns `true` when `input` is incomplete and the user's next line should
 /// be joined to it before parsing.
 ///
-/// Runs the real parser and reads its own [`Incompleteness`] verdict rather
-/// than guessing from the raw text.
+/// Runs the real parser and reads its own verdict rather than guessing from
+/// the raw text.
 pub fn needs_continuation(input: &str) -> bool {
     matches!(
         parse(input),
         Err(ParseError {
-            incompleteness: Some(_),
+            incomplete: true,
             ..
         })
     )
@@ -113,7 +99,12 @@ pub(crate) fn parse_with(
     file: crate::source::FileId,
 ) -> Result<Vec<Stmt>, ParseError> {
     let tokens = lexer::lex_with(source, file)?;
-    Parser::run_complete(tokens, Parser::parse_program)
+    Parser::run_complete(
+        tokens,
+        Span::point(file, 0),
+        trailing_input,
+        Parser::parse_program,
+    )
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────
@@ -128,6 +119,10 @@ enum SepFlow {
 struct Parser {
     tokens: Vec<(Token, Span)>,
     pos: usize,
+    /// Where the stream came from: the `$[…]` or `$(…)` token for a
+    /// sub-stream, the file's start at the top level.  A sub-stream carries
+    /// no `Eof`, so an empty one has no token to point at.
+    at: Span,
     /// Descent depth, maintained only by [`Parser::nested`].  Values,
     /// arithmetic, and patterns each pass through one guarded chokepoint per
     /// level, so this one counter bounds all three.
@@ -135,34 +130,26 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(tokens: Vec<(Token, Span)>) -> Self {
-        Self {
-            tokens,
-            pos: 0,
-            depth: 0,
-        }
-    }
-
     /// Parse a token stream and require that `body` consumed all of it.  The
     /// sole constructor, so no entry point — top level or sub-stream — can let
-    /// a production that stops early silently drop the remainder.
+    /// a production that stops early silently drop the remainder.  `leftover`
+    /// says what an unconsumed token means for this particular stream.
     fn run_complete<T>(
         tokens: Vec<(Token, Span)>,
+        at: Span,
+        leftover: fn(&Token) -> String,
         body: impl FnOnce(&mut Self) -> Result<T, ParseError>,
     ) -> Result<T, ParseError> {
-        let mut parser = Self::new(tokens);
+        let mut parser = Self {
+            tokens,
+            pos: 0,
+            at,
+            depth: 0,
+        };
         let value = body(&mut parser)?;
         if parser.peek() != &Token::Eof {
-            // `parse_program` stops at `}` without consuming it, so a leftover
-            // one means an unmatched brace — which may sit mid-program, where
-            // "trailing input" would be doubly false.
-            if parser.peek() == &Token::RBrace {
-                return Err(parser.error("unmatched `}` — no enclosing block is open"));
-            }
-            let found = parser.peek().clone();
-            return Err(parser.error(format!(
-                "trailing input: unexpected {found} after the parse completed"
-            )));
+            let message = leftover(parser.peek());
+            return Err(parser.error(message));
         }
         Ok(value)
     }
@@ -188,13 +175,14 @@ impl Parser {
         self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t)
     }
 
-    /// Span of the current token, or of the last one past the end.  The lexer
-    /// always emits an `Eof`, so only an empty vector reaches the fallback.
+    /// Span of the current token, of the last one past the end, or — for an
+    /// empty sub-stream, which has no tokens at all — of the `$[…]` / `$(…)`
+    /// this stream came out of.
     fn span(&self) -> Span {
         self.tokens
             .get(self.pos)
             .or_else(|| self.tokens.last())
-            .map_or_else(|| Span::point(crate::source::FileId::DUMMY, 0), |(_, s)| *s)
+            .map_or(self.at, |(_, s)| *s)
     }
 
     fn advance(&mut self) -> &Token {
@@ -240,15 +228,15 @@ impl Parser {
             message: message.into(),
             span: Some(self.span()),
             lex_kind: None,
-            incompleteness: None,
+            incomplete: false,
         }
     }
 
     /// Like [`Self::error`], but the REPL reads another line instead of
     /// reporting it.
-    fn incomplete(&self, why: Incompleteness, message: impl Into<String>) -> ParseError {
+    fn incomplete(&self, message: impl Into<String>) -> ParseError {
         ParseError {
-            incompleteness: Some(why),
+            incomplete: true,
             ..self.error(message)
         }
     }
@@ -259,7 +247,7 @@ impl Parser {
             message: message.into(),
             span: Some(span),
             lex_kind: None,
-            incompleteness: None,
+            incomplete: false,
         }
     }
 
@@ -268,10 +256,7 @@ impl Parser {
     /// mid-typing, not a dangling operator.
     fn require_continuation(&self, what: &str) -> Result<(), ParseError> {
         if self.peek() == &Token::Eof {
-            return Err(self.incomplete(
-                Incompleteness::AwaitingContinuation,
-                format!("expected {what} after the continuation"),
-            ));
+            return Err(self.incomplete(format!("expected {what} after the continuation")));
         }
         Ok(())
     }
@@ -368,8 +353,10 @@ impl Parser {
         })
     }
 
-    /// Consume `?` with at most one preceding newline and none after; rewinds
-    /// and returns false if no `?` follows.
+    /// Consume `?` with at most one preceding newline and any number after;
+    /// rewinds and returns false if no `?` follows.  A trailing `?` is a
+    /// continuation exactly as a trailing `|` is, so the REPL's continuation
+    /// prompt is telling the truth rather than baiting the user.
     fn eat_chain_question(&mut self) -> bool {
         let save = self.pos;
         if self.peek() == &Token::Newline {
@@ -377,6 +364,7 @@ impl Parser {
         }
         if self.peek() == &Token::Question {
             self.advance();
+            self.skip_newlines();
             true
         } else {
             self.pos = save;
@@ -729,10 +717,7 @@ impl Parser {
         // The RHS may start on the next line: `let x =\n  expr`.
         self.skip_newlines();
         if self.peek() == &Token::Eof {
-            return Err(self.incomplete(
-                Incompleteness::BinderAwaitingRhs,
-                "expected the right-hand side of the `let` binding",
-            ));
+            return Err(self.incomplete("expected the right-hand side of the `let` binding"));
         }
         let (value_span, value) = self.capture_span(Self::parse_chain)?;
         Ok(Some(Ast::Let {
@@ -766,9 +751,9 @@ impl Parser {
                 p.advance();
                 Ok(Pattern::Wildcard)
             }
-            Token::Word(Word::Plain(name)) if is_reserved(name) => Err(p.error(format!(
-                "'{name}' is a reserved keyword and cannot be used as a binding name"
-            ))),
+            Token::Word(Word::Plain(name)) if is_reserved(name) => {
+                Err(p.error(crate::syntax::reserved_keyword_message(name)))
+            }
             Token::Word(Word::Plain(name)) if lexer::is_ident(name) => {
                 let name = name.clone();
                 p.advance();
@@ -816,9 +801,7 @@ impl Parser {
                     return Err(p.error("expected name after '...'"));
                 };
                 if is_reserved(&name) {
-                    return Err(p.error(format!(
-                        "'{name}' is a reserved keyword and cannot be used as a binding name"
-                    )));
+                    return Err(p.error(crate::syntax::reserved_keyword_message(&name)));
                 }
                 if !lexer::is_ident(&name) {
                     return Err(p.error(
@@ -977,44 +960,29 @@ impl Parser {
             } => {
                 let op_span = self.span();
                 self.advance();
-                if mode == RedirectMode::HereString && fd.is_some_and(|n| n != 0) {
-                    return Err(Self::error_at(
-                        op_span,
-                        "`<<` always feeds stdin — drop the file-descriptor prefix",
-                    ));
-                }
-                // Reads and here-strings feed fd 0; everything else writes fd 1.
-                let default_fd = u32::from(!matches!(
-                    mode,
-                    RedirectMode::Read | RedirectMode::HereString
-                ));
-                let target = if let Some(tfd) = target_fd {
-                    RedirectTarget::Fd(tfd)
+                let (target, word_span) = if let Some(tfd) = target_fd {
+                    (RedirectTarget::Fd(tfd), op_span)
                 } else {
                     let (word_span, word) = self.capture_span(Self::parse_word)?;
-                    if mode == RedirectMode::HereString
-                        && let Ast::Word(w) = &word
-                    {
-                        let message: String = match w {
-                            Word::Plain(_) => "ral has no heredocs: `<<` feeds a string to \
-                                 stdin. Use a raw string: `cmd << #' ... '#`, \
-                                 which may use newlines"
-                                .into(),
-                            Word::Slash(_) | Word::Tilde(_) => {
-                                "`<<` feeds a string to stdin, not a file — \
-                                 to read a file into stdin, use `< path`"
-                                    .into()
-                            }
-                        };
-                        return Err(Self::error_at(word_span, message));
-                    }
-                    RedirectTarget::File(Box::new(word))
+                    (RedirectTarget::File(Box::new(word)), word_span)
                 };
-                Ok(Redirect {
-                    fd: fd.unwrap_or(default_fd),
-                    mode,
-                    target,
-                })
+                // The fd rule first: `1<< x` is a misplaced fd, not a heredoc.
+                let redirect =
+                    Redirect::new(fd, mode, target).map_err(|m| Self::error_at(op_span, m))?;
+                if mode == RedirectMode::HereString
+                    && let RedirectTarget::File(w) = redirect.target()
+                    && let Ast::Word(w) = w.as_ref()
+                {
+                    let message = match w {
+                        Word::Plain(_) => crate::syntax::NO_HEREDOCS,
+                        Word::Slash(_) | Word::Tilde(_) => {
+                            "`<<` feeds a string to stdin, not a file — \
+                             to read a file into stdin, use `< path`"
+                        }
+                    };
+                    return Err(Self::error_at(word_span, message));
+                }
+                Ok(redirect)
             }
             _ => Err(self.error("expected redirect")),
         }
@@ -1117,16 +1085,18 @@ impl Parser {
                 Ok(Ast::Literal(s))
             }
             Token::DoubleQuoted(parts) => {
+                let at = self.span();
                 self.advance();
-                Self::parse_interpolation_parts(&parts)
+                Self::parse_interpolation_parts(&parts, at)
             }
             Token::Variable(name) => {
                 self.advance();
                 Ok(Ast::Variable(name))
             }
             Token::Expr(tokens) => {
+                let at = self.span();
                 self.advance();
-                parse_expr_block(tokens)
+                parse_expr_block(tokens, at)
             }
             Token::Caret => Err(self.error("'^name' is only valid in command-head position")),
             Token::Bang => self.parse_bang(),
@@ -1325,7 +1295,10 @@ impl Parser {
     /// Lower the segments of a double-quoted string.  A splice is the tokens
     /// it would be outside the string, and parses as the same atom; their
     /// spans still address the outer source.
-    fn parse_interpolation_parts(parts: &[Spanned<StringPart>]) -> Result<Ast, ParseError> {
+    fn parse_interpolation_parts(
+        parts: &[Spanned<StringPart>],
+        at: Span,
+    ) -> Result<Ast, ParseError> {
         if parts.len() == 1
             && let StringPart::Literal(s) = &parts[0].item
         {
@@ -1336,7 +1309,12 @@ impl Parser {
         for part in parts {
             let segment = match &part.item {
                 StringPart::Literal(s) => Ast::Literal(s.clone()),
-                StringPart::Splice(tokens) => Self::run_complete(tokens.clone(), Self::parse_atom)?,
+                StringPart::Splice(tokens) => Self::run_complete(
+                    tokens.clone(),
+                    part.span.unwrap_or(at),
+                    trailing_input,
+                    Self::parse_atom,
+                )?,
             };
             ast_parts.push(Spanned::with_span(part.span, segment));
         }
@@ -1455,7 +1433,7 @@ fn numeric_operand(operand: &Spanned<Box<Ast>>) -> Result<(), ParseError> {
             },
             span: operand.span,
             lex_kind: None,
-            incompleteness: None,
+            incomplete: false,
         }),
         _ => Ok(()),
     }
@@ -1513,7 +1491,7 @@ fn lower_map_entries(
                 },
                 span: a.span,
                 lex_kind: None,
-                incompleteness: None,
+                incomplete: false,
             }),
         })
         .collect()
@@ -1537,17 +1515,27 @@ fn check_key_alphabet(
     Ok(())
 }
 
-/// Parse the pre-lexed body of `$[…]` as one expression.
-fn parse_expr_block(tokens: Vec<(Token, Span)>) -> Result<Ast, ParseError> {
-    let mut parser = Parser::new(tokens);
-    let expr = parser.parse_expr_prec(0)?;
-    if parser.peek() != &Token::Eof {
-        let found = parser.peek().clone();
-        return Err(parser.error(format!(
-            "expected an operator before {found} — `$[…]` holds one expression"
-        )));
+/// What a token the parse never reached means for a whole program or a
+/// `$(…)` splice.
+fn trailing_input(found: &Token) -> String {
+    // `parse_program` stops at `}` without consuming it, so a leftover one
+    // means an unmatched brace — which may sit mid-program, where "trailing
+    // input" would be doubly false.
+    if *found == Token::RBrace {
+        return "unmatched `}` — no enclosing block is open".into();
     }
-    Ok(*expr.item)
+    format!("trailing input: unexpected {found} after the parse completed")
+}
+
+/// Parse the pre-lexed body of `$[…]` as one expression.  `at` is the `$[…]`
+/// token itself, the only span an empty body can be reported against.
+fn parse_expr_block(tokens: Vec<(Token, Span)>, at: Span) -> Result<Ast, ParseError> {
+    Parser::run_complete(
+        tokens,
+        at,
+        |found| format!("expected an operator before {found} — `$[…]` holds one expression"),
+        |p| Ok(*p.parse_expr_prec(0)?.item),
+    )
 }
 
 /// Names no binding may take: a keyword by [`crate::syntax::is_keyword`], or a
@@ -2088,6 +2076,19 @@ mod tests {
     fn parse_chain_continues_across_newline_before_question() {
         let ast = unwrap_stmts(parse("a\n? b").unwrap());
         assert_eq!(ast, vec![Ast::Chain(vec![sp(plain("a")), sp(plain("b"))])]);
+    }
+
+    /// A trailing `?` continues the chain, as a trailing `|` does — which is
+    /// what the REPL's continuation prompt already promises.
+    #[test]
+    fn parse_chain_continues_across_newline_after_question() {
+        for src in ["a ?\nb", "a ?\n\n  b", "a\n?\nb"] {
+            assert_eq!(
+                unwrap_stmts(parse(src).unwrap()),
+                vec![Ast::Chain(vec![sp(plain("a")), sp(plain("b"))])],
+                "{src:?}"
+            );
+        }
     }
 
     #[test]
@@ -2921,11 +2922,11 @@ mod tests {
         match &ast[0] {
             Ast::Call { redirects, .. } => {
                 assert_eq!(redirects.len(), 1);
-                assert_eq!(redirects[0].fd, 0);
-                assert_eq!(redirects[0].mode, RedirectMode::HereString);
+                assert_eq!(redirects[0].fd(), 0);
+                assert_eq!(redirects[0].mode(), RedirectMode::HereString);
                 assert_eq!(
-                    redirects[0].target,
-                    RedirectTarget::File(Box::new(Ast::Literal("body".into())))
+                    redirects[0].target(),
+                    &RedirectTarget::File(Box::new(Ast::Literal("body".into())))
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -2938,10 +2939,10 @@ mod tests {
         let ast = unwrap_stmts(parse("cat << $body").unwrap());
         match &ast[0] {
             Ast::Call { redirects, .. } => {
-                assert_eq!(redirects[0].mode, RedirectMode::HereString);
+                assert_eq!(redirects[0].mode(), RedirectMode::HereString);
                 assert_eq!(
-                    redirects[0].target,
-                    RedirectTarget::File(Box::new(Ast::Variable("body".into())))
+                    redirects[0].target(),
+                    &RedirectTarget::File(Box::new(Ast::Variable("body".into())))
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -2975,7 +2976,7 @@ mod tests {
     fn herestring_fd_prefix() {
         let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
         match &ast[0] {
-            Ast::Call { redirects, .. } => assert_eq!(redirects[0].fd, 0),
+            Ast::Call { redirects, .. } => assert_eq!(redirects[0].fd(), 0),
             other => panic!("expected command, got {other:?}"),
         }
         let err = parse("cat 2<< #'x'#").expect_err("fd 2 herestring must not parse");

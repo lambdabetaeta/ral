@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 /// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
 /// marker, so a high-volume capture has to become an explicit redirect.  Two
 /// readings of the one event: a detached worker keeps the marked prefix, and a
-/// capture whose bytes are about to become a value refuses it (`eval_capture`).
+/// capture whose bytes are about to become a value refuses it
+/// (`evaluator::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
@@ -57,7 +58,7 @@ pub type ByteBuffer = Arc<CapturedBytes>;
 ///
 /// Only [`Sink::child_stdout`] and [`Sink::child_stderr`] decide which, so no
 /// caller reasons about "inherit, pipe, pump, tee" on its own.
-pub struct ChildStdioPlan {
+pub(crate) struct ChildStdioPlan {
     pub(crate) stdio: crate::process::StdioSpec,
     pub(crate) pump: Option<Sink>,
 }
@@ -520,7 +521,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::sync::Arc;
 
-        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
         let mut sink = Sink::Pipe {
             writer: Arc::new(writer),
             wake: Wake::new().expect("wake"),
@@ -540,7 +541,7 @@ mod tests {
         use std::io::Read;
         use std::sync::Arc;
 
-        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
         let sink = Sink::Pipe {
             writer: Arc::new(writer),
             wake: Wake::new().expect("wake"),
@@ -570,7 +571,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
         let writer = Arc::new(writer);
         let sink = Sink::Pipe {
             writer: writer.clone(),

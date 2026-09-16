@@ -159,7 +159,7 @@ impl BindingLedger {
         armed.last_used.insert(name.to_string(), armed.epoch);
     }
 
-    /// The armed lease — read by `Shell::install_scope_binding` for its
+    /// The armed lease — read by `Shell::note_define` for its
     /// large-binding check.
     pub(crate) fn lease(&self) -> Option<BindingLease> {
         self.0.as_ref().map(|armed| armed.lease)
@@ -295,7 +295,7 @@ mod tests {
 
 /// Run-level tests for the install chokepoint and the use-observation
 /// harvest: every persistent top-level install routes through
-/// `Shell::install_scope_binding` and gets leased while deeper-scope writes
+/// `Shell::note_define` and gets leased while deeper-scope writes
 /// are recorded nowhere, and a committed run's referenced names renew at both
 /// harvest seams — `run`'s own compiled program, and `check_source`'s /
 /// `compile_toplevel`'s runtime-compiled loads. Driven through the public

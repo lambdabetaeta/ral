@@ -214,10 +214,20 @@ impl Default for InternCtx {
     }
 }
 
+/// One wording for the one fault, raised from both the ordering pass and the
+/// rehydration that reads the table it built.
+fn unresolved_scope_ref(id: u32) -> Error {
+    Error::new(
+        format!("serial: scope ref {id} out of range or unresolved"),
+        1,
+    )
+}
+
 /// Whether `value` reaches a `Handle` without crossing a closure boundary — a
-/// closure's captured env is interned through `intern_scope`, which drops
-/// handle-bearing bindings there.  The match is exhaustive on purpose: a new
-/// `Value` variant must be classified rather than pass as handle-free.
+/// closure's captured env is interned through [`InternCtx::intern_env`], and
+/// [`InternCtx::finish`] drops handle-bearing bindings from the row it fills.
+/// The match is exhaustive on purpose: a new `Value` variant must be
+/// classified rather than pass as handle-free.
 fn value_carries_handle(value: &Value) -> bool {
     match value {
         Value::Handle(_) => true,
@@ -292,10 +302,7 @@ impl WireDecoder {
         for set in &deps {
             for &d in set {
                 if d as usize >= n {
-                    return Err(Error::new(
-                        format!("serial: scope ref {d} out of range or unresolved"),
-                        1,
-                    ));
+                    return Err(unresolved_scope_ref(d));
                 }
             }
         }
@@ -667,15 +674,7 @@ impl SerialEnvSnapshot {
             .rows
             .get(self.bindings as usize)
             .and_then(std::clone::Clone::clone)
-            .ok_or_else(|| {
-                Error::new(
-                    format!(
-                        "serial: scope ref {} out of range or unresolved",
-                        self.bindings
-                    ),
-                    1,
-                )
-            })?;
+            .ok_or_else(|| unresolved_scope_ref(self.bindings))?;
         Ok(Env::from_parts(
             Arc::clone(&dec.natives),
             Arc::clone(&dec.prelude),
@@ -854,7 +853,7 @@ mod tests {
     }
 
     /// Encoding walks the chain as a queue, so a quarter-megabyte stack
-    /// encodes fifty thousand links.  (Regression: `intern_scope` and
+    /// encodes fifty thousand links.  (Regression: `intern_env` and
     /// `from_runtime` recursed into each other once per link, and a helper
     /// stage died on a few hundred lines of `from-lines`.)
     #[test]

@@ -8,7 +8,7 @@ use super::audit::observe;
 use crate::io::Sink;
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
+use crate::types::{Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 /// What the body's result means for the writes this frame staged.
 #[derive(Clone, Copy)]
@@ -76,10 +76,16 @@ fn install_sink_redirects(
     let mut stdout_changed = false;
     let mut stderr_changed = false;
 
+    // The arms are ral's whole fd model; `Redirect::new` admits no other
+    // shape, so there is no fall-through to write.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "two distinct reasons to install nothing: fd 0 is parked elsewhere, an identity dup names the stream it already is"
+    )]
     for EvalRedirectV { fd, mode, target } in redirects {
         match (*fd, target) {
-            (0, EvalRedirect::File(_))
-                if matches!(mode, RedirectMode::Read | RedirectMode::HereString) => {}
+            // fd 0 is already parked on `shell.io.stdin`.
+            (0, EvalRedirect::File(_)) => {}
             (1, EvalRedirect::File(path)) => {
                 stdout = open_redirect_sink(path, *mode, shell, intents)?;
                 stdout_changed = true;
@@ -89,38 +95,14 @@ fn install_sink_redirects(
                 stderr = open_redirect_sink(path, mode, shell, intents)?;
                 stderr_changed = true;
             }
-            (1, EvalRedirect::Fd(1)) => {
-                stdout = stdout.clone();
-                stdout_changed = true;
-            }
-            // Only 2→1: `1>&2` is not in the surface, so nothing can build it.
             (2, EvalRedirect::Fd(1)) => {
                 stderr = stdout.clone();
                 stderr_changed = true;
             }
-            (2, EvalRedirect::Fd(2)) => {
-                stderr = stderr.clone();
-                stderr_changed = true;
-            }
-            (1 | 2, EvalRedirect::Fd(other)) => {
-                return Err(Break::Error(Error::new(
-                    format!(
-                        "redirect: fd {fd} cannot be routed to fd {other} \
-                         inside an in-process ral frame"
-                    ),
-                    1,
-                )));
-            }
-            // The lexer admits no fd past 2, so what is left is fd 0 written
-            // to or duplicated onto — standard input has no such shape.
-            _ => {
-                return Err(Break::Error(Error::new(
-                    "redirect: standard input can only be read — \
-                     `< file` opens a file on it, `<< 'text'` feeds it a string"
-                        .to_string(),
-                    1,
-                )));
-            }
+            // `1>&1` / `2>&2`: naming the stream you already are. Rebinding
+            // would divert `ambient` under a capture, for no gain.
+            (1, EvalRedirect::Fd(1)) | (2, EvalRedirect::Fd(2)) => {}
+            _ => unreachable!("`Redirect::new` builds no other fd form"),
         }
     }
 
@@ -221,10 +203,8 @@ impl RedirectState {
                             Ok(()) => outcome = WriteOutcome::Committed,
                             Err(e) => {
                                 if commit_err.is_ok() {
-                                    commit_err = Err(Break::Error(Error::new(
-                                        format!("atomic write: {e}"),
-                                        1,
-                                    )));
+                                    commit_err =
+                                        Err(crate::runtime::command::atomic_write_error(&e));
                                 }
                                 outcome = WriteOutcome::Failed;
                             }
@@ -322,11 +302,9 @@ where
     // both paths get a clean shell to write through.
     state.tear_down(shell);
     let settled = state.settle_writes(fate, mooring, shell);
-    match result {
-        Ok(v) => {
-            settled?;
-            Ok(v)
-        }
-        Err(brk) => Err(brk),
-    }
+    // The body's own break outranks a failed commit: `settled` is only
+    // consulted once the body has succeeded.
+    let v = result?;
+    settled?;
+    Ok(v)
 }

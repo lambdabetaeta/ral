@@ -37,7 +37,7 @@ pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
     clippy::disallowed_methods,
     reason = "[silent:git-dir-discovery] reads the .git worktree pointer and the git directory's answering claim at session startup, to discover the actual git directory; not turn-time I/O"
 )]
-pub fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, PolicyError> {
+pub(crate) fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, PolicyError> {
     let Some(dot_git) = find_git_entry(cwd) else {
         return Ok(None);
     };

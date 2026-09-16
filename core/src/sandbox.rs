@@ -63,16 +63,20 @@ pub(crate) use diag::{augment_failure, sample_descendants};
 /// Whether this platform can enforce `net: false`: Linux via `--unshare-net`,
 /// macOS via deny-default Seatbelt, Windows via an `AppContainer` with no
 /// network capability SID, which cannot open a socket.
-fn net_enforced() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    {
-        true
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        false
-    }
-}
+const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
+
+/// Whether this platform's backend carries the exec allow-list into the
+/// kernel, per the rendering named in this module's header: Seatbelt's
+/// `process-exec` clause, Landlock's `Execute` ruleset.  Windows has no
+/// counterpart, so an exec opinion there is the in-process gate's alone.
+///
+/// `capability::sandbox::sandbox_projection` reads this to decide whether an
+/// exec-only grant is worth an OS sandbox at all, so a backend that gains
+/// exec rendering switches the trigger on here, beside the law it renders,
+/// rather than in a second `cfg` that can be forgotten.  Landlock absent from
+/// a running kernel is *not* an exception: the envelope is still built and
+/// `linux::landlock::enter` simply has nothing to enter.
+pub(crate) const EXEC_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 /// The one refusal for "this host cannot establish the confinement the active
 /// grant asks for".  Whether it is an axis no backend here enforces, an
@@ -87,7 +91,7 @@ pub(crate) fn confinement_unavailable(reason: &str) -> crate::types::Error {
 /// enforce.  Offline is the only such axis: `net: false` must refuse rather
 /// than run somewhere the bit is silently ignored.
 pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), &'static str> {
-    if !projection.net && !net_enforced() {
+    if !projection.net && !NET_ENFORCED {
         return Err(
             "offline mode (net: false) is unsupported on this platform: \
                     no kernel network enforcement exists",
@@ -441,7 +445,7 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SANDBOX_PROJECTION_FLAG, net_enforced, projection_enforceable, strip_policy_arg};
+    use super::{NET_ENFORCED, SANDBOX_PROJECTION_FLAG, projection_enforceable, strip_policy_arg};
     use crate::types::SandboxProjection;
 
     #[test]
@@ -463,7 +467,7 @@ mod tests {
             net: false,
             exec: crate::types::ExecProjection::default(),
         };
-        assert_eq!(projection_enforceable(&p_net_false).is_ok(), net_enforced());
+        assert_eq!(projection_enforceable(&p_net_false).is_ok(), NET_ENFORCED);
     }
 
     #[cfg(windows)]

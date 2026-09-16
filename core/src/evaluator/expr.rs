@@ -1,6 +1,6 @@
-//! Arithmetic, comparison, negation, and subscripting: the leaves `comp.rs`
-//! dispatches `CompKind::Binary`, `CompKind::Negate`, `CompKind::Not`, and
-//! `CompKind::Index` to.
+//! Arithmetic, comparison, negation, and subscripting: the leaves
+//! `machine::eval_rules` dispatches `CompKind::Binary`, `CompKind::Negate`,
+//! `CompKind::Not`, and `CompKind::Index` to.
 
 use super::val::close;
 use crate::ir::Val;
@@ -86,15 +86,13 @@ pub(crate) fn eval_not(val: &Val, env: &Env) -> Result<Value, Error> {
 
 /// `-v` on a number, `Int` overflow-checked as [`arithmetic`] is.
 pub(crate) fn eval_negate(val: &Val, env: &Env) -> Result<Value, Error> {
-    let v = close(val, env)?;
-    require_numeric(&v)?;
-    match v {
+    match close(val, env)? {
         Value::Int(n) => n
             .checked_neg()
             .map(Value::Int)
             .ok_or_else(|| Error::new(format!("integer overflow: -{n} exceeds i64 range"), 1)),
-        // Cleared `require_numeric` and is not an `Int`, so `as_float` holds.
-        other => Ok(Value::Float(-other.as_float().unwrap())),
+        Value::Float(f) => Ok(Value::Float(-f)),
+        other => Err(not_numeric(&other)),
     }
 }
 
@@ -105,18 +103,24 @@ pub(crate) fn eval_binary(op: BinaryOp, lhs: &Val, rhs: &Val, env: &Env) -> Sett
     binop(&l, op, &r)
 }
 
+/// The one wording for a non-numeric operand, shared by `-v` and by
+/// `arithmetic`'s two-operand check.
+fn not_numeric(val: &Value) -> Error {
+    Error::new(
+        format!(
+            "expected Int or Float in arithmetic, got {} '{}'",
+            val.type_name(),
+            val
+        ),
+        1,
+    )
+    .with_hint("use int or float to convert")
+}
+
 fn require_numeric(val: &Value) -> Result<(), Error> {
     match val {
         Value::Int(_) | Value::Float(_) => Ok(()),
-        _ => Err(Error::new(
-            format!(
-                "expected Int or Float in arithmetic, got {} '{}'",
-                val.type_name(),
-                val
-            ),
-            1,
-        )
-        .with_hint("use int or float to convert")),
+        _ => Err(not_numeric(val)),
     }
 }
 

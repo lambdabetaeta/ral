@@ -199,11 +199,13 @@ impl Env {
 
     /// Largest binding's shallow byte estimate, session wins, no value cloned.
     pub(crate) fn largest_shallow_size(&self) -> usize {
-        self.fold_union(|b| b.value.shallow_size())
-            .into_iter()
-            .map(|(_, size)| size)
-            .max()
-            .unwrap_or(0)
+        let session = self.bindings.values().map(|b| b.value.shallow_size());
+        let shadowed_prelude = self
+            .prelude
+            .iter()
+            .filter(|(k, _)| !self.bindings.contains_key(k.as_str()))
+            .map(|(_, b)| b.value.shallow_size());
+        session.chain(shadowed_prelude).max().unwrap_or(0)
     }
 
     /// Every binding across prelude and session, session wins.

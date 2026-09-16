@@ -312,6 +312,13 @@ impl Shell {
     /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
     /// this run's foreground frame minted under `under`.
     fn dispatch(&mut self, under: &ForegroundScope, mut req: RunRequest<'_>) -> RunReport {
+        // Armed *before* compiling, so the limit bounds compile and typecheck
+        // too: `compile_run`'s `process::clear` touches only the signal
+        // escalation count, never the reaper. The guard disarms on drop, so
+        // an early `Static` return leaves no entry.
+        let foreground = self.durable_root().foreground(under);
+        let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
+
         match req.run.program {
             Program::Source(ref src) => {
                 // The two session ledgers' clock: one tick per source dispatch
@@ -319,13 +326,6 @@ impl Shell {
                 // their scratch without renewing it. Both no-op when unarmed.
                 self.local.bindings.tick();
                 self.local.workers.tick_epoch();
-
-                // Armed *before* compiling, so the limit bounds compile and
-                // typecheck too: `compile_run`'s `process::clear` touches only
-                // the signal escalation count, never the reaper. The guard
-                // disarms on drop, so an early `Static` return leaves no entry.
-                let foreground = self.durable_root().foreground(under);
-                let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
                 let (top, single_command, root) = match compile_run(self, src, &req.run.script_name)
                 {
@@ -367,9 +367,6 @@ impl Shell {
                 // The host conveys data, not closures: hook args are
                 // first-order by type (`FOValue`).
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
-
-                let foreground = self.durable_root().foreground(under);
-                let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
                 // Capture and terminal authority are the registered hook's to
                 // decide, not the dispatching host's.
@@ -572,7 +569,7 @@ impl Drop for IoLoan<'_> {
 /// [`Mooring`] the caller builds separately.
 pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Source) -> Io {
     let mut run_io = Io {
-        stdin: Source::Terminal,
+        stdin,
         stdout: shell.io.stdout.clone(),
         ambient: shell.io.ambient.clone(),
         stderr: shell.io.stderr.clone(),
@@ -580,7 +577,6 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
         terminal: shell.io.terminal,
         launch_role: shell.io.launch_role,
     };
-    run_io.stdin = stdin;
     if let Some((stdout, stderr)) = capture {
         // The run's buffer is the whole of what the world sees of it, so it is
         // the visible stream as well as the payload sink.

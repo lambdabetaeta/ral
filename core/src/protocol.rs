@@ -211,17 +211,12 @@ impl EnquiryError {
 }
 
 /// Front-end → engine out-of-band control frame.
+///
+/// One verb today. It stays an enum because the tag is the wire encoding: a
+/// second verb must be able to arrive without changing how `Cancel` encodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
     Cancel(DispatchId),
-    Resize(Winsize),
-}
-
-/// Terminal window size in rows × columns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Winsize {
-    pub(crate) rows: u16,
-    pub(crate) cols: u16,
 }
 
 // ── Terminal endpoint ─────────────────────────────────────────────────
@@ -283,6 +278,39 @@ impl Report {
     }
 }
 
+/// The status of an ending that *failed*: never zero, so an error can never
+/// be reported with the code that means success.
+///
+/// `render_ending` once built a `Raised` out of a settled run's own status —
+/// normally `0` — and a host dutifully reported the failure as a success. The
+/// clamp lives in the type rather than at that one site: `From<i32>` is the
+/// only way in, the wire form is the plain integer, and `serde` routes a
+/// decoded status back through the same door, so no peer can smuggle a
+/// success code into a failure either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "i32", into = "i32")]
+pub struct FailureStatus(i32);
+
+impl From<i32> for FailureStatus {
+    fn from(status: i32) -> Self {
+        Self(status.clamp(1, 255))
+    }
+}
+
+impl From<FailureStatus> for i32 {
+    fn from(status: FailureStatus) -> Self {
+        status.0
+    }
+}
+
+impl FailureStatus {
+    /// The exit code a host reports.
+    #[must_use]
+    pub fn get(self) -> i32 {
+        self.0
+    }
+}
+
 /// How a run left evaluation, wire-shaped.
 ///
 /// The protocol projection of the engine's [`Ending`](crate::run::Ending),
@@ -291,7 +319,8 @@ impl Report {
 /// string it rendered to instead. `status` is carried explicitly wherever it
 /// is not the whole of the arm's payload, since a renderer that has already
 /// discarded the engine `Error` for its `rendered` string has no other way
-/// back to it.
+/// back to it; on the two failing arms it is a [`FailureStatus`], which has
+/// no success code to carry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Ending {
     Settled {
@@ -306,27 +335,25 @@ pub enum Ending {
         rendered: String,
         command_exit: bool,
         single_command: bool,
-        status: i32,
+        status: FailureStatus,
     },
     /// A raise the wall itself caused. No `command_exit`/`single_command`:
     /// the timeout remedy is unconditional, so no renderer reads them here.
     Walled {
         rendered: String,
-        status: i32,
+        status: FailureStatus,
     },
     Exited(i32),
 }
 
 impl Ending {
-    /// The flat status view: the wire's own `status` field for the arms that
-    /// carry one, the whole of the payload for the two that don't.
+    /// The flat status view: the `status` an arm carries, or the whole of
+    /// [`Self::Exited`]'s payload.
     #[must_use]
     pub fn status(&self) -> i32 {
         match self {
-            Self::Settled { status, .. }
-            | Self::Raised { status, .. }
-            | Self::Walled { status, .. } => *status,
-            Self::Exited(code) => *code,
+            Self::Settled { status, .. } | Self::Exited(status) => *status,
+            Self::Raised { status, .. } | Self::Walled { status, .. } => status.get(),
         }
     }
 }
@@ -346,11 +373,13 @@ fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) 
             // silently dropped.
             match FOValue::try_from(&value) {
                 Ok(value) => Ending::Settled { value, status },
+                // The settled status cannot carry over: this ending is a
+                // failure, and `FailureStatus` will not spell one as success.
                 Err(_) => Ending::Raised {
                     rendered: "run result is not transportable across the engine protocol".into(),
                     command_exit: false,
                     single_command: false,
-                    status,
+                    status: status.into(),
                 },
             }
         }
@@ -377,7 +406,7 @@ fn render_raise(
     sources: &crate::source::SourceDb,
     walled: bool,
 ) -> Ending {
-    let status = error.exit_code().clamp(0, 255);
+    let status = FailureStatus::from(error.exit_code());
     let command_exit = matches!(
         error.status,
         crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
@@ -472,7 +501,7 @@ mod ending_wire_round_trip_tests {
             rendered: "error: boom\n".into(),
             command_exit: true,
             single_command: false,
-            status: 7,
+            status: 7.into(),
         }));
     }
 
@@ -480,13 +509,34 @@ mod ending_wire_round_trip_tests {
     fn walled_round_trips() {
         round_trips(&ran(Ending::Walled {
             rendered: "error: timed out\n".into(),
-            status: 143,
+            status: 143.into(),
         }));
     }
 
     #[test]
     fn exited_round_trips() {
         round_trips(&ran(Ending::Exited(3)));
+    }
+
+    /// A failure never reports success, however it was built and whatever a
+    /// peer sends: the projection of a settled run whose value has no wire
+    /// form once reused that run's own status — normally `0` — and a host
+    /// printed an error while reporting the run as having succeeded.
+    #[test]
+    fn a_failing_ending_never_carries_a_success_status() {
+        let raised = Ending::Raised {
+            rendered: "run result is not transportable across the engine protocol".into(),
+            command_exit: false,
+            single_command: false,
+            status: 0.into(),
+        };
+        assert_eq!(raised.status(), 1, "a raise reported success");
+        round_trips(&ran(raised));
+
+        let smuggled: Ending =
+            serde_json::from_str(r#"{"Walled":{"rendered":"error: timed out\n","status":0}}"#)
+                .expect("a Walled ending must decode");
+        assert_eq!(smuggled.status(), 1, "a decoded raise reported success");
     }
 
     #[test]
@@ -697,10 +747,12 @@ pub fn dispatch_to_report(
             Event::Report(report) => return Ok(report),
         }
     }
-    Err(transport
-        .severed()
-        .expect("the reader severs before it closes the event stream"))
+    Err(transport.severed().expect(READER_SEVERS_FIRST))
 }
+
+/// A closed event stream always has a cause: every reader exit path severs
+/// before it drops the sender.
+const READER_SEVERS_FIRST: &str = "the reader severs before it closes the event stream";
 
 /// Dispatches and probes share this mint: both are answered by an
 /// [`Event::Report`] under a [`DispatchId`], so two counters would let a
@@ -943,22 +995,16 @@ impl ControlSender {
             let _ = write_through(ch, severance, &Frame::Control(ctrl));
             return;
         }
-        match ctrl {
-            Control::Cancel(id) => {
-                // Cancellation is sticky and a fold walks the chain live, so a
-                // scope cancelled here before the run's frame exists is still
-                // observed once that frame is minted a descendant of it.
-                if let Some(target) = &self.cancel_target {
-                    let recorded = target.lock_ignore_poison();
-                    if let Some((current, scope)) = recorded.as_ref()
-                        && *current == id
-                    {
-                        scope.cancel(crate::process::CancelCause::Explicit);
-                    }
-                }
-            }
-            Control::Resize(_) => {
-                // The process-level signal machinery already handles this.
+        // Cancellation is sticky and a fold walks the chain live, so a scope
+        // cancelled here before the run's frame exists is still observed once
+        // that frame is minted a descendant of it.
+        let Control::Cancel(id) = ctrl;
+        if let Some(target) = &self.cancel_target {
+            let recorded = target.lock_ignore_poison();
+            if let Some((current, scope)) = recorded.as_ref()
+                && *current == id
+            {
+                scope.cancel(crate::process::CancelCause::Explicit);
             }
         }
     }
@@ -1511,39 +1557,19 @@ mod identity_cancel_tests {
 
 // ── Wire transport ────────────────────────────────────────────────────
 
-/// The one front-end write door: locks `ch`, writes `frame`, and on error
-/// severs the connection before the lock is released — records `severance`,
-/// shuts the channel down while the guard is still held, and reports the
-/// failure. Shared by [`WireTransport::write`] and the wire arm of
-/// [`ControlSender::send`].
-///
-/// Invariant: a stream that suffered a failed write is severed before the
-/// lock is released, so nothing can append a fresh frame after a truncated
-/// one. `Err` is handed back so a caller that must react further — the
-/// heartbeat's `Ping` arm breaking its loop — can, without repeating the
-/// severing itself.
-///
-/// Deliberately outside [`LockExt`]'s recover-poison policy: a panic between
-/// `write_frame` and `shutdown` can leave a partial frame already on the
-/// socket, severed by neither `severance` nor a shutdown call. Recovering the
-/// poison would let the next writer resume into that torn frame stream, which
-/// is worse than the panic propagating; a poisoned `ch` must stay poisoned.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the wire writer: a panic between write_frame and shutdown leaves a partial frame on the socket that neither severance nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
-)]
+/// The front-end's half of the severance law: [`crate::wire::write_or_sever`]
+/// recording into `severance`. Shared by [`WireTransport::write`] and the wire
+/// arm of [`ControlSender::send`]; `Err` is handed back so a caller that must
+/// react further — the heartbeat's `Ping` arm breaking its loop — can, without
+/// repeating the severing itself.
 fn write_through(
     ch: &Mutex<crate::wire::WireChannel>,
     severance: &OnceLock<Severed>,
     frame: &Frame,
 ) -> io::Result<()> {
-    let mut guard = ch.lock().unwrap();
-    let outcome = guard.write_frame(frame);
-    if let Err(e) = &outcome {
+    crate::wire::write_or_sever(ch, frame, |e| {
         sever(severance, Severed::Closed(e.to_string()));
-        guard.shutdown();
-    }
-    outcome
+    })
 }
 
 /// How briskly a front-end manufactures traffic to keep an idle engine
@@ -1919,14 +1945,6 @@ impl WireTransport {
         })
     }
 
-    /// Why no further frame will cross the protocol, if that has happened — a
-    /// write error, a read EOF, a refused `Attach`, or the heartbeat's silence
-    /// deadline. This is how a front-end tells *detached* from merely failed:
-    /// once severed, no further frame will ever cross.
-    pub(crate) fn severed(&self) -> Option<Severed> {
-        self.severance.get().cloned()
-    }
-
     /// Declare the peer dead for a reason the front-end observed itself, and
     /// shut the connection so the engine sees EOF.
     pub fn sever(&self, cause: Severed) {
@@ -2040,8 +2058,7 @@ impl Transport for WireTransport {
                 Some(item) => carried.push_back(item),
                 None => {
                     break Err(ProbeError::Severed(
-                        self.severed()
-                            .expect("the reader severs before it closes the event stream"),
+                        self.severed().expect(READER_SEVERS_FIRST),
                     ));
                 }
             }
@@ -2063,6 +2080,10 @@ impl Transport for WireTransport {
         &self.events_recv
     }
 
+    /// Why no further frame will cross the protocol, if that has happened — a
+    /// write error, a read EOF, a refused `Attach`, or the heartbeat's silence
+    /// deadline. This is how a front-end tells *detached* from merely failed:
+    /// once severed, no further frame will ever cross.
     fn severed(&self) -> Option<Severed> {
         self.severance.get().cloned()
     }

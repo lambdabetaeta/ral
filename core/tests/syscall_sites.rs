@@ -302,6 +302,11 @@ const BANNED_TOKENS: &[&str] = &[
     "fs::set_permissions",
     "Command::new",
     "CommandExt::exec",
+    // The pipe door: `cloexec_pipe` closes a CLOEXEC window Apple leaves open
+    // between `pipe()` and the flag, so a raw `os_pipe::pipe()` is a site too.
+    // Listed here rather than left to clippy because the one that got through
+    // was `cfg(windows)`, which a Unix clippy run never compiles.
+    "os_pipe::pipe(",
     // The cap-std twins are imported by name and then called bare, so the
     // import is the token that betrays them.
     "cap_primitives::fs::",

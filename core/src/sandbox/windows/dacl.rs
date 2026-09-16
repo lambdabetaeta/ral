@@ -1097,6 +1097,23 @@ fn trustee_for(sid: &OwnedSid) -> TRUSTEE_W {
     }
 }
 
+/// The verdict on a `SetNamedSecurityInfoW` that wrote a DACL.  Refusal to
+/// take ownership of the ACL is its own error: the path is someone else's to
+/// stamp, which the user can act on, unlike a bare Win32 code.
+fn dacl_written(path: &Path, rc: u32) -> Result<(), DaclError> {
+    match rc {
+        ERROR_SUCCESS => Ok(()),
+        ERROR_ACCESS_DENIED => Err(DaclError::WriteDacDenied {
+            path: path.to_path_buf(),
+            reason: format!(
+                "SetNamedSecurityInfoW: {}",
+                io::Error::from_raw_os_error(rc.cast_signed())
+            ),
+        }),
+        _ => Err(win32_err(path, "SetNamedSecurityInfoW", rc)),
+    }
+}
+
 fn win32_err(path: &Path, op: &str, rc: u32) -> DaclError {
     DaclError::Win32 {
         path: path.to_path_buf(),
@@ -1116,7 +1133,7 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
 /// inserts in canonical order — explicit deny, explicit allow, inherited — so
 /// a deny nested inside an allowed parent beats the allow the parent
 /// inherits down to it. The other direction never reaches this backend at
-/// all: `sandbox::capability::sandbox_projection` calls
+/// all: `capability::sandbox::sandbox_projection` calls
 /// [`PrefixSet::outside`](crate::path::PrefixSet::outside) so an allow
 /// beneath a deny is dropped from the projection before any ACE is stamped,
 /// rather than relying on ACL order to bury it. A directory gets `OI|CI`,
@@ -1199,19 +1216,7 @@ fn apply_explicit_ace(
         windows_sys::Win32::Foundation::LocalFree(sd);
     }
 
-    if rc != ERROR_SUCCESS {
-        if rc == ERROR_ACCESS_DENIED {
-            return Err(DaclError::WriteDacDenied {
-                path: path.to_path_buf(),
-                reason: format!(
-                    "SetNamedSecurityInfoW: {}",
-                    io::Error::from_raw_os_error(rc.cast_signed())
-                ),
-            });
-        }
-        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
-    }
-    Ok(())
+    dacl_written(path, rc)
 }
 
 /// Stamp a single `SYSTEM_MANDATORY_LABEL_ACE` at [`LOW_INTEGRITY_SID`] into
@@ -1684,19 +1689,7 @@ fn replace_explicit_aces_for_sid(
             std::ptr::null_mut(),
         )
     };
-    if rc != ERROR_SUCCESS {
-        if rc == ERROR_ACCESS_DENIED {
-            return Err(DaclError::WriteDacDenied {
-                path: path.to_path_buf(),
-                reason: format!(
-                    "SetNamedSecurityInfoW: {}",
-                    io::Error::from_raw_os_error(rc.cast_signed())
-                ),
-            });
-        }
-        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
-    }
-    Ok(())
+    dacl_written(path, rc)
 }
 
 /// The pure half of [`replace_explicit_aces_for_sid`]. The new ACL comes back

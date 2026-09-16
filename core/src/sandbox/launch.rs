@@ -156,12 +156,21 @@ fn windows_sandboxed_command(
 /// confinement — a bundled tool run in-process under the `--ral-bundled-tool`
 /// tail, a host program `execve`d by [`serve_sandbox_exec`] under the
 /// `--ral-sandbox-exec` one.
+///
+/// Building the tail is also where the anti-swap guard belongs, since this is
+/// the one point both Unix backends pass through on their way to re-execing
+/// ral: a pinned executable swapped on disk since boot (a mid-session `cargo
+/// install`) would launch a foreign build under our confinement, and Linux
+/// re-execs by the on-disk name, exactly where a swap lands.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn trampoline_tail(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
 ) -> Settled<Vec<String>> {
+    if let Some(pinned) = super::reexec::SANDBOX_SELF.get() {
+        super::reexec::verify_unswapped(pinned).map_err(Break::Error)?;
+    }
     let json = serde_json::to_string(projection).map_err(|e| {
         Break::Error(Error::new(
             format!("sandbox: failed to encode projection: {e}"),
@@ -204,10 +213,6 @@ fn linux_sandboxed_command(
         )));
     }
     let cwd = shell.cwd().to_string_lossy().into_owned();
-    // bwrap execs the trampoline by its on-disk name, where a swap would land.
-    if let Some(s) = super::reexec::SANDBOX_SELF.get() {
-        super::reexec::verify_unswapped(s).map_err(Break::Error)?;
-    }
     let self_path = super::reexec::self_arg0().map_err(|e| {
         Break::Error(Error::new(
             format!("sandbox: cannot resolve self exe for the confined re-exec: {e}"),
@@ -243,11 +248,6 @@ fn macos_sandboxed_command(
     args: &[String],
 ) -> Settled<Command> {
     let tail = trampoline_tail(projection, target, args)?;
-    // Refuse to re-exec a pinned executable swapped on disk since boot (a
-    // mid-session `cargo install`), which would launch a foreign build.
-    if let Some(s) = super::reexec::SANDBOX_SELF.get() {
-        super::reexec::verify_unswapped(s).map_err(Break::Error)?;
-    }
     let mut cmd = super::self_command().map_err(|e| {
         Break::Error(Error::new(
             format!("sandbox: failed to pin self for re-exec: {e}"),

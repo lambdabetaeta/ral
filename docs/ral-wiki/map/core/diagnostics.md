@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -72,8 +72,9 @@ one-liner is used instead. The per-stage entry points are
 `format_parse_error_ariadne`, `format_type_error_ariadne` (each taking
 `(file, source)`), and `format_runtime_error_ariadne` / `format_runtime_error_auto`
 (resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
-`shell_warning` for unstructured command-layer output. Color is gated through
-`ansi::use_color`. `format_static_diagnostics` is `StaticDiagnostics`'s own
+`shell_warning` for unstructured command-layer output. Every caret report is one `CaretReport` — code, message, primary and optional
+secondary `LabelRange`, hint — so the single ariadne core takes the bundle
+rather than a spread of arguments. Color is gated through `ansi::use_color`. `format_static_diagnostics` is `StaticDiagnostics`'s own
 renderer — the one place a static failure becomes text and an exit status (2
 parse, 1 type, the host error's own otherwise) together, so every host prints
 the same report.

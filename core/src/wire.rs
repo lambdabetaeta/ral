@@ -9,6 +9,7 @@
 
 use crate::protocol::Frame;
 use std::io;
+use std::sync::Mutex;
 
 /// The connected stream socket a [`WireChannel`] frames over: std's owner
 /// type, not a statement about the address family.
@@ -213,15 +214,53 @@ impl WireChannel {
     }
 }
 
+/// The one write door under the severance law: write `frame`, and if the
+/// write fails, record it through `record` and shut the channel down before
+/// the lock is released.
+///
+/// Both ends of the protocol pass through here — the front-end's
+/// `write_through` records a `Severed` cause, the engine's `engine_write`
+/// raises its fault flag — so the ordering the law states is enforced once
+/// rather than restated at each door. What it buys: nothing can append a
+/// fresh frame after a truncated one, and no window exists in which the
+/// record still calls an already-shut socket healthy.
+///
+/// Deliberately outside [`LockExt`](crate::sync::LockExt)'s recover-poison
+/// policy: a panic between `write_frame` and `shutdown` can leave a partial
+/// frame on the socket that neither `record` nor a shutdown has sealed off,
+/// and letting the next writer resume into that torn stream is worse than
+/// the panic propagating; a poisoned channel must stay poisoned.
+///
+/// # Errors
+/// Returns the write failure, so a caller that must react further — the
+/// heartbeat's `Ping` arm breaking its loop — can, without severing again.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the wire writer: a panic between write_frame and shutdown leaves a partial frame on the socket that neither the severance record nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
+)]
+pub(crate) fn write_or_sever(
+    ch: &Mutex<WireChannel>,
+    frame: &Frame,
+    record: impl FnOnce(&io::Error),
+) -> io::Result<()> {
+    let mut guard = ch.lock().unwrap();
+    let outcome = guard.write_frame(frame);
+    if let Err(e) = &outcome {
+        record(e);
+        guard.shutdown();
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Control, Winsize};
+    use crate::protocol::{Control, DispatchId};
 
     #[test]
     fn round_trip_control() {
         let (mut a, mut b) = WireChannel::pair().unwrap();
-        let frame = Frame::Control(Control::Resize(Winsize { rows: 24, cols: 80 }));
+        let frame = Frame::Control(Control::Cancel(DispatchId(7)));
         a.write_frame(&frame).unwrap();
         let got = b.read_frame().unwrap().unwrap();
         assert_eq!(got, frame);

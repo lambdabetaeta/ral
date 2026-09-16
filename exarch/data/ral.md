@@ -4,7 +4,7 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > /tmp/out
 
-Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below.
+Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below. `&` is a metacharacter everywhere, glued or spaced — `echo hi&` is refused, not a word ending in `&` — so a `&` inside an argument must be quoted: `curl #'https://h/?a=1&b=2'#`.
 
 `ral` is essentially call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized, thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
@@ -139,7 +139,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << #'…'#` (space after `<<` required) feeds the string to `cmd`'s stdin (a stored string works too: `cmd << $body`). One newline at the very front of the string is dropped, so the body can start on the line under the command. Write a file with `echo #'…'# > path`.
-- There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr.
+- There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr. Those, with `< f`, `<< str`, `> f`, `>> f` and `>~ f`, are the whole of ral's fd vocabulary: there is no fd plumbing, so `1< f`, `0> f` and any fd past 2 are parse errors rather than something quietly reinterpreted.
 
 Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT USE ESCAPES `\|`):
 

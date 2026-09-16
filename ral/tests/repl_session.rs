@@ -121,9 +121,7 @@ fn rc_bad_literal_key_fails_the_whole_file() {
 /// static schema for the literal case.
 #[test]
 fn rc_computed_bad_key_is_reported_and_the_rest_still_applies() {
-    let (_dir, env) = rc_home(
-        "let cfg = [edit_mode: 42, bindings: [okname: 'yes']]\nreturn $cfg",
-    );
+    let (_dir, env) = rc_home("let cfg = [edit_mode: 42, bindings: [okname: 'yes']]\nreturn $cfg");
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(

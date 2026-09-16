@@ -87,7 +87,10 @@ impl Inferencer<'_> {
                         if let Err(actual) = this.check_bytes_route(route, &value) {
                             let kind = TypeErrorKind::CompTyMismatch {
                                 expected: CompTy::bytes(),
-                                actual: CompTy::Return(PayloadRoute::Bytes, Box::new(actual.clone())),
+                                actual: CompTy::Return(
+                                    PayloadRoute::Bytes,
+                                    Box::new(actual.clone()),
+                                ),
                                 diffs: vec![CompDiff::ReturnType {
                                     expected: Ty::Unit,
                                     actual,

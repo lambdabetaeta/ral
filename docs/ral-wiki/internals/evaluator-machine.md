@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a3ff030d
-verified_at_date: 2026-09-12
-anchors: [Machine, step_eval, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
+verified_at_commit: e4d859c3
+verified_at_date: 2026-09-16
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -37,15 +37,24 @@ lambda's does ([[design/scoping|scoping]]). Whether a thunk "is a lambda" is
 read off the body's shape by `Comp::arrow`, never stored.
 
 **`step` is the tables.** `Machine::step` dispatches on the focus:
-`step_eval` has one match arm per `CompKind` (the ξ-rules: `Return` closes
+`eval_rules` has one match arm per `CompKind` (the ξ-rules: `Return` closes
 its value, `Bind` swaps stdout to the ambient sink and pushes `To`, `App`
 closes its arguments then pushes `Apply` and evaluates the head, `Rec`
 unfolds the n-ary group, `Exec` classifies the head through the lexical
 environment, `Pipeline` launches and joins its node, the six handler forms
 close their operands, install, push their frame and force the body …);
 `step_return` and `step_halt` have one arm per `Frame` — the two columns of
-the frame table. No arm calls another arm; no arm loops. A rule that raises
-stamps the span of the node that pushed the frame.
+the frame table. No arm calls another arm; no arm loops.
+
+**A rule cannot leave unlocated.** `eval_rules` returns `Result<Focus,
+Break>`, so every rule raises with `?` rather than by building a `Focus::Halt`
+of its own; `step_eval` is its sole caller and does
+`unwrap_or_else(Focus::Halt)` then `stamp_focus(focus, comp.span)`. There is
+exactly one exit, so a raising rule is stamped with the span of the node it
+is the rule for, and no arm can be written that skips the stamp. `step_case`
+and `step_exec` are rules under the same discipline and return the same
+`Result`. (Before this shape, a bare `return` in the `Rec` arm bypassed the
+stamp and cancelling a recursive definition rendered without a caret.)
 
 **Frames hold environments, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M

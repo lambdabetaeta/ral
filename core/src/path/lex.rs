@@ -15,7 +15,7 @@ use super::process_cwd;
 /// The matcher needs this because `canonicalize` cannot always bridge the
 /// two forms — under Seatbelt `realpath(3)` can fail on `/tmp` itself — so a
 /// grant authored in one spelling still covers an access in the other.
-pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
+fn path_aliases(p: &Path) -> Vec<PathBuf> {
     let mut out = vec![p.to_path_buf()];
     out.extend(super::canon::firmlink_toggle(p));
     out
@@ -31,6 +31,12 @@ pub(crate) fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
     if cfg!(windows) {
+        // The identity fold is defined on strings, so this branch necessarily
+        // accepts the lossy form: two distinct non-UTF-8 paths that decode
+        // alike compare equal here.  `NormalizedPrefix` already freezes to
+        // `to_string_lossy` strings, so nothing is closed by fixing only the
+        // matcher — and failing closed here would make a *deny* prefix fail
+        // open.
         ps.iter().any(|p| {
             qs.iter()
                 .any(|q| starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true))
@@ -78,20 +84,29 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> b
 /// erring below the real NTFS `$UpCase` table rather than above it — missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
 pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
-    let s = strip_verbatim_prefix(p);
-    let s = s
-        .strip_prefix("UNC\\")
-        .or_else(|| s.strip_prefix("UNC/"))
-        .map_or_else(|| s.to_string(), |rest| format!(r"\{rest}"));
-    s.split(['/', '\\'])
+    windows_head(p)
+        .split(['/', '\\'])
         .filter(|c| !c.is_empty())
         .map(str::to_ascii_lowercase)
         .collect()
 }
 
+/// A path string with its Windows head normalised: a verbatim prefix
+/// stripped, a verbatim UNC head folded back to `\server\share`.  The step
+/// [`windows_identity_components`] takes before it lower-cases and splits,
+/// shared with the prompt's home-strip (`super::tilde`), which needs the head
+/// fold without the case fold.  One copy, because a head the two folded
+/// differently would silently unfold a `~`.
+pub(crate) fn windows_head(p: &str) -> String {
+    let s = strip_verbatim_prefix(p);
+    s.strip_prefix("UNC\\")
+        .or_else(|| s.strip_prefix("UNC/"))
+        .map_or_else(|| s.to_string(), |rest| format!(r"\{rest}"))
+}
+
 /// Strip a leading verbatim prefix — two separators, `?`, a separator — under
 /// either slash spelling and the mixed forms between.
-pub(crate) fn strip_verbatim_prefix(p: &str) -> &str {
+fn strip_verbatim_prefix(p: &str) -> &str {
     let b = p.as_bytes();
     let is_sep = |c: u8| c == b'/' || c == b'\\';
     if b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3]) {
@@ -307,7 +322,7 @@ pub fn resolve_relative_to_script(path: &str, script: &str) -> PathBuf {
 /// (`tempfile::Builder::tempfile_in`, opening the directory to fsync it)
 /// therefore don't choke on a bare filename.
 #[allow(clippy::disallowed_methods)]
-pub fn parent_or_cwd(path: &Path) -> &Path {
+pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))

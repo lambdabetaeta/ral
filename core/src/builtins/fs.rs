@@ -114,13 +114,15 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
                         .unwrap_or(path),
                     None => path,
                 };
-                results.push(Value::String(rendered.to_string_lossy().into_owned()));
+                results.push(rendered.to_string_lossy().into_owned());
             }
         }
         Err(e) => return Err(sig(format!("glob: {e}"))),
     }
-    results.sort_by_key(std::string::ToString::to_string);
-    Ok(Value::list(results))
+    results.sort();
+    Ok(Value::list(
+        results.into_iter().map(Value::String).collect(),
+    ))
 }
 
 /// Label an `io::Error` with the operation and the path that provoked it.
@@ -162,13 +164,14 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let raw = args[0].to_string();
     let rp = shell.resolve(&raw);
     let path = rp.as_path().to_path_buf();
+    let missing = || sig(format!("file-info: {raw}: no such file or directory"));
     let located = shell
         .locate_existing(&rp, &FsOp::Read, Leaf::AsNamed)?
-        .ok_or_else(|| sig(format!("file-info: {raw}: no such file or directory")))?;
+        .ok_or_else(missing)?;
     let stat = located
         .stat()
         .map_err(|e| io_err("file-info", &path, &e))?
-        .ok_or_else(|| sig(format!("file-info: {raw}: no such file or directory")))?;
+        .ok_or_else(missing)?;
     let target = if stat.kind == Kind::Symlink {
         located
             .read_link()

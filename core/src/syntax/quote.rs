@@ -127,7 +127,7 @@ mod tests {
         for s in [
             "a b", // space
             "a|b", "a$b", "a!b", "a~b", "a<b", "a>b", "a\"b", "a'b", "a`b", "a(b", "a)b", "a;b",
-            "a^b", "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
+            "a&b", "a^b", "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
         ] {
             assert!(!is_bare_word(s), "{s:?} should not be bare");
         }
@@ -267,6 +267,7 @@ mod tests {
             "a b.txt",
             "$HOME",
             "a!b",
+            "a&b",
             "~foo",
             "it's.txt",
             "a'#b",

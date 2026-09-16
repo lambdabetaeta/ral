@@ -172,8 +172,9 @@ pub struct LocalState {
     pub(crate) workers_owned: bool,
     /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
     /// host stack frame (§2.1 of the CEK plan): a native such as `map`
-    /// applying a user function, guarded by an RAII depth token so a panic
-    /// unwinding out never leaves it raised.
+    /// applying a user function. `machine::run` increments before its
+    /// `catch_unwind` and decrements right after, so a panic unwinding out
+    /// still leaves it lowered before the payload resumes.
     pub(crate) machine_depth: usize,
 }
 
@@ -375,6 +376,27 @@ impl Shell {
                 1,
             ))),
         }
+    }
+
+    /// The closed session scheme for a value binding — `None` for anything
+    /// but a lambda- or block-shaped thunk. Shared by [`Self::bind_value`]
+    /// and [`Self::register_hook`], which differ only in what they do with it.
+    pub(crate) fn value_scheme(
+        &self,
+        value: &crate::types::Value,
+    ) -> Option<Arc<crate::typecheck::Scheme>> {
+        let (param, body) = match value {
+            crate::types::Value::Thunk(closure) => match closure.comp.arrow() {
+                Some((param, body)) => (Some(param), body),
+                None => (None, &closure.comp),
+            },
+            _ => return None,
+        };
+        Some(Arc::new(crate::typecheck::binding_value_scheme(
+            param,
+            body,
+            self.session_schemes(),
+        )))
     }
 }
 

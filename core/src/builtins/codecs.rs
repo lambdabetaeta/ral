@@ -41,26 +41,26 @@ fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     read_stdin_bytes(name, shell)
 }
 
+/// Channel text for a `from-X` decoder that needs real UTF-8: the same
+/// refusal, and the same way out of it, for every one of them.
+fn input_text(args: &[Value], name: &str, shell: &Shell) -> Settled<String> {
+    decode_utf8_strict(
+        input_bytes(args, name, shell)?,
+        &format!("{name}: input is not valid UTF-8"),
+        "use from-bytes to keep raw bytes",
+    )
+}
+
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &Shell) -> Settled<Value> {
     Ok(Value::Bytes(input_bytes(args, "from-bytes", shell)?))
 }
 
 pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-string", shell)?;
-    Ok(Value::String(decode_utf8_strict(
-        bytes,
-        "from-string: input is not valid UTF-8",
-        "use from-bytes to keep raw bytes",
-    )?))
+    Ok(Value::String(input_text(args, "from-string", shell)?))
 }
 
 pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-line", shell)?;
-    let text = decode_utf8_strict(
-        bytes,
-        "from-line: input is not valid UTF-8",
-        "use from-bytes to keep raw bytes",
-    )?;
+    let text = input_text(args, "from-line", shell)?;
     Ok(Value::String(
         crate::io::str_strip_one_terminator(&text).to_owned(),
     ))
@@ -141,12 +141,7 @@ fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
 }
 
 pub(super) fn builtin_from_json(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-json", shell)?;
-    let text = decode_utf8_strict(
-        bytes,
-        "from-json: input is not valid UTF-8",
-        "use from-bytes to keep raw bytes",
-    )?;
+    let text = input_text(args, "from-json", shell)?;
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
     json_to_value(&json)

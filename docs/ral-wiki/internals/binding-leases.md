@@ -1,7 +1,7 @@
 ---
 verified_at_commit: c1bb993b
 verified_at_date: 2026-09-12
-anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -26,7 +26,7 @@ baseline, permanently exempt (`Shell::arm_binding_lease`, called where each
 agent's shell is installed, so `/clear`'s rebuilt shell re-seals for free).
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
 are invisible to the ledger by the same predicate that classifies installs
-(`Env::at_session_scope` at the `install_scope_binding` chokepoint): they die
+(`Env::at_session_scope` at the `note_define` chokepoint): they die
 with their frame anyway.
 
 ## The clock, and what counts as use

@@ -15,7 +15,7 @@ use crate::ir::{
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode};
+use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode, ScopeAst};
 use crate::syntax::tag::tag_row_label;
 use crate::types::{BuiltinEntry, RefusedArg};
 use std::sync::Arc;
@@ -604,7 +604,8 @@ impl Inferencer<'_> {
                 let inferred = this.without_command_head_reason(|this| {
                     this.with_scope(|this| this.check_comp(&body, &body_ty))
                 });
-                this.ctx.unify_comp_ty(&inferred, &body_ty, Reason::Argument);
+                this.ctx
+                    .unify_comp_ty(&inferred, &body_ty, Reason::Argument);
             });
         }
         (cty, applied)
@@ -860,9 +861,12 @@ impl Inferencer<'_> {
         let (value, route) = self.extract_return(&body);
         let (head, reinterprets) = self.head_pipe_route(name);
         if matches!(self.ctx.unifier.resolve_route(head), PayloadRoute::Bytes) {
-            return self
-                .check_bytes_route(route, &value)
-                .map_err(|actual| PinFailure::ByteHeadReturnsValue { actual, reinterprets });
+            return self.check_bytes_route(route, &value).map_err(|actual| {
+                PinFailure::ByteHeadReturnsValue {
+                    actual,
+                    reinterprets,
+                }
+            });
         }
         self.ctx
             .unifier
@@ -1235,8 +1239,11 @@ impl Inferencer<'_> {
                         let row = self.with_span(value.span, |this| {
                             let spread_ty = this.infer_val(&value.item);
                             let row = Row::Var(this.ctx.unifier.fresh_row_var());
-                            this.ctx
-                                .unify_ty(&spread_ty, &Ty::Record(row.clone()), Reason::MapSpread);
+                            this.ctx.unify_ty(
+                                &spread_ty,
+                                &Ty::Record(row.clone()),
+                                Reason::MapSpread,
+                            );
                             row
                         });
                         spreads.push((value.span, row));
@@ -1250,9 +1257,12 @@ impl Inferencer<'_> {
             // build from the low-precedence end, splicing each spread's row in
             // whole — a literal's row is the concatenation of its parts, and
             // nothing here may forget what a part already knows.
-            let row = spreads.into_iter().rev().fold(Row::Empty, |rest, (span, spread)| {
-                self.with_span(span, |this| this.splice(&spread, rest))
-            });
+            let row = spreads
+                .into_iter()
+                .rev()
+                .fold(Row::Empty, |rest, (span, spread)| {
+                    self.with_span(span, |this| this.splice(&spread, rest))
+                });
             let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
                 Row::Extend(key, Box::new(ty), Box::new(rest))
             });
@@ -1329,10 +1339,9 @@ impl Inferencer<'_> {
                 }
             }
         };
-        known
-            .into_iter()
-            .rev()
-            .fold(tail, |row, (label, ty)| Row::Extend(label, ty, Box::new(row)))
+        known.into_iter().rev().fold(tail, |row, (label, ty)| {
+            Row::Extend(label, ty, Box::new(row))
+        })
     }
 
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
@@ -1343,10 +1352,7 @@ impl Inferencer<'_> {
             Val::Float(_) => Ty::Float,
             Val::Bool(_) => Ty::Bool,
             Val::Variable(name) => {
-                if matches!(
-                    name.as_str(),
-                    "within" | "try" | "guard" | "grant" | "audit"
-                ) {
+                if ScopeAst::lookup_keyword(name).is_some() {
                     self.ctx
                         .diagnose(TypeErrorKind::ControlOperatorAsValue { name: name.clone() });
                     self.ctx.unifier.fresh_ty()

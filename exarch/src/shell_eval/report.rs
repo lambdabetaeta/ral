@@ -54,7 +54,7 @@ pub(crate) fn render(
             if *command_exit {
                 out.push_str(&exit_tip(*single_command));
             }
-            *status
+            status.get()
         }
         Ending::Exited(code) => *code,
     };
@@ -206,7 +206,7 @@ mod tests {
     fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
         let ending = Ending::Walled {
             rendered: "error: sleep 30\n".into(),
-            status: 143,
+            status: 143.into(),
         };
         let trail = vec![worker_birth(1, "sleep 20")];
         let fragment = ActFragment::from_acts(vec![committed_act("reply", None)]);
@@ -230,7 +230,7 @@ mod tests {
             rendered: "error: boom\n".into(),
             command_exit: false,
             single_command: true,
-            status: 7,
+            status: 7.into(),
         };
         let (out, exit) = render(&ending, &[], &ActFragment::default(), &[], 5);
         assert_eq!(exit, 7);
@@ -301,7 +301,7 @@ mod tests {
                     rendered: "error: boom\n".into(),
                     command_exit: false,
                     single_command: true,
-                    status: 7,
+                    status: 7.into(),
                 },
                 7,
             ),
@@ -309,7 +309,7 @@ mod tests {
                 "wall",
                 Ending::Walled {
                     rendered: "error: wall\n".into(),
-                    status: 143,
+                    status: 143.into(),
                 },
                 124,
             ),

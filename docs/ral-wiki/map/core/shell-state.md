@@ -154,7 +154,7 @@ corrupting the store.
   default()`) until `Shell::arm_binding_lease` seals every name then visible
   in the scope chain as permanently-exempt baseline and starts the
   committed-run clock. Every persistent top-level scope write funnels
-  through one fused chokepoint, `Shell::install_scope_binding` (`scope.rs`,
+  through one fused chokepoint, `Shell::note_define` (`scope.rs`,
   beside `bind_value`/`set_var`): it classifies the write by
   `Env::at_session_scope()` and stamps the ledger only when true, so "write a
   scope entry" and "stamp the ledger" can never be pulled apart at a call

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -142,7 +142,11 @@ what the OS profile emits, since the sandbox matcher works lexically), its
 judged on), and its `Namespace`, all fixed by one disk consultation at the
 freeze door. The duality is load-bearing, not redundant: enforce the ceiling
 on the resolved form, emit the surface form the sandboxed body will actually
-open.
+open. Which is which is enforced rather than documented: the surface form
+leaves the type only as a *string* (`as_str`, `into_string`) for rendering,
+never as a `Path` a caller could hand to a containment predicate — the `xdg:`
+freeze guard once did exactly that, and read a symlink out of `$HOME` as
+contained.
 
 `prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
 disk-free: `covers` is the one containment judgment, keyed on
@@ -167,8 +171,12 @@ directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-conso
 ## OS sandbox — `core/src/sandbox/`
 
 External commands inside a `grant` block run under an OS sandbox enforcing the
-declared **filesystem and network** capabilities. Exec is gated in-process on
-every platform (`capability::check_exec_args`) before the spawn; both Unix
+declared **filesystem and network** capabilities — and **exec**, wherever a
+backend carries the allow-list into the kernel, so a grant whose only opinion
+is `exec` engages the sandbox too (`sandbox::EXEC_ENFORCED`, the one statement
+of that fact, read by `capability::sandbox::sandbox_projection`). Exec is
+gated in-process on every platform (`capability::check_exec_args`) before the
+spawn; both Unix
 backends additionally render the allow-list into the kernel, catching the
 re-execs the in-process check never sees (`sh -c`, `find -exec`) — macOS as a
 Seatbelt `process-exec` clause, Linux as a Landlock `Execute` ruleset the

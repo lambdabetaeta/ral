@@ -69,13 +69,13 @@ fn full(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) 
             let parts = budgeted(items.len(), items.iter(), budget, |v| {
                 child(v, indent, params, budget)
             });
-            bracketed(&parts, indent, "[", "]", params)
+            bracketed(&parts, indent, params)
         }
         Value::Map(pairs) if !pairs.is_empty() => {
             let parts = budgeted(pairs.len(), pairs.iter(), budget, |(k, v)| {
                 format!("{k}: {}", child(v, indent, params, budget))
             });
-            bracketed(&parts, indent, "[", "]", params)
+            bracketed(&parts, indent, params)
         }
         Value::Variant {
             label,
@@ -199,23 +199,14 @@ fn elide(s: &str, budget: usize) -> String {
     }
 }
 
-fn bracketed(
-    parts: &[String],
-    indent: usize,
-    open: &str,
-    close: &str,
-    params: &PrintParams,
-) -> String {
-    let inline = format!("{open}{}{close}", parts.join(", "));
+fn bracketed(parts: &[String], indent: usize, params: &PrintParams) -> String {
+    let inline = format!("[{}]", parts.join(", "));
     if inline.chars().count() <= params.max_width && !inline.contains('\n') {
         return inline;
     }
     let pad = "  ".repeat(indent + 1);
     let end_pad = "  ".repeat(indent);
-    format!(
-        "{open}\n{pad}{}\n{end_pad}{close}",
-        parts.join(&format!(",\n{pad}"))
-    )
+    format!("[\n{pad}{}\n{end_pad}]", parts.join(&format!(",\n{pad}")))
 }
 
 /// Smallest `n` for which `body` round-trips inside `n*'#' + "'" + body + "'" +

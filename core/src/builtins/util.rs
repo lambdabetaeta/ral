@@ -128,47 +128,32 @@ fn uncomparable(a: &Value, b: &Value, op: &str) -> Break {
     )
 }
 
+/// Conjunction over pairwise equalities that short-circuits on `Err` only: an
+/// early `false` must not mask a later pair's uncomparability.
+fn all_equal(mut pairs: impl Iterator<Item = Settled<bool>>) -> Settled<bool> {
+    pairs.try_fold(true, |acc, eq| eq.map(|e| acc && e))
+}
+
 /// Structural equality, shared by `equal` and by `==`/`!=` in `$[…]`.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
     Ok(match (a, b) {
         (Value::Unit, Value::Unit) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
+        // Int·Int is answered exactly above; everything else in the numeric
+        // tower is decided by promotion, as `value_ordering` decides order.
         #[allow(
             clippy::float_cmp,
             reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
         )]
-        (Value::Float(x), Value::Float(y)) => x == y,
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
-        )]
-        #[allow(
-            clippy::float_cmp,
-            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
-        )]
-        (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "mixed Int/Float equality is defined by promoting the Int to f64; precision loss beyond 2^53 is intrinsic to cross-tower comparison"
-        )]
-        #[allow(
-            clippy::float_cmp,
-            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
-        )]
-        (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
+        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+            a.as_float() == b.as_float()
+        }
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
             if xs.len() == ys.len() {
-                // Collect before folding: a short-circuiting `all` would let an
-                // early `false` mask a later pair's uncomparability.
-                let pairwise = xs
-                    .iter()
-                    .zip(ys.iter())
-                    .map(|(a, b)| values_equal(a, b))
-                    .collect::<Settled<Vec<bool>>>()?;
-                pairwise.into_iter().all(|eq| eq)
+                all_equal(xs.iter().zip(ys.iter()).map(|(a, b)| values_equal(a, b)))?
             } else {
                 false
             }
@@ -176,14 +161,11 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Map(xs), Value::Map(ys)) => {
             // Both sides iterate sorted by key, so a pointwise zip decides it.
             if xs.len() == ys.len() {
-                let pairwise = xs
-                    .iter()
-                    .zip(ys.iter())
-                    .map(|((kx, vx), (ky, vy))| -> Settled<bool> {
-                        Ok(kx == ky && values_equal(vx, vy)?)
-                    })
-                    .collect::<Settled<Vec<bool>>>()?;
-                pairwise.into_iter().all(|eq| eq)
+                all_equal(
+                    xs.iter()
+                        .zip(ys.iter())
+                        .map(|((kx, vx), (ky, vy))| Ok(kx == ky && values_equal(vx, vy)?)),
+                )?
             } else {
                 false
             }
@@ -221,12 +203,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
             if ea.name != eb.name || aa.len() != ab.len() {
                 false
             } else {
-                let pairwise = aa
-                    .iter()
-                    .zip(ab.iter())
-                    .map(|(x, y)| values_equal(x, y))
-                    .collect::<Settled<Vec<bool>>>()?;
-                pairwise.into_iter().all(|eq| eq)
+                all_equal(aa.iter().zip(ab.iter()).map(|(x, y)| values_equal(x, y)))?
             }
         }
         (Value::Thunk(_) | Value::Handle(_), _) | (_, Value::Thunk(_) | Value::Handle(_)) => {
@@ -308,7 +285,7 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
         .io
         .stdin
         .reader()
-        .map_err(|e| sig(format!("could not duplicate stdin: {e}")))?
+        .map_err(crate::runtime::command::stdin_error)?
     {
         return Ok(Box::new(std::io::BufReader::new(reader)));
     }

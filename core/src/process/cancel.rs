@@ -84,7 +84,7 @@ impl CancelCause {
     /// the vocabulary is one, and lives here so it cannot drift.
     pub(crate) fn event(self) -> &'static str {
         match self {
-            Self::ReaderGone => "reader-gone",
+            Self::ReaderGone => "its reader ended",
             Self::Interrupt => "the call was interrupted",
             Self::Explicit => "the call was cancelled",
             Self::Deadline => "the call's time limit expired",

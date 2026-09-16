@@ -9,6 +9,7 @@
 //! same way.
 
 use crate::evaluator::audit::{listening, observe};
+use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 mod child;
@@ -28,10 +29,10 @@ pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
     EvalRedirect, EvalRedirectV, PendingWrite, StdinRedirectGuard, atomic_write,
-    install_stdin_redirect, open_file, stderr_mode,
+    atomic_write_error, install_stdin_redirect, open_file, stderr_mode,
 };
 use stdio::classify_redirects;
-pub(crate) use stdio::{StdinRoute, TtyInputPermit};
+pub(crate) use stdio::{StdinRoute, TtyInputPermit, stdin_error};
 use vet::ExecImage;
 pub(crate) use vet::vet;
 
@@ -66,8 +67,7 @@ pub(crate) fn run(
 
     let plan = classify_redirects(redirects)?;
     command.stdin(wire_stdin(shell)?.into_stdio());
-    let (mut atomic_commit, stdout_file_dup) =
-        wire_stdout_file(&mut command, &plan, mooring, shell)?;
+    let (atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, mooring, shell)?;
     let inherit_tty = inherit_tty(&plan, shell);
 
     // Stdout before stderr: `wire_stderr`'s `2>&1` case clones a writer
@@ -154,70 +154,13 @@ pub(crate) fn run(
 
     // Held rather than `?`-propagated: the drain below must still run for a
     // command that did run, even when its commit failed.
-    let commit_result = if let Some(commit) = atomic_commit.take() {
-        let (path, mode) = plan
-            .stdout_file
-            .as_ref()
-            .expect("atomic_commit is only Some when plan.stdout_file is Some");
-        if outcome.is_success() {
-            // Both reads must precede the rename, and cost two whole-file
-            // reads: taken only for an ear to hear them.
-            let (old_bytes, preview) = if listening(shell, mooring) {
-                (
-                    commit.old_snapshot_for_diff(shell),
-                    commit.new_snapshot_for_diff(),
-                )
-            } else {
-                (None, None)
-            };
-            match commit.commit() {
-                Ok(()) => {
-                    observe(
-                        shell,
-                        mooring,
-                        Observed::Write {
-                            path: path.clone(),
-                            mode: *mode,
-                            outcome: WriteOutcome::Committed,
-                            new_bytes: preview,
-                            old_bytes,
-                        },
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    observe(
-                        shell,
-                        mooring,
-                        Observed::Write {
-                            path: path.clone(),
-                            mode: *mode,
-                            outcome: WriteOutcome::Failed,
-                            new_bytes: None,
-                            old_bytes: None,
-                        },
-                    );
-                    Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)))
-                }
-            }
-        } else {
-            commit.abandon();
-            observe(
-                shell,
-                mooring,
-                Observed::Write {
-                    path: path.clone(),
-                    mode: *mode,
-                    outcome: WriteOutcome::Aborted,
-                    new_bytes: None,
-                    old_bytes: None,
-                },
-            );
-            Ok(())
-        }
-    } else {
-        Ok(())
-    };
+    let commit_result = settle_atomic_write(
+        atomic_commit,
+        plan.stdout_file.as_ref(),
+        outcome.is_success(),
+        shell,
+        mooring,
+    );
 
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
@@ -236,6 +179,80 @@ pub(crate) fn run(
             pids.insert(child_pid);
             let err = crate::sandbox::augment_failure(err, shell, &pids, started);
             Err(Break::Error(err))
+        }
+    }
+}
+
+/// Settle a `>` staged by [`stdio::wire_stdout_file`], if the call staged
+/// one: commit it on a successful run, abandon it otherwise, and post the
+/// write observation either way.
+fn settle_atomic_write(
+    atomic_commit: Option<PendingWrite>,
+    stdout_file: Option<&(String, RedirectMode)>,
+    succeeded: bool,
+    shell: &mut Shell,
+    mooring: &Mooring,
+) -> Settled<()> {
+    let Some(commit) = atomic_commit else {
+        return Ok(());
+    };
+    let (path, mode) =
+        stdout_file.expect("atomic_commit is only Some when plan.stdout_file is Some");
+
+    if !succeeded {
+        commit.abandon();
+        observe(
+            shell,
+            mooring,
+            Observed::Write {
+                path: path.clone(),
+                mode: *mode,
+                outcome: WriteOutcome::Aborted,
+                new_bytes: None,
+                old_bytes: None,
+            },
+        );
+        return Ok(());
+    }
+
+    // Both reads must precede the rename, and cost two whole-file reads:
+    // taken only for an ear to hear them.
+    let (old_bytes, preview) = if listening(shell, mooring) {
+        (
+            commit.old_snapshot_for_diff(shell),
+            commit.new_snapshot_for_diff(),
+        )
+    } else {
+        (None, None)
+    };
+    match commit.commit() {
+        Ok(()) => {
+            observe(
+                shell,
+                mooring,
+                Observed::Write {
+                    path: path.clone(),
+                    mode: *mode,
+                    outcome: WriteOutcome::Committed,
+                    new_bytes: preview,
+                    old_bytes,
+                },
+            );
+            Ok(())
+        }
+        Err(e) => {
+            observe(
+                shell,
+                mooring,
+                Observed::Write {
+                    path: path.clone(),
+                    mode: *mode,
+                    outcome: WriteOutcome::Failed,
+                    new_bytes: None,
+                    old_bytes: None,
+                },
+            );
+            Err(atomic_write_error(&e))
         }
     }
 }

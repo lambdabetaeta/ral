@@ -17,7 +17,7 @@ recursion is irreducible; the evaluator reaches it at
 `command_call::classify_command` → `run_base_frame` / `run_external`, and the `command` redirect guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
-- `command_call.rs` — `run_call`, the single site that resolves a head
+- `command_call.rs` — `classify_command`, the single site that resolves a head
   (env → handlers → external) and runs the chosen arm; the evaluator's
   down-seam for a bare command. There is no builtin arm: a native table entry is
   an `Env` hit on a native value, and a base-frame row is a `Base` hit on the

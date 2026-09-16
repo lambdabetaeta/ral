@@ -48,8 +48,7 @@ impl TypeErrorKind {
                 format!("this record literal writes the field '{label}' twice")
             }
             Self::OpenSpreadNotLast { .. } => {
-                "this spread has to come last, because nothing here says what fields it has"
-                    .into()
+                "this spread has to come last, because nothing here says what fields it has".into()
             }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a3ff030d
-generated_at_date: 2026-09-12
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -61,9 +61,10 @@ this shares belong to [[map/core/shell-state|shell-state]].
 Internals:
 
 - `machine.rs` — the whole machine: `Machine { focus: Focus, stack:
-  Vec<Frame> }`, `step_eval` (one arm per `CompKind` — the ξ-rules),
-  `step_return` and `step_halt` (one arm per `Frame` each — the two frame-table
-  columns). `CompKind::Capture(body)` installs a buffer through
+  Vec<Frame> }`, `step_eval` and its rule table `eval_rules` (one arm per
+  `CompKind` — the ξ-rules, each raising with `?` so `step_eval`'s
+  `stamp_focus` is their single exit), `step_return` and `step_halt` (one arm
+  per `Frame` each — the two frame-table columns). `CompKind::Capture(body)` installs a buffer through
   `evaluator::capture`'s `with_capture` and returns the collected bytes
   exactly, as `Value::Bytes`, under `Frame::Capture`; the checker binds that
   value to a fresh name and composes a `Decode` node over it, which — since

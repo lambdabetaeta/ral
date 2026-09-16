@@ -19,6 +19,12 @@ use std::sync::Arc;
 pub(crate) use capture::with_audit_capture;
 pub use capture::with_capture;
 
+/// A halt in a non-final step abandons what follows it. Said the same way
+/// wherever a block is sequenced: a phrase list here, a `Bind` chain in
+/// [`machine`].
+const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
+                                   `attempt` if its failure should not stop the rest";
+
 // ── Phrases (§3.2) ───────────────────────────────────────────────────────
 
 /// What one [`run_phrases`] run left behind.
@@ -91,10 +97,7 @@ pub(crate) fn run_phrases(
             // A non-final phrase's own hintless error gets the same
             // abandonment hint `Frame::To`'s halt gives a chain step.
             Err(Break::Error(e)) if non_final && e.hint.is_none() => {
-                outcome = Err(Break::Error(e.with_hint(
-                    "later steps in this block did not run; wrap a step in `attempt` if its \
-                     failure should not stop the rest",
-                )));
+                outcome = Err(Break::Error(e.with_hint(ABANDONED_TAIL_HINT)));
                 break;
             }
             Err(err) => {
@@ -160,7 +163,8 @@ fn run_phrase_define(
         comp,
         schemes,
     } = define;
-    if matches!(mode, Mode::Session) {
+    let is_session = matches!(mode, Mode::Session);
+    if is_session {
         pattern::check_pattern_shadow(pattern, shell)?;
     }
     let closure = crate::types::Closure {
@@ -169,7 +173,6 @@ fn run_phrase_define(
     };
     let v =
         capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
-    let is_session = matches!(mode, Mode::Session);
     *env = pattern::bind_pattern_staged(
         pattern,
         &v,

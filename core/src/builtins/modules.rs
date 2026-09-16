@@ -39,30 +39,12 @@ pub fn evaluate_checked(
     source: &str,
     virtual_path: &str,
 ) -> Settled<Value> {
-    let key = virtual_path.to_string();
-    if shell.context.modules.stack.contains(&key) {
-        let cycle: Vec<&str> = shell
-            .context
-            .modules
-            .stack
-            .iter()
-            .map(std::string::String::as_str)
-            .collect();
-        return Err(sig(format!(
-            "circular dependency: {} -> {key}",
-            cycle.join(" -> ")
-        )));
-    }
-    if shell.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
-        return Err(sig(format!(
-            "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
-        )));
-    }
-    shell.install_script_context(&key, source);
-    shell.context.modules.stack.push(key);
-    let ran =
-        crate::evaluator::run_phrases(&top.phrases, shell.env.clone(), Mode::Local, mooring, shell);
-    shell.context.modules.stack.pop();
+    let load = ModuleLoad {
+        top,
+        virtual_path,
+        source_text: source,
+    };
+    let ran = module_phrases(load, shell.env.clone(), Mode::Local, mooring, shell)?;
     // Unlike a nested `use`, this loader's whole point is to install its
     // defines into the running session — rc, a plugin, a capability file,
     // exarch's agent library — so its own `Ran::env` lands in `shell.env`
@@ -128,25 +110,26 @@ fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) ->
     Ok(top)
 }
 
-/// A compiled module ready to run: `use`'s own input to [`module_phrases`].
+/// A compiled module ready to run: what both loaders hand [`module_phrases`].
 #[derive(Clone, Copy)]
-pub(crate) struct ModuleLoad<'a> {
-    pub(crate) top: &'a Toplevel,
-    pub(crate) virtual_path: &'a str,
-    pub(crate) source_text: &'a str,
+struct ModuleLoad<'a> {
+    top: &'a Toplevel,
+    virtual_path: &'a str,
+    source_text: &'a str,
 }
 
-/// Run `load`'s phrases under `mode`, guarded by the same cycle/depth checks
-/// and module-stack bookkeeping [`evaluate_checked`] applies.  `use` is a
-/// native, so [`command_call::run_host_thunk`](crate::runtime::command_call)
-/// already records its own audit frame; this records nothing further.
+/// Run `load`'s phrases under `mode`, guarded by the cycle check, the depth
+/// limit and the module-stack frame: the one door every runtime load goes
+/// through, `use` and [`evaluate_checked`] alike.  `use` is a native, so
+/// [`command_call::run_host_thunk`](crate::runtime::command_call) already
+/// records its own audit frame; this records nothing further.
 ///
 /// # Errors
 /// A circular dependency or a depth-limit refusal — before any phrase runs.
 /// A phrase that halts is `Ran::outcome`, not this `Err`: a module is not
 /// transactional (`docs/SPEC.md` §5.6), so every caller threads `Ran::env`
 /// before it propagates `Ran::outcome`.
-pub(crate) fn module_phrases(
+fn module_phrases(
     load: ModuleLoad<'_>,
     env: Env,
     mode: Mode,
@@ -207,8 +190,8 @@ impl Drop for ModuleStackFrame<'_> {
 /// door's script name too, so the file's `$SCRIPT` references bake to it.
 ///
 /// The [`FileId`](crate::source::FileId) is peeked, not minted: the
-/// registration [`evaluate_checked`] performs a moment later lands on it,
-/// and nothing else registers a source in between.
+/// registration [`module_phrases`] performs a moment later lands on it, and
+/// nothing else registers a source in between.
 ///
 /// Also the binding-lease harvest seam: every runtime-compiled load passes
 /// through here inside an already-committed run, so its referenced names
@@ -228,8 +211,8 @@ fn check_source(
         contract,
     )
     .into_comp_or_message()
-        .map(std::sync::Arc::new)
-        .map_err(sig)?;
+    .map(std::sync::Arc::new)
+    .map_err(sig)?;
     if shell.local.bindings.armed() {
         shell.local.bindings.renew(top.referenced_names());
     }
@@ -320,7 +303,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
 }
 
 /// Resolve `path` against the directory of the innermost load in flight —
-/// the top of the stack [`evaluate_checked`] pushes to — falling back to
+/// the top of the stack [`module_phrases`] pushes to — falling back to
 /// the run's own root source at top level, where the stack is empty.
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
     let script = shell.context.modules.stack.last().map_or_else(

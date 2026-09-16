@@ -6,7 +6,8 @@ use crate::diagnostic;
 use crate::ir::{Val, ValListElem, ValMapEntry};
 use crate::types::{Closure, Env, Error, List, Value};
 
-/// Renders one interpolation piece for `eval_interpolation` in `comp.rs`.
+/// Renders one interpolation piece for `machine::eval_rules`'s
+/// `CompKind::Interpolation` rule.
 pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
     match v {
         Value::Unit | Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
@@ -100,7 +101,7 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     Ok(Value::List(items))
 }
 
-/// Shared with argument-spread checking in `call.rs`.
+/// Shared with argument-spread checking in `machine::close_args`.
 pub(crate) fn spread_type_err(val: &Value) -> Error {
     Error::new(
         format!("spread requires a List, got {}", val.type_name()),

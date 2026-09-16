@@ -66,16 +66,22 @@ struct LabelRange {
 
 /// The one report shape — red primary label, optional yellow secondary,
 /// optional help.  Callers differ only in how they derive the ranges.
-#[allow(clippy::too_many_arguments)]
-fn render_ariadne(
-    file: &str,
-    source: &str,
-    code: &str,
-    message: &str,
+struct CaretReport {
+    code: &'static str,
+    message: String,
     primary: LabelRange,
     secondary: Option<LabelRange>,
-    hint: Option<&str>,
-) -> String {
+    hint: Option<String>,
+}
+
+fn render_ariadne(file: &str, source: &str, report: CaretReport) -> String {
+    let CaretReport {
+        code,
+        message,
+        primary,
+        secondary,
+        hint,
+    } = report;
     let file_owned: String = file.to_string();
     let mut builder = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
         ariadne::ReportKind::Error,
@@ -121,15 +127,7 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
     if let Some(kind) = &err.lex_kind
         && let Some(report) = lex_error_report(source, kind)
     {
-        return render_ariadne(
-            file,
-            source,
-            report.code,
-            &report.message,
-            report.primary,
-            report.secondary,
-            report.hint.as_deref(),
-        );
+        return render_ariadne(file, source, report);
     }
     let range = err.span.map_or_else(
         || eof_char_range(source),
@@ -138,14 +136,16 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
     render_ariadne(
         file,
         source,
-        "P0001",
-        &err.message,
-        LabelRange {
-            range,
-            label: "here".into(),
+        CaretReport {
+            code: "P0001",
+            message: err.message.clone(),
+            primary: LabelRange {
+                range,
+                label: "here".into(),
+            },
+            secondary: None,
+            hint: None,
         },
-        None,
-        None,
     )
 }
 
@@ -200,17 +200,8 @@ fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
     }
 }
 
-/// The parts `render_ariadne` consumes.
-struct LexErrorReport {
-    code: &'static str,
-    message: String,
-    primary: LabelRange,
-    secondary: Option<LabelRange>,
-    hint: Option<String>,
-}
-
 /// `None` for `Other(_)`, so the caller falls back to the single-label render.
-fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport> {
+fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<CaretReport> {
     match kind {
         LexErrorKind::UnterminatedString {
             form,
@@ -233,7 +224,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
                     describe_inner(source, i)
                 )
             });
-            Some(LexErrorReport {
+            Some(CaretReport {
                 code: "L0001",
                 message: format!("unterminated {form}: expected closing `{close}`"),
                 primary,
@@ -246,7 +237,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             close,
             opened,
             ..
-        } => Some(LexErrorReport {
+        } => Some(CaretReport {
             code: "L0002",
             message: format!("unterminated `{open}…{close}`"),
             primary: LabelRange {
@@ -256,7 +247,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             secondary: None,
             hint: Some(format!("expected closing `{close}` before end of input")),
         }),
-        LexErrorKind::UnclosedDeref { opened, .. } => Some(LexErrorReport {
+        LexErrorKind::UnclosedDeref { opened, .. } => Some(CaretReport {
             code: "L0003",
             message: "unclosed `$(…)` dereference".into(),
             primary: LabelRange {
@@ -284,14 +275,16 @@ pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeErro
     render_ariadne(
         file,
         source,
-        code,
-        &message,
-        LabelRange {
-            range,
-            label: err.kind.render_label(),
+        CaretReport {
+            code,
+            message,
+            primary: LabelRange {
+                range,
+                label: err.kind.render_label(),
+            },
+            secondary: None,
+            hint,
         },
-        None,
-        hint.as_deref(),
     )
 }
 
@@ -343,14 +336,16 @@ pub(crate) fn format_runtime_error_ariadne(
     render_ariadne(
         source.name(),
         source.as_str(),
-        "R0001",
-        message,
-        LabelRange {
-            range: byte_span_to_char_range(source.as_str(), span),
-            label: "here".into(),
+        CaretReport {
+            code: "R0001",
+            message: message.to_string(),
+            primary: LabelRange {
+                range: byte_span_to_char_range(source.as_str(), span),
+                label: "here".into(),
+            },
+            secondary: None,
+            hint: hint.map(ToString::to_string),
         },
-        None,
-        hint,
     )
 }
 
@@ -469,7 +464,7 @@ mod tests {
             message: message.into(),
             span,
             lex_kind: None,
-            incompleteness: None,
+            incomplete: false,
         }
     }
 
@@ -478,7 +473,7 @@ mod tests {
             message: kind.message(),
             span: None,
             lex_kind: Some(kind),
-            incompleteness: None,
+            incomplete: false,
         }
     }
 

@@ -269,18 +269,7 @@ impl Shell {
 
         // The same scheme inference an ordinary session `let` uses.  A
         // non-thunk gets no scheme; `validate` below is the gate that rejects it.
-        let arm = match &value {
-            Value::Thunk(closure) => match closure.comp.arrow() {
-                Some((param, body)) => Some((Some(param), body)),
-                None => Some((None, &closure.comp)),
-            },
-            _ => None,
-        };
-        let scheme = arm
-            .map(|(param, body)| {
-                crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
-            })
-            .map(std::sync::Arc::new);
+        let scheme = self.value_scheme(&value);
         let binding = Binding { value, scheme };
 
         let hook = Hook {

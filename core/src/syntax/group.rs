@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) enum StmtGroup {
     /// Every non-recursive `let`, and every non-binding statement.
     Single(Stmt),
-    /// A recursive knot, emitted as `CompKind::LetRec`.  Each member carries
+    /// A recursive knot, emitted as `CompKind::Rec`.  Each member carries
     /// its own RHS span so the elaborator stamps them individually.
     LetRec(Vec<(String, Box<Ast>, Option<Span>)>),
 }

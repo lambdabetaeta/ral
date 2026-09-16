@@ -28,10 +28,34 @@ use super::util::check_arity;
 use super::util::{expect_handle, expect_thunk};
 use crate::types::as_list;
 
-/// How a child block's stdout/stderr are wired.
-pub(super) enum ChildIoMode {
-    Buffered,
+/// Which birth [`spawn_child`] is serving.  One door carries three surface
+/// verbs, and everything that varies between them — the verb a refusal must
+/// name, the lease class the worker registers under, how its bytes are wired —
+/// is read off this rather than passed alongside it.
+enum Birth {
+    Spawn,
     Watch { label: String },
+    Service,
+}
+
+impl Birth {
+    /// The verb the user wrote, for an error that must not name another.
+    fn verb(&self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Watch { .. } => "watch",
+            Self::Service => "service",
+        }
+    }
+
+    /// A durable worker escapes the lease chain; the absent chain *is* the
+    /// durable policy.
+    fn class(&self) -> LeaseClass {
+        match self {
+            Self::Spawn | Self::Watch { .. } => LeaseClass::Worker,
+            Self::Service => LeaseClass::Durable,
+        }
+    }
 }
 
 /// Cap on a detached worker's deferred surface: past it one `surface-overflow`
@@ -138,24 +162,25 @@ impl Drop for FlushGuard {
 /// [`LeaseClass::Worker`] birth under a frame supplying a [`WorkerLease`] then
 /// arms the idle-observation chain ([`lease_fire`]); a [`LeaseClass::Durable`]
 /// one arms nothing — the absent chain *is* the durable policy.
-pub(super) fn spawn_child<F>(
+fn spawn_child<F>(
     snap: Arc<Env>,
     mooring: &Mooring,
     shell: &mut Shell,
-    io_mode: ChildIoMode,
-    class: LeaseClass,
+    birth: Birth,
     cmd: &str,
     work: F,
 ) -> Settled<HandleInner>
 where
     F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
 {
+    let class = birth.class();
     let reservation = match shell.local.workers.reserve(mooring.worker_cap) {
         Ok(reservation) => reservation,
         Err(CapReached(cap)) => {
             return Err(sig(format!(
-                "spawn: {cap} workers already live on this agent; \
-                 await or cancel one"
+                "{}: {cap} workers already live on this agent; \
+                 await or cancel one",
+                birth.verb()
             )));
         }
     };
@@ -173,9 +198,9 @@ where
     });
     let joined = Arc::new(Mutex::new(false));
     let worker_joined = joined.clone();
-    let (stdout, stderr, flush_pending) = match io_mode {
-        ChildIoMode::Buffered => (stdout_sink, stderr_sink, false),
-        ChildIoMode::Watch { label } => {
+    let (stdout, stderr, flush_pending) = match birth {
+        Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink, false),
+        Birth::Watch { label } => {
             let clone_parent = || shell.io.stdout.clone();
             let framed = |inner, prefix| Sink::LineFramed {
                 inner: Box::new(inner),
@@ -336,8 +361,8 @@ fn lease_fire(chain: &LeaseChain) {
         chain.scope.cancel(crate::process::CancelCause::Deadline);
     } else {
         let next = std::cmp::min(
-            chain.lease.idle.checked_sub(idle).unwrap(),
-            chain.lease.backstop.checked_sub(age).unwrap(),
+            chain.lease.idle.saturating_sub(idle),
+            chain.lease.backstop.saturating_sub(age),
         );
         let rearm = chain.clone();
         crate::process::arm_callback(next, move || lease_fire(&rearm)).keep();
@@ -386,8 +411,7 @@ fn spawn_buffered(
         captured,
         mooring,
         shell,
-        ChildIoMode::Buffered,
-        LeaseClass::Worker,
+        Birth::Spawn,
         "<block>",
         worker_body(body),
     )?)))
@@ -434,8 +458,7 @@ fn spawn_labelled(
         captured,
         mooring,
         shell,
-        ChildIoMode::Watch { label },
-        LeaseClass::Worker,
+        Birth::Watch { label },
         "<watch>",
         worker_body(body),
     )?)))
@@ -484,8 +507,7 @@ pub(super) fn builtin_service(
         captured,
         mooring,
         shell,
-        ChildIoMode::Buffered,
-        LeaseClass::Durable,
+        Birth::Service,
         &desc,
         worker_body(body),
     )?)))
@@ -517,11 +539,26 @@ pub(super) fn builtin_detach(
 /// Stop a handle: the policy `cancel` and `race`'s loser cleanup share.  An
 /// already-completed handle keeps its cached outcome, so a finished worker's
 /// value is never destroyed by a losing `race` or a `cancel` that lost the toss.
+///
+/// The `state` guard spans the test and the transition, so there is no window
+/// for a worker to finish in between and have its outcome torn out from under
+/// it: every transition holds this lock, and takes `result` and `cached` under
+/// it, never the other way round.  The scope fires after the guard is dropped —
+/// `CancelScope::cancel` runs every armed watcher on this thread, and nothing
+/// that runs arbitrary code belongs inside a handle's transition.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the guard's span is the point: dropping it earlier reopens the window in which a worker completes between the test and the transition and loses its outcome"
+)]
 fn stop_handle(handle: &HandleInner) {
-    if *handle.state.lock_ignore_poison() != HandleState::Completed {
-        handle.cancel.cancel(crate::process::CancelCause::Explicit);
-        detach_handle(handle);
+    {
+        let mut state = handle.state.lock_ignore_poison();
+        if *state == HandleState::Completed {
+            return;
+        }
+        detach_handle(handle, &mut state);
     }
+    handle.cancel.cancel(crate::process::CancelCause::Explicit);
 }
 
 /// `cancel <handle>` -- mark a running concurrent block as cancelled.
@@ -551,29 +588,31 @@ fn ensure_live(handle: &HandleInner) -> Settled<()> {
 /// `poll` and `race` would read as still-running.
 #[allow(
     clippy::significant_drop_tightening,
-    reason = "the result guard must span the cached re-check, try_recv, and cache write; releasing early lets a second awaiter observe a bare Disconnected"
+    reason = "settling is a transition: the state guard must span the cache read, try_recv and cache write, or a second awaiter observes a bare Disconnected"
 )]
 fn try_settle(handle: &HandleInner) -> Option<CompletedHandle> {
+    // Settling is once-only, and a transition: take `state` first and hold it
+    // across the whole thing, so a second awaiter either sees the first's
+    // cached outcome or blocks, and a concurrent `cancel` waits its turn.
+    let mut state = handle.state.lock_ignore_poison();
     let cached = handle.cached.lock_ignore_poison().clone();
     if let Some(completed) = cached {
         return Some(completed);
     }
-    // Settling is once-only: hold `result` across the re-check, the receive,
-    // and the cache write, so a second awaiter either sees the first's cached
-    // outcome or blocks — never a bare `Disconnected` left by someone's `recv`.
     let mut rx_guard = handle.result.lock_ignore_poison();
-    let cached = handle.cached.lock_ignore_poison().clone();
-    if let Some(completed) = cached {
-        return Some(completed);
-    }
     let rx = rx_guard.as_ref()?;
     let result = match rx.try_recv() {
         Ok(result) => result,
-        Err(TryRecvError::Disconnected) => Err(sig("await: spawned thread panicked")),
+        // The worker names itself: the eliminator that found the corpse is not
+        // what panicked, and `await`, `poll` and `race` all arrive here.
+        Err(TryRecvError::Disconnected) => {
+            Err(sig(format!("{}: spawned thread panicked", handle.cmd)))
+        }
         Err(TryRecvError::Empty) => return None,
     };
     rx_guard.take();
-    Some(complete_handle(handle, result))
+    drop(rx_guard);
+    Some(complete_handle(handle, &mut state, result))
 }
 
 /// Replay a finished detached worker's buffered surface events through the
@@ -758,12 +797,17 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
 /// Transition a handle to `Completed`, drain both byte buffers exactly once
 /// into a cached [`CompletedHandle`].  Draining on the error path too
 /// captures a failed block's bytes; the cache serves every repeat.
-fn complete_handle(handle: &HandleInner, result: Settled<Value>) -> CompletedHandle {
-    {
-        let mut state = handle.state.lock_ignore_poison();
-        if *state == HandleState::Running {
-            *state = HandleState::Completed;
-        }
+///
+/// Takes the caller's `state` guard rather than re-locking: the transition and
+/// the cache write are one step, which is what makes a concurrent `cancel`
+/// either find nothing to stop or leave a settled outcome alone.
+fn complete_handle(
+    handle: &HandleInner,
+    state: &mut HandleState,
+    result: Settled<Value>,
+) -> CompletedHandle {
+    if *state == HandleState::Running {
+        *state = HandleState::Completed;
     }
     let completed = CompletedHandle {
         stdout: take_buffer(&handle.stdout_buf),
@@ -775,9 +819,10 @@ fn complete_handle(handle: &HandleInner, result: Settled<Value>) -> CompletedHan
     completed
 }
 
-/// Release a handle's receiver and clear its cached result.
-fn detach_handle(handle: &HandleInner) {
-    *handle.state.lock_ignore_poison() = HandleState::Cancelled;
+/// Release a handle's receiver and clear its cached result, under the caller's
+/// `state` guard — the transition and the release are one step.
+fn detach_handle(handle: &HandleInner, state: &mut HandleState) {
+    *state = HandleState::Cancelled;
     let mut rx_guard = handle.result.lock_ignore_poison();
     let _ = rx_guard.take();
     drop(rx_guard);
@@ -1074,8 +1119,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<abandoned>",
             check_loop,
         )
@@ -1117,15 +1161,9 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let snap = Arc::new(shell.env.clone());
-        let handle = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<test>",
-            |_, _child| Ok(Value::Unit),
-        )
+        let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<test>", |_, _child| {
+            Ok(Value::Unit)
+        })
         .expect("spawn must succeed");
         let scope = handle.cancel;
 
@@ -1174,8 +1212,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<test>",
             move |mooring, child| {
                 let outcome = child.enquire(mooring, crate::serial::FOValue::Unit);
@@ -1207,8 +1244,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<test>",
             move |mooring, child| {
                 let outcome = child.fork_into_nursery(mooring);
@@ -1241,8 +1277,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<babysat>",
             move |_, _c| {
                 gate_rx.recv().unwrap();
@@ -1277,16 +1312,8 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.env.clone());
-        let handle = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<immortal>",
-            check_loop,
-        )
-        .expect("spawn must succeed");
+        let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<immortal>", check_loop)
+            .expect("spawn must succeed");
         let scope = handle.cancel.clone();
 
         let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1315,15 +1342,9 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.env.clone());
-        let handle = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<done>",
-            |_, _child| Ok(Value::Unit),
-        )
+        let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<done>", |_, _child| {
+            Ok(Value::Unit)
+        })
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
 
@@ -1359,16 +1380,8 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.env.clone());
-        let handle = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<listed>",
-            check_loop,
-        )
-        .expect("spawn must succeed");
+        let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<listed>", check_loop)
+            .expect("spawn must succeed");
         let scope = handle.cancel;
 
         let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1402,24 +1415,15 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Durable,
+            Birth::Service,
             "<service>",
             check_loop,
         )
         .expect("durable spawn must succeed");
         let born = std::time::Instant::now();
         let snap = Arc::new(shell.env.clone());
-        let sibling = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<sibling>",
-            check_loop,
-        )
-        .expect("ordinary spawn must succeed");
+        let sibling = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<sibling>", check_loop)
+            .expect("ordinary spawn must succeed");
 
         // The ordinary sibling proves the frame's lease is genuinely armed.
         let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1463,8 +1467,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Durable,
+            Birth::Service,
             "<service>",
             check_loop,
         )
@@ -1897,16 +1900,7 @@ mod tests {
             let snap = Arc::new(shell.env.clone());
             // Hold the handle so the channel stays connected until the flush;
             // never observed, so no eliminator competes for the `joined` latch.
-            let _handle = spawn_child(
-                snap,
-                &m,
-                &mut shell,
-                ChildIoMode::Buffered,
-                LeaseClass::Worker,
-                "<block>",
-                work,
-            )
-            .unwrap();
+            let _handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<block>", work).unwrap();
             let mut got = wait_for_batch(&batches);
             assert_eq!(got.len(), 1, "one batch per completed worker");
             got.pop().unwrap()
@@ -1945,8 +1939,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<block>",
             |mooring, _child| {
                 if let Some(sink) = mooring.surface.as_ref() {
@@ -1993,8 +1986,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<block>",
             |mooring, _child| {
                 if let Some(sink) = mooring.surface.as_ref() {
@@ -2043,8 +2035,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<block>",
             |mooring, _child| {
                 if let Some(sink) = mooring.surface.as_ref() {
@@ -2095,8 +2086,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<test-cmd>",
             |_, _child| Ok(Value::Unit),
         )
@@ -2126,30 +2116,18 @@ mod tests {
 
         // `await` removes.
         let snap = Arc::new(shell.env.clone());
-        let h1 = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<a>",
-            |_, _c| Ok(Value::Unit),
-        )
+        let h1 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<a>", |_, _c| {
+            Ok(Value::Unit)
+        })
         .unwrap();
         await_handle(&h1, &m, &shell).expect("await ok");
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
         let snap = Arc::new(shell.env.clone());
-        let h2 = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<b>",
-            |_, _c| Ok(Value::Unit),
-        )
+        let h2 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<b>", |_, _c| {
+            Ok(Value::Unit)
+        })
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
         builtin_cancel(&[Value::Handle(Box::new(h2))], &shell).expect("cancel ok");
@@ -2157,15 +2135,9 @@ mod tests {
 
         // A settled `poll` removes.
         let snap = Arc::new(shell.env.clone());
-        let h3 = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<c>",
-            |_, _c| Ok(Value::Unit),
-        )
+        let h3 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<c>", |_, _c| {
+            Ok(Value::Unit)
+        })
         .unwrap();
         loop {
             let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &shell).unwrap();
@@ -2184,18 +2156,10 @@ mod tests {
         // `` `pending ``, with no timing guess.
         let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.env.clone());
-        let h4 = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<d>",
-            move |_, _c| {
-                unblock_rx.recv().unwrap();
-                Ok(Value::Unit)
-            },
-        )
+        let h4 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<d>", move |_, _c| {
+            unblock_rx.recv().unwrap();
+            Ok(Value::Unit)
+        })
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
         let pending = builtin_poll(&[Value::Handle(Box::new(h4.clone()))], &shell).unwrap();
@@ -2219,15 +2183,9 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let snap = Arc::new(shell.env.clone());
-        let winner = spawn_child(
-            snap,
-            &m,
-            &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<winner>",
-            |_, _c| Ok(Value::Unit),
-        )
+        let winner = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<winner>", |_, _c| {
+            Ok(Value::Unit)
+        })
         .unwrap();
 
         // The losers block on their own channels, so the winner always settles
@@ -2238,8 +2196,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<loser1>",
             move |_, _c| {
                 let _ = l1_rx.recv();
@@ -2253,8 +2210,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<loser2>",
             move |_, _c| {
                 let _ = l2_rx.recv();
@@ -2297,8 +2253,7 @@ mod tests {
             snap,
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<outer>",
             move |mooring, child_shell| {
                 go_rx.recv().unwrap();
@@ -2307,8 +2262,7 @@ mod tests {
                     child_snap,
                     mooring,
                     child_shell,
-                    ChildIoMode::Buffered,
-                    LeaseClass::Worker,
+                    Birth::Spawn,
                     "<inner>",
                     |_, _c| Ok(Value::Unit),
                 )
@@ -2356,8 +2310,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<done>",
             |_, _child| Ok(Value::Unit),
         )
@@ -2405,8 +2358,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<gated>",
             move |_, _c| {
                 gate_rx.recv().unwrap();
@@ -2443,8 +2395,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<kept>",
             |_, _child| Ok(Value::Unit),
         )
@@ -2471,8 +2422,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<claimed>",
             |_, _child| Ok(Value::Unit),
         )
@@ -2510,8 +2460,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<live>",
             move |_, _c| {
                 gate_rx.recv().unwrap();
@@ -2555,8 +2504,7 @@ mod tests {
                 Arc::new(shell.env.clone()),
                 &m,
                 &mut shell,
-                ChildIoMode::Buffered,
-                LeaseClass::Worker,
+                Birth::Spawn,
                 cmd,
                 move |_, _c| {
                     gate_rx.recv().unwrap();
@@ -2573,8 +2521,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<three>",
             |_, _c| Ok(Value::Unit),
         );
@@ -2600,8 +2547,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<after>",
             |_, _c| Ok(Value::Unit),
         )
@@ -2622,17 +2568,13 @@ mod tests {
         m.worker_cap = Some(2);
 
         let mut gates = Vec::new();
-        for (class, cmd) in [
-            (LeaseClass::Durable, "<service>"),
-            (LeaseClass::Worker, "<block>"),
-        ] {
+        for (birth, cmd) in [(Birth::Service, "<service>"), (Birth::Spawn, "<block>")] {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             spawn_child(
                 Arc::new(shell.env.clone()),
                 &m,
                 &mut shell,
-                ChildIoMode::Buffered,
-                class,
+                birth,
                 cmd,
                 move |_, _c| {
                     gate_rx.recv().unwrap();
@@ -2647,8 +2589,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<three>",
             |_, _c| Ok(Value::Unit),
         );
@@ -2673,8 +2614,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<done>",
             |_, _c| Ok(Value::Unit),
         )
@@ -2686,8 +2626,7 @@ mod tests {
             Arc::new(shell.env.clone()),
             &m,
             &mut shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
+            Birth::Spawn,
             "<next>",
             |_, _c| Ok(Value::Unit),
         )

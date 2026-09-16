@@ -1,0 +1,13 @@
+# Test: `each` settles to unit.
+#
+# It is the effects-only fold — `map` is the one that answers — and its type
+# says `F Unit`, so the last callback's value must never come back: a value of
+# another type bound to a name the checker believes is `Unit` is unsound.
+
+each { |n| echo $n } [1, 2]
+
+let ints = each { |n| return $[$n + 100] } [1, 2, 3]
+echo !{equal $ints ()}
+
+let texts = each { |s| return "[$s]" } ['a', 'b']
+echo !{equal $texts ()}

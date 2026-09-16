@@ -15,7 +15,9 @@ use ral_core::types::{Break, Closure, DefaultPolicy, Escape, HookName, HookSig, 
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use std::sync::{Arc, Mutex};
 
-use super::super::config::{RcSettings, apply_rc_config, create_default_rc, find_ralrc, rc_field_ty};
+use super::super::config::{
+    RcSettings, apply_rc_config, create_default_rc, find_ralrc, rc_field_ty,
+};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
@@ -472,18 +474,23 @@ fn evaluate_startup_file(
     // the file defines outlives this boot, and its spans have to keep naming
     // the file for the whole session.
     let file = shell.sources().next_id();
-    let annotated =
-        match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path, contract) {
-            ral_core::CompileOutcome::Compiled(annotated) => annotated,
-            ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
-            ral_core::CompileOutcome::Types(errs) => {
-                eprint!(
-                    "{}",
-                    diagnostic::format_type_errors_ariadne(path, &src, &errs)
-                );
-                return Err(format!("{path}: skipped due to type errors"));
-            }
-        };
+    let annotated = match ral_core::compile_and_typecheck(
+        &src,
+        shell.session_schemes(),
+        file,
+        path,
+        contract,
+    ) {
+        ral_core::CompileOutcome::Compiled(annotated) => annotated,
+        ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
+        ral_core::CompileOutcome::Types(errs) => {
+            eprint!(
+                "{}",
+                diagnostic::format_type_errors_ariadne(path, &src, &errs)
+            );
+            return Err(format!("{path}: skipped due to type errors"));
+        }
+    };
     let comp = std::sync::Arc::new(annotated);
     // Evaluate under the same guarded pipeline `use`/plugin loading share:
     // `evaluate_checked` owns the cycle and depth guards, and registers the

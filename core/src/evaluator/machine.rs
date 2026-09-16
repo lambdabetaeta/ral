@@ -1,7 +1,7 @@
 //! The machine: closures in focus, frames on a stack, one `step` (§2 of the
 //! CEK plan, `dev/docs/plans/260825_cek_machine.md`).
 //!
-//! [`Machine::step_eval`] is §2.2, one match arm per row on `CompKind`;
+//! [`Machine::eval_rules`] is §2.2, one match arm per row on `CompKind`;
 //! [`Machine::step_return`] and [`Machine::step_halt`] are §2.3's two
 //! columns, one match arm per row on [`Frame`]. `step` itself only
 //! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
@@ -139,8 +139,8 @@ fn stamp_focus(focus: Focus, span: Option<Span>) -> Focus {
     }
 }
 
-/// The text of `comp.rs:41–48`, unreachable for a checked program except
-/// where an `F`-holed frame meets a `Lambda` terminal.
+/// Unreachable for a checked program except where an `F`-holed frame meets a
+/// `Lambda` terminal.
 fn bare_lambda_error() -> Error {
     Error::new(
         "tried to evaluate a bare lambda in computation position — a function value must be \
@@ -469,24 +469,35 @@ impl Machine {
 
     fn step_eval(&mut self, closure: Closure, mooring: &Mooring, shell: &mut Shell) -> Focus {
         let (comp, env) = closure.into_parts();
-        let focus = match &comp.item {
-            CompKind::Return(val) => match close(val, &env) {
-                Ok(v) => Focus::Return(Terminal::Value(v)),
-                Err(e) => Focus::Halt(Break::Error(e)),
-            },
+        let focus = self
+            .eval_rules(&comp, env, mooring, shell)
+            .unwrap_or_else(Focus::Halt);
+        stamp_focus(focus, comp.span)
+    }
+
+    /// One rule per row on [`CompKind`], each raising with `?`. `step_eval`
+    /// is their only exit, so no rule can reach the machine without passing
+    /// under `stamp_focus`.
+    fn eval_rules(
+        &mut self,
+        comp: &Arc<Comp>,
+        env: Env,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Result<Focus, Break> {
+        Ok(match &comp.item {
+            CompKind::Return(val) => Focus::Return(Terminal::Value(close(val, &env)?)),
 
             // Canonical at A → C, never a value: the frame on top decides.
             // Unreachable except under Apply/a C-holed frame for a checked
             // program (§3.5, S3).
             CompKind::Lam { .. } => Focus::Return(Terminal::Lambda(Closure {
-                comp: Arc::clone(&comp),
+                comp: Arc::clone(comp),
                 env,
             })),
 
             CompKind::Rec { group, index } => {
-                if let Err(b) = crate::process::check(mooring) {
-                    return Focus::Halt(b);
-                }
+                crate::process::check(mooring)?;
                 let mut env2 = env.clone();
                 for (j, (name, _)) in group.iter().enumerate() {
                     env2.bind(
@@ -506,58 +517,29 @@ impl Machine {
                 })
             }
 
-            CompKind::Observe(reg) => match observe::observe(reg, shell) {
-                Ok(v) => Focus::Return(Terminal::Value(v)),
-                Err(e) => Focus::Halt(Break::Error(e)),
-            },
+            CompKind::Observe(reg) => Focus::Return(Terminal::Value(observe::observe(reg, shell)?)),
 
-            CompKind::Force(val) => match close(val, &env) {
-                Ok(v) => Self::force(v, &env, mooring, shell),
-                Err(e) => Focus::Halt(Break::Error(e)),
-            },
+            CompKind::Force(val) => Self::force(close(val, &env)?, &env, mooring, shell),
 
-            CompKind::Interpolation(parts) => 'arm: {
+            CompKind::Interpolation(parts) => {
                 let mut s = String::new();
                 for p in parts {
-                    let v = match close(p, &env) {
-                        Ok(v) => v,
-                        Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                    };
-                    match interpolate_piece(&v) {
-                        Ok(piece) => s.push_str(&piece),
-                        Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                    }
+                    s.push_str(&interpolate_piece(&close(p, &env)?)?);
                 }
                 Focus::Return(Terminal::Value(Value::String(s)))
             }
 
-            CompKind::Binary(op, lhs, rhs) => match expr::eval_binary(*op, lhs, rhs, &env) {
-                Ok(v) => Focus::Return(Terminal::Value(v)),
-                Err(b) => Focus::Halt(b),
-            },
-            CompKind::Negate(v) => match expr::eval_negate(v, &env) {
-                Ok(val) => Focus::Return(Terminal::Value(val)),
-                Err(e) => Focus::Halt(Break::Error(e)),
-            },
-            CompKind::Not(v) => match expr::eval_not(v, &env) {
-                Ok(val) => Focus::Return(Terminal::Value(val)),
-                Err(e) => Focus::Halt(Break::Error(e)),
-            },
+            CompKind::Binary(op, lhs, rhs) => {
+                Focus::Return(Terminal::Value(expr::eval_binary(*op, lhs, rhs, &env)?))
+            }
+            CompKind::Negate(v) => Focus::Return(Terminal::Value(expr::eval_negate(v, &env)?)),
+            CompKind::Not(v) => Focus::Return(Terminal::Value(expr::eval_not(v, &env)?)),
 
-            CompKind::Index { target, keys } => 'arm: {
-                let mut v = match close(target, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
+            CompKind::Index { target, keys } => {
+                let mut v = close(target, &env)?;
                 for key in keys {
-                    let k = match close(&key.item, &env) {
-                        Ok(k) => k,
-                        Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                    };
-                    v = match expr::index_value(&v, &k) {
-                        Ok(v) => v,
-                        Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                    };
+                    let k = close(&key.item, &env)?;
+                    v = expr::index_value(&v, &k)?;
                 }
                 Focus::Return(Terminal::Value(v))
             }
@@ -566,18 +548,14 @@ impl Machine {
                 comp: rhs,
                 pattern: _,
                 rest: _,
-            } => 'arm: {
-                if let Err(b) = crate::process::check(mooring) {
-                    break 'arm Focus::Halt(b);
-                }
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
-                }
-                let prev = shell.io.swap_ambient_stdout();
+            } => {
+                crate::process::check(mooring)?;
+                self.reserve(shell)?;
+                let prev_stdout = shell.io.swap_ambient_stdout();
                 self.push(Frame::To {
-                    bind: Arc::clone(&comp),
+                    bind: Arc::clone(comp),
                     env: env.clone(),
-                    prev_stdout: prev,
+                    prev_stdout,
                 });
                 Focus::Eval(Closure {
                     comp: Arc::clone(rhs),
@@ -585,34 +563,25 @@ impl Machine {
                 })
             }
 
-            CompKind::If { cond, then, else_ } => match close(&cond.item, &env) {
-                Ok(Value::Bool(b)) => {
-                    let branch = if b { then } else { else_ };
-                    Focus::Eval(Closure {
-                        comp: Arc::clone(branch),
-                        env,
-                    })
+            CompKind::If { cond, then, else_ } => match close(&cond.item, &env)? {
+                Value::Bool(b) => Focus::Eval(Closure {
+                    comp: Arc::clone(if b { then } else { else_ }),
+                    env,
+                }),
+                other => {
+                    return Err(Break::Error(Error::new(
+                        format!("if: expected Bool, got {} '{}'", other.type_name(), other),
+                        1,
+                    )));
                 }
-                Ok(other) => Focus::Halt(Break::Error(Error::new(
-                    format!("if: expected Bool, got {} '{}'", other.type_name(), other),
-                    1,
-                ))),
-                Err(e) => Focus::Halt(Break::Error(e)),
             },
 
-            CompKind::Case { scrutinee, arms } => Self::step_case(scrutinee, arms, &env, shell),
+            CompKind::Case { scrutinee, arms } => Self::step_case(scrutinee, arms, &env, shell)?,
 
-            CompKind::App { head, args } => 'arm: {
-                if let Err(b) = crate::process::check(mooring) {
-                    break 'arm Focus::Halt(b);
-                }
-                let argv = match close_args(args, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
-                }
+            CompKind::App { head, args } => {
+                crate::process::check(mooring)?;
+                let argv = close_args(args, &env)?;
+                self.reserve(shell)?;
                 self.push(Frame::Apply {
                     args: argv,
                     env: env.clone(),
@@ -624,29 +593,21 @@ impl Machine {
                 })
             }
 
-            CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell),
+            CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell)?,
 
-            CompKind::Pipeline { stages, yields, .. } => 'arm: {
+            CompKind::Pipeline { stages, yields, .. } => {
                 if stages.len() == 1 {
-                    break 'arm Focus::Eval(Closure {
+                    return Ok(Focus::Eval(Closure {
                         comp: Arc::clone(&stages[0]),
                         env,
-                    });
+                    }));
                 }
-                let node = match pipeline::PipeNode::launch(stages, *yields, &env, mooring, shell) {
-                    Ok(node) => node,
-                    Err(b) => break 'arm Focus::Halt(b),
-                };
-                match node.join(mooring, shell) {
-                    Ok(v) => Focus::Return(Terminal::Value(v)),
-                    Err(b) => Focus::Halt(b),
-                }
+                let node = pipeline::PipeNode::launch(stages, *yields, &env, mooring, shell)?;
+                Focus::Return(Terminal::Value(node.join(mooring, shell)?))
             }
 
-            CompKind::Capture(body) => 'arm: {
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
-                }
+            CompKind::Capture(body) => {
+                self.reserve(shell)?;
                 let (sink, buf) = io::new_buffer();
                 let prev = std::mem::replace(&mut shell.io.stdout, sink);
                 self.push(Frame::Capture {
@@ -660,153 +621,94 @@ impl Machine {
                 })
             }
 
-            CompKind::Decode(val) => 'arm: {
-                let v = match close(val, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
+            CompKind::Decode(val) => {
+                let v = close(val, &env)?;
                 let Value::Bytes(mut bytes) = v else {
-                    break 'arm Focus::Halt(stamp(
-                        Break::Error(
-                            Error::new(
-                                format!(
-                                    "the value boundary was handed {} where a captured byte payload belongs",
-                                    v.type_name()
-                                ),
-                                1,
-                            )
-                            .with_hint(
-                                "only the type checker writes this step, so this is a fault in ral \
-                                 rather than in your program — please report the source that produced it",
+                    return Err(Break::Error(
+                        Error::new(
+                            format!(
+                                "the value boundary was handed {} where a captured byte payload belongs",
+                                v.type_name()
                             ),
+                            1,
+                        )
+                        .with_hint(
+                            "only the type checker writes this step, so this is a fault in ral \
+                             rather than in your program — please report the source that produced it",
                         ),
-                        comp.span,
                     ));
                 };
                 io::strip_trailing_newline(&mut bytes);
-                match crate::builtins::util::decode_utf8_strict(
-                    bytes,
-                    "captured output is not valid UTF-8",
-                    "bind with `| from-bytes` to keep raw output",
-                ) {
-                    Ok(text) => Focus::Return(Terminal::Value(Value::String(text))),
-                    Err(b) => Focus::Halt(stamp(b, comp.span)),
-                }
+                Focus::Return(Terminal::Value(Value::String(
+                    crate::builtins::util::decode_utf8_strict(
+                        bytes,
+                        "captured output is not valid UTF-8",
+                        "bind with `| from-bytes` to keep raw output",
+                    )?,
+                )))
             }
 
-            CompKind::Redirect { body, redirects } => 'arm: {
-                let redirs = match close_redirects(redirects, &env) {
-                    Ok(r) => r,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
-                    break 'arm Focus::Halt(b);
-                }
+            CompKind::Redirect { body, redirects } => {
+                let redirs = close_redirects(redirects, &env)?;
+                self.push_redirect(&redirs, mooring, shell)?;
                 Focus::Eval(Closure {
                     comp: Arc::clone(body),
                     env,
                 })
             }
 
-            CompKind::Within { opts, body } => 'arm: {
-                let o = match close(opts, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                let m = match as_map(&o, "within") {
-                    Ok(m) => m,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                let scope = match WithinScope::parse(&m, &env, shell) {
-                    Ok(s) => s,
-                    Err(b) => break 'arm Focus::Halt(b),
-                };
-                let b = match close(body, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(err) = self.reserve(shell) {
-                    break 'arm Focus::Halt(err);
-                }
+            CompKind::Within { opts, body } => {
+                let opts = close(opts, &env)?;
+                let scope = WithinScope::parse(&as_map(&opts, "within")?, &env, shell)?;
+                let body = close(body, &env)?;
+                self.reserve(shell)?;
                 let undo = scope.enter(shell);
                 self.push(Frame::Within(undo));
-                Self::force(b, &env, mooring, shell)
+                Self::force(body, &env, mooring, shell)
             }
 
-            CompKind::Grant { caps, body } => 'arm: {
-                let c = match close(caps, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
+            CompKind::Grant { caps, body } => {
+                let c = close(caps, &env)?;
                 let home = shell.context.home();
                 let cwd = shell.cwd();
                 let ctx = FreezeCtx {
                     home: home.as_deref(),
                     cwd: &cwd,
                 };
-                let caps = match crate::capability::decode_capability_map(&c, "grant", &ctx) {
-                    Ok(c) => c,
-                    Err(e) => break 'arm Focus::Halt(Break::from(e)),
-                };
-                let b = match close(body, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(err) = self.reserve(shell) {
-                    break 'arm Focus::Halt(err);
-                }
+                let caps = crate::capability::decode_capability_map(&c, "grant", &ctx)?;
+                let body = close(body, &env)?;
+                self.reserve(shell)?;
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 self.push(Frame::Grant);
-                Self::force(b, &env, mooring, shell)
+                Self::force(body, &env, mooring, shell)
             }
 
-            CompKind::Try { body, handler } => 'arm: {
-                let b = match close(body, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                let h = match close(handler, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(err) = self.reserve(shell) {
-                    break 'arm Focus::Halt(err);
-                }
+            CompKind::Try { body, handler } => {
+                let body = close(body, &env)?;
+                let handler = close(handler, &env)?;
+                self.reserve(shell)?;
                 self.push(Frame::Try {
-                    handler: h,
+                    handler,
                     env: Box::new(env.clone()),
                 });
-                Self::force(b, &env, mooring, shell)
+                Self::force(body, &env, mooring, shell)
             }
 
-            CompKind::Guard { body, cleanup } => 'arm: {
-                let b = match close(body, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                let c = match close(cleanup, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(err) = self.reserve(shell) {
-                    break 'arm Focus::Halt(err);
-                }
+            CompKind::Guard { body, cleanup } => {
+                let body = close(body, &env)?;
+                let cleanup = close(cleanup, &env)?;
+                self.reserve(shell)?;
                 self.push(Frame::Guard {
-                    cleanup: c,
+                    cleanup,
                     env: Box::new(env.clone()),
                 });
-                Self::force(b, &env, mooring, shell)
+                Self::force(body, &env, mooring, shell)
             }
 
-            CompKind::Audit { body } => 'arm: {
-                let b = match close(body, &env) {
-                    Ok(v) => v,
-                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
-                };
-                if let Err(err) = self.reserve(shell) {
-                    break 'arm Focus::Halt(err);
-                }
+            CompKind::Audit { body } => {
+                let body = close(body, &env)?;
+                self.reserve(shell)?;
                 let saved = shell.local.audit.capture_policy();
                 shell
                     .local
@@ -814,10 +716,9 @@ impl Machine {
                     .set_capture(super::audit::merge_capture(saved, CapturePolicy::Bytes));
                 let scope = shell.local.audit.open();
                 self.push(Frame::Audit { scope, saved });
-                Self::force(b, &env, mooring, shell)
+                Self::force(body, &env, mooring, shell)
             }
-        };
-        stamp_focus(focus, comp.span)
+        })
     }
 
     fn step_case(
@@ -825,11 +726,11 @@ impl Machine {
         arms: &[CaseArm],
         env: &Env,
         shell: &mut Shell,
-    ) -> Focus {
-        let (label, payload) = match close(&scrutinee.item, env) {
-            Ok(Value::Variant { label, payload }) => (label, payload),
-            Ok(other) => {
-                return Focus::Halt(Break::Error(Error::new(
+    ) -> Result<Focus, Break> {
+        let (label, payload) = match close(&scrutinee.item, env)? {
+            Value::Variant { label, payload } => (label, payload),
+            other => {
+                return Err(Break::Error(Error::new(
                     format!(
                         "case: scrutinee must be a variant, got {} {}",
                         other.type_name(),
@@ -838,14 +739,13 @@ impl Machine {
                     1,
                 )));
             }
-            Err(e) => return Focus::Halt(Break::Error(e)),
         };
         let Some(arm) = arms.iter().find(|arm| arm.tag.item == label) else {
             let handled: Vec<String> = arms
                 .iter()
                 .map(|a| crate::syntax::tag::tag_row_label(&a.tag.item))
                 .collect();
-            return Focus::Halt(Break::Error(Error::new(
+            return Err(Break::Error(Error::new(
                 format!(
                     "case: no arm for variant `{label}`; this case matches: {}",
                     handled.join(", ")
@@ -854,13 +754,11 @@ impl Machine {
             )));
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
-        match pattern::bind_pattern(&arm.pattern, &payload, &[], env.clone(), shell) {
-            Ok(env2) => Focus::Eval(Closure {
-                comp: Arc::clone(arm.body.comp()),
-                env: env2,
-            }),
-            Err(b) => Focus::Halt(b),
-        }
+        let env2 = pattern::bind_pattern(&arm.pattern, &payload, &[], env.clone(), shell)?;
+        Ok(Focus::Eval(Closure {
+            comp: Arc::clone(arm.body.comp()),
+            env: env2,
+        }))
     }
 
     fn step_exec(
@@ -870,61 +768,39 @@ impl Machine {
         env: &Env,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Focus {
-        if let Err(b) = crate::process::check(mooring) {
-            return Focus::Halt(b);
-        }
-        let argv = match close_args(&exec.args, env) {
-            Ok(v) => v,
-            Err(e) => return Focus::Halt(Break::Error(e)),
-        };
-        let redirs = match close_redirects(&exec.redirects, env) {
-            Ok(v) => v,
-            Err(e) => return Focus::Halt(Break::Error(e)),
-        };
+    ) -> Result<Focus, Break> {
+        crate::process::check(mooring)?;
+        let argv = close_args(&exec.args, env)?;
+        let redirs = close_redirects(&exec.redirects, env)?;
         if !matches!(exec.head.name().bare(), Some(name) if name.starts_with('_')) {
             shell.local.audit.call_site = span;
         }
-        let resolution = match command_call::classify_command(&exec.head, env, mooring, shell) {
-            Ok(r) => r,
-            Err(b) => return Focus::Halt(b),
-        };
-        match resolution {
-            Resolution::Env(v) => {
-                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
-                    return Focus::Halt(b);
+        Ok(
+            match command_call::classify_command(&exec.head, env, mooring, shell)? {
+                Resolution::Env(v) => {
+                    self.push_redirect(&redirs, mooring, shell)?;
+                    if argv.is_empty() {
+                        Self::force(v, env, mooring, shell)
+                    } else {
+                        self.apply_rule(v, argv, env, span, mooring, shell)
+                    }
                 }
-                if argv.is_empty() {
-                    Self::force(v, env, mooring, shell)
-                } else {
-                    self.apply_rule(v, argv, env, span, mooring, shell)
+                Resolution::Handler { entry, depth } => {
+                    self.push_redirect(&redirs, mooring, shell)?;
+                    self.reserve(shell)?;
+                    let frame = Box::new(shell.context.handlers.strip_matched(depth));
+                    self.push(Frame::Unmask { frame });
+                    let call_args = render_handler_args(&entry.name, entry.arity, &argv);
+                    self.apply_rule(entry.thunk.clone(), call_args, env, span, mooring, shell)
                 }
-            }
-            Resolution::Handler { entry, depth } => {
-                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
-                    return Focus::Halt(b);
-                }
-                if let Err(b) = self.reserve(shell) {
-                    return Focus::Halt(b);
-                }
-                let frame = Box::new(shell.context.handlers.strip_matched(depth));
-                self.push(Frame::Unmask { frame });
-                let call_args = render_handler_args(&entry.name, entry.arity, &argv);
-                self.apply_rule(entry.thunk.clone(), call_args, env, span, mooring, shell)
-            }
-            Resolution::Base(entry) => {
-                match command_call::run_base_frame(&entry, &argv, &redirs, env, mooring, shell) {
-                    Ok(v) => Focus::Return(Terminal::Value(v)),
-                    Err(b) => Focus::Halt(b),
-                }
-            }
-            Resolution::External(id) => {
-                match command_call::run_external(id, &argv, &redirs, env, mooring, shell) {
-                    Ok(v) => Focus::Return(Terminal::Value(v)),
-                    Err(b) => Focus::Halt(b),
-                }
-            }
-        }
+                Resolution::Base(entry) => Focus::Return(Terminal::Value(
+                    command_call::run_base_frame(&entry, &argv, &redirs, env, mooring, shell)?,
+                )),
+                Resolution::External(id) => Focus::Return(Terminal::Value(
+                    command_call::run_external(id, &argv, &redirs, env, mooring, shell)?,
+                )),
+            },
+        )
     }
 
     // ── §2.3: frames, and their two rules each ──────────────────────────
@@ -1044,19 +920,12 @@ impl Machine {
         match frame {
             Frame::To { prev_stdout, .. } => {
                 shell.io.stdout = prev_stdout;
-                let s = if let Break::Error(e) = s {
-                    if e.hint.is_none() {
-                        Break::Error(e.with_hint(
-                            "later steps in this block did not run; wrap a step in `attempt` if its \
-                             failure should not stop the rest",
-                        ))
-                    } else {
-                        Break::Error(e)
+                Focus::Halt(match s {
+                    Break::Error(e) if e.hint.is_none() => {
+                        Break::Error(e.with_hint(super::ABANDONED_TAIL_HINT))
                     }
-                } else {
-                    s
-                };
-                Focus::Halt(s)
+                    s => s,
+                })
             }
 
             Frame::Capture { prev, buf, .. } => {
@@ -1537,6 +1406,28 @@ mod tests {
             out.is_err(),
             "a cancelled tight loop must halt rather than spin"
         );
+    }
+
+    /// A cancellation is a `Break` like any other: whichever polled rule
+    /// sees it, the halt leaves `step_eval` through `stamp_focus` and so
+    /// carries that node's span.
+    #[test]
+    fn a_cancelled_rec_and_a_cancelled_bind_both_carry_a_span() {
+        for source in ["let f = { !$f }\n!$f", "if true { let x = 1; return $x }"] {
+            let mut shell = new_shell();
+            let mooring = Mooring::adrift();
+            mooring
+                .cancel
+                .cancel(crate::process::cancel::CancelCause::Explicit);
+            match run_with(source, &mooring, &mut shell) {
+                Err(Break::Error(e)) => assert!(
+                    e.span.is_some(),
+                    "a cancellation in `{source}` must be located, got {:?}",
+                    e.message
+                ),
+                other => panic!("`{source}` must halt when cancelled, got {other:?}"),
+            }
+        }
     }
 
     /// §2.1/§4: a native (`map`) applying a function that itself calls `map`

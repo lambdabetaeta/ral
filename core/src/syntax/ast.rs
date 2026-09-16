@@ -352,11 +352,82 @@ pub(crate) enum RedirectTarget {
 
 /// An I/O redirect. It is a field of [`Ast::Call`] and [`Ast::Scope`] rather
 /// than an entry in their argument lists, so it can never pass for a value.
+///
+/// The fields are private and [`Redirect::new`] is the only way to build one,
+/// so the fd forms ral has no plumbing for are unspellable rather than caught
+/// downstream: every `RedirectV` and `EvalRedirectV` is lowered from one of
+/// these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
-    pub(crate) fd: u32,
-    pub(crate) mode: RedirectMode,
-    pub(crate) target: RedirectTarget,
+    fd: u32,
+    mode: RedirectMode,
+    target: RedirectTarget,
+}
+
+impl Redirect {
+    /// ral's whole fd model, in the one place a redirect can be built.
+    ///
+    /// ral models `0<`, `<<`, `1>`, `2>` and `2>&1`; the identity dups `1>&1`
+    /// and `2>&2` are accepted and mean nothing, as they do in bash.  Every
+    /// other fd form — `1<`, `0>`, `1>&2`, any fd ≥ 3 — is refused here,
+    /// because ral has no fd plumbing for it to mean anything with, and a
+    /// spelling whose bash meaning ral cannot honour is rejected rather than
+    /// silently reinterpreted.  (The lexer refuses `1>&2` and fd ≥ 3 first,
+    /// with advice this rule cannot give; the arms for them below are the
+    /// rule stated whole, not a second gate.)
+    pub(crate) fn new(
+        fd: Option<u32>,
+        mode: RedirectMode,
+        target: RedirectTarget,
+    ) -> Result<Self, String> {
+        use RedirectMode::{Append, HereString, Read, StreamWrite, Write};
+        use RedirectTarget::{Fd, File};
+
+        // Reads and here-strings feed fd 0; everything else writes fd 1.
+        let fd = fd.unwrap_or_else(|| u32::from(!matches!(mode, Read | HereString)));
+        let refusal = match (fd, mode, &target) {
+            (0, Read | HereString, File(_))
+            | (1 | 2, Write | StreamWrite | Append, File(_))
+            | (1 | 2, Write, Fd(1))
+            | (2, Write, Fd(2)) => None,
+
+            (_, HereString, _) => {
+                Some("`<<` always feeds stdin — drop the file-descriptor prefix".to_string())
+            }
+            (_, Read, _) => Some(format!(
+                "`<` always feeds standard input, so `{fd}<` reads nothing in ral — \
+                 drop the `{fd}`, or did you mean `{fd}> file` to write there?"
+            )),
+            (0, _, _) => Some(
+                "standard input cannot be written to — \
+                 did you mean `< file`, which reads one into it?"
+                    .to_string(),
+            ),
+            (_, _, Fd(n)) => Some(format!(
+                "ral has no fd plumbing beyond `2>&1`, so `{fd}>&{n}` has nothing to mean"
+            )),
+            _ => Some(format!(
+                "file descriptor {fd}: ral has only standard input (0), standard output (1) \
+                 and standard error (2)"
+            )),
+        };
+        match refusal {
+            None => Ok(Self { fd, mode, target }),
+            Some(message) => Err(message),
+        }
+    }
+
+    pub(crate) fn fd(&self) -> u32 {
+        self.fd
+    }
+
+    pub(crate) fn mode(&self) -> RedirectMode {
+        self.mode
+    }
+
+    pub(crate) fn target(&self) -> &RedirectTarget {
+        &self.target
+    }
 }
 
 /// Operand shape of a control-operator scope form, one variant per surface

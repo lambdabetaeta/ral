@@ -119,9 +119,17 @@ impl Allowance {
 fn percent_from_fraction(f: f64) -> u32 {
     let clamped = f.clamp(0.0, 1.0);
     let rounded = (clamped * 100.0).round();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 0.0..=100.0 above")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0.0..=100.0 above"
+    )]
     let percent = rounded as u32;
-    if clamped > 0.0 && percent == 0 { 1 } else { percent }
+    if clamped > 0.0 && percent == 0 {
+        1
+    } else {
+        percent
+    }
 }
 
 /// `5 hours`, `7 days`, `30 minutes` — the largest whole unit that divides
@@ -187,7 +195,10 @@ pub enum Reading {
 /// line saying so: a card that silently omitted them would read as a claim
 /// that they are unlimited.
 pub fn limits_card(readings: &[(String, Reading)]) -> Card {
-    if readings.iter().all(|(_, r)| matches!(r, Reading::Unmetered)) {
+    if readings
+        .iter()
+        .all(|(_, r)| matches!(r, Reading::Unmetered))
+    {
         let names = readings
             .iter()
             .map(|(label, _)| label.as_str())
@@ -273,9 +284,7 @@ impl MeterSource for LiveMeters {
             .ok_or_else(|| format!("{} has no resolved credential", self.roster.label(account)))?;
         match meter {
             Meter::Codex => meters::codex::read(account, credential, &self.roster),
-            Meter::OpenRouterCredits => {
-                meters::openrouter::read(account, credential, &self.roster)
-            }
+            Meter::OpenRouterCredits => meters::openrouter::read(account, credential, &self.roster),
         }
     }
 }
@@ -412,7 +421,10 @@ mod tests {
             resets_at: Some(now - 10),
         };
         let label = already_past.field_at(now).label;
-        assert!(!label.contains("resets in"), "a past reset yields no clause");
+        assert!(
+            !label.contains("resets in"),
+            "a past reset yields no clause"
+        );
         assert!(label.contains("1 hour"));
     }
 
@@ -537,7 +549,11 @@ mod tests {
 
         let card = Survey::open(&roster, &source).settle();
 
-        assert_eq!(card.0.len(), 6, "one section mark plus one body mark per account");
+        assert_eq!(
+            card.0.len(),
+            6,
+            "one section mark plus one body mark per account"
+        );
         let Mark::Fields { rows } = &card.0[1] else {
             panic!("the loaded account renders its allowances");
         };

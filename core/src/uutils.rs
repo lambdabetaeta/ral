@@ -382,8 +382,9 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
             params.from.to_string_lossy(),
             params.to.to_string_lossy()
         );
-    } else {
-        io::stdout().write_all(&result).unwrap();
+    } else if let Err(error) = io::stdout().write_all(&result) {
+        eprintln!("{error}");
+        return 2;
     }
     if result.is_empty() {
         maybe_report_identical_files();

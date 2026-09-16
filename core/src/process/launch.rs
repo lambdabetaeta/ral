@@ -918,7 +918,7 @@ mod windows {
         }
 
         fn piped(stream: Stream) -> io::Result<Self> {
-            let (reader, writer) = os_pipe::pipe()?;
+            let (reader, writer) = crate::process::cloexec_pipe()?;
             match stream {
                 Stream::Stdin => {
                     let raw = reader.as_raw_handle() as HANDLE;

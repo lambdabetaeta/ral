@@ -22,11 +22,11 @@ use std::fmt;
 
 /// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`, as the two
 /// predicates the char-by-char scan needs.
-pub(crate) fn is_ident_start(ch: char) -> bool {
+fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
 }
 
-pub(crate) fn is_ident_cont(ch: char) -> bool {
+fn is_ident_cont(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
 }
 
@@ -48,7 +48,7 @@ pub(crate) fn is_ident(s: &str) -> bool {
 /// before space, newline, or `]`, and punctuates a `,` inside `[…]`.  The
 /// whole-string question is answered by [`crate::syntax::quote::is_bare_word`],
 /// which lexes rather than scanning chars.
-pub(crate) fn is_bare_char(ch: char) -> bool {
+fn is_bare_char(ch: char) -> bool {
     !matches!(
         ch,
         ' ' | '\t'
@@ -71,6 +71,7 @@ pub(crate) fn is_bare_char(ch: char) -> bool {
             | '('
             | ')'
             | ';'
+            | '&'
     )
 }
 
@@ -827,11 +828,11 @@ impl Lexer {
 
     /// Push each body char and consume the closing `'` with its `level`
     /// `#`s.  A `'` trailed by fewer than `level` `#`s is body text.
-    fn scan_quoted_body<F: FnMut(char)>(
+    fn scan_quoted_body(
         &mut self,
         span: Span,
         level: usize,
-        mut push: F,
+        body: &mut String,
     ) -> Result<(), LexError> {
         loop {
             match self.peek() {
@@ -855,11 +856,11 @@ impl Lexer {
                         }
                         return Ok(());
                     }
-                    push('\'');
+                    body.push('\'');
                     self.bump();
                 }
                 Some(ch) => {
-                    push(ch);
+                    body.push(ch);
                     self.bump();
                 }
             }
@@ -871,7 +872,7 @@ impl Lexer {
     fn scan_quoted(&mut self, span: Span, level: usize) -> Result<(Token, Span), LexError> {
         self.bump();
         let mut body = String::new();
-        self.scan_quoted_body(span, level, |c| body.push(c))?;
+        self.scan_quoted_body(span, level, &mut body)?;
         Ok((Token::SingleQuoted(body), self.finish(span)))
     }
 
@@ -1399,9 +1400,10 @@ impl Lexer {
             if self.peek().is_some_and(|ch| !ch.is_whitespace()) {
                 return Err(Self::error(
                     self.finish(span),
-                    "ral has no heredocs: `<<` feeds a string to stdin and \
-                     takes a space before its payload — `cmd << #' ... '#` \
-                     (a raw string, which may use newlines)",
+                    format!(
+                        "`<<` takes a space before its payload — {}",
+                        crate::syntax::NO_HEREDOCS
+                    ),
                 ));
             }
             return Ok(self.finish_redirect(fd, RedirectMode::HereString, None, span));
@@ -2103,6 +2105,12 @@ mod tests {
             }
         )));
         assert!(lex_err("$[1 & 0]").contains("`&&`"));
+        // Glued: `&` is not a bare char, so `true&&false` is a conjunction
+        // rather than one long command name.
+        let Token::Expr(glued) = &tok_types("$[true&&false]")[0] else {
+            panic!("expected Expr token");
+        };
+        assert_eq!(glued.len(), 3, "expected `true`, `&&`, `false`: {glued:?}");
     }
 
     /// Outside `$[…]` the shell meaning stands: `&` is refused by name, `&&`
@@ -2111,6 +2119,10 @@ mod tests {
     fn shell_mode_keeps_shell_meanings() {
         assert!(lex_err("sleep 1 &").contains("spawn"));
         assert!(lex_err("a && b").contains("no `&&`"));
+        // Glued too: `&` never hides inside a word, so bash's backgrounding
+        // reflex earns the message rather than a word ending in `&`.
+        assert!(lex_err("sleep 1&").contains("spawn"));
+        assert!(lex_err("a&&b").contains("no `&&`"));
         assert_eq!(
             tok_types("echo a >= b"),
             vec![

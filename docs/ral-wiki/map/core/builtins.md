@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: e4d859c3
+generated_at_date: 2026-09-16
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -12,7 +12,12 @@ binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
 `BuiltinEntry::fixed_arity` derives it from the type rule and caches it, a
-`usize` for every entry in the table. The manifest is *authored as two*, and
+`usize` for every entry in the table. Settling at `Unit` is derived the same
+way and enforced at the same door: `BuiltinEntry::settles_at_unit` reads the
+declared result off the curry spine, and a row whose scheme says `F Unit`
+answers unit from `call_body` whatever its Rust body computed, so no builtin
+can hand a value of another type to a name the checker believes is `Unit` —
+`each` did, before the audit. The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
 `Value::Native` in the base scope, a base-frame row seeds a base handler frame
 (`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
@@ -89,8 +94,15 @@ Bodies are grouped by concern, one submodule each:
   outcome }` ([[map/core/shell-state|types/value.rs]]); the eliminators project that
   one settle. `try_settle` is the shared non-blocking sample (cached outcome, else a
   `try_recv` completed through `complete_handle`; a `Disconnected` receiver — a
-  panicked worker — settles as the same failure `await` reports, so `poll`/`race`
-  see a finished block rather than spinning). `await`/`race` `project_completed` the
+  panicked worker — settles as a failure naming the worker rather than whichever
+  eliminator found it, so `poll`/`race` see a finished block rather than
+  spinning).  A handle's `state` mutex is its transition lock: settling and
+  stopping each take it first and hold it across both the test and the
+  transition, taking `result` and `cached` under it and never the other way
+  round.  That is what makes the promise good that a finished worker's value is
+  never destroyed by a losing `race` or a `cancel` — a worker that completes
+  cannot slip between a `stop_handle` test and its `detach_handle`, because
+  there is no window between them. `await`/`race` `project_completed` the
   outcome to `{value, stdout, stderr}`, re-raising `` `err ``; `poll` is total,
   wrapping it as `` `settled `` `{stdout, stderr, outcome: `ok/`err}` (the `` `err ``
   payload built through the shared `evaluator::scope::error_record`, the record
@@ -118,7 +130,9 @@ Bodies are grouped by concern, one submodule each:
   `card::value_to_notice`), and cancels the worker's scope with
   `Deadline` — never detaching the handle, so a later `poll`/`await` still
   observes the partial output and failure. The class decides the chain at
-  the spawn door: `spawn_child` takes a `LeaseClass`, and only a `Worker`
+  the spawn door: `spawn_child` takes a `Birth` — which of `spawn`, `watch`
+  and `service` is being served, and so the verb a refusal names, the lease
+  class registered and how the child's bytes are wired — and only a `Worker`
   birth arms it — `service` registers `Durable` and arms nothing, so no
   reaper entry ever exists for it; the absent chain *is* the durable
   policy, whose only bounds are the handle's own `cancel`, the host's
@@ -126,8 +140,8 @@ Bodies are grouped by concern, one submodule each:
   The spawn door also enforces the frame's admission cap
   (`Mooring::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
-  running or reserved, with an error naming `await`/`cancel` as the
-  remedies, the reservation held across thread spawn and released into the
+  running or reserved, with an error naming the verb the caller actually
+  wrote and `await`/`cancel` as the remedies, the reservation held across thread spawn and released into the
   registered entry, so a racing sibling birth never sees a filling seat as
   free (`workers` is retired — [[map/exarch/builtins|builtins]]); settled
   entries lingering under retention hold no seat. A

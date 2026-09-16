@@ -78,7 +78,10 @@ pub(super) struct ManifestHandlers {
 /// `parse_hooks`/`parse_keybindings`/`parse_aliases` below; `capabilities:`
 /// is rejected outright rather than type-checked, so it has no schema entry
 /// either.
-pub(super) fn manifest_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<ral_core::typecheck::Ty> {
+pub(super) fn manifest_field_ty(
+    key: &str,
+    _u: &mut ral_core::typecheck::Unifier,
+) -> Option<ral_core::typecheck::Ty> {
     match key {
         "name" => Some(ral_core::typecheck::Ty::String),
         _ => None,

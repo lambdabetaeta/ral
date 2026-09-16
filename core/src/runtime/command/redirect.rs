@@ -276,11 +276,15 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settl
     let (mut file, commit) = open_file(path, RedirectMode::Write, shell)?;
     file.write_all(bytes).map_err(|e| io_error(path, &e))?;
     match commit {
-        Some(commit) => commit
-            .commit()
-            .map_err(|e| Break::Error(Error::new(format!("atomic write: {e}"), 1))),
+        Some(commit) => commit.commit().map_err(|e| atomic_write_error(&e)),
         None => Ok(()),
     }
+}
+
+/// Shared by every atomic `>` commit failure — here and
+/// `command::settle_atomic_write`.
+pub(crate) fn atomic_write_error(e: &std::io::Error) -> Break {
+    Break::Error(Error::new(format!("atomic write: {e}"), 1))
 }
 
 /// Park the fd-0 redirect — `< file` or the here-string `<< str` — on

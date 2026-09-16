@@ -35,3 +35,14 @@ pub(crate) fn nesting_too_deep_message() -> String {
          brackets, braces, or expression blocks) — simplify the input"
     )
 }
+
+/// One wording for both sites that meet the bash-heredoc reflex: the lexer,
+/// when the payload is glued to `<<`, and the parser, when it is a bare word.
+pub(crate) const NO_HEREDOCS: &str = "ral has no heredocs: `<<` feeds a string to stdin. \
+     Use a raw string: `cmd << #\' ... \'#`, which may use newlines";
+
+/// One wording for both binding positions that refuse a keyword: a plain
+/// binder and a `...rest` name.
+pub(crate) fn reserved_keyword_message(name: &str) -> String {
+    format!("'{name}' is a reserved keyword and cannot be used as a binding name")
+}

@@ -244,24 +244,22 @@ impl Source {
 /// outer run's live spans still carry.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
-    sources: Arc<Vec<Option<Source>>>,
+    sources: Arc<Vec<Source>>,
 }
 
 impl SourceDb {
     /// Register `source`, returning the [`FileId`] that resolves to it.
     pub fn register(&mut self, source: Source) -> FileId {
         let id = self.next_id();
-        Arc::make_mut(&mut self.sources).push(Some(source));
+        Arc::make_mut(&mut self.sources).push(source);
         id
     }
 
-    /// The [`Source`] `id` resolves to, or `None` for [`FileId::DUMMY`] and
-    /// for ids this registry does not hold.
+    /// The [`Source`] `id` resolves to, or `None` for an id this registry
+    /// does not hold — [`FileId::DUMMY`] among them, being `u32::MAX` and so
+    /// past the end of any registry a session could fill.
     pub fn get(&self, id: FileId) -> Option<&Source> {
-        if id == FileId::DUMMY {
-            return None;
-        }
-        self.sources.get(id.0 as usize)?.as_ref()
+        self.sources.get(id.0 as usize)
     }
 
     /// The [`FileId`] the next [`register`](Self::register) will mint, so a

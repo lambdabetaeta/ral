@@ -152,7 +152,10 @@ pub(crate) fn apply_rc_config(
 /// type per key rather than one across the key, and no single `Ty` pins
 /// either. `apply_rc_key`'s own per-key check below is what still catches
 /// all of them, and every key here besides.
-pub(super) fn rc_field_ty(key: &str, u: &mut ral_core::typecheck::Unifier) -> Option<ral_core::typecheck::Ty> {
+pub(super) fn rc_field_ty(
+    key: &str,
+    u: &mut ral_core::typecheck::Unifier,
+) -> Option<ral_core::typecheck::Ty> {
     use ral_core::typecheck::Ty;
     match key {
         "edit_mode" | "surface" => Some(Ty::String),
@@ -340,7 +343,11 @@ fn apply_rc_key(
                 if let Err(err) = load_rc_plugin(&name, options, shell, runtime) {
                     eprint!(
                         "{}",
-                        ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
+                        ral_core::diagnostic::format_runtime_error_auto(
+                            shell.sources(),
+                            &err,
+                            None
+                        )
                     );
                 }
             }

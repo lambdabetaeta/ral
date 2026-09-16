@@ -485,14 +485,20 @@ pub(crate) fn apply_seed(
     shell: &mut Shell,
     narrow: GrantNarrower,
 ) -> Result<(), String> {
-    let dec = WireDecoder::for_shell(shell, &seed.scope_table)
-        .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
+    let dec = WireDecoder::for_shell(shell, &seed.scope_table).map_err(|e| {
+        format!(
+            "hatch: the seed's scope table failed to decode: {}",
+            e.message
+        )
+    })?;
     install_wire_shell(seed.shell, shell, &dec)
         .map_err(|e| format!("hatch: the seed's context failed to decode: {}", e.message))?;
-    shell.env = seed
-        .captured
-        .into_runtime(&dec)
-        .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
+    shell.env = seed.captured.into_runtime(&dec).map_err(|e| {
+        format!(
+            "hatch: the seed's captured environment failed to decode: {}",
+            e.message
+        )
+    })?;
 
     let cwd = shell.cwd();
     let layer = narrow(&seed.grant, &cwd.to_string_lossy())?;

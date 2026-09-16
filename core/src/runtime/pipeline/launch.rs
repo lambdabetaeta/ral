@@ -11,7 +11,7 @@ use super::stage::{ExternalStage, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::PgidPolicy;
-use crate::types::{Break, Env, Error, Mooring, Settled, Shell, Value};
+use crate::types::{Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// Route stdin for the stage on the pipeline's input boundary, consuming
@@ -24,7 +24,7 @@ fn route_parent_stdin(group: &PipelineGroup, shell: &Shell) -> Settled<command::
     if matches!(shell.io.stdin, Source::Empty) {
         return Ok(command::StdinRoute::Null);
     }
-    let reader = shell.io.stdin.reader().map_err(stdin_error)?;
+    let reader = shell.io.stdin.reader().map_err(command::stdin_error)?;
     Ok(match reader {
         Some(r) => command::StdinRoute::Reader(r),
         None if !shell.io.terminal.startup_stdin_tty => {
@@ -35,10 +35,6 @@ fn route_parent_stdin(group: &PipelineGroup, shell: &Shell) -> Settled<command::
         }
         None => command::StdinRoute::Null,
     })
-}
-
-fn stdin_error(e: impl std::fmt::Display) -> Break {
-    Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
 }
 
 /// A thread reads what a child would inherit, except a tty: reading the
@@ -55,8 +51,10 @@ pub(super) fn stage_stdin(
         ByteIn::Parent => match &shell.io.stdin {
             Source::Empty => None,
             Source::Terminal if shell.io.terminal.startup_stdin_tty => None,
-            Source::Terminal => Some(SourceReader::file(dup_stdin_file().map_err(stdin_error)?)),
-            Source::Reader(r) => Some(r.try_clone().map_err(stdin_error)?),
+            Source::Terminal => Some(SourceReader::file(
+                dup_stdin_file().map_err(command::stdin_error)?,
+            )),
+            Source::Reader(r) => Some(r.try_clone().map_err(command::stdin_error)?),
         },
     };
     Ok(reader.map_or(Source::Empty, |r| {

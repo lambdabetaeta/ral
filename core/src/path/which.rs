@@ -237,7 +237,7 @@ pub fn forget_located_commands() {
 }
 
 fn name_has_separator(name: &str) -> bool {
-    name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') || name.contains('\\')
+    name.contains(['/', '\\'])
 }
 
 /// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.

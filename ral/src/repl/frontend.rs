@@ -250,6 +250,19 @@ mod tests {
         assert_eq!(out, "echo hi |\nworld");
     }
 
+    /// A trailing `?` is a continuation exactly as a trailing `|` is, and
+    /// the joined buffer must then parse — the REPL used to offer the
+    /// continuation and the parser refuse it.
+    #[test]
+    fn folds_a_line_after_a_trailing_chain_question() {
+        let mut rest = vec!["echo b"].into_iter();
+        let out = join_continuation("echo a ?".into(), || {
+            Continuation::Line(rest.next().unwrap().to_string())
+        });
+        assert_eq!(out, "echo a ?\necho b");
+        assert!(ral_core::syntax::parser::parse(&out).is_ok(), "{out:?}");
+    }
+
     /// Discard (Ctrl-C / Ctrl-D / read error) abandons the partial buffer.
     #[test]
     fn discard_yields_empty() {

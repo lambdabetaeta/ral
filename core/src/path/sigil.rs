@@ -17,7 +17,8 @@
 //! exec-map freeze handles them instead of this module.
 
 use crate::path::basedir::{XdgKind, resolve_xdg};
-use crate::path::lex::fold_dots;
+use crate::path::canon::canonicalise_lenient;
+use crate::path::lex::{fold_dots, path_within};
 use crate::path::resolved::NormalizedPrefix;
 use crate::path::tilde::{TildePath, Unexpandable, expand_tilde_path};
 use crate::types::PolicyError;
@@ -45,10 +46,17 @@ pub(crate) fn looks_like_path_or_sigil(s: &str) -> bool {
 pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
     let body = input.strip_prefix("xdg:")?;
     let (name, sub) = match body.split_once('/') {
-        Some((n, s)) => (n, Some(s)),
+        Some((n, s)) => (n, Some(relative_suffix(s))),
         None => (body, None),
     };
     Some((XdgKind::parse(name)?, sub))
+}
+
+/// A sigil's sub-path as something that joins *onto* its base: leading
+/// separators come off, because `Path::join` on a rooted suffix discards the
+/// base outright — `xdg:data//etc` would otherwise name `/etc`.
+fn relative_suffix(s: &str) -> &str {
+    s.trim_start_matches(['/', '\\'])
 }
 
 /// Expand a `~` or `xdg:` head, or return `input` unchanged.  The runtime half
@@ -180,8 +188,8 @@ fn home_unknown_message() -> String {
         .to_string()
 }
 
-/// Match `name:`, `name:sub`, or `name:/sub`; leading slashes come off the
-/// suffix so it joins as a relative component.
+/// Match `name:`, `name:sub`, or `name:/sub`, the suffix made
+/// [`relative_suffix`]-safe.
 #[allow(
     clippy::option_option,
     reason = "tri-state: no-match / match-no-suffix / match-with-suffix"
@@ -191,7 +199,7 @@ fn parse_literal_sigil<'a>(input: &'a str, name: &str) -> Option<Option<&'a str>
     Some(if body.is_empty() {
         None
     } else {
-        Some(body.trim_start_matches('/'))
+        Some(relative_suffix(body))
     })
 }
 
@@ -205,9 +213,15 @@ fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
 
 /// Resolve an XDG kind plus sub-path, and require the result under `home`:
 /// otherwise an attacker-set `XDG_DATA_HOME=/etc` would silently widen an
-/// `xdg:data` grant to `/etc`.  Both sides are folded before the comparison, so
-/// `xdg:config/../../etc` collapses to `/etc` and is caught at the door instead
-/// of stepping over the guard and collapsing only at match time.
+/// `xdg:data` grant to `/etc`.
+///
+/// The question is asked exactly as the runtime gate asks it — [`path_within`]
+/// over the symlink-followed forms — so guard and gate cannot disagree.  Both
+/// sides are folded and canonicalised: `xdg:config/../../etc` collapses to
+/// `/etc` rather than stepping over the guard and collapsing at match time, a
+/// `$XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a
+/// HOME that is itself a symlink (macOS `/home`) still contains its own
+/// subdirectories.
 ///
 /// That guard is stated in `home`'s terms, so an unknown home leaves an
 /// `xdg:` grant unanswerable — an absolute `$XDG_*_HOME` included, since there
@@ -222,8 +236,8 @@ fn resolve_xdg_safe(
         return Err(PolicyError::new(home_unknown_message()));
     };
     let resolved = join_sub(base, sub);
-    let folded_home = fold_dots(Path::new(home));
-    if resolved.surface_path().starts_with(&folded_home) {
+    let canonical_home = canonicalise_lenient(&fold_dots(Path::new(home)));
+    if path_within(resolved.resolved_path(), &canonical_home) {
         return Ok(resolved);
     }
     let val = std::env::var(kind.env_var()).unwrap_or_default();
@@ -246,11 +260,19 @@ fn resolve_xdg_safe(
             name = kind.token_name(),
         )
     };
+    let via = if resolved.resolved() == resolved.as_str() {
+        String::new()
+    } else {
+        format!(
+            " (written '{}', which is a symbolic link)",
+            resolved.as_str()
+        )
+    };
     Err(PolicyError::new(format!(
-        "xdg:{name} resolves to '{path}', outside HOME — refusing to widen \
-         the grant.  {clause}",
+        "xdg:{name} resolves to '{path}'{via}, outside HOME — refusing to \
+         widen the grant.  {clause}",
         name = kind.token_name(),
-        path = resolved.as_str(),
+        path = resolved.resolved(),
         clause = env_clause,
     )))
 }
@@ -409,6 +431,62 @@ mod tests {
         .unwrap_err()
         .message;
         assert!(err.contains("outside HOME"), "{err}");
+    }
+
+    /// The escape the surface form hides: `$XDG_DATA_HOME` naming a link
+    /// *inside* HOME whose target is outside it.  The gate matches the
+    /// symlink-followed form, so the guard must ask it there too.
+    // Unix-only: `std::os::unix::fs::symlink`, and `/etc` is a Unix root.
+    #[cfg(unix)]
+    #[test]
+    fn freeze_rejects_xdg_home_symlinked_out_of_home() {
+        let home = tempfile::tempdir().unwrap();
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let err = crate::test_env::with_var("XDG_DATA_HOME", Some(&link.to_string_lossy()), || {
+            frozen(&["xdg:data"], &ctx(&home_str, Path::new("/cwd")))
+                .unwrap_err()
+                .message
+        });
+        assert!(err.contains("outside HOME"), "{err}");
+        assert!(
+            err.contains("/etc"),
+            "the message must name where it lands: {err}"
+        );
+    }
+
+    /// The dual, and the reason both sides are canonicalised: macOS reaches
+    /// a `/var/folders/...` tempdir through a symlink, so canonicalising only
+    /// the XDG side would refuse a HOME nobody tampered with.
+    // Unix-only: pairs with the test above.
+    #[cfg(unix)]
+    #[test]
+    fn freeze_accepts_xdg_home_under_a_symlinked_home() {
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        crate::test_env::with_var("XDG_DATA_HOME", Some(&data.to_string_lossy()), || {
+            frozen(&["xdg:data"], &ctx(&home_str, Path::new("/cwd"))).unwrap();
+        });
+    }
+
+    /// `Path::join` on a rooted suffix discards the base, so an `xdg:` token
+    /// spelled with a double slash must not name the root.  Both halves of
+    /// expansion answer alike.
+    // Unix-only: Linux XDG defaults, and `/etc` is a Unix root.
+    #[cfg(unix)]
+    #[test]
+    fn xdg_subpath_cannot_discard_its_base() {
+        crate::test_env::with_var("XDG_CONFIG_HOME", None, || {
+            let paths = frozen(&["xdg:config//etc"], &ctx("/h", Path::new("/cwd"))).unwrap();
+            assert_eq!(paths, vec!["/h/.config/etc".to_string()]);
+            assert_eq!(
+                expand_path_prefix("xdg:config//etc", Some("/h")),
+                "/h/.config/etc"
+            );
+        });
     }
 
     /// Even a sigil-free literal is stored in the form the gate matches against.

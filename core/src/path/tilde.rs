@@ -214,15 +214,10 @@ fn windows_strip_home(path: &str, home: &str) -> String {
         return path.to_string();
     }
     let home_depth = super::lex::windows_identity_components(home).len();
-    // The same verbatim/UNC normalisation `windows_identity_components`
-    // folds before it lower-cases and splits, mirrored here without the case
-    // fold: the displayed tail must keep `path`'s own casing, not `home`'s.
-    let stripped = super::lex::strip_verbatim_prefix(path);
-    let stripped = stripped
-        .strip_prefix("UNC\\")
-        .or_else(|| stripped.strip_prefix("UNC/"))
-        .map_or_else(|| stripped.to_string(), |rest| format!(r"\{rest}"));
-    let tail: Vec<&str> = stripped
+    // The head fold without the case fold: the displayed tail must keep
+    // `path`'s own casing, not `home`'s.
+    let head = super::lex::windows_head(path);
+    let tail: Vec<&str> = head
         .split(['/', '\\'])
         .filter(|c| !c.is_empty())
         .skip(home_depth)
