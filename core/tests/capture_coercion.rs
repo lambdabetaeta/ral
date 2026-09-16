@@ -81,6 +81,12 @@ fn a_byte_routed_let_binds_the_decoded_text() {
 /// An alias spelled like the machinery the coercion used to call cannot be
 /// reached by it: the captured `let` still binds `"hi"`, the `String` the
 /// checker promised, and not the alias's own value.
+///
+/// The binder is spelled out rather than held to one letter because ral keeps
+/// value and command names disjoint, and what is on `PATH` is the host's
+/// business: `let r` binds here and is refused on a machine carrying R, as
+/// GitHub's Windows runner does.  A name nobody ships as a program keeps the
+/// test measuring the coercion.
 #[test]
 fn an_alias_cannot_stand_in_for_the_coercion() {
     let mut shell = fresh_shell();
@@ -89,7 +95,7 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
         "alias __decode-captured { |_| echo 42 }\nreturn ()",
     );
     assert_eq!(
-        ok(&mut shell, "let r = __decode-captured anything\nreturn $r"),
+        ok(&mut shell, "let intercepted = __decode-captured anything\nreturn $intercepted"),
         Value::String("42".into()),
         "the alias must really be installed and dispatchable, or this test proves nothing"
     );
@@ -123,7 +129,7 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
     assert_eq!(
         ok(
             &mut shell,
-            &format!("{frame} {{ let r = __decode-captured anything\n return $r }}")
+            &format!("{frame} {{ let intercepted = __decode-captured anything\n return $intercepted }}")
         ),
         Value::String("42".into()),
         "the frame must really intercept the name, or this test proves nothing"

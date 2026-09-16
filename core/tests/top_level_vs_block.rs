@@ -86,8 +86,8 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
 fn projecting_caps() -> Capabilities {
     Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
-            write_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
+            read_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
+            write_prefixes: vec![ral_core::path::NormalizedPrefix::root()],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::root()

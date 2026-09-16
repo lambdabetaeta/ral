@@ -161,6 +161,28 @@ impl NormalizedPrefix {
         Self::freeze(path.as_ref())
     }
 
+    /// The filesystem root, as the prefix that covers every path: the
+    /// implicit ceiling a policy attenuates down from.
+    ///
+    /// Minted rather than frozen, because freezing would *narrow* it.
+    /// `realpath("/")` is drive-relative on Windows — it answers `D:\` when
+    /// the process cwd sits on `D:` — so a ceiling built through
+    /// [`from_surface`](Self::from_surface) covers one drive and silently
+    /// denies every other, and a session whose checkout and whose `%TEMP%`
+    /// are on different drives (GitHub's Windows runners are exactly that)
+    /// loses the whole of the second.  Left unfrozen, `/` folds to zero
+    /// components under
+    /// [`starts_with_identity`](super::lex::starts_with_identity) and is the
+    /// universal prefix on either platform, which is what a ceiling means.
+    #[must_use]
+    pub fn root() -> Self {
+        Self {
+            surface: "/".into(),
+            resolved: "/".into(),
+            namespace: Namespace::Host,
+        }
+    }
+
     /// Mint a prefix naming a path inside the Linux guest, whichever host
     /// mints it.
     ///
@@ -316,6 +338,30 @@ impl PartialEq<String> for NormalizedPrefix {
 #[cfg(test)]
 mod tests {
     use super::NormalizedPrefix;
+
+    /// The ceiling covers every path, on whatever drive.
+    ///
+    /// Windows-only because it is the only host where "the root" is not one
+    /// place: `realpath("/")` answers the *current* drive there, so a ceiling
+    /// frozen through `from_surface` covered `D:\` alone whenever the process
+    /// ran from `D:`, and denied a `%TEMP%` on `C:` — the shape GitHub's
+    /// Windows runners have.  Spelled with drives rather than with the live
+    /// root, so it pins the claim on a host that has only one.
+    #[cfg(windows)]
+    #[test]
+    fn the_root_ceiling_covers_paths_on_every_drive() {
+        let root = NormalizedPrefix::root();
+        for path in [
+            r"C:\Users\someone\AppData\Local\Temp\x",
+            r"D:\a\repo\y",
+            r"Z:\z",
+        ] {
+            assert!(
+                crate::path::prefix_set::covers(&root, &NormalizedPrefix::from_surface(path)),
+                "the ceiling must cover {path}"
+            );
+        }
+    }
 
     /// Asserting on the *bytes* is deliberate: a test that instead checked
     /// admission of `/work/letter.docx` would pass on Windows even with

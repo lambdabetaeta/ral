@@ -441,7 +441,7 @@ fn bare_admit_and_subcommand_gating_unregressed() {
 #[cfg(unix)]
 fn projection_fs() -> FsPolicy {
     FsPolicy {
-        read_prefixes: vec![NormalizedPrefix::from_surface("/")],
+        read_prefixes: vec![NormalizedPrefix::root()],
         write_prefixes: Vec::new(),
         deny_paths: Vec::new(),
     }

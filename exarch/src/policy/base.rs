@@ -84,7 +84,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
 /// restriction file's carve-outs land on a policy rather than on nothing.  `/`
 /// is minted in the normal form every other grant-side prefix carries.
 pub(super) fn root_fs_policy() -> FsPolicy {
-    let root = || ral_core::path::NormalizedPrefix::from_surface("/");
+    let root = ral_core::path::NormalizedPrefix::root;
     FsPolicy {
         read_prefixes: vec![root()],
         write_prefixes: vec![root()],

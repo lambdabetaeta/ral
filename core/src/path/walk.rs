@@ -195,11 +195,80 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
         return splice(&dir, &real, leaf, &[]).map(Step::Link);
     }
     real.push(leaf);
+    let real = dealias(&dir, leaf, real);
     Ok(Step::Object(Located {
         dir,
         leaf: leaf.to_os_string(),
         real,
     }))
+}
+
+/// Everywhere but Windows a name has one spelling, and the walk's own is it.
+#[cfg(not(windows))]
+fn dealias(_dir: &File, _leaf: &OsStr, real: PathBuf) -> PathBuf {
+    real
+}
+
+/// Windows keeps a second, 8.3 name for an entry whose own is too long for
+/// it: `SHORTN~1` and `shortname-probe-directory` are one directory under
+/// two spellings.  The walk assembles the spelling it was *handed*, so a
+/// grant frozen through `realpath` — which answers in long names — and an
+/// access arriving short never meet, and the grant denies its own directory.
+/// `TEMP` is the common way in: a Windows account whose name overflows 8.3
+/// has a short `%TEMP%`, as GitHub's runners (`RUNNER~1`) do.
+///
+/// The answer has to come from a handle, not from a second pass over the
+/// name: resolving once is this module's whole point, and a re-walk is the
+/// gap [`walk`] exists to close.  `GetFinalPathNameByHandleW` asks the
+/// kernel what the object behind a handle the walk *already opened* is
+/// called — the same question `fs::canonicalize` asks, so the two agree by
+/// construction.
+///
+/// `~` is the one character an 8.3 alias always carries, so the guard costs
+/// an ordinary walk nothing and a name that merely contains a `~` one
+/// handle query that returns it unchanged.  A leaf that is not a directory
+/// keeps the spelling it came with: opening a file to read its name would be
+/// an access nothing has authorised yet, and what that leaves is a long
+/// grant failing to match a short access — a denial, never an admission.
+#[cfg(windows)]
+fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> PathBuf {
+    if !real.as_os_str().to_string_lossy().contains('~') {
+        return real;
+    }
+    if let Ok(leaf_dir) = open_search_dir(dir, leaf)
+        && let Some(canonical) = final_path(&leaf_dir)
+    {
+        return canonical;
+    }
+    final_path(dir).map_or(real, |base| base.join(leaf))
+}
+
+/// The canonical path of the object behind `f`, verbatim head stripped so it
+/// is spelled as the rest of `crate::path` spells one.
+#[cfg(windows)]
+fn final_path(f: &File) -> Option<PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW,
+    };
+
+    let handle = f.as_raw_handle();
+    // Called for a length, then for the name: the first call returns the
+    // count *without* the terminator, the second the count written, so a
+    // second answer that did not shrink means the name changed underneath.
+    let needed = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, FILE_NAME_NORMALIZED) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; needed as usize];
+    let written =
+        unsafe { GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), needed, FILE_NAME_NORMALIZED) };
+    if written == 0 || written >= needed {
+        return None;
+    }
+    buf.truncate(written as usize);
+    let name = String::from_utf16(&buf).ok()?;
+    Some(PathBuf::from(super::lex::windows_head(&name)))
 }
 
 /// A search handle on `name` in `dir`: the right to resolve names through
