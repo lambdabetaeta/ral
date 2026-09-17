@@ -23,11 +23,16 @@ use ratatui::{
 /// an unterminated string or an unbalanced brace — colours nothing at all
 /// rather than guess.
 pub(super) fn highlight_ral(src: &str) -> Vec<Line<'static>> {
-    let spans = match lex(src) {
+    into_lines(highlight_ral_spans(src))
+}
+
+/// [`highlight_ral`] unsplit: the styled run for a source that is to be laid
+/// out by a caller of its own, such as a value sharing a row with a label.
+pub(super) fn highlight_ral_spans(src: &str) -> Vec<Span<'static>> {
+    match lex(src) {
         Ok(tokens) => highlighted_spans(src, &tokens),
         Err(_) => vec![Span::styled(src.to_string(), default_ink())],
-    };
-    into_lines(spans)
+    }
 }
 
 fn default_ink() -> Style {

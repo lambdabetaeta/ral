@@ -6,6 +6,7 @@
 //! on the first content row, so a selection through a block copies clean.
 
 use super::block::Detail;
+use super::highlight::highlight_ral_spans;
 use super::palette::{
     CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
 };
@@ -252,78 +253,88 @@ pub(super) fn tool_call_static(cmd: &str, width: u16) -> Vec<Line<'static>> {
     ls
 }
 
-/// The verb column of an act row, pinned to the longest verb (`context-drop`)
-/// plus a space so verbs align across blocks.  [`render_field_rows`] cannot
-/// supply it: it sizes from the rows it is handed, and an act block is one row.
-pub(super) const ACT_VERB_W: usize = 13;
-/// The subject column of an act row, truncated into rather than allowed to
-/// shift the payload column.  Wide enough that a name never has to be cut: a
-/// subject is an identity, and a cut identity names nothing.
-pub(super) const ACT_SUBJECT_W: usize = 20;
+/// The verb column of an act row, pinned to the longest verb
+/// (`context-evict`) plus a space, so verbs align across blocks.
+/// [`render_field_rows`] cannot supply it: it sizes from the rows it is
+/// handed, and an act block is one row.
+pub(super) const ACT_VERB_W: usize = 14;
 
-/// A harness act: `verb`, `subject`, `payload` in three columns, the first two
-/// pinned.  An act changes the world outside the turn, so it carries no
-/// magnitude and wears no size-bar.  A `failed` act tiers the short refusal hot
-/// on the row that names the attempt; the long form is the model's raise.
-/// `full` wraps the payload under its column; reduced truncates into it.
+/// How an act's payload reads, which is the whole of how it is inked.  An act
+/// row is chrome rather than card data, so this names the palette directly
+/// instead of borrowing a [`Role`] — see [`role_style`].
+pub(super) enum Payload {
+    /// The ordinary case: the act says its piece in words.
+    Prose,
+    /// The short refusal, hot on the row that names the attempt; the long form
+    /// is the model's raise.
+    Refusal,
+    /// A ral value, wearing the language's own colours.
+    Value,
+}
+
+/// A harness act: `verb`, `[subject]`, `payload`.  Only the verb is pinned to a
+/// column — its vocabulary is closed, so it aligns down the page; a subject is a
+/// free name, and pinning one pads every row out to the width of the longest
+/// name nobody used.  The brackets are what make it a name: a subject is the one
+/// thing on the row that is an identity rather than a word.  An act changes the
+/// world outside the turn, so it carries no magnitude and wears no size-bar.
+/// `full` wraps the payload, hanging under its own opening column; reduced cuts
+/// it to the row.
 pub(super) fn act_row(
     verb: &str,
     subject: Option<&str>,
     payload: &str,
-    failed: bool,
+    kind: &Payload,
     width: u16,
     full: bool,
 ) -> Vec<Line<'static>> {
-    let payload_w = (width as usize)
-        .saturating_sub(ACT_VERB_W + ACT_SUBJECT_W)
-        .max(8);
-    let ink = if failed {
-        Style::default().fg(RED_HOT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(SLATE)
-    };
     let mut head = vec![Span::styled(
         format!("{verb:<ACT_VERB_W$}"),
         Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
     )];
-    // Pad the subject cell only when a payload follows, so a landed `cancel`
-    // copies as `cancel     hunter` with no trailing run of column padding.
+    // No separator after a subject that ends the row, so a landed `cancel`
+    // copies as `cancel        [hunter]` with nothing trailing it.
     if let Some(subject) = subject.filter(|s| !s.is_empty()) {
-        let mut cell = truncate_spans(&[bold(subject.to_string(), LIME)], ACT_SUBJECT_W - 1);
+        head.push(agent_name(subject, LIME));
         if !payload.is_empty() {
-            cell.push(Span::raw(" ".repeat(ACT_SUBJECT_W - span_run_width(&cell))));
+            head.push(Span::raw(" "));
         }
-        head.extend(cell);
-    } else if !payload.is_empty() {
-        head.push(Span::raw(" ".repeat(ACT_SUBJECT_W)));
     }
     let mut out = vec![Line::default()];
     if payload.is_empty() {
         out.push(Line::from(head));
-    } else if full {
-        push_wrapped(&mut out, payload, payload_w, |chunk, first| {
-            if first {
-                let mut spans = head.clone();
-                spans.push(Span::styled(chunk, ink));
-                Line::from(spans)
-            } else {
-                Line::from(vec![
-                    Span::raw(" ".repeat(ACT_VERB_W + ACT_SUBJECT_W)),
-                    Span::styled(chunk, ink),
-                ])
-            }
-        });
+        return out;
+    }
+    let body = match kind {
+        Payload::Value => highlight_ral_spans(payload),
+        Payload::Prose | Payload::Refusal => vec![Span::styled(
+            payload.to_string(),
+            match kind {
+                Payload::Refusal => Style::default().fg(RED_HOT).add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(SLATE),
+            },
+        )],
+    };
+    if full {
+        out.extend(hang(&head, body, width.into()));
     } else {
-        head.extend(truncate_spans(
-            &[Span::styled(payload.to_string(), ink)],
-            payload_w,
-        ));
+        let body_w = (width as usize)
+            .saturating_sub(span_run_width(&head))
+            .max(8);
+        head.extend(truncate_spans(&body, body_w));
         out.push(Line::from(head));
     }
     out
 }
 
-/// An async subagent's landed line: `agent NAME finished [1 min 12 secs]`, the
+/// An agent's name as it reads in the transcript: bracketed, because a name is
+/// an identity and not a word, and never cut, because a cut identity names
+/// nothing.
+fn agent_name(name: &str, hue: Color) -> Span<'static> {
+    bold(format!("[{name}]"), hue)
+}
+
+/// An async subagent's landed line: `agent [NAME] finished · 1 min 12 secs`, the
 /// bold `name` turning [`ORANGE`] with the verb when `error` is set.  No body
 /// and no magnitude — a reply is a value on the child's own agent, read with
 /// `` agents `read ``, so there is nothing here to size or to disclose.  The
@@ -342,12 +353,9 @@ pub(super) fn subagent_header(
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let mut spans = vec![
         Span::styled("agent ", dim),
-        bold(
-            name.to_string(),
-            if error.is_some() { ORANGE } else { LIME },
-        ),
+        agent_name(name, if error.is_some() { ORANGE } else { LIME }),
         Span::styled(
-            format!(" {verb}  [{}]", crate::bus::elapsed_phrase(elapsed)),
+            format!(" {verb}  · {}", crate::bus::elapsed_phrase(elapsed)),
             dim,
         ),
     ];
@@ -419,24 +427,14 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     ])
 }
 
-/// A diff block's columns, measured once for the whole block so every row's
-/// text starts in the same one: the line-number gutter, and what `width` leaves
-/// a row's own text once the gutter, its space and the `<sign> ` are paid.
+/// A diff block's columns: the line-number gutter, measured once for the whole
+/// block so every row's text starts in the same one, and the block's own width.
+/// What is left for a row's text is [`hang`]'s to work out, from the head it is
+/// handed.
 #[derive(Clone, Copy)]
 struct DiffCols {
     gutter: usize,
-    body_w: usize,
-}
-
-impl DiffCols {
-    /// Floored, so a pathological width still wraps rather than dividing by a
-    /// column that is not there.
-    fn new(gutter: usize, width: usize) -> Self {
-        Self {
-            gutter,
-            body_w: width.saturating_sub(gutter + 1 + 2).max(8),
-        }
-    }
+    width: usize,
 }
 
 /// The header, then the first `cap` diff rows (all when `None`), the hunks
@@ -448,8 +446,8 @@ fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> 
     let total: usize = hunks.iter().map(|h| h.rows.len()).sum();
     let mut left = cap.unwrap_or(total).min(total);
     let cut = left < total;
-    let cols = DiffCols::new(
-        hunks
+    let cols = DiffCols {
+        gutter: hunks
             .iter()
             .map(hunk_max_lineno)
             .max()
@@ -458,7 +456,7 @@ fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> 
             .len()
             .max(3),
         width,
-    );
+    };
     for (i, h) in hunks.iter().enumerate() {
         if left == 0 {
             break;
@@ -548,7 +546,7 @@ fn push_gutter_row(
     base: Color,
     hot: Option<Color>,
 ) {
-    let DiffCols { gutter, body_w } = cols;
+    let DiffCols { gutter, width } = cols;
     let body: Vec<Span<'static>> = segs
         .iter()
         .filter(|s| !s.text.is_empty())
@@ -561,26 +559,22 @@ fn push_gutter_row(
             Span::styled(s.text.clone(), style)
         })
         .collect();
-    for (i, wrapped) in wrap_line(&Line::from(body), body_w).into_iter().enumerate() {
-        let (num, marker) = if i == 0 {
-            (format!("{lineno:>gutter$}"), format!("{sign} "))
-        } else {
-            (" ".repeat(gutter), "  ".to_string())
-        };
-        let mut spans = vec![
-            Span::styled(format!("{num} "), Style::default().fg(SLATE)),
-            Span::styled(marker, Style::default().fg(base)),
-        ];
-        spans.extend(wrapped.spans);
-        ls.push(Line::from(spans));
-    }
+    let head = vec![
+        Span::styled(format!("{lineno:>gutter$} "), Style::default().fg(SLATE)),
+        Span::styled(format!("{sign} "), Style::default().fg(base)),
+    ];
+    ls.extend(hang(&head, body, width));
 }
 
 // ── Card rendering ───────────────────────────────────────────────────────────
 
 /// The one binding of a nominal [`Role`] to the retinal variable that carries
-/// it: hue, plus a weight shift where emphasis is part of the role.  Content
-/// hue lives here alone, so the kit names a role but never a colour.
+/// it: hue, plus a weight shift where emphasis is part of the role.  A role is
+/// what a *card* names, so every hue a card can ask for lives here alone and it
+/// names a role, never a colour.  The transcript's own chrome — a rail, a
+/// header, an act row — inks itself from [`super::palette`] directly: it is the
+/// TUI speaking, not the card's data, and it must not have to widen a
+/// vocabulary the bus shares with `ral` in order to say so.
 fn role_style(role: Role) -> Style {
     match role {
         Role::Path => Style::default().fg(CYAN),
@@ -913,26 +907,18 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
 }
 
 /// A `fields` mark at `width` — selective alignment: every value lands in one
-/// shared column.  A single-span text value wraps under it; a multi-span value
-/// or a [`Measure`] renders inline on one row.
+/// shared column and folds under it, roles bound to ink on the way in.
 fn render_fields(rows: &[CardField], width: usize) -> Vec<Line<'static>> {
     let field_rows: Vec<FieldRow> = rows
         .iter()
         .map(|f| FieldRow {
             label: f.label.clone(),
             value: match &f.value {
-                FieldVal::Inline(spans) => match spans.as_slice() {
-                    [one] => FieldValue::Wrapped {
-                        text: one.text.clone(),
-                        style: span_style(one.role),
-                    },
-                    many => FieldValue::Inline(
-                        many.iter()
-                            .map(|s| Span::styled(s.text.clone(), span_style(s.role)))
-                            .collect(),
-                    ),
-                },
-                FieldVal::Measure(m) => FieldValue::Inline(measure_value_spans(m)),
+                FieldVal::Inline(spans) => spans
+                    .iter()
+                    .map(|s| Span::styled(s.text.clone(), span_style(s.role)))
+                    .collect(),
+                FieldVal::Measure(m) => measure_value_spans(m),
             },
         })
         .collect();
@@ -990,6 +976,33 @@ pub(super) fn bold(c: String, col: Color) -> Span<'static> {
     Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD))
 }
 
+/// `body` folded into the width left of `head`, with `head` on the first row
+/// and a blank of its width under every other — the one hanging fold in the
+/// kit, shared by an act's payload, a diff row's text and a labelled field.
+/// Style-preserving throughout, so a body may carry any ink its builder gave
+/// it, syntax highlighting included.
+pub(super) fn hang(
+    head: &[Span<'static>],
+    body: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let indent = span_run_width(head);
+    let body_w = width.saturating_sub(indent).max(8);
+    wrap_line(&Line::from(body), body_w)
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut spans = if i == 0 {
+                head.to_vec()
+            } else {
+                vec![Span::raw(" ".repeat(indent))]
+            };
+            spans.extend(row.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
 /// Wrap `text` to `body_w` and push `row(chunk, first)` per chunk.
 /// [`textwrap::wrap`] always yields at least one chunk, empty input included,
 /// so a blank value still renders its marker via `row("", true)`.
@@ -1008,27 +1021,19 @@ pub(super) fn push_wrapped(
 
 // ── Aligned-field rendering (the `fields` mark + provider errors) ────────────
 
-/// Text to wrap under the shared label column, or pre-styled spans to render
-/// inline on the value row.
-enum FieldValue {
-    Wrapped { text: String, style: Style },
-    Inline(Vec<Span<'static>>),
-}
-
 /// One `(label, value)` row ahead of layout — what the `fields` mark and
-/// [`provider_error`] both feed into [`render_field_rows`].
+/// [`provider_error`] both feed into [`render_field_rows`].  The value arrives
+/// styled: [`hang`] folds spans, so there is no second, flatter kind of value
+/// that exists only in order to wrap.
 struct FieldRow {
     label: String,
-    value: FieldValue,
+    value: Vec<Span<'static>>,
 }
 
 fn text_field(label: impl Into<String>, value: impl Into<String>) -> FieldRow {
     FieldRow {
         label: label.into(),
-        value: FieldValue::Wrapped {
-            text: value.into(),
-            style: Style::default(),
-        },
+        value: vec![Span::raw(value.into())],
     }
 }
 
@@ -1042,26 +1047,16 @@ fn field_label(label: &str, label_w: usize) -> Span<'static> {
 
 /// Aligned `(label, value)` rows in one shared column — the primitive
 /// [`render_fields`], [`provider_error`] and [`legend_rows`] all feed.  The
-/// column is measured once from the longest label, so every value starts alike.
+/// column is measured once from the longest label, so every value starts alike,
+/// and each value hangs under it.
 fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
     let Some(label_w) = rows.iter().map(|r| r.label.chars().count()).max() else {
         return Vec::new();
     };
     let label_w = label_w + 2; // "<label>  "
-    let mut ls: Vec<Line<'static>> = Vec::new();
-    for r in rows {
-        match &r.value {
-            FieldValue::Wrapped { text, style } => {
-                push_field(&mut ls, &r.label, text, *style, label_w, width);
-            }
-            FieldValue::Inline(spans) => {
-                let mut line = vec![field_label(&r.label, label_w)];
-                line.extend(spans.iter().cloned());
-                ls.push(Line::from(line));
-            }
-        }
-    }
-    ls
+    rows.iter()
+        .flat_map(|r| hang(&[field_label(&r.label, label_w)], r.value.clone(), width))
+        .collect()
 }
 
 /// Align pre-styled `(label, sample)` rows — the `/legend` panel.  Its samples
@@ -1073,7 +1068,7 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>, width: u16) -> 
         .into_iter()
         .map(|(label, spans)| FieldRow {
             label: label.to_string(),
-            value: FieldValue::Inline(spans),
+            value: spans,
         })
         .collect();
     render_field_rows(&rows, width.into())
@@ -1119,10 +1114,10 @@ fn field_row(f: FaultField) -> FieldRow {
 fn wait_field(label: String, secs: u64) -> FieldRow {
     FieldRow {
         label,
-        value: FieldValue::Inline(vec![
+        value: vec![
             Span::raw(format!("{}  ", crate::agent::resources::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
-        ]),
+        ],
     }
 }
 
@@ -1136,28 +1131,6 @@ fn headline(kind: &str) -> Line<'static> {
         ),
         bold(kind.into(), RED),
     ])
-}
-
-/// Append one labelled text field, wrapped to `width` so long URLs fold rather
-/// than clip.  Continuations blank the label; `label_w` is the block-wide
-/// width, passed in rather than measured here, so every field shares a column.
-fn push_field(
-    ls: &mut Vec<Line<'static>>,
-    label: &str,
-    value: &str,
-    value_style: Style,
-    label_w: usize,
-    width: usize,
-) {
-    let body_w = width.saturating_sub(label_w).max(8);
-    push_wrapped(ls, value, body_w, |chunk, first| {
-        let lead = if first {
-            field_label(label, label_w)
-        } else {
-            Span::raw(" ".repeat(label_w))
-        };
-        Line::from(vec![lead, Span::styled(chunk, value_style)])
-    });
 }
 
 /// Fold one logical line into visual rows no wider than `width`, word-aware and

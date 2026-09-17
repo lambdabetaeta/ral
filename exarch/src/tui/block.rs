@@ -849,7 +849,13 @@ impl Block {
                 verb,
                 subject.as_deref(),
                 payload,
-                *failed,
+                // `reply` is the one act whose payload is a ral value rather
+                // than a sentence, so it is the one that reads in ral's hues.
+                &match (*failed, verb.as_str()) {
+                    (true, _) => line::Payload::Refusal,
+                    (false, "reply") => line::Payload::Value,
+                    _ => line::Payload::Prose,
+                },
                 width,
                 at >= Detail::Full,
             ),
@@ -1007,11 +1013,12 @@ mod tests {
         );
     }
 
-    /// An act's first two columns are pinned, so verbs align down the page and
-    /// every payload opens in the same column — the alignment `render_field_rows`
-    /// cannot supply, since each act is a row that would only align with itself.
+    /// An act's verb column is pinned, so verbs align down the page — the
+    /// alignment `render_field_rows` cannot supply, since each act is a row that
+    /// would only align with itself.  The subject is not a column: it follows
+    /// its verb, whole, and the payload follows it.
     #[test]
-    fn act_columns_are_pinned_across_blocks() {
+    fn an_act_pins_its_verb_column_and_nothing_else() {
         let rendered = |verb, subject: Option<&str>, payload: &str| {
             let block = act(verb, subject, payload, false);
             let lines = block.body(READ_W, Detail::Summary, "");
@@ -1023,21 +1030,66 @@ mod tests {
                 Some("hunter"),
                 "audit every unwrap() in exarch/src"
             ),
-            "spawn        hunter              audit every unwrap() in exarch/src"
+            "spawn         [hunter] audit every unwrap() in exarch/src"
         );
         assert_eq!(
             rendered("unschedule", Some("nightly"), ""),
-            "unschedule   nightly",
+            "unschedule    [nightly]",
             "a landed act with no argument leaves the payload cell empty"
         );
         assert_eq!(
             rendered("schedule", Some("nightly"), "0 9 * * 1-5"),
-            "schedule     nightly             0 9 * * 1-5"
+            "schedule      [nightly] 0 9 * * 1-5"
         );
         assert_eq!(
             rendered("reply", None, "[status: \"clean\", findings: 0]"),
-            "reply                            [status: \"clean\", findings: 0]",
-            "a subject-less act leaves the cell blank, not the column"
+            "reply         [status: \"clean\", findings: 0]",
+            "a subject-less act opens its payload at the verb column"
+        );
+        assert_eq!(
+            rendered("context-evict", Some("hunter"), "3 turns"),
+            "context-evict [hunter] 3 turns",
+            "the longest verb still clears its column by a space"
+        );
+        assert_eq!(
+            rendered("spawn", Some("a-name-of-the-full-24-ch"), "go"),
+            "spawn         [a-name-of-the-full-24-ch] go",
+            "a name is an identity, and an identity is never cut"
+        );
+    }
+
+    /// A reply's payload is a ral value, not a sentence, so it reads in the
+    /// language's own colours — the same lexer the tool-call panels use.
+    #[test]
+    fn a_reply_reads_its_value_in_ral() {
+        let block = act("reply", None, "[status: \"clean\", findings: 0]", false);
+        let lines = block.body(READ_W, Detail::Summary, "");
+        let row = lines.last().expect("an act renders one content row");
+        let string = row
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "\"clean\"")
+            .expect("the value's string literal is a span of its own");
+        assert_eq!(string.style.fg, Some(super::super::palette::CODE_STRING));
+
+        // A refusal is prose whatever the verb, and stays hot rather than lexed.
+        let refused = act(
+            "spawn",
+            Some("hunter"),
+            "refused: [that name is taken]",
+            true,
+        );
+        let refused = refused.body(READ_W, Detail::Summary, "");
+        assert_eq!(
+            refused
+                .last()
+                .expect("a row")
+                .spans
+                .last()
+                .expect("payload")
+                .style
+                .fg,
+            Some(super::super::palette::RED_HOT)
         );
     }
 
@@ -1065,7 +1117,7 @@ mod tests {
         let row = lines.last().expect("an act renders one content row");
         assert_eq!(
             line::text(row),
-            "cancel       hunter              refused: not a descendant"
+            "cancel        [hunter] refused: not a descendant"
         );
         let outcome = row.spans.last().expect("the payload span");
         assert_eq!(outcome.style.fg, Some(super::super::palette::RED_HOT));

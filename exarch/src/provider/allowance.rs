@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn a_survey_composes_loaded_unmetered_and_failed_accounts_into_one_card() {
+    fn a_survey_draws_only_the_accounts_with_something_to_report() {
         let loaded = declared_account("loaded");
         let unmetered = declared_account("unmetered");
         let failing = declared_account("failing");
@@ -536,7 +536,7 @@ mod tests {
         };
         let mut readings = BTreeMap::new();
         readings.insert(loaded.id, Ok(vec![allowance.clone()]));
-        readings.insert(unmetered.id, Ok(Vec::new()));
+        readings.insert(unmetered.id.clone(), Ok(Vec::new()));
         readings.insert(failing.id.clone(), Err("network is down".to_string()));
         let source = FakeSource {
             readings: std::sync::Arc::new(readings),
@@ -546,8 +546,9 @@ mod tests {
 
         assert_eq!(
             card.0.len(),
-            6,
-            "one section mark plus one body mark per account"
+            4,
+            "a section mark plus a body mark for each account with something to \
+             report — the unmetered one draws nothing at all"
         );
         let Mark::Fields { rows } = &card.0[1] else {
             panic!("the loaded account renders its allowances");
@@ -556,11 +557,6 @@ mod tests {
         assert_eq!(rows[0].label, allowance.field().label);
 
         let Mark::Text { spans } = &card.0[3] else {
-            panic!("the unmetered account renders one muted sentence");
-        };
-        assert!(spans[0].text.contains("unmetered"));
-
-        let Mark::Text { spans } = &card.0[5] else {
             panic!("the failing account renders its failure sentence");
         };
         assert!(spans[0].text.contains("network is down"));
@@ -568,6 +564,19 @@ mod tests {
             spans[0].text.contains(&roster.label(&failing)),
             "the failure sentence names the account by its label: {}",
             spans[0].text
+        );
+
+        let named = card
+            .0
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Text { spans } => Some(spans[0].text.clone()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            !named.contains(&roster.label(&unmetered)),
+            "an account with no ration to report is not mentioned: {named}"
         );
     }
 }

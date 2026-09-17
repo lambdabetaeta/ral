@@ -87,7 +87,8 @@ no bar derivable. `Kind::HarnessResult` stops feeding `set_result_size`. The
 magnitude was never a quantity; deleting it is the Gantt-ribbon lesson applied a
 second time.
 
-**Three columns, the verb pinned.** Verb, subject, payload. The verb column is
+**Three columns, the verb pinned.** Verb, subject, payload. (Amended
+2026-09-17: only the verb column survives — see below.) The verb column is
 pinned to a module constant sized by the longest verb (`unschedule`), so verbs
 align down the page across separate blocks — `render_field_rows` cannot supply
 this, because it derives its column width from the row set it is handed and an
@@ -250,6 +251,36 @@ moot: there is no longer an unlabelled schedule to reason about.
 [`ScheduleRegistry::schedule`] drops the minting and the label parameter
 becomes a plain `String`; [`crate::fleet::desk::payload_label`] refuses a
 missing or malformed label at the wire before it ever reaches the registry.
+
+## Amendment (2026-09-17): one column, not three
+
+A verb is a closed vocabulary ([`DeskAct::verb`] is an enum of eight), so
+pinning it costs the width of the longest name and buys alignment down every
+page. A subject is a free identifier of one to twenty-four characters
+([`crate::fleet::check_name`]), and pinning one buys alignment between rows
+usually screens apart while charging *every* row the width of the longest name
+nobody used. The subject column goes; the subject follows its verb whole, the
+payload follows the subject, and a wrap hangs under the payload's own opening
+column.
+
+Both constants had drifted from the vocabularies they were sized against —
+`ACT_VERB_W` was 13 under a comment naming `context-drop` after the 13-character
+`context-evict` had joined, so the longest verb rendered with no separator at
+all; `ACT_SUBJECT_W` cut at 19 under a comment claiming a name is never cut,
+while names run to 24. A column kept in agreement with a vocabulary it does not
+own is a column that drifts.
+
+**A name reads in brackets.** `[hunter]`, in the act row and the subagent header
+alike: a subject is the one thing on the row that is an identity rather than a
+word, and with the column gone the brackets are what say so. The header's
+elapsed phrase drops its own brackets for `· 1 min 12 secs`, so the shape means
+only that.
+
+**A reply's payload reads in ral.** `reply` is the one act whose payload is not
+a sentence — the desk renders the model's value through `ral_value_to_text`, so
+the string on the row is ral source, lexed and coloured by `highlight_ral_spans`
+like any other ral the TUI shows. A refusal stays prose and stays hot whatever
+the verb.
 
 ## Out of scope
 
