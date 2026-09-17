@@ -3,12 +3,16 @@
 //! `prompt::assemble`.
 
 use crate::headless::OutputFormat;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 
 /// All flags are long-form only: short letters would collide, and there are
 /// few enough to spell out.
 #[derive(Parser, Debug)]
-#[command(about = "Exarch — a delegate driving ral under a grant", long_about = None)]
+#[command(
+    about = "Exarch — a delegate driving ral under a grant",
+    long_about = None,
+    group(ArgGroup::new("headless_mode").args(["headless", "prompt"]).multiple(true))
+)]
 // Each bool is its own switch, not a field of some bundle worth grouping.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
@@ -34,11 +38,11 @@ pub struct Cli {
     /// choice is saved for the next run.
     #[arg(long)]
     pub provider: Option<String>,
-    /// Start the session with this prompt.
+    /// Run one headless exchange with this prompt.
     ///
-    /// Exarch passes the text to the model exactly as written. Empty text or
-    /// text containing only spaces counts as no prompt. A headless run needs a
-    /// non-blank prompt. You cannot give a prompt as an unnamed argument.
+    /// This implies `--headless`. Exarch passes the text to the model exactly
+    /// as written. Empty text or text containing only spaces counts as no
+    /// prompt. You cannot give a prompt as an unnamed argument.
     #[arg(long, conflicts_with = "file")]
     pub prompt: Option<String>,
     /// Read the opening prompt from a file.
@@ -115,8 +119,8 @@ pub struct Cli {
     /// `text`, the default, writes the agent's final reply as readable ral
     /// text. `json` writes one result object containing the reply, stop reason,
     /// step count, duration, token use and cost. This option requires
-    /// `--headless`.
-    #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless")]
+    /// headless mode, selected by `--headless` or implied by `--prompt`.
+    #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless_mode")]
     pub output_format: OutputFormat,
     /// Allow the agent to schedule its own future wake-ups.
     ///
@@ -131,7 +135,7 @@ pub struct Cli {
     ///
     /// The editor starts in insert mode. Without this option, it uses
     /// Emacs-style keys. This option is unavailable in headless mode.
-    #[arg(long = "vi", conflicts_with = "headless")]
+    #[arg(long = "vi", conflicts_with = "headless_mode")]
     pub vi: bool,
 
     /// Choose the file-editing method that Exarch teaches the agent to use.
@@ -147,14 +151,21 @@ pub struct Cli {
     ///
     /// Chat mode gives the model no tools and none of Exarch's normal agent
     /// instructions. Exarch still records the conversation. You cannot combine
-    /// chat mode with `--headless`, `--system`, `--resume`, `--allow-schedule`
-    /// or `--edit`.
-    #[arg(long = "chat", conflicts_with_all = ["headless", "system_files"])]
+    /// chat mode with `--headless`, `--prompt`, `--system`, `--resume`,
+    /// `--allow-schedule` or `--edit`.
+    #[arg(long = "chat", conflicts_with_all = ["headless_mode", "system_files"])]
     pub chat: bool,
 
     /// Also offer the `thinking` relay — an experiment, so kept off `--help`.
     #[arg(long = "thinking-tool", hide = true, conflicts_with = "chat")]
     pub thinking_tool: bool,
+}
+
+impl Cli {
+    /// Whether this invocation uses the one-shot frontend.
+    pub(crate) fn is_headless(&self) -> bool {
+        self.headless || self.prompt.is_some()
+    }
 }
 
 /// The editing scheme `--edit` selects: one system-prompt section, since both
@@ -228,4 +239,30 @@ pub fn load_seed(
         (None, None) => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn prompt_is_headless_mode() {
+        assert!(
+            !Cli::try_parse_from(["exarch"])
+                .expect("bare TUI")
+                .is_headless()
+        );
+
+        let cli = Cli::try_parse_from(["exarch", "--prompt", "do it"])
+            .expect("a prompt is a complete headless invocation");
+        assert!(cli.is_headless());
+
+        assert!(Cli::try_parse_from(["exarch", "--prompt", "do it", "--vi"]).is_err());
+        assert!(Cli::try_parse_from(["exarch", "--prompt", "do it", "--chat"]).is_err());
+        assert!(
+            Cli::try_parse_from(["exarch", "--prompt", "do it", "--output-format", "json",])
+                .is_ok()
+        );
+    }
 }

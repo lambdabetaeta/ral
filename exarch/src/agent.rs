@@ -465,8 +465,8 @@ impl Agent {
 
     /// Send a marked model-visible note to `to` as an exchange, so a woken
     /// resting child is not reaped mid-answer.  A direct child so woken is
-    /// awaited again; a deeper descendant answers its own parent, not us.
-    /// Scoping is the caller's — [`Self::descendant`].
+    /// awaited again; anyone else answers their own parent, not us.  Unscoped:
+    /// any live agent may be messaged, in any direction across the tree.
     pub(crate) fn message(&self, to: &Self, text: String) {
         if to.parent_id() == Some(self.id) {
             self.status.lock_ignore_poison().awaiting.insert(to.id);
@@ -547,7 +547,7 @@ impl Agent {
     }
 
     /// `target` if it is a proper descendant of this agent, else `None` — the
-    /// scoping `` agents `cancel ``/`` `message ``/`` `read `` share.  A climb
+    /// scoping `` agents `cancel `` and `` `read `` share.  A climb
     /// from `target`'s *parent*, so it costs O(depth) and takes no lock, and
     /// so nothing is a proper descendant of itself.
     pub(crate) fn descendant(&self, target: &Arc<Self>) -> Option<Arc<Self>> {
@@ -559,6 +559,17 @@ impl Agent {
             above = node.parent.as_ref();
         }
         None
+    }
+
+    /// The root of this agent's tree — itself, if it is one.  The trunk for
+    /// anything the model spawned; a `/branch` tab is its own root, which is
+    /// what keeps one tab's listing out of another's.
+    pub(crate) fn root(self: &Arc<Self>) -> Arc<Self> {
+        let mut here = self.clone();
+        while let Some(up) = here.parent().cloned() {
+            here = up;
+        }
+        here
     }
 
     /// The park signal for a node that launched async agents: a live direct

@@ -29,12 +29,14 @@ unabridged stdout and stderr from every command (the TUI itself shows
 a head/tail digest for noisy commands).  Type `/quit` (or send EOF) to
 exit.
 
-Seed the conversation with a prompt from a string or a file; the REPL
-opens after the seed turn finishes:
+Run one headless exchange with `--prompt`; it implies `--headless`, writes the
+final reply to standard output, and exits. A file can still seed the interactive
+session, or run headlessly when combined with `--headless`:
 
 ```
 cargo run -p exarch -- --prompt "list the rust files"
 cargo run -p exarch -- --file task.md
+cargo run -p exarch -- --headless --file task.md
 ```
 
 ## Providers and models

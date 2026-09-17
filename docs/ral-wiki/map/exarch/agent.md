@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2d120d2
-generated_at_date: 2026-09-11
+generated_at_commit: fb9107b8
+generated_at_date: 2026-09-17
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -504,9 +504,11 @@ identity — well-formed and unique among live agents, both enforced at
 `TRUNK_NAME`, `agent/build.rs`), which is where a name *becomes* identity and
 so the one place a wire peer cannot go around. The desk refuses both a beat
 earlier, before it forks a log or dials anything, but only `enrol` is
-authoritative. A name is also the handle `` agents `message ``/`` `cancel ``
-resolve descendants by, through `Fleet::resolve` and then the scope climb
-(`Agent::descendant`). Every `Agent` carries a strong `parent`, so the tree
+authoritative. A name is also the handle `` agents `message ``/`` `cancel `` resolve by,
+through `Fleet::resolve` — and then, for `` `cancel `` and `` `read `` alone,
+the scope climb (`Agent::descendant`); a message needs no climb. The roster
+(`fleet::roster::listing`) reads `Fleet::live`, the same name map `resolve`
+reaches, so the set a model can see is exactly the set it can message. Every `Agent` carries a strong `parent`, so the tree
 is the spawn tree directly: `Agent::cancel_tree` cancels an agent and its
 whole subtree, `Agent::cancel_descendants` abandons a returning agent's
 children, and `Agent::clear_subtree` reaps a subtree and forgets what it

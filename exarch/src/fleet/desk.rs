@@ -16,7 +16,10 @@ use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{Emitter, Stamp};
 use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
-use crate::fleet::{Fleet, check_name, roster::listing};
+use crate::fleet::{
+    Fleet, check_name,
+    roster::{Spawner, listing, summary},
+};
 use crate::provider::Provider;
 use crate::shell_eval::{self, PinDigests, Surface};
 use ral_core::Value as RalValue;
@@ -297,6 +300,12 @@ pub(crate) struct ExarchDesk {
 /// and saturation stays total where an `as` cast would wrap in silence.
 fn secs_to_i64(d: Duration) -> i64 {
     i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
+}
+
+/// A roster count as ral's one integer type, saturating as [`secs_to_i64`]
+/// does — no fleet approaches the clamp, and a wrapped count would lie.
+fn count(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// Decode a payload as an `N`-element list, or a didactic error naming the
@@ -769,8 +778,9 @@ impl ExarchDesk {
     }
 
     /// `` `agents `` — the fleet, one class for the whole family.
-    /// Every tag answers the roster, both spawn arms included: a wire spawn
-    /// does not answer until its child exists, so it has one to be listed on.
+    /// Every tag but `` `list `` and `` `read `` answers the summary, both
+    /// spawn arms included: a wire spawn does not answer until its child
+    /// exists, so it is counted by the time it answers.
     fn agents(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "agents")?;
         match tag.as_str() {
@@ -989,6 +999,7 @@ impl ExarchDesk {
                 allow_schedule: s.agent.allow_schedule,
                 spawns: s.agent.fuel().saturating_sub(1) > 0,
             },
+            &spec.name,
         );
         let child_account =
             crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
@@ -1140,7 +1151,7 @@ impl ExarchDesk {
             spawned.is_err(),
         );
         match spawned {
-            Ok(_) => Ok(self.roster()),
+            Ok(_) => Ok(self.summary()),
             Err(reason) => Err(Error::new(reason, 1)),
         }
     }
@@ -1217,8 +1228,35 @@ impl ExarchDesk {
         })
     }
 
-    /// The listing of this agent's descendants, tagged `` `roster `` — the
-    /// answer to every `` `agents `` tag there is.
+    /// The world after a transition, tagged `` `summary `` — what every tag
+    /// but `` `list `` and `` `read `` answers.  A roster here would cost
+    /// O(fleet) on every spawn of a fan-out to restate what the caller mostly
+    /// knew; these two integers are what it could not have derived.
+    fn summary(&self) -> FOValue {
+        let counts = summary(&self.services.agent);
+        FOValue::Variant {
+            label: "summary".to_string(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![
+                    (
+                        "live".to_string(),
+                        FOValue::Int {
+                            value: count(counts.live),
+                        },
+                    ),
+                    (
+                        "replied".to_string(),
+                        FOValue::Int {
+                            value: count(counts.replied),
+                        },
+                    ),
+                ],
+            })),
+        }
+    }
+
+    /// The listing of the reader's own tree, tagged `` `roster `` — the answer
+    /// to `` `list `` alone.
     fn roster(&self) -> FOValue {
         let s = &self.services;
         let rows = FOValue::List {
@@ -1230,6 +1268,19 @@ impl ExarchDesk {
                     FOValue::Map {
                         entries: vec![
                             ("name".to_string(), FOValue::String { value: a.name }),
+                            (
+                                "spawner".to_string(),
+                                match a.spawner {
+                                    Spawner::Root => FOValue::Variant {
+                                        label: "root".to_string(),
+                                        payload: None,
+                                    },
+                                    Spawner::Agent(name) => FOValue::Variant {
+                                        label: "agent".to_string(),
+                                        payload: Some(Box::new(FOValue::String { value: name })),
+                                    },
+                                },
+                            ),
                             (
                                 "state".to_string(),
                                 FOValue::Variant {
@@ -1302,16 +1353,18 @@ impl ExarchDesk {
         if refused {
             Err(Error::new(content, 1))
         } else {
-            Ok(self.roster())
+            Ok(self.summary())
         }
     }
 
-    /// `` `message `` — resolve a live descendant by name and send it a note.
+    /// `` `message `` — resolve any live agent by name and send it a note.
+    /// Unscoped, unlike `` `cancel ``: a note is the fleet's one way for a
+    /// child to reach an ancestor or a sibling, and it only ever queues a turn.
     fn message(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "agents `message";
         let s = &self.services;
         let mut spec = Fields::payload(payload, CLASS, "[to: …, text: …]")?;
-        let name = payload_string(spec.take("to", "the descendant's name")?, CLASS, "to")?;
+        let name = payload_string(spec.take("to", "the recipient's name")?, CLASS, "to")?;
         let text = payload_string(spec.take("text", "what to send")?, CLASS, "text")?;
 
         // Unlike `cancel`, an unresolved name refuses rather than no-ops:
@@ -1326,19 +1379,17 @@ impl ExarchDesk {
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
-            Some(found) => match s.agent.descendant(&found) {
-                None => (
-                    "refused: not a descendant".to_string(),
-                    format!(
-                        "agent '{name}' is not an agent you started; `agents `message` may only reach a descendant of yours"
-                    ),
-                    false,
+            Some(to) if to.id == s.agent.id => (
+                "refused: that is you".to_string(),
+                format!(
+                    "agent '{name}' is you; `agents `message` reaches another agent — to wake yourself, arm a `schedules` fire"
                 ),
-                Some(to) => {
-                    s.agent.message(&to, text);
-                    (sent, format!("sent message to agent '{name}'"), true)
-                }
-            },
+                false,
+            ),
+            Some(to) => {
+                s.agent.message(&to, text);
+                (sent, format!("sent message to agent '{name}'"), true)
+            }
         };
         s.commit_act(DeskAct::Message, Some(&name), payload, !ok);
         s.record_forensic(crate::record::Forensic::HarnessResult {
@@ -1347,7 +1398,7 @@ impl ExarchDesk {
         // A delivery answers the roster like every other tag; a refusal raises,
         // and the raise is the model's only copy of it.
         if ok {
-            Ok(self.roster())
+            Ok(self.summary())
         } else {
             Err(Error::new(content, 1))
         }
@@ -1507,7 +1558,7 @@ impl ExarchDesk {
         // No subject: the parent is the only recipient a returning agent has.
         s.commit_act(DeskAct::Reply, None, payload, false);
         s.reply.set(value);
-        Ok(self.roster())
+        Ok(self.summary())
     }
 
     /// `` `read `` — fetch the value the live descendant named by the payload
@@ -2566,6 +2617,35 @@ mod tests {
         )
     }
 
+    /// Unwrap a `` `summary `` answer into `(live, replied)`.
+    pub(super) fn summary_counts(answer: FOValue) -> (i64, i64) {
+        let FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } = answer
+        else {
+            panic!("every `agents tag answers a tagged variant")
+        };
+        assert_eq!(label, "summary", "a transition answers the summary");
+        let FOValue::Map { entries } = *payload else {
+            panic!("a summary carries a record")
+        };
+        let int = |key: &str| match entries.iter().find(|(k, _)| k == key) {
+            Some((_, FOValue::Int { value })) => *value,
+            _ => panic!("a summary carries an Int `{key}`"),
+        };
+        (int("live"), int("replied"))
+    }
+
+    /// The rows `` `list `` answers, for a test whose transition no longer
+    /// carries them.
+    pub(super) fn listed(desk: &ExarchDesk) -> Vec<FOValue> {
+        roster(
+            desk.handle(family_req("agents", "list", None))
+                .expect("`list answers the rows"),
+        )
+    }
+
     /// Unwrap a `` `roster `` answer into its rows.
     pub(super) fn roster(answer: FOValue) -> Vec<FOValue> {
         let FOValue::Variant {
@@ -3397,11 +3477,15 @@ mod tests {
             .handle(start_req(session, "say hi", "helper", "confined", true))
             .expect("a valid `start must succeed");
 
-        let rows = roster(answer);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(str_field(&rows[0], "name").as_deref(), Some("helper"));
+        let (live, _) = summary_counts(answer);
+        assert_eq!(live, 1, "the child is the one other agent alive");
+        let rows = listed(&desk);
+        let child = rows
+            .iter()
+            .find(|row| str_field(row, "name").as_deref() == Some("helper"))
+            .expect("the child stands on the listing");
         assert!(
-            str_field(&rows[0], "log-dir").is_some(),
+            str_field(child, "log-dir").is_some(),
             "a roster row carries the agent's log directory"
         );
 
@@ -3473,7 +3557,7 @@ mod tests {
     /// the roster a spawn answers with carries a sibling that spawn never
     /// touched, so nothing has to ask again to see what the fleet now is.
     #[test]
-    fn start_answers_the_whole_roster_not_a_receipt() {
+    fn start_answers_the_fleets_state_not_a_receipt() {
         let (desk, fleet, parent_inbox) = spawnable_desk(3);
         desk.services
             .agent
@@ -3491,15 +3575,27 @@ mod tests {
 
         let root = root_shell();
         let session = desk.services.nursery.park(forkable_child_shell(&root));
-        let mut names = roster_names(
+        let (live, _) = summary_counts(
             desk.handle(start_req(session, "go", "helper", "confined", false))
                 .expect("the spawn must succeed"),
         );
+        assert_eq!(
+            live, 2,
+            "the spawn counts the fleet's state, the sibling it did not start included"
+        );
+        let mut names: Vec<String> = listed(&desk)
+            .iter()
+            .filter_map(|row| str_field(row, "name"))
+            .collect();
         names.sort();
         assert_eq!(
             names,
-            vec!["already-there".to_string(), "helper".to_string()],
-            "the spawn answers the fleet's state, siblings and all"
+            vec![
+                "already-there".to_string(),
+                "helper".to_string(),
+                "parent".to_string()
+            ],
+            "and `list names them, the reader among them"
         );
 
         let _ = wait_for_settle(&parent_inbox);
@@ -3576,8 +3672,9 @@ mod tests {
             "the refusal must name the tag it refused, got: {}",
             err.message
         );
-        assert!(
-            listing(&desk.services.agent).is_empty(),
+        assert_eq!(
+            summary(&desk.services.agent).live,
+            0,
             "a refused selection must never register a child"
         );
     }
@@ -3703,8 +3800,13 @@ mod tests {
             .handle(start_req(session, "say hi", "helper", "confined", true))
             .expect("a valid `start must succeed");
 
-        let rows = roster(answer);
-        let log_dir = str_field(&rows[0], "log-dir").expect("a roster row carries its log dir");
+        let _ = summary_counts(answer);
+        let rows = listed(&desk);
+        let child = rows
+            .iter()
+            .find(|row| str_field(row, "name").as_deref() == Some("helper"))
+            .expect("the child stands on the listing");
+        let log_dir = str_field(child, "log-dir").expect("a roster row carries its log dir");
 
         let expected = desk
             .services
@@ -3717,6 +3819,7 @@ mod tests {
                     allow_schedule: desk.services.agent.allow_schedule,
                     spawns: desk.services.agent.fuel().saturating_sub(1) > 0,
                 },
+                "helper",
             )
             .len();
         assert_eq!(
@@ -3790,7 +3893,7 @@ mod tests {
              refused call"
         );
         assert_eq!(
-            listing(&desk.services.agent).len(),
+            summary(&desk.services.agent).live,
             1,
             "the second, refused spawn must leave no child behind"
         );
@@ -3819,8 +3922,9 @@ mod tests {
             "the name is refused before adopt, so the parked fork must stay \
              for the run guard to reap"
         );
-        assert!(
-            listing(&desk.services.agent).is_empty(),
+        assert_eq!(
+            summary(&desk.services.agent).live,
+            0,
             "a refused spawn leaves no child behind"
         );
     }
@@ -3905,10 +4009,10 @@ mod tests {
         );
     }
 
-    /// Never a sibling, an ancestor, or itself: what the fleet's own tests
-    /// check on the climb, checked here at the desk entry point.
+    /// `` `cancel `` may only reach what this agent started; `` `message ``
+    /// reaches any live agent but this one.
     #[test]
-    fn message_and_cancel_scope_to_descendants() {
+    fn cancel_scopes_to_descendants_and_message_does_not() {
         let (desk_root, fleet, _root_inbox) = spawnable_desk(3);
         // root -> mid -> grandchild, and root -> sibling (mid's sibling).
         let under = |name: &str, parent: &Arc<Agent>| {
@@ -3924,17 +4028,19 @@ mod tests {
         let mut desk1 = desk_root;
         desk1.services.agent = mid;
 
+        for who in ["sibling", "parent", "grandchild"] {
+            assert!(
+                desk1.handle(message_req(who, "hi")).is_ok(),
+                "a message must reach {who}, whichever way across the tree it runs"
+            );
+        }
+
         let err = desk1
-            .handle(message_req("sibling", "hi"))
-            .expect_err("a message to a sibling must be refused");
+            .handle(message_req("mid", "hi"))
+            .expect_err("a message to oneself must be refused");
         assert_eq!(
             err.message,
-            "agent 'sibling' is not an agent you started; `agents `message` may only reach a descendant of yours"
-        );
-
-        assert!(
-            desk1.handle(message_req("grandchild", "hi")).is_ok(),
-            "a message to a proper descendant must succeed"
+            "agent 'mid' is you; `agents `message` reaches another agent — to wake yourself, arm a `schedules` fire"
         );
 
         let cancel_err = desk1
@@ -4462,8 +4568,9 @@ mod tests {
             other => panic!("expected an Agent result item, got {other:?}"),
         }
         handle.join().expect("worker thread must not panic");
-        assert!(
-            crate::fleet::roster::listing(&parent.agent).is_empty(),
+        assert_eq!(
+            crate::fleet::roster::summary(&parent.agent).live,
+            0,
             "the reaped child settles, and the walk that looked for it pruned it"
         );
     }
@@ -4519,7 +4626,7 @@ mod tests {
     reason = "[test] test fs/process scaffolding"
 )]
 mod wire_tests {
-    use super::tests::{message_req, roster_names, start_req_forked};
+    use super::tests::{family_req, message_req, roster_names, start_req_forked, summary_counts};
     use super::*;
     use crate::agent::cancel::EvalReach;
     use crate::agent::event::AgentLog;
@@ -4780,10 +4887,18 @@ mod wire_tests {
         let answer = desk
             .handle(wire_start_req("helper", port, token))
             .expect("`start must dial, hatch and spawn");
+        let (live, _) = summary_counts(answer);
         assert_eq!(
-            roster_names(answer),
-            vec!["helper".to_string()],
-            "the hatched child is on the roster the spawn answers with"
+            live, 1,
+            "the hatched child is counted by the spawn it answers"
+        );
+        assert!(
+            roster_names(
+                desk.handle(family_req("agents", "list", None))
+                    .expect("`list answers the rows")
+            )
+            .contains(&"helper".to_string()),
+            "and stands on the listing"
         );
         assert_eq!(
             dial.ports(),
@@ -4837,8 +4952,9 @@ mod wire_tests {
             "got: {}",
             err.message
         );
-        assert!(
-            listing(&desk.services.agent).is_empty(),
+        assert_eq!(
+            summary(&desk.services.agent).live,
+            0,
             "a hatch that was never acknowledged names no child on the roster"
         );
     }

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: fb9107b8
+generated_at_date: 2026-09-17
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -55,8 +55,9 @@ exit code.
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
   — the ral binary seats it on `RootSeat::Identity`; a wire seat drives a
   remote engine instead, and synod reuses the same construction — and hands
-  off to one frontend — the inline TUI or, under `--headless`, the
-  pipe-friendly headless runner — which wraps the trunk's shared handles in
+  off to one frontend — the inline TUI or the pipe-friendly headless runner,
+  selected explicitly by `--headless` or implicitly by `--prompt` — which wraps
+  the trunk's shared handles in
   a [[map/exarch/agent|`Fleet`]].
 
 ## Accounts
@@ -189,9 +190,14 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   blocks as policy, long-running work behind `defer`/`await`, and work that must
   outlive the session behind `detach`
   ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
-- **`Host`** is the environment snapshot (`host::snapshot`, [[#Bootstrap]]) with
-  the live grant under it: a static legend (`data/grant-legend.md`) over the
-  capability bullets, or one ambient-authority line when nothing is attenuated.
+- **`Host`** opens by naming the reader — the one host fact that is not the
+  host's, since a name is what every other agent addresses it by and the only
+  way it picks its own row out of a roster — then gives the environment snapshot
+  (`host::snapshot`, [[#Bootstrap]]) with the live grant under it: a static
+  legend (`data/grant-legend.md`) over the capability bullets, or one
+  ambient-authority line when nothing is attenuated. The name is a second
+  placeholder beside the builtin index (`NAME_PLACEHOLDER`), filled per agent by
+  `BuiltinIndex::apply`, because the section is otherwise baked once at boot.
 - **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd

@@ -415,6 +415,7 @@ impl Avatar {
                     allow_schedule,
                     spawns: fuel > 0,
                 },
+                TRUNK_NAME,
             )
         };
         let root_dir = resume.as_deref().unwrap_or(&run_dir);
@@ -603,6 +604,7 @@ impl Avatar {
                 allow_schedule: self.agent.allow_schedule,
                 spawns: fuel > 0,
             },
+            &name,
         );
         // Seeded from the parent's *current* provider, so a later `/model` on
         // either never disturbs the other — and so the child's log header
@@ -743,6 +745,7 @@ impl Avatar {
                 allow_schedule,
                 spawns: SPAWN_FUEL > 0,
             },
+            TRUNK_NAME,
         );
         // Beside the scratch, which the seat below owns: the session's whole
         // footprint is then one directory, and it goes when the agent does.

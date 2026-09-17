@@ -110,6 +110,7 @@ pre_main_ctor!();
 /// frontend fails.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
+    let headless = c.is_headless();
     // Subcommands act and exit before the provider-availability check below,
     // since `login` is how the OpenAI provider becomes available.
     if let Some(command) = c.command {
@@ -171,7 +172,7 @@ pub fn run() -> Result<(), String> {
     }
     // An unset model means "the `/model` picker will choose"; a headless run has
     // no picker, so it must be told one.
-    if model.is_empty() && c.headless {
+    if model.is_empty() && headless {
         return Err(format!(
             "'{}' has no default model — pass --model NAME for a headless run",
             provider::identity::label(&account, &available)
@@ -221,7 +222,7 @@ pub fn run() -> Result<(), String> {
             &scratch,
             &cwd_path,
             &config_dir,
-            !c.headless,
+            !headless,
             c.edit,
         )?
     };
@@ -247,7 +248,7 @@ pub fn run() -> Result<(), String> {
             allow_schedule: c.allow_schedule,
             // An interactive trunk parks for the human; a headless one
             // terminates once its seeded work is idle.
-            interactive: !c.headless,
+            interactive: !headless,
             chat: c.chat,
             thinking_tool: c.thinking_tool,
             disk_warn_bytes,
@@ -273,7 +274,7 @@ pub fn run() -> Result<(), String> {
         restrict_files: &restrict_files,
         cwd: &cwd,
     };
-    if c.headless {
+    if headless {
         headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
         tui::run(

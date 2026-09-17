@@ -172,31 +172,37 @@ fn verbatim(spec: &Value, verb: &str) -> Settled<FOValue> {
     })
 }
 
-/// The `agents` family's answer: `` `roster [rows] ``, whichever tag was
-/// sent. Every tag but `` `read `` answers this way — `` `read `` answers the
-/// fetched record instead, so [`builtin_agents`] never routes it here.
-fn roster(answer: FOValue) -> Settled<Value> {
+/// The `agents` family's answer: `` `roster [rows] `` from `` `list ``, and
+/// `` `summary [live, replied] `` from every other tag. `` `read `` answers
+/// the fetched value instead, so [`builtin_agents`] never routes it here.
+/// This door is what tells the shapes apart, the family's answer type being a
+/// free `α` ([`scheme_agents`]).
+fn fleet_answer(answer: FOValue) -> Settled<Value> {
     let FOValue::Variant {
         label,
         payload: Some(payload),
     } = answer
     else {
         return Err(sig(
-            "agents: host answered an unexpected shape for the roster",
+            "agents: host answered an unexpected shape for the fleet",
         ));
     };
-    if label != "roster" {
-        return Err(sig(format!(
-            "agents: host answered `{label} where `roster was expected — every tag in this family \
-             answers the roster"
-        )));
-    }
-    let FOValue::List { items } = *payload else {
-        return Err(sig(
+    match (label.as_str(), *payload) {
+        ("roster", FOValue::List { items }) => {
+            Ok(Value::list(items.into_iter().map(Value::from).collect()))
+        }
+        ("summary", record @ FOValue::Map { .. }) => Ok(Value::from(record)),
+        ("roster", _) => Err(sig(
             "agents: host's `roster answer must carry a list of agent rows",
-        ));
-    };
-    Ok(Value::list(items.into_iter().map(Value::from).collect()))
+        )),
+        ("summary", _) => Err(sig(
+            "agents: host's `summary answer must carry [live: Int, replied: Int]",
+        )),
+        _ => Err(sig(format!(
+            "agents: host answered `{label} where `roster or `summary was expected — `list \
+             answers the rows, every other tag the two counts"
+        ))),
+    }
 }
 
 /// `` `start ``'s payload: the model's record verbatim, and how the fork it
@@ -392,8 +398,7 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
 }
 
 /// `` `message ``'s payload: enquires `` agents `message `` with the model's
-/// record; name resolution, descendant-scoping, and delivery errors all
-/// belong to the desk.
+/// record; name resolution and delivery errors all belong to the desk.
 fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
     let Value::Map(fields) = spec else {
         return Err(sig(format!(
@@ -403,7 +408,7 @@ fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVa
     };
     let Some(to) = fields.get("to") else {
         return Err(sig(
-            "agents: the `message` spec needs a `to` field — the descendant's name",
+            "agents: the `message` spec needs a `to` field — the recipient's name",
         ));
     };
     let Some(text) = fields.get("text") else {
@@ -413,7 +418,7 @@ fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVa
     };
     if !matches!(to, Value::String(_)) {
         return Err(sig(format!(
-            "agents: `to` must be a Str naming the descendant, got {}",
+            "agents: `to` must be a Str naming the recipient, got {}",
             to.type_name()
         )));
     }
@@ -517,7 +522,7 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
             )));
         }
     };
-    roster(answer)
+    fleet_answer(answer)
 }
 
 /// `` `add ``'s payload: checked through
@@ -903,13 +908,13 @@ fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
 /// runtime door that names the six legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
-/// The answer is no longer one fixed shape: every tag but `` `read `` still
-/// answers the roster `[[name, state, idle-s, elapsed-s, log-dir]]`, but
-/// `` `read `` answers the value a descendant handed up, whose shape this
-/// call cannot know — so `α` is left free rather than fixed to the roster's
-/// list type. This is the `pin-read`/`from-json` move
-/// ([`scheme_pin_read`]): trusted, not checked, since only [`roster`]'s
-/// runtime door can tell the two apart.
+/// The answer is not one fixed shape: `` `list `` answers the roster
+/// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, every other tag but
+/// `` `read `` the summary `[live, replied]`, and `` `read `` the value a
+/// descendant handed up, whose shape this call cannot know — so `α` is left
+/// free rather than fixed to any of the three. This is the
+/// `pin-read`/`from-json` move ([`scheme_pin_read`]): trusted, not checked,
+/// since only [`fleet_answer`]'s runtime door can tell them apart.
 ///
 /// `start`'s and `message`'s record rows are closed because a record
 /// literal with literal keys infers an exact one (`infer_map_val` builds on
@@ -1128,7 +1133,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
         scheme_agents,
-        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `read answers with the roster afterwards, [[name: Str, state: `busy|`waiting-on-agents|`replied|`waiting, idle-s: Int, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input, and wakes a `replied or `waiting child into a fresh exchange. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and — for every tag but `read — the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `list and `read answers `summary [live: Int, replied: Int] afterwards — how many other agents are alive around you, and how many of the agents you started park holding a value you have not fetched. It is the world after the transition rather than a receipt for what you just did, but two integers rather than a roster: after a `start you already know the name you chose, and what you could not have derived is whether someone is waiting on you. A non-zero `replied` is the one number asking you to act — call `read. Call `list when you want the rows.\n\nagents `list  — the rows: every live agent in your own tree, oldest first, you among them — not only the ones you started, because you may message any of them. `spawner` says who started each one: `root for an agent a human started, `agent <name> otherwise, so the flat listing is still the spawn tree, and the rows reachable from your own name are the ones you may also `cancel and `read. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction, your own among them.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live agent named `to`; it lands at that agent's next exchange boundary, not as human input, and wakes a `replied or `waiting one into a fresh exchange. Any live agent may receive it — a descendant, a sibling, an ancestor — but not yourself; the fleet is one mailbox space, and `list names all of it, so anyone you can see you can write to. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. The roster names the whole fleet, so it lists agents this tag will refuse: `spawner` is how you tell them apart before you ask. A cancel is a request, not a transaction: the child is still running when this answers, and still counted by the `summary you get back. A name still on a later `list is NOT a failed cancel — do not fire it again; read `list later still and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and what it answers — the rows for `list, the two counts for every tag but `list and `read — is the fleet as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
@@ -1259,7 +1264,7 @@ mod tests {
             );
         }
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "an unknown grant label must never register a child"
         );
     }
@@ -1282,7 +1287,7 @@ mod tests {
         );
         assert!(result.content.contains("mnemon"), "got: {}", result.content);
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "an unknown type tag must never register a child"
         );
     }
@@ -1308,7 +1313,7 @@ mod tests {
             );
         }
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "an unknown selection tag must never register a child"
         );
     }
@@ -1331,7 +1336,7 @@ mod tests {
             result.content
         );
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "an empty selection name must never register a child"
         );
     }
@@ -1349,7 +1354,7 @@ mod tests {
         );
         assert!(result.content.contains("name"), "got: {}", result.content);
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "an invalid name must never register a child"
         );
     }
@@ -1390,7 +1395,7 @@ mod tests {
             result.content
         );
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "a missing spec field must never register a child"
         );
     }
@@ -1415,7 +1420,7 @@ mod tests {
             result.content
         );
         assert!(
-            crate::fleet::roster::listing(&session.agent).is_empty(),
+            crate::fleet::roster::summary(&session.agent).live == 0,
             "a misspelled spec field must never register a child"
         );
     }
@@ -1425,7 +1430,7 @@ mod tests {
     /// `Arc<Provider>`, so one script consumed by both a driven parent
     /// exchange and its child races over which gets which stage.
     #[test]
-    fn agent_full_stack_round_trip_answers_the_roster_and_parks_a_reply() {
+    fn agent_full_stack_round_trip_answers_the_summary_and_parks_a_reply() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
@@ -1447,8 +1452,8 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("helper"),
-            "the roster answered afterwards must carry the child's row, got: {}",
+            result.content.contains("live: 1"),
+            "the summary answered afterwards must count the child, got: {}",
             result.content
         );
 
@@ -1498,7 +1503,7 @@ mod tests {
     /// `` `start ``/`` `cancel `` pair would be racing CPU-bound work with no
     /// reliable window in between.
     #[test]
-    fn agents_cancel_answer_still_lists_the_cancelled_row() {
+    fn agents_cancel_answer_still_counts_the_cancelled_agent() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let mut doomed = crate::agent::testkit::TestAgentSpec::new("doomed");
         doomed.parent = Some(session.agent.clone());
@@ -1514,9 +1519,9 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("doomed"),
-            "a cancel is a request, not a transaction — the cancelled row must \
-             still be in the roster answered afterwards, got: {}",
+            result.content.contains("live: 1"),
+            "a cancel is a request, not a transaction — the target is still \
+             counted by the summary answered afterwards, got: {}",
             result.content
         );
     }
@@ -1857,8 +1862,8 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("finder"),
-            "the roster must be the run's value and must name the child, got: {}",
+            result.content.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {}",
             result.content
         );
 
@@ -1978,8 +1983,8 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("pinner"),
-            "the roster must be the run's value and must name the child, got: {}",
+            result.content.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {}",
             result.content
         );
 
@@ -2042,8 +2047,8 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("reader"),
-            "the roster must be the run's value and must name the child, got: {}",
+            result.content.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {}",
             result.content
         );
 
@@ -2219,8 +2224,8 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("tasker"),
-            "the roster must be the run's value and must name the child, got: {}",
+            result.content.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {}",
             result.content
         );
 

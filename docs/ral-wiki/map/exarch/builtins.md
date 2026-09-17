@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: fb9107b8
+generated_at_date: 2026-09-17
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -320,9 +320,18 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
 - **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
   of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
   `` `reply <value> ``, `` `read <name> `` — each taking one argument. Every
-  tag but `` `read `` answers with the roster *afterwards*,
-  `[[name: Str, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`,
-  rather than a receipt of its own; `` `read `` answers `[name: Str, reply: α]`,
+  tag but `` `list `` and `` `read `` answers `` `summary [live: Int, replied:
+  Int] `` *afterwards* — other live agents in the reader's tree, and how many of
+  its own children park holding a value it has not fetched — rather than a
+  receipt of its own. The rule is unchanged (the answer is the world after the
+  transition); what changed is its cost, since a roster on every spawn of a
+  fan-out is O(fleet) restating what the caller mostly chose, while `replied` is
+  the one count it could not derive and the one asking for an action.
+  `` `list `` alone answers the rows,
+  `[[name: Str, spawner: <root|agent Str>, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`
+  — the reader's whole tree, itself among them, since what it may *message* is
+  wider than what it spawned. The climb stops at a root, so one `/branch` tab
+  never lists another's. `` `read `` answers `[name: Str, reply: α]`,
   the value a replied child deposited, which is why the family's answer type is
   a bare `α` (the `pin-read` precedent) rather than the roster it once was
   ([[decisions/260826_reply-parks|reply-parks]]). `` `reply `` is the sole
@@ -363,8 +372,15 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
   `resolve_pinned_provider` and never touches the catalog: a spawn can never
   block the fleet on a model-list round trip. Fuel bounds delegation depth,
   not fan-out — refused only once the caller's own `fuel` reaches zero.
-  `` `message [to: …, text: …] `` and `` `cancel <name> `` are descendant-only,
-  resolved by name and enforced at the desk; a scope violation raises. Where a
+  `` `cancel <name> `` is descendant-only, resolved by name and enforced at
+  the desk; a scope violation raises. `` `message [to: …, text: …] `` is not:
+  the fleet is one mailbox space, so a note runs in any direction across the
+  tree and only a note to oneself refuses. The roster is the fleet to match —
+  every live agent, the reader included — so what a model may list and what it
+  may message are one set rather than two that drift. Each row's `spawner`
+  (`` `root `` for one a human started, `` `agent <name> `` otherwise) carries
+  the scope `` `cancel `` and `` `read `` still enforce: the listing states the
+  rule it does not impose. Where a
   removed schedule is simply gone from its answer, a cancelled agent is not:
   `Agent::cancel_tree` only sets the cooperative token (and stamps the eval
   reach), so **a successful

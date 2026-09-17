@@ -87,6 +87,12 @@ pub fn assemble(
 /// each granted family's section as the agent is constructed.
 pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 
+/// The same stand-in for the one host fact that is not the host's: which agent
+/// is reading.  A name is the handle every other agent addresses it by and the
+/// only way it picks its own row out of a roster, so it cannot be baked with
+/// the rest of [`host_section`] — [`BuiltinIndex::apply`] fills it.
+pub(crate) const NAME_PLACEHOLDER: &str = "@@EXARCH_AGENT_NAME@@";
+
 /// One agent's construction-fixed authorities — the same bits the desk reads
 /// when refusing, so prompt and refusal cannot disagree.
 pub(crate) struct Grants {
@@ -181,12 +187,18 @@ impl BuiltinIndex {
         )
     }
 
-    /// Resolve `template` for one agent: fill the placeholder with the
-    /// grant-filtered index, then append each held family's section. A fresh
-    /// model therefore sees neither a verb nor a prompt section it is certain
-    /// to be refused.
-    pub(crate) fn apply(&self, template: &str, grants: &Grants) -> String {
-        let mut resolved = template.replace(BUILTIN_INDEX_PLACEHOLDER, &self.section(grants));
+    /// Resolve `template` for one agent: fill both placeholders — the
+    /// grant-filtered index and the agent's own name — then append each held
+    /// family's section. A fresh model therefore sees neither a verb nor a
+    /// prompt section it is certain to be refused.
+    ///
+    /// The name is unconditional where the family sections are not: an agent
+    /// with no fuel and no return still appears in every roster and can still
+    /// be messaged, so it still needs to know which row is its own.
+    pub(crate) fn apply(&self, template: &str, grants: &Grants, name: &str) -> String {
+        let mut resolved = template
+            .replace(BUILTIN_INDEX_PLACEHOLDER, &self.section(grants))
+            .replace(NAME_PLACEHOLDER, name);
         for (held, _, section) in families(grants) {
             if let (true, Some((heading, body))) = (held, section) {
                 append_section(&mut resolved, heading, body);
@@ -295,7 +307,7 @@ pub fn host_section(caps: &GrantStack, scratch: &crate::bootstrap::Scratch) -> S
         .xdg_dir(ral_core::path::basedir::XdgKind::State);
     let scratch_line = format!("`${}` = {}", scratch.var(), scratch.path().display());
     format!(
-        "{}\n{}",
+        "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{}",
         host::snapshot(&state),
         stack_summary(caps, &scratch_line)
     )
@@ -541,6 +553,7 @@ mod tests {
                 allow_schedule: false,
                 spawns: false,
             },
+            "leaf",
         );
         assert!(!resolved.contains("# Agents"));
         assert!(resolved.contains("# Reply"));
@@ -556,7 +569,7 @@ mod tests {
             spawns: false,
         };
         let template = format!("before\n\n{BUILTIN_INDEX_PLACEHOLDER}\n\nafter");
-        let resolved = index.apply(&template, &grants);
+        let resolved = index.apply(&template, &grants, "chunk-3");
         assert_eq!(
             resolved,
             format!("before\n\n{}\n\nafter", index.section(&grants))
@@ -564,7 +577,7 @@ mod tests {
         assert!(!resolved.contains(BUILTIN_INDEX_PLACEHOLDER));
     }
 
-    /// A custom base need not carry the builtin placeholder.
+    /// A custom base need not carry either placeholder.
     #[test]
     fn builtin_index_apply_is_a_noop_without_the_placeholder() {
         let shell = crate::bootstrap::boot_shell();
@@ -575,9 +588,33 @@ mod tests {
                     returns: false,
                     allow_schedule: false,
                     spawns: false,
-                }
+                },
+                "chunk-3",
             ),
             "plain text"
+        );
+    }
+
+    /// The name reaches the agent through `Host`, whoever it is — an agent with
+    /// neither fuel nor a return still appears in a roster and can still be
+    /// messaged, so it still needs to know which row is its own.
+    #[test]
+    fn apply_names_the_agent_to_itself() {
+        let shell = crate::bootstrap::boot_shell();
+        let index = BuiltinIndex::resolve(&shell);
+        let template = format!("before\n\n{NAME_PLACEHOLDER}\n\nafter");
+        let resolved = index.apply(
+            &template,
+            &Grants {
+                returns: false,
+                allow_schedule: false,
+                spawns: false,
+            },
+            "chunk-3",
+        );
+        assert!(
+            resolved.contains("chunk-3") && !resolved.contains(NAME_PLACEHOLDER),
+            "the placeholder must never reach a model: {resolved}"
         );
     }
 }

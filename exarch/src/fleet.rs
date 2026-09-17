@@ -526,12 +526,15 @@ mod tests {
         lint.reach = reach_into(&eval_root);
         let lint = born(&fleet, lint).expect("a fresh child of a live trunk");
 
+        let names: Vec<String> = roster::listing(&trunk)
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
         assert_eq!(
-            roster::listing(&trunk).len(),
-            1,
-            "the trunk lists its one child"
+            names,
+            vec!["trunk".to_string(), "lint".to_string()],
+            "the listing is the reader's whole tree, itself among them"
         );
-        assert_eq!(roster::listing(&trunk)[0].name, "lint");
 
         lint.cancel_tree(CancelCause::Explicit);
         assert!(lint.cancel_token().is_cancelled(), "cancel sets the token");
@@ -577,8 +580,8 @@ mod tests {
         assert!(fleet.name_live("child"), "a live agent resolves by name");
         assert_eq!(
             roster::listing(&trunk).len(),
-            1,
-            "and stands in its parent's roster"
+            2,
+            "and stands in its parent's listing, beside the parent"
         );
 
         drop(child);
@@ -587,9 +590,10 @@ mod tests {
             !fleet.name_live("child"),
             "a settled agent resolves nowhere, and frees its name"
         );
-        assert!(
-            roster::listing(&trunk).is_empty(),
-            "and the walk that looked for it pruned it"
+        assert_eq!(
+            roster::listing(&trunk).len(),
+            1,
+            "and the walk that looked for it pruned it, leaving the trunk alone"
         );
     }
 
@@ -634,17 +638,87 @@ mod tests {
         );
     }
 
+    /// The listing is a tree flattened, so every row carries the edge that put
+    /// it there — and a root's `spawner` is nobody, because a human started it.
+    #[test]
+    fn every_row_names_who_started_it() {
+        let fleet = Fleet::new();
+        let trunk = agent(&fleet, "trunk", None);
+        let mid = agent(&fleet, "mid", Some(&trunk));
+        let _leaf = agent(&fleet, "leaf", Some(&mid));
+
+        let edges: Vec<(String, Option<String>)> = roster::listing(&trunk)
+            .into_iter()
+            .map(|row| {
+                (
+                    row.name,
+                    match row.spawner {
+                        roster::Spawner::Root => None,
+                        roster::Spawner::Agent(up) => Some(up),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                ("trunk".to_string(), None),
+                ("mid".to_string(), Some("trunk".to_string())),
+                ("leaf".to_string(), Some("mid".to_string())),
+            ],
+            "the flat listing still reads as the spawn tree"
+        );
+    }
+
+    /// `live` is company and `replied` is an obligation, so they are scoped
+    /// differently on purpose: a sibling is out there but owes this agent
+    /// nothing, while a descendant holding a value owes it a `` `read ``.
+    #[test]
+    fn the_summary_counts_company_and_what_is_owed() {
+        let fleet = Fleet::new();
+        let trunk = agent(&fleet, "trunk", None);
+        let mid = agent(&fleet, "mid", Some(&trunk));
+        let _sibling = agent(&fleet, "sibling", Some(&trunk));
+        let child = agent(&fleet, "child", Some(&mid));
+
+        let alone = roster::summary(&mid);
+        assert_eq!(alone.live, 3, "trunk, sibling and child are all out there");
+        assert_eq!(alone.replied, 0, "none of them holds a value yet");
+
+        child.deposit_reply(ral_core::serial::FOValue::Int { value: 1 });
+        let owed = roster::summary(&mid);
+        assert_eq!(
+            owed.live, 3,
+            "a reply does not settle the agent that made it"
+        );
+        assert_eq!(
+            owed.replied, 1,
+            "and the descendant holding it asks for a `read"
+        );
+        assert_eq!(
+            roster::summary(&trunk).replied,
+            0,
+            "the value is owed to the spawner alone, not to everyone above it"
+        );
+    }
+
     /// A `/branch` child roots its own tree rather than joining its creator's:
-    /// the fleet the model manages never lists it, and the model's own cancel
-    /// verb cannot reach it through the spawner.
+    /// the listing climbs to a root and stops, so one tab never lists another's
+    /// agents, and the model's own cancel verb cannot reach them either.  Only
+    /// `` `message `` crosses, by a name the human must have carried over.
     #[test]
     fn a_branch_is_a_root_outside_its_spawners_fleet() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
         let branch = agent(&fleet, "branch", None);
 
-        assert!(
-            roster::listing(&trunk).is_empty(),
+        let names: Vec<String> = roster::listing(&trunk)
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["trunk".to_string()],
             "the trunk's listing omits a branch that shares its fleet but no edge"
         );
         assert!(

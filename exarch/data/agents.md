@@ -33,8 +33,16 @@ When all the agents are done:
 
 DO NOT POLL AGENTS. Wait to be notified of their completion.
 
-`` agents `message [to: <name>, text: <text>] `` messages an agent. An agent that has replied remains idle for an hour, and can still be messaged to have its context re-used. If a similar task has come in.
+`` agents `message [to: <name>, text: <text>] `` messages an agent. An agent that has replied remains idle for an hour, and can still be messaged to have its context re-used, if a similar task has come in. Any live agent may be messaged by name — a child of yours, a sibling, or whoever started you — and `` `list `` names them all, so you can reach anyone you can see.
 
 There are two types of agents. `` `amnemon `` is the default; it begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
 
-Every tag but `` `read `` answers with a roster of agents afterwards, `[[name, state, idle-s, elapsed-s, log-dir]]`. `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting ``. `` agents `list `` shows it, and `` agents `cancel <name> `` stops one. A `` `cancel `` will take effect at the next tool boundary, so there might be some delay.
+Every tag but `` `list `` and `` `read `` answers `` `summary [live: Int, replied: Int] `` afterwards: how many other agents are alive around you, and how many of the agents you started are parked holding a value you have not fetched. A non-zero `replied` means go and `` `read ``.
+
+`` agents `list `` gives the rows, `[[name, spawner, state, idle-s, elapsed-s, log-dir]]` — every live agent in your tree, you included, not only what you started. `spawner` says who started each one: `` `root `` for an agent a human started, `` `agent <name> `` otherwise. `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting ``.
+
+You may message anyone on that list, but only cancel or read an agent you started — one whose `spawner` is you, or that sits under one. To find just your own:
+
+    filter { |r| equal $r[spawner] `agent 'my-name' } !{agents `list}
+
+`` agents `cancel <name> `` stops an agent you started. It takes effect at the next tool boundary, so there might be some delay.
