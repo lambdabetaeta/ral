@@ -1,5 +1,5 @@
 //! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
-//! nodes, plus the field schemas for the `within`/`grant` option maps.  The
+//! nodes, plus the field schemas for the `within`/`grant` option records.  The
 //! sixth scope node, `CompKind::Redirect`, is typed inline in `infer.rs`.
 //!
 //! Unknown option keys are rejected at runtime — by `WithinScope::parse` and
@@ -16,7 +16,7 @@ use super::route::PayloadRoute;
 use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use super::unify::Unifier;
-use crate::ir::{Val, ValMapEntry};
+use crate::ir::{Val, ValRecordEntry};
 use crate::source::{Spanned, WithSpan};
 
 /// What a scope rule knows before its computation type exists: the value the
@@ -32,7 +32,7 @@ impl Inferencer<'_> {
     /// catch-all `handler:` matches every name, so no one name can be bound.
     /// Each thunk is inferred exactly once, so an error inside is reported once.
     fn infer_within_opts(&mut self, opts: &Val) -> Vec<(String, Scheme)> {
-        let Val::Map(outer_entries) = opts else {
+        let Val::Record(outer_entries) = opts else {
             let _ = self.infer_val(opts);
             return Vec::new();
         };
@@ -41,17 +41,17 @@ impl Inferencer<'_> {
 
         for outer_entry in outer_entries {
             match outer_entry {
-                ValMapEntry::Entry(
-                    Val::String(key),
+                ValRecordEntry::Field(
+                    key,
                     Spanned {
-                        item: Val::Map(inner_entries),
+                        item: Val::Record(inner_entries),
                         ..
                     },
                 ) if key == "handlers" => {
                     for inner_entry in inner_entries {
                         match inner_entry {
-                            ValMapEntry::Entry(
-                                Val::String(name),
+                            ValRecordEntry::Field(
+                                name,
                                 value @ Spanned {
                                     item: Val::Thunk(comp),
                                     ..
@@ -62,19 +62,18 @@ impl Inferencer<'_> {
                                 });
                                 bindings.push((name.clone(), scheme));
                             }
-                            ValMapEntry::Entry(key_val, val_val) => {
-                                let _ = self.infer_val(key_val);
+                            ValRecordEntry::Field(_, val_val) => {
                                 let _ = self.infer_val(&val_val.item);
                             }
-                            ValMapEntry::Spread(val) => {
+                            ValRecordEntry::Spread(val) => {
                                 let _ = self.infer_val(&val.item);
                             }
                         }
                     }
                 }
 
-                ValMapEntry::Entry(
-                    Val::String(key),
+                ValRecordEntry::Field(
+                    key,
                     value @ Spanned {
                         item: Val::Thunk(comp),
                         ..
@@ -102,7 +101,7 @@ impl Inferencer<'_> {
                 }
 
                 entry => {
-                    self.check_map_entry_fields(
+                    self.check_record_entry_fields(
                         std::slice::from_ref(entry),
                         "within",
                         within_field_ty,
@@ -210,7 +209,7 @@ impl Inferencer<'_> {
 
     fn infer_scope_opts(&mut self, opts: &Val, form: &'static str, schema: FieldSchema) {
         match opts {
-            Val::Map(entries) => self.check_map_entry_fields(entries, form, schema),
+            Val::Record(entries) => self.check_record_entry_fields(entries, form, schema),
             _ => {
                 let _ = self.infer_val(opts);
             }
@@ -231,26 +230,21 @@ impl Inferencer<'_> {
     }
 }
 
-/// Schema for the `within [env:, dir:]` options map; `handlers:`/`handler:`
-/// hold thunks and dispatch at runtime.
-fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
+/// Schema for the `within` options record. `handlers:`/`handler:` hold thunks
+/// and dispatch at runtime; `env:` is heterogeneous and `parse_env`'s to judge.
+fn within_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
     match key {
-        "env" => Some(Ty::Map(Box::new(u.fresh_ty()))),
         "dir" => Some(Ty::String),
         _ => None,
     }
 }
 
-/// Schema for the `grant [exec:, fs:, net:, detach:, editor:, shell:]`
-/// map.  `exec` and `fs` are left to `decode_capability_map`: an `exec` policy
-/// value is either an `'allow'`/`'deny'` string or a subcommand list, and the
-/// two mix freely within one map, so no homogeneous element type fits.  Their
-/// values are still inferred, so an error inside a policy expression surfaces.
+/// Schema for the `grant` options record. Everything but the two flags is
+/// `decode_capability_map`'s: a policy value may be a string or a list, and
+/// the two mix within one record. Their values are still inferred.
 fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
-    let bool_map = || Ty::Map(Box::new(Ty::Bool));
     match key {
         "net" | "detach" => Some(Ty::Bool),
-        "editor" | "shell" => Some(bool_map()),
         _ => None,
     }
 }

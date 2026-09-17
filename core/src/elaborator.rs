@@ -16,14 +16,15 @@
 
 use crate::ir::{
     Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, Phrase,
-    PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
+    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, RecordEntry, Redirect,
     RedirectTarget, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
@@ -699,6 +700,30 @@ impl Elaborator {
                 ))
             ),
 
+            Ast::Record(entries) => comp!(
+                self,
+                CompKind::Return(Val::Record(
+                    entries
+                        .iter()
+                        .map(|e| match e {
+                            RecordEntry::Field { key, value } => ValRecordEntry::Field(
+                                key.row_label(),
+                                Spanned::with_span(
+                                    value.span,
+                                    self.with_span(value.span, |this| {
+                                        this.to_val(&value.item, binds)
+                                    }),
+                                ),
+                            ),
+                            RecordEntry::Spread(a) => ValRecordEntry::Spread(Spanned::with_span(
+                                a.span,
+                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
+                            )),
+                        })
+                        .collect(),
+                ))
+            ),
+
             Ast::Map(entries) => comp!(
                 self,
                 CompKind::Return(Val::Map(
@@ -706,7 +731,7 @@ impl Elaborator {
                         .iter()
                         .map(|e| match e {
                             MapEntry::Entry { key, value } => ValMapEntry::Entry(
-                                Val::String(key.row_label()),
+                                Val::String(key.clone()),
                                 Spanned::with_span(
                                     value.span,
                                     self.with_span(value.span, |this| {
@@ -1220,6 +1245,19 @@ mod tests {
     fn strip_val(val: &Val) -> Val {
         match val {
             Val::List(elems) => Val::List(elems.iter().map(strip_slot).collect()),
+            Val::Record(entries) => Val::Record(
+                entries
+                    .iter()
+                    .map(|entry| match entry {
+                        ValRecordEntry::Field(k, v) => {
+                            ValRecordEntry::Field(k.clone(), Spanned::synthetic(strip_val(&v.item)))
+                        }
+                        ValRecordEntry::Spread(v) => {
+                            ValRecordEntry::Spread(Spanned::synthetic(strip_val(&v.item)))
+                        }
+                    })
+                    .collect(),
+            ),
             Val::Map(entries) => Val::Map(
                 entries
                     .iter()

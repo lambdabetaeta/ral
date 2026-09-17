@@ -662,16 +662,19 @@ A static key can be a bare name or a quoted string. A computed key uses a
 string value such as `$key`. Any computed key that is not a `String` is an
 error. Keys are unique in the resulting value and iterate in sorted order.
 
-A bracketed literal is a record if it opens with `:` or contains a
-`key: value` entry; otherwise it is a list. `[:]` is that marker's degenerate
-case — nothing follows the `:`. Without the marker, a literal built entirely
-from spreads has no entry to settle its shape and falls to list, so the
-marker is also how a pure record merge is written:
+A bracketed literal that opens with `:` is a map: `[:]` is the empty one and
+`[:, a: 1, b: 2]` a map on keys written out. Otherwise its keys decide. A
+literal every one of whose entries has a static key is a record; a literal
+with any computed key is a map, because a keyset settled at run time cannot
+carry a type per key; a literal with no entry at all is a list.
 
 ```ral
-let given = [host: 'prod']
-let merged = [:, ...$given, ...$defaults]
+let record = [host: 'db', port: 5432]
+let by_data = [:, host: 'db', port: 'https']
+let computed = [$key: 5432]
 ```
+
+A tag is a label, so a tag key in a map literal is an error.
 
 Every explicit entry wins over every spread entry, regardless of position. If
 spread entries conflict with each other, the first spread entry wins. Writing
@@ -724,8 +727,11 @@ $config[database][port]
 ```
 
 Lists use zero-based, non-negative `Int` indices. Records and maps use `String`
-keys. A missing key, an out-of-range list index, a key of the wrong kind, or an
-attempt to index another value kind is an error.
+keys. A key written out selects a record field, whatever the value turns out to
+be; a map, whose keys are data rather than labels, is read by a computed key
+(`$m[$k]`) or with the prelude's `get $m key default`. A missing key, an
+out-of-range list index, a key of the wrong kind, or an attempt to index
+another value kind is an error.
 
 ### 4.8. Equality and ordering
 
@@ -2111,14 +2117,14 @@ A function call carries its `cd` result back to its caller. A forced block is a 
 
 ### 10.3. Importing a module with `use`
 
-`use path` evaluates a file in a fresh top-level scope and returns its public bindings as a map:
+`use path` evaluates a file in a fresh top-level scope and returns its public bindings as a record, each at its own type, read by name:
 
 ```ral
 let math = use 'lib/math.ral'
 echo $math[mean] [1, 2, 3]
 ```
 
-Bindings do not leak into the caller. Names beginning with `_` are private and are omitted from the returned map:
+Bindings do not leak into the caller. Names beginning with `_` are private and are omitted from the returned record:
 
 ```ral
 # lib/math.ral
@@ -2126,7 +2132,7 @@ let _sum = { |xs| fold add 0 $xs }
 let mean = { |xs| $[_sum $xs / length $xs] }
 ```
 
-The module’s final expression is evaluated, but `use` returns the binding map rather than that expression’s value.
+The module’s final expression is evaluated, but `use` returns the bindings rather than that expression’s value. A module's bindings are heterogeneous and reached by name, so the result is a record: `$m[mean]` reads one, and a key computed at run time has no type to give.
 
 `use` first resolves a path relative to the containing file, or relative to `$CWD` when there is no containing file. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
 
@@ -2568,7 +2574,7 @@ A denial at any layer remains a denial.
 
 ### 12.1. Capability fields
 
-A capability map accepts exactly these keys:
+A capability record accepts exactly these keys:
 
 - `exec`
 - `fs`
@@ -2599,7 +2605,7 @@ allows editor reads, denies editor writes and TUI access, and leaves non-editor 
 
 ### 12.2. `exec`
 
-`exec` is a map from command names or paths to a policy:
+`exec` names commands or paths, each with a policy:
 
 ```ral
 exec: [
@@ -2795,7 +2801,7 @@ On another host, a filesystem restriction fails when no per-command sandbox back
 ### 12.12. Capability profiles
 
 A capability profile is an ordinary `.ral` script whose terminal value must be
-a `Map` with exactly the same contract as the map accepted by `grant`:
+a capability record with exactly the same contract as the one `grant` accepts:
 
 ```ral
 # read-only.ral
@@ -2821,9 +2827,9 @@ ral --capabilities base.ral,offline.ral script.ral
 
 The loader parses, elaborates, type-checks, and evaluates each profile, then
 decodes that terminal value. Bindings created by the script are not projected
-into a policy as `use` bindings would be: the value itself must be the map.
+into a policy as `use` bindings would be: the value itself must be the record.
 `return [...]` is the direct way to make that contract explicit. A profile
-that ends in `Unit`, a scalar, a list, or any other non-map value is rejected.
+that ends in `Unit`, a scalar, a list, or any other non-record value is rejected.
 
 All listed profiles use the same load-time home and working directory. They
 are decoded by the same strict decoder as inline grants. Each decoded profile
@@ -2833,7 +2839,7 @@ ambient root, rather than flattened into one composite policy — the ceiling
 they form is whatever the ordinary per-check fold of that stack decides. Later
 inline grants may narrow that ceiling but cannot widen it.
 
-`use 'profile.ral'` instead returns the file’s bindings as a map, so a profile computed inline can feed `grant` directly — with `profile.ral` defining `let policy = [...]`:
+`use 'profile.ral'` instead returns the file’s bindings as a record, so a profile computed inline can feed `grant` directly — with `profile.ral` defining `let policy = [...]`:
 
 ```ral
 let p = use 'profile.ral'
@@ -3743,17 +3749,17 @@ The recognized fields are:
 
 | Field | Meaning |
 |---|---|
-| `env: Map` | Set environment entries and bindings. `PWD` and `OLDPWD` are ignored because ral derives them from its logical working-directory state. |
+| `env: Record` | Set environment entries and bindings. `PWD` and `OLDPWD` are ignored because ral derives them from its logical working-directory state. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
-| `bindings: Map` | Install lexical values, including functions. |
-| `aliases: Map` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
+| `bindings: Record` | Install lexical values, including functions. |
+| `aliases: Record` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
 | `edit_mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal`, `readline`, or `structural`; default `readline`. |
 | `recursion_limit: Int` | A positive function-call recursion limit; default `100_000`. |
-| `plugins: Map` | Maps each plugin name to its options map; loaded before the first prompt; see below. |
+| `plugins: Record` | Names each plugin and its options; loaded before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
-| `theme: Map` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
+| `theme: Record` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
 
 Unknown top-level RC keys are ignored for forward compatibility. An unknown
 key inside `theme` produces a warning. Every recognized field is
@@ -4237,15 +4243,17 @@ tag           ::= "`" identifier atom?
 block         ::= "{" program "}"
                 | "{" "|" pattern+ "|" program "}"
 
-collection    ::= list | map
+collection    ::= list | record | map
 list          ::= "[" list-items? "]"
 list-items    ::= list-item ("," list-item)* ","?
 list-item     ::= atom | "..." atom
+record        ::= "[" record-entry ("," record-entry)* ","? "]"
+record-entry  ::= static-key ":" atom | "..." atom
 map           ::= "[:]"
                 | "[:," map-entry ("," map-entry)* ","? "]"
                 | "[" map-entry ("," map-entry)* ","? "]"
 map-entry     ::= map-key ":" atom | "..." atom
-map-key       ::= identifier | quoted-string | variable | tag-key
+map-key       ::= identifier | quoted-string | variable
 
 unit-literal  ::= "(" ")"
 
@@ -4270,11 +4278,11 @@ redirect      ::= fd? ">" word-value
 For `<<`, an explicit descriptor, if present, must be 0. For `>&`, the source
 descriptor must not be 1 when the target is 2: `1>&2` and its short spelling
 `>&2` are rejected in favour of `warn` (§7.4). `[]` is the empty
-list and `[:]` the empty map. Otherwise the first
-non-spread entry determines whether a bracketed collection is a list or a map.
-A literal or pattern may use bare keys or tag keys, but may not mix the two
-static key alphabets. A map literal may additionally use a dynamic `$name`
-key; a pattern may not.
+list and `[:]` the empty map. Otherwise a collection's entries decide: any
+computed key makes it a map, static keys alone a record, no entry at all a
+list (§4.5). A record literal or a pattern may use bare keys or tag keys, but
+may not mix the two static key alphabets. A map literal may additionally use a
+dynamic `$name` key, and may use no tag key; a pattern may use neither.
 
 A `case`'s arm list resembles a tag-keyed map literal but is a production of
 its own, and no expression may stand in its place: a spread among the arms and

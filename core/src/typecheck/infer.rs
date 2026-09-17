@@ -10,7 +10,7 @@ use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
 use crate::ir::{
     ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Phrase, Register,
-    Toplevel, Val, ValListElem, ValMapEntry,
+    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -50,25 +50,6 @@ fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
             _ => return out,
         }
     }
-}
-
-/// A record literal's entries: every key is a literal label, so a computed key
-/// cannot be one.  `None` is a literal with a computed key somewhere, which is
-/// a map rather than a record and keeps none of the shape below.
-enum RecordPart<'a> {
-    Field(&'a String, &'a Spanned<Val>),
-    Spread(&'a Spanned<Val>),
-}
-
-fn record_parts(entries: &[ValMapEntry]) -> Option<Vec<RecordPart<'_>>> {
-    entries
-        .iter()
-        .map(|entry| match entry {
-            ValMapEntry::Entry(Val::String(key), value) => Some(RecordPart::Field(key, value)),
-            ValMapEntry::Spread(value) => Some(RecordPart::Spread(value)),
-            ValMapEntry::Entry(_, _) => None,
-        })
-        .collect()
 }
 
 /// Heuristic: did the lexer close a `"…"` on an unescaped inner quote?  The
@@ -740,22 +721,22 @@ impl Inferencer<'_> {
         );
     }
 
-    /// Check an options map's entries against a per-key `schema`: every value
-    /// is inferred, and a literal key the schema knows also pins its value's
-    /// type.  Unknown, spread, and dynamic keys stay runtime-dispatched.  The
-    /// options map of `within` and `grant` in `typecheck/scope.rs`, whose own
-    /// type nobody reads; a program's *return* map is held to its form by
-    /// [`Self::infer_map_val`], which builds that type too.
-    pub(super) fn check_map_entry_fields(
+    /// Check an options record's entries against a per-key `schema`: every
+    /// value is inferred, and a field the schema knows also pins its value's
+    /// type.  Unknown and spread keys stay runtime-dispatched.  The options
+    /// record of `within` and `grant` in `typecheck/scope.rs`, whose own type
+    /// nobody reads; a program's *return* record is held to its form by
+    /// [`Self::infer_record_val`], which builds that type too.
+    pub(super) fn check_record_entry_fields(
         &mut self,
-        entries: &[ValMapEntry],
+        entries: &[ValRecordEntry],
         form: &'static str,
         schema: FieldSchema,
     ) {
         for entry in entries {
             let (key, val) = match entry {
-                ValMapEntry::Entry(Val::String(k), v) => (Some(k.as_str()), v),
-                ValMapEntry::Entry(_, v) | ValMapEntry::Spread(v) => (None, v),
+                ValRecordEntry::Field(k, v) => (Some(k.as_str()), v),
+                ValRecordEntry::Spread(v) => (None, v),
             };
             self.with_span(val.span, |this| {
                 let actual = this.infer_val(&val.item);
@@ -1212,95 +1193,96 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A map literal, with each literal-keyed entry pinned to what
-    /// `contract`'s schema expects of that key.  `None` is the ordinary map:
-    /// no form speaks about its keys.
-    fn infer_map_val(&mut self, entries: &[ValMapEntry], contract: Option<ReturnContract>) -> Ty {
-        if let Some(parts) = record_parts(entries)
-            && !parts.is_empty()
-        {
-            let mut fields: Vec<(String, Ty)> = Vec::new();
-            let mut spreads: Vec<(Option<Span>, Row)> = Vec::new();
-            for part in parts {
-                match part {
-                    RecordPart::Field(key, value) => {
-                        let ty = self.with_span(value.span, |this| {
-                            if fields.iter().any(|(seen, _)| seen == key) {
-                                this.ctx
-                                    .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
-                            }
-                            let ty = this.infer_val(&value.item);
-                            this.pin_field(contract, key, &ty);
-                            ty
-                        });
-                        fields.push((key.clone(), ty));
-                    }
-                    RecordPart::Spread(value) => {
-                        let row = self.with_span(value.span, |this| {
-                            let spread_ty = this.infer_val(&value.item);
-                            let row = Row::Var(this.ctx.unifier.fresh_row_var());
-                            this.ctx.unify_ty(
-                                &spread_ty,
-                                &Ty::Record(row.clone()),
-                                Reason::MapSpread,
-                            );
-                            row
-                        });
-                        spreads.push((value.span, row));
-                    }
+    /// A record literal, with each field pinned to what `contract`'s schema
+    /// expects of that label.  `None` is the ordinary record: no form speaks
+    /// about its fields.
+    fn infer_record_val(
+        &mut self,
+        entries: &[ValRecordEntry],
+        contract: Option<ReturnContract>,
+    ) -> Ty {
+        let mut fields: Vec<(String, Ty)> = Vec::new();
+        let mut spreads: Vec<(Option<Span>, Row)> = Vec::new();
+        for entry in entries {
+            match entry {
+                ValRecordEntry::Field(key, value) => {
+                    let ty = self.with_span(value.span, |this| {
+                        if fields.iter().any(|(seen, _)| seen == key) {
+                            this.ctx
+                                .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
+                        }
+                        let ty = this.infer_val(&value.item);
+                        this.pin_field(contract, key, &ty);
+                        ty
+                    });
+                    fields.push((key.clone(), ty));
+                }
+                ValRecordEntry::Spread(value) => {
+                    let row = self.with_span(value.span, |this| {
+                        let spread_ty = this.infer_val(&value.item);
+                        let row = Row::Var(this.ctx.unifier.fresh_row_var());
+                        this.ctx.unify_ty(
+                            &spread_ty,
+                            &Ty::Record(row.clone()),
+                            Reason::RecordSpread,
+                        );
+                        row
+                    });
+                    spreads.push((value.span, row));
                 }
             }
-
-            // Chain order is precedence order: an explicit entry beats every
-            // spread and an earlier spread a later one, which is the runtime's
-            // own two passes, and selection-takes-first does the shadowing.  So
-            // build from the low-precedence end, splicing each spread's row in
-            // whole — a literal's row is the concatenation of its parts, and
-            // nothing here may forget what a part already knows.
-            let row = spreads
-                .into_iter()
-                .rev()
-                .fold(Row::Empty, |rest, (span, spread)| {
-                    self.with_span(span, |this| this.splice(&spread, rest))
-                });
-            let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
-                Row::Extend(key, Box::new(ty), Box::new(rest))
-            });
-            Ty::Record(row)
-        } else {
-            // A dynamic-key map is `Map<elem>` with one `elem` shared by every
-            // value and spread: without that, `[$k: 1, $j: "hi"]` checks as
-            // `Map<α>` and lets the consumer pick `Map<Int>` over a String.
-            // Keys must be `String` — the runtime rejects others at status 1,
-            // so `[2: foo]` is lifted to a type error here.
-            let elem = self.ctx.unifier.fresh_ty();
-            for entry in entries {
-                match entry {
-                    ValMapEntry::Entry(key, value) => {
-                        let key_ty = self.infer_val(key);
-                        self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
-                        self.with_span(value.span, |this| {
-                            let value_ty = this.infer_val(&value.item);
-                            if let Val::String(key) = key {
-                                this.pin_field(contract, key, &value_ty);
-                            }
-                            this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
-                        });
-                    }
-                    ValMapEntry::Spread(value) => {
-                        self.with_span(value.span, |this| {
-                            let spread_ty = this.infer_val(&value.item);
-                            this.ctx.unify_ty(
-                                &spread_ty,
-                                &Ty::Map(Box::new(elem.clone())),
-                                Reason::MapSpread,
-                            );
-                        });
-                    }
-                }
-            }
-            Ty::Map(Box::new(elem))
         }
+
+        // Chain order is precedence order: an explicit entry beats every
+        // spread and an earlier spread a later one, which is the runtime's
+        // own two passes, and selection-takes-first does the shadowing.  So
+        // build from the low-precedence end, splicing each spread's row in
+        // whole — a literal's row is the concatenation of its parts, and
+        // nothing here may forget what a part already knows.
+        let row = spreads
+            .into_iter()
+            .rev()
+            .fold(Row::Empty, |rest, (span, spread)| {
+                self.with_span(span, |this| this.splice(&spread, rest))
+            });
+        let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
+            Row::Extend(key, Box::new(ty), Box::new(rest))
+        });
+        Ty::Record(row)
+    }
+
+    /// A map literal: `Map<elem>`, one `elem` shared by every value and spread.
+    /// A key written out is still data, yet `contract`'s schema pins it as a
+    /// record's field would be.
+    fn infer_map_val(&mut self, entries: &[ValMapEntry], contract: Option<ReturnContract>) -> Ty {
+        // Keys must be `String`: the runtime's status-1 refusal, lifted here.
+        let elem = self.ctx.unifier.fresh_ty();
+        for entry in entries {
+            match entry {
+                ValMapEntry::Entry(key, value) => {
+                    let key_ty = self.infer_val(key);
+                    self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
+                    self.with_span(value.span, |this| {
+                        let value_ty = this.infer_val(&value.item);
+                        if let Val::String(key) = key {
+                            this.pin_field(contract, key, &value_ty);
+                        }
+                        this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
+                    });
+                }
+                ValMapEntry::Spread(value) => {
+                    self.with_span(value.span, |this| {
+                        let spread_ty = this.infer_val(&value.item);
+                        this.ctx.unify_ty(
+                            &spread_ty,
+                            &Ty::Map(Box::new(elem.clone())),
+                            Reason::MapSpread,
+                        );
+                    });
+                }
+            }
+        }
+        Ty::Map(Box::new(elem))
     }
 
     /// One spread's row in front of `rest`, everything the literal holds of
@@ -1412,6 +1394,7 @@ impl Inferencer<'_> {
                 }
                 Ty::List(Box::new(elem))
             }
+            Val::Record(entries) => self.infer_record_val(entries, None),
             Val::Map(entries) => self.infer_map_val(entries, None),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.  The
@@ -1485,7 +1468,13 @@ impl Inferencer<'_> {
 
     /// One step of an indexing chain, run under the pos `infer_index` narrowed
     /// to this key, so a failure underlines the step and not the whole chain.
+    /// The key's form decides the rule before the target's type is read, so an
+    /// inline read and the same read extracted into a block agree.
     fn infer_index_step(&mut self, current_ty: &Ty, key: &Val) -> Ty {
+        // A bare number is not a `String` here, and no record has an Int label.
+        if let Val::String(label) = key {
+            return self.infer_field_read(current_ty, label);
+        }
         let resolved = self.ctx.unifier.apply_ty(current_ty);
         match resolved {
             Ty::List(elem) => {
@@ -1504,68 +1493,65 @@ impl Inferencer<'_> {
                 self.ctx.unifier.fresh_ty()
             }
             _ => {
-                // `Val::from_word` leaves a bare non-numeric word a `String`,
-                // and only a `String` key reads a record field; a bare number
-                // falls to the dynamic arm, no record having an Int field name.
-                let record_label = match key {
-                    Val::String(label) => Some(label.clone()),
-                    _ => None,
-                };
-                if let Some(label) = record_label {
-                    let field_ty = self.ctx.unifier.fresh_ty();
-                    let tail_row = self.ctx.unifier.fresh_row();
-                    let record_ty = Ty::Record(Row::Extend(
-                        label.clone(),
-                        Box::new(field_ty.clone()),
-                        Box::new(tail_row),
-                    ));
-                    // A raw unify error on a concretely non-record target reads
-                    // `Int vs [b: α, ...ρ]` — accurate but hostile.  Say it in
-                    // a sentence instead.
-                    let resolved = self.ctx.unifier.apply_ty(current_ty);
-                    let concretely_non_record = !matches!(resolved, Ty::Record(_) | Ty::Var(_));
-                    if concretely_non_record {
-                        self.ctx.diagnose(TypeErrorKind::FieldOnNonRecord {
-                            label,
-                            ty: resolved,
-                        });
-                    } else {
+                // Catching this here is what makes `let x = 42; $x[$k]` a
+                // type error rather than a deferred runtime failure.  A
+                // free target is pinned by the key's type — `Int` ⇒ `List`,
+                // `String` ⇒ `Map` — and otherwise left for whatever pins
+                // it later, which re-enters through the arms above.
+                let key_ty = self.infer_val(key);
+                let elem = self.ctx.unifier.fresh_ty();
+                let resolved_target = self.ctx.unifier.apply_ty(current_ty);
+                match resolved_target {
+                    Ty::Var(_) => match self.ctx.unifier.apply_ty(&key_ty) {
+                        Ty::Int => self.ctx.unify_ty(
+                            current_ty,
+                            &Ty::List(Box::new(elem.clone())),
+                            Reason::DynamicIndexTarget,
+                        ),
+                        Ty::String => self.ctx.unify_ty(
+                            current_ty,
+                            &Ty::Map(Box::new(elem.clone())),
+                            Reason::DynamicIndexTarget,
+                        ),
+                        _ => {}
+                    },
+                    other => {
                         self.ctx
-                            .unify_ty(current_ty, &record_ty, Reason::RecordFieldRead);
+                            .diagnose(TypeErrorKind::DynamicIndexOnScalar { ty: other });
                     }
-                    field_ty
-                } else {
-                    // Catching this here is what makes `let x = 42; $x[$k]` a
-                    // type error rather than a deferred runtime failure.  A
-                    // free target is pinned by the key's type — `Int` ⇒ `List`,
-                    // `String` ⇒ `Map` — and otherwise left for whatever pins
-                    // it later, which re-enters through the arms above.
-                    let key_ty = self.infer_val(key);
-                    let elem = self.ctx.unifier.fresh_ty();
-                    let resolved_target = self.ctx.unifier.apply_ty(current_ty);
-                    match resolved_target {
-                        Ty::Var(_) => match self.ctx.unifier.apply_ty(&key_ty) {
-                            Ty::Int => self.ctx.unify_ty(
-                                current_ty,
-                                &Ty::List(Box::new(elem.clone())),
-                                Reason::DynamicIndexTarget,
-                            ),
-                            Ty::String => self.ctx.unify_ty(
-                                current_ty,
-                                &Ty::Map(Box::new(elem.clone())),
-                                Reason::DynamicIndexTarget,
-                            ),
-                            _ => {}
-                        },
-                        other => {
-                            self.ctx
-                                .diagnose(TypeErrorKind::DynamicIndexOnScalar { ty: other });
-                        }
-                    }
-                    elem
                 }
+                elem
             }
         }
+    }
+
+    /// `$r[label]`: unify the target with `[label: α | ρ]` and return `α`. A
+    /// target already known to be something else is told so in a sentence
+    /// rather than by a raw `Int vs [b: α, ...ρ]`.
+    fn infer_field_read(&mut self, current_ty: &Ty, label: &str) -> Ty {
+        let field_ty = self.ctx.unifier.fresh_ty();
+        let resolved = self.ctx.unifier.apply_ty(current_ty);
+        match resolved {
+            Ty::Record(_) | Ty::Var(_) => {
+                let tail_row = self.ctx.unifier.fresh_row();
+                let record_ty = Ty::Record(Row::Extend(
+                    label.to_string(),
+                    Box::new(field_ty.clone()),
+                    Box::new(tail_row),
+                ));
+                self.ctx
+                    .unify_ty(current_ty, &record_ty, Reason::RecordFieldRead);
+            }
+            Ty::Map(_) => self.ctx.diagnose(TypeErrorKind::FieldOnMap {
+                label: label.to_string(),
+            }),
+            Ty::Thunk(_) => self.ctx.diagnose(TypeErrorKind::IndexIntoThunk),
+            ty => self.ctx.diagnose(TypeErrorKind::FieldOnNonRecord {
+                label: label.to_string(),
+                ty,
+            }),
+        }
+        field_ty
     }
 
     /// Infer one `case` arm: bind its pattern to a fresh payload type, infer
@@ -1739,7 +1725,7 @@ impl Inferencer<'_> {
 
     /// [`Self::infer_comp`], under the form's return contract when `comp` is
     /// exactly the literal `return [k: v, …]` that contract speaks about: the
-    /// schema pins each field as the map is inferred, so the contract rides
+    /// schema pins each key as the literal is inferred, so the contract rides
     /// the one inference of it rather than a second one that could disagree.
     /// Anything else the return could be carries no literal to hold, and is
     /// inferred as it always is.
@@ -1753,6 +1739,9 @@ impl Inferencer<'_> {
         }
 
         let cty = match &comp.item {
+            CompKind::Return(Val::Record(entries)) if contract.is_some() => {
+                CompTy::pure(self.infer_record_val(entries, contract))
+            }
             CompKind::Return(Val::Map(entries)) if contract.is_some() => {
                 CompTy::pure(self.infer_map_val(entries, contract))
             }

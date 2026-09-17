@@ -59,15 +59,28 @@ The two do not unify, and mixing them in one literal is a parse error
 
 ## Which one a literal becomes
 
-The checker reads the keys (`infer_map_val`, `core/src/typecheck/infer.rs`):
+**The classification is syntax, not inference.** The parser reads the keys and
+emits `Ast::Record` or `Ast::Map` (`core/src/syntax/parser.rs`), and each has
+its own entry type, so a record literal cannot hold a computed key nor a map
+literal a tag:
 
+- **`[:` marks a map.** `[:]` is the empty one and `[:, a: 1, b: 2]` a map whose
+  keys are written out: `Map<Int>`. A tag key there is a parse error — a tag is
+  a label, and a map has no labels.
 - **Every key a static label** → `Record`. `[host: "db", port: 5432]` infers
   `[host: String, port: Int]`.
-- **Any key computed** → `Map<α>`. `[$k: 1, $j: 2]` infers `Map<Int>` — the
-  whole literal collapses to homogeneous, because a runtime keyset cannot carry
-  per-label types.
-- **A spread keeps it a record.** `[...$cfg, port: 9090]` unifies `$cfg` as a
-  row and shadows by prepending — see [[design/row-types|row-types]].
+- **Any key computed** → `Map<α>`. `[$k: 1, $j: 2]` infers `Map<Int>` — one
+  computed key collapses the whole literal to homogeneous, because a runtime
+  keyset cannot carry per-label types.
+- **Spreads alone settle nothing**, so a literal built only of them is a list.
+  A spread in a record literal must be a record and in a map literal a map; the
+  two never merge into one another.
+- **A spread in a record literal shadows by prepending.** `[...$cfg, port: 9090]`
+  unifies `$cfg` as a row — see [[design/row-types|row-types]].
+
+The checker then has two rules rather than one — `infer_record_val` and
+`infer_map_val` (`core/src/typecheck/infer.rs`) — and no order-dependent
+classification to make.
 
 This is why your two everyday cases land where they do. `audit { … }` returns a
 record — its labels (`kind`, `status`, `stdout`, `value`, …) are fixed in the
@@ -83,37 +96,43 @@ pins to `Map<α>`; read a literal field off it and it pins toward `Record`.
 The projection rule splits on *how the key is given*, not only on the target
 (`core/src/typecheck/infer.rs`):
 
-- **Static label** — `$r[host]` — unifies the target with `[host: α | ρ]` and
-  returns *that field's own type* `α`. Heterogeneity is fine, because the access
-  is resolved at elaboration.
-- **Computed key** — `$m[$k]` — is well-typed only against `Map<α>`, and returns
-  the uniform `α`. Indexing a concretely-known non-map by a runtime key is a
-  type error: *"only lists (key: Integer) and maps (key: String) accept a key
-  computed at runtime — for a record field, use a static name."*
+- **Static label** — `$r[host]` — is field selection *whatever the target is*:
+  it unifies the target with `[host: α | ρ]` and returns that field's own type
+  `α`. The key's form decides before the target's type is read, so a literal
+  read and the same read extracted into a block (`{ |r| $r[host] } $x`) cannot
+  reach different verdicts. A target already known to be a map is refused, with
+  the way to read it: *"`host` is a field name, and this is a map — read a map's
+  key with `get $m host <default>`, or bind the key and write `$m[$k]`."*
+- **Computed key** — `$m[$k]` — is well-typed against `Map<α>`, returns the
+  uniform `α`, and is the one place the target's own type still selects the
+  rule: a `List` takes an `Int`, a `Map` a `String`, and a still-free target is
+  pinned by the key's type. Indexing a concretely-known scalar by a runtime key
+  is a type error: *"only lists (key: Integer) and maps (key: String) accept a
+  key computed at runtime — for a record field, use a static name."*
 
-So `$env[$name]` is sound precisely because `env` is a `Map`
-(`core/src/typecheck/builtins.rs`): every value shares one type, so a key you
-don't know until run time still has a known result type.
+So `$ENV[$name]` is sound precisely because the computed key pins `$ENV` to a
+`Map`: every value shares one type, so a key you don't know until run time
+still has a known result type. `$ENV[HOME]` pins that occurrence to a record
+with a `HOME` field instead — each `$ENV` types on its own, the register
+carrying no scheme of its own (`core/src/typecheck/infer.rs`).
 
-## The coercion: record → map, forgetful and one-way
+## Neither stands in for the other
 
-A record may be used where a `Map<α>` is expected. Unification carries the one
-coercion (`unify_map_record`, `core/src/typecheck/unify.rs`): it unifies *every*
-field type of the row with the map's element `α` and **closes the tail** (`ρ ↦
-[]`). Consequences:
+A record and a map never unify — not directly, and not under `List`, `Thunk`,
+`Fun` or `Handle`. The map-keyed builtins are typed on `Map` — `keys :: ∀α. Map<α> → F [Str]`,
+`has :: ∀α. Map<α> → Str → F Bool` (`core/src/typecheck/builtins.rs`) — so they
+take a map and only a map: `keys [a: 1, b: 2]` is a type error and
+`keys [:, a: 1, b: 2]` is the program that was meant.
 
-- The map-keyed builtins are typed on `Map` — `keys :: ∀α. Map<α> → F [Str]`,
-  `has :: ∀α. Map<α> → Str → F Bool` (`core/src/typecheck/builtins.rs`) — yet
-  they accept a **homogeneous** record through the coercion. `keys [a: 1, b: 2]`
-  type-checks: the row `[a: Int, b: Int]` collapses to `Map<Int>`.
-- A **heterogeneous** record is rejected: `keys [host: "x", port: 8080]` forces
-  `String ~ Int` and fails. There is no uniform `α`.
-- The coercion is **forgetful** — it discards the labels-as-types and keeps only
-  the uniform fibre — and **one-way**: there is no total `Map → Record`, because
-  static labels cannot be recovered from runtime keys. Passing an *open* record
-  into a map position closes its row; the record view, with its tail, is not
-  recoverable downstream.
-
+A forgetful `Record → Map` reading is definable — collapse every field type onto
+one element and forget the labels — but it is a *coercion*, and a unifier
+expresses only equalities. Held as an equality it runs backwards too: a map
+would then stand where a record is expected, closing that record's row and
+answering for fields nobody wrote, and which of the two a literal is asked to
+be would depend on the order the solver reached it in. The sound direction — a
+homogeneous record where a map is wanted — is recoverable by writing the
+literal as a map (`[:, …]`), which says it in the source rather than in the
+unifier.
 ## Order is not data
 
 One carrier, one order: `Map` is an `imbl::OrdMap` (`core/src/types/map.rs`), so
@@ -152,10 +171,11 @@ homogeneous association on a runtime keyset (a map). The split is forced by the
 data, not chosen for tidiness.
 
 A *set* is the degenerate homogeneous map `Map<Unit>` — keys present, values
-carrying no information — with `has` for membership and `union` / `intersection`
-/ `difference` in the prelude (`docs/SPEC.md` §4.5).
+carrying no information — written `[:, alice: (), bob: ()]`, with `has` for
+membership and `union` / `intersection` / `difference` in the prelude
+(`docs/SPEC.md` §4.5).
 
-**Realised in** [[internals/type-inference|type-inference]] (literal inference,
-the record/map projection split, the `unify_map_record` coercion).
+**Realised in** [[internals/type-inference|type-inference]] (literal inference
+and the record/map projection split).
 
 Cite: `docs/SPEC.md` §4.5; `core/src/typecheck/{ty,infer,unify,builtins}.rs`.

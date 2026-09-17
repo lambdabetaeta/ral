@@ -1,8 +1,5 @@
 //! Union-find unifier over four variable kinds: type, computation type, route, row.
 //!
-//! Record↔Map is the one coercion the language keeps; payload routes get
-//! none, so `Value` and `Bytes` never unify.
-//!
 //! Value and computation types are both *equi-recursive* — a slot may be bound
 //! to a structure containing its own variable — so neither needs an occurs
 //! check.  Instead every traversal carries a [`Visited`] of the roots it is
@@ -734,10 +731,6 @@ impl Unifier {
                 self.name_alternatives(&r1, &r2, r)
             }
             (Ty::Thunk(a1), Ty::Thunk(b1)) => self.unify_comp_ty_inner(&a1, &b1, pairs, depth),
-            // The one coercion: a record stands in for a homogeneous map.
-            (Ty::Map(elem), Ty::Record(row)) | (Ty::Record(row), Ty::Map(elem)) => {
-                self.unify_map_record(&elem, &row, pairs, depth)
-            }
             // Enumerated, not `_`, here and in the two matches below: a new
             // constructor then fails the build until it is routed above,
             // instead of being reported as a mismatch with itself.
@@ -1062,30 +1055,6 @@ impl Unifier {
         }
         self.unify_route(route, PayloadRoute::Bytes).is_ok()
             && self.unify_ty(value, &Ty::Unit).is_ok()
-    }
-
-    /// The spine is width; only a field *type* against the element goes deeper.
-    fn unify_map_record(
-        &mut self,
-        elem: &Ty,
-        row: &Row,
-        pairs: &mut Pairs,
-        depth: u32,
-    ) -> Result<(), TypeErrorKind> {
-        let row = self.resolve_row(row);
-        match row {
-            Row::Empty => Ok(()),
-            Row::Var(RowVar(vi)) => {
-                let r = self.rows.find(vi);
-                self.rows.bind(r, Row::Empty);
-                Ok(())
-            }
-            Row::Extend(_, ty, rest) => {
-                let ty = *ty;
-                self.unify_ty_inner(&ty, elem, pairs, deeper(depth)?)?;
-                self.unify_map_record(elem, &rest, pairs, depth)
-            }
-        }
     }
 }
 

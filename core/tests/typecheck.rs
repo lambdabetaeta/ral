@@ -110,11 +110,18 @@ fn map_element_mismatch_explains_computed_key_homogeneity() {
     );
 }
 
+/// A spread's operand must be what the literal it sits in is made of, and the
+/// sentence names which literal that is.
 #[test]
-fn map_spread_explains_record_or_map_operand() {
+fn a_spread_explains_the_literal_it_sits_in() {
     let errs = raw_errors("let n = 42\nlet m = [a: 1, ...$n]");
     assert!(
-        has_hint(&errs, "a `...x` spread copies another record's fields"),
+        has_hint(&errs, "a `...x` spread inside a record literal"),
+        "expected the record-spread sentence, got: {errs:?}"
+    );
+    let errs = raw_errors("let n = 42\nlet m = [:, a: 1, ...$n]");
+    assert!(
+        has_hint(&errs, "a `...x` spread inside a map literal"),
         "expected the map-spread sentence, got: {errs:?}"
     );
 }
@@ -446,12 +453,104 @@ fn recursive_binding_no_error() {
     );
 }
 
-// ─── Coercions (must NOT produce errors) ─────────────────────────────────────
+// ─── A record is not a map ───────────────────────────────────────────────────
 
+/// There is no record→map coercion: `keys` takes a map, and a record — even a
+/// homogeneous one — is a different type over the same pairs.  The help says
+/// how to write the literal as a map instead.
 #[test]
-fn coercion_record_map_no_error() {
-    // Record ↔ Map: pass a record literal to `keys` (expects [Str:Value]).
-    ok("let r = [a: 1, b: 2]; let _ = !{keys $r}; return ()");
+fn a_record_is_refused_where_a_map_is_expected() {
+    has_error(
+        "let r = [a: 1, b: 2]; let _ = !{keys $r}; return ()",
+        "couldn't match",
+    );
+    let errs = raw_errors("let r = [a: 1, b: 2]; let _ = !{keys $r}; return ()");
+    assert!(
+        has_hint(&errs, "`[:, a: 1, b: 2]`"),
+        "expected the map-spelling help, got: {errs:?}"
+    );
+}
+
+/// And the other direction: a map where a record is expected.
+#[test]
+fn a_map_is_refused_where_a_record_is_expected() {
+    let src = "let f = { |r| return $r[host] }\nlet m = [:, host: 'db']\nreturn !{f $m}";
+    has_error(src, "couldn't match");
+    assert!(
+        has_hint(&raw_errors(src), "a record and a map are different types"),
+        "expected the record-vs-map sentence"
+    );
+}
+
+/// `[:, …]` is the map literal, whatever its keys are written like.
+#[test]
+fn a_marked_literal_is_a_map() {
+    ok("let m = [:, a: 1, b: 2]\nlet k = 'a'\nreturn $m[$k]");
+    has_error("let m = [:, a: 1, b: \"x\"]\nreturn $m", "couldn't match");
+    let errs = raw_errors("let m = [:, a: 1, b: \"x\"]\nreturn $m");
+    assert!(
+        has_hint(
+            &errs,
+            "a map has computed keys, so every value must have the one type"
+        ),
+        "expected the map-element sentence, got: {errs:?}"
+    );
+}
+
+/// A map spread into a record literal is a type error; were it accepted, the
+/// literal would claim no fields beyond the ones written and `$r[flag]` would
+/// read as the map's element type.
+#[test]
+fn a_map_does_not_spread_into_a_record() {
+    has_error(
+        "let k = 'flag'\nlet m = [$k: 1]\nlet r = [ok: true, ...$m]\nif !{get $r flag false} { return 1 } else { return 2 }",
+        "couldn't match",
+    );
+    has_error(
+        "let r = [a: 1]\nlet m = [:, ...$r]\nreturn $m",
+        "couldn't match",
+    );
+}
+
+/// A static key names a field whatever the target is, so a map read at one is
+/// refused — and refused the same way whether the read sits inline or in a
+/// block the value is passed to.  Without that rule the two would disagree.
+#[test]
+fn a_static_key_on_a_map_is_refused_and_says_how_to_read_it() {
+    let src = "let k = 'a'\nlet m = [$k: 1]\nreturn $m[a]";
+    has_error(src, "is a field name");
+    assert!(
+        has_hint(
+            &raw_errors(src),
+            "read a map's key with `get $m a <default>`"
+        ),
+        "expected the `get` help, got: {:?}",
+        raw_errors(src)
+    );
+    has_error(
+        "let k = 'a'\nlet mm = [$k: 1]\nlet f = { |m| return $m[a] }\nreturn !{f $mm}",
+        "couldn't match",
+    );
+}
+
+/// A module's bindings are heterogeneous and reached by name, so `use` yields
+/// an open record: read it at a label, not at a key computed at run time.
+#[test]
+fn a_module_is_read_by_name() {
+    ok("let m = use 'lib.ral'\nreturn $m[version]");
+    has_error(
+        "let m = use 'lib.ral'\nlet k = 'version'\nreturn $m[$k]",
+        "with a runtime key",
+    );
+}
+
+/// The verdict on a list of literals does not depend on the order they are
+/// written in: a computed-key literal and a static-key one are two types, in
+/// either order.
+#[test]
+fn a_list_of_a_map_and_a_record_is_refused_in_either_order() {
+    has_error("let k = 'a'\nreturn [[$k: 1], [a: 2]]", "couldn't match");
+    has_error("let k = 'a'\nreturn [[a: 2], [$k: 1]]", "couldn't match");
 }
 
 // ─── Builtins ─────────────────────────────────────────────────────────────────
@@ -1410,16 +1509,14 @@ fn within_handler_non_literal_value_falls_through() {
     ok(r"let h = { |x| return $[$x + 1] }; within [handlers: [foo: $h]] { foo 1 }");
 }
 
-/// Existing within env/dir fields still typecheck correctly after the refactor.
+/// `dir:` is the one `within` option a single `Ty` states, so it is the one
+/// the schema pins; `env:` is a record of whatever each variable is worth and
+/// `parse_env` owns it, heterogeneous values included.
 #[test]
-fn within_env_and_dir_still_typecheck() {
+fn within_pins_dir_and_leaves_env_to_the_runtime() {
     ok(r#"within [env: [KEY: "val"], dir: "/tmp"] { return "ok" }"#);
-    // Passing an Int where a Map<String> is expected for `env:` — the
-    // actual error message is "couldn't match" with Int vs Map.
-    has_error(
-        r#"within [env: 42, dir: "/tmp"] { return "ok" }"#,
-        "couldn't match",
-    );
+    ok(r#"within [env: [MODE: 'test', RETRIES: 3]] { return "ok" }"#);
+    has_error(r#"within [dir: 42] { return "ok" }"#, "couldn't match");
 }
 
 // ─── alias handler bindings in Seq ───────────────────────────────────────────
@@ -2725,9 +2822,9 @@ fn multiple_spreads_keep_constraining_the_result() {
 /// the one the result reports.
 #[test]
 fn first_spread_wins_in_the_type() {
-    ok("let r = [:, ...[p: 1], ...[p: \"s\"]]\nreturn $[$r[p] + 1]");
+    ok("let r = [x: 0, ...[p: 1], ...[p: \"s\"]]\nreturn $[$r[p] + 1]");
     has_error(
-        "let r = [:, ...[p: \"s\"], ...[p: 1]]\nreturn $[$r[p] + 1]",
+        "let r = [x: 0, ...[p: \"s\"], ...[p: 1]]\nreturn $[$r[p] + 1]",
         "couldn't match",
     );
 }
@@ -2742,18 +2839,18 @@ fn first_spread_wins_in_the_type() {
 fn an_open_spread_must_come_last() {
     has_error(
         "let dflt = [host: 'local', port: 80]\n\
-         let f = { |g| return [:, ...$g, ...$dflt] }\n\
+         let f = { |g| return [x: 0, ...$g, ...$dflt] }\n\
          return $f",
         "has to come last",
     );
     has_error(
-        "let f = { |a b| return [:, ...$a, ...$b] }\nreturn $f",
+        "let f = { |a b| return [x: 0, ...$a, ...$b] }\nreturn $f",
         "has to come last",
     );
-    ok("let f = { |g| return [:, ...[tag: 1], ...$g] }\nreturn $f");
+    ok("let f = { |g| return [x: 0, ...[tag: 1], ...$g] }\nreturn $f");
     ok("let dflt = [host: 'local', port: 80]\n\
         let given = [host: 'prod']\n\
-        let r = [:, ...$given, ...$dflt]\n\
+        let r = [x: 0, ...$given, ...$dflt]\n\
         return $[$r[port] + 1]");
 }
 

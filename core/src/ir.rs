@@ -63,6 +63,9 @@ pub enum Val {
     /// A suspended computation, eliminated by [`CompKind::Force`].
     Thunk(Arc<Comp>),
     List(Vec<ValListElem>),
+    /// `[key: val, …]` — every key a static label.
+    Record(Vec<ValRecordEntry>),
+    /// `[:, key: val, …]`, `[$k: val]` — the keys are data.
     Map(Vec<ValMapEntry>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
@@ -107,10 +110,49 @@ impl ValListElem {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ValRecordEntry {
+    /// `label: value`; the label is the row's, tags included.
+    Field(String, Spanned<Val>),
+    /// `...x`, merged into the surrounding record.
+    Spread(Spanned<Val>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValMapEntry {
+    /// `key: value`, the key a value evaluated to a `String` at run time.
     Entry(Val, Spanned<Val>),
     /// `...x`, merged into the surrounding map.
     Spread(Spanned<Val>),
+}
+
+/// One entry of either literal as the shared runtime carrier reads it.
+#[derive(Clone, Copy)]
+pub(crate) enum MapPart<'a> {
+    Labelled(&'a str, &'a Spanned<Val>),
+    Computed(&'a Val, &'a Spanned<Val>),
+    Spread(&'a Spanned<Val>),
+}
+
+pub(crate) trait MapParts {
+    fn part(&self) -> MapPart<'_>;
+}
+
+impl MapParts for ValRecordEntry {
+    fn part(&self) -> MapPart<'_> {
+        match self {
+            Self::Field(label, value) => MapPart::Labelled(label, value),
+            Self::Spread(value) => MapPart::Spread(value),
+        }
+    }
+}
+
+impl MapParts for ValMapEntry {
+    fn part(&self) -> MapPart<'_> {
+        match self {
+            Self::Entry(key, value) => MapPart::Computed(key, value),
+            Self::Spread(value) => MapPart::Spread(value),
+        }
+    }
 }
 
 /// Positional arguments to a call — the same slots a list literal has.
@@ -365,21 +407,30 @@ fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
                 walk_val(&elem.slot().item, out);
             }
         }
+        Val::Record(entries) => {
+            for entry in entries {
+                walk_map_part(entry.part(), out);
+            }
+        }
         Val::Map(entries) => {
             for entry in entries {
-                match entry {
-                    ValMapEntry::Entry(key, value) => {
-                        walk_val(key, out);
-                        walk_val(&value.item, out);
-                    }
-                    ValMapEntry::Spread(value) => walk_val(&value.item, out),
-                }
+                walk_map_part(entry.part(), out);
             }
         }
         Val::Variant { label: _, payload } => {
             if let Some(p) = payload {
                 walk_val(p, out);
             }
+        }
+    }
+}
+
+fn walk_map_part<'a>(part: MapPart<'a>, out: &mut Vec<&'a str>) {
+    match part {
+        MapPart::Labelled(_, value) | MapPart::Spread(value) => walk_val(&value.item, out),
+        MapPart::Computed(key, value) => {
+            walk_val(key, out);
+            walk_val(&value.item, out);
         }
     }
 }
@@ -800,6 +851,10 @@ mod tests {
             ValListElem::Single(svar("r_list_single")),
             ValListElem::Spread(svar("r_list_spread")),
         ])));
+        let val_record = Spanned::synthetic(CompKind::Return(Val::Record(vec![
+            ValRecordEntry::Field("lbl".into(), svar("r_record_value")),
+            ValRecordEntry::Spread(svar("r_record_spread")),
+        ])));
         let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![
             ValMapEntry::Entry(var("r_map_key"), svar("r_map_value")),
             ValMapEntry::Spread(svar("r_map_spread")),
@@ -845,6 +900,7 @@ mod tests {
             Arc::new(scope_audit),
             Arc::new(scope_redirect),
             Arc::new(val_list),
+            Arc::new(val_record),
             Arc::new(val_map),
             Arc::new(val_variant),
             Arc::new(val_variant_empty),
@@ -897,6 +953,8 @@ mod tests {
             "r_scope_redirect_target",
             "r_list_single",
             "r_list_spread",
+            "r_record_value",
+            "r_record_spread",
             "r_map_key",
             "r_map_value",
             "r_map_spread",

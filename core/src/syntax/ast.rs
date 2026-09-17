@@ -85,13 +85,15 @@ pub enum Ast {
     Unit,
     /// `[a, b, c]`
     List(Vec<ListElem>),
-    /// `[key: val, key: val]`
+    /// `[key: val, key: val]` — every key a static label.
+    Record(Vec<RecordEntry>),
+    /// `[:]`, `[:, key: val]`, `[$k: val]` — the keys are data.
     Map(Vec<MapEntry>),
     /// `"hello $name"`, one segment per literal fragment or `$…` insertion.
     Interpolation(Vec<Spanned<Self>>),
     /// `` `label `` or `` `label payload ``, where the payload is the next
     /// adjacent atom and `label` drops its backtick. Tag-*keyed* records are
-    /// not this: they are `Map` entries with [`MapKey::Tag`] keys.
+    /// not this: they are [`RecordEntry::Field`]s with [`MapKey::Tag`] keys.
     Tag {
         label: String,
         payload: Option<Spanned<Box<Self>>>,
@@ -218,11 +220,20 @@ pub enum ListElem {
     Spread(Spanned<Ast>),
 }
 
-/// Entry of a map literal.
+/// Entry of a record literal; no variant can carry a computed key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RecordEntry {
+    /// `key: value` with a label known statically — see [`MapKey`].
+    Field { key: MapKey, value: Spanned<Ast> },
+    /// `...expr` — splice another record's fields into this one.
+    Spread(Spanned<Ast>),
+}
+
+/// Entry of a map literal; a key is data, so no variant can carry a tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MapEntry {
-    /// `key: value` with a label known statically — see [`MapKey`].
-    Entry { key: MapKey, value: Spanned<Ast> },
+    /// `key: value` or `'key': value` — written out, but still data.
+    Entry { key: String, value: Spanned<Ast> },
     /// `$name: value` — the key is `name`'s value at runtime.
     Deref { name: String, value: Spanned<Ast> },
     /// `...expr` — splice another map's entries into this one.

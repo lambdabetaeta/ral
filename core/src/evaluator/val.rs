@@ -3,7 +3,7 @@
 //! reads `Env` and nothing else, so it can never observe a `cd`.
 
 use crate::diagnostic;
-use crate::ir::{Val, ValListElem, ValMapEntry};
+use crate::ir::{MapPart, MapParts, Val, ValListElem};
 use crate::types::{Closure, Env, Error, List, Value};
 
 /// Renders one interpolation piece for `machine::eval_rules`'s
@@ -48,6 +48,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
             env: env.clone(),
         })),
         Val::List(elems) => eval_list(elems, env),
+        Val::Record(entries) => eval_map(entries, env),
         Val::Map(entries) => eval_map(entries, env),
         Val::Variant { label, payload } => {
             let payload = match payload {
@@ -110,18 +111,19 @@ pub(crate) fn spread_type_err(val: &Value) -> Error {
     .with_hint("spread (...) expands a list")
 }
 
-/// Evaluates a map literal. Explicit entries win over spreads: `seen`
-/// gates the spread pass, because `Value::map` collects into an ordered
-/// map where a later insert would otherwise overwrite the earlier.
-fn eval_map(entries: &[ValMapEntry], env: &Env) -> Result<Value, Error> {
+/// Evaluates a record or map literal — one carrier, so one rule. Explicit
+/// entries win over spreads: `seen` gates the spread pass, because
+/// `Value::map` collects into an ordered map where a later insert would
+/// otherwise overwrite the earlier.
+fn eval_map<E: MapParts>(entries: &[E], env: &Env) -> Result<Value, Error> {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
     for entry in entries {
-        if let ValMapEntry::Entry(key_val, v) = entry {
-            let key_value = close(key_val, env)?;
-            let key = match &key_value {
-                Value::String(s) => s.clone(),
-                _ => {
+        let (key, value) = match entry.part() {
+            MapPart::Labelled(label, v) => (label.to_string(), v),
+            MapPart::Computed(key_val, v) => {
+                let key_value = close(key_val, env)?;
+                let Value::String(key) = key_value else {
                     return Err(Error::new(
                         format!(
                             "map key must be a String, got {} '{key_value}'",
@@ -130,16 +132,18 @@ fn eval_map(entries: &[ValMapEntry], env: &Env) -> Result<Value, Error> {
                         1,
                     )
                     .with_hint("use str to convert"));
-                }
-            };
-            if !seen.insert(key.clone()) {
-                diagnostic::shell_warning(&format!("duplicate key '{key}'"));
+                };
+                (key, v)
             }
-            pairs.push((key, close(&v.item, env)?));
+            MapPart::Spread(_) => continue,
+        };
+        if !seen.insert(key.clone()) {
+            diagnostic::shell_warning(&format!("duplicate key '{key}'"));
         }
+        pairs.push((key, close(&value.item, env)?));
     }
     for entry in entries {
-        if let ValMapEntry::Spread(v) = entry {
+        if let MapPart::Spread(v) = entry.part() {
             match close(&v.item, env)? {
                 Value::Map(inner) => {
                     for (k, v) in inner {

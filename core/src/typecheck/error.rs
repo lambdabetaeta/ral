@@ -94,8 +94,11 @@ pub enum Reason {
     ListSpread,
     MapKey,
     MapElem,
+    /// A `...x` inside a record literal, which copies fields.
+    RecordSpread,
+    /// A `...x` inside a map literal, which copies entries.
     MapSpread,
-    /// An options-map entry against its schema-declared field type, under `form`.
+    /// An options-record entry against its schema-declared field type, under `form`.
     OptionField {
         form: &'static str,
         key: String,
@@ -275,6 +278,10 @@ pub enum TypeErrorKind {
         label: String,
         ty: Ty,
     },
+    /// A field read (`$m[key]`) on a map, whose keys are data rather than labels.
+    FieldOnMap {
+        label: String,
+    },
     /// A computed index (`$v[$k]`) on a value that accepts no key at all.
     DynamicIndexOnScalar {
         ty: Ty,
@@ -316,6 +323,7 @@ impl TypeErrorKind {
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",
+            Self::FieldOnMap { .. } => "T0063",
             Self::DeadPipeEdge { .. } => "T0070",
         }
     }

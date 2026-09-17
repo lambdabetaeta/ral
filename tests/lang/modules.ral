@@ -4,13 +4,14 @@
 let tmpdir = temp-dir
 echo "let version = 1\nlet _private = 42" > "$tmpdir/lib.ral"
 
-# use returns a map excluding _ names
+# use returns a record of the module's bindings, excluding _ names; a
+# record is reached by name, so absence shows as the read failing.
 let m = use "$tmpdir/lib.ral"
-echo !{has $m version}
-echo !{has $m _private}
 echo $m[version]
+let private = try { return $m[_private] } { |_| return -1 }
+echo !{equal $private -1}
 
-# re-using an unchanged file yields a structurally equal map
+# re-using an unchanged file yields a structurally equal record
 let m2 = use "$tmpdir/lib.ral"
 echo !{equal $m $m2}
 

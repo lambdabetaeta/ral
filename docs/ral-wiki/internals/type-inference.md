@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2f2c84a0
-verified_at_date: 2026-08-12
-anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
+verified_at_commit: fb9107b8
+verified_at_date: 2026-09-17
+anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, infer_record_val, infer_map_val, infer_field_read, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
 # Type inference: the algorithm
@@ -59,6 +59,20 @@ unifying.
   same — a handler or alias arm against its head — and nowhere else. There is no
   adjacency premise: a `|` constrains no route at all
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+
+**A literal's kind is syntax, and a key's form picks the projection rule.**
+The parser classifies a bracketed literal, so the checker has one rule per IR
+constructor — `infer_record_val` and `infer_map_val`: a record's fields each
+keep their own type in a row, a map's values share one element type, and the
+two types unify only with their own kind
+([[design/records-and-maps|records-and-maps]]). Indexing splits the same way,
+on the key rather than the target: a `Val::String` key is
+`infer_field_read`, which unifies the target with `[label: α | ρ]` whatever its
+current inference state, so an inline read and the same read extracted into a
+block cannot disagree. The computed-key arm alone overloads on the target —
+`List` by an `Int` key, `Map` by a `String`, a still-free target pinned by the
+key's type — and is the one indexing verdict that depends on how much the
+store already knows.
 
 **One shape rule, `force_return_shape`, does the work an adjacency rule used to.**
 `extract_return` (`infer.rs`) resolves a `CompTy` to `Return(route, value)`,

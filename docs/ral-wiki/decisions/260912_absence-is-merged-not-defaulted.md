@@ -7,12 +7,12 @@ generated_at_commit: a3ff030d
 
 **A missing field is filled by merging in a record that supplies it, not by
 attaching a fallback expression to the pattern that reads it.** Two changes
-land as one decision: a bracketed literal now classifies as a record when it
-opens with `:` or contains a `key: value` entry, which makes a pure
-two-record merge (`[:, ...$given, ...$dflt]`) expressible for the first time;
-and map-pattern defaults (`[port: p = 8080]`) are deleted, because with the
-merge expressible a defaulted field is a second, worse mechanism for exactly
-what spread shadowing already does at the level of data.
+land as one decision: a bracketed literal's entries settle its kind, so a
+two-record merge written with one explicit field
+(`[tier: 'a', ...$given, ...$dflt]`) is a record and not a list; and
+map-pattern defaults (`[port: p = 8080]`) are deleted, because with the merge
+expressible a defaulted field is a second, worse mechanism for exactly what
+spread shadowing already does at the level of data.
 
 ## Context
 
@@ -20,10 +20,9 @@ what spread shadowing already does at the level of data.
 shadowing are how ral expresses optionality and defaults structurally — see
 its "Scoped labels and spread shadowing are how ral expresses optionality and
 defaults at the level of data" — but that route was unreachable for the one
-case that matters here: a *pure* merge of two records, with no field of its
-own to anchor the literal's shape. `[...$given, ...$dflt]`, with nothing but
-spreads, had no `key: value` entry to settle whether it was a record or a
-list, and fell to list — silently, since a list of maps is not a type error
+case that matters here: a merge of two records. `[...$given, ...$dflt]`, with
+nothing but spreads, has no entry to settle whether it is a record or a list,
+and falls to list — silently, since a list of records is not a type error
 until something indexes it. Reaching for a default *inside the pattern*
 instead was the only way to say "fall back to this value" without that
 literal.
@@ -45,14 +44,15 @@ rule did not reach.
 
 ## Decision
 
-**A bracketed literal is a record if it opens with `:` or contains a
-`key: value` entry; otherwise it is a list.** `[:]` is that marker's
-degenerate case rather than a special-cased empty-map token — nothing
-follows the `:`. This is what makes `[:, ...$given, ...$dflt]` a record
-merge: the leading `:` settles the literal's shape before either spread is
-read, and record-spread's existing priority rule — first spread wins on a
-conflict — does the rest, giving `$given` its fields back and falling
-through to `$dflt` for whatever it omits.
+**A bracketed literal's keys settle its kind, and one explicit field is enough
+to settle it.** `[tier: 'a', ...$given, ...$dflt]` is a record merge: the
+field says the literal is a record before either spread is read, and
+record-spread's existing priority rule — an explicit entry beats every spread,
+and of two spreads the first wins on a conflict — does the rest, giving
+`$given` its fields back and falling through to `$dflt` for whatever it omits.
+A literal of spreads alone stays a list; a merge that has no field of its own
+to write is one the reader must anchor
+([[design/records-and-maps|records-and-maps]]).
 
 **Map-pattern defaults are deleted.** `MapPatternEntry` loses its `default`
 field; the parser no longer reads an `=` after a map-pattern entry's
@@ -81,7 +81,7 @@ let [host: h, port: p = 8080] = $cfg
 becomes
 
 ```ral
-let [host: h, port: p] = [:, ...$cfg, ...[port: 8080]]
+let [host: h, port: p] = [tier: 'a', ...$cfg, ...[port: 8080]]
 ```
 
 An explicit entry always wins over a spread regardless of position, so the
@@ -105,8 +105,9 @@ field's actual type, so `let [flag: flag = 1] = [:]` typechecked and then
 failed at runtime with a type mismatch, and an ill-typed default such as
 `!{floor true}` escaped checking entirely — it was only ever forced if the
 field was absent at run time, never checked against the field's inferred
-type. Merging plain records has no such gap: every field in `[:, ...$given,
-...$dflt]` is checked at the type the record literal already gives it.
+type. Merging plain records has no such gap: every field in
+`[tier: 'a', ...$given, ...$dflt]` is checked at the type the record literal
+already gives it.
 
 That last sentence held only for known records, and at the time it was written
 a second hole hid the difference: a literal with two or more spreads discarded

@@ -128,6 +128,10 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
+            Self::FieldOnMap { label } => format!(
+                "`{label}` is a field name, and this is a map — a map's keys are runtime \
+                 data, so it has no field to read"
+            ),
             Self::DynamicIndexOnScalar { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -196,6 +200,7 @@ impl TypeErrorKind {
             | Self::IndexIntoThunk
             | Self::FieldOnNonRecord { .. }
             | Self::DynamicIndexOnScalar { .. } => "here".into(),
+            Self::FieldOnMap { .. } => "this is a map, not a record".into(),
         }
     }
 }
@@ -402,6 +407,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::FieldOnNonRecord { .. } => {
             Some("check that the value you're indexing is a record like `[a: 1, b: 2]`".to_string())
         }
+        TypeErrorKind::FieldOnMap { label } => Some(format!(
+            "read a map's key with `get $m {label} <default>`, or bind the key and write \
+             `$m[$k]` — a static name reads a record's field, and a record is written \
+             `[{label}: …]`"
+        )),
         TypeErrorKind::DynamicIndexOnScalar { .. } => Some(
             "only lists (key: Integer) and maps (key: String) \
              accept a key computed at runtime — for a record \
@@ -607,10 +617,17 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              keep their own type"
                 .to_string(),
         ),
+        Reason::RecordSpread => Some(
+            "a `...x` spread inside a record literal copies another record's fields \
+             into it, so the value after `...` must itself be a record — a map's keys \
+             are data, not labels, so a map has no fields to copy"
+                .to_string(),
+        ),
         Reason::MapSpread => Some(
-            "a `...x` spread copies another record's fields — or another map's \
-             entries — into this position, so the value after `...` must itself be a \
-             record or a map"
+            "a `...x` spread inside a map literal (`[:, …]`) copies another map's \
+             entries into it, so the value after `...` must itself be a map — a \
+             record's fields are reached by name, so spread it into a record literal \
+             (`[...$r, …]`) instead"
                 .to_string(),
         ),
         Reason::ScopeBody => Some(
@@ -661,7 +678,8 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     };
     (matches!(expected, Ty::Record(_)) || matches!(actual, Ty::Record(_))).then(|| {
         "this is a list literal, and `...` here copies list elements — a record \
-         merge is written as its own literal: `[:, ...a, ...b]`"
+         merge is written as a record literal (`[...$a, port: 1]`), a map merge as a \
+         map literal (`[:, ...a, ...b]`)"
             .to_string()
     })
 }
@@ -675,6 +693,16 @@ fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
+    let is_record = |t: &Ty| matches!(t, Ty::Record(_));
+    let is_map = |t: &Ty| matches!(t, Ty::Map(_));
+    if (is_record(expected) && is_map(actual)) || (is_map(expected) && is_record(actual)) {
+        return Some(
+            "a record and a map are different types over the same pairs: a record's \
+             fields are reached by name (`$r[a]`), while a map's keys are data. If these \
+             keys are data, write the literal as a map — `[:, a: 1, b: 2]` or `[$k: v]`"
+                .to_string(),
+        );
+    }
     let is_thunk = |t: &Ty| matches!(t, Ty::Thunk(_));
     if is_thunk(expected) != is_thunk(actual) {
         return Some(

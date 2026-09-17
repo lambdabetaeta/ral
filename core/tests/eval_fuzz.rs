@@ -464,25 +464,28 @@ fn map_multiple_spreads_explicit_wins() {
 }
 
 #[test]
-fn marked_record_merge_first_spread_wins() {
-    // `[:, ...$given, ...$dflt]` — the record marker admits an all-spread
-    // literal; the first spread's fields win, so defaults go last.
+fn record_merge_first_spread_wins() {
+    // A record merge is a record literal: the explicit field settles its
+    // shape, and the first spread's fields win, so defaults go last.
     let v = must_succeed(
         "let dflt = [host: 'local', port: 80]\n\
          let given = [host: 'prod']\n\
-         return [:, ...$given, ...$dflt]",
+         return [tier: 'a', ...$given, ...$dflt]",
     );
-    assert_eq!(v, must_succeed("return [host: 'prod', port: 80]"),);
+    assert_eq!(
+        v,
+        must_succeed("return [tier: 'a', host: 'prod', port: 80]"),
+    );
 }
 
 #[test]
-fn marked_record_single_spread() {
-    let v = must_succeed("let subject = [host: 'local', port: 80]\nreturn [:, ...$subject]");
-    assert_eq!(v, must_succeed("return [host: 'local', port: 80]"));
+fn marked_map_single_spread() {
+    let v = must_succeed("let subject = [:, host: 'local', port: 'x']\nreturn [:, ...$subject]");
+    assert_eq!(v, must_succeed("return [:, host: 'local', port: 'x']"));
 }
 
 #[test]
-fn marked_record_still_empty() {
+fn marked_map_still_empty() {
     assert_eq!(must_succeed("return [:]"), must_succeed("return [:]"));
     assert_eq!(must_succeed("!{is-empty [:]}"), Value::Bool(true));
 }
@@ -496,27 +499,27 @@ fn unmarked_spreads_still_list() {
 }
 
 #[test]
-fn marked_record_with_explicit_entry_and_spread() {
-    let v = must_succeed("let dflt = [host: 'local', port: 80]\nreturn [:, host: 'x', ...$dflt]");
+fn record_with_explicit_entry_and_spread() {
+    let v = must_succeed("let dflt = [host: 'local', port: 80]\nreturn [host: 'x', ...$dflt]");
     assert_eq!(v, must_succeed("return [host: 'x', port: 80]"));
 }
 
 #[test]
-fn marked_record_merge_destructures_to_each_winner() {
+fn record_merge_destructures_to_each_winner() {
     // A merge is assembled where the records are known; the pattern then reads
     // the winner of each field — the given value where it has one, the default
     // where it does not.
     let v = must_succeed(
         "let dflt = [host: 'local', port: 80]\n\
          let given = [host: 'prod']\n\
-         let [host: hn, port: pn] = [:, ...$given, ...$dflt]\n\
+         let [host: hn, port: pn] = [tier: 'a', ...$given, ...$dflt]\n\
          return [h: $hn, p: $pn]",
     );
     assert_eq!(v, must_succeed("return [h: 'prod', p: 80]"));
 }
 
 #[test]
-fn marked_record_bare_element_errors() {
+fn marked_map_bare_element_errors() {
     must_fail("[:, 5]");
 }
 
@@ -729,8 +732,8 @@ fn split_and_join() {
 
 #[test]
 fn has_on_map() {
-    assert_eq!(must_succeed("!{has [a: 1, b: 2] a}"), Value::Bool(true));
-    assert_eq!(must_succeed("!{has [a: 1, b: 2] c}"), Value::Bool(false));
+    assert_eq!(must_succeed("!{has [:, a: 1, b: 2] a}"), Value::Bool(true));
+    assert_eq!(must_succeed("!{has [:, a: 1, b: 2] c}"), Value::Bool(false));
 }
 
 // ── Scoped effects ───────────────────────────────────────────────────────
@@ -2212,7 +2215,7 @@ fn guard_propagates_original_error() {
 #[test]
 fn keys_returns_list() {
     assert_eq!(
-        must_succeed("!{keys [a: 1, b: 2, c: 3]}"),
+        must_succeed("!{keys [:, a: 1, b: 2, c: 3]}"),
         Value::list(vec![
             Value::String("a".into()),
             Value::String("b".into()),
@@ -2228,7 +2231,7 @@ fn keys_empty_map() {
 
 #[test]
 fn entries_returns_pairs() {
-    let result = must_succeed("!{entries [x: hello]}");
+    let result = must_succeed("!{entries [:, x: hello]}");
     if let Value::List(items) = result {
         assert_eq!(items.len(), 1);
         if let Value::List(pair) = &items[0] {
@@ -2245,7 +2248,7 @@ fn entries_returns_pairs() {
 #[test]
 fn values_returns_values() {
     assert_eq!(
-        must_succeed("!{values [a: 1, b: 2]}"),
+        must_succeed("!{values [:, a: 1, b: 2]}"),
         Value::list(vec![Value::Int(1), Value::Int(2)])
     );
 }

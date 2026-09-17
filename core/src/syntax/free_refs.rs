@@ -5,7 +5,7 @@
 //! the strongly connected components of that graph become the `LetRec` knots.
 
 use crate::syntax::ast::{
-    Ast, Head, ListElem, MapEntry, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
+    Ast, Head, ListElem, MapEntry, RecordEntry, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
@@ -133,6 +133,18 @@ impl Ast {
                 for elem in elems {
                     match elem {
                         ListElem::Single(a) | ListElem::Spread(a) => {
+                            a.item.collect_free_refs(candidates, scopes, out);
+                        }
+                    }
+                }
+            }
+            Self::Record(entries) => {
+                for entry in entries {
+                    match entry {
+                        RecordEntry::Field { value, .. } => {
+                            value.item.collect_free_refs(candidates, scopes, out);
+                        }
+                        RecordEntry::Spread(a) => {
                             a.item.collect_free_refs(candidates, scopes, out);
                         }
                     }

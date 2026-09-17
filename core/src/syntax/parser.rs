@@ -16,8 +16,8 @@
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
     Ast, BinaryOp, BinaryOpKind, CaseArm, Head, IfBranch, ListElem, MapEntry, MapKey,
-    MapPatternEntry, Pattern, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt,
-    Word, WordLiteral,
+    MapPatternEntry, Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget, ScopeAst,
+    ScopeKeyword, Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -1203,12 +1203,10 @@ impl Parser {
         }
     }
 
-    /// collection = list | map — `[]` is the empty list; a literal opening
-    /// with `:` is always a map, `[:]` being its degenerate empty case.
-    ///
-    /// Otherwise a spread belongs to either shape, so the items are read in
-    /// one pass and the first plain one — a `key: value` entry or a bare
-    /// element — settles which literal this is.
+    /// collection = list | record | map — `[]` is the empty list; a literal
+    /// opening with `:` is a map, `[:]` being its degenerate empty case.
+    /// Otherwise the items are read in one pass and each lifts the literal to
+    /// at least its own kind: a static key makes a record, a computed key a map.
     fn parse_collection(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBracket)?;
 
@@ -1217,44 +1215,30 @@ impl Parser {
             return Ok(Ast::List(vec![]));
         }
 
-        if self.peek() == &Token::Colon {
+        let literal = if self.peek() == &Token::Colon {
             self.advance();
             if self.peek() == &Token::RBracket {
                 self.advance();
                 return Ok(Ast::Map(vec![]));
             }
             self.expect(&Token::Comma)?;
-            let mut items = Vec::new();
-            self.parse_separated_until(&Token::RBracket, "collection", |p| {
-                items.push(p.parse_collection_item()?);
-                Ok(SepFlow::Cont)
-            })?;
-            return Ok(Ast::Map(lower_map_entries(items, /*marked=*/ true)?));
-        }
+            Literal::Map {
+                entries: Vec::new(),
+                marker: MapMarker::Colon,
+            }
+        } else {
+            Literal::List(Vec::new())
+        };
 
         let mut items = Vec::new();
         self.parse_separated_until(&Token::RBracket, "collection", |p| {
             items.push(p.parse_collection_item()?);
             Ok(SepFlow::Cont)
         })?;
-
-        if items
-            .iter()
-            .any(|item| matches!(item, CollectionItem::Entry { .. }))
-        {
-            return Ok(Ast::Map(lower_map_entries(items, /*marked=*/ false)?));
-        }
-
-        Ok(Ast::List(
-            items
-                .into_iter()
-                .map(|item| match item {
-                    CollectionItem::Spread(a) => ListElem::Spread(a),
-                    CollectionItem::Elem(a) => ListElem::Single(a),
-                    CollectionItem::Entry { .. } => unreachable!("no entry found above"),
-                })
-                .collect(),
-        ))
+        Ok(items
+            .into_iter()
+            .try_fold(literal, Literal::push)?
+            .into_ast())
     }
 
     /// item = '...' atom | mapkey ':' atom | atom
@@ -1446,55 +1430,207 @@ enum InfixOp {
     Or,
 }
 
-/// Lower record-literal items into `MapEntry`s.  `marked` says whether the
-/// literal is a record because it opened with `:` (no entries required) or
-/// because it contains one (a bare element is then the error), which only
-/// changes the diagnostic for [`CollectionItem::Elem`].
-fn lower_map_entries(
-    items: Vec<CollectionItem>,
-    marked: bool,
-) -> Result<Vec<MapEntry>, ParseError> {
-    // Bare `name` versus tag `` `name ``; a dynamic `$var` key is unknown
-    // until runtime and so votes for neither alphabet.
-    let mut alphabet: Option<bool> = None;
-    items
-        .into_iter()
-        .map(|item| match item {
-            CollectionItem::Spread(a) => Ok(MapEntry::Spread(a)),
-            CollectionItem::Entry {
-                key: MapKeyForm::Static(key),
-                key_span,
-                value,
-            } => {
+const KEYED_ELEM_ERROR: &str = "this collection has `key: value` entries, so every entry \
+     needs a key — or drop the keys to make it a list";
+
+/// A bracket literal as its items arrive. Each item lifts it to at least its
+/// own kind along list < record < map, so no item meets a kind already ruled out.
+enum Literal {
+    List(Vec<ListElem>),
+    Record {
+        items: Vec<StaticItem>,
+        /// Bare `name` versus tag `` `name ``.
+        tags: Option<bool>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+        marker: MapMarker,
+    },
+}
+
+/// A record item; the key's span is kept for the tag error a later computed
+/// key may raise.
+enum StaticItem {
+    Spread(Spanned<Ast>),
+    Field {
+        key: MapKey,
+        key_span: Span,
+        value: Spanned<Ast>,
+    },
+}
+
+/// What made the literal a map, which is what its errors point at.
+#[derive(Clone, Copy)]
+enum MapMarker {
+    Colon,
+    ComputedKey,
+}
+
+impl MapMarker {
+    fn elem_message(self) -> &'static str {
+        match self {
+            Self::Colon => {
+                "this collection opens with `:`, so it's a map — every item needs \
+                 a `key: value` or a `...` spread"
+            }
+            Self::ComputedKey => KEYED_ELEM_ERROR,
+        }
+    }
+
+    fn record_fix(self) -> &'static str {
+        match self {
+            Self::Colon => "drop the `:,`",
+            Self::ComputedKey => "give the computed key a static name",
+        }
+    }
+}
+
+impl Literal {
+    fn push(self, item: CollectionItem) -> Result<Self, ParseError> {
+        match (self, item) {
+            (Self::List(mut elems), CollectionItem::Elem(a)) => {
+                elems.push(ListElem::Single(a));
+                Ok(Self::List(elems))
+            }
+            (Self::List(mut elems), CollectionItem::Spread(a)) => {
+                elems.push(ListElem::Spread(a));
+                Ok(Self::List(elems))
+            }
+            (Self::List(elems), entry @ CollectionItem::Entry { .. }) => {
+                let items = elems
+                    .into_iter()
+                    .map(|elem| match elem {
+                        ListElem::Spread(a) => Ok(StaticItem::Spread(a)),
+                        ListElem::Single(a) => Err(elem_error(&a, KEYED_ELEM_ERROR)),
+                    })
+                    .collect::<Result<_, _>>()?;
+                Self::Record { items, tags: None }.push(entry)
+            }
+            (Self::Record { mut items, tags }, CollectionItem::Spread(a)) => {
+                items.push(StaticItem::Spread(a));
+                Ok(Self::Record { items, tags })
+            }
+            (
+                Self::Record {
+                    mut items,
+                    mut tags,
+                },
+                CollectionItem::Entry {
+                    key: MapKeyForm::Static(key),
+                    key_span,
+                    value,
+                },
+            ) => {
                 check_key_alphabet(
-                    &mut alphabet,
+                    &mut tags,
                     key.is_tag(),
                     key_span,
                     "record literal mixes bare and tag keys — pick one alphabet",
                 )?;
-                Ok(MapEntry::Entry { key, value })
+                items.push(StaticItem::Field {
+                    key,
+                    key_span,
+                    value,
+                });
+                Ok(Self::Record { items, tags })
             }
-            CollectionItem::Entry {
-                key: MapKeyForm::Deref(name),
-                value,
-                ..
-            } => Ok(MapEntry::Deref { name, value }),
-            CollectionItem::Elem(a) => Err(ParseError {
-                message: if marked {
-                    "this collection opens with `:`, so it's a record — every item needs \
-                     a `key: value` or a `...` spread"
-                        .into()
-                } else {
-                    "this collection has `key: value` entries, so every entry \
-                              needs a key — or drop the keys to make it a list"
-                        .into()
+            (
+                Self::Record { items, .. },
+                entry @ CollectionItem::Entry {
+                    key: MapKeyForm::Deref(_),
+                    ..
                 },
-                span: a.span,
-                lex_kind: None,
-                incomplete: false,
-            }),
-        })
-        .collect()
+            ) => {
+                let marker = MapMarker::ComputedKey;
+                let entries = items
+                    .into_iter()
+                    .map(|item| match item {
+                        StaticItem::Spread(a) => Ok(MapEntry::Spread(a)),
+                        StaticItem::Field {
+                            key,
+                            key_span,
+                            value,
+                        } => map_entry(MapKeyForm::Static(key), key_span, value, marker),
+                    })
+                    .collect::<Result<_, _>>()?;
+                Self::Map { entries, marker }.push(entry)
+            }
+            (Self::Record { .. }, CollectionItem::Elem(a)) => Err(elem_error(&a, KEYED_ELEM_ERROR)),
+            (
+                Self::Map {
+                    mut entries,
+                    marker,
+                },
+                CollectionItem::Spread(a),
+            ) => {
+                entries.push(MapEntry::Spread(a));
+                Ok(Self::Map { entries, marker })
+            }
+            (
+                Self::Map {
+                    mut entries,
+                    marker,
+                },
+                CollectionItem::Entry {
+                    key,
+                    key_span,
+                    value,
+                },
+            ) => {
+                entries.push(map_entry(key, key_span, value, marker)?);
+                Ok(Self::Map { entries, marker })
+            }
+            (Self::Map { marker, .. }, CollectionItem::Elem(a)) => {
+                Err(elem_error(&a, marker.elem_message()))
+            }
+        }
+    }
+
+    fn into_ast(self) -> Ast {
+        match self {
+            Self::List(elems) => Ast::List(elems),
+            Self::Record { items, .. } => Ast::Record(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        StaticItem::Spread(a) => RecordEntry::Spread(a),
+                        StaticItem::Field { key, value, .. } => RecordEntry::Field { key, value },
+                    })
+                    .collect(),
+            ),
+            Self::Map { entries, .. } => Ast::Map(entries),
+        }
+    }
+}
+
+/// A map's keys are data, so a tag — a label — is refused.
+fn map_entry(
+    key: MapKeyForm,
+    key_span: Span,
+    value: Spanned<Ast>,
+    marker: MapMarker,
+) -> Result<MapEntry, ParseError> {
+    match key {
+        MapKeyForm::Static(MapKey::Bare(key)) => Ok(MapEntry::Entry { key, value }),
+        MapKeyForm::Deref(name) => Ok(MapEntry::Deref { name, value }),
+        MapKeyForm::Static(MapKey::Tag(label)) => Err(Parser::error_at(
+            key_span,
+            format!(
+                "`` `{label} `` is a tag, and a map's keys are data — write the key as a \
+                 bare word or a quoted string, or make this a record: {}",
+                marker.record_fix()
+            ),
+        )),
+    }
+}
+
+fn elem_error(item: &Spanned<Ast>, message: &str) -> ParseError {
+    ParseError {
+        message: message.into(),
+        span: item.span,
+        lex_kind: None,
+        incomplete: false,
+    }
 }
 
 /// The first key fixes the alphabet and every later one must match, so
@@ -1705,6 +1841,20 @@ mod tests {
                         }
                         ListElem::Spread(a) => {
                             ListElem::Spread(Spanned::synthetic(strip_one(a.item)))
+                        }
+                    })
+                    .collect(),
+            ),
+            Ast::Record(entries) => Ast::Record(
+                entries
+                    .into_iter()
+                    .map(|e| match e {
+                        RecordEntry::Field { key, value } => RecordEntry::Field {
+                            key,
+                            value: Spanned::synthetic(strip_one(value.item)),
+                        },
+                        RecordEntry::Spread(a) => {
+                            RecordEntry::Spread(Spanned::synthetic(strip_one(a.item)))
                         }
                     })
                     .collect(),
@@ -2168,21 +2318,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_map() {
+    fn parse_record() {
         let ast = unwrap_stmts(parse("return [host: localhost, port: 8080]").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Return(Some(Spanned::synthetic_boxed(Ast::Map(vec![
-                MapEntry::Entry {
-                    key: MapKey::Bare("host".into()),
-                    value: sp(plain("localhost")),
-                },
-                MapEntry::Entry {
-                    key: MapKey::Bare("port".into()),
-                    value: sp(plain("8080")),
-                },
-            ]),)))]
+            vec![Ast::Return(Some(Spanned::synthetic_boxed(Ast::Record(
+                vec![
+                    RecordEntry::Field {
+                        key: MapKey::Bare("host".into()),
+                        value: sp(plain("localhost")),
+                    },
+                    RecordEntry::Field {
+                        key: MapKey::Bare("port".into()),
+                        value: sp(plain("8080")),
+                    },
+                ]
+            ),)))]
         );
+    }
+
+    /// `[:, …]` is a map however its keys are written, so a value of another
+    /// type under a second key is the map element rule's business, not the
+    /// parser's.
+    #[test]
+    fn parse_marked_map_with_static_keys() {
+        let ast = unwrap_stmts(parse("[:, a: 1, b: 2]").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Map(vec![
+                MapEntry::Entry {
+                    key: "a".into(),
+                    value: sp(plain("1")),
+                },
+                MapEntry::Entry {
+                    key: "b".into(),
+                    value: sp(plain("2")),
+                },
+            ])]
+        );
+    }
+
+    /// A tag is a label, and a map has keys rather than labels.
+    #[test]
+    fn parse_tag_key_in_map_literal_errors() {
+        let err = parse("[:, `dev: 8080]").unwrap_err();
+        assert!(err.message.contains("is a tag"), "{}", err.message);
+        assert!(parse("[$k: 1, `dev: 2]").is_err());
     }
 
     #[test]
@@ -2516,8 +2697,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_marked_record_of_only_spreads() {
-        // `[:, ...a, ...b]` — a record with no entries at all, otherwise
+    fn parse_marked_map_of_only_spreads() {
+        // `[:, ...a, ...b]` — a map with no entries at all, otherwise
         // indistinguishable from a list until the leading `:` marks it.
         let ast = unwrap_stmts(parse("[:, ...$a, ...$b]").unwrap());
         assert_eq!(
@@ -2530,13 +2711,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_marked_record_with_entry() {
+    fn parse_marked_map_with_entry() {
         let ast = unwrap_stmts(parse("[:, k: 'v', ...$d]").unwrap());
         assert_eq!(
             ast,
             vec![Ast::Map(vec![
                 MapEntry::Entry {
-                    key: MapKey::Bare("k".into()),
+                    key: "k".into(),
                     value: sp(Ast::Literal("v".into())),
                 },
                 MapEntry::Spread(sp(Ast::Variable("d".into()))),
@@ -2545,20 +2726,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_marked_record_bare_element_errors() {
+    fn parse_marked_map_bare_element_errors() {
         assert!(parse("[:, 5]").is_err());
     }
 
     #[test]
-    fn parse_leading_spread_disambiguates_to_map() {
+    fn parse_leading_spread_disambiguates_to_record() {
         // The `key: val` pair sits past the spread, where the lookahead has to
-        // reach to call this a map.
+        // reach to call this a record.
         let ast = unwrap_stmts(parse("[...$d, k: 'v']").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Map(vec![
-                MapEntry::Spread(sp(Ast::Variable("d".into()))),
-                MapEntry::Entry {
+            vec![Ast::Record(vec![
+                RecordEntry::Spread(sp(Ast::Variable("d".into()))),
+                RecordEntry::Field {
                     key: MapKey::Bare("k".into()),
                     value: sp(Ast::Literal("v".into())),
                 },
@@ -2569,17 +2750,36 @@ mod tests {
     /// The inner `]` of the spread operand must not be read as the outer
     /// collection's close, or `[...[a: 1], b: 2]` would parse as a list.
     #[test]
-    fn parse_leading_spread_of_nested_collection_disambiguates_to_map() {
+    fn parse_leading_spread_of_nested_collection_disambiguates_to_record() {
         let ast = unwrap_stmts(parse("[...[a: 1], b: 2]").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Map(vec![
-                MapEntry::Spread(sp(Ast::Map(vec![MapEntry::Entry {
+            vec![Ast::Record(vec![
+                RecordEntry::Spread(sp(Ast::Record(vec![RecordEntry::Field {
                     key: MapKey::Bare("a".into()),
                     value: sp(plain("1")),
                 }]))),
-                MapEntry::Entry {
+                RecordEntry::Field {
                     key: MapKey::Bare("b".into()),
+                    value: sp(plain("2")),
+                },
+            ])]
+        );
+    }
+
+    /// One computed key makes the whole literal a map, static keys and all.
+    #[test]
+    fn parse_computed_key_disambiguates_to_map() {
+        let ast = unwrap_stmts(parse("[a: 1, $k: 2]").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Map(vec![
+                MapEntry::Entry {
+                    key: "a".into(),
+                    value: sp(plain("1")),
+                },
+                MapEntry::Deref {
+                    name: "k".into(),
                     value: sp(plain("2")),
                 },
             ])]
@@ -2606,36 +2806,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_map_with_blocks() {
-        // Standalone: a multiline map is a value, not a command.
+    fn parse_record_with_blocks() {
+        // Standalone: a multiline record is a value, not a command.
         let src1 = "[\n    quit: { echo q },\n    help: { echo h },\n]";
         let ast1 = unwrap_stmts(parse(src1).unwrap());
         assert_eq!(ast1.len(), 1);
-        assert!(matches!(&ast1[0], Ast::Map(_)));
+        assert!(matches!(&ast1[0], Ast::Record(_)));
 
-        // And the same map in argument position.
+        // And the same record in argument position.
         let src = "dispatch $action [\n    quit: { echo quitting },\n    help: { echo help },\n    _: { echo unknown },\n]";
         let ast = unwrap_stmts(parse(src).unwrap());
         match &ast[0] {
             Ast::Call { head, args, .. } => {
                 assert_eq!(head, &bare_head("dispatch"));
                 assert_eq!(args.len(), 2);
-                assert!(matches!(&args[1].item, Ast::Map(_)));
+                assert!(matches!(&args[1].item, Ast::Record(_)));
             }
             _ => panic!("expected command, got {:?}", ast[0]),
         }
     }
 
     #[test]
-    fn parse_newline_separates_statements_in_block_inside_map() {
+    fn parse_newline_separates_statements_in_block_inside_record() {
         let src = "return [prompt: { let x = hi\nreturn \"$x> \" }]";
         let ast = unwrap_stmts(parse(src).unwrap());
         match &ast[0] {
             Ast::Return(Some(val)) => match val.item.as_ref() {
-                Ast::Map(entries) => {
+                Ast::Record(entries) => {
                     assert_eq!(entries.len(), 1);
-                    let MapEntry::Entry { value, .. } = &entries[0] else {
-                        panic!("expected map entry");
+                    let RecordEntry::Field { value, .. } = &entries[0] else {
+                        panic!("expected record field");
                     };
                     let Ast::Block(stmts) = &value.item else {
                         panic!("expected block in prompt entry");
@@ -2643,9 +2843,9 @@ mod tests {
                     assert!(matches!(stmts[0].item, Ast::Let { .. }));
                     assert!(matches!(stmts[1].item, Ast::Return(Some(_))));
                 }
-                _ => panic!("expected map"),
+                _ => panic!("expected record"),
             },
-            _ => panic!("expected return map"),
+            _ => panic!("expected return record"),
         }
     }
 
@@ -2656,19 +2856,19 @@ mod tests {
         let Ast::Return(Some(val)) = &ast[0] else {
             panic!("expected return");
         };
-        let Ast::Map(entries) = val.item.as_ref() else {
-            panic!("expected map");
+        let Ast::Record(entries) = val.item.as_ref() else {
+            panic!("expected record");
         };
-        let MapEntry::Entry {
+        let RecordEntry::Field {
             value: aliases_val, ..
         } = &entries[0]
         else {
             panic!("expected aliases entry");
         };
-        let Ast::Map(alias_entries) = &aliases_val.item else {
-            panic!("expected aliases map");
+        let Ast::Record(alias_entries) = &aliases_val.item else {
+            panic!("expected aliases record");
         };
-        let MapEntry::Entry { value: ls_val, .. } = &alias_entries[0] else {
+        let RecordEntry::Field { value: ls_val, .. } = &alias_entries[0] else {
             panic!("expected ls entry");
         };
         let Ast::Lambda { body, .. } = &ls_val.item else {
@@ -3474,7 +3674,7 @@ mod tests {
         let (op, _) = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
         match op {
             ScopeAst::Within { opts, body } => {
-                assert!(matches!(*opts, Ast::Map(_)));
+                assert!(matches!(*opts, Ast::Record(_)));
                 assert!(matches!(*body, Ast::Block(_)));
             }
             _ => panic!("expected ScopeAst::Within, got {op:?}"),

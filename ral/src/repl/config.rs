@@ -144,24 +144,23 @@ pub(crate) fn apply_rc_config(
     (settings, startup)
 }
 
-/// Schema for the rc top-level map's scalar-typed keys.
+/// Schema for the rc top-level record's scalar-typed keys.
 ///
 /// The rc's [`ReturnContract`](ral_core::typecheck::ReturnContract), held
 /// against a literal rc return as it is checked — deliberately partial:
-/// `prompt:`/`aliases:`/`bindings:`/`plugins:` hold handler values, or one
-/// type per key rather than one across the key, and no single `Ty` pins
-/// either. `apply_rc_key`'s own per-key check below is what still catches
-/// all of them, and every key here besides.
+/// `prompt:`/`aliases:`/`bindings:`/`plugins:`/`env:`/`theme:` hold handler
+/// values, or one type per key rather than one across the key, and no single
+/// `Ty` pins any of them. `apply_rc_key`'s own per-key check below is what
+/// still catches all of them, and every key here besides.
 pub(super) fn rc_field_ty(
     key: &str,
-    u: &mut ral_core::typecheck::Unifier,
+    _u: &mut ral_core::typecheck::Unifier,
 ) -> Option<ral_core::typecheck::Ty> {
     use ral_core::typecheck::Ty;
     match key {
         "edit_mode" | "surface" => Some(Ty::String),
         "bell" => Some(Ty::Bool),
         "recursion_limit" => Some(Ty::Int),
-        "env" | "theme" => Some(Ty::Map(Box::new(Ty::Var(u.fresh_tyvar())))),
         _ => None,
     }
 }

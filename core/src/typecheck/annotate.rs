@@ -14,7 +14,7 @@ use super::scheme::Scheme;
 use super::ty::GroundRoute;
 use crate::ir::{
     Args, CaseArm, Comp, CompKind, Exec, IrPattern, Phrase, PipeYield, RedirectV, Toplevel, Val,
-    ValListElem, ValMapEntry, ValRedirectTarget,
+    ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -444,6 +444,19 @@ fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
         Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx))),
         Val::List(elems) => Val::List(elems.iter().map(|e| annotate_list_elem(e, ctx)).collect()),
+        Val::Record(entries) => Val::Record(
+            entries
+                .iter()
+                .map(|e| match e {
+                    ValRecordEntry::Field(label, v) => {
+                        ValRecordEntry::Field(label.clone(), annotate_spanned_val(v, ctx))
+                    }
+                    ValRecordEntry::Spread(v) => {
+                        ValRecordEntry::Spread(annotate_spanned_val(v, ctx))
+                    }
+                })
+                .collect(),
+        ),
         Val::Map(entries) => Val::Map(
             entries
                 .iter()

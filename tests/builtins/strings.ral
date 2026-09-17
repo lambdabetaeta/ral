@@ -47,7 +47,7 @@ echo !{shell-quote 'hello world'}
 # Expected: 'hello world'
 
 # has
-let m = [a: 1, b: 2]
+let m = [:, a: 1, b: 2]
 if !{has $m a} { echo 'has a' }
 if $[not !{has $m c}] { echo 'no c' }
 # Expected: has a, no c

@@ -774,7 +774,17 @@ pub mod scheme {
 
     scheme!(ask: [Ty::String] -> Ty::String);
 
-    scheme!(use_op<av>: [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
+    /// `use :: ∀ρ. Str → F [ | ρ]` — an open record, since a module's bindings
+    /// are heterogeneous and reached by name.
+    pub fn use_op(u: &mut Unifier) -> Scheme {
+        let rv = u.fresh_row_var();
+        mk_scheme(
+            &[],
+            &[],
+            &[rv],
+            thunk(fun(Ty::String, pure(Ty::Record(Row::Var(rv))))),
+        )
+    }
 
     // ── Terminal, help & encoders ────────────────────────────────────────
     //
@@ -958,7 +968,7 @@ pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
     step
 }
 
-/// A per-key type schema, driving `check_map_entry_fields` in `super::infer`.
+/// A per-key type schema, driving `check_record_entry_fields` in `super::infer`.
 ///
 /// `None` for a key leaves that entry runtime-dispatched: still inferred for its
 /// side-effects, but unified against nothing. `pub`, not `pub(crate)`: a host
@@ -977,10 +987,10 @@ pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     };
     matches!(
         positional.first(),
-        Some(crate::ir::Val::Map(entries)) if entries.iter().any(|e| matches!(
+        Some(crate::ir::Val::Record(entries)) if entries.iter().any(|e| matches!(
             e,
-            crate::ir::ValMapEntry::Entry(
-                crate::ir::Val::String(k),
+            crate::ir::ValRecordEntry::Field(
+                k,
                 crate::source::Spanned {
                     item: crate::ir::Val::Int(0),
                     ..

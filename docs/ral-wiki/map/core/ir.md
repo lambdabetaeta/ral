@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a3ff030d
-generated_at_date: 2026-09-12
+generated_at_commit: fb9107b8
+generated_at_date: 2026-09-17
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -19,11 +19,16 @@ ledger.
 
 The two categories:
 
-- `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, maps,
-  thunks, variables. A value can never diverge or perform I/O. `Val` itself
-  stays unspanned; every position onto which the checker narrows while emitting
-  a constraint carries `Spanned<Val>`. `Args` and list literals are the same
-  `ValListElem` slots. A map entry carries its value's span, because the surface
+- `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
+  maps, thunks, variables. A value can never diverge or perform I/O. `Val`
+  itself stays unspanned; every position onto which the checker narrows while
+  emitting a constraint carries `Spanned<Val>`. `Args` and list literals are the
+  same `ValListElem` slots. `Val::Record` and `Val::Map` carry their own entry
+  types — `ValRecordEntry::Field(String, …)` against `ValMapEntry::Entry(Val,
+  …)` — so a record cannot hold a key computed at run time and the
+  [[design/records-and-maps|record/map]] classification is settled by the
+  parser rather than re-derived. Both read as `MapPart`s where the one runtime
+  carrier is built. An entry carries its value's span, because the surface
   captures no key span.
 - `Comp` — effectful, sequenced computation. `Comp` wraps a `CompKind` plus an
   optional `Span` for error reporting (synthetic nodes carry `span: None`).

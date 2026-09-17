@@ -25,8 +25,8 @@ The arms for zero and one spread were exact; the third was not an
 approximation but a hole, and it shipped in the initial release, when an
 all-spread literal still classified as a list and the arm was near-unreachable.
 [[decisions/260912_absence-is-merged-not-defaulted|absence-is-merged-not-defaulted]]
-then made `[:, ...$given, ...$dflt]` expressible and pointed the language's
-whole defaults mechanism at it.
+then pointed the language's whole defaults mechanism at the two-spread merge,
+`[tier: 'a', ...$given, ...$dflt]`.
 
 ## Decision
 
@@ -58,7 +58,7 @@ fields that would have been unreachable:
 Where the entries behind end in a *second* open spread, no order exists and the
 help says so instead, naming the fields as the only way through.
 
-The mirror order stays legal and exact: `[:, ...[tag: 1], ...$g]` places the
+The mirror order stays legal and exact: `[x: 0, ...[tag: 1], ...$g]` places the
 known chain first and lets `$g` be the open tail.
 
 **Reversing the precedence convention would not help.** Under last-wins the open
@@ -96,9 +96,9 @@ checks a block argument after the spine is unified and pushes the expectation
 inwards ([[internals/type-inference|type-inference]]). The rule below is
 unchanged — it simply stopped firing on programs whose rows were never open.
 What remains refused is the row that no call can close: a parameter nothing
-determines, as in `{|a b| [:, ...$a, ...$b]}`.
+determines, as in `{|a b| [x: 0, ...$a, ...$b]}`.
 
-**Two open spreads no longer unify.** `{|a b| [:, ...$a, ...$b]}` was inferred
+**Two open spreads no longer unify.** `{|a b| [x: 0, ...$a, ...$b]}` was inferred
 at `∀ρ. [ρ] → [ρ] → [ρ]`, a contract no caller wants; it is now refused at the
 literal instead of blaming an argument.
 
