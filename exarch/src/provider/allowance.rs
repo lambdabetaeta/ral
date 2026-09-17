@@ -7,7 +7,7 @@
 mod meters;
 
 use crate::agent::resources::{hms, section_mark};
-use crate::bus::card::{Card, Field, FieldVal, Mark, Measure, Role, Span};
+use crate::bus::card::{Card, Field, FieldVal, Mark, Measure, Span};
 use crate::provider::credential::Roster;
 use crate::provider::identity::{AccountId, Meter};
 use crate::provider::listing::Fetches;
@@ -191,9 +191,8 @@ pub enum Reading {
 
 /// One section per account — its label as the heading — over its rows.
 ///
-/// Accounts whose service publishes nothing are listed too, with one muted
-/// line saying so: a card that silently omitted them would read as a claim
-/// that they are unlimited.
+/// Unmetered accounts draw no section; when every account is one, the card
+/// names them in a sentence rather than reading as a claim of no limit.
 pub fn limits_card(readings: &[(String, Reading)]) -> Card {
     if readings
         .iter()
@@ -217,8 +216,7 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
     }
     let mut marks = Vec::new();
     for (label, reading) in readings {
-        marks.push(section_mark(label));
-        marks.push(match reading {
+        let mark = match reading {
             Reading::Allowances(allowances) => {
                 let mut sorted: Vec<&Allowance> = allowances.iter().collect();
                 sorted.sort_by(|a, b| match (a.window, b.window) {
@@ -231,16 +229,13 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
                     rows: sorted.iter().map(|a| a.field()).collect(),
                 }
             }
-            Reading::Unmetered => Mark::Text {
-                spans: vec![Span::new(
-                    Role::Muted,
-                    format!("{label} publishes no ration"),
-                )],
-            },
+            Reading::Unmetered => continue,
             Reading::Failed(reason) => Mark::Text {
                 spans: vec![Span::plain(format!("{label}: {reason}"))],
             },
-        });
+        };
+        marks.push(section_mark(label));
+        marks.push(mark);
     }
     Card(marks)
 }

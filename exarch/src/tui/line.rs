@@ -904,11 +904,11 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
         ((u64::from(done) * u64::from(W)) / u64::from(total)).min(u64::from(W)) as u32
     };
     vec![
-        Span::styled("█".repeat(filled as usize), Style::default().fg(LIME)),
         Span::styled(
-            "░".repeat((W - filled) as usize),
+            "█".repeat(filled as usize),
             Style::default().fg(SLATE).add_modifier(Modifier::DIM),
         ),
+        Span::styled("░".repeat((W - filled) as usize), Style::default().fg(LIME)),
     ]
 }
 
