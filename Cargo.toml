@@ -115,7 +115,10 @@ debug = "line-tables-only"
 lto = true
 codegen-units = 1
 strip = true
-opt-level = "z"
+# Speed, not size.  The binary ships beside a half-gigabyte rootfs, so the few
+# MB "z" would save is noise in the installer — while the vectorization and
+# inlining it disables cost real throughput in the search path.
+opt-level = 3
 panic = "unwind"  # must unwind: catch_unwind in driver loop needs it to recover from tool panics
 
 # Same codegen as release, but with debug info kept and stripping disabled
