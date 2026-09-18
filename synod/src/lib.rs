@@ -9,8 +9,8 @@
 //! - **the grant** ([`grant`]) — one folder, nothing else, and a network the
 //!   host terminates and filters;
 //! - **the prompt** ([`prompt`]) — an office persona over an office toolbox;
-//! - **the safety net** ([`workspace`]) — the folder is recorded before a
-//!   job, the changes reported after it, and anything can be put back;
+//! - **the account** ([`workspace`]) — the folder's shape is recorded
+//!   before a job and again after it, and the difference is reported;
 //! - **the machine** ([`vm_manager`]) — the folder is placed inside a real
 //!   virtual machine, walled off from the rest of the computer;
 //! - **the surface** — plain language, no git vocabulary anywhere.

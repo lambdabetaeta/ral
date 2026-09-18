@@ -1,26 +1,24 @@
-//! The safety net around a run: checkpoint before, report and undo after.
+//! The honest account of a run: the folder's shape before, its shape
+//! after, and the difference named.
 //!
-//! The agent works directly in the granted folder.  What makes that
-//! tolerable: the folder is recorded before the job, the difference is
-//! reported after, and anything can be put back — per file or whole job —
-//! with edits made *after* the job surfacing as conflicts, never silently
-//! overwritten.  Bytes about to be replaced or removed are always kept in
-//! the store first, so no undo destroys anything.  Undoing an undo is not
-//! a one-click operation yet: the bytes survive in the store, the button
-//! does not.
+//! The agent works directly in the granted folder, and nothing here ever
+//! puts anything back.  What this module promises is narrower and keepable:
+//! the folder is stat-walked once when the conversation opens and again
+//! when a turn settles, and the two records are compared into a report the
+//! user can read.  No file is ever opened, so a folder costs one stat-walk
+//! to record no matter how many gigabytes are in it — and the report says
+//! plainly where that leaves it short, marking a file whose timestamp moved
+//! but whose size did not as *touched* rather than claiming an edit it
+//! cannot prove.
 //!
 //! The GUI is the product surface; this module's public API is its seam.
 //! Everything public here is serde-serializable for that reason, and none
 //! of it is exposed on the command line.
 
 pub mod changes;
-pub mod history;
 pub mod manifest;
 pub mod report;
-pub mod restore;
 
 pub use changes::Change;
-pub use history::{HistoryStore, Moment};
-pub use manifest::{EntryKind, LARGE_FOLDER_BYTES};
-pub use report::{job_report, undo_all, undo_file};
-pub use restore::{Resolution, RestoreOutcome};
+pub use manifest::{EntryKind, Manifest, covers};
+pub use report::{JobReport, job_report};

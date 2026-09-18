@@ -31,8 +31,9 @@
 
     /* The report column's quiet register: how far this report reaches, and
        where it stopped. A standing fact, not an alarm — nothing like
-       .banner's. Worn by #report-gap (what the copy could not read) and by
-       #report-error (the report itself could not be taken). */
+       .banner's. Worn by #report-gap (what a walk could not read), by
+       #report-error (the report itself could not be taken), and by
+       #report-legend (what a `≈` row does and does not claim). */
     .report-gap {
       display: none;
       margin-top: 14px;
@@ -73,8 +74,8 @@
     .group:first-child { margin-top: 0; }
 
     /* One changed file, one row. Shape carries the kind — a nominal fact hue
-       could not order anyway — leaving hue to mean "this one needs you",
-       which here is the conflict tint alone. */
+       could not order anyway — so every row is the same tint: none of them
+       asks anything of the reader, they only report. */
     .card {
       display: flex;
       align-items: center;
@@ -85,13 +86,11 @@
       padding: 5px 8px 5px 10px;
       animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
-    /* The one row that says more than it can fit: the note takes a line of
-       its own and the choices fall below it. */
-    .card.conflict {
-      border-color: var(--conflict-line);
-      background: var(--conflict-bg);
-      flex-wrap: wrap;
-    }
+    /* A file something wrote to without changing its size. Synod cannot say
+       whether the contents differ, so the row is held back from an edit's
+       full weight — the legend above the list says why. */
+    .card.touched .glyph,
+    .card.touched .name .base { color: var(--ink-soft); }
 
     .glyph {
       flex: none;
@@ -130,14 +129,6 @@
       color: var(--ink);
     }
 
-    .conflict-note {
-      flex-basis: 100%;
-      margin: 4px 0 2px;
-      color: var(--conflict);
-      font-size: 12.5px;
-      line-height: 1.45;
-    }
-
     /* Quiet, and small enough that the row stays a row. */
     .btn-mini {
       flex: none;
@@ -150,17 +141,11 @@
       border-radius: 8px;
     }
     .btn-mini:not(:disabled):hover { color: var(--accent); border-color: var(--accent); }
-    .btn-mini.keep {
-      background: var(--accent);
-      border-color: transparent;
-      color: var(--accent-ink);
-    }
-    .btn-mini.keep:not(:disabled):hover { background: var(--accent-hover); color: var(--accent-ink); }
 
     .banner {
       margin-top: 14px; padding: 12px 14px;
       border-radius: 11px; font-size: 13.5px; line-height: 1.5;
-      background: var(--conflict-bg); border: 1px solid var(--conflict-line); color: var(--conflict);
+      background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn);
       display: none;
     }
     .banner.show { display: block; }

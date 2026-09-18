@@ -147,12 +147,6 @@
       color: var(--danger);
       font-size: 14px;
     }
-    .msg.system.info .bubble {
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      color: var(--ink-soft);
-      font-size: 14px;
-    }
     .welcome {
       color: var(--ink-faint);
       font-size: 15px;

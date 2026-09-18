@@ -3,7 +3,7 @@ name = "synod"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "An office-work delegate over one granted folder — a plain-language job, a report of what changed, and undo."
+description = "An office-work delegate over one granted folder — a plain-language job, and an honest report of what changed."
 
 [lints]
 workspace = true
@@ -36,8 +36,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde      = { workspace = true }
 serde_json = { workspace = true }
-blake3     = { workspace = true }
-fs4        = { workspace = true }
 ts-rs      = { workspace = true }
 
 # The guest's whole network: `session::net_seat` hands the net wire beside

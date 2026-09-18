@@ -3,16 +3,16 @@
 //! It opens with nothing to choose but a folder.  Pick one, and the window
 //! becomes a conversation with the assistant that runs in it — a message
 //! in, the assistant's narration streaming back, and a change report
-//! beside it that refreshes after every exchange, with undo a click away.
-//! Closing the window ends the conversation.  The window is deliberately
-//! spare — a secretary, not a programmer, sits in front of it, so nothing
-//! here says "agent", "session", "model", or "machine".
+//! beside it that refreshes after every exchange.  Closing the window ends
+//! the conversation.  The window is deliberately spare — a secretary, not
+//! a programmer, sits in front of it, so nothing here says "agent",
+//! "session", "model", or "machine".
 //!
-//! The assistant changes the files in the folder directly; the safety net
-//! is undo, not a gate before the work becomes real.  So the change report
-//! is not a final screen but a standing one, open beside the conversation
-//! for its whole life — the assistant's own account of what it has done so
-//! far, and a way to put any file (or everything) back the way it was.
+//! The assistant changes the files in the folder directly, and nothing
+//! here puts them back.  What the window owes the user instead is an
+//! honest account: the change report is not a final screen but a standing
+//! one, open beside the conversation for its whole life — the assistant's
+//! own account of what it has done so far, and a way to open any of it.
 //!
 //! This binary is the *host* half of that shell — and, unlike a shell over
 //! a separate program, it IS the agent: it hosts the conversation
@@ -27,9 +27,9 @@
 //!   applications, in [`shell::commands`];
 //! - signing in to a `ChatGPT` plan from the opening screen, in
 //!   [`shell::signin`];
-//! - the change report and the undo actions, in [`shell::review`], over the
-//!   workspace vocabulary in `synod::workspace` — the checkpoint, the
-//!   change set, and the conflict-checked restore.
+//! - the change report, in [`shell::review`], over the workspace
+//!   vocabulary in `synod::workspace` — the two stat-walked manifests and
+//!   the change set between them.
 //!
 //! The conversation is a [`synod::session::Conversation`], held open on its
 //! own worker thread for as long as the window wants it, its narration
@@ -54,9 +54,6 @@ use tauri::Manager;
 
 fn main() {
     exarch::exit_if_re_exec_child();
-    // Before any conversation can open its own store: collect whatever a
-    // crashed run left behind.
-    synod::workspace::history::sweep_stale();
     let accounts = Accounts::new(synod::session::prepare().map(|store| {
         let catalog = Arc::new(Mutex::new(ModelCatalog::new(
             LiveSource::new(&store),
@@ -93,10 +90,7 @@ fn main() {
             keys::forget_endpoint,
             signin::sign_in,
             signin::cancel_sign_in,
-            review::open_earlier,
             review::job_report,
-            review::undo_file,
-            review::undo_all,
         ])
         // Closing the window ends the conversation cleanly rather than
         // orphaning its machine: hold the close, end the conversation on

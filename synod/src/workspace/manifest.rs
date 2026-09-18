@@ -1,20 +1,25 @@
-//! What a folder holds at one moment: paths, kinds, sizes, content hashes.
+//! What a folder holds at one moment: paths, kinds, sizes, timestamps.
+//!
+//! Nothing here ever opens a file.  A manifest is built from what
+//! `symlink_metadata` yields and nothing else, which is what makes opening
+//! a folder cost one stat-walk regardless of how many gigabytes are in it —
+//! and what makes [`Change::Touched`](crate::workspace::changes::Change)
+//! necessary, since a walk that never reads bytes cannot claim they differ.
 //!
 //! # On the filesystem calls below
 //!
-//! Building a manifest means walking the granted folder and stat-ing,
-//! hashing, or reading every entry in it — [`Manifest::of_folder_via`]'s own
-//! walk, [`hash_file`], and the tests that write fixture files for it to
-//! read back. This is synod's own before/after bookkeeping, not the
-//! model's turn-time I/O, which runs inside the guest and is gated there.
+//! Building a manifest means walking the granted folder and stat-ing every
+//! entry in it — [`Manifest::of_folder_via`]'s own walk, and the tests that
+//! write fixture files for it to look at. This is synod's own before/after
+//! bookkeeping, not the model's turn-time I/O, which runs inside the guest
+//! and is gated there.
 #![allow(
     clippy::disallowed_methods,
-    reason = "REASONED-SILENT: the manifest walk stats, hashes, and reads the granted \
-              folder to record its shape — synod's own bookkeeping, not the model's \
-              turn-time I/O. See the module docs."
+    reason = "REASONED-SILENT: the manifest walk stats the granted folder to record its \
+              shape — synod's own bookkeeping, not the model's turn-time I/O. See the \
+              module docs."
 )]
 
-use crate::workspace::restore::covers;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -22,44 +27,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Warn before checkpointing a folder bigger than this.
+/// Whether `name` covers `path`: the same path, or a folder `path` sits
+/// under.
 ///
-/// A checkpoint reads every byte, before and after each job.  2 GiB keeps
-/// that in the seconds on a local disk; past it — especially on a
-/// network share at tens of MB/s — the wait reaches minutes and the
-/// user deserves a heads-up before it starts.
-pub const LARGE_FOLDER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// How a walk turns a file into its size and hash — the history store hooks
-/// in here to keep the bytes while it hashes them, or to reuse a hash
-/// already on record when the stat facts say the bytes cannot have moved.
-///
-/// Given the entry's `/`-joined key, its path, and the size and mtime the
-/// walk already read from `symlink_metadata`, it answers the size and hash
-/// to record — or `None` when the file vanished between the walk's listing
-/// and the hook's own read of it, in which case the walk records nothing.
-pub(crate) type FileEntry<'a> =
-    &'a mut dyn FnMut(&str, &Path, u64, u64) -> Result<Option<(u64, ContentHash)>, String>;
-
-/// A blake3 hash of a file's bytes, hex-encoded.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContentHash(String);
-
-impl ContentHash {
-    pub fn of_bytes(bytes: &[u8]) -> Self {
-        Self(blake3::hash(bytes).to_hex().to_string())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<blake3::Hash> for ContentHash {
-    fn from(hash: blake3::Hash) -> Self {
-        Self(hash.to_hex().to_string())
-    }
+/// The one folder-prefix-with-boundary rule the crate uses to resolve a
+/// report's names — a file, or a folder and everything under it —
+/// against the paths a manifest actually holds.
+pub fn covers(path: &str, name: &str) -> bool {
+    path == name
+        || path
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// One entry in a [`Manifest`].
@@ -68,17 +46,15 @@ impl From<blake3::Hash> for ContentHash {
 pub enum EntryKind {
     File {
         size: u64,
-        hash: ContentHash,
-        /// The file's Unix permission bits, so a restore puts back the
-        /// same mode it recorded — not the object store's own default.
-        /// `0` on a non-Unix host, where no mode is ever read or applied.
-        mode: u32,
         /// Nanoseconds since the Unix epoch, from the walk's own
-        /// `symlink_metadata`; `0` on a platform that yields none, or for
-        /// a record written before this field existed — either way, honest
-        /// for "unknown, always re-read".
-        #[serde(default)]
+        /// `symlink_metadata`; `0` on a platform or filesystem that yields
+        /// none — honest for "unknown", and two entries both unknown
+        /// compare equal, which is the quiet answer rather than a
+        /// manufactured one.
         mtime_ns: u64,
+        /// The file's Unix permission bits.  `0` on a non-Unix host, where
+        /// no mode is ever read.
+        mode: u32,
     },
     Folder,
     /// A symbolic link, recorded by its target text and never followed.
@@ -88,29 +64,26 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    /// Whether two records describe the same thing, for the purposes of
-    /// "did this change?".
+    /// Whether two records describe the same thing, setting the timestamp
+    /// aside.
     ///
-    /// Everything but `mtime_ns`: a timestamp is the walk's own trust
-    /// bookkeeping (the racy guard in
-    /// [`HistoryStore::capture`](crate::workspace::HistoryStore::capture)),
-    /// never an edit. A backup agent, a sync client, or a tool that rewrote
-    /// a file with the bytes it already had moves the timestamp and changes
-    /// nothing — reporting that as the assistant's doing, or conflicting an
-    /// undo on it, would be a lie about the folder.
+    /// A timestamp moving is not by itself evidence that anything differs:
+    /// a backup agent, a sync client, or a tool that rewrote a file with
+    /// the bytes it already had moves it and changes nothing.  Since no
+    /// manifest reads bytes any more, that case cannot be settled — so the
+    /// diff tells it apart as
+    /// [`Change::Touched`](crate::workspace::changes::Change::Touched)
+    /// rather than folding it into an edit it cannot prove.
     pub(crate) fn same_as(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                Self::File {
-                    size, hash, mode, ..
-                },
+                Self::File { size, mode, .. },
                 Self::File {
                     size: other_size,
-                    hash: other_hash,
                     mode: other_mode,
                     ..
                 },
-            ) => size == other_size && hash == other_hash && mode == other_mode,
+            ) => size == other_size && mode == other_mode,
             _ => self == other,
         }
     }
@@ -118,50 +91,46 @@ impl EntryKind {
 
 /// A folder's contents at one moment, keyed by `/`-joined relative path.
 ///
-/// Folders are recorded too, so empty ones survive a round trip.
+/// Folders are recorded too, so an empty one is a fact this can state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub entries: BTreeMap<String, EntryKind>,
     /// Paths this walk listed and could not record, because they went
-    /// away before it read them.  Not an error — a fact about what this
-    /// manifest does and does not describe.
+    /// away before it looked at them.  Not an error — a fact about what
+    /// this manifest does and does not describe.
     #[serde(default)]
     pub unread: Vec<String>,
 }
 
 impl Manifest {
-    /// Read `root` into a manifest, hashing every file.
+    /// Stat-walk `root` into a manifest.
     ///
     /// # Errors
-    /// A plain sentence when something in the folder cannot be read, or when
-    /// the folder itself is gone.
+    /// A plain sentence when something in the folder cannot be looked at,
+    /// or when the folder itself is gone.
     pub fn of_folder(root: &Path) -> Result<Self, String> {
-        Self::of_folder_via(
-            root,
-            &Stop::default(),
-            &mut |_key, path, _size, _mtime_ns| hash_file(path),
-        )
+        Self::of_folder_via(root, &Stop::default(), &mut |_so_far| {})
     }
 
-    /// Like [`Manifest::of_folder`], but `file_entry` decides how each
-    /// file's size and hash are produced, and `stop` can end the walk part
-    /// way through.
+    /// Like [`Manifest::of_folder`], but observable and interruptible.
+    ///
+    /// `progress` is called after every file the walk records — with the
+    /// running count, not the one file — so a caller walking a folder too
+    /// big to finish in an eyeblink can show something other than a frozen
+    /// window.  `stop` ends the walk at its next entry.
     ///
     /// # Errors
     /// A stopped walk is an error, never a short manifest: a truncated
-    /// record of the folder would read as one where everything unread had
+    /// record of the folder would read as one where everything unwalked had
     /// been deleted.  A `root` that is gone is an error for the same reason,
     /// at the limit — an empty manifest would say the folder held nothing,
     /// and every file in the other manifest would answer to that as a
-    /// creation to undo.  Only the root can raise `Vanished` this far: a
-    /// subfolder that goes is recorded as unread and walked past.
-    pub(crate) fn of_folder_via(
-        root: &Path,
-        stop: &Stop,
-        file_entry: FileEntry<'_>,
-    ) -> Result<Self, String> {
+    /// deletion.  Only the root can raise `Vanished` this far: a subfolder
+    /// that goes is recorded as unread and walked past.
+    pub fn of_folder_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Self, String> {
         let mut entries = BTreeMap::new();
         let mut unread = Vec::new();
+        let mut files: u64 = 0;
         let mut visit =
             |key: &str, path: &Path, meta: &std::fs::Metadata| -> Result<(), WalkError> {
                 if meta.file_type().is_symlink() {
@@ -193,26 +162,20 @@ impl Manifest {
                 } else if meta.is_dir() {
                     entries.insert(key.to_string(), EntryKind::Folder);
                 } else if meta.is_file() {
-                    let size = meta.len();
-                    let file_mtime_ns = mtime_ns(meta);
-                    match file_entry(key, path, size, file_mtime_ns).map_err(WalkError::Other)? {
-                        Some((size, hash)) => {
-                            entries.insert(
-                                key.to_string(),
-                                EntryKind::File {
-                                    size,
-                                    hash,
-                                    mode: file_mode(meta),
-                                    mtime_ns: file_mtime_ns,
-                                },
-                            );
-                        }
-                        None => return Err(WalkError::Vanished),
-                    }
+                    entries.insert(
+                        key.to_string(),
+                        EntryKind::File {
+                            size: meta.len(),
+                            mtime_ns: mtime_ns(meta),
+                            mode: file_mode(meta),
+                        },
+                    );
+                    files += 1;
+                    progress(files);
                 } else {
                     return Err(WalkError::Other(format!(
                         "{} is not an ordinary file, folder, or link, so synod could not \
-                     promise to put it back; please move it out of the folder first.",
+                     account for it; please move it out of the folder first.",
                         path.display()
                     )));
                 }
@@ -231,23 +194,6 @@ impl Manifest {
             Err(WalkError::Other(message)) => Err(message),
         }
     }
-}
-
-/// Hash a file's bytes, streaming.
-///
-/// # Errors
-/// A plain sentence when the file cannot be read for a reason other than
-/// having vanished — a vanished file answers `Ok(None)`.
-pub(crate) fn hash_file(path: &Path) -> Result<Option<(u64, ContentHash)>, String> {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("Synod could not read {}: {e}.", path.display())),
-    };
-    let mut hasher = blake3::Hasher::new();
-    let size = std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| format!("Synod could not read {}: {e}.", path.display()))?;
-    Ok(Some((size, ContentHash::from(hasher.finalize()))))
 }
 
 /// A file's Unix permission bits; `0` on a host with no such notion.
@@ -271,15 +217,25 @@ fn mtime_ns(meta: &std::fs::Metadata) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// A running walk's stop switch, shared with whoever may want it to end
-/// early — a conversation being ended has no use for the copy it started,
-/// and waiting that copy out is not the same as stopping it.
+/// How a walk being watched reports what it has found so far: the running
+/// file count, not the one file that pushed it forward.
+///
+/// A borrowed `FnMut` rather than a generic, so [`Manifest::of_folder_via`]
+/// stays a plain function callers can pass a closure or a no-op to without
+/// fighting monomorphization.
+pub type Progress<'a> = &'a mut dyn FnMut(u64);
+
+/// A running walk's stop switch.
+///
+/// Shared with whoever may want the walk to end early: a conversation being
+/// closed has no use for the baseline it started, and waiting that walk out
+/// is not the same as stopping it.
 #[derive(Clone, Default)]
 pub struct Stop(Arc<AtomicBool>);
 
 impl Stop {
     /// Ask the walk to stop at its next entry. Nothing resets this: a
-    /// stopped copy is abandoned, never resumed.
+    /// stopped walk is abandoned, never resumed.
     pub fn stop(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
@@ -289,9 +245,9 @@ impl Stop {
     }
 }
 
-/// A vanished entry — a subfolder, or one a visitor finds already gone —
+/// A vanished entry — a subfolder, or one the visitor finds already gone —
 /// is not a real read failure: it tells [`walk`] to record `unread` and
-/// move on, rather than fail the whole capture.
+/// move on, rather than fail the whole manifest.
 enum WalkError {
     Vanished,
     Stopped,
@@ -321,10 +277,9 @@ pub(crate) fn merge_unread(a: &[String], b: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// How a live entry gets recorded — `of_folder_via`'s visitor builds a
-/// [`Manifest`]; `measure`'s counts bytes.  `Err(Vanished)` tells [`walk`]
-/// this one entry (not the whole subtree) disappeared underneath it; it
-/// folds into `unread` exactly like a subfolder doing the same.
+/// How a live entry gets recorded.  `Err(Vanished)` tells [`walk`] this one
+/// entry (not the whole subtree) disappeared underneath it; it folds into
+/// `unread` exactly like a subfolder doing the same.
 type Visit<'a> = &'a mut dyn FnMut(&str, &Path, &std::fs::Metadata) -> Result<(), WalkError>;
 
 fn walk(
@@ -366,7 +321,7 @@ fn walk(
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta,
             // Listed, then gone before it could be looked at: unread, not
-            // absent, the same as a file gone before it could be read.
+            // absent.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 record_unread(unread, key);
                 continue;
@@ -395,74 +350,6 @@ fn walk(
     Ok(())
 }
 
-/// How much a folder holds, without reading a single file's bytes — the
-/// large-folder warning's pre-walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Measure {
-    pub files: u64,
-    pub bytes: u64,
-}
-
-/// Stat-walk `root` to count its regular files and sum their sizes.
-///
-/// Symlinks and folders cost nothing; a path that vanishes mid-walk is
-/// simply not counted, the same as a capture would treat it.  A thin
-/// wrapper over [`measure_via`] for the callers — tests among them — with
-/// no interest in watching or interrupting the walk.
-///
-/// # Errors
-/// A plain sentence when the folder cannot be looked inside.
-pub fn measure(root: &Path) -> Result<Measure, String> {
-    measure_via(root, &Stop::default(), &mut |_so_far| {})
-}
-
-/// Like [`measure`], but observable and interruptible.
-///
-/// `progress` is called after every file the walk counts — with the
-/// running total, not just the one file — so a caller watching a folder too
-/// big to measure in an eyeblink can show something other than a frozen
-/// window, and `stop` can end the walk before it reaches the end, the same
-/// switch [`Manifest::of_folder_via`] takes.
-///
-/// # Errors
-/// A plain sentence when the folder cannot be looked inside, or when `stop`
-/// ended the walk early.  A stopped walk answers `Err`, never the partial
-/// [`Measure`] it had counted so far: a folder a user closed the window on
-/// while synod was still stat-ing it must not be reported as though that
-/// count were the whole folder — the same dishonesty
-/// [`Manifest::of_folder_via`]'s own doc comment rules out for a stopped
-/// manifest.
-pub fn measure_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Measure, String> {
-    let mut measure = Measure::default();
-    // Symlinks and folders never reach the `is_file` arm: zero-cost, a
-    // link is its target text, never its bytes.
-    let mut visit = |_key: &str, _path: &Path, meta: &std::fs::Metadata| -> Result<(), WalkError> {
-        if meta.is_file() {
-            measure.files += 1;
-            measure.bytes += meta.len();
-            progress(measure);
-        }
-        Ok(())
-    };
-    match walk(root, "", &mut Vec::new(), stop, &mut visit) {
-        Ok(()) | Err(WalkError::Vanished) => Ok(measure),
-        Err(WalkError::Stopped) => Err(
-            "Synod stopped measuring this folder before it had finished, so it cannot say \
-             how big the copy would be."
-                .to_string(),
-        ),
-        Err(WalkError::Other(message)) => Err(message),
-    }
-}
-
-/// How a walk being measured reports what it has found so far.
-///
-/// The running [`Measure`], not just the one file that pushed it forward.
-/// The register [`FileEntry`] is in: a borrowed `FnMut` rather than a
-/// generic, so [`measure_via`] stays a plain function callers can pass a
-/// closure or a no-op to without fighting monomorphization.
-pub type Progress<'a> = &'a mut dyn FnMut(Measure);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,10 +365,7 @@ mod tests {
 
         let manifest = Manifest::of_folder(dir.path()).expect("an ordinary folder reads");
         match manifest.entries.get("letter.txt") {
-            Some(EntryKind::File { size, hash, .. }) => {
-                assert_eq!(*size, 8);
-                assert_eq!(*hash, ContentHash::of_bytes(b"dear all"));
-            }
+            Some(EntryKind::File { size, .. }) => assert_eq!(*size, 8),
             other => panic!("expected a recorded file, got {other:?}"),
         }
         assert_eq!(manifest.entries.get("sent"), Some(&EntryKind::Folder));
@@ -489,7 +373,7 @@ mod tests {
         assert_eq!(
             manifest.entries.get("empty"),
             Some(&EntryKind::Folder),
-            "an empty folder must round-trip"
+            "an empty folder is a fact about the folder"
         );
     }
 
@@ -511,89 +395,40 @@ mod tests {
     }
 
     #[test]
-    fn hash_file_on_a_missing_path_answers_gone_rather_than_erring() {
-        let dir = workshop("manifest-hash-missing");
-        let missing = dir.path().join("never-existed.txt");
-        assert_eq!(
-            hash_file(&missing).expect("a missing file is not an error"),
-            None
-        );
-    }
-
-    #[test]
-    fn measure_counts_files_and_bytes_without_reading_them() {
-        let dir = workshop("manifest-measure");
-        std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
-        std::fs::create_dir(dir.path().join("sub")).expect("fixture");
-        std::fs::write(dir.path().join("sub").join("b.txt"), b"gone").expect("fixture");
-        std::fs::create_dir(dir.path().join("empty")).expect("fixture");
-
-        let measure = measure(dir.path()).expect("an ordinary folder measures");
-        assert_eq!(measure.files, 2);
-        assert_eq!(measure.bytes, 8 + 4);
-    }
-
-    /// A file gone by the time `file_entry` reads it is recorded in
-    /// `unread` by its own key, not silently dropped.
-    #[test]
-    fn a_file_gone_at_read_time_is_recorded_unread() {
-        let dir = workshop("manifest-unread-file");
-        std::fs::write(dir.path().join("keep.txt"), b"kept").expect("fixture");
-        std::fs::write(dir.path().join("gone.txt"), b"vanishing").expect("fixture");
-
-        let manifest = Manifest::of_folder_via(
-            dir.path(),
-            &Stop::default(),
-            &mut |key, path, _size, _mtime_ns| {
-                if key == "gone.txt" {
-                    Ok(None)
-                } else {
-                    hash_file(path)
-                }
-            },
-        )
-        .expect("an ordinary folder reads");
-
-        assert!(manifest.entries.contains_key("keep.txt"));
-        assert!(!manifest.entries.contains_key("gone.txt"));
-        assert_eq!(manifest.unread, vec!["gone.txt".to_string()]);
-    }
-
-    #[test]
-    fn measure_via_reports_progress_after_every_file() {
-        let dir = workshop("manifest-measure-progress");
+    fn the_walk_reports_progress_after_every_file() {
+        let dir = workshop("manifest-progress");
         std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
         std::fs::write(dir.path().join("b.txt"), b"gone").expect("fixture");
+        std::fs::create_dir(dir.path().join("empty")).expect("fixture");
 
         let mut seen = Vec::new();
-        let measure = measure_via(dir.path(), &Stop::default(), &mut |so_far| seen.push(so_far))
-            .expect("an ordinary folder measures");
+        Manifest::of_folder_via(dir.path(), &Stop::default(), &mut |so_far| {
+            seen.push(so_far);
+        })
+        .expect("an ordinary folder reads");
 
-        assert_eq!(seen.len(), 2, "one progress call per file, not per byte or per folder");
         assert_eq!(
-            seen.last().copied(),
-            Some(measure),
-            "the last progress call must already show the walk's final total"
+            seen,
+            vec![1, 2],
+            "one progress call per file — never per folder, never per byte"
         );
     }
 
-    /// A stopped measure must not silently hand back the partial count as
-    /// though the walk had finished — that would tell the caller a folder
-    /// closed on mid-scan held only the handful of files counted before the
-    /// stop, which is a lie about the folder, not a fact about it.
+    /// A stopped walk must not hand back the partial manifest as though it
+    /// had finished: everything it never reached would read as deleted.
     #[test]
-    fn measure_via_stopped_partway_errs_rather_than_answering_a_partial_count() {
-        let dir = workshop("manifest-measure-stopped");
+    fn a_walk_stopped_partway_errs_rather_than_answering_a_short_manifest() {
+        let dir = workshop("manifest-stopped");
         std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
         std::fs::write(dir.path().join("b.txt"), b"gone").expect("fixture");
         std::fs::write(dir.path().join("c.txt"), b"more").expect("fixture");
 
         let stop = Stop::default();
-        let result = measure_via(dir.path(), &stop, &mut |_so_far| stop.stop());
+        let result = Manifest::of_folder_via(dir.path(), &stop, &mut |_so_far| stop.stop());
 
         assert!(
             result.is_err(),
-            "a walk stopped after its first file must answer Err, never Ok(a short Measure)"
+            "a walk stopped after its first file must answer Err, never Ok(a short manifest)"
         );
     }
 

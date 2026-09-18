@@ -7,7 +7,6 @@ import {
   clearOpenDial,
   openStreamingProse,
   addSystemMessage,
-  addNoticeMessage,
   dialAddNote,
   dialAddCall,
   dialAddHarness,
@@ -113,11 +112,6 @@ function renderBlock(block) {
       bubble.textContent = block.text;
       return msg;
     }
-    case "notice": {
-      const { msg, bubble } = messageShell("msg system info");
-      bubble.textContent = block.text;
-      return msg;
-    }
     // A surfaced card wears the `msg` wrap for its transcript standing
     // — width, entrance, left alignment — but no bubble: the mark-card
     // is its own chrome.
@@ -158,7 +152,6 @@ function formatUsage(p) {
 /** @param {import("./bindings/Opening.ts").Opening} p */
 export function onOpening(p) {
   setFacts(p);
-  if (p.folder_line) addNoticeMessage(p.folder_line);
 }
 
 /** @param {import("./bindings/SynodEvent.ts").SynodEvent} p */

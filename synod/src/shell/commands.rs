@@ -52,12 +52,12 @@ pub(crate) struct Handle {
     generation: u64,
     sender: mpsc::Sender<String>,
     join: JoinHandle<()>,
-    /// Reaches into this generation's `Conversation::begin`, still stat-ing
-    /// the folder on the worker thread, from outside it: a restart
+    /// Reaches into this generation's baseline walk, still stat-ing the
+    /// folder on a thread of its own, from outside it: a restart
     /// superseding this handle and the window's own close both flip it
     /// before waiting on `join`, so neither is held hostage behind a slow
     /// share's walk finishing on its own.
-    measure_stop: synod::workspace::manifest::Stop,
+    baseline_stop: synod::workspace::manifest::Stop,
 }
 
 /// The conversation has ended, one way or another — a failure, or a
@@ -269,7 +269,7 @@ pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
         return;
     };
     drop(handle.sender);
-    handle.measure_stop.stop();
+    handle.baseline_stop.stop();
     let join = handle.join;
     let (done, wait) = mpsc::channel::<()>();
     std::thread::spawn(move || {
@@ -307,31 +307,38 @@ fn spawn_conversation(
         // restart while the superseded generation is still stat-ing a slow
         // share must not make the fresh conversation sit behind that walk
         // finishing on its own.
-        handle.measure_stop.stop();
+        handle.baseline_stop.stop();
         handle.join
     });
 
-    let measure_stop = synod::workspace::manifest::Stop::default();
+    let baseline_stop = synod::workspace::manifest::Stop::default();
     let (sender, receiver) = mpsc::channel();
     let emitter = Emitter {
         app,
         slot: slot.clone(),
         generation,
     };
-    let thread_measure_stop = measure_stop.clone();
+    let thread_baseline_stop = baseline_stop.clone();
     let join = std::thread::spawn(move || {
-        run_conversation(emitter, superseded, folder, choice, receiver, thread_measure_stop);
+        run_conversation(
+            emitter,
+            superseded,
+            folder,
+            choice,
+            receiver,
+            thread_baseline_stop,
+        );
     });
     *held = Some(Handle {
         generation,
         sender,
         join,
-        measure_stop,
+        baseline_stop,
     });
 }
 
 /// The worker thread's whole body: first join whatever conversation this
-/// one superseded, so its final checkpoint is written before this one
+/// one superseded, so its closing walk is finished before this one
 /// walks the folder's baseline; then, if a later generation has since
 /// claimed the slot out from under this one (restart-spam), stand down
 /// quietly rather than boot a machine nobody is waiting on.  Otherwise run
@@ -349,7 +356,7 @@ fn run_conversation(
     folder: String,
     choice: Option<Choice>,
     receiver: mpsc::Receiver<String>,
-    measure_stop: synod::workspace::manifest::Stop,
+    baseline_stop: synod::workspace::manifest::Stop,
 ) {
     if let Some(old) = superseded {
         emitter.state("finishing the previous session", true);
@@ -361,7 +368,7 @@ fn run_conversation(
     emitter.state("starting", true);
 
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        converse(&emitter, &folder, choice, &receiver, &measure_stop)
+        converse(&emitter, &folder, choice, &receiver, &baseline_stop)
     }))
     .unwrap_or(ConversationEnded {
         stopped: false,
@@ -379,7 +386,7 @@ fn converse(
     folder: &str,
     choice: Option<Choice>,
     receiver: &mpsc::Receiver<String>,
-    measure_stop: &synod::workspace::manifest::Stop,
+    baseline_stop: &synod::workspace::manifest::Stop,
 ) -> ConversationEnded {
     let mut sink = super::sink::TauriSink::new(emitter.clone());
 
@@ -401,24 +408,27 @@ fn converse(
                   user-input adapter site clippy.toml admits, not a path built from parts"
     )]
     let picked = Path::new(folder);
-    // Named before it is booted or hashed: on a large folder or a
-    // network share, `begin`'s own stat-walk is the one silent minute
-    // a user meets before anything else has had a chance to say something.
-    let mut report_measure = |measure: synod::workspace::manifest::Measure| {
-        if measure.files == 1 || measure.files.is_multiple_of(500) {
-            emitter.state(
-                format!("reading the folder — {} files seen so far", measure.files),
+    // Narrated because it is silent otherwise: on a large folder or a
+    // network share, the baseline stat-walk is the one long minute a user
+    // meets before anything else has had a chance to say something.  Owned
+    // rather than borrowed because the walk runs on its own thread, on past
+    // `begin`'s return.
+    let walk_emitter = emitter.clone();
+    let report_walk = Box::new(move |files: u64| {
+        if files == 1 || files.is_multiple_of(500) {
+            walk_emitter.state(
+                format!("reading the folder — {files} files seen so far"),
                 true,
             );
         }
-    };
+    });
     let (mut conversation, opening) = match Conversation::begin(
         picked,
         store,
         catalog,
         choice,
-        measure_stop,
-        &mut report_measure,
+        baseline_stop,
+        report_walk,
     ) {
         Ok(begun) => begun,
         Err(e) => {
@@ -436,6 +446,11 @@ fn converse(
     emitter.emit("synod-opening", opening);
     emitter.state("ready", false);
 
+    // A fresh conversation opens on a fresh report: whatever the last one
+    // left held describes a folder this window is no longer showing.
+    let review = emitter.app.state::<super::review::Review>();
+    super::review::forget(&review);
+
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {
             emitter.emit(
@@ -443,9 +458,12 @@ fn converse(
                 super::sink::SynodEvent::Failure { message: e },
             );
         }
-        // Announced even after a failed exchange: the after-checkpoint ran
+        // Held even after a failed exchange: the closing walk ran
         // regardless, and whatever changed before the failure is already in
-        // the report the window will now re-read.
+        // the report the window will now ask for.
+        if let Some(report) = conversation.report() {
+            super::review::hold(&review, picked, report);
+        }
         emitter.emit("exchange-done", ());
     }
 
@@ -456,9 +474,7 @@ fn converse(
     }
 }
 
-/// Hand `path` to the user's default application for that file.  Also the
-/// way [`review::open_earlier`](super::review::open_earlier) opens the
-/// version it sets out from history.
+/// Hand `path` to the user's default application for that file.
 pub(crate) fn open_with_default(app: &AppHandle, path: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()

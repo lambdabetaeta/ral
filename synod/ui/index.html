@@ -35,7 +35,7 @@
  ██████      ██     ██    ██   ██████   ██████  </pre>
         <h1 class="title">Let's work in a folder together.</h1>
         <p class="lede">Choose the folder to work in. The assistant only reads and
-          changes files inside it, and everything it does can be put back.</p>
+          changes files inside it, and tells you afterwards what it changed.</p>
         <div class="field" id="assistant-field" style="display: none;">
           <label for="assistant-select" class="field-label">Assistant</label>
           <span class="select-shell"><select id="assistant-select"></select></span>
@@ -145,12 +145,12 @@
 
           <p class="report-gap" id="report-gap"></p>
           <p class="report-gap" id="report-error"></p>
+          <p class="report-gap" id="report-legend"></p>
 
           <div class="banner" id="review-banner"></div>
 
           <div class="bulk" id="bulk" style="display: none;">
             <span class="count" id="review-count"></span>
-            <button type="button" class="btn-mini" id="undo-all">Revert all</button>
           </div>
 
           <div class="cards" id="cards"></div>

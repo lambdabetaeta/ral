@@ -50,11 +50,12 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    speak of it.  The host path appears nowhere: a model handed one
 ///    will use it in programs, and inside the guest it names nothing.
 ///    Edits land in the user's real documents at
-///    once; there is no accept gate by design, and the safety net —
-///    checkpoint before, undo after — is the host's business, never the
+///    once; there is no accept gate by design, and nothing is ever put
+///    back.  All the host keeps is an account of what changed — the
+///    folder's shape before and after — which is its business, never the
 ///    model's.  So this section must never suggest a change is pending
-///    review or reversible: a model that believes in a gate is a model
-///    that overwrites originals cheerfully.
+///    review or reversible: a model that believes in a gate, or in an
+///    undo, is a model that overwrites originals cheerfully.
 /// 6. **Network** (`data/network.md`) — a fixed package-site allowlist, not
 ///    the web.
 /// 7. **Host** — [`host_section`], synod's own: guest truths only.
@@ -165,8 +166,9 @@ mod tests {
     ];
 
     /// Wording that would tell the model its work is staged behind a review
-    /// step.  There deliberately is no such gate — the safety net is the
-    /// host's, and a model that believes its work is staged or reversible
+    /// step, or that it can be taken back.  There deliberately is neither —
+    /// every edit lands in the user's real documents at once and stays
+    /// there — and a model that believes its work is staged or reversible
     /// will overwrite an original expecting someone to catch the mistake.
     /// This list is the guard: the prompt is written so that none of these
     /// phrases can appear in it.

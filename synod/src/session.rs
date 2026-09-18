@@ -42,7 +42,6 @@ use exarch::provider::{
     models::{LiveSource, ModelCatalog, resolve_account},
     pricing,
 };
-use opening::{no_copy_line, no_room_for_copy, slow_copy_line};
 use ral_core::sync::LockExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -123,6 +122,11 @@ pub struct Conversation {
     dial: Arc<crate::machine_dial::MachineDial>,
     agent: Avatar,
     baseline: Baseline,
+    /// What the folder's shape says this conversation has changed so far,
+    /// remade after every exchange against the one baseline — so the
+    /// window reads a report back from memory rather than from disk, and
+    /// the folder is never walked on the window's behalf.
+    report: Option<workspace::JobReport>,
     /// The guest's whole network, running on its own threads since before
     /// the first exchange — see [`net_seat`].
     net: guest_net::Session<NetWire>,
@@ -154,33 +158,33 @@ impl Conversation {
     /// cannot be started, or if guest networking cannot start. Guest
     /// networking does not start degraded; a conversation with no network
     /// it can trust is refused outright rather than opened quietly without
-    /// one. The before-checkpoint itself is not among these: its capture
-    /// runs on past `begin`'s return, and [`Conversation::exchange`] reports
-    /// its failure instead.
+    /// one. The baseline walk itself is not among these: it runs on past
+    /// `begin`'s return, and [`Conversation::exchange`] reports its failure
+    /// instead.
     ///
     /// # Panics
     /// Panics if the resolved tuning's effort is one
     /// [`provider::EFFORT_LADDER`] does not name, which [`resolve_tuning`]
     /// cannot produce.
     ///
-    /// `measure_stop` and `measure_progress` reach the one slow, silent step
-    /// before any of the above: the stat-walk that sizes the folder for the
-    /// `no_room_for_copy` decision and the opening's `folder_line`, on a
-    /// large folder or a network share the one part of `begin` with no
-    /// natural bound.  `measure_progress` is called after every file the
-    /// walk counts, so a caller can tell the window something is happening
-    /// instead of leaving it looking frozen; `measure_stop` lets a caller
-    /// end the walk early — closing the window mid-scan should not hold the
-    /// user hostage to a slow share — at the cost of `begin` then returning
-    /// the plain sentence [`workspace::manifest::measure_via`] answers for a
-    /// stopped walk, same as any other reason the folder could not be read.
+    /// `baseline_stop` and `baseline_progress` reach the one step here with
+    /// no natural bound: the stat-walk that records the folder as it stands
+    /// before anything touches it, which on a large folder or a network
+    /// share can take minutes.  `baseline_progress` is called after every
+    /// file the walk records, so a caller can tell the window something is
+    /// happening instead of leaving it looking frozen; `baseline_stop` lets
+    /// a caller end the walk early — closing the window mid-scan should not
+    /// hold the user hostage to a slow share — at the cost of the first
+    /// exchange then answering the plain sentence a stopped walk gets.
+    /// `baseline_progress` is owned and `Send` because the walk outlives
+    /// this call.
     pub fn begin(
         folder: &Path,
         store: &Arc<Mutex<CredentialStore>>,
         catalog: &Arc<Mutex<ModelCatalog<LiveSource>>>,
         choice: Option<Choice>,
-        measure_stop: &workspace::manifest::Stop,
-        measure_progress: workspace::manifest::Progress<'_>,
+        baseline_stop: &workspace::manifest::Stop,
+        baseline_progress: Box<dyn FnMut(u64) + Send>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         // Handed as the *means* of readying the media rather than the media
@@ -217,34 +221,21 @@ impl Conversation {
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
-        // The store is fresh at every `begin` — it never outlives its own
-        // conversation — so this folder's one full read is paid here every
-        // time, and the lines below fire purely on what the folder holds.
-        let measure =
-            workspace::manifest::measure_via(grant.root(), measure_stop, measure_progress)?;
-
-        // A copy with nowhere to go is not attempted.  Filling the disk to
-        // reach a safety net leaves the user worse off than opening without
-        // one, and it is their own folder either way: the conversation runs,
-        // the opening says there is no undo, and no store is even made.
-        let (baseline, folder_line) = if let Some(free) = no_room_for_copy(measure, grant.root()) {
-            (Baseline::Untaken, Some(no_copy_line(measure, free)))
-        } else {
-            let history = workspace::HistoryStore::open_for(grant.root())?;
-            // The two slow arms of an opening wait on different things
-            // entirely: the boot on a guest kernel coming up, the
-            // before-checkpoint on every byte of the folder being read
-            // and kept.  Neither needs the other, and nothing touches
-            // the folder until the first exchange, so the capture starts
-            // now, before the boot, and the conversation opens the moment
-            // the boot is done — the capture goes on running, joined only
-            // once an exchange or `end` needs the settled store. Every
-            // error path below still joins it before reporting, so no
-            // walk is ever left running past the conversation that
-            // started it.
-            let root = grant.root().to_path_buf();
-            (Baseline::spawn(root, history), slow_copy_line(measure))
-        };
+        // The two slow arms of an opening wait on different things
+        // entirely: the boot on a guest kernel coming up, the baseline on
+        // every entry in the folder being stat-ed.  Neither needs the
+        // other, and nothing touches the folder until the first exchange,
+        // so the walk starts now, before the boot, and the conversation
+        // opens the moment the boot is done — the walk goes on running,
+        // joined only once an exchange needs the settled manifest.  Every
+        // error path below drops the baseline, whose own `Drop` stops and
+        // joins the walk, so none is ever left running past the
+        // conversation that started it.
+        let baseline = Baseline::spawn(
+            grant.root().to_path_buf(),
+            baseline_stop,
+            baseline_progress,
+        );
 
         let machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
             format!(
@@ -313,6 +304,7 @@ impl Conversation {
                 dial,
                 agent,
                 baseline,
+                report: None,
                 net,
                 engine_captured: false,
             },
@@ -320,7 +312,6 @@ impl Conversation {
                 label,
                 model: announced_model,
                 effort: announced_effort,
-                folder_line,
             },
         ))
     }
@@ -331,38 +322,50 @@ impl Conversation {
     /// once the whole fleet quiesces: the trunk parked, no live helpers
     /// left, their results drained.
     ///
-    /// Settles the baseline first — joining its capture thread if this is
-    /// the first exchange — before the guest touches anything, since the
-    /// folder must never be read and written at once. Checkpoints what this
-    /// exchange left behind, cumulatively from the baseline — taken even
-    /// after a failed exchange, since whatever changed before the failure is
-    /// still undoable. Taking it only after quiescence is what keeps a
-    /// helper's late write from ever landing after the checkpoint and being
-    /// blamed on the user. Renders no report: the window reads one back
-    /// through [`workspace::job_report`].
+    /// Settles the baseline first — joining its walk if this is the first
+    /// exchange — before the guest touches anything, since the folder must
+    /// never be read and written at once. Stat-walks the folder again once
+    /// the turn has settled and holds the report between that walk and the
+    /// baseline, cumulatively: every report this conversation ever renders
+    /// is judged against the one folder it opened on. The closing walk runs
+    /// even after a failed exchange, since whatever changed before the
+    /// failure is still the assistant's doing. Taking it only after
+    /// quiescence is what keeps a helper's late write from ever landing
+    /// after the walk and being blamed on the user.
     ///
     /// # Errors
-    /// Returns `Err` if the baseline capture failed or its thread panicked;
-    /// otherwise if the exchange itself fails; otherwise if the exchange
-    /// succeeded but the after-checkpoint could not be taken, that error is
-    /// returned instead.
+    /// Returns `Err` if the baseline walk failed or its thread panicked;
+    /// otherwise if the exchange itself fails; otherwise if the closing
+    /// walk could not be taken, that error is returned instead.
     pub fn exchange<S: exarch::bus::Sink>(
         &mut self,
         message: String,
         sink: &mut S,
     ) -> Result<(), String> {
-        let history = self.baseline.store()?;
+        // Asked for before the turn, so a baseline that failed is reported
+        // now rather than after the guest has already written to a folder
+        // nothing can be judged against.
+        self.baseline.manifest()?;
         let outcome = exarch::headless::converse_settled(&mut self.agent, message, sink);
-        // No baseline, no after-checkpoint: a checkpoint with nothing to be
-        // judged against is a record no report can read.
-        let after = history
-            .map(|history| history.capture(self.grant.root(), workspace::Moment::After))
-            .transpose();
-        // After the checkpoint, before either result is reported: a dead
+        let after = workspace::Manifest::of_folder(self.grant.root());
+        if let (Ok(before), Ok(after)) = (self.baseline.manifest(), &after) {
+            self.report = Some(workspace::job_report(before, after));
+        }
+        // After the closing walk, before either result is reported: a dead
         // engine must be written down while its machine is still up, and the
-        // checkpoint has to be taken whether the engine survived or not.
+        // walk has to be taken whether the engine survived or not.
         self.capture_a_dead_engine();
         outcome.and_then(|()| after.map(drop))
+    }
+
+    /// What this conversation has changed so far, as of the last exchange —
+    /// `None` before the first one has settled.
+    ///
+    /// Reads nothing: the report was made when the closing walk finished,
+    /// and this hands back what is already in hand.
+    #[must_use]
+    pub fn report(&self) -> Option<&workspace::JobReport> {
+        self.report.as_ref()
     }
 
     /// Write down what the guest said, if this exchange is the one the engine
@@ -389,30 +392,24 @@ impl Conversation {
         engine_log::capture(&run_dir, &lost.logged(), &self.dial.console());
     }
 
-    /// Shut the machine down, ending the conversation — and, its store
-    /// having no life left to serve, wipe it: closing the window is
-    /// accepting the folder as it stands, so undo ends here too.
+    /// Shut the machine down, ending the conversation.  Nothing is put
+    /// back and nothing is cleaned up in the folder: closing the window is
+    /// accepting the folder as it stands, which it already did.
     ///
     /// Recovers the machine through [`unseat_machine`], which drops the
     /// agent before reclaiming it from the dialler — see its own doc for
     /// why that order is load-bearing. The net wire follows, never before
     /// the control wire — a session with its control plane gone but its
     /// network still live has nothing left to police what that network is
-    /// used for. The wipe comes last, and runs whatever state the baseline
-    /// settled into — a `Failed` baseline may still have left partial
-    /// objects behind, and those are exactly what a wipe is for. A wipe
-    /// cut short by the window's own close timeout is not a leak: the
-    /// directory it left unlocked is exactly what
-    /// [`workspace::history::sweep_stale`] collects at the next start.
+    /// used for.
     ///
     /// # Errors
     /// Returns `Err` if the machine does not stop cleanly, or if a
     /// guest-net worker panicked — failures this never swallows. A baseline
-    /// still `Pending` (the user closed before ever sending a message) is
-    /// stopped and joined, and its own outcome goes unreported: a copy on
-    /// its way to being wiped has no error left worth raising, least of all
-    /// the one this stop just caused. A wipe failure surfaces only once
-    /// everything above it has succeeded.
+    /// walk still running (the user closed before ever sending a message)
+    /// is stopped and joined, and its own outcome goes unreported: a
+    /// baseline nobody will ever ask for has no error left worth raising,
+    /// least of all the one this stop just caused.
     ///
     /// # Panics
     /// Panics if [`unseat_machine`] does — see its own doc.
@@ -421,7 +418,7 @@ impl Conversation {
             dial,
             agent,
             net,
-            mut baseline,
+            baseline,
             ..
         } = self;
         let machine = unseat_machine(agent, dial);
@@ -436,12 +433,11 @@ impl Conversation {
         // Only after the machine is down: a conversation can end before its
         // first exchange, and joining a still-running walk must not hold a
         // dead-to-the-user window open ahead of the shutdown that ends it.
-        // Halted first, so what is joined is a walk on its way out rather
-        // than one still reading a folder whose copy is about to be wiped.
+        // Halted rather than merely dropped, so what the drop joins is a
+        // walk on its way out rather than one still reading the folder.
         baseline.halt();
-        let wipe_err = baseline.into_store().and_then(|store| store.wipe().err());
-        shutdown?;
-        wipe_err.map_or(Ok(()), Err)
+        drop(baseline);
+        shutdown
     }
 }
 

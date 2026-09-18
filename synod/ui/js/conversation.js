@@ -146,8 +146,8 @@ $("message").addEventListener("keydown", (e) => {
 });
 
 $("start-again").addEventListener("click", async () => {
-  if (!await confirmDialog("This begins a fresh conversation; nothing already " +
-    "changed in your folder is undone by this.", { title: "Start again?", kind: "warning" })) return;
+  if (!await confirmDialog("This begins a fresh conversation. Everything already " +
+    "changed in your folder stays exactly as it is.", { title: "Start again?", kind: "warning" })) return;
   /** @type {HTMLButtonElement} */ ($("start-again")).disabled = true;
   // Restarting is the same act as starting: `start_conversation`
   // supersedes whatever is running, over the selection this conversation

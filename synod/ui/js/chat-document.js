@@ -8,7 +8,7 @@ import { renderMarkCard } from "./card-renderer.js";
 // ---- The chat document ------------------------------------------------
 
 // The transcript's single source of truth: an append-only list of plain
-// data blocks — user, assistant, system, and notice prose, surfaced
+// data blocks — user, assistant, and system prose, surfaced
 // cards, and dials.
 // Everything under #transcript is a projection of this list; no block
 // holds an element, and no handler writes to the transcript directly.
@@ -82,13 +82,6 @@ export function addUserMessage(text) {
 
 export function addSystemMessage(text) {
   pushBlock({ kind: "system", text });
-}
-
-// A neutral notice, not a failure — e.g. the large-folder warning at
-// conversation start. Same shape as a system message, raised tint
-// instead of danger.
-export function addNoticeMessage(text) {
-  pushBlock({ kind: "notice", text });
 }
 
 // A surfaced card is the work's output — a deliberate act that stands

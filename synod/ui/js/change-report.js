@@ -2,29 +2,40 @@ import { $, invoke, state } from "./core.js";
 import { actionButton } from "./ui-helpers.js";
 
 // ---- The change-report panel ----------------------------------------
+// An account of what the assistant did, and nothing more: every change
+// listed here is already real in the user's folder, and nothing on this
+// panel puts anything back.
+//
 // The kind is marked by shape; the verb names the glyph to a reader who
-// hovers the row, and to a screen reader.
+// hovers the row, and to a screen reader. `touched` is deliberately not
+// `modified`: synod reads no file's bytes, so a file whose timestamp moved
+// while its size did not was written to by something, and whether the
+// contents differ is not a thing the report can honestly claim.
 const KINDS = {
   created: { glyph: "+", verb: "Created" },
   modified: { glyph: "~", verb: "Modified" },
+  touched: { glyph: "≈", verb: "Written to" },
   deleted: { glyph: "−", verb: "Deleted" },
   renamed: { glyph: "→", verb: "Renamed" },
 };
 const UNKNOWN_KIND = { glyph: "·", verb: "Changed" };
 
-// Server commands (job_report, undo_file, undo_all) replace this
-// wholesale; "Keep mine" at a conflict is a local acknowledgement, so it
-// mutates this copy directly.
+// What the `≈` rows mean, said once under the heading rather than on
+// every row that earns it.
+const TOUCHED_LEGEND = "≈ means something wrote to the file without changing its size. "
+  + "Synod does not read your files, so it cannot tell you whether the contents differ.";
+
 /** @type {import("./bindings/WindowReport.ts").WindowReport} */
 let report = { files: [], unreadable: [] };
 
-// Set when `job_report` itself failed — the store or a checkpoint record
-// could not be read — as opposed to succeeding with an empty change set.
-// `renderReport` must never call the former "nothing has changed".
+// Set when `job_report` itself failed — the folder could not be walked, or
+// the window and the shell disagree about which folder is live — as opposed
+// to succeeding with an empty change set. `renderReport` must never call
+// the former "nothing has changed".
 let reportError = null;
 
-// The rows already on screen: a revert rebuilds the whole list, and the
-// survivors flashing in again would read as fresh work.
+// The rows already on screen, so the survivors of a refresh do not flash
+// in again as though they were fresh work.
 let shownRows = new Set();
 
 // Wipe the report back to empty and render, for a fresh conversation.
@@ -32,6 +43,7 @@ let shownRows = new Set();
 export function resetReport() {
   report = { files: [], unreadable: [] };
   reportError = null;
+  shownRows = new Set();
   renderReport();
 }
 
@@ -52,7 +64,7 @@ function showBanner(text) {
   b.classList.add("show");
 }
 
-// Names the copy listed but could not read. Built as nodes, never as
+// Names what a walk listed but could not read. Built as nodes, never as
 // markup: these are names off the user's own disk.
 function renderGap(names) {
   const gap = $("report-gap");
@@ -66,50 +78,51 @@ function renderGap(names) {
     code.textContent = name;
     gap.append(code);
   });
-  gap.append(" while taking its copy, so anything in "
+  gap.append(" while looking at the folder, so anything in "
     + (names.length === 1 ? "it" : "them")
-    + " is not shown here and cannot be put back.");
+    + " is not shown here.");
 }
 
-// The column answers one question: what stands changed in the folder
-// right now. A reverted file is no longer changed, so its row leaves.
+// The column answers one question: what has this conversation changed in
+// the folder so far.
 function renderReport() {
   $("review-banner").classList.remove("show");
   const files = report.files || [];
-  const inPlace = files.filter((f) => f.status === "applied");
 
   // A report that could not be taken is not an empty one: saying "nothing
-  // has changed" here would promise a safety net that is in fact broken.
+  // has changed" here would claim an account synod does not in fact have.
   const empty = $("report-empty");
   const failed = $("report-error");
   failed.textContent = reportError ?? "";
   failed.classList.toggle("show", reportError !== null);
   renderGap(reportError ? [] : report.unreadable || []);
-  empty.style.display = reportError === null && inPlace.length === 0 ? "" : "none";
-  empty.textContent = files.length === 0
-    ? "Nothing has changed in this folder yet."
-    : "Everything has been reverted.";
+  empty.style.display = reportError === null && files.length === 0 ? "" : "none";
 
-  $("bulk").style.display = inPlace.length === 0 ? "none" : "";
-  $("review-count").textContent = inPlace.length === 1
-    ? "1 change is in place"
-    : inPlace.length + " changes are in place";
+  const legend = $("report-legend");
+  const anyTouched = files.some((f) => f.kind === "touched");
+  legend.textContent = anyTouched ? TOUCHED_LEGEND : "";
+  legend.classList.toggle("show", anyTouched);
+
+  $("bulk").style.display = files.length === 0 ? "none" : "";
+  $("review-count").textContent = files.length === 1
+    ? "1 change in this folder"
+    : files.length + " changes in this folder";
 
   const shown = shownRows;
-  shownRows = new Set(inPlace.map((f) => f.id));
+  shownRows = new Set(files.map((f) => f.path));
   const list = $("cards");
   list.innerHTML = "";
   // Sorted by folder, then by name, so each folder is named exactly once.
-  inPlace.sort((a, b) => dirOf(a.path).localeCompare(dirOf(b.path))
+  const rows = files.slice().sort((a, b) => dirOf(a.path).localeCompare(dirOf(b.path))
     || baseOf(a.path).localeCompare(baseOf(b.path)));
   let group = null;
-  for (const file of inPlace) {
+  for (const file of rows) {
     const dir = dirOf(file.path);
     if (dir !== group) {
       group = dir;
       list.appendChild(groupHeading(dir));
     }
-    list.appendChild(renderCard(file, shown.has(file.id)));
+    list.appendChild(renderCard(file, shown.has(file.path)));
   }
 }
 
@@ -132,7 +145,7 @@ function groupHeading(dir) {
 function renderCard(file, settled) {
   const k = KINDS[file.kind] || UNKNOWN_KIND;
   const row = document.createElement("div");
-  row.className = "card" + (file.conflict ? " conflict" : "") + (settled ? " settled" : "");
+  row.className = "card" + (file.kind === "touched" ? " touched" : "") + (settled ? " settled" : "");
   row.title = file.kind === "renamed" && file.rename_from
     ? "Renamed " + file.rename_from + " to " + file.path
     : k.verb + " " + file.path;
@@ -145,24 +158,11 @@ function renderCard(file, settled) {
 
   row.append(glyph, nameCell(file));
 
-  if (file.conflict) {
-    const note = document.createElement("p");
-    note.className = "conflict-note";
-    note.textContent = "You've changed this file yourself since the assistant finished. "
-      + "Reverting would replace your newer version with the older one.";
-    row.appendChild(note);
-  }
-
-  if (file.current_path) row.appendChild(openButton("Open", "open_file", { path: file.current_path }));
-  if (file.conflict) {
-    if (file.before_path) {
-      row.appendChild(openButton("Open the older one", "open_earlier",
-        { folder: state.folder, path: file.before_path }));
-    }
-    row.appendChild(actionButton("Keep mine", "btn-mini keep", () => keepMine(file.id)));
-    row.appendChild(actionButton("Revert anyway", "btn-mini", () => undo("undo_file", file.id, true)));
-  } else {
-    row.appendChild(actionButton("Revert", "btn-mini", () => undo("undo_file", file.id, false)));
+  if (file.current_path) {
+    row.appendChild(actionButton("Open", "btn-mini", async () => {
+      try { await invoke("open_file", { path: file.current_path }); }
+      catch (err) { showBanner(String(err)); }
+    }));
   }
   return row;
 }
@@ -185,33 +185,3 @@ function nameCell(file) {
   cell.appendChild(base);
   return cell;
 }
-
-function openButton(label, cmd, args) {
-  return actionButton(label, "btn-mini", async () => {
-    try { await invoke(cmd, args); }
-    catch (err) { showBanner(String(err)); }
-  });
-}
-
-// Put a file (or everything) back — a server round trip, so the
-// returned report is the new truth.  `force` is the explicit "put back
-// the older one" choice at a conflict; a plain undo asks gently and a
-// file the user edited since the exchange comes back marked conflicted.
-async function undo(cmd, id, force) {
-  try {
-    const args = { folder: state.folder, force: Boolean(force) };
-    if (id !== null) args.id = id;
-    report = await invoke(cmd, args);
-    renderReport();
-  } catch (err) { showBanner(String(err)); }
-}
-
-// Keep the user's own version at a conflict: leave the file exactly as
-// it is and simply clear the conflict on the card.  Nothing to undo, so
-// this stays local until the next report refresh re-derives it.
-function keepMine(id) {
-  const file = report.files.find((f) => f.id === id);
-  if (file) { file.conflict = false; renderReport(); }
-}
-
-$("undo-all").addEventListener("click", () => undo("undo_all", null, false));

@@ -19,7 +19,7 @@
 //!
 //! [`Grant::root`] is a **host** path: the folder as the user picked it,
 //! for everything that happens on this side of the wall — the mount, the
-//! checkpoints, the window's own words.  The *engine* lives inside the
+//! manifests, the window's own words.  The *engine* lives inside the
 //! guest, where the folder appears at
 //! [`MachineSpec::GUEST_WORKSPACE`](vm_manager::MachineSpec::GUEST_WORKSPACE)
 //! and the working space is the guest's own [`GUEST_SCRATCH`] tmpfs, so
@@ -356,7 +356,8 @@ impl Grant {
     /// all of which the user handed over on purpose.  Carving a subtree
     /// back out would make the grant say something other than what the
     /// user was shown, and the real control on *changes* is the host-side
-    /// safety net — checkpoint, report, undo — not a hidden read barrier.
+    /// account of them — the folder recorded before and after, and the
+    /// difference reported — not a hidden read barrier.
     pub fn capabilities(&self) -> Capabilities {
         // Minted by the guest's rule, not this host's: `from_guest` folds
         // `/work` in the namespace the gate will match it in.  The ordinary

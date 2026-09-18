@@ -111,7 +111,7 @@
       overflow-wrap: anywhere;
       color: var(--ink-soft);
     }
-    .dial-note.warn { color: var(--conflict); }
+    .dial-note.warn { color: var(--warn); }
     .dial-note.bad { color: var(--danger); }
     .dial-note.muted { color: var(--ink-faint); }
 

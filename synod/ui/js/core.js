@@ -10,7 +10,7 @@ export const listen = TAURI ? TAURI.event.listen : async () => () => {};
 // is injected separately from the core one, and reaching through a missing
 // `dialog` at module load would take the whole window down over a
 // confirmation.  Answering `true` is the safe absence — this dialog guards
-// an act that undoes nothing, so a missing plugin should leave the button
+// an act that changes nothing by itself, so a missing plugin should leave the button
 // working, not dead.
 export const confirmDialog = TAURI?.dialog?.confirm ?? (async () => true);
 

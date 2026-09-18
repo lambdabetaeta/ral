@@ -1,155 +1,70 @@
-//! The after-run report and the undo entry points.
+//! The after-run report: what the job changed, and what it could not see.
 //!
-//! These are the calls the GUI makes: [`job_report`] for "what did the
-//! job change", [`undo_file`] and [`undo_all`] to put things back.
+//! One call the whole window rests on — [`job_report`], a pure function of
+//! the two manifests the conversation already holds.  It opens nothing,
+//! reads nothing, and touches no file: by the time it runs, both walks are
+//! done and the folder has already told it everything it is going to.
 
-use crate::workspace::changes::{Change, ChangeSet};
-use crate::workspace::history::{Checkpoint, HistoryStore};
+use crate::workspace::changes::ChangeSet;
 use crate::workspace::manifest::{Manifest, merge_unread};
-use crate::workspace::restore::{Resolution, RestoreOutcome, covers, restore};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
-/// What the folder's most recent job changed.
+/// What a job changed, judged between the folder as it stood before and
+/// the folder as it stands now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobReport {
-    /// When the job's closing checkpoint was taken; absent when the run
-    /// died before taking it.
-    pub finished_at_ms: Option<u64>,
+    /// When the closing walk finished — the instant this report was made,
+    /// which is the same thing: nothing is read after it.
+    pub finished_at_ms: u64,
     pub changes: ChangeSet,
-    /// Paths neither manifest could read, so nothing about them is shown
-    /// as a change.
+    /// Paths one of the two walks could not read, so nothing about them is
+    /// shown as a change.  Named rather than quietly dropped: a report that
+    /// hid its own blind spots would read as a complete account.
     pub unreadable: Vec<String>,
 }
 
-/// The report for `folder`'s most recent job.
-///
-/// A run that died before its closing checkpoint is reported against the
-/// folder as it stands now instead.
-///
-/// # Errors
-/// A plain sentence when no job has run here, or the records fail to read.
-pub fn job_report(store: &HistoryStore, folder: &Path) -> Result<JobReport, String> {
-    let (before, after) = last_job(store, folder, "report")?;
-    let (finished_at_ms, now) = match after {
-        Some(checkpoint) => (Some(checkpoint.taken_at_ms), checkpoint.manifest),
-        None => (None, Manifest::of_folder(folder)?),
-    };
-    Ok(JobReport {
-        finished_at_ms,
-        unreadable: merge_unread(&before.manifest.unread, &now.unread),
-        changes: ChangeSet::between(&before.manifest, &now),
-    })
-}
-
-/// Put everything in `folder` back as it was before the last job.
-///
-/// # Errors
-/// A plain sentence when no job has run here, or the restore fails partway.
-pub fn undo_all(
-    store: &HistoryStore,
-    folder: &Path,
-    resolution: Resolution,
-) -> Result<RestoreOutcome, String> {
-    let (before, after) = last_job(store, folder, "undo")?;
-    restore(store, folder, &before, after.as_ref(), None, resolution)
-}
-
-/// Put one file — or one folder and everything under it — back as it was
-/// before the last job.  `path` is named as the report names it.
-///
-/// # Errors
-/// A plain sentence when no job has run here, when `path` names nothing
-/// known, or when the restore fails partway.
-pub fn undo_file(
-    store: &HistoryStore,
-    folder: &Path,
-    path: &str,
-    resolution: Resolution,
-) -> Result<RestoreOutcome, String> {
-    let (before, after) = last_job(store, folder, "undo")?;
-    let now = match &after {
-        Some(checkpoint) => checkpoint.manifest.clone(),
-        None => Manifest::of_folder(folder)?,
-    };
-    let names = rename_closure(path, &ChangeSet::between(&before.manifest, &now));
-    restore(
-        store,
-        folder,
-        &before,
-        after.as_ref(),
-        Some(&names),
-        resolution,
-    )
-}
-
-/// The names `path` resolves to, expanded to a fixpoint over `changes`'
-/// renames.  A rename is one change with two names; undoing it must put
-/// the old name back AND take the new one away, so a name covering
-/// either side — exactly, or as a folder over a file moved into or out of
-/// it — pulls in the other side too, or half the rename would stand.  The
-/// loop, not one pass, matters: an endpoint just pulled in can itself
-/// cover another rename's endpoint.
-fn rename_closure(path: &str, changes: &ChangeSet) -> Vec<String> {
-    let mut names = vec![path.to_string()];
-    loop {
-        let mut grew = false;
-        for change in &changes.changes {
-            let Change::Renamed { from, to } = change else {
-                continue;
-            };
-            if !names.iter().any(|n| covers(from, n) || covers(to, n)) {
-                continue;
-            }
-            for endpoint in [from, to] {
-                if !names.contains(endpoint) {
-                    names.push(endpoint.clone());
-                    grew = true;
-                }
-            }
-        }
-        if !grew {
-            return names;
-        }
+/// The report between `before` and `after`.
+#[must_use]
+pub fn job_report(before: &Manifest, after: &Manifest) -> JobReport {
+    JobReport {
+        finished_at_ms: now_ms(),
+        unreadable: merge_unread(&before.unread, &after.unread),
+        changes: ChangeSet::between(before, after),
     }
 }
 
-fn last_job(
-    store: &HistoryStore,
-    folder: &Path,
-    doing: &str,
-) -> Result<(Checkpoint, Option<Checkpoint>), String> {
-    store.latest_job()?.ok_or_else(|| {
-        format!(
-            "Synod has not run a job in {} yet, so there is nothing to {doing}.",
-            folder.display()
-        )
-    })
+/// Now, in milliseconds since the Unix epoch; `0` on a clock set before it.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: fixtures writing, renaming and deleting files to stand in \
-              for a job, so there is something to report or undo; the production code in \
-              this file touches no filesystem at all"
+              for a job, so there is something to report; the production code in this file \
+              touches no filesystem at all"
 )]
 mod tests {
     use super::*;
-    use crate::test_fixture::granted_workshop as workshop;
-    use crate::workspace::history::Moment;
+    use crate::test_fixture::workshop;
+    use crate::workspace::changes::Change;
 
     #[test]
     fn the_report_names_each_change() {
-        let (_dir, folder, store) = workshop("report-report");
+        let dir = workshop("report-report");
+        let folder = dir.path();
         std::fs::write(folder.join("invoices-2026.xlsx"), b"v1").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-        std::fs::write(folder.join("invoices-2026.xlsx"), b"v2").expect("job");
-        std::fs::create_dir(folder.join("reminder-letters")).expect("job");
-        store.capture(&folder, Moment::After).expect("after");
+        let before = Manifest::of_folder(folder).expect("baseline");
 
-        let report = job_report(&store, &folder).expect("reports");
-        assert!(report.finished_at_ms.is_some());
+        std::fs::write(folder.join("invoices-2026.xlsx"), b"v2 is longer").expect("job");
+        std::fs::create_dir(folder.join("reminder-letters")).expect("job");
+        let after = Manifest::of_folder(folder).expect("closing walk");
+
+        let report = job_report(&before, &after);
+        assert!(report.finished_at_ms > 0);
         assert!(report.changes.changes.contains(&Change::Modified {
             path: "invoices-2026.xlsx".into(),
         }));
@@ -161,144 +76,48 @@ mod tests {
 
     #[test]
     fn a_quiet_job_says_so() {
-        let (_dir, folder, store) = workshop("report-quiet");
+        let dir = workshop("report-quiet");
+        let folder = dir.path();
         std::fs::write(folder.join("a.txt"), b"same").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-        store.capture(&folder, Moment::After).expect("after");
+        let before = Manifest::of_folder(folder).expect("baseline");
+        let after = Manifest::of_folder(folder).expect("closing walk");
 
-        let report = job_report(&store, &folder).expect("reports");
-        assert!(report.changes.changes.is_empty());
+        assert!(job_report(&before, &after).changes.changes.is_empty());
     }
 
-    /// A run that died before its closing checkpoint still gets a report:
-    /// the folder as it stands now stands in for the checkpoint nobody
-    /// took, so a job that rewrote documents is never reported as quiet.
+    /// A rename over the real filesystem, end to end: the move preserves
+    /// size and timestamp, which is exactly what pairs the two names.
     #[test]
-    fn a_crashed_run_is_reported_against_the_folder_as_it_stands() {
-        let (_dir, folder, store) = workshop("report-crashed");
-        std::fs::write(folder.join("letter.docx"), b"v1").expect("fixture");
-        std::fs::write(folder.join("notes.txt"), b"kept").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-
-        // The job ran and the machine died: no after-checkpoint at all.
-        std::fs::write(folder.join("letter.docx"), b"v2").expect("job");
-        std::fs::create_dir(folder.join("sent")).expect("job");
-        std::fs::remove_file(folder.join("notes.txt")).expect("job");
-
-        let report = job_report(&store, &folder).expect("reports");
-        assert!(report.finished_at_ms.is_none(), "the run took no after");
-        assert!(report.changes.changes.contains(&Change::Modified {
-            path: "letter.docx".into(),
-        }));
-        assert!(report.changes.changes.contains(&Change::Created {
-            path: "sent".into(),
-            folder: true,
-        }));
-        assert!(report.changes.changes.contains(&Change::Deleted {
-            path: "notes.txt".into(),
-            folder: false,
-        }));
-    }
-
-    #[test]
-    fn before_any_job_there_is_nothing_to_report_or_undo() {
-        let (_dir, folder, store) = workshop("report-nothing");
-        let message = job_report(&store, &folder).expect_err("no job yet");
-        assert!(message.contains("nothing to report"), "{message}");
-        let message = undo_all(&store, &folder, Resolution::KeepCurrent).expect_err("no job yet");
-        assert!(message.contains("nothing to undo"), "{message}");
-    }
-
-    /// A rename undone by either of its names undoes both sides: the old
-    /// name comes back and the new one goes away — never half a rename.
-    #[test]
-    fn undoing_a_rename_by_either_name_undoes_both_sides() {
-        let (_dir, folder, store) = workshop("report-rename");
+    fn a_renamed_file_is_reported_as_one_change_with_two_names() {
+        let dir = workshop("report-rename");
+        let folder = dir.path();
         std::fs::write(folder.join("scan001.pdf"), b"the scan").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
+        let before = Manifest::of_folder(folder).expect("baseline");
+
         std::fs::rename(folder.join("scan001.pdf"), folder.join("enrolment.pdf")).expect("job");
-        store.capture(&folder, Moment::After).expect("after");
+        let after = Manifest::of_folder(folder).expect("closing walk");
 
-        let outcome = undo_file(&store, &folder, "enrolment.pdf", Resolution::KeepCurrent)
-            .expect("a rename undoes by its new name");
-        assert_eq!(outcome.put_back, ["scan001.pdf"]);
-        assert_eq!(outcome.removed, ["enrolment.pdf"]);
-        assert!(folder.join("scan001.pdf").exists());
-        assert!(!folder.join("enrolment.pdf").exists());
-    }
-
-    /// Undoing the folder a file was renamed *into* must not strand the
-    /// file: both the folder's own creation and the rename that landed a
-    /// file inside it come back together, so the old name reappears
-    /// instead of the file simply vanishing with the folder.
-    #[test]
-    fn undoing_a_created_folder_also_undoes_a_rename_into_it() {
-        let (_dir, folder, store) = workshop("report-rename-into-folder");
-        std::fs::write(folder.join("draft.docx"), b"the draft").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-        std::fs::create_dir(folder.join("reports")).expect("job");
-        std::fs::rename(
-            folder.join("draft.docx"),
-            folder.join("reports").join("draft.docx"),
-        )
-        .expect("job");
-        store.capture(&folder, Moment::After).expect("after");
-
-        let outcome = undo_file(&store, &folder, "reports", Resolution::KeepCurrent)
-            .expect("undoing the folder undoes the rename into it too");
-        assert_eq!(outcome.put_back, ["draft.docx"]);
-        assert_eq!(outcome.removed, ["reports/draft.docx", "reports"]);
-        assert!(folder.join("draft.docx").exists());
-        assert!(!folder.join("reports").exists());
-    }
-
-    /// The mirror case: undoing a deleted folder a file was renamed *out
-    /// of* must also undo that rename, or the file ends up duplicated —
-    /// once under the restored folder, once at the name it was moved to.
-    #[test]
-    fn undoing_a_deleted_folder_also_undoes_a_rename_out_of_it() {
-        let (_dir, folder, store) = workshop("report-rename-out-of-folder");
-        std::fs::create_dir(folder.join("archive")).expect("fixture");
-        std::fs::write(folder.join("archive").join("report.docx"), b"the report").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-        std::fs::rename(
-            folder.join("archive").join("report.docx"),
-            folder.join("report.docx"),
-        )
-        .expect("job");
-        std::fs::remove_dir(folder.join("archive")).expect("job");
-        store.capture(&folder, Moment::After).expect("after");
-
-        let outcome = undo_file(&store, &folder, "archive", Resolution::KeepCurrent)
-            .expect("undoing the folder undoes the rename out of it too");
-        assert_eq!(outcome.put_back, ["archive", "archive/report.docx"]);
-        assert_eq!(outcome.removed, ["report.docx"]);
-        assert!(folder.join("archive").join("report.docx").exists());
-        assert!(!folder.join("report.docx").exists());
-    }
-
-    #[test]
-    fn undo_all_and_undo_file_reach_the_driver() {
-        let (_dir, folder, store) = workshop("report-undo");
-        std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
-        std::fs::write(folder.join("b.txt"), b"b original").expect("fixture");
-        store.capture(&folder, Moment::Before).expect("baseline");
-        std::fs::write(folder.join("a.txt"), b"a rewritten").expect("job");
-        std::fs::write(folder.join("b.txt"), b"b rewritten").expect("job");
-        store.capture(&folder, Moment::After).expect("after");
-
-        let outcome =
-            undo_file(&store, &folder, "a.txt", Resolution::KeepCurrent).expect("one file undoes");
-        assert_eq!(outcome.put_back, ["a.txt"]);
-        let outcome = undo_all(&store, &folder, Resolution::KeepCurrent).expect("the rest undoes");
-        assert_eq!(outcome.put_back, ["b.txt"]);
         assert_eq!(
-            std::fs::read(folder.join("a.txt")).expect("rereads"),
-            b"a original"
+            job_report(&before, &after).changes.changes,
+            vec![Change::Renamed {
+                from: "scan001.pdf".into(),
+                to: "enrolment.pdf".into(),
+            }]
         );
-        assert_eq!(
-            std::fs::read(folder.join("b.txt")).expect("rereads"),
-            b"b original"
-        );
+    }
+
+    /// The report says what one walk could not see, rather than presenting
+    /// a partial account as a complete one.
+    #[test]
+    fn what_neither_walk_could_read_is_named_in_the_report() {
+        let dir = workshop("report-unreadable");
+        let folder = dir.path();
+        let mut before = Manifest::of_folder(folder).expect("baseline");
+        before.unread = vec!["scans".to_string()];
+        let mut after = Manifest::of_folder(folder).expect("closing walk");
+        after.unread = vec!["scans/2026".to_string()];
+
+        let report = job_report(&before, &after);
+        assert_eq!(report.unreadable, vec!["scans".to_string()]);
     }
 }

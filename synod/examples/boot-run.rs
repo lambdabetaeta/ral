@@ -5,7 +5,7 @@
 //! [`synod::session::Conversation::begin`] calls — and drives one
 //! [`converse_settled`] exchange whose script has the model delegate: spawn
 //! a helper, have the helper write a file and reply, wait for the whole
-//! fleet to quiesce, then checkpoint and report.
+//! fleet to quiesce, then walk the folder again and report.
 //!
 //! It is the same program on both platforms, and that is the interesting
 //! part: nothing below is `#[cfg]`-ed except which backend is constructed —
@@ -56,7 +56,7 @@ use ral_core::types::GrantStack;
 use std::path::PathBuf;
 use std::sync::Arc;
 use synod::session::{seat_machine, unseat_machine};
-use synod::workspace::{self, HistoryStore};
+use synod::workspace::{self, Manifest};
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
 /// The file the helper is asked to write, checked against the after-job
@@ -72,13 +72,10 @@ fn main() {
     };
     let folder_path = PathBuf::from(&folder);
 
-    // The safety net, exactly as `Conversation::begin` takes it: a baseline
-    // before anything touches the folder, so the report at the end is
-    // judged against what the guest actually changed.
-    let history = HistoryStore::open_for(&folder_path).expect("open the folder's safety-net store");
-    history
-        .capture(&folder_path, workspace::Moment::Before)
-        .expect("take the before checkpoint");
+    // The baseline, exactly as `Conversation::begin` takes it: the folder's
+    // shape before anything touches it, so the report at the end is judged
+    // against what the guest actually changed.
+    let before = Manifest::of_folder(&folder_path).expect("stat-walk the folder as it stands");
 
     let artifact = BootArtifact {
         kernel: kernel.into(),
@@ -185,10 +182,9 @@ fn main() {
         Err(err) => eprintln!("the exchange failed: {err}"),
     }
 
-    let after = history.capture(&folder_path, workspace::Moment::After);
-    let report_ok = if let (Ok(()), Ok(_)) = (&exchange, &after) {
-        let report = workspace::job_report(&history, &folder_path)
-            .expect("a job just ran; the report must read back");
+    let after = Manifest::of_folder(&folder_path);
+    let report_ok = if let (Ok(()), Ok(after)) = (&exchange, &after) {
+        let report = workspace::job_report(&before, after);
         let wrote_it = report.changes.changes.iter().any(|c| {
             matches!(c, workspace::changes::Change::Created { path, folder: false } if path == HELPER_FILE)
         });
@@ -200,7 +196,7 @@ fn main() {
         }
         wrote_it
     } else {
-        eprintln!("FAIL: the exchange or its after-checkpoint did not succeed");
+        eprintln!("FAIL: the exchange or its closing walk did not succeed");
         false
     };
 

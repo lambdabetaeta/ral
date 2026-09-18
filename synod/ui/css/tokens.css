@@ -20,9 +20,9 @@
       --accent-ink: light-dark(#fbf8f1, #17201c);
 
       --discard: light-dark(#9a6a52, #c79a83);
-      --conflict: light-dark(#a5641c, #e0a85e);
-      --conflict-bg: light-dark(#f7ecd9, #34291a);
-      --conflict-line: light-dark(#e6cfa6, #5a4526);
+      --warn: light-dark(#a5641c, #e0a85e);
+      --warn-bg: light-dark(#f7ecd9, #34291a);
+      --warn-line: light-dark(#e6cfa6, #5a4526);
       --danger: light-dark(#a5401c, #e08a5e);
       --danger-bg: light-dark(#f7ded9, #34211a);
       --danger-line: light-dark(#e6b6a6, #5a3526);
