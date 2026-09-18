@@ -1,4 +1,4 @@
-//! The IT-owned network policy: which public DNS names a guest's CONNECT
+//! The network policy: which public DNS names a guest's CONNECT
 //! tunnel may reach, on port 443. `guest-net` enforces it; this module only
 //! says what it is.
 //!
@@ -215,8 +215,8 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
 #[must_use]
 pub fn refusal(host: &str) -> String {
     format!(
-        "'{host}' is not on the list of sites your IT department has approved for this \
-         assistant to reach — ask your IT department to add it if you need this site"
+        "'{host}' is not on the list of sites this assistant is allowed to reach — \
+         ask whoever administers this computer to add it if you need this site"
     )
 }
 

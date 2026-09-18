@@ -6,7 +6,7 @@ status: active
 
 > Amended by
 > [[decisions/260725_windows-machine-broker|a `LocalSystem` service holds the privilege, not the user]]:
-> the deployment row below — *IT adds the fleet to Hyper-V Administrators* — is
+> the deployment row below — *the fleet is added to Hyper-V Administrators* — is
 > replaced by a broker service the MSI installs, because that group's members may
 > attach a physical disk and so read past every NTFS permission. The machine
 > itself is unchanged: the same document, the same devices, the same absent
@@ -132,8 +132,9 @@ run as administrator, does not ask to be elevated, and does not need any
 privilege at run time; it needs the compute service to answer it. That is
 checked *before* a folder is granted rather than discovered halfway into a
 session, and the refusal names what stood in the way, because a group membership
-or a missing feature is what an IT department fixes with one line and a bug
-report is what it cannot. Which account carries the requirement is settled by
+or a missing feature is what whoever administers this computer fixes with
+one line and a bug report is what they cannot. Which account carries the
+requirement is settled by
 [[decisions/260725_windows-machine-broker|windows-machine-broker]]: on an
 installed synod it is a `LocalSystem` service, and the group is never asked of a
 user.
@@ -215,8 +216,8 @@ networkless machine.
   the clean inside-out halt, where closing the host end of the wire is the
   guest's cue to power itself off.
 - **The refusals are enumerated, not generic.** On Windows there are three, each
-  a different remedy: the feature is not installed (IT enables a Windows
-  feature), this account may not use it (IT adds a group membership), or the
+  a different remedy: the feature is not installed (enable a Windows
+  feature), this account may not use it (add a group membership), or the
   service is not answering (a fault to report). A synod that cannot put hardware
   between the agent and the computer still refuses to start rather than degrade.
 

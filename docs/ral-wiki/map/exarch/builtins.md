@@ -348,7 +348,7 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
   of the five spawnable [[map/exarch/policy|base]] names (`confined`,
   `read-only`, `edit-only`, `reasonable`, `dangerous`); `search` is a `Bool`
   admitting the provider's own hosted web search, clamped at the desk to at
-  most the caller's own bit, which the trunk takes from the IT network policy's
+  most the caller's own bit, which the trunk takes from the network policy's
   `search` verdict ([[map/exarch/agent|agent]]). `provider` and `model` are
   each `` `inherit `` or `` `named <Str> ``, and both are always written:
   ral has no optional field, so absence is *data* carried by a variant

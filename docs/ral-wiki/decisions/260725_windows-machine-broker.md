@@ -21,13 +21,13 @@ the document).
 
 The Host Compute System API answers `HCS_E_ACCESS_DENIED` to any caller who is
 neither an administrator nor a member of the local *Hyper-V Administrators*
-group. The backend decision recorded that as a deployment step — a group an IT
-department fills with one line — and that is a defensible reading when the
-fleet is a fleet. It is the wrong reading when the unit of installation is one
-person double-clicking an installer, which is what synod is now held to. Synod's
-user is a university secretary who is not an administrator of her own computer
-and must not become one, nor acquire anything that resembles becoming one, in
-order to grant a folder and ask for a letter to be filed.
+group. The backend decision recorded that as a deployment step — a group
+whoever administers the fleet fills with one line — and that is a defensible
+reading when the fleet is a fleet. It is the wrong reading when the unit of
+installation is one person double-clicking an installer, which is what synod
+is now held to. Synod's user is someone who is not an administrator of their
+own computer and must not become one, nor acquire anything that resembles
+becoming one, in order to grant a folder and ask for a letter to be filed.
 
 Windows has three answers for a program in this position, and they are not three
 spellings of one thing: put the user in the group, ask a privileged service
@@ -225,7 +225,7 @@ maintainer is not left thinking the group is the only route.
 - **The refusals gain a remedy and lose one.** "This account may not use
   Hyper-V" stops being a user-facing sentence on an installed synod and becomes
   the developer's own affair; in its place are "the service is not answering"
-  (naming it as Windows displays it, so IT can start it) and "synod and its
+  (naming it as Windows displays it, so it can be started) and "synod and its
   service are different versions". A synod that cannot put hardware between the
   agent and the computer still refuses to start rather than degrade.
 - **The service can be run as a console program, and that is how a boot is

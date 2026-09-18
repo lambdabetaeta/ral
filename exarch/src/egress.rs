@@ -1,4 +1,4 @@
-//! The IT-set network policy and the durable trail behind every CONNECT
+//! The network policy and the durable trail behind every CONNECT
 //! tunnel: opened once per front-end process, host side, and inherited
 //! verbatim by every child.
 //!
@@ -250,8 +250,8 @@ impl Egress {
         }
     }
 
-    /// [`Self::for_test`] with the provider's own web search denied — the IT
-    /// verdict a searchless fixture is built from.
+    /// [`Self::for_test`] with the provider's own web search denied — the
+    /// policy verdict a searchless fixture is built from.
     #[must_use]
     pub fn for_test_without_search() -> Self {
         Self {

@@ -62,7 +62,7 @@ the absence of a listener.
 - **`CONNECT` without interception.** Answer the tunnel request, dial the
   named host, never look inside. Loses precisely because `synod` ships to
   arbitrary machines and makes a security claim on all of them: there is no
-  IT department downstream curating a tight per-site allowlist, so what ships
+  one downstream curating a tight per-site allowlist, so what ships
   must be broad enough to be useful on day one — and a broad allowlist
   checked only at hostname depth is barely a boundary, since every allowed
   host that accepts writes is a full-bandwidth way out (allowing

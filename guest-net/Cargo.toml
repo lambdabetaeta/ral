@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 # The policy and the audit ledger are exarch's, not a second copy: what a
-# fleet's IT department wrote in `net-policy.ral` is what the gate enforces,
+# whoever administers a fleet wrote in `net-policy.ral` is what the gate enforces,
 # and every decision it takes lands in the same audit file.
 exarch = { path = "../exarch", default-features = false }
 # The frame codec is the guest's own file, linked here rather than

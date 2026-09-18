@@ -60,8 +60,8 @@ pub(super) type HcsOperation = *mut c_void;
 /// way of saying the caller is neither an administrator nor a member of the
 /// *Hyper-V Administrators* group, and so may not touch virtual machines at
 /// all.  It is the one HCS failure synod must recognise rather than merely
-/// report, because it is the one an IT department fixes with a group
-/// membership rather than a bug report ([`super::NOT_PERMITTED`]).
+/// report, because it is the one fixed with a group membership
+/// rather than a bug report ([`super::NOT_PERMITTED`]).
 pub(super) const HCS_E_ACCESS_DENIED: HRESULT = 0x8037_011B_u32.cast_signed();
 
 /// How long any single HCS call is given to settle before the backend stops
@@ -597,8 +597,8 @@ mod tests {
     }
 
     /// Windows explains the one code synod classifies rather than merely
-    /// prints, and its explanation names the group an IT department must add
-    /// the user to.  If this ever stops holding, [`super::NOT_PERMITTED`] is
+    /// prints, and its explanation names the group the user must be added
+    /// to.  If this ever stops holding, [`super::NOT_PERMITTED`] is
     /// carrying the whole message alone and should say more.
     #[test]
     fn windows_explains_the_access_denial_itself() {

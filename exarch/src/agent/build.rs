@@ -91,7 +91,7 @@ pub(crate) struct Build {
     /// trunk.
     pub(crate) tools: Toolset,
     /// Whether the agent may ride the provider's own hosted web search —
-    /// bounded by the IT policy verdict, never a CLI flag or user config.
+    /// bounded by the network policy verdict, never a CLI flag or user config.
     pub(crate) search: bool,
     /// Fresh for the trunk, the parent's clone for a fork: one fleet per run.
     pub(crate) fleet: Arc<Fleet>,
@@ -794,7 +794,7 @@ impl Avatar {
 pub(crate) struct TestTrunk {
     pub(crate) system: String,
     pub(crate) allow_schedule: bool,
-    /// The IT policy the trunk's `search` reach is derived from.
+    /// The network policy the trunk's `search` reach is derived from.
     pub(crate) egress: crate::egress::Egress,
     pub(crate) disk_warn_bytes: Option<u64>,
     /// The idle bound of the fleet this trunk is born into.

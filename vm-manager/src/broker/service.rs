@@ -310,7 +310,7 @@ impl Versioned for Reply {
         } else {
             Self::Refused(format!(
                 "synod and its machine service are different versions (synod speaks {spoken}, the \
-                 service speaks {VERSION}) — ask your IT department to install them together"
+                 service speaks {VERSION}) — ask whoever administers this computer to install them together"
             ))
         }
     }

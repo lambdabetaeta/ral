@@ -21,7 +21,7 @@
 //!
 //! A machine's sockets carry security descriptors, and the default the compute
 //! service applies grants only `SYSTEM` and the built-in Administrators group.
-//! Synod is neither: it runs as an ordinary user whom IT has put in *Hyper-V
+//! Synod is neither: it runs as an ordinary user placed in *Hyper-V
 //! Administrators*, which is not the Administrators group.  So the machine's
 //! document names this user explicitly ([`socket_sddl`]) — and names *only*
 //! this user, alongside the two the service would have granted anyway.  A
@@ -427,9 +427,10 @@ mod tests {
     /// the guest's one door to every process on the computer.
     ///
     /// The user's entry is a *resolved* SID rather than a two-letter alias, and
-    /// deliberately not asserted to be a machine-local one: a university
-    /// account is as likely to be a directory identity (`S-1-12-1-…`, Entra ID)
-    /// as a local one (`S-1-5-21-…`), and both are ordinary SIDs to SDDL.
+    /// deliberately not asserted to be a machine-local one: a managed
+    /// computer's account is as likely to be a directory identity
+    /// (`S-1-12-1-…`, Entra ID) as a local one (`S-1-5-21-…`), and both are
+    /// ordinary SIDs to SDDL.
     #[test]
     fn the_socket_descriptor_names_this_user_and_no_wildcard() {
         let sddl = socket_sddl().expect("this process can read its own user");

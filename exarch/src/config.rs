@@ -175,7 +175,7 @@ fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
 /// Shared with [`crate::net_policy::load`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
+    reason = "[silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
 )]
 pub(crate) fn read_optional_file(
     path: &std::path::Path,

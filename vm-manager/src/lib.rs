@@ -437,13 +437,13 @@ const NO_BACKEND: &str = "this computer cannot run synod's virtual machine — i
 /// build shipped with no boot media to start one from.
 #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
 const NO_BOOT_MEDIA: &str = "synod could not find the virtual-machine image it ships with — \
-                              ask your IT department to reinstall it";
+                              ask whoever installed synod to reinstall it";
 
 /// Shown by [`detect`] when boot media is present but this process is not
 /// signed with the entitlement Virtualization.framework demands.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const UNENTITLED: &str = "this copy of synod is not signed with the entitlement it needs to \
-                           start a virtual machine — ask your IT department for a properly \
+                           start a virtual machine — ask whoever installed synod for a properly \
                            signed build";
 
 /// How a front-end readies its boot media, run only if the backend turns out
@@ -555,7 +555,7 @@ pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
 /// Why a machine could not be started.
 ///
 /// The [`Display`](fmt::Display) text is written for the person who granted
-/// the folder — a university secretary, not a programmer.
+/// the folder, not a programmer.
 #[derive(Debug)]
 pub enum Error {
     /// The granted folder is not there.
@@ -600,7 +600,7 @@ impl fmt::Display for Error {
             Self::MissingBootFile { path, cause } => write!(
                 f,
                 "synod's virtual-machine image is missing a file it needs to start: {} ({cause}). \
-                 Ask your IT department to reinstall synod.",
+                 Ask whoever installed synod to reinstall it.",
                 path.display()
             ),
             Self::GuestPathNotAbsolute(path) => write!(

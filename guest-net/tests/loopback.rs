@@ -395,7 +395,7 @@ fn the_authority_confusion_regression_is_refused_before_any_dial() {
         .unwrap();
 }
 
-/// DNS rebinding, end to end: a host the IT department really did approve,
+/// DNS rebinding, end to end: a host that really was approved,
 /// whose answer is the cloud metadata address. Policy admits the name, so
 /// `vet::open`'s own `is_public` filter is all that stands between the
 /// guest and the host's own network — and its refusal must reach the guest

@@ -105,7 +105,7 @@ a name or a `Weak`, never a strong handle down the tree.
 The **trunk** is the parent-less node (`parent = None`), built by
 `Avatar::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
 prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
-the IT-set `Egress` (`exarch/src/egress.rs`), and the optional `dial` a wire
+the `Egress` (`exarch/src/egress.rs`), and the optional `dial` a wire
 trunk reaches its children through ([[#Wire-seat spawn|below]]) — each set
 once at launch and inherited verbatim by every fork — while `RootSeat` picks
 the seat kind (`Identity` boots its own shell from `scratch`; `Wire` adopts a
@@ -113,7 +113,7 @@ built transport whose engine lives elsewhere, and spawns its sub-agents by
 dialling back into it).
 
 `Egress` bundles the two things a fleet's outbound network shares across
-every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the IT-owned
+every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the
 allowlist read from `/etc/exarch/net-policy.ral` or the embedded default —
 an exact `hosts` list of lowercase ASCII DNS names plus `search`, with the
 retired `read`/`write`, `max-bytes` and `rate-per-minute` keys now hard

@@ -264,7 +264,7 @@ pub(crate) fn chat_trunk() -> Avatar {
     root(true, true)
 }
 
-/// A trunk whose IT policy denies hosted search — the ceiling a fork inherits,
+/// A trunk whose network policy denies hosted search — the ceiling a fork inherits,
 /// in the direction the ordinary fixture does not cover.
 pub(crate) fn searchless_trunk() -> Avatar {
     Avatar::for_test_with(crate::agent::TestTrunk {

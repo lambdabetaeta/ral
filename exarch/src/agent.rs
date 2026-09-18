@@ -139,7 +139,7 @@ pub struct Agent {
     /// read this one value, so they cannot disagree about whether the call
     /// they are handling was ever invited.
     tools: Toolset,
-    /// Whether this agent may ride the provider's hosted web search — the IT
+    /// Whether this agent may ride the provider's hosted web search — the
     /// network policy's verdict ([`crate::egress::Egress`]), inherited verbatim.
     search: bool,
     /// Whether this agent holds `reply`: `!interactive` at the trunk, `true`
@@ -153,7 +153,7 @@ pub struct Agent {
     /// The operator's ceiling, shared verbatim by every fork — a host setting.
     /// `None` means [`Avatar::check_disk_warn`] never walks the dirs at all.
     disk_warn_bytes: Option<u64>,
-    /// The IT-set network policy and its audit ledger — shared verbatim by
+    /// The network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
     egress: crate::egress::Egress,
     /// The dial-side capability a wire trunk's `` agents `start `` reaches its

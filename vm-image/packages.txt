@@ -83,7 +83,7 @@ file
 libc-bin
 
 # --- Fonts: metric-compatible MS substitutes + wide Unicode coverage ---
-# Carlito == Calibri, Caladea == Cambria: a converted university letter must
+# Carlito == Calibri, Caladea == Cambria: a converted letter must
 # render in the reader's own metrics, not tofu or reflowed substitutes.
 fonts-crosextra-carlito
 fonts-crosextra-caladea

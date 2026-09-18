@@ -209,12 +209,12 @@ the mirror from `ARCH` rather than let a caller pair them wrongly.)
    so there is no `locale-gen` step to run in a network-less image.
 5. The **fonts-noto family** is spelled as its real split packages:
    `fonts-noto-core`, `-extra`, `-ui-core`, `-cjk`, `-color-emoji`.
-   `fonts-noto-cjk` is large; it is included on purpose so a UK university's
+   `fonts-noto-cjk` is large; it is included on purpose so
    international correspondence renders without tofu (the §7 concern), but it is
    the first thing to drop if image size ever bites.
 6. The metric-compatible MS substitutes are `fonts-crosextra-carlito`
    (= Calibri) and `fonts-crosextra-caladea` (= Cambria) — the pair that makes a
-   converted university letter reflow the same as the original.
+   converted letter reflow the same as the original.
 
 ## Sizes and results
 

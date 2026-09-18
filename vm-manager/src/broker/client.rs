@@ -61,8 +61,8 @@ impl Hypervisor for Brokered {
         let mut pipe = connect().map_err(|cause| {
             unavailable(&format!(
                 "synod's machine service is not answering: {cause}. It is installed with synod \
-                 and started by Windows; if it has been stopped, ask your IT department to start \
-                 the 'Synod machine broker' service"
+                 and started by Windows; if it has been stopped, ask whoever administers this \
+                 computer to start the 'Synod machine broker' service"
             ))
         })?;
 

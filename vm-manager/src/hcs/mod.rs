@@ -27,8 +27,8 @@
 //! Nothing here needs administrative rights at *run* time, but HCS itself is
 //! gated: the compute service serves only administrators and members of the
 //! **Hyper-V Administrators** group.  That is a deployment fact, not a bug —
-//! a managed fleet already has its IT department deploying synod's policy file
-//! by Group Policy — and it is checked before a folder is granted rather than
+//! a managed fleet already deploys synod's policy file by Group Policy — and
+//! it is checked before a folder is granted rather than
 //! discovered halfway into a session, which is what [`available`] is for.
 //!
 //! # Why there is no worker thread here
@@ -115,8 +115,8 @@ const HYPERVISOR: &str = "Hyper-V";
 /// (`api`'s tests pin that), so this text says what to do about it in the
 /// register a secretary reads, and leaves the mechanism to the detail.
 const NOT_PERMITTED: &str = "synod is not allowed to create virtual machines on this computer — \
-                             ask your IT department to add this account to the computer's \
-                             'Hyper-V Administrators' group";
+                             ask whoever administers this computer to add this account to the \
+                             computer's 'Hyper-V Administrators' group";
 
 /// Shown when boot media is present and the platform could host a guest, but
 /// the compute service is not answering at all.
@@ -129,8 +129,8 @@ fn service_unreachable(why: &str) -> String {
 ///
 /// Asked by [`crate::detect`] before a session begins.  Three answers are
 /// possible and each is a different remedy: the Virtual Machine Platform is not
-/// installed (IT enables a Windows feature), this account may not use it (IT
-/// adds a group membership), or the service is not running (a fault to report).
+/// installed (enable a Windows feature), this account may not use it (add a
+/// group membership), or the service is not running (a fault to report).
 ///
 /// # Errors
 /// Returns the sentence to show the person who granted the folder.
@@ -663,7 +663,7 @@ impl Drop for Guest {
 /// its own means, and a verbatim prefix there is at best redundant and at worst
 /// a path with four characters too many.  So it is stripped: `\\?\C:\x` becomes
 /// `C:\x`, and a verbatim UNC path (`\\?\UNC\server\share`, which is what a
-/// granted folder on a departmental file share canonicalises to, and those are
+/// granted folder on a network file share canonicalises to, and those are
 /// as common as folders on local disk) becomes `\\server\share` again.
 /// Anything else is already plain and passes through untouched.
 /// `pub(crate)` for the broker, which spells a client's canonicalised folder
@@ -1074,7 +1074,7 @@ mod tests {
 
     /// Whatever this computer answers about hosting a guest, it answers in a
     /// sentence a secretary could act on — and the access denial names the
-    /// group, since that is the one an IT department fixes.
+    /// group, since that is the one whoever administers the computer fixes.
     #[test]
     fn availability_answers_in_a_sentence() {
         match available() {

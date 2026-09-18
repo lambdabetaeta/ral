@@ -5,7 +5,7 @@
 //!
 //! [`super::hcs`] can create a machine only for a caller the compute service
 //! serves — an administrator, or a member of the local *Hyper-V
-//! Administrators* group. Synod's user is a university secretary, and neither
+//! Administrators* group. Synod's user is an office secretary, and neither
 //! is acceptable for her. Being an administrator is obviously wrong. Being in
 //! that group is *quietly* wrong, and worth spelling out because it looks like
 //! the cheap answer: it permits attaching a **physical disk** to a virtual
