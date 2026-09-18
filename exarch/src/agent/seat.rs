@@ -69,14 +69,12 @@ pub enum EnginePhase {
 /// *that* in "the engine behind this session is gone", and the front-end
 /// wrapped the lot in "could not start the assistant".  Four layers, one
 /// fact, and the reader learnt nothing from any of them — least of all where
-/// to go and look.  So the sentence is now short and fixed, and everything a
-/// debugger actually wants rides beside it rather than inside it: a stable
-/// [`Severed::code`] to quote, and the run's log directory to open.
+/// to go and look.  So the sentence is now short and fixed, and the one thing
+/// beside it is the one thing a reader can act on: the run's log directory.
 ///
-/// The engine's own words are deliberately *not* in the sentence.  For a
-/// clean EOF there are none worth having, and for a refusal or a protocol
-/// fault they are a paragraph of machinery — so they go to the log, which is
-/// what [`Self::logged`] is for and why the sentence names the log's path.
+/// Neither the engine's own words nor [`Severed::code`] belong in a window —
+/// a paragraph of machinery and a token for a bug report.  Both go to the
+/// log, which is what [`Self::logged`] is for and why the sentence names it.
 ///
 /// It is an [`Error`](std::error::Error) so that the one edge that has to
 /// cross an [`io::Error`](std::io::Error) — `Avatar::root`, whose other
@@ -135,32 +133,32 @@ impl EngineLost {
     }
 
     /// The form that belongs in a log rather than in a window: the sentence a
-    /// user is shown, with the engine's own account of itself appended, so
-    /// the durable record keeps what the sentence dropped.
+    /// user is shown, then the code to quote and the engine's own account of
+    /// itself, so the durable record keeps what the sentence dropped.
     #[must_use]
     pub fn logged(&self) -> String {
-        format!("{self}\n\n{}", self.cause)
+        format!("{self}\n\n({}) {}", self.cause.code(), self.cause)
     }
 }
 
 impl std::error::Error for EngineLost {}
 
-/// One plain sentence, then a bracket for whoever needs more than a sentence.
-///
-/// Read it aloud and it says only what a person can act on; the bracket is
-/// skippable by anyone who does not want it and exact for anyone who does.
+/// What happened and what to do, in two full stops, then a bracket holding
+/// the one thing worth following: a path.  A dash would ask the reader which
+/// half is the advice, and a code beside the path is a word they cannot act
+/// on standing where the thing they can act on should be.
 impl std::fmt::Display for EngineLost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sentence = match self.phase {
-            EnginePhase::Starting => "The assistant could not be started — try again.",
+            EnginePhase::Starting => "The assistant could not be started. Try again.",
             EnginePhase::Running => {
-                "The assistant stopped, so this conversation cannot go on — start a new one."
+                "The assistant stopped, so this conversation cannot go on. Start a new one."
             }
         };
         f.write_str(sentence)?;
         match &self.log_dir {
-            Some(dir) => write!(f, " ({}; details in {})", self.cause.code(), dir.display()),
-            None => write!(f, " ({})", self.cause.code()),
+            Some(dir) => write!(f, " (details in {})", dir.display()),
+            None => Ok(()),
         }
     }
 }
@@ -187,24 +185,31 @@ mod lost {
         let running = EngineLost::running(&closed(), None).to_string();
         assert_ne!(starting, running);
         assert!(
-            !starting.contains("start a new"),
+            !starting.to_lowercase().contains("start a new"),
             "a session that never began cannot be told to begin another: {starting}"
         );
         assert!(
-            running.contains("start a new"),
+            running.to_lowercase().contains("start a new"),
             "a session whose state is gone is worth abandoning: {running}"
         );
     }
 
-    /// One sentence for the user, and beside it the two things anyone who
-    /// wants to dig has to have: something exact to quote, and somewhere to
-    /// go.  The engine's own words stay out of it.
+    /// A user's line carries somewhere to go and nothing else: no code, no
+    /// transport's restatement, and no dash holding the advice at arm's
+    /// length.
     #[test]
-    fn the_sentence_carries_a_code_and_a_path_and_nothing_else() {
+    fn the_sentence_carries_a_path_and_nothing_else() {
         let dir = std::path::PathBuf::from("/state/synod/proj/2026-09-16-170235-26184");
         let shown = EngineLost::starting(&closed(), Some(&dir)).to_string();
-        assert!(shown.contains("engine-closed"), "{shown}");
         assert!(shown.contains("2026-09-16-170235-26184"), "{shown}");
+        assert!(
+            !shown.contains("engine-closed"),
+            "a code is for the log, not the window: {shown}"
+        );
+        assert!(
+            !shown.contains('—'),
+            "the advice is its own sentence, not a clause after a dash: {shown}"
+        );
         assert!(
             !shown.contains("the engine closed the connection"),
             "the transport's own restatement is what this replaced: {shown}"
@@ -217,12 +222,18 @@ mod lost {
     }
 
     /// With nowhere to send a reader the invitation is simply absent — never
-    /// a dangling "details in" with nothing after it.
+    /// a dangling "details in", and never an empty bracket in its place.
     #[test]
-    fn a_failure_with_no_log_still_carries_its_code() {
-        let shown = EngineLost::running(&Severed::Faulted("junk frame".into()), None).to_string();
-        assert!(shown.contains("engine-faulted"), "{shown}");
+    fn a_failure_with_no_log_is_the_sentence_alone() {
+        let lost = EngineLost::running(&Severed::Faulted("junk frame".into()), None);
+        let shown = lost.to_string();
         assert!(!shown.contains("details in"), "{shown}");
+        assert!(!shown.contains('('), "{shown}");
+        assert!(
+            lost.logged().contains("engine-faulted"),
+            "the code the window dropped is still in the record: {}",
+            lost.logged()
+        );
     }
 
     /// What goes into a record keeps the engine's own account of itself; what
@@ -235,6 +246,10 @@ mod lost {
         assert!(
             logged.contains("protocol version 9"),
             "the engine's own refusal is worth keeping somewhere: {logged}"
+        );
+        assert!(
+            logged.contains("engine-refused") && !lost.to_string().contains("engine-refused"),
+            "the code left the window for the record, not the bin: {logged}"
         );
         assert_eq!(lost.phase(), EnginePhase::Running);
         assert_eq!(lost.cause().code(), "engine-refused");

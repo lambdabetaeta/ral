@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn the_guests_words_and_the_users_sentence_are_both_in_the_file() {
         let text = render(
-            "The assistant could not be started — try again. (engine-closed; details in /run)",
+            "The assistant could not be started. Try again. (details in /run)",
             &vm_manager::GuestConsole {
                 log: None,
                 tail: vec![
@@ -175,7 +175,7 @@ mod tests {
             },
         );
         assert!(
-            text.contains("engine-closed"),
+            text.contains("could not be started. Try again."),
             "the file stands alone, so it repeats the sentence the user saw: {text}"
         );
         assert!(
