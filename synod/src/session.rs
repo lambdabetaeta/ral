@@ -162,11 +162,25 @@ impl Conversation {
     /// Panics if the resolved tuning's effort is one
     /// [`provider::EFFORT_LADDER`] does not name, which [`resolve_tuning`]
     /// cannot produce.
+    ///
+    /// `measure_stop` and `measure_progress` reach the one slow, silent step
+    /// before any of the above: the stat-walk that sizes the folder for the
+    /// `no_room_for_copy` decision and the opening's `folder_line`, on a
+    /// large folder or a network share the one part of `begin` with no
+    /// natural bound.  `measure_progress` is called after every file the
+    /// walk counts, so a caller can tell the window something is happening
+    /// instead of leaving it looking frozen; `measure_stop` lets a caller
+    /// end the walk early — closing the window mid-scan should not hold the
+    /// user hostage to a slow share — at the cost of `begin` then returning
+    /// the plain sentence [`workspace::manifest::measure_via`] answers for a
+    /// stopped walk, same as any other reason the folder could not be read.
     pub fn begin(
         folder: &Path,
         store: &Arc<Mutex<CredentialStore>>,
         catalog: &Arc<Mutex<ModelCatalog<LiveSource>>>,
         choice: Option<Choice>,
+        measure_stop: &workspace::manifest::Stop,
+        measure_progress: workspace::manifest::Progress<'_>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
         // Handed as the *means* of readying the media rather than the media
@@ -181,7 +195,8 @@ impl Conversation {
         let hypervisor = vm_manager::detect(boot)?;
 
         let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
-        // The IT-set network policy, audit ledger, and rate budget — one
+        // The network policy, audit ledger, and rate budget set for this
+        // computer — one
         // file regardless of which front-end is running, opened once here.
         let egress = exarch::egress::Egress::open(SYNOD)?;
 
@@ -205,7 +220,8 @@ impl Conversation {
         // The store is fresh at every `begin` — it never outlives its own
         // conversation — so this folder's one full read is paid here every
         // time, and the lines below fire purely on what the folder holds.
-        let measure = workspace::manifest::measure(grant.root())?;
+        let measure =
+            workspace::manifest::measure_via(grant.root(), measure_stop, measure_progress)?;
 
         // A copy with nowhere to go is not attempted.  Filling the disk to
         // reach a safety net leaves the user worse off than opening without
@@ -567,7 +583,7 @@ fn select_account(
     if available.is_empty() {
         return Err(
             "no assistant account is set up on this computer — sign in with ChatGPT on the \
-             opening screen, or ask your IT department to set a provider API key \
+             opening screen, or ask whoever administers this computer to set a \n             provider API key \
              (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
                 .into(),
         );
@@ -666,7 +682,7 @@ fn choose(available: &[Account]) -> Result<(Account, String), String> {
         .ok_or_else(|| {
             format!(
                 "the account set up on this computer ('{}') does not say which model to \
-                 use — ask your IT department to set one up.",
+                 use — ask whoever administers this computer to set one up.",
                 identity::label(account, available)
             )
         })

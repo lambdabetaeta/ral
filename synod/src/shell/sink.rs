@@ -211,7 +211,7 @@ pub enum SynodEvent {
     /// outstanding — the spinner's warrant.  Mostly the agent's own states,
     /// relayed; also the shell's, for the waits that precede any agent.
     State {
-        label: &'static str,
+        label: String,
         pending: bool,
     },
     ToolCall {
@@ -475,7 +475,7 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
     match t {
         Transient::Token(text) => Some(SynodEvent::Token { text: text.clone() }),
         Transient::State(state) => Some(SynodEvent::State {
-            label: state.label(),
+            label: state.label().to_string(),
             pending: state.pending(),
         }),
         Transient::StopReason(reason) => Some(SynodEvent::StopReason {

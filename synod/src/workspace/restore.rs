@@ -38,6 +38,14 @@ pub enum Resolution {
 }
 
 /// What a restore did.
+///
+/// A restore never aborts partway and throws its record away: every path
+/// it has already put back, removed, or set aside stays on this outcome
+/// even when a later path in the same run cannot be handled.  That is why
+/// [`restore`] returns `Ok` far more often than the shape of the code
+/// might suggest — a path this platform cannot recreate, or one that hit
+/// a genuine I/O error, is recorded here rather than raised, so the
+/// caller always sees the whole picture of what changed on disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreOutcome {
     /// Paths put back to their checkpointed version.
@@ -46,6 +54,29 @@ pub struct RestoreOutcome {
     pub removed: Vec<String>,
     /// Paths left alone under [`Resolution::KeepCurrent`].
     pub conflicts: Vec<String>,
+    /// Paths whose checkpointed entry this platform cannot recreate — a
+    /// symlink baked into the manifest on a machine that makes no
+    /// symlinks Synod can write, for instance.  Left exactly as they
+    /// stood; the restore carries on with everything else rather than
+    /// abandoning the whole run over one link.
+    pub unrestorable: Vec<String>,
+    /// Plain sentences describing a path the restore tried to put back
+    /// or remove and could not, for a reason that is not the platform's
+    /// fault — a permission error, a file locked by another process, and
+    /// so on.  Recorded rather than returned as an early `Err` so that
+    /// every path handled before the failure is not thrown away with it.
+    pub failed: Vec<String>,
+}
+
+/// Whether two records of one path describe the same thing, absent record
+/// and all — [`EntryKind::same_as`] lifted over `Option`, so a timestamp
+/// that moved is neither a change to undo nor an edit to conflict on.
+fn same(a: Option<&EntryKind>, b: Option<&EntryKind>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_as(b),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Whether `name` covers `path`: the same path, or a folder `path` sits
@@ -76,8 +107,16 @@ pub fn covers(path: &str, name: &str) -> bool {
 /// resolves either name to the pair.
 ///
 /// # Errors
-/// A plain sentence when `only` names nothing known, or when reading or
-/// writing the folder fails partway.
+/// A plain sentence when `only` names nothing known, or when checkpointing
+/// the folder before touching anything fails — nothing has been written
+/// or removed yet at that point, so there is no partial outcome to lose.
+/// Once the put-back loop itself starts, nothing it meets aborts it: a
+/// path this platform cannot recreate lands in
+/// [`RestoreOutcome::unrestorable`], and a genuine I/O failure lands in
+/// [`RestoreOutcome::failed`], with the restore continuing to the
+/// remaining paths either way. That keeps the one promise this module
+/// cannot break — the record of what was already put back or removed
+/// never gets discarded behind a `?`.
 pub(crate) fn restore(
     store: &HistoryStore,
     root: &Path,
@@ -118,10 +157,11 @@ pub(crate) fn restore(
         }
         let want = baseline.manifest.entries.get(path);
         let now = current.manifest.entries.get(path);
-        if want == now {
+        if same(want, now) {
             continue;
         }
-        let edited_after = run_left.is_none_or(|left| left.manifest.entries.get(path) != now);
+        let edited_after =
+            run_left.is_none_or(|left| !same(left.manifest.entries.get(path), now));
         if edited_after && resolution == Resolution::KeepCurrent {
             outcome.conflicts.push(path.clone());
             continue;
@@ -146,9 +186,11 @@ pub(crate) fn restore(
                 outcome.conflicts.push((*path).clone());
                 continue;
             }
-        } else {
-            std::fs::remove_file(&target)
-                .map_err(|e| format!("Synod could not remove {}: {e}.", target.display()))?;
+        } else if let Err(e) = std::fs::remove_file(&target) {
+            outcome
+                .failed
+                .push(format!("Synod could not remove {}: {e}.", target.display()));
+            continue;
         }
         outcome.removed.push((*path).clone());
     }
@@ -166,33 +208,61 @@ pub(crate) fn restore(
                     }
                 }
                 (_, false) => {
-                    std::fs::remove_file(&target).map_err(|e| {
-                        format!("Synod could not put back {}: {e}.", target.display())
-                    })?;
+                    if let Err(e) = std::fs::remove_file(&target) {
+                        outcome.failed.push(format!(
+                            "Synod could not put back {}: {e}.",
+                            target.display()
+                        ));
+                        continue;
+                    }
                 }
             }
         }
         match kind {
             EntryKind::Folder => {
-                std::fs::create_dir_all(&target)
-                    .map_err(|e| format!("Synod could not put back {}: {e}.", target.display()))?;
+                if let Err(e) = std::fs::create_dir_all(&target) {
+                    outcome.failed.push(format!(
+                        "Synod could not put back {}: {e}.",
+                        target.display()
+                    ));
+                    continue;
+                }
             }
-            EntryKind::File { hash, mode, .. } => store.place(hash, *mode, &target)?,
+            EntryKind::File { hash, mode, .. } => {
+                if let Err(e) = store.place(hash, *mode, &target) {
+                    outcome.failed.push(e);
+                    continue;
+                }
+            }
             EntryKind::Link { target: text } => {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        format!("Synod could not put back {}: {e}.", target.display())
-                    })?;
+                if let Some(parent) = target.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    outcome.failed.push(format!(
+                        "Synod could not put back {}: {e}.",
+                        target.display()
+                    ));
+                    continue;
                 }
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(text, &target)
-                    .map_err(|e| format!("Synod could not put back {}: {e}.", target.display()))?;
+                if let Err(e) = std::os::unix::fs::symlink(text, &target) {
+                    outcome.failed.push(format!(
+                        "Synod could not put back {}: {e}.",
+                        target.display()
+                    ));
+                    continue;
+                }
+                // A link this platform cannot recreate is not an error to
+                // abort the run over — it is the exact "leave it alone and
+                // report it" shape `Resolution::KeepCurrent` already
+                // models, just forced by the platform rather than chosen
+                // by the caller. Every other path still gets put back.
                 #[cfg(not(unix))]
-                return Err(format!(
-                    "Synod cannot put back the link {} — it pointed at {text}, and this \
-                     computer does not make links Synod can write.",
-                    target.display()
-                ));
+                {
+                    let _ = text;
+                    outcome.unrestorable.push(path.clone());
+                    continue;
+                }
             }
         }
         outcome.put_back.push(path.clone());
@@ -365,6 +435,127 @@ mod tests {
             std::fs::read(folder.join("b.txt")).expect("rereads"),
             b"b rewritten",
             "the other file keeps the job's version"
+        );
+    }
+
+    /// A link this platform cannot recreate is recorded and skipped, not
+    /// raised — the restore still puts back every other path from the same
+    /// job. The baseline's manifest is just data, so a `Link` entry stands
+    /// in for a real symlink without this test needing to make one.
+    #[test]
+    fn an_unrestorable_link_does_not_stop_the_rest_of_the_restore() {
+        let (_dir, folder, store) = workshop("restore-unrestorable-link");
+        std::fs::write(folder.join("plain.txt"), b"original").expect("fixture");
+        let mut baseline = store.capture(&folder, Moment::Before).expect("baseline");
+        baseline.manifest.entries.insert(
+            "link.txt".to_string(),
+            EntryKind::Link {
+                target: "plain.txt".to_string(),
+            },
+        );
+
+        std::fs::write(folder.join("plain.txt"), b"rewritten").expect("job");
+        let after = store.capture(&folder, Moment::After).expect("after");
+
+        let outcome = restore(
+            &store,
+            &folder,
+            &baseline,
+            Some(&after),
+            None,
+            Resolution::KeepCurrent,
+        )
+        .expect("an unrestorable link must not abort the restore");
+
+        assert!(
+            outcome.put_back.contains(&"plain.txt".to_string()),
+            "the rest of the job must still be put back: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("plain.txt")).expect("rereads"),
+            b"original"
+        );
+
+        #[cfg(not(unix))]
+        {
+            assert_eq!(outcome.unrestorable, ["link.txt"]);
+            assert!(
+                outcome.conflicts.is_empty() && outcome.failed.is_empty(),
+                "a platform limit is neither a conflict nor a failure: {outcome:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            assert!(outcome.unrestorable.is_empty());
+            assert!(outcome.put_back.contains(&"link.txt".to_string()));
+        }
+    }
+
+    /// A genuine I/O failure on one path — as opposed to a conflict, or a
+    /// link this platform cannot make — must not throw away the record of
+    /// every other path the same restore already put back.  Locking a file
+    /// so its put-back is refused stands in for the disk errors this
+    /// module cannot provoke on demand (a full disk, a vanished mount).
+    /// Windows-only: the exclusive-share handle it uses to force the
+    /// failure is a Windows-specific lever, and this crate's target here
+    /// is Windows.
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_put_back_does_not_erase_what_already_worked() {
+        let (_dir, folder, store) = workshop("restore-failed-keeps-outcome");
+        std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
+        std::fs::write(folder.join("locked.txt"), b"locked original").expect("fixture");
+        let baseline = store.capture(&folder, Moment::Before).expect("baseline");
+        std::fs::write(folder.join("a.txt"), b"a rewritten").expect("job");
+        std::fs::write(folder.join("locked.txt"), b"locked rewritten").expect("job");
+        let after = store.capture(&folder, Moment::After).expect("after");
+
+        // An exclusive-share handle held open makes Windows refuse the
+        // put-back's own remove_file with "used by another process" — a
+        // stand-in for the disk errors this test cannot otherwise provoke
+        // on demand. Dropped before the assertions so the tempdir guard
+        // can tear the folder down afterwards.
+        let locked = folder.join("locked.txt");
+        let handle = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&locked)
+                .expect("lock it")
+        };
+
+        let outcome = restore(
+            &store,
+            &folder,
+            &baseline,
+            Some(&after),
+            None,
+            Resolution::KeepCurrent,
+        )
+        .expect("a mid-loop I/O failure is recorded on the outcome, not raised as an Err");
+
+        drop(handle);
+
+        assert_eq!(
+            outcome.put_back,
+            ["a.txt"],
+            "the path that worked must still be reported"
+        );
+        assert_eq!(
+            outcome.failed.len(),
+            1,
+            "the locked path's failure must be recorded, not silently dropped: {outcome:?}"
+        );
+        assert!(
+            outcome.failed[0].contains("locked.txt"),
+            "the failure must name the path it happened to: {}",
+            outcome.failed[0]
+        );
+        assert_eq!(
+            std::fs::read(folder.join("a.txt")).expect("rereads"),
+            b"a original",
+            "a's put-back must not be lost because locked.txt's failed"
         );
     }
 

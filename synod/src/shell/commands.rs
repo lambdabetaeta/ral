@@ -52,6 +52,12 @@ pub(crate) struct Handle {
     generation: u64,
     sender: mpsc::Sender<String>,
     join: JoinHandle<()>,
+    /// Reaches into this generation's `Conversation::begin`, still stat-ing
+    /// the folder on the worker thread, from outside it: a restart
+    /// superseding this handle and the window's own close both flip it
+    /// before waiting on `join`, so neither is held hostage behind a slow
+    /// share's walk finishing on its own.
+    measure_stop: synod::workspace::manifest::Stop,
 }
 
 /// The conversation has ended, one way or another — a failure, or a
@@ -99,10 +105,13 @@ impl Emitter {
     /// before there is an agent whose states to relay.  The shell's own
     /// narration runs from the worker's first breath to the opening, where
     /// `ready` hands the station over.
-    fn state(&self, label: &'static str, pending: bool) {
+    fn state(&self, label: impl Into<String>, pending: bool) {
         self.emit(
             "synod-event",
-            super::sink::SynodEvent::State { label, pending },
+            super::sink::SynodEvent::State {
+                label: label.into(),
+                pending,
+            },
         );
     }
 
@@ -260,6 +269,7 @@ pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
         return;
     };
     drop(handle.sender);
+    handle.measure_stop.stop();
     let join = handle.join;
     let (done, wait) = mpsc::channel::<()>();
     std::thread::spawn(move || {
@@ -293,26 +303,30 @@ fn spawn_conversation(
     let mut held = slot.lock_ignore_poison();
     let superseded = held.take().map(|handle| {
         drop(handle.sender);
+        // Stopped here, not left for the new worker's join to wait out: a
+        // restart while the superseded generation is still stat-ing a slow
+        // share must not make the fresh conversation sit behind that walk
+        // finishing on its own.
+        handle.measure_stop.stop();
         handle.join
     });
 
+    let measure_stop = synod::workspace::manifest::Stop::default();
     let (sender, receiver) = mpsc::channel();
-    let thread_slot = slot.clone();
+    let emitter = Emitter {
+        app,
+        slot: slot.clone(),
+        generation,
+    };
+    let thread_measure_stop = measure_stop.clone();
     let join = std::thread::spawn(move || {
-        run_conversation(
-            app,
-            thread_slot,
-            generation,
-            superseded,
-            folder,
-            choice,
-            receiver,
-        );
+        run_conversation(emitter, superseded, folder, choice, receiver, thread_measure_stop);
     });
     *held = Some(Handle {
         generation,
         sender,
         join,
+        measure_stop,
     });
 }
 
@@ -330,20 +344,13 @@ fn spawn_conversation(
 /// before it returns, and the window has already reset its transcript and
 /// is waiting on this one.
 fn run_conversation(
-    app: AppHandle,
-    slot: Arc<Mutex<Option<Handle>>>,
-    generation: u64,
+    emitter: Emitter,
     superseded: Option<JoinHandle<()>>,
     folder: String,
     choice: Option<Choice>,
     receiver: mpsc::Receiver<String>,
+    measure_stop: synod::workspace::manifest::Stop,
 ) {
-    let emitter = Emitter {
-        app,
-        slot,
-        generation,
-    };
-
     if let Some(old) = superseded {
         emitter.state("finishing the previous session", true);
         let _ = old.join();
@@ -354,7 +361,7 @@ fn run_conversation(
     emitter.state("starting", true);
 
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        converse(&emitter, &folder, choice, &receiver)
+        converse(&emitter, &folder, choice, &receiver, &measure_stop)
     }))
     .unwrap_or(ConversationEnded {
         stopped: false,
@@ -372,6 +379,7 @@ fn converse(
     folder: &str,
     choice: Option<Choice>,
     receiver: &mpsc::Receiver<String>,
+    measure_stop: &synod::workspace::manifest::Stop,
 ) -> ConversationEnded {
     let mut sink = super::sink::TauriSink::new(emitter.clone());
 
@@ -393,7 +401,25 @@ fn converse(
                   user-input adapter site clippy.toml admits, not a path built from parts"
     )]
     let picked = Path::new(folder);
-    let (mut conversation, opening) = match Conversation::begin(picked, store, catalog, choice) {
+    // Named before it is booted or hashed: on a large folder or a
+    // network share, `begin`'s own stat-walk is the one silent minute
+    // a user meets before anything else has had a chance to say something.
+    let mut report_measure = |measure: synod::workspace::manifest::Measure| {
+        if measure.files == 1 || measure.files.is_multiple_of(500) {
+            emitter.state(
+                format!("reading the folder — {} files seen so far", measure.files),
+                true,
+            );
+        }
+    };
+    let (mut conversation, opening) = match Conversation::begin(
+        picked,
+        store,
+        catalog,
+        choice,
+        measure_stop,
+        &mut report_measure,
+    ) {
         Ok(begun) => begun,
         Err(e) => {
             emitter.emit(

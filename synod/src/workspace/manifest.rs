@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// A checkpoint reads every byte, before and after each job.  2 GiB keeps
 /// that in the seconds on a local disk; past it — especially on a
-/// departmental share at tens of MB/s — the wait reaches minutes and the
+/// network share at tens of MB/s — the wait reaches minutes and the
 /// user deserves a heads-up before it starts.
 pub const LARGE_FOLDER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -85,6 +85,35 @@ pub enum EntryKind {
     Link {
         target: String,
     },
+}
+
+impl EntryKind {
+    /// Whether two records describe the same thing, for the purposes of
+    /// "did this change?".
+    ///
+    /// Everything but `mtime_ns`: a timestamp is the walk's own trust
+    /// bookkeeping (the racy guard in
+    /// [`HistoryStore::capture`](crate::workspace::HistoryStore::capture)),
+    /// never an edit. A backup agent, a sync client, or a tool that rewrote
+    /// a file with the bytes it already had moves the timestamp and changes
+    /// nothing — reporting that as the assistant's doing, or conflicting an
+    /// undo on it, would be a lie about the folder.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::File {
+                    size, hash, mode, ..
+                },
+                Self::File {
+                    size: other_size,
+                    hash: other_hash,
+                    mode: other_mode,
+                    ..
+                },
+            ) => size == other_size && hash == other_hash && mode == other_mode,
+            _ => self == other,
+        }
+    }
 }
 
 /// A folder's contents at one moment, keyed by `/`-joined relative path.
@@ -377,11 +406,33 @@ pub struct Measure {
 /// Stat-walk `root` to count its regular files and sum their sizes.
 ///
 /// Symlinks and folders cost nothing; a path that vanishes mid-walk is
-/// simply not counted, the same as a capture would treat it.
+/// simply not counted, the same as a capture would treat it.  A thin
+/// wrapper over [`measure_via`] for the callers — tests among them — with
+/// no interest in watching or interrupting the walk.
 ///
 /// # Errors
 /// A plain sentence when the folder cannot be looked inside.
 pub fn measure(root: &Path) -> Result<Measure, String> {
+    measure_via(root, &Stop::default(), &mut |_so_far| {})
+}
+
+/// Like [`measure`], but observable and interruptible.
+///
+/// `progress` is called after every file the walk counts — with the
+/// running total, not just the one file — so a caller watching a folder too
+/// big to measure in an eyeblink can show something other than a frozen
+/// window, and `stop` can end the walk before it reaches the end, the same
+/// switch [`Manifest::of_folder_via`] takes.
+///
+/// # Errors
+/// A plain sentence when the folder cannot be looked inside, or when `stop`
+/// ended the walk early.  A stopped walk answers `Err`, never the partial
+/// [`Measure`] it had counted so far: a folder a user closed the window on
+/// while synod was still stat-ing it must not be reported as though that
+/// count were the whole folder — the same dishonesty
+/// [`Manifest::of_folder_via`]'s own doc comment rules out for a stopped
+/// manifest.
+pub fn measure_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Measure, String> {
     let mut measure = Measure::default();
     // Symlinks and folders never reach the `is_file` arm: zero-cost, a
     // link is its target text, never its bytes.
@@ -389,16 +440,28 @@ pub fn measure(root: &Path) -> Result<Measure, String> {
         if meta.is_file() {
             measure.files += 1;
             measure.bytes += meta.len();
+            progress(measure);
         }
         Ok(())
     };
-    if let Err(WalkError::Other(message)) =
-        walk(root, "", &mut Vec::new(), &Stop::default(), &mut visit)
-    {
-        return Err(message);
+    match walk(root, "", &mut Vec::new(), stop, &mut visit) {
+        Ok(()) | Err(WalkError::Vanished) => Ok(measure),
+        Err(WalkError::Stopped) => Err(
+            "Synod stopped measuring this folder before it had finished, so it cannot say \
+             how big the copy would be."
+                .to_string(),
+        ),
+        Err(WalkError::Other(message)) => Err(message),
     }
-    Ok(measure)
 }
+
+/// How a walk being measured reports what it has found so far.
+///
+/// The running [`Measure`], not just the one file that pushed it forward.
+/// The register [`FileEntry`] is in: a borrowed `FnMut` rather than a
+/// generic, so [`measure_via`] stays a plain function callers can pass a
+/// closure or a no-op to without fighting monomorphization.
+pub type Progress<'a> = &'a mut dyn FnMut(Measure);
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +557,44 @@ mod tests {
         assert!(manifest.entries.contains_key("keep.txt"));
         assert!(!manifest.entries.contains_key("gone.txt"));
         assert_eq!(manifest.unread, vec!["gone.txt".to_string()]);
+    }
+
+    #[test]
+    fn measure_via_reports_progress_after_every_file() {
+        let dir = workshop("manifest-measure-progress");
+        std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
+        std::fs::write(dir.path().join("b.txt"), b"gone").expect("fixture");
+
+        let mut seen = Vec::new();
+        let measure = measure_via(dir.path(), &Stop::default(), &mut |so_far| seen.push(so_far))
+            .expect("an ordinary folder measures");
+
+        assert_eq!(seen.len(), 2, "one progress call per file, not per byte or per folder");
+        assert_eq!(
+            seen.last().copied(),
+            Some(measure),
+            "the last progress call must already show the walk's final total"
+        );
+    }
+
+    /// A stopped measure must not silently hand back the partial count as
+    /// though the walk had finished — that would tell the caller a folder
+    /// closed on mid-scan held only the handful of files counted before the
+    /// stop, which is a lie about the folder, not a fact about it.
+    #[test]
+    fn measure_via_stopped_partway_errs_rather_than_answering_a_partial_count() {
+        let dir = workshop("manifest-measure-stopped");
+        std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
+        std::fs::write(dir.path().join("b.txt"), b"gone").expect("fixture");
+        std::fs::write(dir.path().join("c.txt"), b"more").expect("fixture");
+
+        let stop = Stop::default();
+        let result = measure_via(dir.path(), &stop, &mut |_so_far| stop.stop());
+
+        assert!(
+            result.is_err(),
+            "a walk stopped after its first file must answer Err, never Ok(a short Measure)"
+        );
     }
 
     #[test]

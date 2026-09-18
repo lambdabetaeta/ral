@@ -43,8 +43,13 @@ impl Drop for PendingWalk {
     ///
     /// [`Conversation::begin`]: crate::session::Conversation::begin
     fn drop(&mut self) {
-        self.stop.stop();
+        // Only an *unjoined* walk is stopped here. The switch is the
+        // store's own, shared with every capture it will ever take, and
+        // tripping it is permanent: stopping a walk that [`Self::join`]
+        // already took would end the baseline and every later exchange's
+        // checkpoint with it.
         if let Some(handle) = self.handle.take() {
+            self.stop.stop();
             let _ = handle.join();
         }
     }
@@ -160,5 +165,34 @@ impl Baseline {
             Self::Ready(store) | Self::Failed(store, _) => Some(store),
             Self::Untaken | Self::Crashed(_) | Self::Pending(_) | Self::Settling => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: a fixture file written so the baseline walk has something               to read; the production code in this file touches no filesystem at all"
+)]
+mod tests {
+    use super::*;
+    use crate::test_fixture::granted_workshop;
+
+    /// The baseline's walk shares its stop switch with the store it
+    /// captures into, so joining that walk must not trip the switch: every
+    /// later exchange checkpoints through the very same store.
+    #[test]
+    fn a_settled_baseline_leaves_the_store_able_to_capture_again() {
+        let (_dir, folder, store) = granted_workshop("baseline-settled");
+        std::fs::write(folder.join("letter.txt"), b"dear all").expect("fixture");
+
+        let mut baseline = Baseline::spawn(folder.clone(), store);
+        let store = baseline
+            .store()
+            .expect("the baseline capture succeeds")
+            .expect("a copy was taken");
+
+        store
+            .capture(&folder, workspace::Moment::After)
+            .expect("a settled baseline leaves its store able to capture again");
     }
 }

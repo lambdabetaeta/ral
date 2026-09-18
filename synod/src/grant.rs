@@ -201,7 +201,7 @@ impl Grant {
             ),
             std::io::ErrorKind::PermissionDenied => format!(
                 "This computer will not let synod open {shown}. \
-                 Ask your IT team for access to it, or choose a folder you can open yourself."
+                 Ask whoever administers this computer for access to it, or choose a folder you can open yourself."
             ),
             _ => format!("Synod could not open {shown}: {e}. Please choose another folder."),
         })?;
@@ -224,7 +224,7 @@ impl Grant {
         std::fs::read_dir(&root).map_err(|e| {
             format!(
                 "Synod cannot see what is inside {} ({e}). \
-                 Ask your IT team whether you have permission to open this folder.",
+                 Ask whoever administers this computer whether you have permission to open this folder.",
                 root.display()
             )
         })?;
@@ -240,7 +240,7 @@ impl Grant {
     /// One law covers all three — a grant must not contain the user's
     /// home folder — with the disk root caught first, since the home
     /// folder may be unknown.  It is deliberately not a size or a
-    /// depth test: a departmental share at `/Volumes/Registry/Admissions`
+    /// depth test: a network share at `/Volumes/Registry/Admissions`
     /// is a perfectly ordinary grant and must stay one.
     #[allow(
         clippy::disallowed_methods,

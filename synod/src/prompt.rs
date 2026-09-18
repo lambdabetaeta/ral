@@ -13,7 +13,7 @@ use ral_core::types::Capabilities;
 use std::path::Path;
 
 /// The office house rules, if the operator deployed any: a plain-language
-/// file the university's own staff can write — letter templates, naming
+/// file the office's own staff can write — letter templates, naming
 /// conventions, who signs what — read from the trusted config directory,
 /// never from the granted folder.  Instructions, not authority: the text
 /// steers behaviour and cannot widen the grant.

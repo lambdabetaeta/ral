@@ -226,11 +226,7 @@ impl HistoryStore {
         let Some(path) = latest else {
             return Ok(None);
         };
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Synod could not read its record {}: {e}.", path.display()))?;
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| format!("Synod's record {} is damaged: {e}.", path.display()))
+        parse_checkpoint(&path).map(Some)
     }
 
     /// Every checkpoint for this folder, oldest first.
@@ -271,19 +267,44 @@ impl HistoryStore {
     /// per exchange — so this pairs the before with the *last* of them, the
     /// cumulative state as of now, not the first exchange's alone.
     ///
+    /// Every job report, undo, and the review window asks this, so unlike
+    /// [`Self::checkpoints`] it must not parse every manifest this
+    /// conversation has written — that cost would grow without bound as a
+    /// conversation goes on. Ids sort chronologically, so this lists the
+    /// filenames only, walks them newest first, and parses just enough:
+    /// remember the first `After` seen (the newest one, since we are going
+    /// backwards) and stop the moment a `Before` turns up, since nothing
+    /// older can change the answer.
+    ///
     /// # Errors
-    /// A plain sentence when the records cannot be read back.
+    /// A plain sentence when the records cannot be listed, or a checkpoint
+    /// on the walk back to the latest `Before` cannot be read back.
     pub fn latest_job(&self) -> Result<Option<(Checkpoint, Option<Checkpoint>)>, String> {
-        let all = self.checkpoints()?;
-        let Some(at) = all.iter().rposition(|c| c.moment == Moment::Before) else {
-            return Ok(None);
+        let dir = self.dir.join("checkpoints");
+        let could_not = |e| {
+            format!(
+                "Synod could not open its records at {}: {e}.",
+                dir.display()
+            )
         };
-        let after = all[at + 1..]
-            .iter()
-            .rev()
-            .find(|c| c.moment == Moment::After)
-            .cloned();
-        Ok(Some((all[at].clone(), after)))
+        let mut paths = Vec::new();
+        for item in std::fs::read_dir(&dir).map_err(could_not)? {
+            let path = item.map_err(could_not)?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                paths.push(path);
+            }
+        }
+        paths.sort_by(|a, b| b.as_path().cmp(a.as_path()));
+        let mut after = None;
+        for path in paths {
+            let checkpoint = parse_checkpoint(&path)?;
+            match checkpoint.moment {
+                Moment::Before => return Ok(Some((checkpoint, after))),
+                Moment::After if after.is_none() => after = Some(checkpoint),
+                Moment::After | Moment::Undo => {}
+            }
+        }
+        Ok(None)
     }
 
     /// The kept bytes for `hash`.
@@ -539,6 +560,16 @@ pub(crate) fn free_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Read and parse one checkpoint file, shared by [`HistoryStore::latest`]
+/// and [`HistoryStore::latest_job`] — the two callers that parse checkpoints
+/// one at a time rather than all of them at once.
+fn parse_checkpoint(path: &Path) -> Result<Checkpoint, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Synod could not read its record {}: {e}.", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("Synod's record {} is damaged: {e}.", path.display()))
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -674,6 +705,39 @@ mod tests {
                 .id,
             last.id,
             "the report must reflect the most recent exchange, not the first"
+        );
+    }
+
+    /// The sharpest proof that `latest_job` stops at the newest `Before`
+    /// rather than parsing everything, as [`HistoryStore::checkpoints`]
+    /// does: plant a corrupt checkpoint file *older* than the latest
+    /// `Before` and confirm `latest_job` still succeeds. If it ever went
+    /// back to parsing the whole directory, this file would trip it.
+    #[test]
+    fn latest_job_never_parses_a_checkpoint_older_than_the_latest_before() {
+        let (_dir, folder, store) = workshop("history-latest-job-stops-early");
+        std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
+
+        let before = store.capture(&folder, Moment::Before).expect("captures");
+        let after = store.capture(&folder, Moment::After).expect("captures");
+
+        // An id that sorts before both real checkpoints above — an
+        // all-zero timestamp — so it is the oldest record in the store, and
+        // planted only now so it never stands as `latest()`'s reference
+        // during the captures above.
+        let corrupt_path = store
+            .dir
+            .join("checkpoints")
+            .join("000000000000000-0000000000-000000.json");
+        std::fs::write(&corrupt_path, b"not valid json").expect("fixture writes corrupt record");
+
+        let (paired_before, paired_after) =
+            store.latest_job().expect("reads despite the corrupt record").expect("a job exists");
+        assert_eq!(paired_before.id, before.id);
+        assert_eq!(
+            paired_after.expect("the run finished").id,
+            after.id,
+            "the corrupt record must never be reached"
         );
     }
 

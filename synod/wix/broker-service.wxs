@@ -15,7 +15,7 @@
   Compute System API that the machine layer drives (`vm-manager/src/hcs/`,
   `dev/docs/VM/SYNOD.md` §2) answers `HCS_E_ACCESS_DENIED` to any caller who is
   neither an administrator nor a member of the local *Hyper-V Administrators*
-  group.  Synod's users are university secretaries: they are not
+  group.  Synod's users are office secretaries: they are not
   administrators on their machines, and they must not have to become them to
   open a folder and ask for a letter to be filed.
 
