@@ -356,7 +356,13 @@ mod tests {
         let set = PrefixSet::resolve(&Resolver::shell_less(), &["/"]);
         let root = set.0.first().expect("the root freezes to one prefix");
         assert_eq!(root.resolved(), "/", "got {root:?}");
-        for path in [r"C:\Users\someone\Temp\x", r"D:\a\repo\y", "/etc/hosts"] {
+        // A drive spelling is a path only on Windows; on a Unix host it is
+        // one relative name, and covering it would be a different claim.
+        let mut paths = vec!["/etc/hosts"];
+        if cfg!(windows) {
+            paths.extend([r"C:\Users\someone\Temp\x", r"D:\a\repo\y"]);
+        }
+        for path in paths {
             assert!(
                 covers(root, &NormalizedPrefix::from_surface(path)),
                 "the re-frozen ceiling must still cover {path}"
