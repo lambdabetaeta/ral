@@ -15,6 +15,9 @@ is a wire-seat child's spawn machinery.** The why is
 ## `core/src/protocol.rs`
 
 - `PROTOCOL_VERSION` (currently 7) — checked at `Attach`; a mismatch refuses.
+- `check_media` — the same number compared at *build* time, against the
+  `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
+  guest media; `synod/build.rs` refuses to package media that disagrees.
 - `HATCH_ACK` — the guest's one-byte readiness signal, written from
   `hatch.rs`; lives here for platform neutrality, not because it is ever a
   `Frame`.

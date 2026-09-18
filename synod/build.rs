@@ -5,8 +5,8 @@
 //! the build product.
 //!
 //! And one line it does not ask for: the guest media staged into that bundle
-//! must speak the same boot contract as the host being built around it.  See
-//! [`boot_contract`].
+//! must speak the same boot contract *and* the same engine protocol as the
+//! host being built around it.  See [`media`].
 
 #![allow(
     clippy::disallowed_methods,
@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    boot_contract();
+    media();
     tauri_build::build();
 }
 
@@ -37,6 +37,13 @@ fn main() {
 /// resource map's own, spelled relative to this crate, so the file checked is
 /// the file bundled.
 ///
+/// The engine's protocol version rides the same manifest and the same logic
+/// ([`ral_core::protocol::check_media`]), for a failure one layer along: that
+/// installer's guest booted and dialled, and then refused the host's `Attach`
+/// — a conversation that cannot start, and a host that can say only that a
+/// socket closed.  Both numbers are asked here so a stale image is one build
+/// error naming itself, whichever of the two has drifted.
+///
 /// No media at all is *not* a failure: a `cargo check`, a test run, and every
 /// developer who has not spent an hour of podman on an image must still be
 /// able to compile the crate.  The bundle is where absent media becomes an
@@ -45,7 +52,7 @@ fn main() {
     clippy::disallowed_methods,
     reason = "[silent:boot-contract-build] Build-time read of the guest media's own boot-manifest.txt, to compare the contract it records against this host's. Build scaffolding, not turn-time model data I/O — raises no surface card."
 )]
-fn boot_contract() {
+fn media() {
     // Walked up to the workspace and down again, component by component,
     // rather than joined as one `../vm-image/...` literal: this path is quoted
     // back to a person in the refusal, and what they can paste into a shell is
@@ -70,8 +77,11 @@ fn boot_contract() {
     // own `--- stderr` heading, and the sentence is the whole of what the
     // reader needs — a panic would bury it under a location and a backtrace
     // note that point into this file rather than at the stale image.
-    if let Err(refusal) = ral_daemon::boot::check_media(&text, &manifest.display().to_string()) {
-        eprintln!("synod cannot be packaged with this guest media: {refusal}");
-        std::process::exit(1);
+    let path = manifest.display().to_string();
+    for check in [ral_daemon::boot::check_media, ral_core::protocol::check_media] {
+        if let Err(refusal) = check(&text, &path) {
+            eprintln!("synod cannot be packaged with this guest media: {refusal}");
+            std::process::exit(1);
+        }
     }
 }

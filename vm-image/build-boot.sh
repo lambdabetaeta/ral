@@ -48,7 +48,7 @@
 #                           modules, vendored mke2fs
 #   kernel.sha256, initramfs.img.sha256
 #   boot-manifest.txt       arch, kernel package version, built git commit,
-#                           boot contract version
+#                           boot contract version, engine protocol version
 #   kernel-config-check.txt real CONFIG_* values behind the module set
 #   verify.txt              static-link / arch / cpio manifest spot-checks
 #   build.log               full build transcript
@@ -343,6 +343,24 @@ case "$BOOT_CONTRACT" in
     exit 1 ;;
 esac
 echo ">> [container] boot contract $BOOT_CONTRACT"
+
+# And the engine protocol that media will speak (ral-core's
+# `protocol::PROTOCOL_VERSION`), compiled the same way and for the same
+# reason one layer along: a host built against a newer algebra refuses to
+# package this media rather than ship an engine that will refuse its Attach
+# and leave the front-end holding a closed socket.
+echo ">> [container] reading the protocol version out of the engine it just built"
+( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
+    -p ral-core --example proto-version )
+PROTO_VERSION=$("$BIN/examples/proto-version")
+case "$PROTO_VERSION" in
+  '' | *[!0-9]*)
+    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.\n' \
+      "$PROTO_VERSION" >&2
+    echo "core/examples/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
+    exit 1 ;;
+esac
+echo ">> [container] protocol version $PROTO_VERSION"
 
 # --- 2. Extract the pinned suite's kernel + modules --------------------------
 # ubuntu:24.04's own apt sources point at noble; add the pinned suite as an
@@ -642,6 +660,9 @@ cat /out/verify.txt
   # ral_daemon::boot::check_media): which generation of `ral.` settings the
   # ral-daemon inside initramfs.img understands.
   echo "boot_contract=$BOOT_CONTRACT"
+  # Its sibling, read back by the same build.rs: which generation of the
+  # frame algebra the engine inside initramfs.img speaks.
+  echo "proto_version=$PROTO_VERSION"
   echo "rust_target=$RUST_TARGET"
   echo "modules_shipped=${NEEDED_MODULES[*]:-none}"
 } > /out/boot-manifest.txt

@@ -23,6 +23,9 @@ tauri-build = { version = "2", features = [] }
 # being built with.  A build dependency rather than a normal one because the
 # comparison is the *build's* business — synod's own code never asks.
 ral-daemon = { path = "../ral-daemon" }
+# The other half of the same comparison: the protocol the media's engine
+# speaks, from the crate that defines it.
+ral-core = { path = "../core" }
 
 [dependencies]
 ral-core   = { path = "../core" }

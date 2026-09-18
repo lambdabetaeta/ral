@@ -29,7 +29,60 @@ use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub(crate) const PROTOCOL_VERSION: u32 = 7;
+/// The frame algebra's generation, checked at `Attach` and refused on
+/// mismatch.  Public because a build has to compare it against the engine
+/// sitting in the guest media beside it: see [`check_media`].
+pub const PROTOCOL_VERSION: u32 = 7;
+
+/// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
+/// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
+pub const MEDIA_KEY: &str = "proto_version";
+
+/// Refuse to package a host around an engine it cannot talk to.
+///
+/// The `Attach` check is right and loud, but it is loud *in the guest*: the
+/// host sees a socket close and can say only `engine-closed`.  This is the
+/// same number where being wrong costs one failed build instead of an
+/// installer that cannot start a conversation.  Same shape, same reasons and
+/// same writer as `ral_daemon::boot::check_media` — which is why the two
+/// live apart, each beside the constant it defends.
+///
+/// # Errors
+/// If the media records no version, an unparseable one, or one this host has
+/// outgrown.
+pub fn check_media(manifest: &str, path: &str) -> Result<(), String> {
+    const REMEDY: &str = "Rebuild the media from this checkout — `just guest-boot amd64` for the \
+                          Windows guest, `just guest-boot` for the Mac's — and package again.";
+
+    let recorded = manifest
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(MEDIA_KEY)?.strip_prefix('='))
+        .next_back();
+
+    let Some(recorded) = recorded else {
+        return Err(format!(
+            "the guest media described by {path} carries no `{MEDIA_KEY}=` line, so nothing here \
+             can tell whether its engine speaks this host's protocol. One that does not refuses \
+             the attach, and all the host learns is that a socket closed. {REMEDY}"
+        ));
+    };
+    let recorded = recorded.trim();
+    let recorded: u32 = recorded.parse().map_err(|err| {
+        format!(
+            "{path} records `{MEDIA_KEY}={recorded}`, which is not a protocol version: {err}."
+        )
+    })?;
+
+    if recorded != PROTOCOL_VERSION {
+        return Err(format!(
+            "the guest media's engine speaks protocol {recorded}, and this host speaks \
+             {PROTOCOL_VERSION} ({path} records `{MEDIA_KEY}={recorded}`). That engine would \
+             refuse this host's attach and close the connection, and the conversation would fail \
+             to start with nothing but a closed socket to show for it. {REMEDY}"
+        ));
+    }
+    Ok(())
+}
 
 /// The byte before the first frame, written by a guest that has just spawned
 /// a child engine onto this connection and read by the host that dialled it.
@@ -3051,5 +3104,58 @@ mod severance_codes {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), codes.len(), "two severances share a code");
+    }
+}
+
+/// The build-time half of the `Attach` check: what stops a stale engine
+/// reaching a user at all.
+#[cfg(test)]
+mod media_protocol {
+    use super::{MEDIA_KEY, PROTOCOL_VERSION, check_media};
+
+    /// A manifest as `build-boot.sh` writes it: the line is found by its key
+    /// among the others, and media that agrees is packaged in silence.
+    #[test]
+    fn media_speaking_this_protocol_is_fit_to_package() {
+        let manifest = format!(
+            "arch=amd64\nboot_contract=2\n{MEDIA_KEY}={PROTOCOL_VERSION}\n\
+             rust_target=x86_64-unknown-linux-musl\n"
+        );
+        check_media(&manifest, "out/boot/boot-manifest.txt").expect("matching media must pass");
+    }
+
+    /// The skew this exists for — the one that shipped a synod whose engine
+    /// spoke 4 to a host speaking 7. Both numbers and the manifest, or a
+    /// reader cannot tell which side is old.
+    #[test]
+    fn an_engine_behind_the_host_names_both_numbers() {
+        let stale = format!("arch=amd64\n{MEDIA_KEY}={}\n", PROTOCOL_VERSION - 3);
+        let err = check_media(&stale, "vm-image/out/boot/boot-manifest.txt")
+            .expect_err("media from an older protocol must not be packaged");
+        assert!(
+            err.contains(&format!("protocol {}", PROTOCOL_VERSION - 3)),
+            "{err}"
+        );
+        assert!(err.contains(&PROTOCOL_VERSION.to_string()), "{err}");
+        assert!(err.contains("vm-image/out/boot/boot-manifest.txt"), "{err}");
+        assert!(err.contains("just guest-boot amd64"), "{err}");
+    }
+
+    /// Media older than this mechanism records nothing, and says so rather
+    /// than blaming a version it cannot know.
+    #[test]
+    fn media_predating_the_line_gets_its_own_sentence() {
+        let err = check_media("arch=amd64\nral_git_hash=7c1c8ae6\n", "out/boot-manifest.txt")
+            .expect_err("a manifest with no protocol line must not be packaged");
+        assert!(err.contains(&format!("no `{MEDIA_KEY}=` line")), "{err}");
+        assert!(err.contains("just guest-boot"), "{err}");
+    }
+
+    /// A broken manifest is refused as one, never silently read as zero.
+    #[test]
+    fn a_line_that_is_not_a_number_is_refused_as_such() {
+        let err = check_media(&format!("{MEDIA_KEY}=seven\n"), "m.txt")
+            .expect_err("an unparsable protocol version must be refused");
+        assert!(err.contains("not a protocol version"), "{err}");
     }
 }
