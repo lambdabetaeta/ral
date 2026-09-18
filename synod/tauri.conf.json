@@ -3,7 +3,8 @@
   "productName": "Synod",
   "identifier": "app.synod.desktop",
   "build": {
-    "frontendDist": "./ui"
+    "frontendDist": "./ui",
+    "beforeBuildCommand": "cargo run --quiet -p synod --example check-media"
   },
   "app": {
     "withGlobalTauri": true,

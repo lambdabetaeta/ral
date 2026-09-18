@@ -133,6 +133,7 @@ START=$(date +%s)
 # cold one. `RAL_BUILD_CACHE` is that somewhere, and it is opt-in because
 # nothing shipped may come out of it: the media is built from /ral every time,
 # and a stale cache costs only the disk it sits on.
+# `${a[@]+...}` below: bash 3.2 calls an empty array unbound under `set -u`.
 CACHE_MOUNT=()
 if [ -n "${RAL_BUILD_CACHE:-}" ]; then
   mkdir -p "$RAL_BUILD_CACHE"
@@ -146,7 +147,7 @@ podman run --rm -i \
   -e SUITE -e ARCH -e MIRROR -e RUST_TARGET -e GIT_HASH -e CARGO_BUILD_JOBS \
   -v "$(host_path "$REPO_DIR"):/ral:ro" \
   -v "$(host_path "$OUT_DIR"):/out" \
-  "${CACHE_MOUNT[@]}" \
+  ${CACHE_MOUNT[@]+"${CACHE_MOUNT[@]}"} \
   "$BASE_IMAGE" \
   bash -euo pipefail -s <<'INNER' 2>&1 | tee "$OUT_DIR/build.log"
 export DEBIAN_FRONTEND=noninteractive

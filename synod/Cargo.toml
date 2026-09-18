@@ -18,14 +18,6 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# The boot contract, at build time, from the crate that defines it: `build.rs`
-# compares the number the guest media recorded against the one this host is
-# being built with.  A build dependency rather than a normal one because the
-# comparison is the *build's* business — synod's own code never asks.
-ral-daemon = { path = "../ral-daemon" }
-# The other half of the same comparison: the protocol the media's engine
-# speaks, from the crate that defines it.
-ral-core = { path = "../core" }
 
 [dependencies]
 ral-core   = { path = "../core" }
@@ -50,3 +42,5 @@ guest-net  = { path = "../guest-net" }
 [dev-dependencies]
 # `test_fixture::workshop`'s per-test directory, which deletes itself.
 tempfile = { workspace = true }
+# The boot contract, for `examples/check-media`; synod's own code never asks.
+ral-daemon = { path = "../ral-daemon" }
