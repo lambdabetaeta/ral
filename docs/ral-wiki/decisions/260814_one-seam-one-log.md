@@ -136,7 +136,7 @@ decision rather than a unilateral call mid-implementation:
    worker-panic report in `bus/sink.rs` and the seam's own append-failure
    reporters emit `Kind::Error` with no record behind it; a fold-only live
    view would silently lose exactly the failures it most needs to show.
-4. **`ContextEdited`'s display row is bridge-only.** Live, the row rides
+4. **`ContextEdited`'s (now `Protocol::Evicted`'s) display row is bridge-only.** Live, the row rides
    `record_kind`'s projection of the protocol record; the view fold skips
    `Protocol` entirely, so a resumed scrollback has no context-edit row. The
    plan's own disposition assigns it "a notice commit from the producer";

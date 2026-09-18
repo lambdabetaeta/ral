@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
+use exarch::agent::event::{Cut, EditAuthority, ProviderErrorRecord};
 use exarch::agent::{Avatar, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -402,12 +402,12 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     assert_eq!(view[0].role, ChatRole::User);
     let marker = view[0].content.first_text().unwrap_or_default();
     assert!(
-        marker.starts_with("[EXARCH // Exchange") && marker.contains("left your context"),
-        "the context must open on the head marker, got {marker:?}"
+        marker.starts_with("[EXARCH // Turn") && marker.contains("left your context"),
+        "the context must open on the head hole's marker, got {marker:?}"
     );
     assert!(
         marker.contains("EXCHANGE1"),
-        "the head marker indexes the evicted exchange by its opening line, got {marker:?}"
+        "the marker lists the evicted prompt by its opening line, got {marker:?}"
     );
     let rendered = serde_json::to_string(&view).unwrap();
     assert!(
@@ -442,8 +442,8 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     assert!(
         records.iter().any(|record| matches!(
             record,
-            Record::Protocol(Protocol::ContextEdited {
-                op: ContextOp::Evict { note: None, .. },
+            Record::Protocol(Protocol::Evicted {
+                cut: Cut { note: None, .. },
                 by: EditAuthority::Harness,
             })
         )),

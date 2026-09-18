@@ -263,15 +263,16 @@ pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
 /// "context" header — the one rendering `tui` and `headless` both draw from,
 /// and `pub` for synod.
 ///
-/// The survey is one row per turn; the card groups them into their exchanges
-/// at draw time, since an exchange of two hundred tool turns is one thing the
-/// human is reading about. No live marker: the newest turn is the one an
-/// eviction structurally cannot name, so saying so twice would say nothing.
-pub fn context_rows_card(rows: &[crate::record::TurnRow], evicted: usize) -> Card {
-    let fields = context_exchanges(rows)
+/// The survey is one row per turn; the card groups them at draw time into a
+/// prompt and the turns answering it, since two hundred tool turns under one
+/// prompt are one thing the human is reading about. No live marker: the
+/// newest turn is the one an eviction structurally cannot name, so saying so
+/// twice would say nothing.
+pub fn context_rows_card(rows: &[crate::record::TurnRow]) -> Card {
+    let fields = context_groups(rows)
         .into_iter()
         .map(|group| Field {
-            label: format!("exchange {}", group.exchange),
+            label: format!("turn {}", group.prompt),
             value: FieldVal::Inline(vec![
                 Span::plain(group.label),
                 Span::new(
@@ -284,39 +285,29 @@ pub fn context_rows_card(rows: &[crate::record::TurnRow], evicted: usize) -> Car
     let mut marks = vec![Mark::Text {
         spans: vec![Span::new(Role::Strong, "context")],
     }];
-    if evicted > 0 {
-        marks.push(Mark::Text {
-            spans: vec![Span::new(
-                Role::Muted,
-                format!(
-                    "evicted: {evicted} turn{}",
-                    if evicted == 1 { "" } else { "s" }
-                ),
-            )],
-        });
-    }
     marks.push(Mark::Fields { rows: fields });
     Card(marks)
 }
 
-/// One drawn exchange: its opening line, the turns of it still in the
-/// context, and what they weigh together.
-struct ContextExchange {
-    exchange: u64,
+/// One drawn group: the prompt it opens on, its opening line, the turns of it
+/// still in the context, and what they weigh together.
+struct ContextGroup {
+    prompt: u64,
     label: String,
     /// `turns 13–15`, or `turn 13` where one stands alone.
     turns: String,
     bytes: usize,
 }
 
-/// The survey's turns grouped into contiguous runs sharing an exchange. The
-/// label is the exchange's own opening line where its user turn is still in
-/// the context, and the run's first line where a cut took that turn.
-fn context_exchanges(rows: &[crate::record::TurnRow]) -> Vec<ContextExchange> {
+/// The survey's turns grouped as a prompt and the turns answering it: a group
+/// opens at every user row, so rows before the first one — an ancestor's
+/// turns, or an answer whose prompt a cut took — form a group of their own.
+/// The label is the opening line of whichever row opens the group.
+fn context_groups(rows: &[crate::record::TurnRow]) -> Vec<ContextGroup> {
     let mut drawn: Vec<(&crate::record::TurnRow, u64, usize)> = Vec::new();
     for row in rows {
         match drawn.last_mut() {
-            Some((first, last, bytes)) if first.exchange == row.exchange => {
+            Some((_, last, bytes)) if !matches!(row.role, crate::agent::event::Role::User) => {
                 *last = row.id;
                 *bytes += row.bytes;
             }
@@ -325,8 +316,8 @@ fn context_exchanges(rows: &[crate::record::TurnRow]) -> Vec<ContextExchange> {
     }
     drawn
         .into_iter()
-        .map(|(first, last, bytes)| ContextExchange {
-            exchange: first.exchange,
+        .map(|(first, last, bytes)| ContextGroup {
+            prompt: first.id,
             label: first.label.clone(),
             turns: if first.id == last {
                 format!("turn {last}")

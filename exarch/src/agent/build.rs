@@ -5,7 +5,7 @@
 
 use crate::agent::cancel::EvalReach;
 use crate::agent::dial::Dial;
-use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
+use crate::agent::event::{AgentLog, EditAuthority};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
@@ -540,14 +540,17 @@ impl Avatar {
         error.map_or(Ok(()), Err)
     }
 
+    /// Evict `anchor` and every resident turn after it, no note: the harness
+    /// states facts about the conversation.  Descendants and the shell are
+    /// untouched.
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
         // Coupled first, so the edit's record — the one notification there is,
-        // now that `apply_edit` authors it through the seam — publishes live.
+        // now that `evict` authors it through the seam — publishes live.
         self.couple(emit);
         {
             let mut log = self.log.lock();
-            let exchanges = log.rewind_exchanges(anchor)?;
-            log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?;
+            let turns = log.suffix_from(anchor)?;
+            log.evict(&turns, None, EditAuthority::User)?;
         }
         self.inbox.drop_nudges();
         if let Some(nudges) = &mut self.nudges {
@@ -1310,27 +1313,21 @@ mod tests {
 
         assert_eq!(
             session.rewind(9, &emit).unwrap_err(),
-            "exchange 9 is not present in your context — the last exchange is 5"
+            "turn 9 is not recorded — the latest is 6"
         );
 
         session
             .log
             .lock()
-            .apply_edit(
-                ContextOp::Evict {
-                    through: 2,
-                    note: None,
-                },
-                EditAuthority::Harness,
-            )
+            .evict(&[1, 2], None, EditAuthority::Harness)
             .unwrap();
         assert_eq!(
             session.rewind(1, &emit).unwrap_err(),
-            "exchange 1 has already left your context — the earliest still in it is 3"
+            "turn 1 has already left your context — the earliest still in it is 3"
         );
 
         session.inbox.push(Post::Nudge {
-            exchange: 5,
+            prompt: 5,
             text: "stale continuation".into(),
         });
         session
@@ -1343,20 +1340,20 @@ mod tests {
         );
         assert!(
             !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
-            "a queued nudge for a rewound exchange must not commit"
+            "a queued nudge for a rewound prompt must not commit"
         );
-        // The eviction applied above published its own edit record once the
-        // first rewind attempt coupled the seam, so the drop is asserted
-        // anywhere on the channel rather than at a fixed position.
+        // The eviction applied above published its own record once the first
+        // rewind attempt coupled the seam, so the cut is asserted anywhere on
+        // the channel rather than at a fixed position.
         assert!(
             crate::bus::drain_records(&rx)
                 .into_iter()
                 .any(|record| matches!(
                     record,
-                    crate::record::Record::Protocol(crate::record::Protocol::ContextEdited {
-                        op: ContextOp::Drop { exchanges },
+                    crate::record::Record::Protocol(crate::record::Protocol::Evicted {
+                        cut,
                         by: EditAuthority::User,
-                    }) if exchanges == vec![3, 5]
+                    }) if cut.turns == vec![3, 4, 5, 6]
                 )),
             "rewind must be durable on the trace"
         );

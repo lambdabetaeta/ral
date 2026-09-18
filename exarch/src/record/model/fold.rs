@@ -1,109 +1,104 @@
-//! The one fold: [`Context::step`] judges a record and applies it, and a
-//! context edit is the one step that moves a turn from here to there —
-//! its legality and its planning live beside it.
+//! The one fold: [`Context::step`] judges a record and applies it, and an
+//! eviction is the one step that moves a turn from here to there — its
+//! resolution and its planning live beside it.
 
 use super::state::{admissible, advance};
 use super::{
-    Context, Held, Turn, into_chat_messages, message_bytes, message_label,
-    not_recorded_refusal_turn, opening_line,
+    Context, Held, Turn, into_chat_messages, message_bytes, message_label, message_role,
+    not_recorded_refusal_turn, opening_line, runs,
 };
-use crate::agent::event::{ContextOp, TurnKind};
+use crate::agent::event::{Role, TurnKind};
 use crate::record::{Protocol, Record, Recorded, Refusal};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 impl Context {
-    /// Resolve a user rewind into the whole visible suffix beginning at its
-    /// anchor. The anchor is checked before the suffix is derived.
+    /// The set of resident turns an eviction naming `turns` actually takes:
+    /// the one place the survivor rule lives, and the set the writer records
+    /// so replay departs exactly these ids.
+    ///
+    /// Refused by name: a turn never recorded, one that has already left, and
+    /// the turn being written now. Kept silently: a prompt one of whose
+    /// answers the set leaves in the context — hence the invariant that every
+    /// resident assistant turn has its prompt resident before it.
+    ///
+    /// # Errors
+    /// Refuses an eviction that names no turn, one of the three above, and a
+    /// set the survivor rule would empty.
+    pub(crate) fn resolve_cut(&self, turns: &[u64]) -> Result<Vec<u64>, String> {
+        // Order and repeats are the caller's business, not a refusal.
+        let mut named: BTreeSet<u64> = turns.iter().copied().collect();
+        if named.is_empty() {
+            return Err("an eviction must name at least one turn".into());
+        }
+        for &id in &named {
+            let Some(turn) = self.turn(id) else {
+                return Err(not_recorded_refusal_turn(id, self.reach()));
+            };
+            if !turn.is_resident() {
+                return Err(self.departed_turn_refusal(id));
+            }
+            if self.unclosed_turn() == Some(id) {
+                return Err(format!(
+                    "turn {id} is being written now — an eviction keeps the work in hand"
+                ));
+            }
+        }
+        // The survivor rule: a prompt one of whose answers the set leaves in
+        // the context stays with it.
+        let kept: Vec<u64> = named
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.turn(id).is_some_and(Turn::is_user)
+                    && self
+                        .answers(id)
+                        .any(|turn| turn.is_resident() && !named.contains(&turn.id))
+            })
+            .collect();
+        for id in &kept {
+            let _ = named.remove(id);
+        }
+        if named.is_empty() {
+            let user = *kept
+                .first()
+                .expect("the set emptied, so the rule kept a prompt back");
+            let rest: Vec<u64> = self
+                .answers(user)
+                .filter(|turn| turn.is_resident())
+                .map(|turn| turn.id)
+                .collect();
+            let (turns, are, them) = if rest.len() == 1 {
+                ("turn", "is", "it")
+            } else {
+                ("turns", "are", "them")
+            };
+            return Err(format!(
+                "turn {user} is the prompt whose {turns} {} {are} still in your context, and a \
+                 prompt stays with {them} — name {them} too, or leave it",
+                runs(&rest)
+            ));
+        }
+        Ok(named.into_iter().collect())
+    }
+
+    /// Every resident turn from `anchor` on — what a user rewind takes. The
+    /// anchor is checked before the suffix is derived; at a ready boundary
+    /// nothing is unclosed, so the suffix may be the whole context.
     ///
     /// # Errors
     /// Refuses an absent anchor or one that has already left the context.
-    pub(crate) fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        let mut exchanges: Vec<u64> = Vec::new();
-        for turn in self.resident() {
-            if turn.exchange >= anchor && exchanges.last() != Some(&turn.exchange) {
-                exchanges.push(turn.exchange);
-            }
-        }
-        if exchanges.first() != Some(&anchor) {
-            if self.turn(anchor).is_some() {
-                return Err(self.departed_refusal(anchor));
-            }
-            return Err(rewind_unknown_refusal(anchor, self.last_context_exchange()));
-        }
-        Ok(exchanges)
-    }
-
-    /// # Errors
-    /// Refuses an unnamed edit, an unaddressable target, or the work in hand.
-    pub(crate) fn validate_edit(&self, op: &ContextOp) -> Result<(), String> {
-        match op {
-            ContextOp::Evict { through, .. } => self.validate_cut(*through),
-            ContextOp::Drop { exchanges } => {
-                if exchanges.is_empty() {
-                    return Err("a context edit must name at least one exchange".into());
-                }
-                let mut named = HashSet::with_capacity(exchanges.len());
-                for &exchange in exchanges {
-                    if !named.insert(exchange) {
-                        return Err(format!("exchange {exchange} was named more than once"));
-                    }
-                    self.validate_droppable(exchange)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// A cut names a turn still in the context, and never the newest one: an
-    /// eviction exists to keep the work in hand.
-    fn validate_cut(&self, through: u64) -> Result<(), String> {
-        let Some(turn) = self.turn(through) else {
-            return Err(not_recorded_refusal_turn(through, self.reach()));
+    pub(crate) fn suffix_from(&self, anchor: u64) -> Result<Vec<u64>, String> {
+        let Some(turn) = self.turn(anchor) else {
+            return Err(not_recorded_refusal_turn(anchor, self.reach()));
         };
         if !turn.is_resident() {
-            return Err(self.departed_turn_refusal(through));
+            return Err(self.departed_turn_refusal(anchor));
         }
-        if self
+        Ok(self
             .resident()
-            .last()
-            .is_some_and(|last| last.id == through)
-        {
-            return Err(format!(
-                "{through} is the newest turn; an eviction keeps the work in hand"
-            ));
-        }
-        Ok(())
-    }
-
-    /// An exchange is droppable iff some turn of it is still in the context
-    /// and it is not the one being written.
-    fn validate_droppable(&self, exchange: u64) -> Result<(), String> {
-        if !self.resident().any(|turn| turn.exchange == exchange) {
-            if self.exchange_turns(exchange).is_empty() {
-                return Err(format!(
-                    "exchange {exchange} is not present in your context"
-                ));
-            }
-            return Err(self.departed_refusal(exchange));
-        }
-        if self.is_live_exchange(exchange) {
-            return Err(format!(
-                "exchange {exchange} is the one you are in — a context edit may only name closed exchanges"
-            ));
-        }
-        Ok(())
-    }
-
-    fn departed_refusal(&self, exchange: u64) -> String {
-        match self.resident().next() {
-            Some(first) => format!(
-                "exchange {exchange} has already left your context — the earliest still in it is {}",
-                first.exchange
-            ),
-            None => format!(
-                "exchange {exchange} has already left your context — no exchange is still in it"
-            ),
-        }
+            .filter(|turn| turn.id >= anchor)
+            .map(|turn| turn.id)
+            .collect())
     }
 
     fn departed_turn_refusal(&self, turn: u64) -> String {
@@ -118,21 +113,21 @@ impl Context {
         }
     }
 
-    /// The cut an eviction would make to spend no more than `keep` bytes on
-    /// what stays, `None` when nothing is old enough to shed.
+    /// The cut the harness's pressure eviction would make to spend no more
+    /// than `keep` bytes on what stays, resolved; `None` when nothing is old
+    /// enough to shed.
     ///
     /// Candidates are every turn in the context but the last, so the work in
     /// hand is unnameable rather than merely unlikely. The last turn's own
-    /// weight is spent up front, and its user turn's with it: a user turn
-    /// stays while its exchange has an assistant turn in context, so that one
-    /// is never a saving. For the same reason a user turn that overshoots
-    /// cannot leave alone — its whole exchange does, the cut falling through
-    /// the exchange's newest resident turn.
-    pub(crate) fn plan_eviction(&self, keep: usize) -> Option<u64> {
+    /// weight is spent up front, and its prompt's with it: a prompt stays
+    /// while one of its answers is in context, so that one is never a saving.
+    /// For the same reason a prompt that overshoots cannot leave alone — its
+    /// answers go with it, the cut falling through the newest resident one.
+    pub(crate) fn plan_eviction(&self, keep: usize) -> Option<Vec<u64>> {
         let resident: Vec<&Turn> = self.resident().collect();
         let (last, candidates) = resident.split_last()?;
         let mut spent = last.bytes;
-        let paid = (!last.is_user()).then_some(last.exchange);
+        let paid = (!last.is_user()).then(|| self.prompt_of(last.id)).flatten();
         if let Some(user) = paid.and_then(|id| self.turn(id)) {
             spent = spent.saturating_add(user.bytes);
         }
@@ -143,17 +138,21 @@ impl Context {
             let total = spent.saturating_add(turn.bytes);
             if total > keep {
                 let through = if turn.is_user() {
-                    candidates
-                        .iter()
-                        .rev()
-                        .find(|t| t.exchange == turn.id)
+                    self.answers(turn.id)
+                        .filter(|t| t.is_resident())
+                        .last()
                         .map_or(turn.id, |t| t.id)
                 } else {
                     turn.id
                 };
-                // A cut that would take nothing is no plan: the work in hand
-                // and the user turn it belongs to already fill the budget.
-                return self.table.takes(through).then_some(through);
+                let prefix: Vec<u64> = resident
+                    .iter()
+                    .filter(|turn| turn.id <= through)
+                    .map(|turn| turn.id)
+                    .collect();
+                // A cut that takes nothing is no plan, and an empty set is
+                // exactly what `resolve_cut` refuses.
+                return self.resolve_cut(&prefix).ok();
             }
             spent = total;
         }
@@ -180,12 +179,13 @@ impl Context {
                 self.table.install(turns, notes);
                 return Ok(());
             }
-            Protocol::ContextEdited { op, .. } => {
-                self.apply_context_op(op);
+            Protocol::Evicted { cut, .. } => {
+                self.table.evict(&cut.turns, cut.note.clone());
                 self.newest_edit = Some(index);
                 return Ok(());
             }
             Protocol::UserPrompt { .. }
+            | Protocol::Steering { .. }
             | Protocol::ContextMessage { .. }
             | Protocol::AssistantMessage { .. }
             | Protocol::ToolResults { .. } => {}
@@ -243,6 +243,28 @@ impl Context {
                 )));
             }
         }
+        if let Protocol::Evicted { cut, .. } = protocol {
+            if cut.turns.is_empty() {
+                return Err(foreign(format!(
+                    "record {n} evicts no turn; was record.jsonl hand-edited?"
+                )));
+            }
+            if let Some(id) = cut
+                .turns
+                .iter()
+                .copied()
+                .find(|id| !self.turn(*id).is_some_and(Turn::is_resident))
+            {
+                return Err(foreign(format!(
+                    "record {n} evicts turn {id}, which is not in the context; was record.jsonl hand-edited?"
+                )));
+            }
+        }
+        if matches!(protocol, Protocol::Steering { .. }) && self.table.turns().is_empty() {
+            return Err(foreign(format!(
+                "record {n} steers a turn, but no turn has been recorded; was record.jsonl hand-edited?"
+            )));
+        }
         if let Some(turn) = self.extends(protocol).filter(|turn| !turn.is_resident()) {
             let id = turn.id;
             return Err(foreign(
@@ -255,35 +277,24 @@ impl Context {
                 },
             ));
         }
-        if let Protocol::ContextMessage { id, exchange, .. } = protocol
-            && let Some(turn) = self.turn(*id)
-            && turn.exchange != *exchange
-        {
-            return Err(foreign(format!(
-                "record {n} imports turn {id} under exchange {exchange}, but the link places that turn in exchange {}",
-                turn.exchange
-            )));
-        }
         Ok(())
     }
 
-    /// An id the log had already moved past: a prompt is either a fresh
-    /// exchange or steering on the one in hand, an assistant message is
-    /// always freshly minted, and an imported message names a turn the link
-    /// brought over.
+    /// An id the log had already moved past: a prompt always opens a turn, an
+    /// assistant message is always freshly minted, and an imported message
+    /// names a turn the link brought over.
     fn stale(&self, protocol: &Protocol) -> Option<u64> {
         let reach = self.reach();
         match protocol {
-            Protocol::UserPrompt { exchange, .. } => Some(*exchange).filter(|id| {
-                Some(*id) <= reach
-                    && self.table.turns().last().map(|turn| turn.exchange) != Some(*id)
-            }),
-            Protocol::AssistantMessage { turn, .. } => Some(*turn).filter(|id| Some(*id) <= reach),
+            Protocol::UserPrompt { turn, .. } | Protocol::AssistantMessage { turn, .. } => {
+                Some(*turn).filter(|id| Some(*id) <= reach)
+            }
             Protocol::ContextMessage { id, .. } => {
                 Some(*id).filter(|id| Some(*id) <= reach && self.turn(*id).is_none())
             }
-            Protocol::ToolResults { .. }
-            | Protocol::ContextEdited { .. }
+            Protocol::Steering { .. }
+            | Protocol::ToolResults { .. }
+            | Protocol::Evicted { .. }
             | Protocol::Inherited { .. } => None,
         }
     }
@@ -292,13 +303,11 @@ impl Context {
     /// newest row, or the row a [`Protocol::ContextMessage`] names.
     fn extends(&self, protocol: &Protocol) -> Option<&Turn> {
         match protocol {
-            Protocol::UserPrompt { exchange, .. } => (Some(*exchange) <= self.reach())
-                .then(|| self.table.turns().last())
-                .flatten(),
-            Protocol::ToolResults { .. } => self.table.turns().last(),
+            Protocol::Steering { .. } | Protocol::ToolResults { .. } => self.table.turns().last(),
             Protocol::ContextMessage { id, .. } => self.turn(*id),
-            Protocol::AssistantMessage { .. }
-            | Protocol::ContextEdited { .. }
+            Protocol::UserPrompt { .. }
+            | Protocol::AssistantMessage { .. }
+            | Protocol::Evicted { .. }
             | Protocol::Inherited { .. } => None,
         }
     }
@@ -306,65 +315,41 @@ impl Context {
     /// Which row a record's material lands on, opening one where the record
     /// bears an id the structure has not reached.
     ///
-    /// A prompt past the reach opens an exchange; one at or below it is
-    /// steering, and extends the assistant turn it answers. An imported
-    /// message names its turn outright, the table having arrived whole with
-    /// the link, and only a note that inherits nothing opens one of its own.
+    /// A prompt opens a turn of its own; a steering line extends the newest.
+    /// An imported message names its turn outright, the table having arrived
+    /// whole with the link, and only a note that inherits nothing opens one of
+    /// its own.
     fn place(&mut self, protocol: &Protocol) -> Option<usize> {
         let reach = self.reach();
         let last = self.table.turns().len().checked_sub(1);
         match protocol {
-            Protocol::UserPrompt { exchange, text } => {
-                if Some(*exchange) <= reach {
-                    return last;
-                }
+            Protocol::UserPrompt { turn, text } => {
                 Some(
                     self.table
-                        .open(*exchange, *exchange, TurnKind::Exchange, opening_line(text)),
+                        .open(*turn, Role::User, TurnKind::Own, opening_line(text)),
                 )
             }
-            Protocol::AssistantMessage { turn, message, .. } => {
-                let exchange = self.table.turns().last()?.exchange;
-                Some(
-                    self.table
-                        .open(*turn, exchange, TurnKind::Exchange, message_label(message)),
-                )
-            }
-            Protocol::ContextMessage {
-                id,
-                exchange,
-                message,
-            } => {
+            Protocol::AssistantMessage { turn, message, .. } => Some(self.table.open(
+                *turn,
+                Role::Assistant,
+                TurnKind::Own,
+                message_label(message),
+            )),
+            Protocol::ContextMessage { id, message } => {
                 if let Some(at) = self.table.turns().iter().position(|turn| turn.id == *id) {
                     return Some(at);
                 }
                 (Some(*id) > reach).then(|| {
-                    self.table
-                        .open(*id, *exchange, TurnKind::Import, message_label(message))
+                    self.table.open(
+                        *id,
+                        message_role(message),
+                        TurnKind::Import,
+                        message_label(message),
+                    )
                 })
             }
-            Protocol::ToolResults { .. } => last,
-            Protocol::ContextEdited { .. } | Protocol::Inherited { .. } => None,
+            Protocol::Steering { .. } | Protocol::ToolResults { .. } => last,
+            Protocol::Evicted { .. } | Protocol::Inherited { .. } => None,
         }
-    }
-
-    /// An edit is the one step that moves a turn from here to there; the
-    /// table decides which turns a cut takes.
-    pub(super) fn apply_context_op(&mut self, op: &ContextOp) {
-        match op {
-            ContextOp::Evict { through, note } => self.table.evict(*through, note.clone()),
-            ContextOp::Drop { exchanges } => self.table.drop_exchanges(exchanges),
-        }
-    }
-}
-
-fn rewind_unknown_refusal(id: u64, last: Option<u64>) -> String {
-    match last {
-        Some(last) => {
-            format!("exchange {id} is not present in your context — the last exchange is {last}")
-        }
-        None => format!(
-            "exchange {id} is not present in your context — there is no last exchange to rewind"
-        ),
     }
 }

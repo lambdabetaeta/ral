@@ -145,7 +145,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         arg: None,
         rewrites: true,
         any_tab: false,
-        help: "Evict the older half of the conversation to the log; it stays readable to the model.",
+        help: "Evict the older half of the context; it stays readable to the model.",
     },
     SlashCommand {
         name: "/context",
@@ -158,10 +158,10 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/rewind",
         aliases: &[],
-        arg: Some("<exchange>"),
+        arg: Some("<turn>"),
         rewrites: true,
         any_tab: false,
-        help: "Drop context from an exchange; descendants and the shell are untouched.",
+        help: "Evict a turn and every turn after it; descendants and the shell are untouched.",
     },
     SlashCommand {
         name: "/resources",

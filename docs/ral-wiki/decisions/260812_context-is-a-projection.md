@@ -185,6 +185,20 @@ residency is the price everywhere. Transience is now where a session
 directory lives — a `TempDir` that unlinks at exit — not a second shape for
 the fold.
 
+## Superseding note: the model may rewind, and the asymmetry is gone
+
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
+withdraws two more of the positions below. A model-facing rewind is no longer
+out of v1: one edit, `` context `evict [turns, note] ``, takes any set of
+resident turns wherever they lie, and the prefix/set asymmetry is dissolved by
+there being a single address — a list of turn ids — for evicting and for
+reading alike. "A live exchange is untouchable until quiescence" was the
+coarsest address at which the real rule could be stated: what no edit may
+touch is the *unclosed* turn, the one being written, and at `ReadyForUser`
+nothing is unclosed, so a user rewind may empty the context. The law is
+untouched — identity is recorded, and the cut a record names is the resolved
+one, the ids that actually left.
+
 ## Accepted losses
 
 The design accepts the following costs and boundaries rather than smuggling

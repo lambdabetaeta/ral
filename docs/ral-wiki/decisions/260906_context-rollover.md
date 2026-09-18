@@ -349,6 +349,17 @@ residency keeps the `Locus`. Two of its accepted losses are withdrawn:
   records themselves, so `fold(log) == memo` holds across `Evict` and
   `Inherited` alike.
 
+## Superseding note: one edit, and a door that speaks turns
+
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
+retires the `` `drop `` tag: there is one context edit, `` `evict [turns,
+note] ``, and the exchange is no longer an address. The read door speaks turns
+too — `` transcript `read [turns: [Int]] `` answers one element per turn, and
+`` `grep ``'s narrowing is the same list — so `exchanges:` is gone from both.
+Evict-don't-summarise, the lineage's one address space and `transcript` as the
+door all stand; what a cut takes is a set, and a marker stands at each hole it
+opens rather than only at the head.
+
 ## See also
 
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] (what

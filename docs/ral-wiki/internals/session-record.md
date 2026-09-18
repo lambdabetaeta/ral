@@ -1,7 +1,7 @@
 ---
 verified_at_commit: d9abfb52
 verified_at_date: 2026-09-11
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_marker, Context::step, Context::plan_eviction, Context::resolve_cut, Context::place]
 ---
 
 # Session record: one seam, one log
@@ -92,43 +92,56 @@ automaton in `model/state.rs`, the fold in `model/fold.rs`, the render in
 where each one is**
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
 
-- `turns: Vec<Turn>` in id order — `{ id, exchange, kind, label, bytes, body }`
-  — where a user turn is the one with `id == exchange`;
+- `turns: Vec<Turn>` in id order — `{ id, role, kind, label, bytes, body }` —
+  `role` being `user` or `assistant`, and `kind` `own`, `import` or
+  `inherited`; which assistant turns answer a given prompt is a function of
+  role and order, derived where the survivor rule and `plan_eviction` need it
+  and held nowhere
+  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
 - a turn's `body` is either `Here { records, origin }`, its records in memory,
   or `There { at, cut }`, a `Pointer` to the file and byte ranges that hold
   them; the *context* is the `Here` subsequence;
 - `notes: Vec<Option<String>>`, one slot per eviction, which `There::cut`
-  indexes — `None` there is a drop, which the marker does not list;
+  indexes — `None` is a cut made without a note, the user's rewind and the
+  harness's own, and the marker then has no line to draw;
 - `source`, this log's own `record.jsonl`, where a turn recorded here points
   once it leaves; the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
 
 Those first three live in a `Table` private to `model/table.rs`, which hands
 the rest of the module a `&[Turn]` and nothing writable. A turn therefore
-changes where it is only through `Table::evict` or `Table::drop_exchanges`,
-the two functions that know which turns a cut takes — so the invariant *the
+changes where it is only through `Table::evict`, the one function that moves a
+turn from here to there — so the invariant *the
 first resident turn is a user turn* is kept by construction rather than by
 every caller remembering the survivor rule.
 
 `Turn` and `Body` are private to the module: a turn holds records, so it is
 not a value to hand out. Two projections take its place. `Turn::row` yields a
-`Row { id, exchange, kind, label, bytes, held }`, `Held` read *off the body* —
-`Here` is `Resident`, `There { cut: Some(c) }` is `Evicted { cut: c }`,
-`There { cut: None }` is `Dropped` — so residency and the structure cannot
+`TurnRow { id, role, kind, label, bytes, held }`, `Held` read *off the body* —
+`Here` is `Resident`, `There { cut }` is `Evicted { cut }`, and there is no
+third state — so residency and the structure cannot
 disagree, and a row states which eviction took its turn rather than leaving a
 reader to infer it from an id window. `Context::linked` yields one
 `Linked { row, at }` per turn: the row, and the address of its transcript
-copy. Those two, with `Row`, `Held`, `Pointer` and `Linked`, are the whole
-public surface; `Display::Context` carries `Vec<Row>`.
+copy. Those two, with `TurnRow`, `Held`, `Pointer` and `Linked`, are the whole
+public surface; `Display::Context` carries `Vec<TurnRow>`.
 
 Everything the model or the human reads off the structure is a pure function
 of it, computed on call and memoised nowhere: `rendered`, `history_bytes`,
-`context_survey`, `transcript_index`, `render_head`, `plan_eviction`,
-`sourced`, and the pressure reminder's `through`. `Context::step` is the one
+`context_survey`, `transcript_index`, `render_marker`, `plan_eviction` — which
+answers the whole set a pressure cut would take — and `sourced`.
+`Context::step` is the one
 fold — it judges a record before applying it, so a hand-edited or foreign file
 is refused by the same function that folds a live one, and a resume has
-nothing to compare its result with. `Table::evict` and `Table::drop_exchanges`
-are the one place a turn moves from here to there.
+nothing to compare its result with. `Table::evict`
+is the one place a turn moves from here to there.
+
+**A recorded cut is the resolved cut.** `Context::resolve_cut` applies the
+survivor rule at the writer — a prompt whose answers still hold a resident
+turn outside the set stays — so `Cut { turns, note }` names the ids
+that actually left. Replay departs exactly those and `judge` refuses a record
+naming a turn that is not resident, re-deriving nothing
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
 **Eviction is a change of address, not a deletion.** The table sets each
 departing turn's body to `There { at, cut }`, where `at` is its `origin`
@@ -139,7 +152,7 @@ carries, *before* the parse, so a range that no longer names what it
 measured — a rotated segment, a copied session directory, an edited log — is
 refused as the mismatch it is rather than answered with whatever now lies at
 those offsets. The door reads a turn at a time, so a search never holds more
-than one exchange, and it holds one descriptor, reopening only where
+than one turn, and it holds one descriptor, reopening only where
 consecutive turns name different logs. The log is thereby the model's
 transcript as well as its identity
 ([[decisions/260906_context-rollover|context-rollover]]).
@@ -156,24 +169,29 @@ structure, then the file".
 ### The provider-facing context is a pure function of the structure
 
 `Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
-behind it. Assembly is one walk: the head marker where `render_head` yields
-one, then every resident turn's messages, in order — an exchange interrupted
-short of a reply included, as it lies
+behind it. Assembly is one walk: at each **hole** — a maximal run of departed
+turns — the one marker `render_marker` yields for it, and every resident turn's
+messages, in order — a prompt whose answers were interrupted
+short of a reply included, as they lie
 ([[invariants/turn-ends-ready|exchange-ends-ready]]). `history_bytes` is the
 same walk over the per-turn sums with no turn rendered at all, and
 `context_survey` reports it as `total-bytes` beside the rows rather than
 summing them.
 
-`render_head` renders on every call too. It groups the departed rows by the
-cut their body names — maximal runs of table-adjacent rows sharing an exchange
-and a cut — and draws `notes[i]` after cut *i*'s rows. Correct by
-construction, since the body says which cut took a turn; and message 0 stays
+`render_marker` renders on every call too. Per hole it draws one role-marked
+row per departed turn, grouped by the cut their body names, with `notes[i]`
+after cut *i*'s rows, in one bracketed user-voice message standing at the
+hole's own position — `[EXARCH // Turns 1–29, 31–35 have left your context. …]`
+over rows like `  41  assistant  <label>  12 KB`, forty rows to a hole before
+the rest collapse into a line naming their range. The hole
+at position 0 is the marker a prefix cut leaves; a later cut touches its own
+hole and nothing else, so the provider re-reads from the hole rather than from
+the start. Correct by
+construction, since the body says which cut took a turn; and a message stays
 byte-stable between edits not because it is cached but because it is a
 function of a structure that did not change. This is the model fold's
 recompute invariant taken to its end: there is no memo to read as authority,
-and nothing to keep in step. Rendering the marker on every call also closes a
-defect the cached one had, where a drop that emptied a partially evicted
-exchange left the sentence describing turns that had since left whole.
+and nothing to keep in step.
 
 The price is one build of the context per provider request — once per turn,
 never per loop iteration — on top of the clone per HTTP attempt at the wire
@@ -280,6 +298,8 @@ the live bus lifetime. The broader accumulator/fold distinction is in
 ADR for the one wire door, and
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] for the
 structure every view above projects — the turn as the atom of eviction, and
-the turn's own body as the one statement of where it is;
+the turn's own body as the one statement of where it is, and
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
+for the one edit that moves a turn and the marker each hole carries;
 [[map/exarch/provider|provider]] covers the one door that turns those messages into an owned wire
 request.

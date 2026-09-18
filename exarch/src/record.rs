@@ -29,7 +29,7 @@ pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, View};
 pub(crate) use log::FleetSink;
 
 use crate::agent::Agent;
-use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
+use crate::agent::event::{Cut, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
 use crate::bus::card::Card;
 use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
@@ -106,15 +106,20 @@ impl From<Forensic> for Record {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Protocol {
+    /// A prompt opening a user turn of its own, under the id it carries.
     UserPrompt {
-        exchange: u64,
+        turn: u64,
+        text: String,
+    },
+    /// A user line extending the newest turn: a steering line, or a nudge
+    /// continuing the prompt in hand.
+    Steering {
         text: String,
     },
     /// A message a `mnemon` child inherits from its parent's context, under
-    /// the turn and exchange ids the parent gave it.
+    /// the turn id the parent gave it.
     ContextMessage {
         id: u64,
-        exchange: u64,
         message: ChatMessage,
     },
     /// The link a `mnemon` child opens with: the parent's whole turn table,
@@ -127,8 +132,8 @@ pub enum Protocol {
         /// recorded.  The child's marker, survey and index are the same
         /// projections of it.
         turns: Vec<model::Linked>,
-        /// The notes made at those evictions, so the child's `render_head` is
-        /// the same projection of the same structure.
+        /// The notes made at those evictions, so the child's markers are the
+        /// same projection of the same structure.
         notes: Vec<Option<String>>,
     },
     AssistantMessage {
@@ -141,8 +146,10 @@ pub enum Protocol {
     ToolResults {
         results: Vec<ToolResult>,
     },
-    ContextEdited {
-        op: ContextOp,
+    /// One eviction: the resident turns it took, resolved by the writer, and
+    /// the model's note.  Replay departs exactly these ids.
+    Evicted {
+        cut: Cut,
         by: EditAuthority,
     },
 }
@@ -226,9 +233,6 @@ pub enum Display {
     },
     Context {
         turns: Vec<model::TurnRow>,
-        /// Turns that have left the context by eviction; drawn as one leading
-        /// line when non-zero.
-        evicted: usize,
     },
     /// Beside `Forensic::TurnStarted`, whose `tuning` the screen never
     /// showed — the display class never derives from the twin it duplicates a
@@ -237,9 +241,9 @@ pub enum Display {
     Turn {
         id: u64,
     },
-    /// Beside `Protocol::ContextEdited`, for the same reason.
-    ContextEdited {
-        op: ContextOp,
+    /// Beside `Protocol::Evicted`, for the same reason.
+    Evicted {
+        cut: Cut,
         by: EditAuthority,
     },
 }
@@ -327,7 +331,7 @@ pub enum Forensic {
     UsageDelta {
         usage: UsageDelta,
     },
-    /// Ctrl-C or Esc mid-exchange.
+    /// Ctrl-C or Esc mid-turn.
     Cancelled,
     /// A diagnostic for the user alone — never reaches the model.
     Error {

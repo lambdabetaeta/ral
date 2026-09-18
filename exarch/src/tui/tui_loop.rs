@@ -79,7 +79,8 @@ impl Control for ReplControl {
             let anchor = match rest {
                 "" => {
                     session.note_error(
-                        "usage: /rewind <exchange> — name a closed exchange in the current context"
+                        "usage: /rewind <turn> — name a turn still in your context; \
+                         it and every later turn leave"
                             .into(),
                     );
                     return Verdict::Continue;
@@ -89,7 +90,7 @@ impl Control for ReplControl {
                         anchor
                     } else {
                         session.note_error(format!(
-                            "/rewind expects one non-negative exchange number, got `{text}`"
+                            "/rewind expects one non-negative turn number, got `{text}`"
                         ));
                         return Verdict::Continue;
                     }
@@ -185,7 +186,7 @@ pub fn run(
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
     // records through the same seam the worker's own commits use.
     let recorder = session.recorder();
-    if let Some((exchanges, bytes)) = session.resume_summary() {
+    if let Some((turns, bytes)) = session.resume_summary() {
         // Fold the record log into a memo *before* the note below, so the
         // note is the boundary: everything ahead of it is replayed history,
         // everything after is the live session.  The memo becomes the
@@ -209,10 +210,7 @@ pub fn run(
         // not replay a prior resume's note as if it were history.
         tui.app.push_note(
             session.agent.id,
-            &format!(
-                "resumed: {exchanges} exchanges, {} KB",
-                bytes.div_ceil(1024)
-            ),
+            &format!("resumed: {turns} turns, {} KB", bytes.div_ceil(1024)),
         );
     }
     // Without a way to wake the parked worker with a `/quit`, the `join` below
@@ -617,9 +615,9 @@ mod tests {
         assert!(
             crate::bus::drain_records(&rx).iter().any(|rec| matches!(
                 rec,
-                Record::Forensic(Forensic::Error { text }) if text.contains("exchange 7")
+                Record::Forensic(Forensic::Error { text }) if text.contains("turn 7")
             )),
-            "a /rewind past the last exchange reports the bad anchor"
+            "a /rewind past the last turn reports the bad anchor"
         );
     }
 }

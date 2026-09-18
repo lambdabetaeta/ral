@@ -9,8 +9,8 @@
 //! output.
 
 use crate::agent::event::{
-    AgentLog, ContextOp, ContextSurvey, EditAuthority, GrepAnswer, TranscriptExchange,
-    TranscriptMessage, TranscriptPart, role_label,
+    AgentLog, ContextSurvey, EditAuthority, GrepAnswer, TranscriptMessage, TranscriptPart,
+    TranscriptTurn, role_label,
 };
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
@@ -88,7 +88,6 @@ pub(crate) enum DeskAct {
     Schedule,
     Unschedule,
     Reply,
-    ContextDrop,
     ContextEvict,
 }
 
@@ -102,7 +101,6 @@ impl DeskAct {
             Self::Schedule => "schedule",
             Self::Unschedule => "unschedule",
             Self::Reply => "reply",
-            Self::ContextDrop => "context-drop",
             Self::ContextEvict => "context-evict",
         }
     }
@@ -117,7 +115,6 @@ impl DeskAct {
             "schedule" => Self::Schedule,
             "unschedule" => Self::Unschedule,
             "reply" => Self::Reply,
-            "context-drop" => Self::ContextDrop,
             "context-evict" => Self::ContextEvict,
             other => unreachable!("desk act fragment carries an unknown verb `{other}`"),
         }
@@ -138,7 +135,6 @@ impl DeskAct {
             // The one act with no addressee: a returning agent replies to its
             // parent and to nobody else.
             Self::Reply => "staged your reply".to_string(),
-            Self::ContextDrop => named("dropped context"),
             Self::ContextEvict => named("evicted context"),
         }
     }
@@ -349,8 +345,8 @@ fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
     }
 }
 
-/// A turn or exchange id: one non-negative Int, refused under the name of
-/// what the field holds.
+/// A turn id: one non-negative Int, refused under the name of what the field
+/// holds.
 fn payload_id(v: FOValue, class: &str, field: &str, what: &str) -> Result<u64, Error> {
     let value = payload_int(v, class, field)?;
     u64::try_from(value).map_err(|_| {
@@ -361,79 +357,30 @@ fn payload_id(v: FOValue, class: &str, field: &str, what: &str) -> Result<u64, E
     })
 }
 
-/// The exchange list, whether it *is* the payload — `` `context `drop `` —
-/// or one field of it.
-fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u64>, Error> {
-    let Some(FOValue::List { items }) = payload.map(|payload| *payload) else {
+/// A turn address: a list of turn ids, however the model built it. What the
+/// set may name — and that it must name something — is the fold's.
+fn payload_turns(v: FOValue, class: &str) -> Result<Vec<u64>, Error> {
+    let FOValue::List { items } = v else {
         return Err(Error::new(
-            format!("`{class}`: `exchanges` must be a list of non-negative Ints"),
+            format!(
+                "`{class}`: `turns` must be a list of turn ids — `!{{range a b}}` builds a run"
+            ),
             1,
         ));
     };
     items
         .into_iter()
         .enumerate()
-        .map(|(index, item)| payload_id(item, class, &format!("exchanges[{index}]"), "exchange"))
+        .map(|(index, item)| payload_id(item, class, &format!("turns[{index}]"), "turn"))
         .collect()
 }
 
-/// A turn range: exactly two non-negative Ints, the earlier first. Both ends
-/// are read, so `[n, n]` is the one turn `n`.
-fn payload_turns(v: FOValue, class: &str) -> Result<(u64, u64), Error> {
-    let FOValue::List { items } = v else {
-        return Err(Error::new(
-            format!("`{class}`: `turns` must be a list of two Ints, [from, to]"),
-            1,
-        ));
-    };
-    let [from, to] = <[FOValue; 2]>::try_from(items).map_err(|items: Vec<FOValue>| {
-        Error::new(
-            format!(
-                "`{class}`: `turns` is a range and takes exactly two Ints, [from, to] — got {}. \
-                 One turn is [n, n].",
-                items.len()
-            ),
-            1,
-        )
-    })?;
-    let from = payload_id(from, class, "turns[0]", "turn")?;
-    let to = payload_id(to, class, "turns[1]", "turn")?;
-    if from > to {
-        return Err(Error::new(
-            format!(
-                "`{class}`: `turns` is [from, to] and {from} is after {to} — did you mean [{to}, {from}]?"
-            ),
-            1,
-        ));
-    }
-    Ok((from, to))
-}
-
-/// The rail subject `` `context `drop `` mints from an exchange list:
-/// `"exchanges [1, 2, 3]"`.
-fn exchanges_subject(exchanges: &[u64]) -> String {
-    format!("exchanges [{}]", exchanges_list(exchanges))
-}
-
-fn exchanges_list(exchanges: &[u64]) -> String {
-    exchanges
-        .iter()
-        .map(u64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// What a `` `transcript `` tag reaches, as the trace line names it:
-/// `"exchanges [1, 3] turns [12, 40]"`, either half absent when unasked.
-fn reach_subject(exchanges: &[u64], turns: Option<(u64, u64)>) -> String {
-    let mut said = Vec::new();
-    if !exchanges.is_empty() {
-        said.push(exchanges_subject(exchanges));
-    }
-    if let Some((from, to)) = turns {
-        said.push(format!("turns [{from}, {to}]"));
-    }
-    said.join(" ")
+/// The rail subject a cut or a read mints from a turn address, as runs:
+/// `"turns 41–43, 50"`. Sorted here, since the model's own list need not be.
+fn turns_subject(turns: &[u64]) -> String {
+    let mut sorted = turns.to_vec();
+    sorted.sort_unstable();
+    format!("turns {}", crate::record::model::runs(&sorted))
 }
 
 fn usize_to_i64(value: usize) -> i64 {
@@ -522,8 +469,9 @@ fn payload_value(
 }
 
 /// One payload read by field name — the dual of the builtin door's `spec.get`
-/// arms. A field the desk does not need is ignored rather than refused: the
-/// surface's closed record types already fix the shape.
+/// arms. The names the tag reads are fixed at construction, so a field the
+/// desk never asks for is refused rather than silently dropped: no operation
+/// reads, or discards, a field the row does not name.
 struct Fields<'a> {
     class: &'a str,
     entries: Vec<(String, FOValue)>,
@@ -531,19 +479,46 @@ struct Fields<'a> {
 
 impl<'a> Fields<'a> {
     /// The tag's whole payload, as a record.
-    fn payload(payload: Option<Box<FOValue>>, class: &'a str, shape: &str) -> Result<Self, Error> {
+    fn payload(
+        payload: Option<Box<FOValue>>,
+        class: &'a str,
+        shape: &str,
+        fields: &[&str],
+    ) -> Result<Self, Error> {
         Self::of(
             payload_value(payload, class, shape)?,
             class,
             "the payload",
             shape,
+            fields,
         )
     }
 
     /// A named field that is itself a record — `` `start ``'s `spec`.
-    fn of(v: FOValue, class: &'a str, subject: &str, shape: &str) -> Result<Self, Error> {
+    fn of(
+        v: FOValue,
+        class: &'a str,
+        subject: &str,
+        shape: &str,
+        fields: &[&str],
+    ) -> Result<Self, Error> {
         match v {
-            FOValue::Map { entries } => Ok(Self { class, entries }),
+            FOValue::Map { entries } => {
+                match entries
+                    .iter()
+                    .find(|(key, _)| !fields.contains(&key.as_str()))
+                {
+                    Some((name, _)) => Err(Error::new(
+                        format!(
+                            "`{class}`: unknown field `{name}` — {subject} takes {}{}",
+                            accepted(fields),
+                            suggestion(name, fields)
+                        ),
+                        1,
+                    )),
+                    None => Ok(Self { class, entries }),
+                }
+            }
             other => Err(Error::new(
                 format!(
                     "`{class}`: {subject} must be a record {shape}, got {}",
@@ -580,6 +555,51 @@ impl<'a> Fields<'a> {
     }
 }
 
+/// The names a record accepts, in prose: `` `a`, `b` and `c` ``.
+fn accepted(fields: &[&str]) -> String {
+    match fields {
+        [] => "no fields".to_string(),
+        [one] => format!("only `{one}`"),
+        [rest @ .., last] => format!(
+            "{} and `{last}`",
+            rest.iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The one accepted name an unknown one plausibly misspells — offered only
+/// when it is unambiguous, since two candidates are no help at all.
+fn suggestion(unknown: &str, fields: &[&str]) -> String {
+    let mut near = fields
+        .iter()
+        .filter(|name| name.starts_with(unknown) || distance(name, unknown) <= 2);
+    match (near.next(), near.next()) {
+        (Some(name), None) => format!(" — did you mean `{name}`?"),
+        _ => String::new(),
+    }
+}
+
+/// Levenshtein distance, over chars.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut row = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            row.push(
+                (prev[j] + usize::from(ca != *cb))
+                    .min(prev[j + 1] + 1)
+                    .min(row[j] + 1),
+            );
+        }
+        prev = row;
+    }
+    prev[b.len()]
+}
+
 /// `` `start ``'s `fork` field: the one part of that payload no model wrote,
 /// minted engine-side because the reentrancy law bars a desk handler from
 /// holding the `&mut Shell` a fork needs. Which tag is legal is the *host's*
@@ -611,7 +631,13 @@ fn payload_fork(v: FOValue, class: &str) -> Result<ForkClaim, Error> {
             label,
             payload: Some(payload),
         } if label == "listening" => {
-            let mut fields = Fields::of(*payload, class, "`fork `listening`", "[port, token]")?;
+            let mut fields = Fields::of(
+                *payload,
+                class,
+                "`fork `listening`",
+                "[port, token]",
+                &["port", "token"],
+            )?;
             let port = payload_int(
                 fields.take("port", "the guest port the host must dial")?,
                 class,
@@ -1160,12 +1186,15 @@ impl ExarchDesk {
     /// is the model's own, read field by field; `fork` is the engine's.
     fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "agents `start";
-        let mut req = Fields::payload(payload, CLASS, "[spec: …, fork: …]")?;
+        let mut req = Fields::payload(payload, CLASS, "[spec: …, fork: …]", &["spec", "fork"])?;
         let mut spec = Fields::of(
             req.take("spec", "the model's own spawn record")?,
             CLASS,
             "`spec`",
             "[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]",
+            &[
+                "prompt", "name", "type", "grant", "search", "provider", "model",
+            ],
         )?;
         let fork = payload_fork(
             req.take("fork", "how this spawn's forked session is to be reached")?,
@@ -1363,7 +1392,7 @@ impl ExarchDesk {
     fn message(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "agents `message";
         let s = &self.services;
-        let mut spec = Fields::payload(payload, CLASS, "[to: …, text: …]")?;
+        let mut spec = Fields::payload(payload, CLASS, "[to: …, text: …]", &["to", "text"])?;
         let name = payload_string(spec.take("to", "the recipient's name")?, CLASS, "to")?;
         let text = payload_string(spec.take("text", "what to send")?, CLASS, "text")?;
 
@@ -1431,7 +1460,12 @@ impl ExarchDesk {
         self.require_schedule_grant(CLASS)?;
         let s = &self.services;
 
-        let mut spec = Fields::payload(payload, CLASS, "[trigger: …, label: …, prompt: …]")?;
+        let mut spec = Fields::payload(
+            payload,
+            CLASS,
+            "[trigger: …, label: …, prompt: …]",
+            &["trigger", "label", "prompt"],
+        )?;
         let trigger = payload_trigger(
             spec.take("trigger", "`cron '<expr>' or `after '<dur>'")?,
             CLASS,
@@ -1651,7 +1685,6 @@ impl ExarchDesk {
         let (tag, payload) = family_tag(payload, "context")?;
         match tag.as_str() {
             "survey" => Ok(survey_answer(&self.context_survey())),
-            "drop" => self.context_drop(payload),
             "evict" => self.context_evict(payload),
             other => Err(unknown_tag("context", other)),
         }
@@ -1682,59 +1715,49 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `transcript `read `` — the exchanges named outright and the turns a
-    /// range covers, as material: one record per exchange the read touched.
-    /// Both fields are optional and the door refuses a read that names
-    /// neither.
+    /// `` `transcript `read `` — the turns the address names, as material:
+    /// one record per turn, in transcript order.
     fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "transcript `read";
-        let mut spec = Fields::payload(payload, CLASS, "[exchanges: [Int], turns: [Int, Int]]")?;
-        let exchanges = match spec.optional("exchanges") {
-            Some(value) => payload_exchanges(Some(Box::new(value)), CLASS)?,
-            None => Vec::new(),
-        };
-        let turns = spec
-            .optional("turns")
-            .map(|value| payload_turns(value, CLASS))
-            .transpose()?;
-        let subject = format!("read {}", reach_subject(&exchanges, turns));
+        let mut spec = Fields::payload(payload, CLASS, "[turns: [Int]]", &["turns"])?;
+        let turns = payload_turns(spec.take("turns", "the turns to read")?, CLASS)?;
+        let subject = format!("read {}", turns_subject(&turns));
         self.traced(
             subject,
-            |log| log.locate_read(&exchanges, turns),
-            |read| read.exchanges().map(transcript_answer),
+            |log| log.locate_read(&turns),
+            |read| read.turns().map(transcript_answer),
         )
     }
 
     /// `` `transcript `grep `` — a Rust regex over the transcript's text, the
-    /// whole of it or the turns a narrowing names. The pattern is compiled
+    /// whole of it or the turns an address names. The pattern is compiled
     /// here, so an invalid one is refused in the regex crate's own words.
     fn transcript_grep(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "transcript `grep";
-        let mut spec = Fields::payload(payload, CLASS, "[pattern: Str]")?;
+        let mut spec = Fields::payload(
+            payload,
+            CLASS,
+            "[pattern: Str, turns: [Int]]",
+            &["pattern", "turns"],
+        )?;
         let pattern = payload_string(
             spec.take("pattern", "the Rust regex to search the transcript for")?,
             CLASS,
             "pattern",
         )?;
-        let exchanges = spec
-            .optional("exchanges")
-            .map(|value| payload_exchanges(Some(Box::new(value)), CLASS))
-            .transpose()?;
         let turns = spec
             .optional("turns")
             .map(|value| payload_turns(value, CLASS))
             .transpose()?;
-        let narrowing = reach_subject(exchanges.as_deref().unwrap_or_default(), turns);
-        let subject = if narrowing.is_empty() {
-            format!("grep {pattern}")
-        } else {
-            format!("grep {pattern} in {narrowing}")
+        let subject = match &turns {
+            Some(turns) => format!("grep {pattern} in {}", turns_subject(turns)),
+            None => format!("grep {pattern}"),
         };
         self.traced(
             subject,
             |log| {
                 let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
-                Ok((log.locate_grep(exchanges.as_deref(), turns)?, regex))
+                Ok((log.locate_grep(turns.as_deref())?, regex))
             },
             |(read, regex)| read.grep(&regex).map(grep_answer),
         )
@@ -1763,36 +1786,24 @@ impl ExarchDesk {
         result.map_err(|error| Error::new(error, 1))
     }
 
-    /// `` `context `drop `` — shed the named exchanges from the context.
-    fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "context `drop";
-        let exchanges = payload_exchanges(payload, CLASS)?;
-        let subject = exchanges_subject(&exchanges);
-        self.context_edit(
-            DeskAct::ContextDrop,
-            Some(&subject),
-            subject.clone(),
-            ContextOp::Drop { exchanges },
-        )
-    }
-
-    /// What a note may weigh. It lands in the head marker at message 0 and
-    /// stays there for the session, so it is one short line, not a summary.
+    /// What a note may weigh. It lands in the marker that stands where the
+    /// turns were and stays there for the session, so it is one short line,
+    /// not a summary.
     const NOTE_CAP: usize = 240;
 
-    /// `` `context `evict `` — every turn through `through` leaves the context
-    /// at once, but for a user turn whose exchange still has a later turn in
-    /// it, with the model's optional `note` beside the index that replaces
-    /// them.
+    /// `` `context `evict `` — the turns the address names leave the context
+    /// at once, wherever they lie, but for a user turn whose answers still
+    /// have a resident turn outside the set; the model's optional `note`
+    /// stands in the marker left where they were.
     fn context_evict(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "context `evict";
-        let mut spec = Fields::payload(payload, CLASS, "[through: …]")?;
-        let through = payload_id(
-            spec.take("through", "the last turn to evict")?,
+        let mut spec = Fields::payload(
+            payload,
             CLASS,
-            "through",
-            "turn",
+            "[turns: [Int], note: Str]",
+            &["turns", "note"],
         )?;
+        let turns = payload_turns(spec.take("turns", "the turns to evict")?, CLASS)?;
         let note = match spec.optional("note") {
             Some(value) => {
                 let note = payload_string(value, CLASS, "note")?;
@@ -1805,7 +1816,7 @@ impl ExarchDesk {
                 if note.len() > Self::NOTE_CAP {
                     return Err(Error::new(
                         format!(
-                            "`{CLASS}`: `note` is {} bytes; the head marker keeps one short line — {} at most. What is the one thing your future self needs to know?",
+                            "`{CLASS}`: `note` is {} bytes; the marker keeps one short line — {} at most. What is the one thing your future self needs to know?",
                             note.len(),
                             Self::NOTE_CAP
                         ),
@@ -1815,7 +1826,7 @@ impl ExarchDesk {
                 if note.contains(['\n', '\r']) {
                     return Err(Error::new(
                         format!(
-                            "`{CLASS}`: `note` must be a single line — the head marker draws one row per exchange the eviction names, and a line break in a note reads as one of them."
+                            "`{CLASS}`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
                         ),
                         1,
                     ));
@@ -1824,40 +1835,36 @@ impl ExarchDesk {
             }
             None => None,
         };
-        let subject = format!("through {through}");
+        let subject = turns_subject(&turns);
         let payload = match &note {
             Some(note) => format!("{subject}, note {note}"),
             None => subject.clone(),
         };
-        self.context_edit(
-            DeskAct::ContextEvict,
-            Some(&subject),
-            payload,
-            ContextOp::Evict { through, note },
-        )
+        self.context_edit(Some(&subject), payload, &turns, note)
     }
 
-    /// The tail both edit tags share: apply the edit, commit the act under
-    /// `refused` on either outcome, and mirror the surviving weight or the
-    /// refusal onto the trace before answering the survey.
+    /// The eviction's tail: apply the cut, commit the act under `refused` on
+    /// either outcome, and mirror the surviving weight or the refusal onto
+    /// the trace before answering the survey.
     fn context_edit(
         &self,
-        act: DeskAct,
         subject: Option<&str>,
         payload: String,
-        op: ContextOp,
+        turns: &[u64],
+        note: Option<String>,
     ) -> Result<FOValue, Error> {
         let result = self
             .services
             .log
             .lock()
-            .apply_edit(op, EditAuthority::Model);
+            .evict(turns, note, EditAuthority::Model);
         match result {
-            // `apply_edit` records `ContextEdited` through the seam, and the
-            // live row derives from that published record: nothing separate
-            // to emit here.
+            // `evict` records `Evicted` through the seam, and the live row
+            // derives from that published record: nothing separate to emit
+            // here.
             Ok(()) => {
-                self.services.commit_act(act, subject, payload, false);
+                self.services
+                    .commit_act(DeskAct::ContextEvict, subject, payload, false);
                 let survey = self.context_survey();
                 let text = format!("context is now {} serialized bytes", survey.total_bytes);
                 self.services
@@ -1865,7 +1872,8 @@ impl ExarchDesk {
                 Ok(survey_answer(&survey))
             }
             Err(error) => {
-                self.services.commit_act(act, subject, payload, true);
+                self.services
+                    .commit_act(DeskAct::ContextEvict, subject, payload, true);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult {
                         text: error.clone(),
@@ -1877,7 +1885,7 @@ impl ExarchDesk {
 }
 
 /// The `` `context `` family's one answer: one row per turn in the context,
-/// then the count of turns evicted from it and what the whole of it weighs.
+/// then what the whole of it weighs.
 fn survey_answer(survey: &ContextSurvey) -> FOValue {
     FOValue::Map {
         entries: vec![
@@ -1891,12 +1899,6 @@ fn survey_answer(survey: &ContextSurvey) -> FOValue {
                             entries: turn_row(turn),
                         })
                         .collect(),
-                },
-            ),
-            (
-                "evicted".to_string(),
-                FOValue::Int {
-                    value: usize_to_i64(survey.evicted),
                 },
             ),
             (
@@ -1919,12 +1921,7 @@ fn turn_row(turn: &crate::record::TurnRow) -> Vec<(String, FOValue)> {
                 value: u64_to_i64(turn.id),
             },
         ),
-        (
-            "exchange".to_string(),
-            FOValue::Int {
-                value: u64_to_i64(turn.exchange),
-            },
-        ),
+        text_field("role", turn.role.as_str().to_string()),
         text_field("kind", turn.kind.as_str().to_string()),
         text_field("label", turn.label.clone()),
         (
@@ -1960,12 +1957,6 @@ fn grep_answer(answer: GrepAnswer) -> FOValue {
         .map(|hit| FOValue::Map {
             entries: vec![
                 (
-                    "exchange".to_string(),
-                    FOValue::Int {
-                        value: u64_to_i64(hit.exchange),
-                    },
-                ),
-                (
                     "turn".to_string(),
                     FOValue::Int {
                         value: u64_to_i64(hit.turn),
@@ -1995,37 +1986,26 @@ fn grep_answer(answer: GrepAnswer) -> FOValue {
     }
 }
 
-/// `` `transcript `read ``'s answer: one record per exchange the read
-/// touched, each naming the turns it covered and carrying the model's own
-/// messages narrowed to variant parts — never a serialization of the
-/// provider's own content structs.
-fn transcript_answer(read: Vec<TranscriptExchange>) -> FOValue {
+/// `` `transcript `read ``'s answer: one record per turn the read named,
+/// each naming its role and carrying the model's own messages
+/// narrowed to variant parts — never a serialization of the provider's own
+/// content structs.
+fn transcript_answer(read: Vec<TranscriptTurn>) -> FOValue {
     FOValue::List {
-        items: read.into_iter().map(transcript_exchange_value).collect(),
+        items: read.into_iter().map(transcript_turn_value).collect(),
     }
 }
 
-fn transcript_exchange_value(read: TranscriptExchange) -> FOValue {
+fn transcript_turn_value(read: TranscriptTurn) -> FOValue {
     FOValue::Map {
         entries: vec![
             (
-                "exchange".to_string(),
+                "turn".to_string(),
                 FOValue::Int {
-                    value: u64_to_i64(read.exchange),
+                    value: u64_to_i64(read.turn),
                 },
             ),
-            (
-                "turns".to_string(),
-                FOValue::List {
-                    items: read
-                        .turns
-                        .into_iter()
-                        .map(|turn| FOValue::Int {
-                            value: u64_to_i64(turn),
-                        })
-                        .collect(),
-                },
-            ),
+            text_field("role", read.role.as_str().to_string()),
             (
                 "messages".to_string(),
                 FOValue::List {
@@ -2384,7 +2364,7 @@ mod tests {
         }
     }
 
-    fn complete_exchange(log: &mut AgentLog, prompt: &str, answer: &str) {
+    fn append_prompt_and_answer(log: &mut AgentLog, prompt: &str, answer: &str) {
         log.append_user(prompt.to_string(), None).expect("prompt");
         log.append_assistant(
             genai::chat::ChatMessage::assistant(answer),
@@ -2399,24 +2379,12 @@ mod tests {
     /// so a change to an encoder breaks these tests instead of leaving them to
     /// hand-build a payload that has quietly drifted from what the builtin
     /// actually sends.
-    fn exchanges_value(exchanges: &[i64]) -> RalValue {
-        RalValue::list(
-            exchanges
-                .iter()
-                .map(|value| RalValue::Int(*value))
-                .collect(),
-        )
+    fn turns_value(turns: &[i64]) -> RalValue {
+        RalValue::list(turns.iter().map(|value| RalValue::Int(*value)).collect())
     }
 
-    fn context_drop_request(exchanges: &[i64]) -> FOValue {
-        let payload =
-            harness::context_exchanges_payload(&exchanges_value(exchanges), "context `drop")
-                .expect("valid exchange list");
-        family_req("context", "drop", Some(payload))
-    }
-
-    fn context_evict_request(through: i64, note: Option<&str>) -> FOValue {
-        let mut fields = vec![("through".to_string(), RalValue::Int(through))];
+    fn context_evict_request(turns: &[i64], note: Option<&str>) -> FOValue {
+        let mut fields = vec![("turns".to_string(), turns_value(turns))];
         fields.extend(note.map(|note| ("note".to_string(), RalValue::String(note.to_string()))));
         let payload =
             harness::context_evict_payload(&RalValue::map(fields)).expect("valid evict spec");
@@ -2429,28 +2397,18 @@ mod tests {
         family_req("context", "survey", None)
     }
 
-    fn turns_value(turns: (i64, i64)) -> RalValue {
-        RalValue::list(vec![RalValue::Int(turns.0), RalValue::Int(turns.1)])
-    }
-
-    /// Neither field is required, so a request naming neither is the shape the
-    /// door refuses rather than one the encoder cannot build.
-    fn transcript_read_request(exchanges: Option<&[i64]>, turns: Option<(i64, i64)>) -> FOValue {
-        let mut fields = Vec::new();
-        fields.extend(
-            exchanges.map(|exchanges| ("exchanges".to_string(), exchanges_value(exchanges))),
-        );
-        fields.extend(turns.map(|turns| ("turns".to_string(), turns_value(turns))));
+    /// An empty address is well-typed, so a read naming no turn is the shape
+    /// the fold refuses rather than one the encoder cannot build.
+    fn transcript_read_request(turns: &[i64]) -> FOValue {
+        let fields = vec![("turns".to_string(), turns_value(turns))];
         let payload =
             harness::transcript_read_payload(&RalValue::map(fields)).expect("valid read spec");
         family_req("transcript", "read", Some(payload))
     }
 
-    fn transcript_grep_request(pattern: &str, exchanges: Option<&[i64]>) -> FOValue {
+    fn transcript_grep_request(pattern: &str, turns: Option<&[i64]>) -> FOValue {
         let mut fields = vec![("pattern".to_string(), RalValue::String(pattern.to_string()))];
-        fields.extend(
-            exchanges.map(|exchanges| ("exchanges".to_string(), exchanges_value(exchanges))),
-        );
+        fields.extend(turns.map(|turns| ("turns".to_string(), turns_value(turns))));
         let payload =
             harness::transcript_grep_payload(&RalValue::map(fields)).expect("valid grep spec");
         family_req("transcript", "grep", Some(payload))
@@ -2762,20 +2720,14 @@ mod tests {
     }
 
     #[test]
-    fn context_survey_rows_every_resident_turn_beside_the_evicted_count() {
+    fn context_survey_rows_every_resident_turn() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "closed\nexchange", "answer");
-            complete_exchange(&mut log, "evicted", "answer");
-            log.apply_edit(
-                ContextOp::Evict {
-                    through: 2,
-                    note: None,
-                },
-                EditAuthority::Model,
-            )
-            .expect("evict");
+            append_prompt_and_answer(&mut log, "closed\nturn", "answer");
+            append_prompt_and_answer(&mut log, "evicted", "answer");
+            log.evict(&[1, 2], None, EditAuthority::Model)
+                .expect("evict");
             log.import_note(genai::chat::ChatMessage::user("inherited\ncontext"))
                 .expect("import");
             log.append_user("live".into(), None).expect("live prompt");
@@ -2812,17 +2764,7 @@ mod tests {
                     .expect("survey kind")
             })
             .collect::<Vec<_>>();
-        assert_eq!(kinds, vec!["exchange", "exchange", "import", "exchange"]);
-        let evicted = entries
-            .iter()
-            .find_map(|(key, value)| {
-                (key == "evicted").then(|| match value {
-                    FOValue::Int { value } => *value,
-                    _ => panic!("survey evicted must be an Int"),
-                })
-            })
-            .expect("survey evicted");
-        assert_eq!(evicted, 2, "the evicted turns are counted, not rowed");
+        assert_eq!(kinds, vec!["own", "own", "import", "own"]);
         let total_bytes = entries
             .iter()
             .find_map(|(key, value)| {
@@ -2835,15 +2777,15 @@ mod tests {
         assert_eq!(total_bytes, i64::try_from(expected_bytes).unwrap());
     }
 
-    /// One record per exchange the read touched, not one concatenated blob:
-    /// the list is the shape the doc's own "read in slices" advice needs to be
+    /// One record per turn the read named, not one concatenated blob: the
+    /// list is the shape the doc's own "read in slices" advice needs to be
     /// sayable.
     #[test]
-    fn transcript_answers_one_record_per_exchange_without_committing_an_act() {
+    fn transcript_answers_one_record_per_turn_without_committing_an_act() {
         let mut desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "first prompt", "first answer");
+            append_prompt_and_answer(&mut log, "first prompt", "first answer");
         }
         let (tx, rx) = channel();
         desk.services.log.lock().record_emitter().attach(FleetSink {
@@ -2854,13 +2796,16 @@ mod tests {
         desk.services.emit = Emitter::new(tx, 0);
 
         let FOValue::List { items } = desk
-            .handle(transcript_read_request(Some(&[1]), None))
+            .handle(transcript_read_request(&[1, 2]))
             .expect("transcript `read")
         else {
-            panic!("transcript `read must answer a list, one record per exchange")
+            panic!("transcript `read must answer a list, one record per turn")
         };
-        let [FOValue::Map { entries }] = items.as_slice() else {
-            panic!("one named exchange must answer exactly one record, got {items:?}")
+        let [first, second] = items.as_slice() else {
+            panic!("two named turns must answer exactly two records, got {items:?}")
+        };
+        let FOValue::Map { entries } = first else {
+            panic!("a read answers records, got {first:?}")
         };
         let field = |name: &str| {
             let Some((_, value)) = entries.iter().find(|(key, _)| key == name) else {
@@ -2868,20 +2813,29 @@ mod tests {
             };
             value
         };
-        assert!(matches!(field("exchange"), FOValue::Int { value: 1 }));
+        assert!(matches!(field("turn"), FOValue::Int { value: 1 }));
+        assert!(matches!(field("role"), FOValue::String { value } if value == "user"));
         let FOValue::List { items: messages } = field("messages") else {
             panic!("a read's messages are a list, got {entries:?}")
         };
         assert_eq!(
             messages.len(),
+            1,
+            "the prompt turn holds one message, got {messages:?}"
+        );
+        assert_eq!(
+            int_field(second.clone(), "turn"),
             2,
-            "the closed exchange's two turns, got {messages:?}"
+            "the second record is the turn asked for after it"
         );
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
         let record = crate::bus::drain_records(&rx)
             .into_iter()
             .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
             .expect("the read must reach the trace");
+        // The address renders as runs; how a run reads is `model::runs`'s own
+        // fact, and what the desk owns is the line it builds around it.
+        let traced = format!("read turns {}", crate::record::model::runs(&[1, 2]));
         assert!(matches!(
             record,
             Record::Display(Display::HarnessCall {
@@ -2889,19 +2843,11 @@ mod tests {
                 subject: Some(subject),
                 payload,
                 failed: false,
-            }) if verb == "transcript"
-                && subject == "read exchanges [1]"
-                && payload == "read exchanges [1]"
+            }) if verb == "transcript" && subject == traced && payload == traced
         ));
 
-        let error = desk
-            .handle(transcript_read_request(None, None))
-            .expect_err("a read that names nothing is not meaningful");
-        assert_eq!(
-            error.message,
-            "transcript `read` must name what to read — `exchanges: [n, …]`, \
-             `turns: [from, to]`, or both"
-        );
+        desk.handle(transcript_read_request(&[]))
+            .expect_err("a read that names no turn is not meaningful");
         let record = crate::bus::drain_records(&rx)
             .into_iter()
             .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
@@ -2916,49 +2862,41 @@ mod tests {
         ));
     }
 
-    /// A range reads the turns it covers wherever they lie, one record per
-    /// exchange it reaches into, and names them back; a range past what is
-    /// recorded, and one reaching the turn being written, are refused by the
-    /// state they meet.
+    /// A read answers the turns it named wherever they lie, each naming the
+    /// role it bears; a turn past what is recorded, and the turn
+    /// being written, are refused by the state they meet.
     #[test]
-    fn transcript_read_addresses_a_turn_range() {
+    fn transcript_read_names_the_role_of_every_turn_it_answers() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "first prompt", "first answer");
-            complete_exchange(&mut log, "second prompt", "second answer");
+            append_prompt_and_answer(&mut log, "first prompt", "first answer");
+            append_prompt_and_answer(&mut log, "second prompt", "second answer");
         }
         let FOValue::List { items } = desk
-            .handle(transcript_read_request(None, Some((2, 3))))
-            .expect("a closed range is readable")
+            .handle(transcript_read_request(&[2, 3]))
+            .expect("closed turns are readable")
         else {
-            panic!("transcript `read must answer a list, one record per exchange")
+            panic!("transcript `read must answer a list, one record per turn")
         };
         let reached = items
             .iter()
             .map(|item| {
-                let FOValue::Map { entries } = item else {
-                    panic!("a read answers records, got {item:?}")
-                };
-                let turns = entries
-                    .iter()
-                    .find_map(|(key, value)| (key == "turns").then_some(value))
-                    .expect("a read names its turns");
-                let FOValue::List { items } = turns else {
-                    panic!("a read's turns are a list, got {turns:?}")
-                };
-                (int_field(item.clone(), "exchange"), items.len())
+                (
+                    int_field(item.clone(), "turn"),
+                    str_field(item, "role").expect("a read names the turn's role"),
+                )
             })
             .collect::<Vec<_>>();
         assert_eq!(
             reached,
-            vec![(1, 1), (3, 1)],
-            "the range clips one turn out of each exchange"
+            vec![(2, "assistant".to_string()), (3, "user".to_string())],
+            "an answer and the prompt after it, each naming its own role"
         );
 
         let error = desk
-            .handle(transcript_read_request(None, Some((3, 9))))
-            .expect_err("a range must not reach past what is recorded");
+            .handle(transcript_read_request(&[9]))
+            .expect_err("a read must not reach past what is recorded");
         assert_eq!(error.message, "turn 9 is not recorded — the latest is 4");
 
         desk.services
@@ -2967,11 +2905,11 @@ mod tests {
             .append_user("live".into(), None)
             .expect("live prompt");
         let error = desk
-            .handle(transcript_read_request(None, Some((4, 5))))
+            .handle(transcript_read_request(&[5]))
             .expect_err("the turn being written is not readable");
         assert_eq!(
             error.message,
-            "exchange 5 is still in progress — no turn of it has closed yet"
+            "turn 5 is being written now — it is the one turn the transcript cannot read back yet"
         );
     }
 
@@ -2994,72 +2932,104 @@ mod tests {
         assert_eq!(error.message, expected);
     }
 
+    /// `turn` for `turns` once searched the whole transcript in silence: the
+    /// reader accepted the payload and no one ever asked for that field.
+    #[test]
+    fn transcript_grep_refuses_a_field_it_does_not_read() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            append_prompt_and_answer(&mut log, "first prompt", "first answer");
+        }
+        let err = desk
+            .handle(family_req(
+                "transcript",
+                "grep",
+                Some(FOValue::Map {
+                    entries: vec![
+                        ("pattern".to_string(), text("answer")),
+                        (
+                            "turn".to_string(),
+                            FOValue::List {
+                                items: vec![FOValue::Int { value: 1 }],
+                            },
+                        ),
+                    ],
+                }),
+            ))
+            .expect_err("`turn` is not a field `grep` reads");
+        assert_eq!(
+            err.message,
+            "`transcript `grep`: unknown field `turn` — the payload takes `pattern` and `turns` — did you mean `turns`?"
+        );
+        desk.handle(transcript_grep_request("answer", Some(&[1, 2])))
+            .expect("the spelt field still narrows the search");
+    }
+
+    /// The desk hands the fold's refusal to the model verbatim.
     #[test]
     fn context_edit_refusals_surface_the_admissibility_sentence() {
         let live_desk = desk();
         {
-            let mut log = live_desk.services.log.lock();
-            log.append_user("live".into(), None).expect("live prompt");
+            let mut live = live_desk.services.log.lock();
+            live.append_user("live".into(), None).expect("live prompt");
         }
         let err = live_desk
-            .handle(context_drop_request(&[1]))
-            .expect_err("the live exchange is not editable");
+            .handle(context_evict_request(&[1], None))
+            .expect_err("the turn being written is not editable");
         assert_eq!(
             err.message,
-            "exchange 1 is the one you are in — a context edit may only name closed exchanges"
+            "turn 1 is being written now — an eviction keeps the work in hand"
         );
 
         let unknown_desk = desk();
         {
             let mut log = unknown_desk.services.log.lock();
-            complete_exchange(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "one", "answer");
         }
         let err = unknown_desk
-            .handle(context_drop_request(&[7]))
-            .expect_err("an unknown exchange is not editable");
-        assert_eq!(err.message, "exchange 7 is not present in your context");
+            .handle(context_evict_request(&[7], None))
+            .expect_err("an unrecorded turn is not editable");
+        assert_eq!(err.message, "turn 7 is not recorded — the latest is 2");
 
         let evicted_desk = desk();
         {
             let mut log = evicted_desk.services.log.lock();
-            complete_exchange(&mut log, "one", "answer");
-            complete_exchange(&mut log, "two", "answer");
-            complete_exchange(&mut log, "three", "answer");
+            append_prompt_and_answer(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "two", "answer");
+            append_prompt_and_answer(&mut log, "three", "answer");
         }
         evicted_desk
-            .handle(context_evict_request(2, None))
+            .handle(context_evict_request(&[1, 2], None))
             .expect("evict");
         let err = evicted_desk
-            .handle(context_drop_request(&[1]))
-            .expect_err("an exchange that has left is not addressable");
+            .handle(context_evict_request(&[1], None))
+            .expect_err("a turn that has left is not addressable");
         assert_eq!(
             err.message,
-            "exchange 1 has already left your context — the earliest still in it is 3"
+            "turn 1 has already left your context — the earliest still in it is 3"
         );
 
-        let err = evicted_desk
-            .handle(context_drop_request(&[]))
-            .expect_err("an empty drop is not an edit");
-        assert_eq!(
-            err.message,
-            "a context edit must name at least one exchange"
-        );
+        evicted_desk
+            .handle(context_evict_request(&[], None))
+            .expect_err("an empty address is not an edit");
     }
 
     /// The edit's answer is the survey the transition leaves behind, not a
     /// receipt for the transition: the number that decides the next edit is
-    /// `total-bytes` now, against the budget.
+    /// `total-bytes` now, against the budget. The act it commits is
+    /// [`DeskAct::ContextEvict`], and the audit sentence names it.
     #[test]
-    fn context_drop_answers_the_survey_the_edit_leaves_behind() {
+    fn context_evict_answers_the_survey_it_leaves_behind_and_commits_the_act() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "a longer answer");
-            complete_exchange(&mut log, "two", "another answer");
+            append_prompt_and_answer(&mut log, "one", "a longer answer");
+            append_prompt_and_answer(&mut log, "two", "another answer");
         }
         let answer = desk
-            .handle(context_drop_request(&[1]))
-            .expect("context drop");
+            .handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
+            .expect("context evict");
         assert_eq!(
             int_field(answer.clone(), "total-bytes"),
             i64::try_from(desk.services.log.lock().history_bytes()).unwrap(),
@@ -3070,11 +3040,21 @@ mod tests {
             rows.iter()
                 .map(|row| (
                     int_field(row.clone(), "id"),
-                    int_field(row.clone(), "exchange")
+                    str_field(row, "role").expect("a survey row names its role")
                 ))
                 .collect::<Vec<_>>(),
-            vec![(3, 3), (4, 3)],
-            "the dropped exchange's turns are gone from the answer"
+            vec![(3, "user".to_string()), (4, "assistant".to_string())],
+            "the evicted turns are gone from the answer"
+        );
+        assert_eq!(str_field(&rows[0], "kind").as_deref(), Some("own"));
+        let audit = desk
+            .services
+            .acts
+            .audit()
+            .expect("a landed eviction leaves an act");
+        assert!(
+            audit.contains("evicted context"),
+            "the audit sentence must name the act, got: {audit}"
         );
     }
 
@@ -3093,60 +3073,18 @@ mod tests {
         items.clone()
     }
 
-    /// The eviction counterpart: it commits [`DeskAct::ContextEvict`], not
-    /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
-    /// took, which nothing else in this suite pins — and its answer counts
-    /// what left beside the turns that survive it.
-    #[test]
-    fn context_evict_commits_the_evict_act_and_counts_what_left() {
-        let desk = desk();
-        {
-            let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "a longer answer");
-            complete_exchange(&mut log, "two", "another answer");
-            complete_exchange(&mut log, "three", "a third answer");
-        }
-        let answer = desk
-            .handle(context_evict_request(2, Some("the parser is fixed")))
-            .expect("context evict");
-        assert_eq!(
-            int_field(answer.clone(), "evicted"),
-            2,
-            "the cut takes the first exchange's two turns"
-        );
-        let rows = survey_rows(&answer);
-        assert_eq!(
-            rows.iter()
-                .map(|row| int_field(row.clone(), "id"))
-                .collect::<Vec<_>>(),
-            vec![3, 4, 5, 6],
-            "every turn above the cut stays"
-        );
-        assert_eq!(str_field(&rows[0], "kind").as_deref(), Some("exchange"));
-        assert_eq!(int_field(rows[0].clone(), "exchange"), 3);
-        let audit = desk
-            .services
-            .acts
-            .audit()
-            .expect("a landed eviction leaves an act");
-        assert!(
-            audit.contains("evicted context"),
-            "the audit sentence must name the act, got: {audit}"
-        );
-    }
-
-    /// An empty note would render `Your note at eviction: ""` in the head
-    /// marker, so the door refuses it rather than the shape allowing it.
+    /// An empty note would render `Your note at eviction: ""` in the marker,
+    /// so the door refuses it rather than the shape allowing it.
     #[test]
     fn context_evict_refuses_an_empty_note() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "answer");
-            complete_exchange(&mut log, "two", "answer");
+            append_prompt_and_answer(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "two", "answer");
         }
         let err = desk
-            .handle(context_evict_request(1, Some("")))
+            .handle(context_evict_request(&[1], Some("")))
             .expect_err("an empty note is not a note");
         assert_eq!(
             err.message,
@@ -3154,46 +3092,81 @@ mod tests {
         );
     }
 
-    /// The head marker keeps the note forever, so the cap is what stands
-    /// between one short line and a summary.
+    /// The marker keeps the note for the rest of the session, so the cap is
+    /// what stands between one short line and a summary.
     #[test]
     fn context_evict_refuses_a_note_over_the_cap() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "answer");
-            complete_exchange(&mut log, "two", "answer");
+            append_prompt_and_answer(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "two", "answer");
         }
         let note = "x".repeat(241);
         let err = desk
-            .handle(context_evict_request(1, Some(&note)))
+            .handle(context_evict_request(&[1], Some(&note)))
             .expect_err("241 bytes is over the 240-byte cap");
         assert_eq!(
             err.message,
-            "`context `evict`: `note` is 241 bytes; the head marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+            "`context `evict`: `note` is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
         );
     }
 
-    /// A line break in a note would draw an extra row in the head marker,
-    /// read as one of the harness's own — the door refuses it rather than the
+    /// A line break in a note would draw an extra row in the marker, read as
+    /// one of the harness's own — the door refuses it rather than the
     /// renderer alone standing between the two.
     #[test]
     fn context_evict_refuses_a_multiline_note() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "answer");
-            complete_exchange(&mut log, "two", "answer");
+            append_prompt_and_answer(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "two", "answer");
         }
         for note in ["line one\nline two", "line one\rline two"] {
             let err = desk
-                .handle(context_evict_request(1, Some(note)))
+                .handle(context_evict_request(&[1], Some(note)))
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`context `evict`: `note` must be a single line — the head marker draws one row per exchange the eviction names, and a line break in a note reads as one of them."
+                "`context `evict`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
             );
         }
+    }
+
+    /// A field no tag reads is refused, not dropped: an eviction that silently
+    /// ignored `through` would cut turns the model never named.
+    #[test]
+    fn context_evict_refuses_a_field_it_does_not_read() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            append_prompt_and_answer(&mut log, "one", "answer");
+            append_prompt_and_answer(&mut log, "two", "answer");
+        }
+        let err = desk
+            .handle(family_req(
+                "context",
+                "evict",
+                Some(FOValue::Map {
+                    entries: vec![
+                        (
+                            "turns".to_string(),
+                            FOValue::List {
+                                items: vec![FOValue::Int { value: 1 }],
+                            },
+                        ),
+                        ("through".to_string(), FOValue::Int { value: 2 }),
+                    ],
+                }),
+            ))
+            .expect_err("`through` is not a field `evict` reads");
+        assert_eq!(
+            err.message,
+            "`context `evict`: unknown field `through` — the payload takes `turns` and `note`"
+        );
+        desk.handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
+            .expect("the fields the tag does read still evict");
     }
 
     /// A `` `pin [key, body] `` surface value carrying a one-span text card —
@@ -3717,6 +3690,48 @@ mod tests {
             err.message.contains("`name`") && err.message.contains("the child's identity"),
             "the refusal must name the field and say what it is for, got: {}",
             err.message
+        );
+    }
+
+    /// A misspelt spec field once lost the child its name in silence; the
+    /// refusal names the record it belongs to and the name it plausibly meant.
+    #[test]
+    fn start_refuses_a_misspelt_spec_field() {
+        let err = desk()
+            .handle(family_req(
+                "agents",
+                "start",
+                Some(FOValue::Map {
+                    entries: vec![
+                        (
+                            "spec".to_string(),
+                            FOValue::Map {
+                                entries: vec![
+                                    ("prompt".to_string(), text("go")),
+                                    ("nmae".to_string(), text("scout")),
+                                    ("type".to_string(), bare("amnemon")),
+                                    ("grant".to_string(), bare("confined")),
+                                    ("search".to_string(), FOValue::Bool { value: false }),
+                                    ("provider".to_string(), bare("inherit")),
+                                    ("model".to_string(), bare("inherit")),
+                                ],
+                            },
+                        ),
+                        (
+                            "fork".to_string(),
+                            FOValue::Variant {
+                                label: "parked".to_string(),
+                                payload: Some(Box::new(FOValue::Int { value: 0 })),
+                            },
+                        ),
+                    ],
+                }),
+            ))
+            .expect_err("`nmae` is not a field the spec carries");
+        assert_eq!(
+            err.message,
+            "`agents `start`: unknown field `nmae` — `spec` takes `prompt`, `name`, `type`, \
+             `grant`, `search`, `provider` and `model` — did you mean `name`?"
         );
     }
 

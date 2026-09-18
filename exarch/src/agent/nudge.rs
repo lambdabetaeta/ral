@@ -53,9 +53,9 @@ pub(crate) enum Pressure {
     Over {
         /// The rendered detail, e.g. "173000 of 200000 tokens".
         detail: String,
-        /// The turn the next boundary's cut would reach, `None` when nothing
+        /// The turns the next boundary's cut would take, `None` when nothing
         /// is old enough to shed.
-        through: Option<u64>,
+        planned: Option<Vec<u64>>,
     },
     Under,
     Unknown,
@@ -117,10 +117,10 @@ impl Nudges {
             // A stale measure relieves nothing and warns of nothing.
             Pressure::Unknown => None,
             Pressure::Over { .. } if self.pressure_told => None,
-            Pressure::Over { detail, through } => {
+            Pressure::Over { detail, planned } => {
                 self.pressure_told = true;
                 record_nudge(log, self.used, "context pressure".into());
-                Some(wrap_reminder(&pressure_message(detail, *through)))
+                Some(wrap_reminder(&pressure_message(detail, planned.as_deref())))
             }
         }
     }
@@ -223,16 +223,21 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
 /// Shown once the gauge crosses its soft line, budget-free like the
 /// pinned-state reminder.  With nothing old enough to shed there is no cut to
 /// announce, and the reading alone is the whole message.
-fn pressure_message(detail: &str, through: Option<u64>) -> String {
-    match through {
-        Some(through) => format!(
-            "Context pressure: {detail}. At the next turn boundary, turns through {through} \
-             will leave your context (and every exchange wholly before them); they stay \
-             readable with `transcript`. To leave your future self a line, run \
-             `context `evict [through: {through}, note: '…']` now; otherwise nothing is \
-             required of you."
-        ),
-        None => format!("Context pressure: {detail}."),
+fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
+    match planned {
+        Some(turns) if !turns.is_empty() => {
+            let runs = crate::record::model::runs(turns);
+            let first = turns[0];
+            let last_plus_one = turns[turns.len() - 1] + 1;
+            format!(
+                "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
+                 leave your context; they stay readable with `transcript`. To leave your \
+                 future self a line, run `context `evict [turns: !{{range {first} \
+                 {last_plus_one}}}, note: '…']` now — a prompt whose exchange is still in \
+                 hand stays on its own; otherwise nothing is required of you."
+            )
+        }
+        _ => format!("Context pressure: {detail}."),
     }
 }
 
@@ -259,10 +264,10 @@ mod tests {
             .expect("session log")
     }
 
-    fn over(through: Option<u64>) -> Pressure {
+    fn over(planned: Option<Vec<u64>>) -> Pressure {
         Pressure::Over {
             detail: "400 of 500 tokens".into(),
-            through,
+            planned,
         }
     }
 
@@ -471,19 +476,19 @@ mod tests {
         assert_eq!(nudges.used, 1, "only the reply half spends budget");
     }
 
-    /// The reminder carries both the reading and the turn the next boundary
-    /// would cut through, and spends no budget.
+    /// The reminder carries both the reading and the turns the next boundary
+    /// would cut, and spends no budget.
     #[test]
     fn pressure_reminder_names_the_cut_and_offers_the_note() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let msg = nudges
-            .pressure_reminder(&over(Some(7)), &mut log)
+            .pressure_reminder(&over(Some(vec![1, 2, 3, 4, 5, 6, 7])), &mut log)
             .expect("pressure due should remind");
         assert!(msg.contains("400 of 500 tokens"), "{msg}");
         assert!(
-            msg.contains("turns through 7 will leave your context")
-                && msg.contains("`context `evict [through: 7"),
+            msg.contains("turns 1–7 will leave your context")
+                && msg.contains("`context `evict [turns: !{range 1 8}"),
             "must name the cut and offer the note: {msg}"
         );
         assert_eq!(nudges.used, 0, "the pressure reminder is budget-free");
@@ -592,9 +597,15 @@ mod tests {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
 
-        assert!(nudges.pressure_reminder(&over(Some(7)), &mut log).is_some());
         assert!(
-            nudges.pressure_reminder(&over(Some(7)), &mut log).is_none(),
+            nudges
+                .pressure_reminder(&over(Some(vec![7])), &mut log)
+                .is_some()
+        );
+        assert!(
+            nudges
+                .pressure_reminder(&over(Some(vec![7])), &mut log)
+                .is_none(),
             "the same excursion must not re-fire"
         );
         assert!(
@@ -603,7 +614,9 @@ mod tests {
                 .is_none()
         );
         assert!(
-            nudges.pressure_reminder(&over(Some(7)), &mut log).is_some(),
+            nudges
+                .pressure_reminder(&over(Some(vec![7])), &mut log)
+                .is_some(),
             "a fresh excursion after Under must fire again"
         );
     }
@@ -615,7 +628,11 @@ mod tests {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
 
-        assert!(nudges.pressure_reminder(&over(Some(7)), &mut log).is_some());
+        assert!(
+            nudges
+                .pressure_reminder(&over(Some(vec![7])), &mut log)
+                .is_some()
+        );
         for _ in 0..3 {
             assert!(
                 nudges
@@ -630,7 +647,9 @@ mod tests {
                 .is_none()
         );
         assert!(
-            nudges.pressure_reminder(&over(Some(7)), &mut log).is_some(),
+            nudges
+                .pressure_reminder(&over(Some(vec![7])), &mut log)
+                .is_some(),
             "a genuine Under reading re-arms; the next Over then fires"
         );
     }

@@ -79,8 +79,11 @@ pub fn clip(text: &str, cap: usize) -> String {
     head_tail(&plain, cap, ELISION_NUDGE).unwrap_or(plain)
 }
 
-/// Render `r` as the block the model receives on later turns — `STDOUT:` /
-/// `STDERR:` / `VALUE:` / `EXIT:`, each body clipped at its own cap.
+/// Render `r` as the block the model receives on later turns.
+///
+/// `STDOUT:` / `STDERR:` / `VALUE:` / `EXIT:`, each body clipped at its own
+/// cap. The `TURN:` stamp that follows is `agent::shell`'s to append: a fact
+/// of the log, not of the result.
 pub fn render(r: &shell_eval::ToolResult) -> String {
     let mut out = String::new();
     if !r.stdout.is_empty() {

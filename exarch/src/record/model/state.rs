@@ -18,10 +18,10 @@ pub(super) enum State {
 }
 
 impl Context {
-    /// Whether a record that opens an exchange — a fresh
-    /// [`Protocol::UserPrompt`], an imported [`Protocol::ContextMessage`] —
-    /// is admissible here. Weaker than [`State::ReadyForUser`]: an exchange
-    /// that never reached a reply is abandoned by the next prompt rather than
+    /// Whether a record that opens or extends a turn — a
+    /// [`Protocol::UserPrompt`], a [`Protocol::Steering`] line, an imported
+    /// [`Protocol::ContextMessage`] — is admissible here. Weaker than [`State::ReadyForUser`]: work that
+    /// never reached a reply is abandoned by the next prompt rather than
     /// closed by a fabricated one, so only outstanding tool calls hold the
     /// log.
     pub fn is_ready(&self) -> bool {
@@ -31,17 +31,20 @@ impl Context {
     /// An edit may land at any rest but a batch in flight: outstanding tool
     /// calls name the assistant frame their results answer, so nothing may
     /// come between. What keeps the work in hand is
-    /// [`Self::plan_eviction`]'s own shape and [`Self::validate_edit`], not
-    /// this.
+    /// [`Self::plan_eviction`]'s own shape and [`Self::resolve_cut`]'s
+    /// refusal of the unclosed turn, not this.
     pub fn can_evict(&self) -> bool {
         self.is_ready()
     }
 
-    /// The exchange still owed a reply — one in flight, or one abandoned
-    /// without ever getting there. The door's concept alone, refusing to read
-    /// the exchange still being written.
-    pub fn is_live_exchange(&self, id: u64) -> bool {
-        !matches!(self.state, State::ReadyForUser) && self.current_exchange() == Some(id)
+    /// The turn being written, when the protocol is mid-turn: the one turn no
+    /// eviction takes and no door reads back, the turns before it having
+    /// closed. `None` at [`State::ReadyForUser`], where nothing
+    /// is in hand.
+    pub(super) fn unclosed_turn(&self) -> Option<u64> {
+        (!matches!(self.state, State::ReadyForUser))
+            .then(|| self.reach())
+            .flatten()
     }
 
     pub(crate) fn is_awaiting_assistant(&self) -> bool {
@@ -91,7 +94,9 @@ impl Context {
 
 pub(super) fn advance(state: &State, protocol: &Protocol) -> State {
     match protocol {
-        Protocol::UserPrompt { .. } => State::AwaitingAssistantAfterUser,
+        Protocol::UserPrompt { .. } | Protocol::Steering { .. } => {
+            State::AwaitingAssistantAfterUser
+        }
         Protocol::AssistantMessage {
             pending_tool_ids, ..
         } if !pending_tool_ids.is_empty() => State::AwaitingToolResults {
@@ -99,16 +104,18 @@ pub(super) fn advance(state: &State, protocol: &Protocol) -> State {
         },
         Protocol::AssistantMessage { .. } => State::ReadyForUser,
         Protocol::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-        Protocol::ContextMessage { .. }
-        | Protocol::ContextEdited { .. }
-        | Protocol::Inherited { .. } => state.clone(),
+        Protocol::ContextMessage { .. } | Protocol::Evicted { .. } | Protocol::Inherited { .. } => {
+            state.clone()
+        }
     }
 }
 
 /// Protocol sequencing legality.
 pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
     match protocol {
-        Protocol::UserPrompt { .. } | Protocol::ContextMessage { .. } => admits_new_turn(state),
+        Protocol::UserPrompt { .. } | Protocol::Steering { .. } | Protocol::ContextMessage { .. } => {
+            admits_new_turn(state)
+        }
         Protocol::AssistantMessage { message, .. } => {
             message.role == ChatRole::Assistant
                 && matches!(
@@ -123,16 +130,16 @@ pub(super) fn admissible(state: &State, protocol: &Protocol) -> bool {
                 false
             }
         }
-        Protocol::ContextEdited { .. }
+        Protocol::Evicted { .. }
         // Sequencing-neutral; where a link may stand is its own rule in
         // [`Context::judge`], needing more than a [`State`].
         | Protocol::Inherited { .. } => true,
     }
 }
 
-/// Whether a record that opens an exchange may follow. Only outstanding tool
-/// calls forbid it: an exchange the model never replied to is abandoned by
-/// the next prompt, not closed by a fabricated reply.
+/// Whether a record that opens or extends a turn may follow. Only outstanding
+/// tool calls forbid it: work the model never replied to is abandoned by the
+/// next prompt, not closed by a fabricated reply.
 fn admits_new_turn(state: &State) -> bool {
     !matches!(state, State::AwaitingToolResults { .. })
 }
@@ -152,22 +159,22 @@ pub(super) fn admissible_prefix<'a, 'b>(records: &'b [&'a Protocol]) -> &'b [&'a
 }
 
 /// The answer a tool call that never ran is given.  It does not name what
-/// ended the exchange, because it cannot vary on it: a cancel and a `reply`
+/// ended the deliberation, because it cannot vary on it: a cancel and a `reply`
 /// each answer their own batch before they quiesce, so only
 /// [`QuiesceReason::Aborted`] ever reaches this.  The cause is
 /// `Forensic::Cancelled`'s or `Forensic::ProviderError`'s to carry.
-const UNRUN_TOOL_CALL: &str = "[EXARCH // No result: the exchange ended before this call ran.]";
+const UNRUN_TOOL_CALL: &str = "[EXARCH // No result: the deliberation ended before this call ran.]";
 
 /// The records a quiesce still owes.
 ///
-/// A tool call that never ran is owed an answer whatever ended the exchange:
+/// A tool call that never ran is owed an answer whatever ended the deliberation:
 /// the calls were really made, "not executed" is really the answer, and a
 /// dangling tool-call block is not a legal request. A [`QuiesceReason::Replied`]
-/// exchange is owed a capstone besides — it ended, and only a record can say
+/// deliberation is owed a capstone besides — it ended, and only a record can say
 /// so, the fold being unable to tell a reply from an interruption at the
 /// resting state the two share.
 ///
-/// Nothing else is synthesised. An exchange that stopped before any reply is
+/// Nothing else is synthesised. A deliberation that stopped before any reply is
 /// left exactly as it lies and rendered as it lies, so the model never reads
 /// a turn it never took.
 fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Protocol> {
@@ -188,7 +195,7 @@ fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Proto
     if matches!(reason, QuiesceReason::Replied) && !matches!(state, State::ReadyForUser) {
         records.push(Protocol::AssistantMessage {
             turn,
-            message: ChatMessage::assistant("[EXARCH // Exchange ended: replied to parent.]"),
+            message: ChatMessage::assistant("[EXARCH // Deliberation ended: replied to parent.]"),
             pending_tool_ids: Vec::new(),
             stop_reason: Some("replied".into()),
         });

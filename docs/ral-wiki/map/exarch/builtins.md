@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fb9107b8
-generated_at_date: 2026-09-17
+generated_at_commit: ced3518c
+generated_at_date: 2026-09-18
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -203,14 +203,19 @@ model pays for, and `transcript` is **the record**, every turn this session or
 its ancestors ever recorded
 ([[decisions/260906_context-rollover|context-rollover]],
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). `context`
-edits and surveys; `transcript` only reads. Both speak **turns**: a user turn
-is a prompt (or an import's opening) and anything before the first reply, an
-assistant turn is the assistant message with the tool results it called for,
-and an exchange is the run of turns from a user turn, carrying that turn's id.
+edits and surveys; `transcript` only reads. Both speak **turns**, and every
+turn carries a **role**: a `user` turn is a prompt (or an import's opening) and
+anything before the first reply, an `assistant` turn is the assistant message
+with the tool results it called for. The turns *answering* a prompt — those
+after it, up to the next prompt — are a function of role and order, derived
+where the survivor rule needs them and named in no answer
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+Every `ral` tool result ends with `TURN: <id>`, the id of the turn it closes,
+so the model has the address before it asks for one.
 
-- **`context <tag>`** → `∀ρ1 ρ2. <survey | drop [Int] | evict [through: Int |
-  ρ1] | ρ2> → F [rows: [[id: Int, exchange: Int, kind: Str, label: Str,
-  bytes: Int]], evicted: Int, total-bytes: Int]`.
+- **`context <tag>`** → `∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> →
+  F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]],
+  total-bytes: Int]`.
   One verb per addressable state: the tag selects the transition, and **every**
   tag answers the survey afterwards. That is not a shared prefix collapsed but
   the rule the registries already follow, and it fits this surface better than
@@ -218,73 +223,77 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
   stops being nameable — so the edit is also the resurvey the
   next edit must be written against.
   - `` `survey `` describes the context, one row per resident turn (`turn_row`,
-    the very shape `` transcript `index `` answers with), beside `evicted`, the
-    count of turns that have left it, and `total-bytes`, which is what is
-    actually sent rather than the sum of the rows: an abandoned exchange's
-    turns report their own weights while the context carries only its one-line
-    note. It changes nothing.
-  - `` `drop <exchanges> `` sheds whole closed exchanges; they remain in the
-    transcript. The live, already-gone, duplicate, or empty selection
-    is refused with an explanation; a user-shaped rewind is the same
-    closed-range operation.
-  - `` `evict [through, note] `` removes every turn through the one named, and
-    with it every exchange wholly before them, replaced at the head by the
-    harness's index of what
-    left; a user turn whose exchange still has a resident turn above the cut
-    stays with it, so a cut into an exchange keeps its prompt, and the newest
-    turn can never be named at all. `note` is the model's own line to its
-    future self, rendered beside
-    that index; the harness's own eviction writes none. The `evict` row is
+    the very shape `` transcript `index `` answers with), beside `total-bytes`,
+    which is what is actually sent rather than the sum of the rows: a departed
+    turn reports the weight it carried while the context carries only the
+    marker standing where it was. Which turns have left is `` transcript
+    `index ``'s `held` to say, so the survey carries no count of them. It
+    changes nothing.
+  - `` `evict [turns, note] `` is the one context edit: it takes the named
+    resident turns out of the context, wherever they lie, and leaves a
+    bracketed user-voice marker standing at each **hole** — a maximal run of
+    departed turns — naming what left and how to read it back
+    ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+    `turns` is a list of turn ids however it was built, so
+    `` `evict [turns: !{range 41 43}] `` and `` `evict [turns: [41, 43]] ``
+    are addressed alike. Refused by name: a turn the transcript never
+    recorded, a turn that has already left, the **unclosed** turn — the one
+    being written, which exists only while a turn is open — and a set that
+    would take nothing. Kept silently: a prompt whose answers still hold a
+    resident turn outside the set, so a cut that reaches into a prompt's
+    answers keeps the prompt, and the context always opens with a user
+    message. `note` is the model's own line
+    to its future self, drawn beneath the rows of the cut that took them; the
+    harness's own eviction and `/rewind` are this same edit under another
+    authority and write none. The `evict` row is
     **open** precisely because `note` is optional and a closed row cannot say
     so: `context_evict_payload` checks its type at the door, and the desk
     refuses a note it will not draw — a marker reading
     `Your note at eviction: ""` is a defect the type should prevent, and
     making `note` required would invite exactly that. Its size and shape are
     the desk's too — at most `NOTE_CAP` (240) bytes, and no line break, since
-    the marker draws one row per exchange fragment the eviction names and a
-    note that could add a row would unbound the one message an eviction never
-    reclaims.
+    the marker draws one row per departed turn and a note that could add a row
+    would unbound the one message an eviction never reclaims.
 
-  Each edit records a `ContextEdited` model event at the desk immediately,
-  under `DeskAct::ContextEvict` or `ContextDrop`. There is no byte-delta
+  The edit records a `Protocol::Evicted { cut, by }` model event at the desk
+  immediately, under `DeskAct::ContextEvict`, whose subject reads the set back
+  as runs — `turns 41–43` (`record::model::runs`). There is no byte-delta
   receipt: the decision-relevant number is `total-bytes` now against the
   budget ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`transcript <tag>`** → `∀α ρ1 ρ2 ρ3. <index | read [ρ1] | grep [pattern: Str
-  | ρ2] | ρ3> → F α`. Read-only: no tag records a protocol event, though each
+- **`transcript <tag>`** → `∀α ρ2 ρ3. <index | read [turns: [Int]] |
+  grep [pattern: Str | ρ2] | ρ3> → F α`. Read-only: no tag records a protocol
+  event, though each
   records a `Display::HarnessCall` for the screen. The answer type is a bare
-  `α` because the three tags answer three shapes. `` `read ``'s row is open
-  *outright* because both of its fields are optional and a record row can
-  anchor only a required one; `transcript_read_payload` checks whichever
-  arrive, and naming neither is the desk's to refuse.
+  `α` because the three tags answer three shapes. Every narrowing is a list of
+  turn ids: what the model can read, it can evict, by the same name
+  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+  `` `read ``'s row is therefore **closed** on its one required field, which a
+  record row can anchor; `` `grep ``'s stays open, since its `turns` is
+  optional and a closed row cannot say so.
   - `` `index `` → the survey's own rows over every turn the transcript holds,
-    plus `held: Str` — `resident`, `evicted`, or `dropped` — oldest first.
-    `kind` is `exchange`, `import`, or `inherited` (an ancestor's). A departed
+    plus `held: Str` — `resident` or `evicted` — oldest first.
+    `kind` is `own`, `import`, or `inherited` (an ancestor's). A departed
     turn is listed at the weight it carried when it left.
-  - `` `read [exchanges: [Int], turns: [Int, Int]] `` →
-    `[[exchange: Int, turns: [Int], messages: [Message]]]`, one record per
-    exchange the read touched, in transcript order, each addressed by its
-    own `exchange` field rather than by a `=== … ===` header a reader had to
-    re-parse, and naming the turns it covered. `exchanges` names whole closed
-    exchanges, `turns` is one inclusive range (`[n, n]` is the single turn
-    `n`), and the two **compose as a union**. An exchange the read reaches
-    whole renders through `closed_messages` — what the model was sent, whether
-    resident, departed to this log's file, or an ancestor's — while a range
-    that reaches only part of one answers those turns' own material; a
-    fork-split exchange renders per turn, since a mixture of two files' records
-    would fold as abandoned.
-  - `` `grep [pattern, exchanges, turns] `` → `[hits: [[exchange: Int,
-    turn: Int, role: Str, line: Int, text: Str]], total: Int]`. A Rust regex —
+  - `` `read [turns: [Int]] `` →
+    `[[turn: Int, role: Str, messages: [Message]]]`, one element per turn
+    named, in transcript order, each addressed by its own `turn` field and
+    carrying the `role` it was taken in rather than a `=== … ===` header a
+    reader had to re-parse. A turn's material is what the model was sent,
+    whether it is resident, departed to this log's file, or an ancestor's
+    (`closed_messages`).
+  - `` `grep [pattern, turns] `` → `[hits: [[turn: Int, role: Str,
+    line: Int, text: Str]], total: Int]`. A Rust regex —
     ral's own `re-*`
     dialect, compiled at the desk so a bad pattern is refused in the regex
     crate's words — over prompts, programs, results, and reasoning, per line.
-    Both narrowings are optional and compose as the same union; with neither,
-    the whole transcript is searched. At most `GREP_HITS` (100)
+    The narrowing is optional; with none, the whole transcript is searched. At
+    most `GREP_HITS` (100)
     hits, oldest first, each line clipped at 200 bytes, with `total` the true
     count so a large one says *narrow*, not *page*.
 
   Only the turn being written *now* is unreadable: the earlier turns of the
-  exchange in hand have closed and read back like any other, which is what the
-  live-exchange refusal names when it points at them.
+  work in hand have closed and read back like any other, which is what the
+  unclosed-turn refusal names when it points at them.
 
   `` `read `` is the one harness answer whose size is the size of the thing it
   describes: the survey spends a few hundred bytes to describe a 200 KB

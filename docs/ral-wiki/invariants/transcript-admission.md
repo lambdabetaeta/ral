@@ -20,11 +20,14 @@ disagree with the first, and nothing for a resume to compare
 
 Sequencing is **not** strict user/assistant alternation, and never was.
 Consecutive same-role messages are routine: a session that has evicted sends
-the head marker — the harness's user-voice index of what left — as message 0,
-immediately before the oldest surviving user turn's prompt, an
+one marker — the harness's user-voice index of what left — at each **hole**,
+the maximal run of departed turns it stands in, so a marker adjacent to the
+next prompt puts two user-voice messages in a row, whether the hole is at
+message 0 before the oldest surviving prompt or mid-history
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]); an
 inherited import can end on a user message with the child's launch prompt
-behind it, and the prompt after an interrupted exchange follows that exchange's
-last tool results or steering directly
+behind it, and a prompt whose predecessor's answers were interrupted follows
+those answers' last tool results or steering directly
 ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's Anthropic
 adapter pushes one JSON object per `ChatMessage` and merges nothing, so those
 reach the provider as written. What the wire actually constrains is the
@@ -62,9 +65,12 @@ Three adjacent obligations keep the invariant whole:
   their results answer and nothing may come between. This is why the harness
   weighs the context at **every turn boundary**, not at `deliberate` entry
   ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). What keeps
-  a cut off the work in hand is not this predicate but `plan_eviction`'s own
-  shape — it draws its candidates from every resident turn *but the last* —
-  and `validate_edit`, which refuses that turn by name.
+  a cut off the work in hand is not this predicate but the rule that **no edit
+  touches the unclosed turn** — the one being written, which exists only while
+  a turn is open: `Context::resolve_cut` refuses it by name, and
+  `plan_eviction` draws its candidates from every resident turn *but the last*,
+  so a harness plan cannot even name it
+  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 - **`Inherited` stands only at a fork's opening.** `Context::step` refuses
   `Protocol::Inherited` anywhere but the first protocol record of a child log —
   the position *is* the rule, `len == 0`, needing no flag and no reading of

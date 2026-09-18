@@ -116,7 +116,9 @@ One call:
   `elapsed-s`, and `log-dir` — a ral record the script can bind and fan out
   over. The child runs off the parent's critical path — the one shape
   in-exchange concurrency cannot express, the parent exchange ending before
-  the child does;
+  the child does — an *exchange* on this page being a human round, the fleet's
+  own clock, never a unit of the context, which has only turns and their roles
+  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
 - **wakes the parent when the child replies** with a one-line notice through
   the parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names.
   The value itself stays on the child's own `Agent` (`Agent::status.reply`,
@@ -141,16 +143,19 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   not inherited; the child forks the request context, not a dangling protocol.
 
 Inheritance is **the parent's table, under the parent's own ids**. Ahead of
-everything goes one `Protocol::Inherited { source, through, turns, cuts }` —
-the parent's `record.jsonl`, the fork's reach, and the parent's whole turn
-table with the cuts made in it, every turn `kind: Inherited` and `held` as the
-parent had it. The child then records one `ContextMessage` per message under
-the parent's own turn and exchange ids, re-recording the resident turns as its
-own: `` context `survey `` shows them as individual `import` rows and
-`` context `drop `` can shed exactly one exchange of them. Nothing
-marker-shaped crosses by value — the child's marker, survey and index are the
+everything goes one `Protocol::Inherited { turns, notes }` — the parent's whole
+turn table, each row `kind: Inherited`, `held` as the parent had it and
+carrying the address of its transcript copy, beside the notes made at the cuts
+that emptied those rows. The child then records one
+`Protocol::ContextMessage { id, message }` per message under the parent's own
+turn ids and roles, re-recording the resident turns as its
+own: `` context `survey `` shows them as individual `import` rows, and
+`` context `evict `` names any of them by turn id, exactly as it names the
+child's own. Nothing
+marker-shaped crosses by value — the child's markers, survey and index are the
 same projections of the same fold
-([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]],
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 That link is what makes the two logs **one transcript**: an id at or below the
 reach
 resolves against the ancestry, walking each ancestor file once into a memoised
@@ -199,13 +204,13 @@ and refuses a named selection in one sentence saying so.
 
 Selective delegation is ordinary data flow, not a new memory mode. The parent
 surveys and reads closed turns, binds the returned records without
-printing them, slices or reshapes them in ral, drops the originals, and hands
+printing them, slices or reshapes them in ral, evicts the originals, and hands
 the binding to an `` `amnemon `` child:
 
 ```ral
-let ctx = transcript `read [exchanges: [4, 7]]
+let ctx = transcript `read [turns: !{range 4 9}]
 let handoff = take 12 $ctx[0][messages]
-context `drop [4, 7]
+context `evict [turns: !{range 4 9}, note: 'handed to `researcher`']
 agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",
   name: 'researcher',

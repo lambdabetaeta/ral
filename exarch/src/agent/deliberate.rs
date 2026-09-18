@@ -11,9 +11,7 @@ use crate::agent::Avatar;
 use crate::agent::attend::announce;
 use crate::agent::cancel;
 use crate::agent::digest::{EVICT_THRESHOLD, suffix_keep_budget};
-use crate::agent::event::{
-    ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
-};
+use crate::agent::event::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
 use crate::bus::{AgentState, Emitter, Item};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
@@ -287,17 +285,17 @@ impl Avatar {
         }
     }
 
-    /// The turn an eviction would cut through were it to run now, `None`
-    /// when nothing is old enough to shed.
+    /// The turns an eviction would take were it to run now, `None` when
+    /// nothing is old enough to shed.
     /// [`crate::record::model::Context::plan_eviction`] never names the
     /// newest turn, so this never answers with the work in hand either.
-    pub(crate) fn planned_eviction(&self) -> Option<u64> {
-        let mut log = self.log.lock();
+    pub(crate) fn planned_eviction(&self) -> Option<Vec<u64>> {
+        let log = self.log.lock();
         if !log.can_evict() {
             return None;
         }
         let keep = suffix_keep_budget(log.history_bytes());
-        log.plan_eviction(keep).map(|plan| plan.through)
+        log.plan_eviction(keep)
     }
 
     /// The context-pressure reminder this tool boundary owes the model, to
@@ -338,22 +336,16 @@ impl Avatar {
         }
         // Keep the recent half verbatim; the older prefix leaves the context.
         let keep = suffix_keep_budget(self.log.lock().history_bytes());
-        let Some(plan) = self.log.lock().plan_eviction(keep) else {
+        let Some(turns) = self.log.lock().plan_eviction(keep) else {
             // No turn old enough to shed: a no-op, not an event.
             return;
         };
         self.recorder()
             .transient(Transient::State(AgentState::Evicting));
-        // `apply_edit` records `ContextEdited` through the seam, and the live
-        // row derives from the published record — there is no separate
-        // notification left to keep in step with it.
-        let edited = self.log.lock().apply_edit(
-            ContextOp::Evict {
-                through: plan.through,
-                note: None,
-            },
-            EditAuthority::Harness,
-        );
+        // `evict` records `Evicted` through the seam, and the live row derives
+        // from the published record — there is no separate notification left
+        // to keep in step with it.
+        let edited = self.log.lock().evict(&turns, None, EditAuthority::Harness);
         if let Err(e) = edited {
             self.note_error(format!("evict failed: {e}"));
         }
@@ -777,7 +769,7 @@ mod tests {
         };
         assert!(
             reminder.contains("At the next turn boundary")
-                && reminder.contains("`context `evict [through:"),
+                && reminder.contains("`context `evict [turns: !{range"),
             "the reminder must name the cut and offer the note: {reminder}"
         );
     }
@@ -841,7 +833,7 @@ mod tests {
         session
             .log
             .lock()
-            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
+            .evict(&[2], None, EditAuthority::Model)
             .unwrap();
 
         assert!(
@@ -1021,9 +1013,9 @@ mod tests {
         T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
         assert_eq!(
-            session.log.lock().current_exchange(),
+            session.log.lock().current_prompt(),
             Some(3),
-            "the queued prompt opens exchange 3 after turns 1–2, rather than steering exchange 1"
+            "the queued prompt lands as turn 3 after turns 1–2, rather than steering turn 1"
         );
         let rendered = session.log.lock().history_rendered();
         let position = |text: &str| {

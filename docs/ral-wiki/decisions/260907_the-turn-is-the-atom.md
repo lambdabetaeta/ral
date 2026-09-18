@@ -384,6 +384,24 @@ then retires the memo itself: `Rendered` is owned and rebuilt per request, and
 what survives of that decision's law is the wire door's one clone per attempt,
 and the context being a pure function of the structure.
 
+## Superseding note: a cut is a set, and a marker stands at each hole
+
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
+supersedes three of the decisions above. §2's `through` is gone: a cut is
+`Cut { turns, note }` over an arbitrary set of resident turns, recorded
+resolved. §4's prefix discipline and the marker at message 0 go with it — a
+marker stands at each **hole**, a maximal run of departed turns, in its own
+place, the hole at position 0 being what a prefix cut leaves, so a late cut no
+longer touches message 0 and the provider re-reads from the hole. §8's door
+speaks a list of turn ids rather than exchanges and a `[from, to]` range,
+ral's `range a b` already being a `[Int]`. The turn stays the atom, the table
+stays one structure, and the loop-top weighing is unchanged; what an edit may
+not touch is the unclosed turn, so `is_live_exchange` leaves the fold. The
+exchange id leaves the records with it: a turn carries a `role`, `user` or
+`assistant`, `UserPrompt { turn, text }` names the prompt's own id and
+`ContextMessage { id, message }` its turn alone, and which assistant turns
+answer a prompt is derived from role and order where it is needed.
+
 ## See also
 
 [[map/exarch/agent|agent]] (`evict` at the loop's top, the pressure reminder,

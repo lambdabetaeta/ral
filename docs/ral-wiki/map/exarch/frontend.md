@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7f1b5097
+generated_at_commit: ced3518c
 generated_at_date: 2026-09-15
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -30,7 +30,11 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
   steering drains mid-exchange at a
   tool boundary (`drain_steering`); a scheduled wakeup or a settled async agent
-  drains at the exchange boundary as its own marked `Item` (`next_item`).
+  drains at the exchange boundary as its own marked `Item` (`next_item`). An
+  **exchange** on this page is a human round — what the fleet's clock counts,
+  what a boundary ends and a key interrupts — never a unit of the context,
+  which has only turns, each with a role
+  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
   The boundary is three-valued, because *waiting for a settled session* and
   *being owed an audience first* are different debts: a `Boundary::Exchange`
   post — a session command that only reads the context (`/branch`, `/context`,

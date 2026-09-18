@@ -1,10 +1,11 @@
 //! The turns and the cuts made in them. The `Vec`s are private to this
-//! module, so a turn changes where it is only through [`Table::evict`] or
-//! [`Table::drop_exchanges`] — the two functions that know which turns a cut
-//! takes, and so the two that keep the first resident turn a user turn.
+//! module, so a turn changes where it is only through [`Table::evict`] —
+//! which departs exactly the ids
+//! [`Context::resolve_cut`](super::Context::resolve_cut) handed it, that
+//! being the one place the survivor rule lives.
 
 use super::{Body, Held, Linked, Pointer, Turn};
-use crate::agent::event::TurnKind;
+use crate::agent::event::{Role, TurnKind};
 use crate::record::{Protocol, Recorded};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -57,10 +58,10 @@ impl Table {
     }
 
     /// Open a fresh turn at the end of the table, and answer its index.
-    pub(super) fn open(&mut self, id: u64, exchange: u64, kind: TurnKind, label: String) -> usize {
+    pub(super) fn open(&mut self, id: u64, role: Role, kind: TurnKind, label: String) -> usize {
         self.turns.push(Turn {
             id,
-            exchange,
+            role,
             kind,
             label,
             bytes: 0,
@@ -103,20 +104,13 @@ impl Table {
                         row.bytes,
                         Body::There {
                             at: at.clone(),
-                            cut: Some(cut),
-                        },
-                    ),
-                    Held::Dropped => (
-                        row.bytes,
-                        Body::There {
-                            at: at.clone(),
-                            cut: None,
+                            cut,
                         },
                     ),
                 };
                 Turn {
                     id: row.id,
-                    exchange: row.exchange,
+                    role: row.role,
                     kind: row.kind,
                     label: row.label.clone(),
                     bytes,
@@ -127,53 +121,17 @@ impl Table {
         self.notes = notes.to_vec();
     }
 
-    /// Whether a cut at `through` would take anything.
-    pub(super) fn takes(&self, through: u64) -> bool {
-        !self.cut_departures(through).is_empty()
-    }
-
-    /// Move every turn the cut takes from here to there, and record the
-    /// model's note in the slot the departed rows now index.
-    pub(super) fn evict(&mut self, through: u64, note: Option<String>) {
-        let leaving = self.cut_departures(through);
-        let cut = Some(self.notes.len());
-        self.depart(&leaving, cut);
+    /// Move the turns `leaving` from here to there, and record the model's
+    /// note in the slot the departed rows now index.
+    pub(super) fn evict(&mut self, leaving: &[u64], note: Option<String>) {
+        let cut = self.notes.len();
+        self.depart(leaving, cut);
         self.notes.push(note);
-    }
-
-    /// Move every resident turn of `exchanges` from here to there. A drop
-    /// leaves no marker, so the departed rows index no note.
-    pub(super) fn drop_exchanges(&mut self, exchanges: &[u64]) {
-        let leaving: Vec<u64> = self
-            .turns
-            .iter()
-            .filter(|turn| turn.is_resident() && exchanges.contains(&turn.exchange))
-            .map(|turn| turn.id)
-            .collect();
-        self.depart(&leaving, None);
-    }
-
-    /// A cut at `through` takes every turn in the context at or below it, but
-    /// a user turn whose exchange still has an assistant turn above the cut:
-    /// that one stays with its survivors.
-    fn cut_departures(&self, through: u64) -> Vec<u64> {
-        self.turns
-            .iter()
-            .filter(|turn| turn.is_resident() && turn.id <= through)
-            .filter(|turn| !(turn.is_user() && self.has_survivor(turn.exchange, through)))
-            .map(|turn| turn.id)
-            .collect()
-    }
-
-    fn has_survivor(&self, exchange: u64, through: u64) -> bool {
-        self.turns
-            .iter()
-            .any(|turn| turn.exchange == exchange && turn.is_resident() && turn.id > through)
     }
 
     /// The address a departing turn keeps: its `origin` where it has one, else
     /// this log's own file and the loci its records were measured at.
-    fn depart(&mut self, leaving: &[u64], cut: Option<usize>) {
+    fn depart(&mut self, leaving: &[u64], cut: usize) {
         let leaving: HashSet<u64> = leaving.iter().copied().collect();
         let source = self.source.clone();
         for turn in &mut self.turns {

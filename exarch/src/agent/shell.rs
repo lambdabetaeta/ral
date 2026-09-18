@@ -16,6 +16,7 @@ use crate::shell_eval;
 use ral_core::protocol::Severed;
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
+use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and
@@ -187,7 +188,7 @@ impl Avatar {
         );
         // Only now, with the dispatch returned: the worker probe below is
         // legal at a run boundary and nowhere else.
-        let content = match outcome {
+        let mut content = match outcome {
             shell_eval::Outcome::Ran {
                 stdout,
                 mut stderr,
@@ -223,6 +224,12 @@ impl Avatar {
         // call's reply standing.
         if let Some(payload) = reply_cell.take() {
             self.reply = Some(payload);
+        }
+        // The assistant turn is recorded before its results are built, so this
+        // is the id of the turn this result closes.
+        let turn = self.log.lock().current_turn();
+        if let Some(turn) = turn {
+            let _ = write!(content, "\nTURN: {turn}");
         }
         SessionToolResult { id, content }
     }
@@ -305,14 +312,19 @@ mod tests {
 
         let result = session.run_shell(
             "transcript-no-echo".into(),
-            "let ctx = transcript `read [exchanges: [1]]",
+            "let ctx = transcript `read [turns: [1, 2]]",
             5,
             &emit,
         );
         assert!(
             !result.content.contains("material that must stay bound")
-                && !result.content.contains("=== exchange 1 ==="),
+                && !result.content.contains("the answer stays in the binding"),
             "a let-bound read must not echo its value: {}",
+            result.content
+        );
+        assert!(
+            result.content.ends_with("\nTURN: 2"),
+            "every tool result closes with the id of the turn it closes: {}",
             result.content
         );
         assert!(

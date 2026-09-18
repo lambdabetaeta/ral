@@ -10,7 +10,7 @@
 //! record at the seam, through [`crate::agent::event`].
 
 use crate::agent::Avatar;
-use crate::agent::event::{ContextOp, EditAuthority};
+use crate::agent::event::EditAuthority;
 use crate::bus::card::{self, Card, Mark, Row, landing, observation_card, observation_from_wire};
 use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
@@ -347,8 +347,8 @@ impl Headless<'_> {
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));
             }
-            K::Context { turns, evicted } => {
-                self.print_card(&card::context_rows_card(turns, *evicted));
+            K::Context { turns } => {
+                self.print_card(&card::context_rows_card(turns));
             }
             K::Turn { id: turn } => {
                 if id == self.root_id {
@@ -356,31 +356,14 @@ impl Headless<'_> {
                     let _ = writeln!(self.err, "[turn {turn}]");
                 }
             }
-            K::ContextEdited { op, by } => {
+            K::Evicted { cut, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",
                     EditAuthority::User => "user",
                     EditAuthority::Harness => "harness",
                 };
-                match op {
-                    ContextOp::Evict { through, .. } => {
-                        let _ = writeln!(
-                            self.err,
-                            "[context evicted through turn {through} ({authority})]"
-                        );
-                    }
-                    ContextOp::Drop { exchanges } => {
-                        let list = exchanges
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let _ = writeln!(
-                            self.err,
-                            "[context dropped exchange(s) {list} ({authority})]"
-                        );
-                    }
-                }
+                let runs = crate::record::model::runs(&cut.turns);
+                let _ = writeln!(self.err, "[turns {runs} left the context ({authority})]");
             }
             // Interactive-only, pure presentation, or — the nudge — the agent
             // steering itself, which stays forensic and never addresses the

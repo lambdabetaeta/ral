@@ -290,11 +290,12 @@ pub enum SynodEvent {
 fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
     match protocol {
         Protocol::UserPrompt { .. }
+        | Protocol::Steering { .. }
         | Protocol::ContextMessage { .. }
         | Protocol::Inherited { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
-        | Protocol::ContextEdited { .. } => None,
+        | Protocol::Evicted { .. } => None,
     }
 }
 
@@ -331,9 +332,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             marks: marks_dto(card.clone()),
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { turns, evicted } => {
-            process_card(Some(context_rows_card(turns, *evicted)))
-        }
+        Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         Display::Turn { id } => Some(SynodEvent::Turn { id: *id }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
@@ -346,7 +345,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         | Display::Prompt { .. }
         | Display::Answer { .. }
         | Display::Result { .. }
-        | Display::ContextEdited { .. } => None,
+        | Display::Evicted { .. } => None,
         // Intercepted by `Router::route_fact` before this fold ever runs.
         Display::SubagentDone { .. } => None,
     }
@@ -363,9 +362,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { card } => process_card(Some(card.clone())),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { turns, evicted } => {
-            process_card(Some(context_rows_card(turns, *evicted)))
-        }
+        Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Prompt { .. }
@@ -374,7 +371,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         | Display::HarnessCall { .. }
         | Display::Result { .. }
         | Display::Turn { .. }
-        | Display::ContextEdited { .. } => None,
+        | Display::Evicted { .. } => None,
         Display::SubagentDone { .. } => None,
     }
 }
@@ -751,10 +748,7 @@ mod tests {
                 idle_calls: vec![0],
             },
         });
-        let context = Record::Display(Display::Context {
-            turns: Vec::new(),
-            evicted: 0,
-        });
+        let context = Record::Display(Display::Context { turns: Vec::new() });
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker {
                 id: ral_core::types::WorkerId(1),

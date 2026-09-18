@@ -22,7 +22,7 @@ use super::line::is_blank;
 use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
-use crate::agent::event::{ContextOp, EditAuthority};
+use crate::agent::event::EditAuthority;
 use crate::bus::card::{self, Card, Landing, landing, observation_card, observation_from_wire};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
@@ -1040,8 +1040,8 @@ impl Scrollback {
             K::Notice { notice } => {
                 vec![surfaced(card::notice_card(&card::to_card_notice(notice)))]
             }
-            K::Context { turns, evicted } => {
-                vec![surfaced(card::context_rows_card(turns, *evicted))]
+            K::Context { turns } => {
+                vec![surfaced(card::context_rows_card(turns))]
             }
             K::Cancelled => chrome(Chrome::Cancelled),
             K::Error { text } => chrome(Chrome::Error(text.clone())),
@@ -1050,26 +1050,14 @@ impl Scrollback {
             K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
             K::SystemNote { text } => note(text),
             K::Turn { .. } => vec![Item::Member(Member::Turn)],
-            K::ContextEdited { op, by } => {
+            K::Evicted { cut, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",
                     EditAuthority::User => "user",
                     EditAuthority::Harness => "harness",
                 };
-                let text = match op {
-                    ContextOp::Evict { through, .. } => {
-                        format!("[context evicted through turn {through} ({authority})]")
-                    }
-                    ContextOp::Drop { exchanges } => {
-                        let list = exchanges
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("[context dropped exchange(s) {list} ({authority})]")
-                    }
-                };
-                note(&text)
+                let runs = crate::record::model::runs(&cut.turns);
+                note(&format!("[turns {runs} left the context ({authority})]"))
             }
         }
     }

@@ -9,7 +9,7 @@
 //! record into.
 
 use super::{BlockId, Display, Fold, Forensic, Recorded, Refusal, Seq, TurnRow};
-use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
+use crate::agent::event::{Cut, EditAuthority, ProviderErrorRecord};
 use crate::bus::card::Card;
 use crate::provider::Usage;
 use ral_core::serial::FOValue;
@@ -63,7 +63,6 @@ pub enum BlockKind {
     },
     Context {
         turns: Vec<TurnRow>,
-        evicted: usize,
     },
     Cancelled,
     Error {
@@ -89,8 +88,8 @@ pub enum BlockKind {
     Turn {
         id: u64,
     },
-    ContextEdited {
-        op: ContextOp,
+    Evicted {
+        cut: Cut,
         by: EditAuthority,
     },
 }
@@ -301,13 +300,9 @@ impl Blocks {
             Display::Card { card } => self.push(seq, BlockKind::Card { card }),
             Display::Done { outcome } => self.push(seq, BlockKind::Done { outcome }),
             Display::Notice { notice } => self.push(seq, BlockKind::Notice { notice }),
-            Display::Context { turns, evicted } => {
-                self.push(seq, BlockKind::Context { turns, evicted })
-            }
+            Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
             Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),
-            Display::ContextEdited { op, by } => {
-                self.push(seq, BlockKind::ContextEdited { op, by })
-            }
+            Display::Evicted { cut, by } => self.push(seq, BlockKind::Evicted { cut, by }),
         }
     }
 

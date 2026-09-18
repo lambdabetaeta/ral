@@ -3,17 +3,14 @@
 //! lock gone — each record checked against its [`Locus`] digest before it
 //! is parsed.
 
-use super::state::State;
-use super::{
-    Body, Context, Pointer, into_chat_messages, not_recorded_refusal, not_recorded_refusal_turn,
-};
+use super::{Body, Context, Pointer, Turn, into_chat_messages, not_recorded_refusal_turn};
 use crate::agent::event::{
-    GrepAnswer, GrepHit, TranscriptExchange, TranscriptMessage, TranscriptPart,
+    GrepAnswer, GrepHit, Role, TranscriptMessage, TranscriptPart, TranscriptTurn,
 };
 use crate::record::{Entry, Locus, Protocol, Record};
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -60,7 +57,27 @@ enum Sourced {
     Located(Pointer),
 }
 
-/// One turn's own material, whatever became of the exchange holding it.
+/// The whole of "seek in the context, then the file": one turn's records
+/// where they are held, or the address to read them back by.
+fn sourced(turn: &Turn) -> Sourced {
+    match &turn.body {
+        Body::Here {
+            records,
+            origin: None,
+        } => Sourced::Held(
+            records
+                .iter()
+                .map(|recorded| recorded.value().clone())
+                .collect(),
+        ),
+        Body::Here {
+            origin: Some(at), ..
+        }
+        | Body::There { at, .. } => Sourced::Located(at.clone()),
+    }
+}
+
+/// One turn's own material, wherever the lineage keeps it.
 fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
     records
         .iter()
@@ -69,17 +86,10 @@ fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
         .collect()
 }
 
-/// One exchange a door read reaches: where each of its turns lies — a fork
-/// can leave one exchange's turns in two files, so placement is per turn.
-struct ExchangeRead {
-    exchange: u64,
-    turns: Vec<(u64, Sourced)>,
-}
-
 /// What a read does where a turn's file will not read back: refuse by path,
 /// or pass over the turn. A narrowing answers for what it named; a search of
-/// the whole transcript passes over what it cannot reach, the head marker
-/// having already told the model which turns it cannot have back.
+/// the whole transcript passes over what it cannot reach, the marker at each
+/// hole having already told the model which turns it cannot have back.
 #[derive(Clone, Copy)]
 enum Unreadable {
     Skip,
@@ -89,27 +99,29 @@ enum Unreadable {
 /// Where every turn a door read names lies, owned outright: the read borrows
 /// nothing from the structure, so the desk can drop the session lock before
 /// it touches a file.
+///
+/// A fork can leave consecutive turns in two files, so placement is per turn,
+/// and each turn carries whose turn it was.
 pub(crate) struct TranscriptRead {
-    exchanges: Vec<ExchangeRead>,
+    turns: Vec<(u64, Role, Sourced)>,
     unreadable: Unreadable,
 }
 
 impl TranscriptRead {
-    /// One [`TranscriptExchange`] per exchange the read touched, narrowed to
+    /// One [`TranscriptTurn`] per turn the read touched, narrowed to
     /// [`TranscriptPart`]s rather than the provider's own content parts.
     ///
     /// # Errors
     /// Refuses a turn whose file will not read back.
-    pub(crate) fn exchanges(self) -> Result<Vec<TranscriptExchange>, String> {
-        let mut read = Vec::with_capacity(self.exchanges.len());
-        self.walk(|exchange, turns| {
-            read.push(TranscriptExchange {
-                exchange,
-                turns: turns.iter().map(|(turn, _)| *turn).collect(),
-                messages: turns
+    pub(crate) fn turns(self) -> Result<Vec<TranscriptTurn>, String> {
+        let mut read = Vec::with_capacity(self.turns.len());
+        self.walk(|turn, role, records| {
+            read.push(TranscriptTurn {
+                turn,
+                role,
+                messages: turn_messages(records)
                     .iter()
-                    .flat_map(|(_, records)| turn_messages(records))
-                    .map(|message| transcript_message(&message))
+                    .map(transcript_message)
                     .collect(),
             });
         })?;
@@ -123,45 +135,34 @@ impl TranscriptRead {
     /// Refuses a file that will not read back.
     pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, String> {
         let mut tally = Tally::default();
-        self.walk(|exchange, turns| {
-            for (turn, records) in turns {
-                grep_messages(
-                    pattern,
-                    exchange,
-                    *turn,
-                    &turn_messages(records),
-                    &mut tally,
-                );
-            }
+        self.walk(|turn, _, records| {
+            grep_messages(pattern, turn, &turn_messages(records), &mut tally);
         })?;
         Ok(tally.answer())
     }
 
-    /// Hand every located exchange's turns to `visit`, in transcript order,
+    /// Hand every located turn's records to `visit`, in transcript order,
     /// holding at most one open file: consecutive turns naming one log share
     /// it, so each file is read in a single pass in locus order.
-    fn walk(self, mut visit: impl FnMut(u64, &[(u64, Vec<Protocol>)])) -> Result<(), String> {
+    fn walk(self, mut visit: impl FnMut(u64, Role, &[Protocol])) -> Result<(), String> {
         let unreadable = self.unreadable;
         let mut open: Option<(PathBuf, File)> = None;
-        for ExchangeRead { exchange, turns } in self.exchanges {
-            let mut read = Vec::with_capacity(turns.len());
-            for (turn, sourced) in turns {
-                match sourced {
-                    Sourced::Held(records) => read.push((turn, records)),
-                    Sourced::Located(Pointer { source, loci }) => {
-                        match read_pointer(&mut open, &source, &loci) {
-                            Ok(records) => read.push((turn, records)),
-                            Err(error) => match unreadable {
-                                Unreadable::Refuse => {
-                                    return Err(read_back_refusal(turn, &source, &error));
-                                }
-                                Unreadable::Skip => {}
-                            },
-                        }
+        for (turn, role, sourced) in self.turns {
+            let records = match sourced {
+                Sourced::Held(records) => records,
+                Sourced::Located(Pointer { source, loci }) => {
+                    match read_pointer(&mut open, &source, &loci) {
+                        Ok(records) => records,
+                        Err(error) => match unreadable {
+                            Unreadable::Refuse => {
+                                return Err(read_back_refusal(turn, &source, &error));
+                            }
+                            Unreadable::Skip => continue,
+                        },
                     }
                 }
-            }
-            visit(exchange, &read);
+            };
+            visit(turn, role, &records);
         }
         Ok(())
     }
@@ -189,29 +190,23 @@ fn read_pointer(
 }
 
 impl Context {
-    /// Read closed turns in transcript order — the exchanges named outright,
-    /// the turns a range covers, or both — as one [`TranscriptExchange`] per
-    /// exchange touched, addressed by its own `exchange` field rather than by
-    /// argument position.
+    /// Read the turns named, in transcript order, as one [`TranscriptTurn`]
+    /// each — addressed by its own `turn` field rather than by argument
+    /// position.
     ///
     /// What comes back is each turn's own material, wherever the lineage
     /// keeps it: in the context, departed to this log's file, or first
     /// recorded in an ancestor's.
     ///
     /// Both halves in one call — [`Self::locate_read`] then
-    /// [`TranscriptRead::exchanges`]; the desk keeps them apart so only the
-    /// first runs under the session lock.
+    /// [`TranscriptRead::turns`]; the desk keeps them apart so only the first
+    /// runs under the session lock.
     ///
     /// # Errors
-    /// Refuses a read that names nothing, a duplicate name, an exchange or
-    /// range this lineage never recorded, the turn still being written, or a
-    /// turn whose file will not read back.
-    pub(crate) fn read_transcript(
-        &self,
-        exchanges: &[u64],
-        turns: Option<(u64, u64)>,
-    ) -> Result<Vec<TranscriptExchange>, String> {
-        self.locate_read(exchanges, turns)?.exchanges()
+    /// Refuses a read that names no turn, a turn this lineage never recorded,
+    /// the turn being written now, or one whose file will not read back.
+    pub(crate) fn read_transcript(&self, turns: &[u64]) -> Result<Vec<TranscriptTurn>, String> {
+        self.locate_read(turns)?.turns()
     }
 
     /// [`Self::read_transcript`]'s first half: resolve every turn the read
@@ -220,123 +215,48 @@ impl Context {
     ///
     /// # Errors
     /// Refuses whatever [`Self::read_transcript`] refuses at location time.
-    pub(crate) fn locate_read(
-        &self,
-        exchanges: &[u64],
-        turns: Option<(u64, u64)>,
-    ) -> Result<TranscriptRead, String> {
-        if exchanges.is_empty() && turns.is_none() {
-            return Err(
-                "transcript `read` must name what to read — `exchanges: [n, …]`, \
-                 `turns: [from, to]`, or both"
-                    .into(),
-            );
-        }
-        let selected = self.select_read(exchanges, turns)?;
-        let mut read = Vec::with_capacity(selected.len());
-        for (exchange, turns) in selected {
-            let mut located = Vec::with_capacity(turns.len());
-            for turn in turns {
-                located.push((turn, self.sourced(turn)?));
-            }
-            read.push(ExchangeRead {
-                exchange,
-                turns: located,
-            });
-        }
+    pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, String> {
         Ok(TranscriptRead {
-            exchanges: read,
+            turns: self.located(&self.readable(turns)?),
             unreadable: Unreadable::Refuse,
         })
     }
 
-    /// Which turns a read names, grouped by exchange in transcript order: the
-    /// named exchanges' own turns, and every turn a range covers.
+    /// The turns a read or a narrowed search names, in transcript order:
+    /// deduplicated, each recorded, and none of them the one in hand.
     ///
     /// # Errors
-    /// Refuses an exchange [`Self::validate_read`] refuses, a range reaching
-    /// past what is recorded, and one reaching the turn still being written.
-    fn select_read(
-        &self,
-        exchanges: &[u64],
-        turns: Option<(u64, u64)>,
-    ) -> Result<Vec<(u64, Vec<u64>)>, String> {
-        self.validate_read(exchanges)?;
-        if let Some((from, to)) = turns {
-            if Some(to) > self.reach() {
-                return Err(not_recorded_refusal_turn(to, self.reach()));
+    /// Refuses a read naming no turn, a turn never recorded, and the turn
+    /// being written now.
+    fn readable(&self, turns: &[u64]) -> Result<Vec<u64>, String> {
+        let named: BTreeSet<u64> = turns.iter().copied().collect();
+        if named.is_empty() {
+            return Err("`turns` names no turn — `!{range a b}` builds a run of ids".into());
+        }
+        for &id in &named {
+            if self.turn(id).is_none() {
+                return Err(not_recorded_refusal_turn(id, self.reach()));
             }
-            if let Some(open) = self
-                .unclosed_turn()
-                .filter(|open| (from..=to).contains(open))
-                && let Some(turn) = self.turn(open)
-            {
-                return Err(self.live_exchange_refusal(turn.exchange));
+            if self.unclosed_turn() == Some(id) {
+                return Err(format!(
+                    "turn {id} is being written now — it is the one turn the transcript cannot \
+                     read back yet"
+                ));
             }
         }
-        let selected = self.select(exchanges, turns);
-        // A validated exchange always has turns of its own, so an empty
-        // selection means the range itself began past the reach.
-        match (selected.is_empty(), turns) {
-            (true, Some((from, _))) => Err(not_recorded_refusal_turn(from, self.reach())),
-            _ => Ok(selected),
-        }
+        Ok(named.into_iter().collect())
     }
 
-    /// Every turn a door names — one whose exchange is named, or that a range
-    /// covers — grouped by exchange in id order. The turn still being written
-    /// is never selected: its exchange's earlier turns have closed, and it
-    /// has not.
-    fn select(&self, exchanges: &[u64], turns: Option<(u64, u64)>) -> Vec<(u64, Vec<u64>)> {
-        let unclosed = self.unclosed_turn();
-        let mut selected: Vec<(u64, Vec<u64>)> = Vec::new();
-        let named = self.table.turns().iter().filter(|turn| {
-            Some(turn.id) != unclosed
-                && (exchanges.contains(&turn.exchange)
-                    || turns.is_some_and(|(from, to)| (from..=to).contains(&turn.id)))
-        });
-        for turn in named {
-            match selected.last_mut() {
-                Some((exchange, ids)) if *exchange == turn.exchange => ids.push(turn.id),
-                _ => selected.push((turn.exchange, vec![turn.id])),
-            }
-        }
-        selected
-    }
-
-    /// The turn still being written, when the protocol is mid-exchange: the
-    /// one turn no door reads back, its exchange's earlier turns having
-    /// closed.
-    fn unclosed_turn(&self) -> Option<u64> {
-        (!matches!(self.state, State::ReadyForUser))
-            .then(|| self.reach())
-            .flatten()
-    }
-
-    /// The whole of "seek in the context, then the file": one turn's records
-    /// where they are held, or the address to read them back by.
-    ///
-    /// # Errors
-    /// Refuses a turn this lineage never recorded.
-    fn sourced(&self, turn: u64) -> Result<Sourced, String> {
-        let Some(found) = self.turn(turn) else {
-            return Err(not_recorded_refusal_turn(turn, self.reach()));
-        };
-        Ok(match &found.body {
-            Body::Here {
-                records,
-                origin: None,
-            } => Sourced::Held(
-                records
-                    .iter()
-                    .map(|recorded| recorded.value().clone())
-                    .collect(),
-            ),
-            Body::Here {
-                origin: Some(at), ..
-            }
-            | Body::There { at, .. } => Sourced::Located(at.clone()),
-        })
+    /// Where each turn's records lie, beside whose turn it was. Every id has
+    /// been checked recorded, so nothing here can fail.
+    fn located(&self, turns: &[u64]) -> Vec<(u64, Role, Sourced)> {
+        turns
+            .iter()
+            .filter_map(|&id| {
+                let turn = self.turn(id)?;
+                Some((id, turn.role, sourced(turn)))
+            })
+            .collect()
     }
 
     /// Search the closed turns' text: the ones a narrowing names, or the
@@ -344,114 +264,57 @@ impl Context {
     /// every hit names the turn it lies in.
     ///
     /// An unreadable turn is refused when a narrowing named it and passed
-    /// over when the whole transcript was searched: the head marker has
-    /// already told the model which of its turns it cannot have back.
+    /// over when the whole transcript was searched: the marker at its hole
+    /// has already told the model which of its turns it cannot have back.
     ///
     /// Both halves in one call — [`Self::locate_grep`] then
     /// [`TranscriptRead::grep`]; the desk keeps them apart so only the first
     /// runs under the session lock.
     ///
     /// # Errors
-    /// Refuses a narrowing [`Self::validate_read`] or [`Self::select_read`]
-    /// refuses, and any turn it names and cannot reach.
+    /// Refuses a narrowing [`Self::read_transcript`] refuses.
     pub(crate) fn grep_transcript(
         &self,
         pattern: &Regex,
-        exchanges: Option<&[u64]>,
-        turns: Option<(u64, u64)>,
+        turns: Option<&[u64]>,
     ) -> Result<GrepAnswer, String> {
-        self.locate_grep(exchanges, turns)?.grep(pattern)
+        self.locate_grep(turns)?.grep(pattern)
     }
 
     /// [`Self::grep_transcript`]'s first half: where every searchable turn
     /// lies, resolved under the caller's lock and borrowing nothing.
     ///
-    /// A turn is searched when a narrowing names its exchange or covers its
-    /// id; with no narrowing at all, the whole transcript is.
+    /// With no narrowing at all the whole transcript is searched, bar the
+    /// turn in hand.
     ///
     /// # Errors
     /// Refuses whatever [`Self::grep_transcript`] refuses at location time.
-    pub(crate) fn locate_grep(
-        &self,
-        exchanges: Option<&[u64]>,
-        turns: Option<(u64, u64)>,
-    ) -> Result<TranscriptRead, String> {
-        if exchanges.is_some_and(<[u64]>::is_empty) && turns.is_none() {
-            return Err(
-                "transcript `grep`: `exchanges` names no exchange — omit it to search the \
-                 whole transcript"
-                    .into(),
-            );
-        }
-        let narrowed = exchanges.is_some() || turns.is_some();
-        let searchable = if narrowed {
-            self.select_read(exchanges.unwrap_or_default(), turns)?
-        } else {
-            self.select(&self.every_exchange(), None)
-        };
-        let mut read = Vec::with_capacity(searchable.len());
-        for (exchange, turns) in searchable {
-            let mut located = Vec::with_capacity(turns.len());
-            for turn in turns {
-                located.push((turn, self.sourced(turn)?));
-            }
-            read.push(ExchangeRead {
-                exchange,
-                turns: located,
+    pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptRead, String> {
+        let Some(narrowing) = turns else {
+            return Ok(TranscriptRead {
+                turns: self.located(&self.every_turn()),
+                unreadable: Unreadable::Skip,
             });
+        };
+        if narrowing.is_empty() {
+            return Err("`turns` names no turn — omit it to search the whole transcript".into());
         }
         Ok(TranscriptRead {
-            exchanges: read,
-            unreadable: if narrowed {
-                Unreadable::Refuse
-            } else {
-                Unreadable::Skip
-            },
+            turns: self.located(&self.readable(narrowing)?),
+            unreadable: Unreadable::Refuse,
         })
     }
 
-    /// Every exchange the structure holds — how an unnarrowed `` `grep ``
-    /// names the whole transcript.
-    fn every_exchange(&self) -> Vec<u64> {
-        let mut exchanges: Vec<u64> = self
-            .table
+    /// Every turn the structure recorded bar the one in hand — how an
+    /// unnarrowed `` `grep `` names the whole transcript.
+    fn every_turn(&self) -> Vec<u64> {
+        let unclosed = self.unclosed_turn();
+        self.table
             .turns()
             .iter()
-            .map(|turn| turn.exchange)
-            .collect();
-        exchanges.dedup();
-        exchanges
-    }
-
-    /// Every named exchange must be closed, named once, and one this lineage
-    /// recorded.
-    fn validate_read(&self, exchanges: &[u64]) -> Result<(), String> {
-        let mut named = HashSet::with_capacity(exchanges.len());
-        for &exchange in exchanges {
-            if !named.insert(exchange) {
-                return Err(format!("exchange {exchange} was named more than once"));
-            }
-            if self.is_live_exchange(exchange) {
-                return Err(self.live_exchange_refusal(exchange));
-            }
-            if self.exchange_turns(exchange).is_empty() {
-                return Err(not_recorded_refusal(exchange, self.reach()));
-            }
-        }
-        Ok(())
-    }
-
-    /// The exchange still being written is refused by name — and told which
-    /// of its own turns have closed, since those are readable.
-    fn live_exchange_refusal(&self, exchange: u64) -> String {
-        let turns = self.exchange_turns(exchange);
-        let closed = &turns[..turns.len().saturating_sub(1)];
-        match (closed.first(), closed.last()) {
-            (Some(from), Some(to)) => format!(
-                "exchange {exchange} is still in progress — its closed turns {from}–{to} are readable with `transcript `read [turns: [{from}, {to}]]`"
-            ),
-            _ => format!("exchange {exchange} is still in progress — no turn of it has closed yet"),
-        }
+            .map(|turn| turn.id)
+            .filter(|id| Some(*id) != unclosed)
+            .collect()
     }
 }
 
@@ -492,20 +355,13 @@ impl Tally {
 }
 
 /// One hit per matching line of one turn's messages.
-fn grep_messages(
-    pattern: &Regex,
-    exchange: u64,
-    turn: u64,
-    messages: &[ChatMessage],
-    tally: &mut Tally,
-) {
+fn grep_messages(pattern: &Regex, turn: u64, messages: &[ChatMessage], tally: &mut Tally) {
     for (position, message) in messages.iter().enumerate() {
         for (index, line) in searched_text(message).lines().enumerate() {
             if pattern.is_match(line) {
                 tally.offer(
                     (turn, position, index),
                     GrepHit {
-                        exchange,
                         turn,
                         role: message.role.clone(),
                         line: index + 1,

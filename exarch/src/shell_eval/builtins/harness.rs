@@ -642,7 +642,7 @@ fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// survey missing any of its fields is host-side drift, not a call error —
 /// name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
-    const FIELDS: [&str; 3] = ["rows", "evicted", "total-bytes"];
+    const FIELDS: [&str; 2] = ["rows", "total-bytes"];
     let FOValue::Map { entries } = &answer else {
         return Err(sig(
             "context: host answered an unexpected shape for the survey",
@@ -659,29 +659,32 @@ fn context_receipt(answer: FOValue) -> Settled<Value> {
     Ok(Value::from(answer))
 }
 
-pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
+/// A turn address: a List of turn ids, however the model built it. Which
+/// turns the set may name is the desk's to judge — this is the type check the
+/// row cannot state.
+pub(crate) fn turn_list_payload(value: &Value, verb: &str) -> Settled<FOValue> {
     let Value::List(items) = value else {
         return Err(sig(format!(
-            "{verb}: expected a List of non-negative exchange Ints, got {}",
+            "{verb}: `turns` must be a List of turn Ints, got {}",
             value.type_name()
         )));
     };
-    let mut exchanges = Vec::with_capacity(items.len());
+    let mut turns = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let Value::Int(exchange) = item else {
+        let Value::Int(turn) = item else {
             return Err(sig(format!(
-                "{verb}: exchange at index {index} must be an Int, got {}",
+                "{verb}: turn at index {index} must be an Int, got {}",
                 item.type_name()
             )));
         };
-        if *exchange < 0 {
+        if *turn < 0 {
             return Err(sig(format!(
-                "{verb}: exchange at index {index} must be non-negative, got {exchange}"
+                "{verb}: turn at index {index} must be non-negative, got {turn}"
             )));
         }
-        exchanges.push(FOValue::Int { value: *exchange });
+        turns.push(FOValue::Int { value: *turn });
     }
-    Ok(FOValue::List { items: exchanges })
+    Ok(FOValue::List { items: turns })
 }
 
 /// The `` `evict `` spec, checked field by field and then sent verbatim: the
@@ -696,26 +699,17 @@ pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
     const VERB: &str = "context `evict";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
-            "{VERB}: expected [through: Int] or [through: Int, note: Str], got {}",
+            "{VERB}: expected [turns: [Int]] or [turns: [Int], note: Str], got {}",
             value.type_name()
         )));
     };
-    let Some(through) = spec.get("through") else {
+    let Some(turns) = spec.get("turns") else {
         return Err(sig(format!(
-            "{VERB}: the spec record needs a `through` field — the last turn to evict"
+            "{VERB}: the spec record needs a `turns` field — the turns to evict; \
+             `!{{range a b}}` builds a run"
         )));
     };
-    let Value::Int(through) = through else {
-        return Err(sig(format!(
-            "{VERB}: `through` must be an Int, got {}",
-            through.type_name()
-        )));
-    };
-    if *through < 0 {
-        return Err(sig(format!(
-            "{VERB}: `through` must be non-negative, got {through}"
-        )));
-    }
+    let _ = turn_list_payload(turns, VERB)?;
     if let Some(note) = spec.get("note")
         && !matches!(note, Value::String(_))
     {
@@ -728,28 +722,23 @@ pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
 }
 
 /// `context <tag>` — one enquiry, whose answer is the context itself:
-/// `` `survey `` describes it, `` `drop `` and `` `evict `` edit it, and every
-/// tag answers the survey the transition leaves behind. The admissibility of
-/// an edit — live, unknown, already gone, empty, the newest turn — is the
-/// desk's.
+/// `` `survey `` describes it, `` `evict `` edits it, and both answer the
+/// survey the transition leaves behind. Which turns an eviction may name —
+/// unrecorded, already departed, the one being written, or none at all — is
+/// the desk's.
 fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "context: expected a `survey, `drop, or `evict tag, got {}",
+            "context: expected a `survey or `evict tag, got {}",
             args[0].type_name()
         )));
     };
     let request = match (label.as_str(), payload) {
         ("survey", None) => request("context", "survey", None),
-        ("drop", Some(exchanges)) => request(
-            "context",
-            "drop",
-            Some(context_exchanges_payload(exchanges, "context `drop")?),
-        ),
         ("evict", Some(spec)) => request("context", "evict", Some(context_evict_payload(spec)?)),
         _ => {
             return Err(sig(format!(
-                "context: tag must be one of `survey, `drop, `evict — got {label}"
+                "context: tag must be one of `survey, `evict — got {label}"
             )));
         }
     };
@@ -797,62 +786,37 @@ fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::from(answer))
 }
 
-/// A turn range: a two-element List of Ints. Order and reach are the desk's
-/// to judge — this is the type check the row cannot state.
-pub(crate) fn context_turns_payload(value: &Value, verb: &str) -> Settled<FOValue> {
-    let Value::List(items) = value else {
-        return Err(sig(format!(
-            "{verb}: `turns` must be a List of two Ints, [from, to], got {}",
-            value.type_name()
-        )));
-    };
-    let (Some(&Value::Int(from)), Some(&Value::Int(to)), 2) =
-        (items.get(0), items.get(1), items.len())
-    else {
-        return Err(sig(format!(
-            "{verb}: `turns` is a range and takes exactly two Ints, [from, to] — one turn is [n, n]"
-        )));
-    };
-    if from < 0 || to < 0 {
-        return Err(sig(format!(
-            "{verb}: `turns` must be non-negative, got [{from}, {to}]"
-        )));
-    }
-    Ok(FOValue::List {
-        items: vec![FOValue::Int { value: from }, FOValue::Int { value: to }],
-    })
-}
-
-/// `` `read ``'s spec, checked field by field and then sent verbatim. Both
-/// fields are optional, so the scheme leaves the whole record row open and
-/// the door is where a field of the wrong type is caught; naming neither is
-/// the desk's to refuse, as it holds what the transcript reaches.
+/// `` `read ``'s spec, checked field by field and then sent verbatim. The
+/// scheme closes the record on `turns`, so what reaches here is already a
+/// List; the element check is the row's to leave and this one's to make.
+/// Which turns are readable is the desk's to refuse, as it holds the record.
 pub(crate) fn transcript_read_payload(value: &Value) -> Settled<FOValue> {
     const VERB: &str = "transcript `read";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
-            "{VERB}: expected [exchanges: [Int]], [turns: [Int, Int]], or both, got {}",
+            "{VERB}: expected [turns: [Int]], got {}",
             value.type_name()
         )));
     };
-    if let Some(exchanges) = spec.get("exchanges") {
-        let _ = context_exchanges_payload(exchanges, VERB)?;
-    }
-    if let Some(turns) = spec.get("turns") {
-        let _ = context_turns_payload(turns, VERB)?;
-    }
+    let Some(turns) = spec.get("turns") else {
+        return Err(sig(format!(
+            "{VERB}: the spec record needs a `turns` field — the turns to read; \
+             `!{{range a b}}` builds a run"
+        )));
+    };
+    let _ = turn_list_payload(turns, VERB)?;
     verbatim(value, VERB)
 }
 
 /// `` `grep ``'s spec, checked field by field and then sent verbatim. The
-/// scheme leaves the record open on `exchanges` and `turns`, since a closed
-/// row cannot express an optional field, so the door is where a narrowing of
-/// the wrong type is caught; the pattern itself is the desk's to compile.
+/// scheme leaves the record open on `turns`, since a closed row cannot
+/// express an optional field, so the door is where an address of the wrong
+/// type is caught; the pattern itself is the desk's to compile.
 pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
     const VERB: &str = "transcript `grep";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
-            "{VERB}: expected [pattern: Str], with optional `exchanges: [Int]` and `turns: [Int, Int]`, got {}",
+            "{VERB}: expected [pattern: Str], with an optional `turns: [Int]`, got {}",
             value.type_name()
         )));
     };
@@ -867,11 +831,8 @@ pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
             pattern.type_name()
         )));
     }
-    if let Some(exchanges) = spec.get("exchanges") {
-        let _ = context_exchanges_payload(exchanges, VERB)?;
-    }
     if let Some(turns) = spec.get("turns") {
-        let _ = context_turns_payload(turns, VERB)?;
+        let _ = turn_list_payload(turns, VERB)?;
     }
     verbatim(value, VERB)
 }
@@ -1035,7 +996,7 @@ fn scheme_pin_list(_u: &mut Unifier) -> Scheme {
 fn context_turn_ty() -> Ty {
     closed_record(&[
         ("id", Ty::Int),
-        ("exchange", Ty::Int),
+        ("role", Ty::String),
         ("kind", Ty::String),
         ("label", Ty::String),
         ("bytes", Ty::Int),
@@ -1045,27 +1006,25 @@ fn context_turn_ty() -> Ty {
 fn context_receipt_ty() -> Ty {
     closed_record(&[
         ("rows", Ty::List(Box::new(context_turn_ty()))),
-        ("evicted", Ty::Int),
         ("total-bytes", Ty::Int),
     ])
 }
 
-/// `context :: ∀ρ1 ρ2. <survey | drop [Int] | evict [through: Int | ρ1] | ρ2> → F [rows: [[id: Int, exchange: Int, kind: Str, label: Str, bytes: Int]], evicted: Int, total-bytes: Int]`
+/// `context :: ∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
-/// tag row so an unknown tag reaches the door naming the three legal ones.
-/// `drop`'s payload is a bare `[Int]`, as `` `cancel ``'s is a bare `Str` —
-/// a list of exchange numbers has no shape left to name.
+/// tag row so an unknown tag reaches the door naming the two legal ones.
 ///
-/// `evict`'s record row is open on `ρ1` because `note` is optional and a
-/// closed row cannot say so; [`context_evict_payload`] refuses a `note` of
-/// the wrong type, and the desk an empty, oversized, or multi-line one — a
-/// required `note` would invite `''`, and a marker reading
-/// `Your note at eviction: ""` is a defect.
+/// `evict`'s record row anchors `turns` — the address is the edit, so there
+/// is nothing optional about it — and stays open on `ρ1` because `note` is
+/// optional and a closed row cannot say so; [`context_evict_payload`]
+/// refuses a `note` of the wrong type, and the desk an empty, oversized, or
+/// multi-line one — a required `note` would invite `''`, and a marker
+/// reading `Your note at eviction: ""` is a defect.
 ///
-/// One answer for all three tags: an edit changes what is addressable, so
-/// the survey the transition leaves behind is what the next edit must be
-/// written against.
+/// One answer for both tags: an edit changes what is addressable, so the
+/// survey the transition leaves behind is what the next edit must be written
+/// against.
 fn scheme_context(u: &mut Unifier) -> Scheme {
     let evict_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
@@ -1077,8 +1036,10 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
             open_variant(
                 &[
                     ("survey", Ty::Unit),
-                    ("drop", Ty::List(Box::new(Ty::Int))),
-                    ("evict", open_record(&[("through", Ty::Int)], evict_row)),
+                    (
+                        "evict",
+                        open_record(&[("turns", Ty::List(Box::new(Ty::Int)))], evict_row),
+                    ),
                 ],
                 tag_row,
             ),
@@ -1087,37 +1048,37 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `transcript :: ∀α ρ1 ρ2 ρ3. <index | read [ρ1] | grep [pattern: Str | ρ2] | ρ3> → F α`
+/// `transcript :: ∀α ρ2 ρ3. <index | read [turns: [Int]] | grep [pattern: Str | ρ2] | ρ3> → F α`
 ///
 /// The outer tag row is open (`ρ3`) so an unrecognised tag reaches the
 /// runtime door that names the three legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
-/// Each tag answers its own shape — a listing, one record per exchange a read
-/// touched, a hit table — so `α` is left free rather than fixed to any one of
+/// Each tag answers its own shape — a listing, one record per turn a read
+/// named, a hit table — so `α` is left free rather than fixed to any one of
 /// them, exactly as [`scheme_agents`] leaves it free for `` `read ``. The
 /// answer's shape is then the door's to check and the docstring's to state.
 ///
-/// `read`'s row is open outright (`ρ1`) because both its fields are optional:
-/// a record row can anchor a required field and say nothing of an optional
-/// one, so the two spellings `[exchanges: …]` and `[turns: …]` share one
-/// wholly open row, and [`transcript_read_payload`] checks whichever fields
-/// arrive. `grep`'s row is open on `ρ2` for the same reason, `pattern` alone
-/// being required.
+/// `read`'s record is closed: its one field is the address it reads, so a
+/// misspelling is a type error rather than a call that reaches the host
+/// naming nothing. `grep`'s row is open on `ρ2`, since `turns` narrows it
+/// and `pattern` alone is required, and a closed row cannot say so.
 fn scheme_transcript(u: &mut Unifier) -> Scheme {
-    let read_row = u.fresh_row_var();
     let grep_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     let answer_ty = u.fresh_tyvar();
     scheme(
         &[answer_ty],
         &[],
-        &[read_row, grep_row, tag_row],
+        &[grep_row, tag_row],
         thunk(fun(
             open_variant(
                 &[
                     ("index", Ty::Unit),
-                    ("read", open_record(&[], read_row)),
+                    (
+                        "read",
+                        closed_record(&[("turns", Ty::List(Box::new(Ty::Int)))]),
+                    ),
                     ("grep", open_record(&[("pattern", Ty::String)], grep_row)),
                 ],
                 tag_row,
@@ -1157,13 +1118,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("context"),
         scheme_context,
-        "context <tag>  — your context: what the provider is sent, turn by turn. A turn is the atom: your prompt (or an import) and anything before the first reply is a user turn; an assistant message, the tool results it called for, and any steering before the next request are one assistant turn. An exchange is the run of turns from a user turn, and carries that turn's id, so exchange numbers go sparse. Every tag answers the survey afterwards, [rows: [[id: Int, exchange: Int, kind: Str, label: Str, bytes: Int]], evicted: Int, total-bytes: Int].\n\ncontext `survey  — one row per turn in your context, oldest first: `id` is the turn, `exchange` the turn that opened its exchange (a user turn has id == exchange), `kind` is `exchange`, `import`, or `inherited` (an ancestor's), `label` the turn's opening line, `bytes` what it weighs. `evicted` counts the turns that have left (still readable with transcript). `total-bytes` against your context window is the number that decides whether to edit at all, and it is what is actually sent: an abandoned exchange's turns report their own weights while the context carries only its one-line note. Changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges; they remain in the transcript. The provider re-reads everything after the earliest dropped exchange on your next request, so a drop that sheds little can cost more than it saves.\n\ncontext `evict [through: <Int>, note: <Str>]  — every turn through `through` leaves the context at once, and with it every exchange wholly before them, replaced by the harness's index of what went. A user turn whose exchange still has a later turn in your context stays with it, so a cut into an exchange keeps its prompt. `note` is optional, one short line for your future self shown beside that index. The newest turn can never be named: an eviction keeps the work in hand. This is what the harness does for you at a turn boundary when the context fills, without a note; do it yourself only to leave one, or to cut early on purpose.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\ncontext `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\ncontext `evict [turns: [Int], note: Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place: a bracketed user-role message stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is optional; if given it is one line of at most 240 bytes and appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("transcript"),
         scheme_transcript,
-        "transcript <tag>  — the record: every turn this session or its ancestors ever recorded, whether or not it is still in your context. Read-only. Only the turn being written now is unreadable; the earlier turns of the exchange you are in have closed, and read back like any other.\n\ntranscript `index  — [[id: Int, exchange: Int, kind: Str, label: Str, bytes: Int, held: Str]], oldest first: the survey's own rows over every turn the transcript holds, with `held` saying which of them you are still paying for — `resident`, `evicted`, or `dropped`. `kind` is `exchange`, `import`, or `inherited` (an ancestor's).\n\ntranscript `read [exchanges: <[Int]>, turns: <[Int, Int]>]  — turns as material. `exchanges` names whole closed exchanges; `turns` is one inclusive range [from, to] of turn ids, and [n, n] is the single turn n. Give at least one of the two — both is fine and reads their union. The answer is [[exchange: Int, turns: [Int], messages: [Message]]] in transcript order, one element per exchange the read touched, each naming the turns it covered. An exchange the read reaches whole comes back exactly as it was sent; a range that reaches only part of one answers those turns' own material. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]], one Message per message the turns hold. A Part is a variant, one arm per kind of content: `text [content: Str] is plain text; `program [tool: Str, source: Str, keys: [Str]] is a tool call — for exarch's own ral tool, `source` is the script that ran and `keys` is empty; for any other tool, `source` is empty and `keys` names its arguments; `result [content: Str] is a tool's response, already the digest the model saw; `reasoning [content: Str] is a model's reasoning, carried in full; `binary [content-type: Str, name: Str, bytes: Int] is an image/audio/video/PDF attachment's metadata only, never its payload; `custom [provider: Str, model: Str] names a provider-specific extension, never its payload. Narrow this material with `filter`/`take`/`view-text` over the records — do not expect elision or byte caps here, that is your job to apply. Bind the answer and read it in slices; the whole of it entering your context is what eviction just saved you from.\n\ntranscript `grep [pattern: <Str>, exchanges: <[Int]>, turns: <[Int, Int]>]  — a Rust regex over every closed turn: prompts, your programs, their results, your reasoning. Both narrowings are optional and a turn is searched when either names it — `exchanges` by exchange, `turns` by id range; with neither, the whole transcript is searched. Answers [hits: [[exchange: Int, turn: Int, role: Str, line: Int, text: Str]], total: Int], at most 100 hits oldest first; `total` is the true count, so a large one means narrow the pattern, the exchanges, or the range. Then `read the turns a hit names.\n\nTo search a long transcript without spending your own context, hand the task to a `mnemon child: agents `start [type: `mnemon, prompt: 'transcript `grep … then reply with …'] — it shares your transcript and runs its own against it. An `amnemon child starts blank and has no transcript but its own.\n\nAnswered only on the run that calls it: inside spawn { … } this errors.",
+        "transcript <tag>  — the record of every turn this session or any ancestor of it ever recorded, in the context or not. Read-only. Every turn is readable except the one being written now — the assistant turn whose result this call is part of. Every tag addresses turns by id, as a list: `!{range 41 44}` is [41, 42, 43]; `context `survey` and `transcript `index` show the ids.\n\ntranscript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn oldest first. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\ntranscript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. Refused, naming the turn: an id never recorded, and the turn being written now. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it, clipping included; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — an attachment's metadata, never its bytes; `custom [provider: Str, model: Str] — a provider extension's identity, never its payload. Nothing here is clipped or capped: bind the answer and take slices of it, since the whole of it in your context is what the eviction saved.\n\ntranscript `grep [pattern: Str, turns: [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern`, a Rust regex. `turns` is optional; absent, every recorded turn is searched. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.\n\nA `mnemon child (agents `start [type: `mnemon, …]) shares this transcript and can search or read it in its own context; an `amnemon child has only its own.\n\nAnswered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_transcript),
     ),
 ];
@@ -2316,16 +2277,16 @@ mod tests {
 
     // ── context family door tests ────────────────────────────────────────
 
-    /// A trunk holding one closed exchange, which every context test needs
+    /// A trunk holding one answered prompt, which every context test needs
     /// before it has anything addressable to name.
-    fn trunk_with_a_closed_exchange() -> crate::agent::Avatar {
+    fn trunk_with_an_answered_prompt() -> crate::agent::Avatar {
         let session = crate::agent::Avatar::for_test("system").unwrap();
         crate::agent::testkit::close_exchange(&session, "first prompt", "first answer");
         session
     }
 
     /// `scheme_context`'s outer tag row is open, so `` context `rewind `` — the
-    /// tag a model most plausibly invents — reaches the door naming the three
+    /// tag a model most plausibly invents — reaches the door naming the two
     /// legal ones rather than dying as a row-unification mismatch.
     #[test]
     fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
@@ -2333,7 +2294,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell("call-1".to_string(), "context `rewind [3]", 5, &emit);
-        for tag in ["survey", "drop", "evict"] {
+        for tag in ["survey", "evict"] {
             assert!(
                 result.content.contains(tag),
                 "must name `{tag}, got: {}",
@@ -2342,37 +2303,58 @@ mod tests {
         }
     }
 
-    /// `` `evict ``'s record row is open only on the tail, so `through`
-    /// itself is still static: a misspelling reaches the type error, not the
-    /// door.
+    /// `` `evict ``'s record row is open only on the tail, so `turns` itself
+    /// is still static: a misspelling reaches the type error, not the door.
     #[test]
     fn misspelled_evict_field_errors_statically_naming_the_field() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "context `evict [thru: 1]", 5, &emit);
+        let result =
+            session.run_shell("call-1".to_string(), "context `evict [turn: [1]]", 5, &emit);
         assert!(
-            !result.content.contains("EXIT: 0") && result.content.contains("through"),
+            !result.content.contains("EXIT: 0") && result.content.contains("turns"),
             "the diagnostic must name the field the row demands, got: {}",
             result.content
         );
     }
 
+    /// The address is the edit, so a spec carrying only a note never reaches
+    /// the host. `scheme_context` anchors `turns`, so no program written in
+    /// ral gets this far — the door is the second line of defence, checked
+    /// here where it can be reached at all.
+    #[test]
+    fn an_eviction_naming_no_turns_is_refused_at_the_door() {
+        let refusal = context_evict_payload(&Value::map(vec![(
+            "note".to_string(),
+            Value::String("nothing to say".to_string()),
+        )]))
+        .expect_err("an eviction must name the turns it takes");
+        let ral_core::types::Break::Error(error) = refusal else {
+            panic!("a door refusal is catchable, never an escape")
+        };
+        assert_eq!(
+            error.message,
+            "context `evict: the spec record needs a `turns` field — the turns to evict; \
+             `!{range a b}` builds a run"
+        );
+    }
+
     /// The whole family through the real shell: an edit answers the survey
     /// the transition leaves behind, so the count of what left is there to
-    /// read without a second call. `through` names a turn — turn 2 is the
-    /// first exchange's reply, so the cut takes that whole exchange. The
-    /// optional `note` rides the open record row, so both shapes type-check.
+    /// read without a second call. The address names turns — 1 and 2 are the
+    /// first prompt and its reply — and the optional `note` rides the
+    /// open record row, so both shapes type-check.
     #[test]
     fn an_eviction_answers_the_survey_it_leaves_behind() {
-        let mut session = trunk_with_a_closed_exchange();
+        let mut session = trunk_with_an_answered_prompt();
         crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "context `evict [through: 2, note: 'the old work is done']",
+            "context `evict [turns: [1, 2], note: 'the old work is done']",
             5,
             &emit,
         );
@@ -2382,8 +2364,8 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("evicted: 2") && result.content.contains("total-bytes"),
-            "the answer must be the survey afterwards, counting the two turns that left, got: {}",
+            result.content.contains("total-bytes"),
+            "the answer must be the survey afterwards, got: {}",
             result.content
         );
         assert!(
@@ -2397,14 +2379,14 @@ mod tests {
     /// harness never asks the model for an empty string.
     #[test]
     fn an_eviction_without_a_note_type_checks() {
-        let mut session = trunk_with_a_closed_exchange();
+        let mut session = trunk_with_an_answered_prompt();
         crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "context `evict [through: 2]",
+            "context `evict [turns: !{range 1 3}]",
             5,
             &emit,
         );
@@ -2415,22 +2397,21 @@ mod tests {
         );
     }
 
-    /// `` `read ``'s answer is a list, so a slice is `$read[0]`, addressed by
-    /// its own `exchange` field, and its messages are ral records with variant
-    /// parts rather than a rendered string.
+    /// `` `read ``'s answer is a list, so a slice is `$read[0]`, naming its
+    /// own `turn` and the `role` it bears, and its messages are ral
+    /// records with variant parts rather than a rendered string.
     #[test]
-    fn transcript_answers_exchange_records_with_variant_parts() {
-        let mut session = trunk_with_a_closed_exchange();
+    fn transcript_answers_turn_records_with_variant_parts() {
+        let mut session = trunk_with_an_answered_prompt();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"let material = transcript `read [exchanges: [1]]
+            r#"let material = transcript `read [turns: [1, 2]]
                echo !{length $material}
-               echo $material[0][exchange]
+               echo $material[0][turn] $material[0][role]
                let msgs = $material[0][messages]
-               echo !{length $msgs}
                let say-role = { |r| case $r [
                  `system: { |_| echo "role=system" },
                  `user: { |_| echo "role=user" },
@@ -2447,14 +2428,20 @@ mod tests {
                ] }
                say-role $msgs[0][role]
                say-part $msgs[0][parts][0]
-               say-role $msgs[1][role]
-               say-part $msgs[1][parts][0]"#,
+               let reply = $material[1][messages]
+               say-role $reply[0][role]
+               say-part $reply[0][parts][0]"#,
             5,
             &emit,
         );
         assert!(
-            result.content.contains("\n1\n"),
-            "one named exchange, got: {}",
+            result.content.contains("\n2\n"),
+            "two named turns, one record each, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("1 user"),
+            "the first record names its own turn and its role, got: {}",
             result.content
         );
         assert!(
@@ -2470,46 +2457,45 @@ mod tests {
         );
     }
 
-    /// The door speaks turns: a range reads back the turns it covers, one
-    /// record per exchange it reaches into, and the two fields ride one
-    /// record — both optional, so either spelling alone type-checks and both
-    /// together read their union.
+    /// The door speaks turn ids, so an address built with `range` and one
+    /// written out read the same turns, each record naming the role it bears
+    /// — a set that spans a prompt boundary answers one record per turn.
     #[test]
-    fn transcript_read_addresses_turns_as_well_as_exchanges() {
-        let mut session = trunk_with_a_closed_exchange();
+    fn transcript_read_addresses_turns_wherever_they_lie() {
+        let mut session = trunk_with_an_answered_prompt();
         crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"let clipped = transcript `read [turns: [2, 3]]
-               echo !{length $clipped}
-               echo $clipped[0][exchange] $clipped[0][turns][0] !{length $clipped[0][messages]}
-               echo $clipped[1][exchange] $clipped[1][turns][0]
-               let both = transcript `read [exchanges: [1], turns: [4, 4]]
-               echo !{length $both} $both[1][turns][0]",
+            r"let spanning = transcript `read [turns: [2, 3]]
+               echo !{length $spanning}
+               echo $spanning[0][turn] $spanning[0][role] !{length $spanning[0][messages]}
+               echo $spanning[1][turn] $spanning[1][role]
+               let built = transcript `read [turns: !{range 3 5}]
+               echo !{length $built} $built[1][turn]",
             5,
             &emit,
         );
         assert!(
             result.content.contains("\n2\n"),
-            "a range across two exchanges answers one record each, got: {}",
+            "two named turns answer one record each, got: {}",
             result.content
         );
         assert!(
-            result.content.contains("1 2 1"),
-            "exchange 1 is reached at turn 2 alone, which holds one message, got: {}",
+            result.content.contains("2 assistant 1"),
+            "turn 2 is an assistant turn holding one message, got: {}",
             result.content
         );
         assert!(
-            result.content.contains("3 3"),
-            "exchange 3 is reached at turn 3, got: {}",
+            result.content.contains("3 user"),
+            "turn 3 is the prompt after it, got: {}",
             result.content
         );
         assert!(
             result.content.contains("2 4"),
-            "the union of both fields reaches two exchanges, the second at turn 4, got: {}",
+            "`range 3 5` is turns 3 and 4, the second of them turn 4, got: {}",
             result.content
         );
     }
@@ -2535,11 +2521,11 @@ mod tests {
     /// The answer type is free, so each tag's own shape has to type-check
     /// against the use the program makes of it: an index row carries `id` and
     /// `held`, and a grep answer projects `hits` and `total` as a record, each
-    /// hit naming the turn it lies in. The optional `exchanges` and `turns`
-    /// ride `` `grep ``'s open record row.
+    /// hit naming the turn it lies in. The optional `turns` rides `` `grep ``'s
+    /// open record row.
     #[test]
     fn index_and_grep_answer_their_own_shapes() {
-        let mut session = trunk_with_a_closed_exchange();
+        let mut session = trunk_with_an_answered_prompt();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
@@ -2549,20 +2535,20 @@ mod tests {
             // names disjoint, so a one-letter binding fails on any host with
             // that letter on PATH (plan9port ships a `g`).
             r"let listed = transcript `index
-               echo $listed[0][id] $listed[0][exchange] $listed[0][held]
+               echo $listed[0][id] $listed[0][role] $listed[0][held]
                let matched = transcript `grep [pattern: 'first (prompt|answer)']
                echo !{length $matched[hits]} $matched[total]
                echo $matched[hits][0][turn] $matched[hits][1][turn]
-               let ranged = transcript `grep [pattern: 'first', turns: [2, 2]]
-               echo $ranged[total]
-               let missed = transcript `grep [pattern: 'nothing here', exchanges: [1]]
+               let narrowed = transcript `grep [pattern: 'first', turns: [2]]
+               echo $narrowed[total]
+               let missed = transcript `grep [pattern: 'nothing here', turns: [1, 2]]
                echo $missed[total]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("1 1 resident"),
-            "the exchange's first turn is listed and still in the context, got: {}",
+            result.content.contains("1 user resident"),
+            "the first turn is listed and still in the context, got: {}",
             result.content
         );
         assert!(
@@ -2577,7 +2563,7 @@ mod tests {
         );
         assert!(
             result.content.contains("\n1\n"),
-            "a range narrows the search to the assistant turn alone, got: {}",
+            "an address narrows the search to the assistant turn alone, got: {}",
             result.content
         );
         assert!(

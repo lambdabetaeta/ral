@@ -36,7 +36,7 @@ The context design [[decisions/260812_context-is-a-projection|context-is-a-proje
 supersedes the old shorthand "`events.jsonl` is the model view". `events.jsonl`
 is now the durable event log whose left fold determines the model view. Its
 membership test is therefore: does the event determine the projection, or is it
-a forensic breadcrumb? Both are legitimate log records. `ContextEdited` is the
+a forensic breadcrumb? Both are legitimate log records. `ContextEdited` (now `Protocol::Evicted`) is the
 new example: its `Fold`/`Drop` operation and authority determine future context,
 while a `Nudge` may be retained as evidence without becoming a model message.
 The old `Compacted` record exposed the failure mode — it said that a compaction

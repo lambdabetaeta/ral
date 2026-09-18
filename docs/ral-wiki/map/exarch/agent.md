@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fb9107b8
+generated_at_commit: ced3518c
 generated_at_date: 2026-09-17
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -58,6 +58,11 @@ not fields of `Fleet` itself. Output caps
 are fixed `agent/digest.rs` constants, not per-agent state.
 
 ## Status, the exchange clock, and the lock rule
+
+An **exchange** on this page is a human round — what the fleet's clock counts
+and what a cancellation interrupts. It is never a unit of the context, which
+has only turns, each with a role
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
 Two per-agent mutexes exist, `Agent::status` and `Agent::children`. **Rule:
 hold at most one at a time.** `children` is locked only to push
@@ -371,14 +376,14 @@ arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-at
 | pin reminder | `react` | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
 | pressure reminder | steering | gauge `Over` ∧ excursion untold | free |
 
-The pressure reminder names the cut it is warning about: `pressure_gauge`
+The pressure reminder names the set it is warning about: `pressure_gauge`
 calls `Avatar::planned_eviction` — a walk back over the turn table's own
 summed weights, no rendering — and carries the answer as
-`Pressure::Over { detail, through }`, so the message tells the model which
-*turn* the next boundary will evict through (and that every exchange wholly
-before it goes with it), that the material stays readable with `transcript`,
-and how to leave itself a line — `` context `evict [through: n, note: '…'] ``
-— before it goes. With nothing old enough to shed, `through` is `None` and the
+`Pressure::Over { detail, planned }`, so the message tells the model which
+*turns* the next boundary would take, rendered as runs, that the material
+stays readable with `transcript`, and how to make the same cut with a line of
+its own — `` context `evict [turns: !{range a b}, note: '…'] `` — before they
+go. With nothing old enough to shed, `planned` is `None` and the
 reading alone is the whole message. Durability is the log's job, so the nudge
 no longer asks the model to write state to files.
 
@@ -642,42 +647,47 @@ hand, so there is no iteration where weighing is unsafe
 autonomous and headless sessions therefore stay bounded *within* one
 deliberation, without an interactive `/evict`.
 `suffix_keep_budget` (half the history bytes) sets the cut and
-`Memo::plan_eviction` walks back over the turn table's summed weights until
-that budget is spent; the plan carries only `through`. The walk's candidates
-are every resident turn but the last, so the work in hand is not in the slice
-a plan can name and a cut `validate_edit` would refuse is unrepresentable
-rather than merely improbable — the budget alone would cut everything when the
-newest turn outweighs the whole of it. A user turn whose exchange still has a
-resident turn above the cut stays with it, so a cut into an exchange keeps its
-prompt; a user turn that overshoots takes its whole exchange, the cut falling
-through that exchange's newest resident turn. **No provider call is
+`plan_eviction(keep)` walks back over the turn table's summed weights until
+that budget is spent, answering the **set** the cut would take —
+`Option<Vec<u64>>`, `None` when nothing is old enough. The walk's candidates
+are every resident turn but the last, so the work in hand is never in a plan's
+set — the budget alone would cut everything when the newest turn outweighs the
+whole of it. A prompt whose answers still hold a resident turn outside the set
+stays with them, so a cut that reaches into a prompt's answers keeps the
+prompt. **No provider call is
 involved**, so a boundary Esc has nothing to interrupt and simply leaves the
 context as it lies
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-A successful eviction records `ContextEdited { op: Evict { through,
-note: None }, by: Harness }`, wrapped in `Transient::State(AgentState::Evicting)`
+A successful eviction is `evict(turns, None, EditAuthority::Harness)`, which
+records `Protocol::Evicted { cut: Cut { turns, note: None }, by }` — the
+*resolved* set, the ids that actually left, so replay departs exactly those and
+re-derives nothing
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]])
+— wrapped in `Transient::State(AgentState::Evicting)`
 for the state row — momentary, since the edit is the whole of it. The same fold
 step marks the departing turns `Held::Evicted` and frees their resident
 records, retaining only their byte ranges in `record.jsonl`; this is residency
-following the context, not a second drain rule. `render_head` draws the marker
-from those very turns and the `Cut` beside them, so what left is still named
+following the context, not a second drain rule. `render_marker` draws one
+marker at each hole the cut opens, from those very turns and the `Cut` beside
+them, so what left is still named
 and still readable through `transcript`. Nothing old enough to shed is a no-op,
 not an event. The durable log is appended to, never rewritten.
 
-Harness eviction is one authority over the same `Evict`/`Drop` edit
+Harness eviction is one authority over the one context edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
-model reaches the other two: `` context `survey ``/`` `drop ``/``
-`evict [through, note] `` edit the context and `transcript`'s ``
-`index ``/`` `read ``/`` `grep `` read the record, each edit recording
-`ContextEdited` with `EditAuthority::Model` rather than `Harness`; only the
+model reaches the other two: `` context `survey ``/``
+`evict [turns, note] `` survey and edit the context and `transcript`'s ``
+`index ``/`` `read ``/`` `grep `` read the record, an edit recording
+`Protocol::Evicted` with `EditAuthority::Model` rather than `Harness`; only the
 model's own `` `evict `` carries a `note`. The user's own hand is
-`/rewind <exchange>`, which desugars to the same `Drop` at
+`/rewind <turn>`, which is `AgentLog::suffix_from(anchor)` — every resident
+turn from that id on — evicted at
 `EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
 `/context` surveys the context without editing it — `emit_context_survey`
 posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
-groups them into exchange runs at draw time, one field per exchange with its
-resident turn range and weight — the read-only sibling
+groups them off their roles at draw time, one field per prompt with the
+resident turn range answering it and its weight — the read-only sibling
 `ReplControl::command` serves alongside `/clear`, `/evict`, `/branch`, and
 `/quit`.
 
@@ -838,7 +848,18 @@ so the user never sees more of a result than the model does. A structured
 `VALUE` now arrives pre-budgeted — the printer spends its own byte budget inside
 the value, cutting where a container can still name what it dropped — so `clip`
 is a backstop there, while stdout, stderr, and raw payload strings still meet it
-head-on. `run_shell` here threads to [[map/exarch/shell-eval|shell-eval]].
+head-on.
+
+Every `ral` result closes with a `TURN: <id>` line naming the turn it closes.
+That is how the model learns its own turn number, and so the address it evicts
+and reads by: the same id `` context `evict [turns: …] `` and
+`` transcript `read [turns: …] `` take. It is appended in `agent/shell.rs`,
+from `AgentLog::current_turn()`, not in `digest`'s rendering — the id is the
+session's, known where the result is assembled and not inside a byte-capped
+section, and `system.md` tells the model to expect it
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+
+`run_shell` here threads to [[map/exarch/shell-eval|shell-eval]].
 
 ## See also
 
@@ -858,5 +879,7 @@ seat is one engine process, one connection),
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] (the turn as
 the unit of eviction, the loop-top weighing, and the pressure reminder's
 channel),
+[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
+(the one edit, its three authorities, and the marker at each hole),
 [[map/synod|synod]] (`MachineDial`, and synod's own helper surface built over
 the wire-seat spawn above).

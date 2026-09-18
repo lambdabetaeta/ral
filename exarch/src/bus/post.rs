@@ -146,7 +146,7 @@ pub(crate) enum Post {
     /// registry turns an attempt back — the same exchange continuing, pushed
     /// through the agent's own `Inbox` and never across agents.
     Nudge {
-        exchange: u64,
+        prompt: u64,
         text: String,
     },
     /// A session command that only *reads* the session (`/branch` forks a
@@ -308,9 +308,9 @@ pub(crate) enum Item {
     Agent(AgentResult),
     /// A marked message from a peer agent.
     Message(AgentMessage),
-    /// The agent's continuation of its own exchange: no human chrome, and it
+    /// The agent's continuation of the prompt in hand: no human chrome, and it
     /// opens no new exchange.
-    Nudge { exchange: u64, text: String },
+    Nudge { prompt: u64, text: String },
     /// A raw slash command for the attend loop's [`Control`](crate::agent::Control).
     Command(String),
     /// A detached `spawn` worker's deferred `surface` batch.  Staleness is
@@ -347,7 +347,7 @@ impl Item {
 
     pub(crate) fn continues(&self) -> Option<u64> {
         match self {
-            Self::Nudge { exchange, .. } => Some(*exchange),
+            Self::Nudge { prompt, .. } => Some(*prompt),
             _ => None,
         }
     }

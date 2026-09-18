@@ -26,3 +26,13 @@ The rule is also why optionality cannot hide in a record's width: a field that
 may or may not be there must be named to be read, and naming it in a result's
 row forces every caller to supply it. Absence therefore travels as a variant
 ([[invariants/optionality-via-variants|optionality-via-variants]]).
+
+The rule holds across the harness wire too. A family tag's record — `` agents
+`start ``'s spec, `` context `evict ``, `` transcript `grep `` — crosses to the
+desk by field name and is read there through `Fields` (`exarch/src/fleet/desk.rs`),
+which is constructed with the complete list of names the tag reads and refuses
+any other: `` `transcript `grep`: unknown field `turn` — the payload takes
+`pattern` and `turns` — did you mean `turns`? ``. An open shell-side row cannot
+state an optional field's absence, so without this a misspelt optional field
+would be read by nobody and silently change the call's meaning — a `grep` over
+the whole transcript where a narrowing was meant.

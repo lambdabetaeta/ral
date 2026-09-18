@@ -285,15 +285,14 @@ impl Avatar {
             None => None,
         };
         if let Some(text) = nudge_msg {
-            let exchange = self.log.lock().current_exchange();
-            if let Some(exchange) = exchange {
-                self.inbox.push(Post::Nudge { exchange, text });
+            let prompt = self.log.lock().current_prompt();
+            if let Some(prompt) = prompt {
+                self.inbox.push(Post::Nudge { prompt, text });
             } else {
                 // Unreachable: every outcome `react` answers followed a
-                // deliberation whose prompt `append_user` committed, which
-                // opened an exchange.
+                // deliberation whose prompt `append_user` committed.
                 let recorded = self.log.lock().record_error(format!(
-                    "a nudge was decided with no exchange open to continue — \
+                    "a nudge was decided with no prompt in hand to continue — \
                      dropping it: {text}"
                 ));
                 if let Err(error) = recorded {
@@ -375,7 +374,7 @@ impl Avatar {
             Some(w) if w > 0 => match self.token_pressure(w) {
                 Some(detail) => nudge::Pressure::Over {
                     detail,
-                    through: self.planned_eviction(),
+                    planned: self.planned_eviction(),
                 },
                 None if self.measured_input().is_some() => nudge::Pressure::Under,
                 None => nudge::Pressure::Unknown,
@@ -385,7 +384,7 @@ impl Avatar {
                 if bytes >= PRESSURE_THRESHOLD_FALLBACK {
                     nudge::Pressure::Over {
                         detail: format!("{} KB", bytes / 1024),
-                        through: self.planned_eviction(),
+                        planned: self.planned_eviction(),
                     }
                 } else {
                     nudge::Pressure::Under

@@ -1,5 +1,10 @@
 # An exchange ends ready
 
+An **exchange** here is a human round — a prompt and all the work it draws,
+the same unit the fleet's clock counts. It is not a unit of the context, which
+has only turns, each with a role
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+
 The session protocol is a state machine over the
 [[internals/session-record|record-backed model projection]] (`AgentLog`) with
 two kinds of phase:
@@ -77,13 +82,15 @@ every system message anywhere in history into one preamble resent on every
 request, so a marker meant to stay pinned where it happened would colonise the
 system prompt instead.
 
-`is_live_exchange` — the exchange still owed a reply — stays keyed to
-`ReadyForUser` rather than `is_ready`. It is no longer an eviction concept: a
-cut is kept off the work in hand by `plan_eviction`'s own shape and by
-`validate_edit`, and what this predicate answers for is the *door*, refusing to
-read the exchange still being written — though that refusal names its own
-closed turns, which are readable
-([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
+Eviction is not stated at this granularity at all. The rule is that **no
+edit touches the unclosed turn** — the one being written, which exists only
+while a turn is open, so at `ReadyForUser` nothing is unclosed
+and a user rewind may empty the context. `Context::resolve_cut` refuses that
+turn by name, and `plan_eviction` draws its candidates from every resident turn
+*but the last*, so a harness plan cannot name it either. The reading door
+refuses the same turn, and that refusal names the closed turns of the work in
+hand, which are readable
+([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
 The hard rule: a path that ends an exchange must leave a fresh prompt
 admissible. Add a new exchange-ending outcome through `quiesce` (extend

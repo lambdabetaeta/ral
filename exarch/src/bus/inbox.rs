@@ -592,7 +592,7 @@ fn to_item(msg: Post, epoch: u64) -> Option<Item> {
             }
         }
         Post::AgentMessage(m) => Item::Message(m),
-        Post::Nudge { exchange, text } => Item::Nudge { exchange, text },
+        Post::Nudge { prompt, text } => Item::Nudge { prompt, text },
         Post::Command(s) | Post::Barrier(s) => Item::Command(s),
         Post::UserSteering(_) => {
             unreachable!("user steering coalesced by the caller")
@@ -1280,15 +1280,15 @@ mod tests {
     fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
         let inbox = Inbox::new();
         inbox.push(Post::Nudge {
-            exchange: 1,
+            prompt: 1,
             text: "retry".into(),
         });
         inbox.push(Post::Nudge {
-            exchange: 1,
+            prompt: 1,
             text: "retry".into(),
         });
         inbox.push(Post::Nudge {
-            exchange: 2,
+            prompt: 2,
             text: "different".into(),
         });
         assert_eq!(

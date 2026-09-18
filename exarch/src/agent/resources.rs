@@ -544,10 +544,7 @@ impl Avatar {
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
         let recorder = self.recorder();
-        if let Err(error) = recorder.emit(crate::record::Display::Context {
-            turns: survey.rows,
-            evicted: survey.evicted,
-        }) {
+        if let Err(error) = recorder.emit(crate::record::Display::Context { turns: survey.rows }) {
             recorder.report_fault(&error);
         }
     }
@@ -721,8 +718,11 @@ mod tests {
                 _ => None,
             })
             .expect("the survey records a Display::Context commit");
-        assert_eq!((fact[0].id, fact[0].exchange), (1, 1));
-        assert_eq!(fact[0].kind, crate::agent::event::TurnKind::Exchange);
+        assert_eq!(
+            (fact[0].id, fact[0].role),
+            (1, crate::agent::event::Role::User)
+        );
+        assert_eq!(fact[0].kind, crate::agent::event::TurnKind::Own);
     }
 
     /// The agent half surveys what this thread owns: the worker registry's
@@ -820,7 +820,7 @@ mod tests {
         // compares snapshots rather than pinning the whole vector.
         session.inbox.push(Post::UserSteering("hold".into()));
         session.inbox.push(Post::Nudge {
-            exchange: 1,
+            prompt: 1,
             text: "go on".into(),
         });
         let depths_before = session.inbox.source_depths();
