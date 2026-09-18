@@ -187,6 +187,12 @@ run *args:
 guest-boot $ARCH='arm64':
     bash vm-image/build-boot.sh
 
+# The same media from Windows, built on WSL's ext4 rather than across drvfs.
+# Keeps the container's build tree between runs; `--clean` drops it.
+[windows]
+guest-boot-wsl ARCH='amd64' DISTRO='Ubuntu' *args:
+    wsl.exe -d {{DISTRO}} -- bash -lc 'cd "$(wslpath "{{justfile_directory()}}")" && ARCH={{ARCH}} bash vm-image/build-boot-wsl.sh {{args}}'
+
 # Office userland for one guest: no argument for the Mac's, `amd64` for Windows'.
 guest-rootfs $ARCH='arm64':
     bash vm-image/build.sh

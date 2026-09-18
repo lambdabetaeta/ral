@@ -128,12 +128,25 @@ export GIT_HASH
 echo ">> building boot.img: $SUITE/$ARCH kernel + initramfs, ral @ $GIT_HASH"
 START=$(date +%s)
 
+# /build is cargo's target dir and cargo home (step 1), and it dies with the
+# container unless someone hands us somewhere to keep it — so every build is a
+# cold one. `RAL_BUILD_CACHE` is that somewhere, and it is opt-in because
+# nothing shipped may come out of it: the media is built from /ral every time,
+# and a stale cache costs only the disk it sits on.
+CACHE_MOUNT=()
+if [ -n "${RAL_BUILD_CACHE:-}" ]; then
+  mkdir -p "$RAL_BUILD_CACHE"
+  CACHE_MOUNT=(-v "$(host_path "$RAL_BUILD_CACHE"):/build")
+  echo ">> reusing the build tree in $RAL_BUILD_CACHE"
+fi
+
 podman run --rm -i \
   --privileged \
   --security-opt label=disable \
-  -e SUITE -e ARCH -e MIRROR -e RUST_TARGET -e GIT_HASH \
+  -e SUITE -e ARCH -e MIRROR -e RUST_TARGET -e GIT_HASH -e CARGO_BUILD_JOBS \
   -v "$(host_path "$REPO_DIR"):/ral:ro" \
   -v "$(host_path "$OUT_DIR"):/out" \
+  "${CACHE_MOUNT[@]}" \
   "$BASE_IMAGE" \
   bash -euo pipefail -s <<'INNER' 2>&1 | tee "$OUT_DIR/build.log"
 export DEBIAN_FRONTEND=noninteractive
@@ -307,6 +320,10 @@ sh /tmp/rustup.sh -y --profile minimal --default-toolchain stable --target "$RUS
     >/tmp/rustup.log 2>&1
 . /root/.cargo/env
 export CARGO_TARGET_DIR=/build/target
+# Registry and git checkouts beside it rather than under /root, so a mounted
+# /build spares the next build the downloads as well as the compiling. rustup
+# has already put cargo on PATH; only where it keeps its caches moves.
+export CARGO_HOME=/build/cargo
 
 echo ">> [container] cargo build --release --target $RUST_TARGET"
 ( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
@@ -350,13 +367,12 @@ echo ">> [container] boot contract $BOOT_CONTRACT"
 # package this media rather than ship an engine that will refuse its Attach
 # and leave the front-end holding a closed socket.
 echo ">> [container] reading the protocol version out of the engine it just built"
-( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
-    -p ral-core --example proto-version )
+( cd /ral && cargo build --release --locked --target "$RUST_TARGET"     -p ral-core --example proto-version )
 PROTO_VERSION=$("$BIN/examples/proto-version")
 case "$PROTO_VERSION" in
   '' | *[!0-9]*)
-    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.\n' \
-      "$PROTO_VERSION" >&2
+    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.
+'       "$PROTO_VERSION" >&2
     echo "core/examples/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
     exit 1 ;;
 esac
