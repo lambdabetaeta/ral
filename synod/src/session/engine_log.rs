@@ -45,6 +45,7 @@
               shell to route through and no run to raise a card in. See the module docs."
 )]
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -91,12 +92,13 @@ fn render(why: &str, console: &vm_manager::GuestConsole) -> String {
     out.push_str("\n\n");
     match console.log.as_ref() {
         Some(path) => {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "The guest's whole console is at {}. It belongs to whichever process ran the \
                  machine, which under an installed synod is a service running as LocalSystem, so \
                  reading it may take an administrator.\n\n",
                 path.display()
-            ));
+            );
         }
         None => out.push_str(
             "No console log was kept for this machine. On this backend the guest's console goes \
