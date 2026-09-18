@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2d120d2
-generated_at_date: 2026-09-11
+generated_at_commit: d0e5d30c
+generated_at_date: 2026-09-18
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -9,9 +9,11 @@ covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core
 synod is a second product over the same engine — an *office-work* delegate
 where [[map/exarch|exarch]] is a coding one. The user grants one folder,
 describes a task in plain English, and the agent works in it — the folder
-itself, in place, under a safety net: checkpoint before the job, a
-plain-language change report after it, conflict-checked undo per file or whole
-job. It is not a fork of exarch and not a mode of it: it depends on exarch as
+itself, in place, and is held to account for it: the folder is recorded
+before the job and again after it, and the difference is reported in plain
+language. Nothing is ever put back — what is done is done
+([[decisions/260807_store-lives-as-long-as-the-conversation|store-lives-as-long-as-the-conversation]],
+superseded). It is not a fork of exarch and not a mode of it: it depends on exarch as
 a library and supplies only what differs
 ([[decisions/260721_synod-is-a-second-product|synod-is-a-second-product]]).
 It is one crate in two halves: the library modules are the engine anyone
@@ -105,48 +107,46 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   back each platform's own owned handles and
   `ral_core::protocol::WireTransport::adopt` takes either, so the protocol
   is one function ([[design/engine-protocol|engine-protocol]]).
-  Before any of that, `begin` stat-measures the folder
-  (`workspace::manifest::measure`) and asks, before a single byte is read,
-  whether the copy fits where the store would go
-  (`session/opening.rs`'s `no_room_for_copy`, off
-  `workspace::history::free_bytes_for`, which walks up to the nearest
-  directory that exists because no store is made yet). A copy that does not
-  fit is *not attempted*: the baseline is `Untaken`, no store is opened, and
-  `no_copy_line` tells the user in the opening that this conversation has no
-  undo — filling the disk to reach a safety net leaves the user worse off
-  than opening without one. A free figure this host cannot read counts as
-  room, so undo is never withheld on a number nobody could produce.
-  Otherwise `begin` opens the store and spawns the before-checkpoint on its
-  own thread as a `session/baseline.rs` `Baseline`
-  (`Pending`/`Ready`/`Failed`/`Crashed`/`Untaken`/`Settling`), with
-  `slow_copy_line` warning on size alone; `begin` never joins that
-  thread itself, so the boot runs alongside the walk rather than after it and
-  the conversation opens the moment the boot is done
-  ([[decisions/260807_store-lives-as-long-as-the-conversation|store-lives-as-long-as-the-conversation]]).
-  A `Pending` baseline's capture thread is owned by a nested `PendingWalk`,
+  Before any of that, `begin` spawns the folder's opening walk on its own
+  thread as a `session/baseline.rs` `Baseline`. That walk is stat-only —
+  path, kind, size, `mtime_ns`, mode, and not one byte of the user's folder
+  read — so it is the same single walk that used to be a stat pre-flight
+  followed by a full-byte capture, and it costs a stat walk however large
+  the folder is. Nothing is copied, so nothing asks whether a copy would
+  fit: there is no store, no free-space pre-flight, and no opening line
+  about either. `begin` never joins the thread itself, so the boot runs
+  alongside the walk rather than after it and the conversation opens the
+  moment the boot is done; the walk reports its running file count through a
+  progress callback the window renders, and carries a `Stop` the window
+  trips when it closes or restarts, so a slow share is never something a
+  user has to wait out.
+  An unsettled baseline's walk thread is owned by a nested `PendingWalk`,
   the one thing in `Baseline` that implements `Drop`: dropped unjoined —
   `begin`'s error path, once `?` runs straight through rather than by way of
   an explicit abandon — it stops and joins the walk itself and discards
-  whatever it produced, so no error path in `begin` can leave a capture
-  thread running past it.
+  whatever it produced, so no error path in `begin` can leave a walk thread
+  running past it. Only an *unjoined* walk is stopped there: the switch ends
+  the walk for good, and tripping it on a walk `settle` already took would
+  end the baseline that walk was producing.
   `exchange` settles the baseline first — joining the capture thread on its
   first call, every call after finding it already settled — before it drives
   anything, since the guest must never write into a folder whose baseline is
   still being read, then drives one message through
   `exarch::headless::converse_settled`
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]),
-  bracketed by the safety net — a checkpoint before, a checkpoint after, even after a
-  failed run; the after-checkpoint waits for fleet quiescence, not merely the
-  trunk's own silence, so a helper still writing to the folder never races the
-  report. `end` closes the wire — the guest halts itself — and only then
-  joins a baseline still `Pending` (a conversation closed before its first
-  message) and wipes the store: closing the window is accepting the folder
-  as it stands, so undo ends with the conversation. The trunk's fuel is
+  then takes the closing walk and holds the `JobReport` the window reads
+  back — taken even after a failed run, since whatever changed before the
+  failure still changed. That closing walk waits for fleet quiescence, not
+  merely the trunk's own silence, so a helper still writing to the folder
+  never races the report. `end` closes the wire — the guest halts itself —
+  and only then joins a walk still running (a conversation closed before its
+  first message). There is nothing to wipe: a conversation leaves nothing on
+  disk at all. The trunk's fuel is
   `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
   `Dial` implementation over `Machine::connect_guest` (below), so synod's
   office assistant may delegate to helpers that run concurrently in the
-  same guest, against the same folder, under the same safety net.
+  same guest, against the same folder, and in the same report.
 - `session/menu.rs` — the model picker: `menu`/`refresh_menu` list what the
   computer's credentials can reach (cached-instant and fetched-complete), and
   a `Choice` names an `AccountId`, model, and effort — an id and never a
@@ -167,9 +167,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   synod's own `Cargo.toml` names no `tokio` dependency. `prepare` itself
   only delegates: where synod's accounts come from is `accounts.rs`.
 - `session/opening.rs` — `Opening`, what the window shows before the first
-  message: who is answering, at what effort, and the folder line
-  (`no_room_for_copy`/`slow_copy_line`/`no_copy_line`, above) the folder
-  itself earns.
+  message: who is answering, and at what effort. There is no line about the
+  folder any more — the copy it used to warn about, and the free space that
+  copy needed, are both gone.
 - `accounts.rs` — **synod's own credential story**, and the one place it
   stops borrowing exarch's. A key reaches exarch through the environment
   because exarch is started from a shell; synod is double-clicked, inherits
@@ -203,68 +203,53 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   static sign-in card gives way to rows drawn from `store.available()`.
   See [[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
 
-## synod/src/workspace/ — the safety net
+## synod/src/workspace/ — the account of what changed
 
-The module the product's guarantee lives in, all host-side, exercised under
-ordinary `cargo test`. It states that host-side standing rather than assuming
-it: `history.rs`, `restore.rs`, `report.rs` and `manifest.rs` are each one kind
-of site — the history store's own bookkeeping, or the capture of the granted
-folder, never the model's turn-time I/O, which happens inside the guest — so
-each says so once, at module scope, in the shape `vm-manager/src/hcs/vhd.rs`
-uses. synod holds no crate-level exemption from the I/O-door and path
+The module the product's one remaining promise lives in, all host-side,
+exercised under ordinary `cargo test`. It promises an honest account of what
+a job changed, and nothing about putting anything back. It states its
+host-side standing rather than assuming it: `manifest.rs` and `report.rs`
+are each one kind of site — synod's own walk of the granted folder, never
+the model's turn-time I/O, which happens inside the guest — so each says so
+once, at module scope, in the shape `vm-manager/src/hcs/vhd.rs` uses. synod holds no crate-level exemption from the I/O-door and path
 disciplines in either of its two roots; every exception is named where it is
 taken:
 
-- `manifest.rs` — a folder's state at one moment: path, kind, size, blake3
-  hash, `mtime_ns` beside it — the stat facts a capture checks before it
-  reopens a file. One `walk`, taking a visitor (`Visit<'a>`, an `FnMut` over
-  a key, a path, and its metadata) rather than a second walk per caller:
-  `of_folder_via`'s visitor builds a `Manifest`, `measure`'s counts bytes and
-  nothing else. A path the walk listed but could not record — a subtree
+- `manifest.rs` — a folder's state at one moment, from `symlink_metadata`
+  alone: path, kind, size, `mtime_ns`, mode. No hash, because no file is
+  ever opened — the walk reads the folder's shape and never its contents,
+  which is a privacy property as much as a cost one. `of_folder_via(root,
+  stop, progress)` is the one walk, over a visitor (`Visit<'a>`, an `FnMut`
+  over a key, a path, and its metadata); `progress` is handed the running
+  file count so a caller can say something during a slow share, and `covers`
+  — the crate's one folder-prefix-with-boundary rule — lives here beside the
+  keys it resolves. A path the walk listed but could not record — a subtree
   whose `read_dir` answers `NotFound`, a file gone before it could be read,
   an entry gone between listing and `symlink_metadata` — goes into
   `Manifest::unread`, the subtree root alone rather than every key beneath
   it, and `changes.rs` suppresses anything it covers. Silence there was the
   worse bug: a subtree missing from a baseline for an ordinary reason (a
   share blipping, a cloud placeholder unhydrated) came back as *created by
-  the assistant*, one Revert per file, each deleting a document. A `root`
-  that is gone is an error, not an empty manifest, for the same reason at the
-  limit. Empty folders and symlink targets recorded, links never followed. A
-  `Stop` the walk reads once per entry ends a copy nobody is waiting for any
-  more; a stopped walk raises `WalkError::Stopped` and writes no checkpoint,
-  never a short manifest, since a truncated record reads as one where
-  everything unread had been deleted. A cheap `measure` — stat only, no bytes
-  read — feeds the pre-flight before the real walk starts.
-- `history.rs` — the per-folder store: content-addressed `objects/`
-  (identical bytes kept once, ever) plus `checkpoints/<id>.json`, with
-  `Before`, `After`, and `Undo` moments. `capture` is a stat walk once a
-  baseline exists: an entry whose size and `mtime_ns` match the folder's
-  latest checkpoint, and whose mtime is strictly older than that
-  checkpoint's own `taken_at_ms` (git's racy guard, stamped at walk start,
-  not walk end), reuses the recorded hash without reopening the file. Every
-  byte a job or an undo replaces is in the store before it is touched. Every
-  open store holds a shared advisory lock on a `lock` file beside it
-  (`flock` on unix, `LockFileEx` on Windows, one `lock_imp` per platform);
-  `wipe` drops that lock and removes the store's directory whole at a clean
-  `Conversation::end`, and `sweep_stale` — called once from `main.rs` before
-  any conversation can open its own store — probes every `<slug>/history`
-  with a non-blocking exclusive lock and removes only the ones nothing
-  holds, a crashed session's leavings; a live shared hold always refuses the
-  probe, so a running conversation is never swept. Every store carries the
-  `Stop` its captures read, so ending a conversation ends the copy it started
-  rather than waiting the copy out — which is what `Conversation::end` does
-  before it wipes, and why a restart no longer runs a second capture
-  alongside the first. `free_bytes` (`statvfs` on unix,
-  `GetDiskFreeSpaceExW` on Windows) answers the pre-flight, via
-  `free_bytes_for` for a store that does not exist yet.
-- `changes.rs` — the delta between two manifests: created, modified, deleted,
-  renamed (a deleted and a created file with identical bytes, paired).
-- `restore.rs` — the conflict-checked driver: a path edited *after* the job
-  is a conflict resolved only by the caller (`KeepCurrent` or explicit
-  `PutBack`); nothing silently overwritten, nothing destroyed.
-- `report.rs` — the GUI's seam: the job report, `undo_file` (either name of a
-  rename undoes both sides), `undo_all`, the headless run's plain-text
-  rendering.
+  the assistant*. A `root` that is gone is an error, not an empty manifest,
+  for the same reason at the limit. Empty folders and symlink targets
+  recorded, links never followed. A `Stop` the walk reads once per entry
+  ends a walk nobody is waiting for any more; a stopped walk raises
+  `WalkError::Stopped` and answers an error, never a short manifest, since a
+  truncated record reads as one where everything unread had been deleted.
+- `changes.rs` — the delta between two manifests: created, **modified**
+  (size or mode differs, so the contents certainly changed), **touched**
+  (the timestamp moved and nothing else did — something wrote to the file,
+  and whether the bytes differ cannot be known without reading them, which
+  synod does not do), deleted, and renamed. A rename pairs a deletion with a
+  creation on identical `(size, mtime_ns)`: a move preserves both, which
+  makes it a sharper signal than the content hash it replaced — a hash match
+  is true of every pair of identical files in the folder, empty ones
+  included. A key many candidates share on both sides is left unpaired,
+  since mass duplication is not a mass rename, and an honest deletion beside
+  an honest creation is never a lie where a confident rename would be.
+- `report.rs` — the GUI's seam: `job_report` is a pure, infallible function
+  of two manifests, and the live `Conversation` holds them, so drawing a
+  report re-reads nothing from disk and cannot fail.
 
 ## synod/src/shell/ — the window
 
@@ -340,16 +325,14 @@ progress and outcome events (`sign-in-step`, `sign-in-done`) rendered beneath
 the button, and the account it wins arriving as the same `models-refreshed`
 the picker already renders through; with no account set up the sign-in is the
 screen's primary button and the folder picker waits for it; `review.rs`
-translates the workspace vocabulary into cards and runs the
-gentle-then-explicit conflict flow, and carries `WindowReport::unreadable`
-beside the cards — what the copy could not read, so the panel can say what
-it is not answering for — held with the card list so an undo does not drop
-it. That holding type, `Held`, carries the report's own folder and refuses a
-later call whose `folder` argument does not match, so a stale or mismatched
-frontend can never fold an undo into a report from a different job;
-`open_earlier` materialises the before-version into the history store's own
-`scratch_dir` — wiped along with the rest of the store at `wipe`, never a
-system `temp_dir`, so nothing opened this way needs cleanup of its own.
+translates the workspace vocabulary into cards, and carries
+`WindowReport::unreadable` beside them — what the walk could not read, so
+the panel can say what it is not answering for. The surface is read-only:
+there is no status to distinguish, nothing to put back, and no conflict a
+caller could be asked to resolve. That holding type, `Held`, carries the
+report's own folder and refuses a later call whose `folder` argument does
+not match, so a stale or mismatched frontend can never draw one job's
+report against another's folder.
 `synod/src/main.rs` runs exarch's
 `exit_if_re_exec_child` re-exec trampoline first, like every
 [[invariants/single-binary|multicall]] binary here.
@@ -716,8 +699,8 @@ exarch's cross-by-copy position.
   listens and the host dials, and why that direction is what deleted the
   correlation machinery rather than shrinking it.
 - [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
-  — why synod's after-checkpoint waits for the whole fleet, not just the
-  trunk.
+  — why synod's closing walk waits for the whole fleet, not just the
+  trunk, so a helper still writing never races the report.
 - [[map/core/io-process|core / io-process]] — the guest spawn jail
   (`jail.rs`) whose unfiltered `socket(AF_VSOCK)` a hatch's eight token bytes
   are the second line against, the guest kernel's refusal of a guest-local

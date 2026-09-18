@@ -1,8 +1,15 @@
 ---
-status: active
+status: superseded
 ---
 
 # The store lives exactly as long as the conversation
+
+> **Superseded on 2026-09-18.** The history store described here no longer
+> exists. Undo was removed from synod outright and the safety copy with it;
+> what survives is a stat-only report of what a job changed, and nothing is
+> put back. The pricing and lifetime decided below were both sound — they
+> were simply not enough to make a byte-for-byte copy of a live folder worth
+> what it cost. See [[map/synod|synod]] for the shape that replaced it.
 
 **Synod's history store is re-priced to cost what a job actually changed, and
 re-scoped to live exactly as long as the conversation that opened it — the two
