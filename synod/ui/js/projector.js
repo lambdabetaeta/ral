@@ -21,6 +21,10 @@ import { setFacts, setStatus } from "./conversation.js";
 
 // ---- The projector ----------------------------------------------------
 
+// How long the streaming bubble may stay raw before it is re-parsed.
+const FLUSH_MS = 100;
+let parsedAt = 0;
+
 // Per block: the element last built for it and the revision it shows.
 // An untouched block keeps its element across renders — same node, same
 // in-flight animation. A block whose rev moved is rebuilt whole; the
@@ -92,12 +96,8 @@ function renderBlock(block) {
       bubble.textContent = block.text;
       return msg;
     }
-    // While tokens are still landing, plain text: a markdown re-parse of
-    // the whole accumulated message on every token is quadratic in the
-    // message length (measured: 3.3s of main-thread time by 8,000
-    // tokens). `block.plain` drops only at a streaming flush boundary or
-    // when the bubble's stream closes, so the expensive parse runs a
-    // handful of times per message rather than once per token.
+    // Plain between flushes: re-parsing per token is quadratic in the
+    // message (measured: 3.3s of main thread by 8,000 tokens).
     case "assistant": {
       const { msg, bubble } = messageShell("msg assistant");
       if (block.plain) {
@@ -164,22 +164,21 @@ export function onSynodEvent(p) {
       if (!streamingProse && !p.text.trim()) break;
       if (streamingProse) {
         streamingProse.raw += p.text;
-        // A token past a boundary flush resumes in plain text — the
-        // markdown re-parse that flush just paid for stays paid for
-        // until the next boundary, not redone on every token after it.
-        streamingProse.plain = true;
+        // On a cadence: `boundary` arrives only once the turn has sealed.
+        const now = performance.now();
+        streamingProse.plain = now - parsedAt < FLUSH_MS;
+        if (!streamingProse.plain) parsedAt = now;
         bump(streamingProse);
       } else {
         clearOpenDial();
+        parsedAt = performance.now();
         openStreamingProse(p.text);
       }
       break;
-    // The streaming flush boundary: a step of the reply has settled, so
-    // this is a cheap moment to pay the one markdown re-parse the plain
-    // text has been deferring. More tokens past it resume in plain text.
     case "boundary":
       if (streamingProse) {
         streamingProse.plain = false;
+        parsedAt = performance.now();
         bump(streamingProse);
       }
       break;
@@ -189,9 +188,6 @@ export function onSynodEvent(p) {
     // `ready` carries no spinner, which is what an empty bar means here.
     case "state":
       setStatus(p.pending ? (p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1) : p.label) + "…" : "");
-      break;
-    case "turn":
-      dialAddNote("[turn " + p.id + "]", "muted");
       break;
     case "tool_call":
       dialAddCall(p);

@@ -201,11 +201,6 @@ pub enum SynodEvent {
     /// to know when to re-render the streaming bubble as markdown instead of
     /// plain text, not to draw anything itself.
     Boundary,
-    /// The id the request now going out will produce.  A cancelled request
-    /// retaken shows the same id twice — accurately.
-    Turn {
-        id: u64,
-    },
     /// The session's whole state, not a passing label: the status bar names
     /// this one until the next arrives, and `pending` says whether anything is
     /// outstanding — the spinner's warrant.  Mostly the agent's own states,
@@ -333,18 +328,20 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { turns } => process_card(Some(context_rows_card(turns))),
-        Display::Turn { id } => Some(SynodEvent::Turn { id: *id }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
         // a settled background block — a worker thread is no business of a
-        // secretary's — and a display twin of a protocol fact the screen
-        // never actually drew live: none of these are narrated to the window,
-        // which draws only from the live deltas and the acts above.
+        // secretary's — the turn breadcrumb, which is the CLI's register and
+        // no fact of the conversation, and a display twin of a protocol fact
+        // the screen never actually drew live: none of these are narrated to
+        // the window, which draws only from the live deltas and the acts
+        // above.
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Prompt { .. }
         | Display::Answer { .. }
         | Display::Result { .. }
+        | Display::Turn { .. }
         | Display::Evicted { .. } => None,
         // Intercepted by `Router::route_fact` before this fold ever runs.
         Display::SubagentDone { .. } => None,
@@ -445,10 +442,6 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
 
 /// Fold one durable [`Record`] the trunk itself produced into the event the
 /// window renders, or `None` for a record the window has no use for.
-///
-/// `Turn`'s protocol twin's `tuning` is dropped, exactly as the `Display`
-/// class that carries it already drops it: the window narrates turns, not
-/// the provider's effort dial.
 pub fn project(record: &Record) -> Option<SynodEvent> {
     match record {
         Record::Protocol(protocol) => project_protocol(protocol),
