@@ -1,4 +1,5 @@
-//! Exarch — a delegate driving ral in process under a user-chosen grant policy.
+//! A coding agent based on the ral shell, driven in process under a
+//! user-chosen grant policy.
 //!
 //! The whole agent is here: the CLI, capability composition, the
 //! [`agent::Avatar`] exchange driver, the [`provider::Provider`] transport, and

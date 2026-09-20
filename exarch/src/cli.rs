@@ -9,7 +9,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 /// few enough to spell out.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Exarch — a delegate driving ral under a grant",
+    about = "A coding agent based on the ral shell.",
     long_about = None,
     group(ArgGroup::new("headless_mode").args(["headless", "prompt"]).multiple(true))
 )]
