@@ -4,6 +4,7 @@
 // loaded.  A top-level read of another module's `let` would break that.
 import { render } from "./projector.js";
 import { renderMarkCard } from "./card-renderer.js";
+import { highlightRal } from "./ral-highlight.js";
 
 // ---- The chat document ------------------------------------------------
 
@@ -219,6 +220,7 @@ function entryScript(entry) {
   const pre = document.createElement("pre");
   pre.className = "dial-script";
   pre.textContent = script;
+  highlightRal(pre);
   return pre;
 }
 

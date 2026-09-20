@@ -9,8 +9,7 @@
 
 use super::line::fold_styled_lines;
 use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
-use ral_core::syntax::is_keyword;
-use ral_core::syntax::lexer::{Token, lex};
+use ral_core::syntax::highlight::{Class, classify};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -29,33 +28,27 @@ pub(super) fn highlight_ral(src: &str) -> Vec<Line<'static>> {
 /// [`highlight_ral`] unsplit: the styled run for a source that is to be laid
 /// out by a caller of its own, such as a value sharing a row with a label.
 pub(super) fn highlight_ral_spans(src: &str) -> Vec<Span<'static>> {
-    match lex(src) {
-        Ok(tokens) => highlighted_spans(src, &tokens),
-        Err(_) => vec![Span::styled(src.to_string(), default_ink())],
-    }
+    highlighted_spans(src, &classify(src))
 }
 
 fn default_ink() -> Style {
     Style::default().fg(Color::White)
 }
 
-/// Emit each token's text in its `class` style and the gap before it as
-/// default ink.  Token spans are ordered and non-overlapping and the trailing
-/// `Eof` sits at the end of the source, so the concatenation is `src` exactly.
-fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> Vec<Span<'static>> {
+/// Emit each classified range in its `style` and the gap before it as
+/// default ink.  Ranges are ordered and non-overlapping, and `classify` is
+/// total over non-zero-width tokens, so the concatenation is `src` exactly.
+fn highlighted_spans(src: &str, classes: &[(std::ops::Range<usize>, Class)]) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut cursor = 0usize;
-    for (tok, span) in tokens {
-        let range = span.range();
+    for (range, class) in classes {
         if range.start > cursor {
             spans.push(Span::styled(
                 src[cursor..range.start].to_string(),
                 default_ink(),
             ));
         }
-        if range.end > range.start {
-            spans.push(Span::styled(src[range.clone()].to_string(), class(tok)));
-        }
+        spans.push(Span::styled(src[range.clone()].to_string(), style(*class)));
         cursor = range.end;
     }
     if cursor < src.len() {
@@ -64,31 +57,15 @@ fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> V
     spans
 }
 
-/// The style one token wears.  Punctuation shares [`SLATE`], a plain word
-/// takes the keyword hue only when [`is_keyword`] says so, and a string or
-/// deref is coloured whole — its nested `$…` splices are not recursed into.
-fn class(tok: &Token) -> Style {
-    let fg = match tok {
-        Token::SingleQuoted(_) | Token::DoubleQuoted(_) => CODE_STRING,
-        Token::Variable(_) => CODE_VARIABLE,
-        Token::Tag(_) => CODE_TAG,
-        Token::LBrace
-        | Token::RBrace
-        | Token::LBracket
-        | Token::RBracket
-        | Token::LParen
-        | Token::RParen
-        | Token::Comma
-        | Token::Pipe
-        | Token::Colon
-        | Token::Spread
-        | Token::Caret
-        | Token::Question
-        | Token::Bang => SLATE,
-        _ => match tok.as_plain_word() {
-            Some(word) if is_keyword(word) => CODE_KEYWORD,
-            _ => Color::White,
-        },
+/// The style one [`Class`] wears.
+fn style(class: Class) -> Style {
+    let fg = match class {
+        Class::Keyword => CODE_KEYWORD,
+        Class::String => CODE_STRING,
+        Class::Tag => CODE_TAG,
+        Class::Variable => CODE_VARIABLE,
+        Class::Punct => SLATE,
+        Class::Plain => return default_ink(),
     };
     Style::default().fg(fg)
 }

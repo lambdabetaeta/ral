@@ -4,6 +4,7 @@
 pub mod ast;
 mod free_refs;
 pub(crate) mod group;
+pub mod highlight;
 pub mod lexer;
 pub mod parser;
 pub(crate) mod quote;

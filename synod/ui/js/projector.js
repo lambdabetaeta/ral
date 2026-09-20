@@ -18,6 +18,7 @@ import {
 import { renderMarkCard } from "./card-renderer.js";
 import { transcriptEl, pinTranscript } from "./core.js";
 import { setFacts, setStatus } from "./conversation.js";
+import { highlightRal } from "./ral-highlight.js";
 
 // ---- The projector ----------------------------------------------------
 
@@ -104,6 +105,7 @@ function renderBlock(block) {
         bubble.textContent = block.raw;
       } else {
         bubble.innerHTML = renderAssistantMarkdown(block.raw);
+        for (const code of bubble.querySelectorAll("code.language-ral")) highlightRal(code);
       }
       return msg;
     }

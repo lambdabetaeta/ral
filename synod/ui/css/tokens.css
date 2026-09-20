@@ -30,6 +30,13 @@
       --diff-add-bg: light-dark(#e9f2ec, #1f2c22);
       --diff-del-bg: light-dark(#f9e9e2, #2e211b);
 
+      /* Ral syntax highlighting — see ral-highlight.js. */
+      --code-keyword: light-dark(#6a4f9c, #b39ddb);
+      --code-string: light-dark(#3f7d52, #8fcf9f);
+      --code-tag: light-dark(#9c4f78, #dba0c0);
+      --code-variable: light-dark(#95601f, #d9a565);
+      --code-punct: light-dark(#6d7686, #9aa4b8);
+
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
     }
 

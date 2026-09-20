@@ -141,6 +141,14 @@
       }
     }
 
+    /* Ral syntax highlighting, applied by ral-highlight.js — shared by
+       assistant code blocks here and the dial's script panel in dial.css. */
+    .tok-keyword { color: var(--code-keyword); }
+    .tok-string { color: var(--code-string); }
+    .tok-tag { color: var(--code-tag); }
+    .tok-variable { color: var(--code-variable); }
+    .tok-punct { color: var(--code-punct); }
+
     .msg.system .bubble {
       background: var(--danger-bg);
       border: 1px solid var(--danger-line);

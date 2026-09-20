@@ -369,6 +369,17 @@ a question only a block parser can answer — so a sentinel that marked put
 inside a `<code>` is handed back as the text it was written as. No message
 wears a name above it — who spoke is said by the bubble's side and colour.
 
+A ral listing — a ```` ```ral ```` fence in the prose, or the script on a dial
+row — is coloured by `ral-highlight.js`, which asks the shell
+(`highlight_ral`) and wraps the answer's spans itself, building text nodes
+rather than markup because the source is the model's. The classification is
+`ral_core::syntax::highlight`, the lexer's own reading of what a token is and
+the one exarch's TUI colours from, so the two front ends cannot disagree and
+neither keeps a grammar of its own. Byte offsets become UTF-16 ones at the
+command, that being where the window's indices start; the result is cached on
+the exact source text, since a streaming block re-renders many times per
+second.
+
 ## vm-manager/ — the machine
 
 One trait each side of a boot: `Hypervisor::boot(&MachineSpec) ->

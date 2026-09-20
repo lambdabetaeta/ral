@@ -46,7 +46,7 @@
 
 mod shell;
 
-use shell::{Accounts, commands, keys, review, signin};
+use shell::{Accounts, commands, highlight, keys, review, signin};
 
 use exarch::provider::models::{LiveSource, ModelCatalog};
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,7 @@ fn main() {
             commands::send_message,
             commands::open_file,
             commands::open_url,
+            highlight::highlight_ral,
             keys::list_accounts,
             keys::save_key,
             keys::forget_key,
