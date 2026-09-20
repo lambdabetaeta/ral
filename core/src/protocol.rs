@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Only the same-host child handle is platform-gated: its handoff is a
 // socketpair end inherited on fd 3. The frame protocol itself is not.
@@ -1664,6 +1665,25 @@ pub struct Liveness {
     pub deadline: Duration,
 }
 
+/// How many whole `tick`s `span` is worth, never none.
+fn ticks(span: Duration, tick: Duration) -> u32 {
+    let count = span.as_nanos().checked_div(tick.as_nanos()).unwrap_or(1);
+    u32::try_from(count).unwrap_or(u32::MAX).max(1)
+}
+
+impl Liveness {
+    /// How many unanswered `Ping`s amount to the deadline.
+    ///
+    /// The deadline is *configured* as a span but *judged* as this count: a
+    /// clock measures the host's absence as readily as the peer's silence, so
+    /// a suspended laptop would wake to find its engine long dead of a silence
+    /// nobody was running to observe.  A probe is evidence because this
+    /// process authored it; a duration is evidence of nothing.
+    fn probes(self) -> u32 {
+        ticks(self.deadline, self.interval)
+    }
+}
+
 /// The peer-patience deadline used wherever one socket needs a single
 /// deadline but no full [`Liveness`]: [`WireTransport::new`]'s same-host child
 /// (no ticker, so only a write deadline applies) and `Liveness::default`'s own
@@ -1710,9 +1730,9 @@ pub struct WireTransport {
     /// reports.
     severance: Arc<OnceLock<Severed>>,
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-    /// The instant of the last frame read — what the ticker measures silence
-    /// against.
-    last_seen: Arc<Mutex<Instant>>,
+    /// `Ping`s sent with no frame back since — what the ticker counts silence
+    /// in. Any frame read resets it; see [`Liveness::probes`].
+    unanswered: Arc<AtomicU32>,
     /// The heartbeat an adopted stream still owes, parked by
     /// [`WireTransport::adopt`] and taken by the first [`Transport::attach`].
     /// `None` under [`WireTransport::new`], which never pings at all.
@@ -1735,8 +1755,8 @@ pub struct WireTransport {
     patience: Duration,
 }
 
-/// The reader loop shared by both constructors. `last_seen` records *every*
-/// frame read, not just `Pong`s — any frame is proof of life. On EOF, a read
+/// The reader loop shared by both constructors. *Every* frame read clears
+/// `unanswered`, not just a `Pong` — any frame is proof of life. On EOF, a read
 /// error, or a refused `Attach` it severs before exiting, so `severed()` is
 /// honest under every teardown path and the dropped `event_tx` closes the
 /// channel whose `recv` is what fails the in-flight dispatch — the reader
@@ -1751,7 +1771,7 @@ fn spawn_wire_reader(
     event_tx: mpsc::Sender<(DispatchId, Event)>,
     deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
     severance: Arc<OnceLock<Severed>>,
-    last_seen: Arc<Mutex<Instant>>,
+    unanswered: Arc<AtomicU32>,
     attached: Arc<(Mutex<bool>, Condvar)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1782,8 +1802,8 @@ fn spawn_wire_reader(
             }
             match reader_ch.read_frame() {
                 Ok(Some(frame)) => {
-                    *last_seen.lock_ignore_poison() = Instant::now();
-                    // A `Pong`'s whole job is the refresh above.
+                    unanswered.store(0, Ordering::Relaxed);
+                    // A `Pong`'s whole job is the reset above.
                     match frame {
                         Frame::Event(id, ev) => {
                             if event_tx.send((id, ev)).is_err() {
@@ -1838,10 +1858,11 @@ fn spawn_wire_reader(
 fn spawn_heartbeat(
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     severance: Arc<OnceLock<Severed>>,
-    last_seen: Arc<Mutex<Instant>>,
+    unanswered: Arc<AtomicU32>,
     liveness: Liveness,
     shutdown: crate::wire::WireChannel,
 ) {
+    let patience = liveness.probes();
     std::thread::spawn(move || {
         let mut seq: u64 = 0;
         loop {
@@ -1849,7 +1870,9 @@ fn spawn_heartbeat(
             if severance.get().is_some() {
                 break;
             }
-            if last_seen.lock_ignore_poison().elapsed() >= liveness.deadline {
+            // Only probes this thread actually sent can condemn the peer, so a
+            // host that was asleep — sending none — wakes accusing nobody.
+            if unanswered.load(Ordering::Relaxed) >= patience {
                 sever(&severance, Severed::Silent(liveness.deadline));
                 shutdown.shutdown();
                 break;
@@ -1858,6 +1881,7 @@ fn spawn_heartbeat(
             if write_through(&write_tx, &severance, &Frame::Ping(seq)).is_err() {
                 break;
             }
+            unanswered.fetch_add(1, Ordering::Relaxed);
         }
     });
 }
@@ -1915,8 +1939,8 @@ impl WireTransport {
 
         let severance = Arc::new(OnceLock::new());
         let (event_tx, event_rx) = mpsc::channel();
-        // No ticker here, but the shared reader keeps `last_seen` anyway.
-        let last_seen = Arc::new(Mutex::new(Instant::now()));
+        // No ticker here, but the shared reader keeps the count anyway.
+        let unanswered = Arc::new(AtomicU32::new(0));
         let deferred_sink = Arc::new(Mutex::new(None));
         let attached = Arc::new((Mutex::new(false), Condvar::new()));
         let reader = spawn_wire_reader(
@@ -1924,7 +1948,7 @@ impl WireTransport {
             event_tx,
             deferred_sink.clone(),
             severance.clone(),
-            last_seen.clone(),
+            unanswered.clone(),
             attached.clone(),
         );
 
@@ -1944,7 +1968,7 @@ impl WireTransport {
             _reader: Mutex::new(Some(reader)),
             severance,
             current_dispatch,
-            last_seen,
+            unanswered,
             pending_heartbeat: Mutex::new(None),
             deferred_sink,
             shutdown,
@@ -1981,7 +2005,7 @@ impl WireTransport {
         let shutdown = writer.try_clone()?;
 
         let severance = Arc::new(OnceLock::new());
-        let last_seen = Arc::new(Mutex::new(Instant::now()));
+        let unanswered = Arc::new(AtomicU32::new(0));
         let (event_tx, event_rx) = mpsc::channel();
         let deferred_sink = Arc::new(Mutex::new(None));
         let attached = Arc::new((Mutex::new(false), Condvar::new()));
@@ -1990,7 +2014,7 @@ impl WireTransport {
             event_tx,
             deferred_sink.clone(),
             severance.clone(),
-            last_seen.clone(),
+            unanswered.clone(),
             attached.clone(),
         );
 
@@ -2011,7 +2035,7 @@ impl WireTransport {
             _reader: Mutex::new(Some(reader)),
             severance,
             current_dispatch,
-            last_seen,
+            unanswered,
             pending_heartbeat: Mutex::new(Some(liveness)),
             deferred_sink,
             shutdown,
@@ -2031,6 +2055,10 @@ impl WireTransport {
     /// `Transport::attach` only writes the frame; the verdict is awaited here,
     /// so a refusal is learnt at construction, not at the first dispatch.
     ///
+    /// Patience is spent in waits this thread observed, never in elapsed
+    /// clock: a suspended host resumes mid-wait having watched one tick, not
+    /// the thousands its clock ran through. Same law as [`Liveness::probes`].
+    ///
     /// # Errors
     /// The transport's severance — a refused `Attach`, a closed connection, or
     /// [`Severed::Silent`] once no verdict arrives within `self.patience`.
@@ -2038,8 +2066,13 @@ impl WireTransport {
     /// # Panics
     /// Never: the `expect` fires only after this call has just severed the
     /// transport itself, on the same line above it.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard is the loop's own state, retaken by every wait"
+    )]
     pub fn await_attached(&self) -> Result<(), Severed> {
-        let deadline = Instant::now() + self.patience;
+        const TICK: Duration = Duration::from_millis(100);
+        let mut left = ticks(self.patience, TICK);
         let mut guard = self.attached.0.lock_ignore_poison();
         loop {
             // Severance first: an `Attached` that raced a death must not grant
@@ -2050,18 +2083,18 @@ impl WireTransport {
             if *guard {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            if left == 0 {
                 sever(&self.severance, Severed::Silent(self.patience));
                 self.shutdown.shutdown();
                 return Err(self
                     .severed()
                     .expect("sever just recorded the cause this call names"));
             }
-            guard = self
-                .attached
-                .1
-                .wait_timeout_ignore_poison(guard, Duration::from_millis(100))
-                .0;
+            let (next, timed_out) = self.attached.1.wait_timeout_ignore_poison(guard, TICK);
+            guard = next;
+            if timed_out.timed_out() {
+                left -= 1;
+            }
         }
     }
 
@@ -2185,14 +2218,14 @@ impl Transport for WireTransport {
         // start: no Ping may precede the handshake.
         let pending = self.pending_heartbeat.lock_ignore_poison().take();
         if let Some(liveness) = pending {
-            // Silence is measured from here, not from `adopt`: a front-end that
+            // Silence is counted from here, not from `adopt`: a front-end that
             // adopted long before attaching must not find its booting engine
             // already declared `Silent` on the heartbeat's first tick.
-            *self.last_seen.lock_ignore_poison() = Instant::now();
+            self.unanswered.store(0, Ordering::Relaxed);
             spawn_heartbeat(
                 self.write_tx.clone(),
                 self.severance.clone(),
-                self.last_seen.clone(),
+                self.unanswered.clone(),
                 liveness,
                 self.shutdown
                     .try_clone()
@@ -2814,6 +2847,7 @@ mod static_diagnostic_seam_tests {
 mod wire_liveness_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+    use std::time::Instant;
 
     /// Several pings fall inside one deadline window, and both are far below
     /// the slack the assertions wait.
@@ -2928,6 +2962,32 @@ mod wire_liveness_tests {
         );
 
         drop(back);
+    }
+
+    /// Silence is counted in probes, not in clock, so the peer is condemned
+    /// only after it has ignored a full deadline's worth of `Ping`s this
+    /// process actually sent. A host asleep sends none and so accuses nobody —
+    /// the sleep/wake false death this replaced.
+    #[test]
+    fn a_peer_is_condemned_by_unanswered_probes_not_by_elapsed_time() {
+        let (front, back) = UnixStream::pair().unwrap();
+        let transport = WireTransport::adopt(front, brisk()).unwrap();
+        attach(&transport);
+
+        // The peer reads but never answers, so every ping stays unanswered.
+        let mut peer = crate::wire::WireChannel::from_stream(back);
+        let mut pings = 0;
+        while transport.severed().is_none() {
+            match peer.read_frame() {
+                Ok(Some(Frame::Ping(_))) => pings += 1,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert!(
+            pings >= brisk().probes(),
+            "death must follow a deadline's worth of probes, got {pings}"
+        );
     }
 
     /// The reader severs before dropping its sender, so `severed()` is honest

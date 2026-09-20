@@ -209,7 +209,11 @@ kills the child on the spot rather than waiting on a death that never comes.
 ## Liveness and severance
 
 **Any frame that arrives is proof of life**; heartbeats exist only to
-manufacture traffic where the failure mode is silence rather than EOF. A
+manufacture traffic where the failure mode is silence rather than EOF.
+**Silence is counted in unanswered probes, never in elapsed clock**
+([[decisions/260920_silence-is-counted-in-probes|silence-is-counted-in-probes]]):
+a deadline is evidence only if someone was running to observe it, and a
+suspended host is not. A
 same-host child's death is a kernel-guaranteed EOF the moment its process
 exits — nothing to manufacture. A guest across a virtual socket can die into
 silence with no EOF at all, so the front-end that crosses one must ping, and

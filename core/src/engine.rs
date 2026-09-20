@@ -602,7 +602,10 @@ fn engine_session(
     }
 
     let mut armed = false;
-    let mut last_frame = Instant::now();
+    // Silence counted in ticks this loop observed, never in elapsed clock: a
+    // suspended guest resumes having watched one tick, not the thousands its
+    // clock ran through, so waking is not the front-end's death.
+    let mut silent_ticks: u32 = 0;
     // The dispatch a `Cancel` may name and the scope that stops it. Replaced,
     // never cleared: a cancel that has outlived its run no longer finds the id
     // it names, so it cannot touch the run that followed.
@@ -619,11 +622,10 @@ fn engine_session(
             match reader_ch.poll_readable(Some(TICK)) {
                 Ok(true) => reader_ch.read_frame(),
                 Ok(false) => {
-                    let silent = last_frame.elapsed();
-                    if silent >= patience.silence {
+                    silent_ticks += 1;
+                    if TICK.saturating_mul(silent_ticks) >= patience.silence {
                         eprintln!(
-                            "engine: front-end silent for {}s (deadline {}s) — failing the in-flight run and exiting",
-                            silent.as_secs(),
+                            "engine: front-end silent for {}s — failing the in-flight run and exiting",
                             patience.silence.as_secs()
                         );
                         break SessionEnd::Corrupt;
@@ -645,7 +647,7 @@ fn engine_session(
             }
         };
         // Any frame at all is proof of life, not just a `Ping`.
-        last_frame = Instant::now();
+        silent_ticks = 0;
 
         match frame {
             Frame::Dispatch(id, run) => {
