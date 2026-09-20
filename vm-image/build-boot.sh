@@ -393,8 +393,10 @@ echo "deb [arch=$ARCH] $MIRROR $SUITE main restricted universe multiverse" \
     > /etc/apt/sources.list.d/pinned-suite.list
 apt-get update -qq
 SIM=$(apt-get install -s --no-install-recommends -t "$SUITE" linux-image-generic)
-IMAGE_PKG=$(echo "$SIM" | grep -oE 'linux-image-[0-9][^ ]*-generic' | head -1)
-MODULES_PKG=$(echo "$SIM" | grep -oE 'linux-modules-[0-9][^ ]*-generic' | head -1)
+# `sed -n 1p` for a first line, never `head -1`: head closes the pipe as soon
+# as it has its line, and that SIGPIPE is a build failure under `pipefail`.
+IMAGE_PKG=$(echo "$SIM" | grep -oE 'linux-image-[0-9][^ ]*-generic' | sed -n 1p)
+MODULES_PKG=$(echo "$SIM" | grep -oE 'linux-modules-[0-9][^ ]*-generic' | sed -n 1p)
 echo ">> [container] fetching $IMAGE_PKG + $MODULES_PKG (no firmware)"
 mkdir -p /build/kernel-debs /build/kernel-extract
 ( cd /build/kernel-debs && apt-get download "$IMAGE_PKG" "$MODULES_PKG" )
@@ -407,7 +409,7 @@ done
 # which is the one path depmod itself will ever look under.
 ln -sfn usr/lib /build/kernel-extract/lib
 
-KERNEL_PATH=$(find /build/kernel-extract/boot -maxdepth 1 -name 'vmlinuz-*' | head -1)
+KERNEL_PATH=$(find /build/kernel-extract/boot -maxdepth 1 -name 'vmlinuz-*' | sed -n 1p)
 KVER=$(basename "$KERNEL_PATH" | sed 's/^vmlinuz-//')
 CONFIG_PATH="/build/kernel-extract/boot/config-$KVER"
 echo ">> [container] kernel $KVER: $(file -b "$KERNEL_PATH")"
@@ -487,7 +489,7 @@ case "$ARCH" in
     ;;
 esac
 
-KERNEL_PKG_VERSION=$(dpkg-deb -f /build/kernel-debs/"$IMAGE_PKG"_*.deb Version | head -1)
+KERNEL_PKG_VERSION=$(dpkg-deb -f /build/kernel-debs/"$IMAGE_PKG"_*.deb Version | sed -n 1p)
 
 # --- 3. Confirm the module set against the real kernel config ---------------
 # README.md's prose named a baseline; this is the pass that checks it against
@@ -657,9 +659,11 @@ fakeroot sh -c '
   # before anything was built, so no qemu stands between this shell and the
   # guest's own binaries.
   echo "== version probes (native $NATIVE_ARCH container, no qemu) =="
-  /build/cpio/sbin/mke2fs -V 2>&1 | head -1
+  /build/cpio/sbin/mke2fs -V 2>&1 | sed -n 1p
   "$BIN/ral-daemon" --help >/dev/null 2>&1 || echo "ral-daemon: refuses off pid 1, as designed"
-  "$BIN/exarch" --version 2>&1 | head -1 || true
+  # `--help`, not `--version`: exarch has no version flag, its own CLI being
+  # long-form only. Either way the point is that the binary runs here.
+  "$BIN/exarch" --help 2>&1 | sed -n 1p || true
 } > /out/verify.txt
 cat /out/verify.txt
 
@@ -673,11 +677,11 @@ cat /out/verify.txt
   echo "kernel_version=$KVER"
   echo "suite=$SUITE arch=$ARCH mirror=$MIRROR"
   echo "ral_git_hash=$GIT_HASH"
-  # The one line a *host* build reads back (synod/build.rs, via
-  # ral_daemon::boot::check_media): which generation of `ral.` settings the
+  # The one line a *host* build reads back (synod/examples/check-media.rs,
+  # via ral_daemon::boot::check_media): which generation of `ral.` settings the
   # ral-daemon inside initramfs.img understands.
   echo "boot_contract=$BOOT_CONTRACT"
-  # Its sibling, read back by the same build.rs: which generation of the
+  # Its sibling, read back by the same check: which generation of the
   # frame algebra the engine inside initramfs.img speaks.
   echo "proto_version=$PROTO_VERSION"
   echo "rust_target=$RUST_TARGET"
