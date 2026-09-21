@@ -123,7 +123,7 @@ pub(super) enum Detail {
     /// header with its size bar and grain.
     Tally,
     /// The representative slice: the run's live tip, a deliberation's header,
-    /// an act's row, a diff's first [`super::line::DIFF_PEEK_ROWS`] rows.
+    /// an act's row, a diff's first [`super::diff::DIFF_PEEK_ROWS`] rows.
     Summary,
     /// The whole thing: every call with its source, the whole deliberation,
     /// the whole payload, every hunk.

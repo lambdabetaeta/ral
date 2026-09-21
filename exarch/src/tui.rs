@@ -11,6 +11,7 @@ mod app;
 mod banner;
 mod block;
 mod commands;
+mod diff;
 mod fidelity;
 mod gesture;
 mod group;

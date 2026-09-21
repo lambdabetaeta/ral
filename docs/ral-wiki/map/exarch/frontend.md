@@ -502,6 +502,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `window` and its boundary lines, `neighbour`, `strip`'s justified row projection, `step_cells`
+        - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body` and its graded `diff_capped`, `patch_header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that seats a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
