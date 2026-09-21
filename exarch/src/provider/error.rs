@@ -609,7 +609,10 @@ mod tests {
             panic!("expected Api with a body, got {e:?}")
         };
         let obj = error_object(b).expect("unwrapped body keeps an error object");
-        assert_eq!(obj.get("param").and_then(serde_json::Value::as_str), Some("tools"));
+        assert_eq!(
+            obj.get("param").and_then(serde_json::Value::as_str),
+            Some("tools")
+        );
         assert_eq!(
             obj.get("provider").and_then(serde_json::Value::as_str),
             Some("ModelRun"),
