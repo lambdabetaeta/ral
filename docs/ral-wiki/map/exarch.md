@@ -234,7 +234,7 @@ the per-agent index and optional sections still resolve from the stored base.
 - [[map/exarch/tools|tools]] — `ral` is the tool, and `thinking` a hidden-flag
   relay beside it; `tools.rs` is a static `Tool` record and a `Copy` `Toolset`
   the agent carries, with no registry. Every other harness verb — the
-  `` agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
+  `` exarch-agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
   by field, fuel-gated, `` `reply ``/`` `read `` gated on `returns`), the schedule family — is a builtin reached
   through it, answered by the desk. The sub-agent model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms and the harness

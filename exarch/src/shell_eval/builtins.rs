@@ -79,19 +79,8 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, in `view-text`'s records, clamped at the top of the file."),
         ("view-hash-around", "view-hash-around PATH LINE PEEK  — the same window in `view-hash`'s records, each carrying its witness."),
-        ("pin-set", "pin-set <key> <card>  — overwrite the register slot under key with card."),
-        ("pin-clear", "pin-clear <key>  — empty the register slot under key."),
-        ("tasks-list", "tasks-list  — the task list as ral records: [id, desc, status, tags, notes] per task."),
-        ("tasks-clear", "tasks-clear  — empty the task list."),
-        ("tasks-add", "tasks-add <desc>  — allocate a fresh id and append a task."),
-        ("tasks-remove", "tasks-remove <id>  — drop a task by id."),
-        ("tasks-tag", "tasks-tag <id> <tag>  — add a tag to a task."),
-        ("tasks-untag", "tasks-untag <id> <tag>  — remove a tag from a task."),
-        ("tasks-note", "tasks-note <id> <note>  — set notes on a task."),
-        ("tasks-retag", "tasks-retag <id> <tags>  — replace all tags on a task."),
-        ("tasks-status", "tasks-status <id> <status>  — change status (validated: `open|`doing|`blocked|`done)."),
-        ("tasks-save", "tasks-save <path>  — write the task list as JSON."),
-        ("tasks-load", "tasks-load <path>  — read a task list from JSON and replace the current one."),
+        ("exarch-tasks", "exarch-tasks <tag>  — your task list: `add a task, `remove one, `clear the whole list, `list to read it; `status`, `tag`, `untag`, `note`, and `retag` edit one task by id; `save`/`load` file it as JSON. Every tag answers the task list after the change, one record per task — id, desc, status, tags, notes — even `list, which changes nothing. A `status` this family does not recognise draws a warning and leaves the list unchanged rather than failing the call.\n\nexarch-tasks `add <desc>  — allocate a fresh id and append a task with status `open.\nexarch-tasks `remove <id>  — drop a task by id.\nexarch-tasks `clear  — empty the task list.\nexarch-tasks `list  — read the task list; changes nothing.\nexarch-tasks `status [id: <Int>, status: `open|`doing|`blocked|`done]  — change a task's status.\nexarch-tasks `tag [id: <Int>, tag: <Str>]  — add a tag to a task.\nexarch-tasks `untag [id: <Int>, tag: <Str>]  — remove a tag from a task.\nexarch-tasks `note [id: <Int>, note: <Str>]  — set a task's notes.\nexarch-tasks `retag [id: <Int>, tags: [<Str>]]  — replace all of a task's tags.\nexarch-tasks `save <path>  — write the task list to PATH as JSON.\nexarch-tasks `load <path>  — read a task list from PATH as JSON, replacing the current one."),
+        ("exarch-goal", "exarch-goal <tag>  — the one goal statement you keep in view: `set <text>` writes it, `clear` empties it."),
     ]
     .into_iter()
     .map(|(n, d)| (n.to_string(), d.to_string()))
@@ -1046,7 +1035,13 @@ fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static EXARCH_BUILTINS_ARR: [BuiltinEntry; 10] = [
+static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
+    BuiltinEntry::new(
+        Cow::Borrowed("exarch-surface"),
+        ral_core::typecheck::builtins::scheme::surface_op,
+        "exarch-surface <event>  — forward a tagged variant onto the rail: `card renders a card there, `pin`/`unpin` write straight to your register (exarch-pins is the tag-based way to reach those same slots), and any other tag is dropped, unrendered.",
+        BuiltinBody::Static(ral_core::builtins::builtin_surface),
+    ),
     BuiltinEntry::new(
         Cow::Borrowed("view-text"),
         scheme_view_text,

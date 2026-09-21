@@ -262,7 +262,7 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   and a genuine exchange boundary `Token::reset`s the flag, so a prior
   exchange's Esc never bleeds into the next.
 - **The tree cascade is two-layer.** `Agent::cancel_tree` (behind
-  `` agents `cancel ``, the per-agent idle lease, and the
+  `` exarch-agents `cancel ``, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
   session's `DurableRoot` (`Shell::cancel_handle`, held on the `Agent` itself
   as `reach: EvalReach`). The

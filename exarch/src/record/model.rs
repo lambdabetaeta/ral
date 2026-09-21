@@ -806,7 +806,7 @@ mod tests {
             "{marker}"
         );
         assert!(
-            marker.contains("`transcript `read [turns: !{range 34 37}]` reads turns 34 through 36 back as material"),
+            marker.contains("`exarch-transcript `read [turns: !{range 34 37}]` reads turns 34 through 36 back as material"),
             "{marker}"
         );
         assert!(
@@ -865,7 +865,10 @@ mod tests {
             first.starts_with("[EXARCH // Turns 1–3 have left your context."),
             "{first}"
         );
-        assert!(first.contains("`transcript `index` lists them."), "{first}");
+        assert!(
+            first.contains("`exarch-transcript `index` lists them."),
+            "{first}"
+        );
         let rows: Vec<&str> = first.lines().filter(|line| line.contains(" KB")).collect();
         assert_eq!(rows.len(), 3, "one row per departed turn, got {first}");
         assert!(

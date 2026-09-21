@@ -20,26 +20,17 @@ let view-hash-around = { |path line peek|
     view-hash $path $lo $[$line + $peek + 1]
 }
 
-# --- the pin family -----------------------------------------------------------
-# `pin-set`/`pin-clear` are thin wrappers over the `surface `pin`` wire;
-# `pin-read`/`pin-list` are host builtins answered from the agent's own
-# register mirror.  Every kit below is a pure prelude over these four: no Rust
-# knows what a task or a goal is.
-
-let pin-set   = { |key card| surface `pin [key: $key, body: $card] }
-let pin-clear = { |key|      surface `unpin [key: $key] }
-
 # --- task management ---------------------------------------------------------
 # Schema: { id: Int, desc: String, status: `open|`doing|`blocked|`done, tags: [String], notes: String }
-# Statuses: open | doing | blocked | done
 # Id allocation: max(ids) + 1; freed ids are recycled.
-# The list lives on the "tasks" pin, not in a binding: every mutator reads the
-# register, changes it, and writes it back through `tasks-sync`, so the state
-# survives blocks, `within`, and skipped rebinds.  Mutate it from the
-# foreground only: `pin-read`/`pin-list` are enquiries, so every `tasks-*`
-# call below fails there too — not inside `spawn { … }`, and not as a stage
-# of a `|` pipeline.  The pin clears when no work is left, so a finished
-# board stops being named by the boundary nudge.
+# The list lives on the "tasks" pin, not in a binding: every mutating tag of
+# `exarch-tasks` reads the register through `tasks-list`, changes it, and
+# writes it back through `tasks-sync`, so state survives blocks, `within`,
+# and skipped rebinds.  `exarch-pins` is foreground-only, so `exarch-tasks`
+# is too — not inside `spawn { … }`, and not as a stage of a `|` pipeline.
+# The pin clears when no work is left, so a finished board stops being named
+# by the boundary nudge.  No Rust knows what a task or a goal is: both kits
+# below are pure prelude over `exarch-pins`.
 
 let task-new = { |id desc|
   [ id: $id, desc: $desc, status: `open, tags: [], notes: "" ]
@@ -49,22 +40,18 @@ let task-statuses = [`open, `doing, `blocked, `done]
 
 # --- per-field setters ---
 
-let task-set-desc   = { |t v| [id: $t[id], desc: $v,       status: $t[status], tags: $t[tags], notes: $t[notes]] }
 let task-set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: $t[tags], notes: $t[notes]] }
 let task-set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
 let task-set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
 
 ## Tags render as one comma-joined, bracketed span on the tasks card, so a
 ## tag holding `,` or `]` would be unreadable back out; refuse it rather than
-## corrupt the round trip.
-let task-add-tag = { |t g|
+## corrupt the round trip.  `where` names the tag that was asked for.
+let check-tag = { |where g|
   if !{re-match #'[,\]]'# $g} {
-    fail [status: 1, message: "task-add-tag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
-  } else {
-    task-set-tags $t [...$t[tags], $g]
-  }
+    fail [status: 1, message: "exarch-tasks `$where: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+  } else { () }
 }
-let task-remove-tag = { |t g| task-set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
 
 # --- id allocation ---
 
@@ -82,9 +69,9 @@ let tasks-next-id = { |ts|
 # open->muted), the two-space-led description, the tag list (empty or " [a,b]"),
 # and the notes (empty or " -- text").  Rendering tags and notes is what a
 # readable register demands: a field the card never shows cannot survive a read
-# back.  The heading is the card's own label, the way `goal-set` writes one: a
-# leading one-line `text` mark is what the framed renderer lifts into the top
-# rule, so the gauge counts what is completed rather than doubling as the title.
+# back.  The heading is the card's own label, the way `exarch-goal `set`` writes
+# one: a leading one-line `text` mark is what the framed renderer lifts into the
+# top rule, so the gauge counts what is completed rather than doubling as the title.
 
 let tasks-card = { |ts|
   let row = { |t|
@@ -152,99 +139,92 @@ let tasks-decode = { |v|
         },
       ]
     } { |_|
-      fail [status: 1, message: "tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
+      fail [status: 1, message: "exarch-tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
     }
   }
 }
 
-let tasks-list = { tasks-decode !{pin-read "tasks"} }
+let tasks-list = { tasks-decode !{exarch-pins `read "tasks"} }
 
 ## The kit's one write point: an empty or all-`done` list clears the slot —
 ## no outstanding work, no pin — otherwise it holds `tasks-card`'s rendering.
+## Answers `ts` unchanged, so every `exarch-tasks` arm can end by calling this.
 let tasks-sync = { |ts|
-  if !{is-empty !{filter { |t| $[not !{equal $t[status] `done}] } $ts}} { pin-clear "tasks" }
-  else { pin-set "tasks" !{tasks-card $ts} }
+  if !{is-empty !{filter { |t| $[not !{equal $t[status] `done}] } $ts}} { exarch-pins `clear "tasks" }
+  else { exarch-pins `set [key: "tasks", body: !{tasks-card $ts}] }
+  $ts
 }
 
-# --- mutators: each reads the register, none takes a list ---
-
-let tasks-add = { |desc|
-  let ts = !{tasks-list}
-  tasks-sync [...$ts, !{task-new !{tasks-next-id $ts} $desc}]
+## Rewrite the task with `id` through `f`, leaving the rest alone: the shape
+## every field-changing tag below has in common.
+let tasks-edit = { |id f|
+  tasks-sync !{map { |t| if $[$t[id] == $id] { $f $t } else { $t } } !{tasks-list}}
 }
 
-let tasks-remove = { |id| tasks-sync !{filter { |t| $[$t[id] != $id] } !{tasks-list}} }
-
-let tasks-status = { |id new-status|
-  if !{elem $new-status $task-statuses} {
-    tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-status $t $new-status } else { $t } } !{tasks-list}}
-  } else {
-    warn "tasks-status: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)"
-  }
-}
-
-let tasks-tag   = { |id tag|  tasks-sync !{map { |t| if $[$t[id] == $id] { task-add-tag    $t $tag  } else { $t } } !{tasks-list}} }
-let tasks-untag = { |id tag|  tasks-sync !{map { |t| if $[$t[id] == $id] { task-remove-tag $t $tag  } else { $t } } !{tasks-list}} }
-let tasks-note  = { |id note| tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-notes  $t $note } else { $t } } !{tasks-list}} }
-
-let tasks-retag = { |id tags|
-  for $tags { |g|
-    if !{re-match #'[,\]]'# $g} {
-      fail [status: 1, message: "tasks-retag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
-    }
-  }
-  tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-tags $t $tags } else { $t } } !{tasks-list}}
-}
-
-let tasks-clear = { tasks-sync [] }
-
-# --- persistence ---
-# `to-json`/`from-json` do not round-trip a bare variant (a JSON tag reads
-# back as a record, not `status` itself), so `status` crosses the file as its
-# word and is translated back on the way in; every other field is already
-# JSON-native.
-
-let tasks-save = { |path|
-  to-json !{map { |t|
-    let word =
-      if    !{equal $t[status] `done}    { "done" }
-      elsif !{equal $t[status] `doing}   { "doing" }
-      elsif !{equal $t[status] `blocked} { "blocked" }
-      else                                { "open" }
-    task-set-status $t $word
-  } !{tasks-list}} > $path
-}
-
-let tasks-load = { |path|
-  let ts = map { |t|
-    let status =
-      if    !{equal $t[status] "done"}    { `done }
-      elsif !{equal $t[status] "doing"}   { `doing }
-      elsif !{equal $t[status] "blocked"} { `blocked }
-      else                                 { `open }
-    task-set-status $t $status
-  } !{from-json < $path}
-  for $ts { |t|
-    for $t[tags] { |g|
-      if !{re-match #'[,\]]'# $g} {
-        fail [status: 1, message: "tasks-load: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
-      }
-    }
-  }
-  tasks-sync $ts
+## The task kit's one entry point: every arm answers the task list after the
+## transition, `list` being the arm that transitions nothing. This uniformity
+## is load-bearing, not a style choice — a ral closure has one return type
+## across all `case` arms.  An invalid `status` `warn`s and answers the list
+## unchanged rather than failing the caller's script.
+let exarch-tasks = { |cmd|
+  case $cmd [
+    `list:   { |_| !{tasks-list} },
+    `clear:  { |_| tasks-sync [] },
+    `add:    { |desc|
+                 let ts = !{tasks-list}
+                 tasks-sync [...$ts, !{task-new !{tasks-next-id $ts} $desc}] },
+    `remove: { |id| tasks-sync !{filter { |t| $[$t[id] != $id] } !{tasks-list}} },
+    `status: { |[id: id, status: s]|
+                 if !{elem $s $task-statuses} { tasks-edit $id { |t| task-set-status $t $s } }
+                 else {
+                   warn "exarch-tasks `status: invalid status -- !{to-string $s | from-string} (expected open|doing|blocked|done)"
+                   !{tasks-list}
+                 } },
+    `tag:    { |[id: id, tag: g]|    check-tag "tag" $g
+                                     tasks-edit $id { |t| task-set-tags $t [...$t[tags], $g] } },
+    `untag:  { |[id: id, tag: g]|    tasks-edit $id { |t| task-set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} } },
+    `note:   { |[id: id, note: n]|   tasks-edit $id { |t| task-set-notes $t $n } },
+    `retag:  { |[id: id, tags: gs]|  for $gs { |g| check-tag "retag" $g }
+                                     tasks-edit $id { |t| task-set-tags $t $gs } },
+    `save:   { |path|
+                 ## `to-json`/`from-json` do not round-trip a bare variant (a JSON tag
+                 ## reads back as a record, not `status` itself), so `status` crosses
+                 ## the file as its word and is translated back on the way in; every
+                 ## other field is already JSON-native.
+                 let ts = !{tasks-list}
+                 to-json !{map { |t|
+                   let word =
+                     if    !{equal $t[status] `done}    { "done" }
+                     elsif !{equal $t[status] `doing}   { "doing" }
+                     elsif !{equal $t[status] `blocked} { "blocked" }
+                     else                                { "open" }
+                   task-set-status $t $word
+                 } $ts} > $path
+                 $ts },
+    `load:   { |path|
+                 let ts = map { |t|
+                   let status =
+                     if    !{equal $t[status] "done"}    { `done }
+                     elsif !{equal $t[status] "doing"}   { `doing }
+                     elsif !{equal $t[status] "blocked"} { `blocked }
+                     else                                 { `open }
+                   task-set-status $t $status
+                 } !{from-json < $path}
+                 for $ts { |t| for $t[tags] { |g| check-tag "load" $g } }
+                 tasks-sync $ts },
+  ]
 }
 
 # --- goal ----------------------------------------------------------------------
 
-## Pin a session goal so the periodic nudge reminder keeps it visible.  A
-## single plain-text card under the "goal" register key; call again to replace.
+## Pin a session goal so the periodic nudge reminder keeps it visible: a
+## single plain-text card under the "goal" register key, replaced by a later
+## `set` and idempotent to `clear` with nothing pinned.  Both arms answer Unit.
 
-let goal-set = { |text|
-  pin-set "goal" `card [`text [spans: [[role: "strong", text: "goal"]]],
-                        `text [spans: [[role: "", text: $text]]]]
+let exarch-goal = { |cmd|
+  case $cmd [
+    `set:   { |text| exarch-pins `set [key: "goal", body: `card [`text [spans: [[role: "strong", text: "goal"]]],
+                                                                  `text [spans: [[role: "", text: $text]]]]] },
+    `clear: { |_|    exarch-pins `clear "goal" },
+  ]
 }
-
-## Drop the goal pin — when the session's aim is met or abandoned.  Idempotent:
-## calling it with nothing pinned is a quiet no-op.
-
-let goal-clear = { pin-clear "goal" }

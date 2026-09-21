@@ -119,11 +119,14 @@ pub(crate) fn run_source(
         };
     }
 
-    // The batch surface: core plus `watch` (`WATCH_BUILTIN`'s doc explains
-    // why it's host-installed).  One value seeds `--check`'s table and boots
-    // the shell below, so the two agree by construction.
+    // The batch surface: core plus `watch` and `surface` (their docs explain
+    // why they're host-installed).  One value seeds `--check`'s table and
+    // boots the shell below, so the two agree by construction.
     let host_surface = ral_core::HostSurface {
-        statics: vec![ral_core::builtins::WATCH_BUILTIN],
+        statics: vec![
+            ral_core::builtins::WATCH_BUILTIN,
+            ral_core::builtins::SURFACE_BUILTIN,
+        ],
         captured: Vec::new(),
     };
     let check_table = host_surface.builtin_table();

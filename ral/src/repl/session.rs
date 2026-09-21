@@ -66,8 +66,8 @@ impl Session {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        // The host surface — the editor (`_ed-*`) builtins, `watch`, and the
-        // captured plugin-lifecycle commands — rides the boot: the
+        // The host surface — the editor (`_ed-*`) builtins, `watch`, `surface`,
+        // and the captured plugin-lifecycle commands — rides the boot: the
         // typechecker reads this shell's builtin table, and plugins loaded
         // from rc are checked against it.
         let mut shell = ral_core::boot::boot_shell(
@@ -77,6 +77,7 @@ impl Session {
                 statics: vec![
                     super::plugin::ed_builtins::ED_BUILTINS,
                     ral_core::builtins::WATCH_BUILTIN,
+                    ral_core::builtins::SURFACE_BUILTIN,
                 ],
                 captured: vec![super::host_handlers::build(runtime.clone())],
             },

@@ -52,7 +52,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("from-lines", "reads the byte channel"),
     ("from-json", "reads the byte channel"),
     ("from-csv", "reads the byte channel"),
-    ("surface", "forwards to a host event sink"),
     ("spawn", "forks a concurrent worker"),
     ("await", "needs a live Handle"),
     ("race", "needs live Handles"),

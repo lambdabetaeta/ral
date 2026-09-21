@@ -9,15 +9,16 @@ state changes by being **overwritten**, not appended. exarch already redraws
 bar — fixed marks, never streamed, never logged); a pin is the missing fourth
 cell, the **same graphic grammar authored by the kit instead of the host**. The
 register started write-only — a kit could publish state but never read it
-back — and is now read/write: `pin-read` and `pin-list` answer from the same
-mirror the nudge already kept, so the model (and a kit) can survey the board
-it writes to. The full reasoning for the wire and its taxonomy is
+back — and is now read/write: `` exarch-pins `read `` and `` exarch-pins
+`list `` answer from the same mirror the nudge already kept, so the model
+(and a kit) can survey the board it writes to. The full reasoning for the wire
+and its taxonomy is
 [[decisions/260622_surface-pins-state|surface-pins-state]]; the read side is
 [[decisions/260803_register-is-read-write|register-is-read-write]].
 
 ## The vocabulary
 
-A pin rides the same `surface` channel as everything else, as a *disposition
+A pin rides the same `exarch-surface` channel as everything else, as a *disposition
 wrapper* around an ordinary [[map/exarch/cards|`` `card ``]] — the wrapper carries
 only **placement**, the card vocabulary and its decoder reused verbatim, and
 this wire is unchanged by the read side:
@@ -30,7 +31,7 @@ this wire is unchanged by the read side:
   **absent body** is the same as `` `unpin ``.
 
 The register once carried one host-owned exception, a `services` slot the
-host reconciled and ordinary `surface` writes could not touch
+host reconciled and ordinary `exarch-surface` writes could not touch
 (`reject_protected_pin`); that mechanism is deleted outright, on no
 technical rationale beyond the operator's own — protected pins should not
 exist. Durable [[design/residency|services]] lose the register as a
@@ -41,16 +42,18 @@ aggregate running count on `/resources` — no per-service listing survives.
 See [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
 2026-08-27 amendment.
 
-On top of that wire sit four model-facing commands, one `pin-*` family:
-`pin-set`/`pin-clear` are ral wrappers over `` `pin ``/`` `unpin ``;
-`pin-read`/`pin-list` are the two Rust enquiries that make the register
-legible back ([[map/exarch/builtins|builtins]]). "Set" says a pin overwrites a
-slot, "clear" says it empties — not "add"/"remove", which would say the
-register is a collection rather than one card per key.
+On top of that wire sits one model-facing enquiry family, `exarch-pins`, and
+it is the register's only door: `` `set ``/`` `clear `` write it,
+`` `read ``/`` `list `` make it legible back
+([[map/exarch/builtins|builtins]]).
+"Set" says a pin overwrites a slot, "clear" says it empties — not
+"add"/"remove", which would say the register is a collection rather than one
+card per key. The family is foreground-only, like `exarch-agents` and `exarch-context`: a
+call inside `spawn { … }` errors rather than degrading.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
-doctrine forbids. `exarch/data/agent.ral` (the tasks section) is the first client: `tasks-status` reads the
+doctrine forbids. `exarch/data/agent.ral` (the tasks section) is the first client: `` exarch-tasks `status` `` reads the
 list back, computes the next one, and pins the gauge that *fills in place* —
 a per-task `open → done` move appends nothing to the transcript, and now
 appends nothing to a bound list either.
@@ -76,8 +79,8 @@ already safe:
   agent: a `key → PinDigest` map (`PinDigests`, [[map/exarch/shell-eval|shell-eval]])
   holding the full decoded `Card`, written on every accepted pin/unpin. It was
   born to let the nudge name what is pinned without parsing rendered text; the
-  read side reuses the same store rather than adding a second one — `pin-read`
-  and `pin-list` are enquiries answered straight from it.
+  read side reuses the same store rather than adding a second one — `` `read ``
+  and `` `list `` are enquiries answered straight from it.
 - **Render.** The register is a **reserved right-hand column** for the *focused*
   session — a flat strip glued to the right edge, never a floating overlay that
   would occlude the yank-able scrollback. It claims only dead margin past the
@@ -90,13 +93,14 @@ already safe:
   ([[decisions/260814_one-seam-one-log|one-seam-one-log]]) that no fold
   draws — the live register follows the shell boundary and is not restored
   on resume. Pinned state is ambient, like the
-  matrix. `pin-read`/`pin-list` still answer headless, since they read the
-  mirror, not the drawn column.
+  matrix. `` exarch-pins `read ``/`` `list `` still answer headless, since they
+  read the mirror, not the drawn column.
 
 ## Reading the register back
 
-`pin-read <key>` answers the card stored under `key`, **canonically
-re-encoded**, or `()` on a miss; `pin-list` answers the occupied keys. The
+`` exarch-pins `read <key>` `` answers the card stored under `key`,
+**canonically re-encoded**, or `()` on a miss; `` `list `` answers the
+occupied keys. The
 encoder (`encode_card`, [[map/exarch/cards|cards]]) is `value_to_card`'s
 inverse on the decoder's image, so what comes back is never the authored
 bytes — a bare-string span or a bare mark, sugar the decoder accepts, comes
@@ -107,7 +111,7 @@ state the decoder discards, and the register would hold a truth the rail does
 not show. Reading the canonical card makes storage and display one thing by
 construction — the **WYSIWYG invariant**: only what the card renders can be
 read back, and two states that render identically are the same state to
-`pin-read`.
+`` `read ``.
 
 Read-after-write within one run is sound for free: under the identity
 binding `IdentityDesk::enquire` drains queued surface frames before answering
@@ -115,22 +119,23 @@ a request (`core/src/protocol.rs`), and under the wire frame order does the
 same, so a pin written earlier in the same script is
 already in the mirror when the read is answered. Both enquiries are per-agent,
 same as the mirror they read — a sub-agent's register is its own, and
-`pin-read` never crosses that line; a foreign-key read is deliberately out of
+`` `read `` never crosses that line; a foreign-key read is deliberately out of
 scope (see the ADR's open questions).
 
 ## The model is the register's default mutator
 
 Because the register now reads as easily as it writes, the model can survey
-the board (`pin-list`), read a slot (`pin-read`), judge it, and revise it
-(`pin-set`) with no kit in the loop — a stray fact, a warning, a note is
-pinnable with zero apparatus, the same way any card is surfaceable with zero
-apparatus. A kit that *owns* a key instead treats its card as a
+the board (`` exarch-pins `list ``), read a slot (`` `read ``), judge it, and
+revise it (`` `set ``) with no kit in the loop — a stray fact, a warning, a
+note is pinnable with zero apparatus, the same way any card is surfaceable
+with zero apparatus. A kit that *owns* a key instead treats its card as a
 serialization: read it back, destructure against its own schema, mutate,
-`pin-set` again. The tasks kit is the worked example
+`` `set `` again. The tasks kit is the worked example
 ([[decisions/260803_register-is-read-write|register-is-read-write]], §4): its
-mutators take no list argument and thread none — `tasks-add`, `tasks-status`,
-`tasks-tag` each read `pin-read "tasks"`, decode it against the kit's own row
-shape, and write the new rollup back through one `tasks-sync` write point,
+mutators take no list argument and thread none — `` exarch-tasks `add ``,
+`` `status ``, `` `tag `` each read `` exarch-pins `read "tasks"` ``, decode
+it against the kit's own row shape, and write the new rollup back through one
+`tasks-sync` write point,
 which clears the slot once no task remains open. A card under `"tasks"` the
 model wrote directly, in a shape the kit's decoder does not recognize, fails
 the next kit call with a didactic `fail` naming the expected shape — the
@@ -140,8 +145,8 @@ price of one keyspace shared between a schemaless mutator and a schema'd one.
 
 Because pinned state is something the *user is watching* on the rail, the
 [[map/exarch/agent|nudge]] facility tells the model when it changes. The
-agent keeps the same small `key → one-line summary` mirror `pin-read` answers
-from, while the session is otherwise pin-blind and the
+agent keeps the same small `key → one-line summary` mirror `` exarch-pins
+`read `` answers from, while the session is otherwise pin-blind and the
 events go straight to the frontend. There is **one** pinned-state nudge,
 uniform for every pin kind (a task, a goal, any other pinned state alike) and
 every agent role (the interactive trunk and a returning sub-agent alike):
@@ -151,7 +156,8 @@ told, and stays silent on every quiet completion that repeats an
 already-told digest. An emptied register is itself silent — unpinning only
 re-arms the edge, so a later re-pin fires again even at a digest told long
 before, and there is no fallback reminder that nudges an empty register
-toward `goal-set`/`tasks-add`: that advertisement is what let a completion,
+toward `` exarch-goal `set `` / `` exarch-tasks `add ``: that
+advertisement is what let a completion,
 its own reminder, and the next completion cycle forever, and it is gone with
 the livelock it caused. The exception is *actionability*: while the agent has
 live descendants, the pin reminder waits for their results, because the
@@ -192,7 +198,7 @@ the trunk or a sub-agent.
 [[decisions/260622_surface-pins-state|surface-pins-state]] (the original
 decision — wire format and taxonomy, write-only as first drafted),
 [[decisions/260803_register-is-read-write|register-is-read-write]] (the read
-side this page now describes: `pin-read`, `pin-list`, the encoder, the
+side this page now describes: `` `read ``, `` `list ``, the encoder, the
 canonical-form rule, and the tasks/goal kits as preludes over the family),
 [[decisions/260619_surface-carries-documents|surface-carries-documents]]
 (the `` `card `` body a pin reuses verbatim),
@@ -200,12 +206,13 @@ canonical-form rule, and the tasks/goal kits as preludes over the family),
 this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/cards|cards]] (the render document the body decodes through, and
 the encoder that inverts it), [[map/exarch/builtins|builtins]] (the
-`pin-set`/`pin-clear`/`pin-read`/`pin-list` family and the tasks kit built over
-it), [[map/exarch/frontend|frontend]] (the scrollback register and the draw
-layout), [[map/exarch/shell-eval|shell-eval]] (the host sink, the pin-first
-decode, and the mirror `pin-read` answers from), [[map/exarch/agent|agent]]
+`exarch-pins` `` `set ``/`` `clear ``/`` `read ``/`` `list `` family and the
+tasks kit built over it), [[map/exarch/frontend|frontend]] (the scrollback
+register and the draw layout), [[map/exarch/shell-eval|shell-eval]] (the host
+sink, the pin-first decode, and the mirror `` exarch-pins `read `` answers
+from), [[map/exarch/agent|agent]]
 (the nudge that reminds the model of its pins, from the same mirror
-`pin-read` reads), [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
+`` exarch-pins `read `` reads), [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
 (the commitment keyspace retired, and its 2026-08-27 amendment records the
 later removal of `services`, the one protected slot that survived it),
 and `exarch/data/agent.ral` (the tasks section — the first client, now a pure

@@ -1,4 +1,4 @@
-//! The fork-detach spine behind `/branch` and the desk's `` agents `start ``.
+//! The fork-detach spine behind `/branch` and the desk's `` exarch-agents `start ``.
 //! Every spawn is launch-only: the child runs the same [`Avatar::attend`] loop
 //! on a detached thread; a reply notice reaches the parent's inbox when the
 //! child replies, a non-reply end when it quiesces.
@@ -44,7 +44,7 @@ pub(crate) fn spawn_branch(
     spawn_async(child, spec, emit)
 }
 
-/// The half of an async spawn that varies between `` agents `start ``'s two
+/// The half of an async spawn that varies between `` exarch-agents `start ``'s two
 /// kinds (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half
 /// they share.
 pub(crate) struct AsyncSpawn {

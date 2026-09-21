@@ -404,7 +404,11 @@ pub mod scheme {
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
-    pub(crate) fn surface_op(u: &mut Unifier) -> Scheme {
+    ///
+    /// `pub`: a host declares its own [`BuiltinEntry`](crate::types::BuiltinEntry)
+    /// over this scheme under its own name; see
+    /// [`crate::builtins::SURFACE_BUILTIN`].
+    pub fn surface_op(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         mk_scheme(
             &[],

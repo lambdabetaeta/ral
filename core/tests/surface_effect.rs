@@ -3,12 +3,15 @@
 //! The `surface` effect: a value handed to the builtin reaches the
 //! host-installed sink unchanged, and with no sink installed the builtin
 //! is the identity.  Drives the public `Shell::run` door the
-//! same way `ral` and `exarch` do.
+//! same way `ral` and `exarch` do — including installing the name, which
+//! core withholds for each host to carry.
 
 mod common;
 
-use common::fresh_shell;
+use common::prelude;
 
+use ral_core::boot::{HostSurface, boot_shell};
+use ral_core::io::TerminalState;
 use ral_core::protocol::{Program, Run};
 use ral_core::serial::FOValue;
 use ral_core::types::{GrantStack, Settled, Shell, Value};
@@ -16,6 +19,19 @@ use ral_core::{
     EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
 };
 use std::sync::{Arc, Mutex};
+
+/// A shell booted the way a host with a rail boots one: core's surface plus
+/// the withheld `surface` name.
+fn host_shell() -> Shell {
+    boot_shell(
+        TerminalState::default(),
+        prelude(),
+        &HostSurface {
+            statics: vec![ral_core::builtins::SURFACE_BUILTIN],
+            captured: Vec::new(),
+        },
+    )
+}
 
 /// A sink that records every surfaced value.
 struct Recorder(Arc<Mutex<Vec<FOValue>>>);
@@ -82,7 +98,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
 /// With no sink installed `surface` returns Unit and is otherwise inert.
 #[test]
 fn surface_without_sink_is_identity() {
-    let mut shell = fresh_shell();
+    let mut shell = host_shell();
     let out = run(
         &mut shell,
         r#"surface `task [status: "open", desc: "x"]"#,
@@ -94,7 +110,7 @@ fn surface_without_sink_is_identity() {
 /// The exact variant the body constructs reaches the installed sink.
 #[test]
 fn surface_forwards_the_event_to_the_sink() {
-    let mut shell = fresh_shell();
+    let mut shell = host_shell();
     let (log, sink) = recording();
     let out = run(
         &mut shell,
@@ -135,7 +151,7 @@ fn surface_forwards_the_event_to_the_sink() {
 /// inside a called closure still reaches the host.
 #[test]
 fn surface_reaches_through_a_thunk_body() {
-    let mut shell = fresh_shell();
+    let mut shell = host_shell();
     let (log, sink) = recording();
     let out = run(
         &mut shell,

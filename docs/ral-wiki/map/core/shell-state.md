@@ -231,7 +231,7 @@ The `fork` door is a two-armed sum, `Fork` (`mooring.rs`), read through
   absence one.
 
 Both arms fork the same shell, `Shell::fork_scrubbed`, which is the whole of
-[[design/agents|agents]]'s one-snapshot law: `` agents `start `` means one
+[[design/agents|agents]]'s one-snapshot law: `` exarch-agents `start `` means one
 thing regardless of seat.
 
 Immutability is what makes the frame free. A value that never moves needs no

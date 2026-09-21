@@ -80,11 +80,18 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
 
 /// Hand the event to the host's structured-event sink, or to nothing when none
 /// is installed.  [`Mooring::surface`] drops values that are not first-order.
+///
+/// `pub`: a host declares its own [`BuiltinEntry`](crate::types::BuiltinEntry)
+/// over this body under its own name; see [`crate::builtins::SURFACE_BUILTIN`].
+///
+/// # Errors
+/// Never returns `Err`; `Settled` only because the registry's fn-pointer
+/// table fixes the return type.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "builtin dispatched through the fn-pointer table in builtins.rs; the uniform `Settled<Value>` return is fixed by the registry, not by this body."
 )]
-pub(super) fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &Shell) -> Settled<Value> {
+pub fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
     if let Some(event) = args.first() {
         mooring.surface(event);
     }

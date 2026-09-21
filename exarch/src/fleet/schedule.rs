@@ -265,7 +265,7 @@ impl Trigger {
         }
     }
 
-    /// The trigger as text, for the `schedules` listing and the wakeup.
+    /// The trigger as text, for the `exarch-schedules` listing and the wakeup.
     pub fn describe(&self) -> String {
         match self {
             Self::Cron { expr, .. } => expr.clone(),
@@ -321,7 +321,7 @@ fn fmt_duration(d: Duration) -> String {
 /// A schedule's id: monotonic, and never reused, not even across `/clear`.
 pub type ScheduleId = u64;
 
-/// A snapshot row for the `schedules` listing.
+/// A snapshot row for the `exarch-schedules` listing.
 pub struct ScheduleInfo {
     pub label: String,
     pub trigger: String,
@@ -400,7 +400,7 @@ impl ScheduleRegistry {
         let mut g = self.lock();
         if g.entries.values().any(|e| e.label == label) {
             return Err(format!(
-                "label '{label}' is already borne by a live schedule — pick another, or `schedules `remove` it first"
+                "label '{label}' is already borne by a live schedule — pick another, or `exarch-schedules `remove` it first"
             ));
         }
         let id = g.next_id;

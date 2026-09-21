@@ -60,8 +60,8 @@ payload must be open, because operations keep arriving. **The extension
 law**, stated once for every channel: a new facility is a new class — a
 `FOValue::Variant` label — on an existing channel, plus a decoder arm at the
 receiving end, never a new channel or frame family. The law binds a second
-level too: a class that nests tags beneath it (`` agents `list ``,
-`` schedules `add ``) draws the same loud error for an unrecognised *tag* as
+level too: a class that nests tags beneath it (`` exarch-agents `list ``,
+`` exarch-schedules `add ``) draws the same loud error for an unrecognised *tag* as
 for an unrecognised class — nesting must not open a silent hole beneath the
 rule it was introduced under. An unrecognised enquiry class or tag answers
 `Err` naming it; an unrecognised surface class is dropped with a note, never

@@ -125,7 +125,7 @@ pub(super) fn render_marker(context: &Context, hole: &[Turn]) -> String {
     if collapsed > 0 {
         let range = format!("{}–{}", rows[0].id, rows[collapsed - 1].id);
         lines.push(format!(
-            "{range:>MARKER_ID$}  ({collapsed} earlier turns — transcript `index)"
+            "{range:>MARKER_ID$}  ({collapsed} earlier turns — exarch-transcript `index)"
         ));
     }
     let mut seen = 0usize;
@@ -161,9 +161,9 @@ fn whereabouts(hole: &[Turn]) -> String {
         format!("reads turns {from} through {} back as material", past - 1)
     };
     format!(
-        "They are still readable: `transcript `read [turns: !{{range {from} {past}}}]` {reads}, \
-         `transcript `grep [pattern: 're']` searches every turn ever recorded, and `transcript \
-         `index` lists them."
+        "They are still readable: `exarch-transcript `read [turns: !{{range {from} {past}}}]` {reads}, \
+         `exarch-transcript `grep [pattern: 're']` searches every turn ever recorded, and \
+         `exarch-transcript `index` lists them."
     )
 }
 

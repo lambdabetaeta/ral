@@ -310,7 +310,7 @@ impl Avatar {
     }
 
     /// Shed the older half of the context, the harness writing no note of its
-    /// own: the model's own `` context `evict `` is where a note comes from.
+    /// own: the model's own `` exarch-context `evict `` is where a note comes from.
     pub(crate) fn evict(&self, provider: &Arc<Provider>, requested: bool, token: &cancel::Token) {
         if !self.log.lock().can_evict() {
             if requested {
@@ -548,7 +548,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply #'# Report\nline one\nline two'#",
+                "exarch-agents `reply #'# Report\nline one\nline two'#",
             )])),
         );
         let (outcome, payload) = drive_peer(&mut child, provider);
@@ -597,7 +597,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'done'",
+                "exarch-agents `reply 'done'",
             )])),
         );
         let (outcome, payload) = drive_peer(&mut child, provider);
@@ -769,7 +769,7 @@ mod tests {
         };
         assert!(
             reminder.contains("At the next turn boundary")
-                && reminder.contains("`context `evict [turns: !{range"),
+                && reminder.contains("`exarch-context `evict [turns: !{range"),
             "the reminder must name the cut and offer the note: {reminder}"
         );
     }
@@ -1081,7 +1081,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'done'",
+                "exarch-agents `reply 'done'",
             )])),
         ));
         let (tx, _rx) = crate::bus::channel();
@@ -1138,7 +1138,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'done'",
+                "exarch-agents `reply 'done'",
             )])),
         ));
         let (tx, _rx) = crate::bus::channel();

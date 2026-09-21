@@ -207,7 +207,7 @@ pub enum Display {
         call: BlockId,
     },
     /// A child's landed line.  No body: the reply is a value on the child's own
-    /// agent, fetched with `` agents `read ``, never copied into the parent's
+    /// agent, fetched with `` exarch-agents `read ``, never copied into the parent's
     /// scrollback.
     SubagentDone {
         name: String,

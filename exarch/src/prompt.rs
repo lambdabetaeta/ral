@@ -108,7 +108,7 @@ pub(crate) struct Grants {
 /// a step finding out. The schedule family is still taught by the persona;
 /// moving that prose here is one `Some`.
 ///
-/// `agents` is one builtin covering two grants that do not coincide: `start`
+/// `exarch-agents` is one builtin covering two grants that do not coincide: `start`
 /// needs spawn fuel, but `reply`/`read` need only `returns` — a leaf agent
 /// with no fuel left still holds `reply`. So the verb name is withheld only
 /// when *neither* grant holds, while the two prompt sections that teach it
@@ -116,8 +116,8 @@ pub(crate) struct Grants {
 type Section = Option<(&'static str, &'static str)>;
 fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 4] {
     [
-        (g.allow_schedule, &["schedules"], None),
-        (g.spawns || g.returns, &["agents"], None),
+        (g.allow_schedule, &["exarch-schedules"], None),
+        (g.spawns || g.returns, &["exarch-agents"], None),
         (
             g.spawns,
             &[],
@@ -483,13 +483,13 @@ mod tests {
             spawns: true,
         });
         let n = names(&index);
-        assert!(n.contains("agents"));
-        assert!(n.contains("schedules"));
+        assert!(n.contains("exarch-agents"));
+        assert!(n.contains("exarch-schedules"));
     }
 
-    /// Zero spawn fuel narrows what `agents `start` can do, never whether the
-    /// name is offered at all: a fuelless returning agent still needs `agents
-    /// `reply` to hand back its value.
+    /// Zero spawn fuel narrows what `exarch-agents `start` can do, never whether the
+    /// name is offered at all: a fuelless returning agent still needs
+    /// `exarch-agents `reply` to hand back its value.
     #[test]
     fn builtin_index_holds_agents_verb_for_a_fuelless_returning_agent() {
         let index = index_for(&Grants {
@@ -499,8 +499,8 @@ mod tests {
         });
         let n = names(&index);
         assert!(
-            n.contains("agents"),
-            "a returning agent still holds `agents `reply` with no spawn fuel left"
+            n.contains("exarch-agents"),
+            "a returning agent still holds `exarch-agents `reply` with no spawn fuel left"
         );
     }
 
@@ -515,11 +515,11 @@ mod tests {
         });
         let n = names(&index);
         assert!(
-            !n.contains("agents"),
+            !n.contains("exarch-agents"),
             "must not advertise a verb the desk always refuses"
         );
         assert!(
-            n.contains("schedules"),
+            n.contains("exarch-schedules"),
             "a granted agent still holds the schedule family"
         );
     }
@@ -532,10 +532,10 @@ mod tests {
             spawns: true,
         });
         let n = names(&index);
-        assert!(!n.contains("schedules"));
+        assert!(!n.contains("exarch-schedules"));
         assert!(
-            n.contains("agents"),
-            "a returning agent still holds `agents`"
+            n.contains("exarch-agents"),
+            "a returning agent still holds `exarch-agents`"
         );
     }
 

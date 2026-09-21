@@ -231,8 +231,8 @@ fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
             let last_plus_one = turns[turns.len() - 1] + 1;
             format!(
                 "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
-                 leave your context; they stay readable with `transcript`. To leave your \
-                 future self a line, run `context `evict [turns: !{{range {first} \
+                 leave your context; they stay readable with `exarch-transcript`. To leave your \
+                 future self a line, run `exarch-context `evict [turns: !{{range {first} \
                  {last_plus_one}}}, note: '…']` now — a prompt whose exchange is still in \
                  hand stays on its own; otherwise nothing is required of you."
             )
@@ -488,7 +488,7 @@ mod tests {
         assert!(msg.contains("400 of 500 tokens"), "{msg}");
         assert!(
             msg.contains("turns 1–7 will leave your context")
-                && msg.contains("`context `evict [turns: !{range 1 8}"),
+                && msg.contains("`exarch-context `evict [turns: !{range 1 8}"),
             "must name the cut and offer the note: {msg}"
         );
         assert_eq!(nudges.used, 0, "the pressure reminder is budget-free");

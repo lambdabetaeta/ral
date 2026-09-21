@@ -331,7 +331,7 @@ fn agent_name(name: &str, hue: Color) -> Span<'static> {
 /// An async subagent's landed line: `agent [NAME] finished · 1 min 12 secs`, the
 /// bold `name` turning [`ORANGE`] with the verb when `error` is set.  No body
 /// and no magnitude — a reply is a value on the child's own agent, read with
-/// `` agents `read ``, so there is nothing here to size or to disclose.  The
+/// `` exarch-agents `read ``, so there is nothing here to size or to disclose.  The
 /// `↘` is the rail's, not this line's.
 pub(super) fn subagent_header(
     name: &str,

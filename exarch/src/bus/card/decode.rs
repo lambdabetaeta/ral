@@ -33,29 +33,6 @@ pub(crate) fn value_to_card(v: &RalValue) -> Option<Card> {
     }
 }
 
-/// Decode a `` `pin ``/`` `unpin `` wrapper into its register key and body card.
-///
-/// The wrapper carries placement only; an absent or empty body reads as
-/// `` `unpin ``, so a pin with nothing left to show drops the slot.
-pub(crate) fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
-    let RalValue::Variant { label, payload } = v else {
-        return None;
-    };
-    match label.as_str() {
-        "pin" => {
-            let m = map_of(payload.as_deref()?)?;
-            let key = str_field(m, "key")?;
-            let body = m
-                .get("body")
-                .and_then(value_to_card)
-                .filter(|c| !c.marks().is_empty());
-            Some((key, body))
-        }
-        "unpin" => Some((str_field(map_of(payload.as_deref()?)?, "key")?, None)),
-        _ => None,
-    }
-}
-
 /// The mark labels a bare surface lifts into a one-mark card: [`decode_mark`]'s
 /// arms.
 fn is_mark_label(label: &str) -> bool {

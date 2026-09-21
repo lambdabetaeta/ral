@@ -6,7 +6,7 @@ covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bu
 
 # Map: exarch / cards
 
-The `surface` builtin carries a **render document** — a `` `card ``, an ordered
+The `exarch-surface` builtin carries a **render document** — a `` `card ``, an ordered
 stack of Bertin *marks* a kit composes entirely in ral. exarch decodes it once
 into a closed Rust model and draws it through one generic interpreter. The *set
 of cards* is open (compose marks, zero Rust per card — a surfaced file write, a
@@ -59,7 +59,7 @@ because a card is a deliberate user-facing act, not a sentinel that might be
 malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk a
 `start` line and a `rows` list of `{tag, text}` records; a missing `hunks`
 lifts to empty so a bare diff still renders. Detached workers buffer their
-`surface` calls and replay them on `await`, so a card replays for free.
+`exarch-surface` calls and replay them on `await`, so a card replays for free.
 
 ## Encode — `encode_card`
 
@@ -67,14 +67,14 @@ lifts to empty so a bare diff still renders. Detached workers buffer their
 decoder's image: `value_to_card(&encode_card(&card)) == card` for every `Card`
 the decoder can produce. It exists because
 [[decisions/260803_register-is-read-write|register-is-read-write]]'s
-`pin-read` hands the model back a stored pin as a value it can destructure,
+`` exarch-pins `read` `` hands the model back a stored pin as a value it can destructure,
 and that value must be **canonical**, not the bytes a kit happened to author:
 a bare-string span or a bare mark — sugar the decoder accepts — comes back
 through the tagged form (`` `text [spans: […]] ``), and an unknown mark comes
 back as the plain text it already degraded to on the way in. Canonical
 read-back is what makes storage and display one thing: a kit cannot smuggle
 state through a payload the decoder discards, because the only card
-`pin-read` can ever return is the one the rail already showed.
+`` exarch-pins `read` `` can ever return is the one the rail already showed.
 
 ## Host-composed one-liners — `done`, notices
 
@@ -216,12 +216,12 @@ a bare ral REPL. The tasks library holds the small constructor so the mark
 grammar lives in one ral place: `tasks-card` in `exarch/data/agent.ral` (the
 tasks section; the kit owns the status→role mapping, since the host knows
 only the closed role set), paired with `tasks-decode`, its inverse over the
-same shape. It leads with a strong `text` heading — the same mark `goal-set`
-writes — so the framed renderer lifts `tasks` into the top rule and the gauge
+same shape. It leads with a strong `text` heading — the same mark
+`` exarch-goal `set `` writes — so the framed renderer lifts `tasks` into the top rule and the gauge
 below it counts what is `completed`, rather than the label doing double duty as
-a title. Every mutator reads the register through `tasks-list`, computes the
+a title. Every mutator reads the register through `` exarch-tasks `list ``, computes the
 new list, and writes it back through
-`tasks-sync` — one write point wrapping `pin-set`/`pin-clear`
+`tasks-sync` — one write point wrapping `` exarch-pins `set ``/`` `clear ``
 ([[map/exarch/builtins|builtins]];
 [[decisions/260803_register-is-read-write|register-is-read-write]]). The card
 is the kit's only state; there is no bound list threaded alongside it to drift
@@ -260,5 +260,5 @@ decision), [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphi
 core I/O events the sibling decoder turns into cards),
 [[decisions/260803_register-is-read-write|register-is-read-write]] (the encoder
 this page's cards feed, and the canonical-form rule it answers to),
-[[design/pins|pins]] (the register `pin-read` answers from),
+[[design/pins|pins]] (the register `` exarch-pins `read` `` answers from),
 [[map/exarch|map: exarch]].

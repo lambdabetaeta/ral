@@ -121,7 +121,7 @@ handle-carrying binding (`Value::Handle` has no wire form, `serial.rs`'s
 `value_carries_handle`), and it is the one door both seats pass through, so an
 in-process identity fork and a wire hatch's `EngineSeed` snapshot the same
 serialisable fragment and
-`` agents `start `` means one thing regardless of seat
+`` exarch-agents `start `` means one thing regardless of seat
 ([[design/agents|agents]]'s one-snapshot law).
 
 ## Framing codec — `core/src/subprocess_codec.rs`

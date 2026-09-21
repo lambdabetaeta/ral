@@ -312,7 +312,7 @@ mod tests {
 
         let result = session.run_shell(
             "transcript-no-echo".into(),
-            "let ctx = transcript `read [turns: [1, 2]]",
+            "let ctx = exarch-transcript `read [turns: [1, 2]]",
             5,
             &emit,
         );
@@ -458,7 +458,7 @@ mod tests {
 
         let result = session.run_shell(
             "c0".into(),
-            "agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
+            "exarch-agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         );

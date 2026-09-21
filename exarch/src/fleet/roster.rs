@@ -1,4 +1,4 @@
-//! What the `agents` family answers.
+//! What the `exarch-agents` family answers.
 //!
 //! [`listing`] is one row per live agent in the reader's own tree; [`summary`]
 //! is the two integers every other transition answers instead.  Both derive
@@ -43,7 +43,7 @@ pub enum Spawner {
     Agent(String),
 }
 
-/// One live agent, for the `agents` listing.
+/// One live agent, for the `exarch-agents` listing.
 pub struct AgentInfo {
     pub name: String,
     pub spawner: Spawner,
@@ -76,7 +76,7 @@ impl AgentInfo {
     }
 }
 
-/// The `agents` listing: every live agent in `reader`'s own tree, ordered by
+/// The `exarch-agents` listing: every live agent in `reader`'s own tree, ordered by
 /// id and `reader` among them.  An agent sees its whole tree, not only what it
 /// spawned, because what it may *message* is wider than what it spawned and a
 /// name it cannot see is a name it cannot be told to write to.  The climb stops

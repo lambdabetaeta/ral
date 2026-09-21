@@ -53,7 +53,7 @@ format, the `absolute_in` cwd-join helper, and the deputy lint).
 `base_layer(base_name, cwd)` resolves a bake-in base, frozen against the
 child's working directory, as the one layer a [[design/agents|sub-agent]]
 spawn pushes. It no longer takes the parent: the desk behind the
-[[map/exarch/builtins|`` agents `start `` tag]] (`fleet/desk.rs`'s
+[[map/exarch/builtins|`` exarch-agents `start `` tag]] (`fleet/desk.rs`'s
 `fork_child`) clones the parent's own `GrantStack` and pushes this layer onto
 the clone, so the same stack that carries the root's authority also carries a
 spawned child's attenuation. The stack's per-check fold ANDs every layer's
@@ -113,7 +113,7 @@ and it fails, naming the tool.
 The consequence for spawning: a base whose `exec` is prefixes alone is
 unusable as a child's `grant`, since the child cannot widen its own ceiling to
 recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`harness.rs::PERMISSION_LABELS` withholds it from `` agents `start ``
+`harness.rs::PERMISSION_LABELS` withholds it from `` exarch-agents `start ``
 ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument

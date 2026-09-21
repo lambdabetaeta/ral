@@ -726,7 +726,7 @@ exarch's cross-by-copy position.
   synod implements above is the seam it dials through.
 - [[design/agents|agents]] — the one-snapshot law: `Shell::fork_scrubbed` is
   the one fork both the identity arm's nursery park and the wire arm's
-  `EngineSeed` take, so `` agents `start `` means one thing regardless of
+  `EngineSeed` take, so `` exarch-agents `start `` means one thing regardless of
   seat.
 - [[design/engine-protocol|engine-protocol]] — why the guest
   listens and the host dials, and why that direction is what deleted the

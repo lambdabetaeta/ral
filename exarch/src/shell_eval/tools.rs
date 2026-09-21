@@ -1,6 +1,6 @@
 //! The tools a request may advertise — `ral`, and `thinking` under
 //! `--thinking-tool` — and the spawn plumbing behind `/branch` and the desk's
-//! `` agents `start ``.
+//! `` exarch-agents `start ``.
 //!
 //! Everything else the model reaches — spawning a sub-agent, messaging one,
 //! scheduling a wakeup, replying — is an ordinary ral builtin in

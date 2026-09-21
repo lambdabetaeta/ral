@@ -131,7 +131,7 @@ is what `guest-net::Config::egress` takes: the policy and ledger a synod
 session's guest network is gated by are the fleet's own, not a second
 copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
 has no guest to police, still keeps `Egress` for one thing: the `search` bit
-that clamps the harness `` agents `start [... search: …] `` field
+that clamps the harness `` exarch-agents `start [... search: …] `` field
 ([[map/exarch/builtins|builtins]]).
 
 An `interactive` node
@@ -381,8 +381,8 @@ calls `Avatar::planned_eviction` — a walk back over the turn table's own
 summed weights, no rendering — and carries the answer as
 `Pressure::Over { detail, planned }`, so the message tells the model which
 *turns* the next boundary would take, rendered as runs, that the material
-stays readable with `transcript`, and how to make the same cut with a line of
-its own — `` context `evict [turns: !{range a b}, note: '…'] `` — before they
+stays readable with `exarch-transcript`, and how to make the same cut with a line of
+its own — `` exarch-context `evict [turns: !{range a b}, note: '…'] `` — before they
 go. With nothing old enough to shed, `planned` is `None` and the
 reading alone is the whole message. Durability is the log's job, so the nudge
 no longer asks the model to write state to files.
@@ -415,7 +415,7 @@ so without the rebirth the telling would be recorded but never committed.
 Edge-triggering the pin reminder closes a livelock: a stationary register can
 now produce at most one nudge, where a bare per-completion reminder let a
 `Complete`, its own reminder, and the next `Complete` cycle forever while the
-register sat unchanged — the no-pins `goal-set` advertisement that used to
+register sat unchanged — the no-pins `` exarch-goal `set `` advertisement that used to
 steer an agent straight into that state is deleted outright with it. A
 standing condition staying *event-shaped* on the wire looks like it should
 strain the fold law
@@ -436,7 +436,7 @@ variant, fold arm, and admission rule — machinery for no semantic gain. An
 eviction may carry a telling out of the context without harm either way: both
 conditions self-heal regardless — pressure re-fires per excursion by
 construction, the pin reminder re-fires on the next register change, and the
-model can always `pin-list`.
+model can always `` exarch-pins `list ``.
 
 A `--chat` trunk holds **no `Nudges`** (`nudges: Option<nudge::Nudges>`,
 `None` when the tool is withheld): every nudge steers the model toward a
@@ -453,7 +453,7 @@ Mutex<Vec<Weak<Agent>>>, lease: Duration }` — two `Weak` doors and the
 idle-lease bound they share, fixed at construction, nothing else. It is not the tree: the tree is
 `Agent::parent`/`Agent::children`, and every walk — the roster, the cancel
 cascade, the scope check — runs there. `names` is the by-name door a spawn
-claims identity at and `` agents `message ``/`` `cancel ``/`` `read ``
+claims identity at and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
 resolve through (`Fleet::resolve`); `roots` holds the trunk and every
 `/branch` — a root reports to nobody, so a walk from `roots`
 (`nearest_reap`) is how the idle-lease scan reaches every live agent in the
@@ -501,7 +501,7 @@ shares through `Fleet` is only identity resolution and the lease.
 
 ## Cancellation cascades the subtree, across both layers
 
-The single cascade serves the deliberate teardowns — `` agents `cancel ``, a
+The single cascade serves the deliberate teardowns — `` exarch-agents `cancel ``, a
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps — and it
 runs over the agent tree itself, not a registry. `Agent::name` is its
 identity — well-formed and unique among live agents, both enforced at
@@ -509,7 +509,7 @@ identity — well-formed and unique among live agents, both enforced at
 `TRUNK_NAME`, `agent/build.rs`), which is where a name *becomes* identity and
 so the one place a wire peer cannot go around. The desk refuses both a beat
 earlier, before it forks a log or dials anything, but only `enrol` is
-authoritative. A name is also the handle `` agents `message ``/`` `cancel `` resolve by,
+authoritative. A name is also the handle `` exarch-agents `message ``/`` `cancel `` resolve by,
 through `Fleet::resolve` — and then, for `` `cancel `` and `` `read `` alone,
 the scope climb (`Agent::descendant`); a message needs no climb. The roster
 (`fleet::roster::listing`) reads `Fleet::live`, the same name map `resolve`
@@ -579,7 +579,7 @@ swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
 so the child inherits the model in force at spawn and may diverge afterward.
 
-A builtin spawn may say otherwise. `` agents `start ``'s `provider` and
+A builtin spawn may say otherwise. `` exarch-agents `start ``'s `provider` and
 `model` fields each name `` `inherit `` or `` `named <Str> ``, and
 `ExarchDesk::child_provider` reads them **before the `SeatKind` split**, so
 both arms share one resolution and a refusal unwinds nothing — no adopted
@@ -671,13 +671,13 @@ records, retaining only their byte ranges in `record.jsonl`; this is residency
 following the context, not a second drain rule. `render_marker` draws one
 marker at each hole the cut opens, from those very turns and the `Cut` beside
 them, so what left is still named
-and still readable through `transcript`. Nothing old enough to shed is a no-op,
+and still readable through `exarch-transcript`. Nothing old enough to shed is a no-op,
 not an event. The durable log is appended to, never rewritten.
 
 Harness eviction is one authority over the one context edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
-model reaches the other two: `` context `survey ``/``
-`evict [turns, note] `` survey and edit the context and `transcript`'s ``
+model reaches the other two: `` exarch-context `survey ``/``
+`evict [turns, note] `` survey and edit the context and `exarch-transcript`'s ``
 `index ``/`` `read ``/`` `grep `` read the record, an edit recording
 `Protocol::Evicted` with `EditAuthority::Model` rather than `Harness`; only the
 model's own `` `evict `` carries a `note`. The user's own hand is
@@ -726,8 +726,8 @@ There is no flow-back: the child's `cd`, env, and new bindings die with it. An
 agent with fuel left may spawn, and each fork hands the child one less unit of
 `fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own
 fuel is never debited, so fuel bounds depth, not fan-out). At `fuel == 0` the
-prompt drops the spawn family — `agents` — and the desk refuses
-`` agents `start `` with the exhaustion text; the desk remains the runtime wall
+prompt drops the spawn family — `exarch-agents` — and the desk refuses
+`` exarch-agents `start `` with the exhaustion text; the desk remains the runtime wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
 mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
@@ -741,7 +741,7 @@ authority ([[decisions/260705_branch-minimal|branch-minimal]]) — `returns:
 false` means `parent` comes back `None`, so a branch is a root exactly as
 the trunk is. A builtin
 spawn takes the decomposed path instead: the `` `start `` tag's body leaves
-the fork where this run's `Fork` door says, and the desk's `` agents `start ``
+the fork where this run's `Fork` door says, and the desk's `` exarch-agents `start ``
 arm collects it and calls `Avatar::assemble` at one less unit of fuel
 ([[map/exarch/builtins|builtins]]).
 
@@ -754,7 +754,7 @@ late sections, so a child never inherits an already-appended `Agent` section.
 
 ### Wire-seat spawn
 
-**Both seats spawn in one exchange of the same `` agents `start ``
+**Both seats spawn in one exchange of the same `` exarch-agents `start ``
 vocabulary; they differ only in where the fork waits.** The arm is chosen on a
 stated fact — `HostServices::kind`, a `SeatKind::{Identity { scratch }, Wire}`
 read off the seat when the desk's capture is built, once per `ral` call
@@ -809,7 +809,7 @@ trunk with fuel > 0 and no dialler is a construction error, refused at
 `Avatar::root` with a sentence rather than discovered by a model calling
 `agent`; off Linux the wire arm refuses in one sentence too.
 The enquiring builtin cannot tell which arm served it — both answer the same
-roster `` agents `` gives every tag. See [[design/agents|agents]] for the
+roster `` exarch-agents `` gives every tag. See [[design/agents|agents]] for the
 seed's isolation law and [[map/synod|synod]] for `MachineDial`, the `Dial`
 over `Machine::connect_guest`. The `` `mnemon `` memory mode
 additionally forks
@@ -841,7 +841,7 @@ line and the token count that names it, for `/resources`), `pressure_due` and
 its `PRESSURE_THRESHOLD_FALLBACK` one reserve ahead of it, and
 `suffix_keep_budget`, the half-the-bytes cut. These caps bound a single result;
 eviction bounds the whole history. A child's reply is not clipped, since it reaches the parent as a value through
-`` agents `read `` rather than as text. An oversize section keeps a head+tail digest
+`` exarch-agents `read `` rather than as text. An oversize section keeps a head+tail digest
 and elides the middle, with a banner nudging the model to scope the query at
 its source and re-read in slices — the same rendering the transcript records,
 so the user never sees more of a result than the model does. A structured
@@ -852,8 +852,8 @@ head-on.
 
 Every `ral` result closes with a `TURN: <id>` line naming the turn it closes.
 That is how the model learns its own turn number, and so the address it evicts
-and reads by: the same id `` context `evict [turns: …] `` and
-`` transcript `read [turns: …] `` take. It is appended in `agent/shell.rs`,
+and reads by: the same id `` exarch-context `evict [turns: …] `` and
+`` exarch-transcript `read [turns: …] `` take. It is appended in `agent/shell.rs`,
 from `AgentLog::current_turn()`, not in `digest`'s rendering — the id is the
 session's, known where the result is assembled and not inside a byte-capped
 section, and `system.md` tells the model to expect it

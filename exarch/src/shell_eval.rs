@@ -12,7 +12,7 @@ pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
-use crate::bus::card::{landing, value_to_card, value_to_done, value_to_pin};
+use crate::bus::card::{landing, value_to_card, value_to_done};
 use crate::bus::{AgentId, Emitter, Stamp, Stamped};
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -154,19 +154,15 @@ pub enum Decoded {
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.
 ///
-/// The five shapes riding the one `surface` channel are disjoint — an
+/// The shapes riding the one `exarch-surface` channel are disjoint — an
 /// observation is a `Map` tagged by its `kind` field, the rest are distinct
-/// variant labels — so the arm order below carries no meaning.  A pin is the
-/// odd one: it is *state*, keyed to a register slot and overwritten in place
-/// on re-pin, not an event appended to scrollback.  Anything else is
-/// [`Decoded::Unknown`].
+/// variant labels — so the arm order below carries no meaning.  Anything else
+/// is [`Decoded::Unknown`].
+///
+/// The register is not among them: a pin is *state*, keyed to a slot and
+/// overwritten in place, and `exarch-pins` is its only door.
 pub fn decode_surface(ev: &RalValue) -> Decoded {
-    if let Some((key, body)) = value_to_pin(ev) {
-        Decoded::Surface(match body {
-            Some(card) => Surface::Pin { key, card },
-            None => Surface::Unpin { key },
-        })
-    } else if let Some(event) = Observation::from_value(ev) {
+    if let Some(event) = Observation::from_value(ev) {
         // Core reports every observation it makes and judges none of them;
         // `landing` is where this host says which it wants.  One core
         // dispatch is one observation, so a rejected one is dropped outright
@@ -658,7 +654,8 @@ mod tests {
         let mut shell = fresh_shell();
         for (name, doc) in builtins::agent_library_docs() {
             let run = run_once(&mut shell, &format!("explain {name}"));
-            let out = String::from_utf8_lossy(&run.stdout);
+            // `explain` indents every line it prints; a family's doc spans lines.
+            let out = String::from_utf8_lossy(&run.stdout).replace("\n  ", "\n");
             assert!(
                 out.contains(&doc),
                 "`explain {name}` must print its indexed doc, got:\n{out}"
@@ -1143,54 +1140,6 @@ keep-bottom
                 ]))),
             }),
             Decoded::Surface(Surface::Done(crate::bus::card::DoneOutcome::Ok))
-        ));
-        assert!(matches!(
-            decode_surface(&RalValue::Variant {
-                label: "pin".into(),
-                payload: Some(Box::new(RalValue::map(vec![
-                    ("key".into(), RalValue::String("tasks".into())),
-                    (
-                        "body".into(),
-                        RalValue::Variant {
-                            label: "card".into(),
-                            payload: Some(Box::new(RalValue::list(vec![RalValue::String(
-                                "x".into(),
-                            )]))),
-                        },
-                    ),
-                ]))),
-            }),
-            Decoded::Surface(Surface::Pin { .. })
-        ));
-        for label in ["unpin", "pin"] {
-            assert!(matches!(
-                decode_surface(&RalValue::Variant {
-                    label: label.into(),
-                    payload: Some(Box::new(RalValue::map(vec![(
-                        "key".into(),
-                        RalValue::String("tasks".into()),
-                    )]))),
-                }),
-                Decoded::Surface(Surface::Unpin { .. })
-            ));
-        }
-        // An *empty* card drops the slot too: a pin with nothing to show is
-        // an `unpin`.
-        assert!(matches!(
-            decode_surface(&RalValue::Variant {
-                label: "pin".into(),
-                payload: Some(Box::new(RalValue::map(vec![
-                    ("key".into(), RalValue::String("tasks".into())),
-                    (
-                        "body".into(),
-                        RalValue::Variant {
-                            label: "card".into(),
-                            payload: Some(Box::new(RalValue::list(vec![]))),
-                        },
-                    ),
-                ]))),
-            }),
-            Decoded::Surface(Surface::Unpin { .. })
         ));
         assert!(matches!(
             decode_surface(&RalValue::String("nope".into())),

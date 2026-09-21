@@ -1,23 +1,24 @@
-//! The harness builtins — `agents`, `schedules`, `pin-read`, `pin-list`,
-//! `context`, `transcript` — with the type schemes that gate them. A
-//! returning agent's reply is a tag of `agents` (`` `reply ``), not a builtin
-//! of its own — the fleet is one family.
+//! The harness builtins — `exarch-agents`, `exarch-schedules`, `exarch-pins`,
+//! `exarch-context`, `exarch-transcript` — with the type schemes that gate
+//! them. A returning agent's reply is a tag of `exarch-agents`
+//! (`` `reply ``), not a builtin of its own — the fleet is one family.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
-//! never reaches the host. `agents`'s `` `start `` tag forks this shell and
-//! tells the host how to reach the fork, which is what the run's
+//! never reaches the host. `exarch-agents`'s `` `start `` tag forks this
+//! shell and tells the host how to reach the fork, which is what the run's
 //! [`Fork`](ral_core::types::Fork) door says: an in-process host adopts a
 //! fork parked in the run's nursery, since the reentrancy law bars a desk
 //! handler from holding `&mut Shell` to fork one itself; a host across a wire
 //! is handed a guest port to dial, and dials it while it answers.
 //! [`crate::fleet::desk::ExarchDesk`] answers every enquiry on the other side.
 //!
-//! One verb per addressable thing, named as the model names it: `agents`,
-//! `schedules`, `context` and `transcript` each carry the model's tag as a
-//! nested variant and its record verbatim, and the tag selects what happens.
-//! The first three name a state, and answer it afterwards. `transcript`
-//! names the record instead, which no tag of it writes, so its tags answer
-//! what they were asked for rather than a state.
+//! One verb per addressable thing, named as the model names it:
+//! `exarch-agents`, `exarch-schedules`, `exarch-pins`, `exarch-context` and
+//! `exarch-transcript` each carry the model's tag as a nested variant and its
+//! record verbatim, and the tag selects what happens. All but
+//! `exarch-transcript` name a state, and answer it afterwards.
+//! `exarch-transcript` names the record instead, which no tag of it writes,
+//! so its tags answer what they were asked for rather than a state.
 
 use crate::fleet::desk::Selection;
 use crate::fleet::schedule::{CronSchedule, parse_duration};
@@ -62,7 +63,7 @@ fn agent_type_label(v: &Value) -> Settled<()> {
         return Ok(());
     }
     Err(sig(format!(
-        "agents: `type` must be `amnemon (blank context) or `mnemon (inherits your conversation) — got {v}"
+        "exarch-agents: `type` must be `amnemon (blank context) or `mnemon (inherits your conversation) — got {v}"
     )))
 }
 
@@ -93,12 +94,12 @@ fn selection_label(v: &Value, field: &str) -> Settled<Selection> {
         } if label == "named" => match payload.as_ref() {
             Value::String(name) if !name.is_empty() => Ok(Selection::Named(name.clone())),
             other => Err(sig(format!(
-                "agents: `{field}`'s `named` must carry a non-empty Str naming the \
+                "exarch-agents: `{field}`'s `named` must carry a non-empty Str naming the \
                  {field} — got {other}"
             ))),
         },
         other => Err(sig(format!(
-            "agents: `{field}` must be `inherit (whatever you are running on) or \
+            "exarch-agents: `{field}` must be `inherit (whatever you are running on) or \
              `named '<{field}>' — got {other}"
         ))),
     }
@@ -115,24 +116,24 @@ fn schedule_trigger(v: &Value) -> Settled<()> {
     } = v
     else {
         return Err(sig(format!(
-            "schedules: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got {v}"
+            "exarch-schedules: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got {v}"
         )));
     };
     let Value::String(expr) = payload.as_ref() else {
         return Err(sig(format!(
-            "schedules: `{label}`'s payload must be a Str, got {}",
+            "exarch-schedules: `{label}`'s payload must be a Str, got {}",
             payload.type_name()
         )));
     };
     match label.as_str() {
         "cron" => CronSchedule::parse(expr)
             .map(|_| ())
-            .map_err(|e| sig(format!("schedules: {e}"))),
+            .map_err(|e| sig(format!("exarch-schedules: {e}"))),
         "after" => parse_duration(expr)
             .map(|_| ())
-            .map_err(|e| sig(format!("schedules: {e}"))),
+            .map_err(|e| sig(format!("exarch-schedules: {e}"))),
         other => Err(sig(format!(
-            "schedules: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got `{other}`"
+            "exarch-schedules: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got `{other}`"
         ))),
     }
 }
@@ -144,7 +145,7 @@ fn schedule_label(v: &Value) -> Settled<()> {
         return Ok(());
     }
     Err(sig(format!(
-        "schedules: `label` must be a Str naming the wakeup, got {}",
+        "exarch-schedules: `label` must be a Str naming the wakeup, got {}",
         v.type_name()
     )))
 }
@@ -172,7 +173,7 @@ fn verbatim(spec: &Value, verb: &str) -> Settled<FOValue> {
     })
 }
 
-/// The `agents` family's answer: `` `roster [rows] `` from `` `list ``, and
+/// The `exarch-agents` family's answer: `` `roster [rows] `` from `` `list ``, and
 /// `` `summary [live, replied] `` from every other tag. `` `read `` answers
 /// the fetched value instead, so [`builtin_agents`] never routes it here.
 /// This door is what tells the shapes apart, the family's answer type being a
@@ -184,7 +185,7 @@ fn fleet_answer(answer: FOValue) -> Settled<Value> {
     } = answer
     else {
         return Err(sig(
-            "agents: host answered an unexpected shape for the fleet",
+            "exarch-agents: host answered an unexpected shape for the fleet",
         ));
     };
     match (label.as_str(), *payload) {
@@ -193,13 +194,13 @@ fn fleet_answer(answer: FOValue) -> Settled<Value> {
         }
         ("summary", record @ FOValue::Map { .. }) => Ok(Value::from(record)),
         ("roster", _) => Err(sig(
-            "agents: host's `roster answer must carry a list of agent rows",
+            "exarch-agents: host's `roster answer must carry a list of agent rows",
         )),
         ("summary", _) => Err(sig(
-            "agents: host's `summary answer must carry [live: Int, replied: Int]",
+            "exarch-agents: host's `summary answer must carry [live: Int, replied: Int]",
         )),
         _ => Err(sig(format!(
-            "agents: host answered `{label} where `roster or `summary was expected — `list \
+            "exarch-agents: host answered `{label} where `roster or `summary was expected — `list \
              answers the rows, every other tag the two counts"
         ))),
     }
@@ -279,9 +280,10 @@ fn hatch_over_the_wire(
     shell: &Shell,
 ) -> Settled<FOValue> {
     let token = mint_token();
-    let (socket, port) = super::guest_port::bind().map_err(|why| sig(format!("agents: {why}")))?;
+    let (socket, port) =
+        super::guest_port::bind().map_err(|why| sig(format!("exarch-agents: {why}")))?;
     let listener = ral_core::hatch::listen_for_hatch(socket, token, &shell.fork_scrubbed(), grant)
-        .map_err(|reason| sig(format!("agents: {reason}")))?;
+        .map_err(|reason| sig(format!("exarch-agents: {reason}")))?;
     let answer = shell.enquire(mooring, start_request(spec, listening(port, token)));
     // A host that refused never dialled, so the thread is still in its poll:
     // wake it, or the join below never returns.
@@ -289,7 +291,9 @@ fn hatch_over_the_wire(
         listener.cancel();
     }
     match listener.join() {
-        Err(ral_core::hatch::Unhatched::Failed(reason)) => Err(sig(format!("agents: {reason}"))),
+        Err(ral_core::hatch::Unhatched::Failed(reason)) => {
+            Err(sig(format!("exarch-agents: {reason}")))
+        }
         _ => Ok(answer?),
     }
 }
@@ -305,13 +309,13 @@ fn hatch_over_the_wire(
     _shell: &Shell,
 ) -> Settled<FOValue> {
     Err(sig(
-        "agents: this engine has no hatch support outside a Linux guest — a wire trunk's helper \
+        "exarch-agents: this engine has no hatch support outside a Linux guest — a wire trunk's helper \
          spawn only ever reaches one",
     ))
 }
 
 /// `` `start ``'s payload: validate, fork this shell, and enquire
-/// `` agents `start `` with the model's record and the fork tag this run's
+/// `` exarch-agents `start `` with the model's record and the fork tag this run's
 /// [`Fork`] door calls for; the desk's `launch` is the other half.
 ///
 /// [`scheme_agents`]'s closed record row inside `` `start `` already
@@ -320,45 +324,45 @@ fn hatch_over_the_wire(
 fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
     let Value::Map(fields) = spec else {
         return Err(sig(format!(
-            "agents: `start`'s payload must be a [prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …] record, got {}",
+            "exarch-agents: `start`'s payload must be a [prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …] record, got {}",
             spec.type_name()
         )));
     };
     if fields.get("prompt").is_none() {
         return Err(sig(
-            "agents: the spec record needs a `prompt` field — the instruction the child starts with",
+            "exarch-agents: the spec record needs a `prompt` field — the instruction the child starts with",
         ));
     }
     let Some(name) = fields.get("name") else {
         return Err(sig(
-            "agents: the spec record needs a `name` field — the child's identity",
+            "exarch-agents: the spec record needs a `name` field — the child's identity",
         ));
     };
     let Some(kind) = fields.get("type") else {
         return Err(sig(
-            "agents: the spec record needs a `type` field — `amnemon or `mnemon",
+            "exarch-agents: the spec record needs a `type` field — `amnemon or `mnemon",
         ));
     };
     let Some(grant) = fields.get("grant") else {
         return Err(sig(
-            "agents: the spec record needs a `grant` field — one of the five permission bases",
+            "exarch-agents: the spec record needs a `grant` field — one of the five permission bases",
         ));
     };
     let Some(search) = fields.get("search") else {
         return Err(sig(
-            "agents: the spec record needs a `search` field — whether the child may use the \
+            "exarch-agents: the spec record needs a `search` field — whether the child may use the \
              provider's built-in web search",
         ));
     };
     let Some(provider) = fields.get("provider") else {
         return Err(sig(
-            "agents: the spec record needs a `provider` field — `inherit to run the child on \
+            "exarch-agents: the spec record needs a `provider` field — `inherit to run the child on \
              your own account, or `named '<provider>'",
         ));
     };
     let Some(model) = fields.get("model") else {
         return Err(sig(
-            "agents: the spec record needs a `model` field — `inherit to run the child on your \
+            "exarch-agents: the spec record needs a `model` field — `inherit to run the child on your \
              own model, or `named '<model>'",
         ));
     };
@@ -366,7 +370,7 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     let name = name.to_string();
     // The door's own early refusal; `Fleet::enrol` is what makes it
     // unskippable.
-    crate::fleet::check_name(&name).map_err(|why| sig(format!("agents: {why}")))?;
+    crate::fleet::check_name(&name).map_err(|why| sig(format!("exarch-agents: {why}")))?;
     agent_type_label(kind)?;
     permission_label(grant)?;
     // The door admitted it, so the grant is a bare tag; the hatch needs its
@@ -374,13 +378,13 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     let grant = bare_tag(grant).unwrap_or_default().to_string();
     if !matches!(search, Value::Bool(_)) {
         return Err(sig(format!(
-            "agents: `search` must be a Bool — got {}",
+            "exarch-agents: `search` must be a Bool — got {}",
             search.type_name()
         )));
     }
     selection_label(provider, "provider")?;
     selection_label(model, "model")?;
-    let spec = verbatim(spec, "agents")?;
+    let spec = verbatim(spec, "exarch-agents")?;
 
     match mooring.fork() {
         Some(Fork::Listen) => hatch_over_the_wire(spec, grant, mooring, shell),
@@ -397,40 +401,40 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     }
 }
 
-/// `` `message ``'s payload: enquires `` agents `message `` with the model's
+/// `` `message ``'s payload: enquires `` exarch-agents `message `` with the model's
 /// record; name resolution and delivery errors all belong to the desk.
 fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
     let Value::Map(fields) = spec else {
         return Err(sig(format!(
-            "agents: `message`'s payload must be a [to: …, text: …] record, got {}",
+            "exarch-agents: `message`'s payload must be a [to: …, text: …] record, got {}",
             spec.type_name()
         )));
     };
     let Some(to) = fields.get("to") else {
         return Err(sig(
-            "agents: the `message` spec needs a `to` field — the recipient's name",
+            "exarch-agents: the `message` spec needs a `to` field — the recipient's name",
         ));
     };
     let Some(text) = fields.get("text") else {
         return Err(sig(
-            "agents: the `message` spec needs a `text` field — what to send",
+            "exarch-agents: the `message` spec needs a `text` field — what to send",
         ));
     };
     if !matches!(to, Value::String(_)) {
         return Err(sig(format!(
-            "agents: `to` must be a Str naming the recipient, got {}",
+            "exarch-agents: `to` must be a Str naming the recipient, got {}",
             to.type_name()
         )));
     }
     if !matches!(text, Value::String(_)) {
         return Err(sig(format!(
-            "agents: `text` must be a Str, got {}",
+            "exarch-agents: `text` must be a Str, got {}",
             text.type_name()
         )));
     }
     Ok(shell.enquire(
         mooring,
-        request("agents", "message", Some(verbatim(spec, "agents")?)),
+        request("agents", "message", Some(verbatim(spec, "exarch-agents")?)),
     )?)
 }
 
@@ -441,7 +445,7 @@ fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVa
 fn reply_agent(value: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
     let payload = FOValue::try_from(value).map_err(|_| {
         sig(
-            "agents: `reply`'s value must be first-order data — no closures, handles, or \
+            "exarch-agents: `reply`'s value must be first-order data — no closures, handles, or \
              environments — since it crosses to whoever spawned you as plain data",
         )
     })?;
@@ -462,7 +466,7 @@ fn reply_agent(value: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVal
 fn read_agent(target: &Value, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     let Value::String(name) = target else {
         return Err(sig(format!(
-            "agents: `read`'s payload must be a Str naming the descendant, got {}",
+            "exarch-agents: `read`'s payload must be a Str naming the descendant, got {}",
             target.type_name()
         )));
     };
@@ -479,13 +483,13 @@ fn read_agent(target: &Value, mooring: &Mooring, shell: &Shell) -> Settled<Value
     Ok(Value::from(answer))
 }
 
-/// `agents <tag>` — one enquiry per tag. Every tag but `` `read `` answers
+/// `exarch-agents <tag>` — one enquiry per tag. Every tag but `` `read `` answers
 /// with the roster; `` `read `` answers the fetched record instead, so it
 /// returns directly rather than falling through to [`roster`].
 fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "agents: expected a `list, `start, `message, `cancel, `reply, or `read tag, got {}",
+            "exarch-agents: expected a `list, `start, `message, `cancel, `reply, or `read tag, got {}",
             args[0].type_name()
         )));
     };
@@ -499,7 +503,7 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
         ("cancel", Some(target)) => {
             let Value::String(name) = target.as_ref() else {
                 return Err(sig(format!(
-                    "agents: `cancel`'s payload must be a Str naming the descendant, got {}",
+                    "exarch-agents: `cancel`'s payload must be a Str naming the descendant, got {}",
                     target.type_name()
                 )));
             };
@@ -517,7 +521,7 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
         ("reply", Some(value)) => reply_agent(value, mooring, shell)?,
         _ => {
             return Err(sig(format!(
-                "agents: tag must be one of `list, `start, `message, `cancel, `reply, `read — got \
+                "exarch-agents: tag must be one of `list, `start, `message, `cancel, `reply, `read — got \
                  {label}"
             )));
         }
@@ -527,28 +531,28 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
 
 /// `` `add ``'s payload: checked through
 /// [`schedule_trigger`]/[`schedule_label`], then enquired verbatim as
-/// `` schedules `add ``. The self-wakeup grant and label uniqueness are
+/// `` exarch-schedules `add ``. The self-wakeup grant and label uniqueness are
 /// refusals the desk and the schedule registry own.
 fn add_schedule(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
     let Value::Map(fields) = spec else {
         return Err(sig(format!(
-            "schedules: `add`'s payload must be a [trigger: …, label: …, prompt: …] record, got {}",
+            "exarch-schedules: `add`'s payload must be a [trigger: …, label: …, prompt: …] record, got {}",
             spec.type_name()
         )));
     };
     let Some(trigger) = fields.get("trigger") else {
         return Err(sig(
-            "schedules: the `add` spec needs a `trigger` field — `cron '<expr>' or `after '<dur>'",
+            "exarch-schedules: the `add` spec needs a `trigger` field — `cron '<expr>' or `after '<dur>'",
         ));
     };
     let Some(label) = fields.get("label") else {
         return Err(sig(
-            "schedules: the `add` spec needs a `label` field — a Str naming the wakeup",
+            "exarch-schedules: the `add` spec needs a `label` field — a Str naming the wakeup",
         ));
     };
     if fields.get("prompt").is_none() {
         return Err(sig(
-            "schedules: the `add` spec needs a `prompt` field — the instruction delivered when the wakeup fires",
+            "exarch-schedules: the `add` spec needs a `prompt` field — the instruction delivered when the wakeup fires",
         ));
     }
     schedule_trigger(trigger)?;
@@ -556,17 +560,21 @@ fn add_schedule(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVal
 
     Ok(shell.enquire(
         mooring,
-        request("schedules", "add", Some(verbatim(spec, "schedules")?)),
+        request(
+            "schedules",
+            "add",
+            Some(verbatim(spec, "exarch-schedules")?),
+        ),
     )?)
 }
 
-/// `schedules <tag>` — one enquiry, whose answer is the registry itself:
+/// `exarch-schedules <tag>` — one enquiry, whose answer is the registry itself:
 /// every tag answers with the table, never a receipt of its own. The
 /// self-wakeup grant refusal is the desk's.
 fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "schedules: expected a `list, `add, or `remove tag, got {}",
+            "exarch-schedules: expected a `list, `add, or `remove tag, got {}",
             args[0].type_name()
         )));
     };
@@ -576,7 +584,7 @@ fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         ("remove", Some(target)) => {
             let Value::String(target_label) = target.as_ref() else {
                 return Err(sig(format!(
-                    "schedules: `remove`'s payload must be a Str naming the wakeup, got {}",
+                    "exarch-schedules: `remove`'s payload must be a Str naming the wakeup, got {}",
                     target.type_name()
                 )));
             };
@@ -593,59 +601,107 @@ fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         }
         _ => {
             return Err(sig(format!(
-                "schedules: tag must be one of `list, `add, `remove — got {label}"
+                "exarch-schedules: tag must be one of `list, `add, `remove — got {label}"
             )));
         }
     };
     let FOValue::List { items } = answer else {
         return Err(sig(
-            "schedules: host answered an unexpected shape for the listing",
+            "exarch-schedules: host answered an unexpected shape for the listing",
         ));
     };
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `pin-read <key>` — enquires `` `pin-read ``; the mirror lookup, the miss
-/// (→ `Unit`), and the canonical re-encoding are the desk's.
-fn builtin_pin_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let key = args[0].to_string();
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "pin-read".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![FOValue::String { value: key }],
-            })),
-        },
-    )?;
-    Ok(Value::from(answer))
-}
-
-/// `pin-list` — enquires `` `pin-list ``; the key ordering is the desk's.
-fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "pin-list".to_string(),
-            payload: None,
-        },
-    )?;
-    let FOValue::List { items } = answer else {
+/// `` `set ``'s payload: a `[key: Str, body]` record, checked and then sent
+/// verbatim — the desk decodes `body` exactly as a surfaced `` `pin ``'s.
+fn set_pin(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let Value::Map(fields) = spec else {
+        return Err(sig(format!(
+            "exarch-pins: `set`'s payload must be a [key: Str, body: …] record, got {}",
+            spec.type_name()
+        )));
+    };
+    let Some(key) = fields.get("key") else {
         return Err(sig(
-            "pin-list: host answered an unexpected shape for the listing",
+            "exarch-pins: the `set` spec needs a `key` field — the register slot to write",
         ));
     };
-    Ok(Value::list(items.into_iter().map(Value::from).collect()))
+    if !matches!(key, Value::String(_)) {
+        return Err(sig(format!(
+            "exarch-pins: `key` must be a Str, got {}",
+            key.type_name()
+        )));
+    }
+    if fields.get("body").is_none() {
+        return Err(sig(
+            "exarch-pins: the `set` spec needs a `body` field — the card to pin",
+        ));
+    }
+    Ok(shell.enquire(
+        mooring,
+        request("pins", "set", Some(verbatim(spec, "exarch-pins")?)),
+    )?)
 }
 
-/// The `` `context `` scheme (`context_receipt_ty`) is a closed record, so a
+/// A tag whose whole payload is the key it names, sent bare — `` `clear ``
+/// and `` `read `` alike.
+fn keyed_pin(key: &Value, tag: &str, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let Value::String(key) = key else {
+        return Err(sig(format!(
+            "exarch-pins: `{tag}`'s payload must be a Str naming the slot, got {}",
+            key.type_name()
+        )));
+    };
+    Ok(shell.enquire(
+        mooring,
+        request("pins", tag, Some(FOValue::String { value: key.clone() })),
+    )?)
+}
+
+/// `exarch-pins <tag>` — one enquiry per tag onto the register: `` `set ``
+/// writes a slot, `` `clear `` empties one, `` `read `` and `` `list ``
+/// answer it back.
+fn builtin_pins(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let Value::Variant { label, payload } = &args[0] else {
+        return Err(sig(format!(
+            "exarch-pins: expected a `set, `clear, `read, or `list tag, got {}",
+            args[0].type_name()
+        )));
+    };
+    match (label.as_str(), payload) {
+        ("set", Some(spec)) => {
+            set_pin(spec, mooring, shell)?;
+            Ok(Value::Unit)
+        }
+        ("clear", Some(key)) => {
+            keyed_pin(key, "clear", mooring, shell)?;
+            Ok(Value::Unit)
+        }
+        ("read", Some(key)) => Ok(Value::from(keyed_pin(key, "read", mooring, shell)?)),
+        ("list", None) => {
+            let answer = shell.enquire(mooring, request("pins", "list", None))?;
+            let FOValue::List { items } = answer else {
+                return Err(sig(
+                    "exarch-pins: host answered an unexpected shape for the listing",
+                ));
+            };
+            Ok(Value::list(items.into_iter().map(Value::from).collect()))
+        }
+        _ => Err(sig(format!(
+            "exarch-pins: tag must be one of `set, `clear, `read, `list — got {label}"
+        ))),
+    }
+}
+
+/// The `` `exarch-context `` scheme (`context_receipt_ty`) is a closed record, so a
 /// survey missing any of its fields is host-side drift, not a call error —
 /// name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
     const FIELDS: [&str; 2] = ["rows", "total-bytes"];
     let FOValue::Map { entries } = &answer else {
         return Err(sig(
-            "context: host answered an unexpected shape for the survey",
+            "exarch-context: host answered an unexpected shape for the survey",
         ));
     };
     if let Some(missing) = FIELDS
@@ -653,7 +709,7 @@ fn context_receipt(answer: FOValue) -> Settled<Value> {
         .find(|field| !entries.iter().any(|(key, _)| key == *field))
     {
         return Err(sig(format!(
-            "context: host answered a survey missing the `{missing}` field"
+            "exarch-context: host answered a survey missing the `{missing}` field"
         )));
     }
     Ok(Value::from(answer))
@@ -696,7 +752,7 @@ pub(crate) fn turn_list_payload(value: &Value, verb: &str) -> Settled<FOValue> {
 /// type is caught; every rule on what a well-typed note may contain — empty,
 /// oversized, multi-line — is the desk's.
 pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
-    const VERB: &str = "context `evict";
+    const VERB: &str = "exarch-context `evict";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
             "{VERB}: expected [turns: [Int]] or [turns: [Int], note: Str], got {}",
@@ -721,7 +777,7 @@ pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
     verbatim(value, VERB)
 }
 
-/// `context <tag>` — one enquiry, whose answer is the context itself:
+/// `exarch-context <tag>` — one enquiry, whose answer is the context itself:
 /// `` `survey `` describes it, `` `evict `` edits it, and both answer the
 /// survey the transition leaves behind. Which turns an eviction may name —
 /// unrecorded, already departed, the one being written, or none at all — is
@@ -729,7 +785,7 @@ pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
 fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "context: expected a `survey or `evict tag, got {}",
+            "exarch-context: expected a `survey or `evict tag, got {}",
             args[0].type_name()
         )));
     };
@@ -738,21 +794,21 @@ fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
         ("evict", Some(spec)) => request("context", "evict", Some(context_evict_payload(spec)?)),
         _ => {
             return Err(sig(format!(
-                "context: tag must be one of `survey, `evict — got {label}"
+                "exarch-context: tag must be one of `survey, `evict — got {label}"
             )));
         }
     };
     context_receipt(shell.enquire(mooring, request)?)
 }
 
-/// `transcript <tag>` — one enquiry onto the record: `` `index `` lists every
+/// `exarch-transcript <tag>` — one enquiry onto the record: `` `index `` lists every
 /// turn it holds, `` `read `` returns the ones a read names as material, and
 /// `` `grep `` searches them. Each tag answers its own shape, so the answer
 /// is checked per tag rather than once.
 fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "transcript: expected an `index, `read, or `grep tag, got {}",
+            "exarch-transcript: expected an `index, `read, or `grep tag, got {}",
             args[0].type_name()
         )));
     };
@@ -768,7 +824,7 @@ fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         ),
         _ => {
             return Err(sig(format!(
-                "transcript: tag must be one of `index, `read, `grep — got {label}"
+                "exarch-transcript: tag must be one of `index, `read, `grep — got {label}"
             )));
         }
     };
@@ -780,7 +836,7 @@ fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     };
     if !shaped {
         return Err(sig(format!(
-            "transcript: host answered an unexpected shape for `{label}"
+            "exarch-transcript: host answered an unexpected shape for `{label}"
         )));
     }
     Ok(Value::from(answer))
@@ -791,7 +847,7 @@ fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 /// List; the element check is the row's to leave and this one's to make.
 /// Which turns are readable is the desk's to refuse, as it holds the record.
 pub(crate) fn transcript_read_payload(value: &Value) -> Settled<FOValue> {
-    const VERB: &str = "transcript `read";
+    const VERB: &str = "exarch-transcript `read";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
             "{VERB}: expected [turns: [Int]], got {}",
@@ -813,7 +869,7 @@ pub(crate) fn transcript_read_payload(value: &Value) -> Settled<FOValue> {
 /// express an optional field, so the door is where an address of the wrong
 /// type is caught; the pattern itself is the desk's to compile.
 pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
-    const VERB: &str = "transcript `grep";
+    const VERB: &str = "exarch-transcript `grep";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
             "{VERB}: expected [pattern: Str], with an optional `turns: [Int]`, got {}",
@@ -870,7 +926,7 @@ fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
     Ty::Record(row)
 }
 
-/// `agents :: ∀α β ρ1 ρ2 ρ3 ρ4 ρ5. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
+/// `exarch-agents :: ∀α β ρ1 ρ2 ρ3 ρ4 ρ5. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
 ///
 /// The outer tag row is open (`ρ5`) so an unrecognised tag reaches the
 /// runtime door that names the six legal ones, rather than dying as a
@@ -881,8 +937,8 @@ fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
 /// `` `read `` the summary `[live, replied]`, and `` `read `` the value a
 /// descendant handed up, whose shape this call cannot know — so `α` is left
 /// free rather than fixed to any of the three. This is the
-/// `pin-read`/`from-json` move ([`scheme_pin_read`]): trusted, not checked,
-/// since only [`fleet_answer`]'s runtime door can tell them apart.
+/// `` `exarch-pins `read `` / `from-json` move ([`scheme_pins`]): trusted, not
+/// checked, since only [`fleet_answer`]'s runtime door can tell them apart.
 ///
 /// `start`'s and `message`'s record rows are closed because a record
 /// literal with literal keys infers an exact one (`infer_map_val` builds on
@@ -947,7 +1003,7 @@ fn schedule_row_ty() -> Ty {
     ])
 }
 
-/// `schedules :: ∀ρ1 ρ2. <list | add [trigger: Variant ρ1, label: Str, prompt: Str] | remove Str | ρ2> → F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
+/// `exarch-schedules :: ∀ρ1 ρ2. <list | add [trigger: Variant ρ1, label: Str, prompt: Str] | remove Str | ρ2> → F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
 ///
 /// Same shape as [`scheme_agents`]: an open outer tag row so an unknown tag
 /// reaches the door naming the three legal ones, a closed `add` record row
@@ -983,23 +1039,46 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `pin-read :: ∀α. String → F α` — the `from-json` precedent
+/// `exarch-pins :: ∀β α ρ1 ρ2. <set [key: Str, body: β] | clear Str | read Str | list | ρ2> → F α`
+///
+/// Same shape as [`scheme_agents`]: the outer tag row is open (`ρ2`) so an
+/// unrecognised tag reaches [`builtin_pins`]'s door, and `set`'s record row
+/// is closed since a record literal infers an exact one. `body`'s `β` is
+/// trusted, unchecked, first-order data, the same move `reply`'s does —
+/// only the desk's decoder judges whether it is a card. `` `read ``'s
+/// answer is `α`, the `from-json`/`` `read `` precedent
 /// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
-/// checked, since only the kit's own decoder can judge whether the card
+/// checked, since only the desk's own decoder can judge whether the card
 /// read back matches the shape it expects.
-fn scheme_pin_read(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
-    scheme(&[av], &[], &[], thunk(fun(Ty::String, pure(Ty::Var(av)))))
+fn scheme_pins(u: &mut Unifier) -> Scheme {
+    let body_ty = u.fresh_tyvar();
+    let tag_row = u.fresh_row_var();
+    let answer_ty = u.fresh_tyvar();
+    scheme(
+        &[body_ty, answer_ty],
+        &[],
+        &[tag_row],
+        thunk(fun(
+            open_variant(
+                &[
+                    (
+                        "set",
+                        closed_record(&[("key", Ty::String), ("body", Ty::Var(body_ty))]),
+                    ),
+                    ("clear", Ty::String),
+                    ("read", Ty::String),
+                    ("list", Ty::Unit),
+                ],
+                tag_row,
+            ),
+            pure(Ty::Var(answer_ty)),
+        )),
+    )
 }
 
-/// `pin-list :: F [String]`
-fn scheme_pin_list(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::List(Box::new(Ty::String)))))
-}
-
-/// One turn as both `` context `survey `` and `` transcript `index `` name
+/// One turn as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
 /// it; the index adds `held`, which a closed row of this shape cannot carry,
-/// so `` `transcript ``'s own answer type is left free.
+/// so `` `exarch-transcript ``'s own answer type is left free.
 fn context_turn_ty() -> Ty {
     closed_record(&[
         ("id", Ty::Int),
@@ -1017,7 +1096,7 @@ fn context_receipt_ty() -> Ty {
     ])
 }
 
-/// `context :: ∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
+/// `exarch-context :: ∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
 /// tag row so an unknown tag reaches the door naming the two legal ones.
@@ -1055,7 +1134,7 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `transcript :: ∀α ρ2 ρ3. <index | read [turns: [Int]] | grep [pattern: Str | ρ2] | ρ3> → F α`
+/// `exarch-transcript :: ∀α ρ2 ρ3. <index | read [turns: [Int]] | grep [pattern: Str | ρ2] | ρ3> → F α`
 ///
 /// The outer tag row is open (`ρ3`) so an unrecognised tag reaches the
 /// runtime door that names the three legal ones, rather than dying as a
@@ -1097,41 +1176,35 @@ fn scheme_transcript(u: &mut Unifier) -> Scheme {
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::new(
-        Cow::Borrowed("agents"),
+        Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `list and `read answers `summary [live: Int, replied: Int] afterwards — how many other agents are alive around you, and how many of the agents you started park holding a value you have not fetched. It is the world after the transition rather than a receipt for what you just did, but two integers rather than a roster: after a `start you already know the name you chose, and what you could not have derived is whether someone is waiting on you. A non-zero `replied` is the one number asking you to act — call `read. Call `list when you want the rows.\n\nagents `list  — the rows: every live agent in your own tree, oldest first, you among them — not only the ones you started, because you may message any of them. `spawner` says who started each one: `root for an agent a human started, `agent <name> otherwise, so the flat listing is still the spawn tree, and the rows reachable from your own name are the ones you may also `cancel and `read. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction, your own among them.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live agent named `to`; it lands at that agent's next exchange boundary, not as human input, and wakes a `replied or `waiting one into a fresh exchange. Any live agent may receive it — a descendant, a sibling, an ancestor — but not yourself; the fleet is one mailbox space, and `list names all of it, so anyone you can see you can write to. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. The roster names the whole fleet, so it lists agents this tag will refuse: `spawner` is how you tell them apart before you ask. A cancel is a request, not a transaction: the child is still running when this answers, and still counted by the `summary you get back. A name still on a later `list is NOT a failed cancel — do not fire it again; read `list later still and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and what it answers — the rows for `list, the two counts for every tag but `list and `read — is the fleet as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `list and `read answers `summary [live: Int, replied: Int] afterwards — how many other agents are alive around you, and how many of the agents you started park holding a value you have not fetched. It is the world after the transition rather than a receipt for what you just did, but two integers rather than a roster: after a `start you already know the name you chose, and what you could not have derived is whether someone is waiting on you. A non-zero `replied` is the one number asking you to act — call `read. Call `list when you want the rows.\n\nexarch-agents `list  — the rows: every live agent in your own tree, oldest first, you among them — not only the ones you started, because you may message any of them. `spawner` says who started each one: `root for an agent a human started, `agent <name> otherwise, so the flat listing is still the spawn tree, and the rows reachable from your own name are the ones you may also `cancel and `read. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction, your own among them.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live agent named `to`; it lands at that agent's next exchange boundary, not as human input, and wakes a `replied or `waiting one into a fresh exchange. Any live agent may receive it — a descendant, a sibling, an ancestor — but not yourself; the fleet is one mailbox space, and `list names all of it, so anyone you can see you can write to. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nexarch-agents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. The roster names the whole fleet, so it lists agents this tag will refuse: `spawner` is how you tell them apart before you ask. A cancel is a request, not a transaction: the child is still running when this answers, and still counted by the `summary you get back. A name still on a later `list is NOT a failed cancel — do not fire it again; read `list later still and find it gone.\n\nexarch-agents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nexarch-agents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and what it answers — the rows for `list, the two counts for every tag but `list and `read — is the fleet as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
-        Cow::Borrowed("schedules"),
+        Cow::Borrowed("exarch-schedules"),
         scheme_schedules,
-        "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nexarch-schedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nexarch-schedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedules),
     ),
     BuiltinEntry::new(
-        Cow::Borrowed("pin-read"),
-        scheme_pin_read,
-        "pin-read <key>  — the card currently pinned under KEY on your register, as a `card value you can destructure, or () if the slot is empty. Reads your own register only. Answered only on the run that calls it: inside spawn { … } this errors.",
-        BuiltinBody::Static(builtin_pin_read),
+        Cow::Borrowed("exarch-pins"),
+        scheme_pins,
+        "exarch-pins <tag>  — your register of pinned state: a small set of named slots that outlive any one exchange. `set` writes a slot, `clear` empties one, `read` fetches a slot back, `list` names every occupied one. Reads and writes your own register only.\n\nexarch-pins `set [key: <Str>, body: <card>]  — overwrite the register slot named `key` with `body`, a `card [...]` value (or one of its marks bare, e.g. `text [...]`). A body with nothing to show clears the slot instead of pinning an empty one.\n\nexarch-pins `clear <key>  — empty the register slot named `key`. Clearing an already-empty slot is not an error.\n\nexarch-pins `read <key>  — the card currently pinned under `key`, as a `card value you can destructure, or () if the slot is empty.\n\nexarch-pins `list  — the keys currently occupied on your register, as [String]. Read one back with `read`.\n\nEach tag is one exchange with the host. Answered only on the run that calls it: inside spawn { … } this errors.",
+        BuiltinBody::Static(builtin_pins),
     ),
     BuiltinEntry::new(
-        Cow::Borrowed("pin-list"),
-        scheme_pin_list,
-        "pin-list  — the keys currently occupied on your pin register, as [String]. Read one back with pin-read. Answered only on the run that calls it: inside spawn { … } this errors.",
-        BuiltinBody::Static(builtin_pin_list),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("context"),
+        Cow::Borrowed("exarch-context"),
         scheme_context,
-        "context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\ncontext `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\ncontext `evict [turns: [Int], note: Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place: a bracketed user-role message stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is optional; if given it is one line of at most 240 bytes and appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `exarch-context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\nexarch-context `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\nexarch-context `evict [turns: [Int], note: Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place: a bracketed user-role message stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is optional; if given it is one line of at most 240 bytes and appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `exarch-transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
-        Cow::Borrowed("transcript"),
+        Cow::Borrowed("exarch-transcript"),
         scheme_transcript,
-        "transcript <tag>  — the record of every turn this session or any ancestor of it ever recorded, in the context or not. Read-only. Every turn is readable except the one being written now — the assistant turn whose result this call is part of. Every tag addresses turns by id, as a list: `!{range 41 44}` is [41, 42, 43]; `context `survey` and `transcript `index` show the ids.\n\ntranscript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn oldest first. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\ntranscript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. Refused, naming the turn: an id never recorded, and the turn being written now. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it, clipping included; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — an attachment's metadata, never its bytes; `custom [provider: Str, model: Str] — a provider extension's identity, never its payload. Nothing here is clipped or capped: bind the answer and take slices of it, since the whole of it in your context is what the eviction saved.\n\ntranscript `grep [pattern: Str, turns: [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern`, a Rust regex. `turns` is optional; absent, every recorded turn is searched. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.\n\nA `mnemon child (agents `start [type: `mnemon, …]) shares this transcript and can search or read it in its own context; an `amnemon child has only its own.\n\nAnswered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-transcript <tag>  — the record of every turn this session or any ancestor of it ever recorded, in the context or not. Read-only. Every turn is readable except the one being written now — the assistant turn whose result this call is part of. Every tag addresses turns by id, as a list: `!{range 41 44}` is [41, 42, 43]; `exarch-context `survey` and `exarch-transcript `index` show the ids.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn oldest first. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. Refused, naming the turn: an id never recorded, and the turn being written now. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it, clipping included; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — an attachment's metadata, never its bytes; `custom [provider: Str, model: Str] — a provider extension's identity, never its payload. Nothing here is clipped or capped: bind the answer and take slices of it, since the whole of it in your context is what the eviction saved.\n\nexarch-transcript `grep [pattern: Str, turns: [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern`, a Rust regex. `turns` is optional; absent, every recorded turn is searched. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.\n\nA `mnemon child (exarch-agents `start [type: `mnemon, …]) shares this transcript and can search or read it in its own context; an `amnemon child has only its own.\n\nAnswered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_transcript),
     ),
 ];
@@ -1220,7 +1293,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1244,7 +1317,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1269,7 +1342,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `guess, model: `inherit]",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `guess, model: `inherit]",
             5,
             &emit,
         );
@@ -1294,7 +1367,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `named '']",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `named '']",
             5,
             &emit,
         );
@@ -1316,7 +1389,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
+            r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
             5,
             &emit,
         );
@@ -1334,7 +1407,7 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "agents `stop 'x'", 5, &emit);
+        let result = session.run_shell("call-1".to_string(), "exarch-agents `stop 'x'", 5, &emit);
         for tag in ["list", "start", "message", "cancel"] {
             assert!(
                 result.content.contains(tag),
@@ -1353,7 +1426,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, search: true, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1378,7 +1451,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, search: true, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1405,7 +1478,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "reply-1",
-                    r"agents `reply 'say hi'",
+                    r"exarch-agents `reply 'say hi'",
                 )]),
             ),
         ));
@@ -1415,7 +1488,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1431,7 +1504,7 @@ mod tests {
                 Some(crate::bus::Item::Agent(r)) => {
                     let notice = r.outcome.marked_item(&r.name, r.elapsed);
                     assert!(
-                        notice.contains("agents `read 'helper'"),
+                        notice.contains("exarch-agents `read 'helper'"),
                         "the reply notice must name the fetch command, got: {notice}"
                     );
                     break;
@@ -1447,13 +1520,18 @@ mod tests {
             }
         }
 
-        let read = session.run_shell("call-2".to_string(), r"agents `read 'helper'", 5, &emit);
+        let read = session.run_shell(
+            "call-2".to_string(),
+            r"exarch-agents `read 'helper'",
+            5,
+            &emit,
+        );
         assert!(
             read.content.contains("say hi"),
-            "agents `read` must answer the child's deposited reply, got: {}",
+            "exarch-agents `read` must answer the child's deposited reply, got: {}",
             read.content
         );
-        let roster = session.run_shell("call-3".to_string(), r"agents `list", 5, &emit);
+        let roster = session.run_shell("call-3".to_string(), r"exarch-agents `list", 5, &emit);
         assert!(
             roster.content.contains("replied"),
             "the replied child must stay on the roster as `replied, got: {}",
@@ -1480,10 +1558,15 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "agents `cancel 'doomed'", 5, &emit);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "exarch-agents `cancel 'doomed'",
+            5,
+            &emit,
+        );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid agents `cancel call must succeed, got: {}",
+            "a valid exarch-agents `cancel call must succeed, got: {}",
             result.content
         );
         assert!(
@@ -1499,7 +1582,7 @@ mod tests {
     // Tag payloads are greedy, but `at_tag_payload_end` in
     // `core/src/syntax/parser.rs` stops one at a comma — so inside a record
     // literal a nullary tag cannot swallow its neighbour. That is why
-    // `` schedules `add `` takes one spec record, not three positional
+    // `` exarch-schedules `add `` takes one spec record, not three positional
     // arguments.
 
     #[test]
@@ -1509,7 +1592,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1531,7 +1614,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1553,7 +1636,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1574,7 +1657,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '1s', label: 'nightly']",
+            "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
             5,
             &emit,
         );
@@ -1598,7 +1681,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
+            "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
             5,
             &emit,
         );
@@ -1631,7 +1714,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1653,13 +1736,13 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid schedules `add call must succeed, got: {}",
+            "a valid exarch-schedules `add call must succeed, got: {}",
             result.content
         );
         assert!(
@@ -1698,7 +1781,7 @@ mod tests {
         }
     }
 
-    /// `` `removed ``/`` `no-such-label `` are retired: `` schedules `remove ``
+    /// `` `removed ``/`` `no-such-label `` are retired: `` exarch-schedules `remove ``
     /// now answers the table afterwards either way, so the row's absence is
     /// the only evidence — a miss on an already-gone label answers the same
     /// way as a hit, and that is not itself proof of a mistake.
@@ -1711,13 +1794,13 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid schedules `add call must succeed, got: {}",
+            "a valid exarch-schedules `add call must succeed, got: {}",
             result.content
         );
         assert_eq!(
@@ -1728,13 +1811,13 @@ mod tests {
 
         let result = session.run_shell(
             "call-2".to_string(),
-            "schedules `remove 'nightly'",
+            "exarch-schedules `remove 'nightly'",
             5,
             &emit,
         );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid schedules `remove call must succeed, got: {}",
+            "a valid exarch-schedules `remove call must succeed, got: {}",
             result.content
         );
         assert!(
@@ -1744,12 +1827,12 @@ mod tests {
         );
         assert!(
             session.agent.schedules.list().is_empty(),
-            "schedules `remove by label must remove the schedule"
+            "exarch-schedules `remove by label must remove the schedule"
         );
 
         let miss = session.run_shell(
             "call-3".to_string(),
-            "schedules `remove 'nightly'",
+            "exarch-schedules `remove 'nightly'",
             5,
             &emit,
         );
@@ -1771,20 +1854,20 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            "schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         session.run_shell(
             "call-2".to_string(),
-            "schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
+            "exarch-schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
             5,
             &emit,
         );
 
         let result = session.run_shell(
             "call-3".to_string(),
-            "schedules `remove 'nightly'",
+            "exarch-schedules `remove 'nightly'",
             5,
             &emit,
         );
@@ -1815,7 +1898,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"let found = ["a.rs", "b.rs"]; agents `reply [files: $found]"#,
+                    r#"let found = ["a.rs", "b.rs"]; exarch-agents `reply [files: $found]"#,
                 )]),
             ),
         ));
@@ -1825,7 +1908,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1850,33 +1933,42 @@ mod tests {
             }
         }
 
-        let read = session.run_shell("call-2".to_string(), r"agents `read 'finder'", 5, &emit);
+        let read = session.run_shell(
+            "call-2".to_string(),
+            r"exarch-agents `read 'finder'",
+            5,
+            &emit,
+        );
         assert!(
             read.content.contains("files:")
                 && read.content.contains("a.rs")
                 && read.content.contains("b.rs"),
-            "the structured record must reach the parent through `agents `read`, got: {}",
+            "the structured record must reach the parent through `exarch-agents `read`, got: {}",
             read.content
         );
     }
 
     /// The refusal is an ordinary call error, not a termination: a later,
-    /// well-formed `` agents `reply `` still succeeds.
+    /// well-formed `` exarch-agents `reply `` still succeeds.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result =
-            session.run_shell("call-1".to_string(), r"agents `reply { echo hi }", 5, &emit);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"exarch-agents `reply { echo hi }",
+            5,
+            &emit,
+        );
         assert!(
             result.content.contains("first-order"),
             "must name the first-order rule, got: {}",
             result.content
         );
 
-        let ok = session.run_shell("call-2".to_string(), r"agents `reply 42", 5, &emit);
+        let ok = session.run_shell("call-2".to_string(), r"exarch-agents `reply 42", 5, &emit);
         assert!(
             ok.content.contains("EXIT: 0"),
             "the session must still be usable after a refused reply, got: {}",
@@ -1892,7 +1984,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"agents `reply "first"; agents `reply "second""#,
+                    r#"exarch-agents `reply "first"; exarch-agents `reply "second""#,
                 )]),
             ),
         ));
@@ -1921,12 +2013,12 @@ mod tests {
         }
     }
 
-    // ── `pin-read` / `pin-list` ─────────────────────────────────────────────
+    // ── `exarch-pins` ────────────────────────────────────────────────────
 
     /// The scripted-provider round-trip pattern of
     /// `reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox`,
-    /// crossed with the desk's `` `pin-read `` arm: the child pins through
-    /// `surface`, reads its own pin back in the same run, and hands the
+    /// crossed with the desk's `` `exarch-pins `read `` arm: the child pins
+    /// with `` `set ``, reads its own pin back in the same run, and hands the
     /// canonical card to its parent.
     #[test]
     fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
@@ -1936,7 +2028,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"surface `pin [key: "note", body: `card ["hi there"]]; agents `reply !{pin-read "note"}"#,
+                    r#"exarch-pins `set [key: "note", body: `card ["hi there"]]; exarch-agents `reply !{exarch-pins `read "note"}"#,
                 )]),
             ),
         ));
@@ -1946,7 +2038,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -1982,7 +2074,12 @@ mod tests {
         // itself does not survive to this rendering; what proves the round
         // trip *canonical* — a lifted `` `text `` mark, not the bare-string
         // sugar it was authored with — does.
-        let read = session.run_shell("call-2".to_string(), r"agents `read 'pinner'", 5, &emit);
+        let read = session.run_shell(
+            "call-2".to_string(),
+            r"exarch-agents `read 'pinner'",
+            5,
+            &emit,
+        );
         assert!(
             read.content.contains("`card") && read.content.contains("`text [spans:"),
             "the canonical card must reach the parent, got: {}",
@@ -2000,7 +2097,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"agents `reply !{pin-read "nope"}"#,
+                    r#"exarch-agents `reply !{exarch-pins `read "nope"}"#,
                 )]),
             ),
         ));
@@ -2010,7 +2107,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -2042,7 +2139,12 @@ mod tests {
             }
         }
 
-        let read = session.run_shell("call-2".to_string(), r"agents `read 'reader'", 5, &emit);
+        let read = session.run_shell(
+            "call-2".to_string(),
+            r"exarch-agents `read 'reader'",
+            5,
+            &emit,
+        );
         assert!(
             read.content.contains("reply: ()"),
             "an absent key must reply unit, got: {}",
@@ -2052,10 +2154,10 @@ mod tests {
 
     // ── the task kit as a pure prelude over the pin family ─────────────────
 
-    /// `tasks-add`, `tasks-status`, `tasks-tag`, and `tasks-note` all read and
-    /// write the "tasks" pin through `tasks-sync`; `tasks-list` and a direct
-    /// `tasks-decode !{pin-read "tasks"}` must agree on every field, including
-    /// the tags and notes the old pinned rollup never rendered.
+    /// Every mutating tag reads and writes the "tasks" pin through `tasks-sync`,
+    /// so `` exarch-tasks `list `` and a direct
+    /// `` tasks-decode !{exarch-pins `read "tasks"} `` must agree on every
+    /// field, tags and notes included.
     #[test]
     fn kit_round_trip_holds_every_field_including_tags_and_notes() {
         // Seven evals deep where this file's other tests run one or two, so a
@@ -2070,47 +2172,52 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            r#"tasks-add "fix the parser""#,
+            r#"exarch-tasks `add "fix the parser""#,
             BUDGET,
             &emit,
         );
         session.run_shell(
             "call-2".to_string(),
-            r#"tasks-add "write docs""#,
+            r#"exarch-tasks `add "write docs""#,
             BUDGET,
             &emit,
         );
-        session.run_shell("call-3".to_string(), "tasks-status 1 `doing", BUDGET, &emit);
+        session.run_shell(
+            "call-3".to_string(),
+            "exarch-tasks `status [id: 1, status: `doing]",
+            BUDGET,
+            &emit,
+        );
         session.run_shell(
             "call-4".to_string(),
-            r#"tasks-tag 1 "urgent""#,
+            r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#,
             BUDGET,
             &emit,
         );
         session.run_shell(
             "call-5".to_string(),
-            r#"tasks-note 1 "blocked on review""#,
+            r#"exarch-tasks `note [id: 1, note: "blocked on review"]"#,
             BUDGET,
             &emit,
         );
 
-        let listed = session.run_shell("call-6".to_string(), "tasks-list", BUDGET, &emit);
+        let listed = session.run_shell("call-6".to_string(), "exarch-tasks `list", BUDGET, &emit);
         for field in ["fix the parser", "`doing", "urgent", "blocked on review"] {
             assert!(
                 listed.content.contains(field),
-                "tasks-list must show the tagged, noted task's {field}, got: {}",
+                "exarch-tasks `list must show the tagged, noted task's {field}, got: {}",
                 listed.content
             );
         }
         assert!(
             listed.content.contains("write docs"),
-            "tasks-list must show the untouched second task, got: {}",
+            "exarch-tasks `list must show the untouched second task, got: {}",
             listed.content
         );
 
         let read = session.run_shell(
             "call-7".to_string(),
-            r#"let [decoded-task, _] = !{tasks-decode !{pin-read "tasks"}}
+            r#"let [decoded-task, _] = !{tasks-decode !{exarch-pins `read "tasks"}}
                echo $decoded-task[desc]
                echo $decoded-task[status]
                echo !{intercalate "," $decoded-task[tags]}
@@ -2140,7 +2247,7 @@ mod tests {
         );
     }
 
-    /// `tasks-add` inside a function body pins to the register, which SPEC
+    /// `` exarch-tasks `add `` inside a function body pins to the register, which SPEC
     /// §10's block-discard rule never touches — a later, separate top-level
     /// run still sees it.
     #[test]
@@ -2151,12 +2258,12 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            r#"let f = { tasks-add "inside a block" }; !{f}"#,
+            r#"let f = { exarch-tasks `add "inside a block" }; !{f}"#,
             5,
             &emit,
         );
 
-        let listed = session.run_shell("call-2".to_string(), "tasks-list", 5, &emit);
+        let listed = session.run_shell("call-2".to_string(), "exarch-tasks `list", 5, &emit);
         assert!(
             listed.content.contains("inside a block"),
             "a task added inside a function body must survive to the next top-level run, got: {}",
@@ -2164,7 +2271,7 @@ mod tests {
         );
     }
 
-    /// A sub-agent's register is its own: a child's `tasks-add` must never
+    /// A sub-agent's register is its own: a child's `` exarch-tasks `add `` must never
     /// reach the parent's "tasks" pin.
     #[test]
     fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
@@ -2172,14 +2279,19 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell("call-1".to_string(), r#"tasks-add "parent task""#, 5, &emit);
+        session.run_shell(
+            "call-1".to_string(),
+            r#"exarch-tasks `add "parent task""#,
+            5,
+            &emit,
+        );
 
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"tasks-add "child task"; agents `reply "done""#,
+                    r#"exarch-tasks `add "child task"; exarch-agents `reply "done""#,
                 )]),
             ),
         ));
@@ -2187,7 +2299,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-2".to_string(),
-            r"agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
@@ -2212,7 +2324,7 @@ mod tests {
             }
         }
 
-        let listed = session.run_shell("call-3".to_string(), "tasks-list", 5, &emit);
+        let listed = session.run_shell("call-3".to_string(), "exarch-tasks `list", 5, &emit);
         assert!(
             listed.content.contains("parent task"),
             "the parent's own task must survive, got: {}",
@@ -2226,7 +2338,7 @@ mod tests {
     }
 
     /// `tasks-sync` clears the slot once no work remains: transitioning the
-    /// last open task to `` `done `` empties the pin, and a later `tasks-add`
+    /// last open task to `` `done `` empties the pin, and a later `` exarch-tasks `add ``
     /// finds no register and restarts id allocation at 1.
     #[test]
     fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
@@ -2234,18 +2346,38 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell("call-1".to_string(), r#"tasks-add "only task""#, 5, &emit);
-        session.run_shell("call-2".to_string(), "tasks-status 1 `done", 5, &emit);
+        session.run_shell(
+            "call-1".to_string(),
+            r#"exarch-tasks `add "only task""#,
+            5,
+            &emit,
+        );
+        session.run_shell(
+            "call-2".to_string(),
+            "exarch-tasks `status [id: 1, status: `done]",
+            5,
+            &emit,
+        );
 
-        let read = session.run_shell("call-3".to_string(), r#"pin-read "tasks""#, 5, &emit);
+        let read = session.run_shell(
+            "call-3".to_string(),
+            r#"exarch-pins `read "tasks""#,
+            5,
+            &emit,
+        );
         assert!(
             !read.content.contains("VALUE:"),
             "an all-done list must clear the pin to unit, got: {}",
             read.content
         );
 
-        session.run_shell("call-4".to_string(), r#"tasks-add "fresh""#, 5, &emit);
-        let listed = session.run_shell("call-5".to_string(), "tasks-list", 5, &emit);
+        session.run_shell(
+            "call-4".to_string(),
+            r#"exarch-tasks `add "fresh""#,
+            5,
+            &emit,
+        );
+        let listed = session.run_shell("call-5".to_string(), "exarch-tasks `list", 5, &emit);
         for field in ["id: 1", "fresh", "`open"] {
             assert!(
                 listed.content.contains(field),
@@ -2267,12 +2399,12 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            r#"pin-set "tasks" `card [`text [spans: [[text: "not task shaped"]]]]"#,
+            r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
             5,
             &emit,
         );
 
-        let result = session.run_shell("call-2".to_string(), r#"tasks-add "x""#, 5, &emit);
+        let result = session.run_shell("call-2".to_string(), r#"exarch-tasks `add "x""#, 5, &emit);
         assert!(
             result
                 .content
@@ -2292,7 +2424,7 @@ mod tests {
         session
     }
 
-    /// `scheme_context`'s outer tag row is open, so `` context `rewind `` — the
+    /// `scheme_context`'s outer tag row is open, so `` exarch-context `rewind `` — the
     /// tag a model most plausibly invents — reaches the door naming the two
     /// legal ones rather than dying as a row-unification mismatch.
     #[test]
@@ -2300,7 +2432,8 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "context `rewind [3]", 5, &emit);
+        let result =
+            session.run_shell("call-1".to_string(), "exarch-context `rewind [3]", 5, &emit);
         for tag in ["survey", "evict"] {
             assert!(
                 result.content.contains(tag),
@@ -2317,8 +2450,12 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result =
-            session.run_shell("call-1".to_string(), "context `evict [turn: [1]]", 5, &emit);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "exarch-context `evict [turn: [1]]",
+            5,
+            &emit,
+        );
         assert!(
             !result.content.contains("EXIT: 0") && result.content.contains("turns"),
             "the diagnostic must name the field the row demands, got: {}",
@@ -2342,7 +2479,7 @@ mod tests {
         };
         assert_eq!(
             error.message,
-            "context `evict: the spec record needs a `turns` field — the turns to evict; \
+            "exarch-context `evict: the spec record needs a `turns` field — the turns to evict; \
              `!{range a b}` builds a run"
         );
     }
@@ -2361,7 +2498,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "context `evict [turns: [1, 2], note: 'the old work is done']",
+            "exarch-context `evict [turns: [1, 2], note: 'the old work is done']",
             5,
             &emit,
         );
@@ -2393,7 +2530,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "context `evict [turns: !{range 1 3}]",
+            "exarch-context `evict [turns: !{range 1 3}]",
             5,
             &emit,
         );
@@ -2415,7 +2552,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"let material = transcript `read [turns: [1, 2]]
+            r#"let material = exarch-transcript `read [turns: [1, 2]]
                echo !{length $material}
                echo $material[0][turn] $material[0][role]
                let msgs = $material[0][messages]
@@ -2476,11 +2613,11 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"let spanning = transcript `read [turns: [2, 3]]
+            r"let spanning = exarch-transcript `read [turns: [2, 3]]
                echo !{length $spanning}
                echo $spanning[0][turn] $spanning[0][role] !{length $spanning[0][messages]}
                echo $spanning[1][turn] $spanning[1][role]
-               let built = transcript `read [turns: !{range 3 5}]
+               let built = exarch-transcript `read [turns: !{range 3 5}]
                echo !{length $built} $built[1][turn]",
             5,
             &emit,
@@ -2507,7 +2644,7 @@ mod tests {
         );
     }
 
-    /// `scheme_transcript`'s outer tag row is open, so `` transcript `search ``
+    /// `scheme_transcript`'s outer tag row is open, so `` exarch-transcript `search ``
     /// — the tag a model most plausibly invents — reaches the door naming the
     /// three legal ones.
     #[test]
@@ -2515,7 +2652,12 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "transcript `search 'x'", 5, &emit);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "exarch-transcript `search 'x'",
+            5,
+            &emit,
+        );
         for tag in ["index", "read", "grep"] {
             assert!(
                 result.content.contains(tag),
@@ -2541,14 +2683,14 @@ mod tests {
             // Bindings are named, not lettered: ral keeps value and command
             // names disjoint, so a one-letter binding fails on any host with
             // that letter on PATH (plan9port ships a `g`).
-            r"let listed = transcript `index
+            r"let listed = exarch-transcript `index
                echo $listed[0][id] $listed[0][role] $listed[0][held]
-               let matched = transcript `grep [pattern: 'first (prompt|answer)']
+               let matched = exarch-transcript `grep [pattern: 'first (prompt|answer)']
                echo !{length $matched[hits]} $matched[total]
                echo $matched[hits][0][turn] $matched[hits][1][turn]
-               let narrowed = transcript `grep [pattern: 'first', turns: [2]]
+               let narrowed = exarch-transcript `grep [pattern: 'first', turns: [2]]
                echo $narrowed[total]
-               let missed = transcript `grep [pattern: 'nothing here', turns: [1, 2]]
+               let missed = exarch-transcript `grep [pattern: 'nothing here', turns: [1, 2]]
                echo $missed[total]",
             5,
             &emit,

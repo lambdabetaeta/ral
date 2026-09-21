@@ -58,7 +58,7 @@ for every tool.
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
-  `` agents `start `` handler build on it — either arm of it, in-process or
+  `` exarch-agents `start `` handler build on it — either arm of it, in-process or
   across a wire — so `/branch` and the harness spawn verb share one
   mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 

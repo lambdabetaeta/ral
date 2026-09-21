@@ -620,7 +620,7 @@ mod tests {
         let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
         let report = ral_core::protocol::dispatch_to_report(
             seat.transport(),
-            source_run("surface `ping"),
+            source_run("exarch-surface `ping"),
             host.clone() as Arc<dyn Host>,
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -670,7 +670,7 @@ mod tests {
 
         let report = ral_core::protocol::dispatch_to_report(
             seat.transport(),
-            source_run("agents `list"),
+            source_run("exarch-agents `list"),
             host,
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -680,7 +680,9 @@ mod tests {
                 ending: ral_core::protocol::Ending::Settled { .. },
                 ..
             } => {}
-            other => panic!("`agents `list` must settle through the installed desk, got {other:?}"),
+            other => panic!(
+                "`exarch-agents `list` must settle through the installed desk, got {other:?}"
+            ),
         }
 
         let _ = child.kill();

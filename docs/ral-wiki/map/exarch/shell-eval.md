@@ -208,10 +208,10 @@ no `Card` mark tree, since that is built by whoever renders — a printer's fold
 over the recorded `Display` commit ([[map/exarch/frontend|frontend]]) — and
 never by the decoder or by the seam that records it (`absorb_surface`):
 
-- a `` `pin ``/`` `unpin `` wrapper decodes to `Surface::Pin { key, card }` /
-  `Surface::Unpin { key }` — a pin is a rendered card in a slot, so its card
-  is the fact itself, not a copy of one; no key is reserved, so every pin
-  decodes and writes the same way regardless of key. Accepted pins are
+- the register is not decoded here at all: `exarch-pins` reaches it through
+  the desk, which builds `Surface::Pin { key, card }` / `Surface::Unpin
+  { key }` itself. A pin is a rendered card in a slot, so its card is the
+  fact itself, not a copy of one, and no key is reserved. Pins are
   mirrored as `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name
   pinned state without parsing rendered text — the read side reuses the same
   store rather than adding a second one ([[design/pins|pins]]);
@@ -229,9 +229,9 @@ never by the decoder or by the seam that records it (`absorb_surface`):
 - a value that is none of these is dropped, the same graceful degradation
   `value_to_card` gives an unknown mark.
 
-The producer is a direct `surface` call at each kit site, with no cross-language
+The producer is a direct `exarch-surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; detached workers do
-not inherit the live sink. Core buffers their `surface` calls and flushes a
+not inherit the live sink. Core buffers their `exarch-surface` calls and flushes a
 settled batch to exarch's deferred sink (the inbox path); without that host
 sink, the ordinary `await`/`race` path replays it into the awaiting run. Either
 path keeps a bus `Emitter` clone from outliving the tool run. Across the

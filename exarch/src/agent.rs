@@ -120,7 +120,7 @@ pub struct Agent {
     children: Mutex<Vec<Weak<Self>>>,
     /// Spawn generations still available below here.  Bounds depth, not
     /// fan-out: a fork spends none of the parent's, only handing the child one
-    /// less, and at zero the desk refuses `` agents `start ``.
+    /// less, and at zero the desk refuses `` exarch-agents `start ``.
     fuel: u32,
     /// A `/model` swaps this handle alone; a fork seeds the child's from a
     /// snapshot, so neither disturbs the other.
@@ -156,7 +156,7 @@ pub struct Agent {
     /// The network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
     egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk's `` agents `start `` reaches its
+    /// The dial-side capability a wire trunk's `` exarch-agents `start `` reaches its
     /// helpers through; `None` on every identity trunk. Shared verbatim by
     /// every fork, so a wire child's own `agent` call dials through the same
     /// seam its parent did.
@@ -204,7 +204,7 @@ struct Status {
     /// working.  The roster's `idle-s`, and the whole of "not busy".
     rest: Option<Instant>,
     /// The value this agent last passed to `reply`, held here for its
-    /// parent's `` agents `read `` to fetch.  Kept apart from [`Self::rest`]
+    /// parent's `` exarch-agents `read `` to fetch.  Kept apart from [`Self::rest`]
     /// because it must survive a wake: a messaged agent is busy again with
     /// its reply still standing, until it replies afresh.
     reply: Option<FOValue>,
@@ -271,7 +271,7 @@ pub struct Avatar {
 
 /// The depth budget exarch's trunks start with.
 ///
-/// At zero the desk refuses `` agents `start ``
+/// At zero the desk refuses `` exarch-agents `start ``
 /// ([`crate::fleet::desk::ExarchDesk::launch`]), so a runaway spawn chain
 /// exhausts fuel instead of threads.  Fan-out is unbounded.
 pub const SPAWN_FUEL: u32 = 3;
@@ -507,7 +507,7 @@ impl Agent {
     }
 
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
-    /// path, and the `` agents `cancel `` scoped verb's per-target primitive.
+    /// path, and the `` exarch-agents `cancel `` scoped verb's per-target primitive.
     pub(crate) fn interrupt(&self) {
         self.cancel.cancel(CancelCause::Interrupt);
         self.reach.interrupt();
@@ -547,7 +547,7 @@ impl Agent {
     }
 
     /// `target` if it is a proper descendant of this agent, else `None` — the
-    /// scoping `` agents `cancel `` and `` `read `` share.  A climb
+    /// scoping `` exarch-agents `cancel `` and `` `read `` share.  A climb
     /// from `target`'s *parent*, so it costs O(depth) and takes no lock, and
     /// so nothing is a proper descendant of itself.
     pub(crate) fn descendant(&self, target: &Arc<Self>) -> Option<Arc<Self>> {

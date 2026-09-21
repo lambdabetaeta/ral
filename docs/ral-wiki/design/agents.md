@@ -73,7 +73,7 @@ same construction facts that govern the desk govern what the model is taught:
 
 Spawning is **available to every agent with fuel left**, so the spawn tree is
 not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
-false, the prompt index omits `agents` as a dead family, while the desk remains
+false, the prompt index omits `exarch-agents` as a dead family, while the desk remains
 the runtime authority. Depth-N works
 structurally — a child enrols in the fleet by name and joins its parent's
 `children` and `fork` snapshots the parent's shell by value at any depth —
@@ -87,7 +87,7 @@ depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
 
-The `` agents `start `` tag is **launch-only and always asynchronous**
+The `` exarch-agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
 single closed record
 `[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]` —
@@ -123,7 +123,7 @@ One call:
   the parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names.
   The value itself stays on the child's own `Agent` (`Agent::status.reply`,
   written by the child's avatar alone) until the parent fetches it with
-  `` agents `read <name> ``
+  `` exarch-agents `read <name> ``
   ([[decisions/260826_reply-parks|reply-parks]],
   [[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
@@ -149,8 +149,8 @@ carrying the address of its transcript copy, beside the notes made at the cuts
 that emptied those rows. The child then records one
 `Protocol::ContextMessage { id, message }` per message under the parent's own
 turn ids and roles, re-recording the resident turns as its
-own: `` context `survey `` shows them as individual `import` rows, and
-`` context `evict `` names any of them by turn id, exactly as it names the
+own: `` exarch-context `survey `` shows them as individual `import` rows, and
+`` exarch-context `evict `` names any of them by turn id, exactly as it names the
 child's own. Nothing
 marker-shaped crosses by value — the child's markers, survey and index are the
 same projections of the same fold
@@ -160,7 +160,7 @@ That link is what makes the two logs **one transcript**: an id at or below the
 reach
 resolves against the ancestry, walking each ancestor file once into a memoised
 index and following that ancestor's own link on to the grandparent, so a
-`mnemon` child can `` transcript `read `` or `` `grep `` anything its lineage
+`mnemon` child can `` exarch-transcript `read `` or `` `grep `` anything its lineage
 ever recorded, evicted from the parent's context long before the fork included.
 Ids are therefore lineage-monotone: the child mints its first prompt above the
 parent's floor, and along any lineage an id names exactly one turn. The
@@ -208,10 +208,10 @@ printing them, slices or reshapes them in ral, evicts the originals, and hands
 the binding to an `` `amnemon `` child:
 
 ```ral
-let ctx = transcript `read [turns: !{range 4 9}]
+let ctx = exarch-transcript `read [turns: !{range 4 9}]
 let handoff = take 12 $ctx[0][messages]
-context `evict [turns: !{range 4 9}, note: 'handed to `researcher`']
-agents `start [
+exarch-context `evict [turns: !{range 4 9}, note: 'handed to `researcher`']
+exarch-agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",
   name: 'researcher',
   type: `amnemon,
@@ -238,7 +238,7 @@ model material.
 A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest
 engine, host-side of a vsock connection
 ([[design/engine-protocol|engine-protocol]]) — the desk
-that answers `` agents `start `` sits in the host process, and cannot reach a
+that answers `` exarch-agents `start `` sits in the host process, and cannot reach a
 `Shell` living in another machine the way it reaches into its own nursery.
 **The whole of that asymmetry is one field of one enquiry.** Beside the model's
 record, `` `start `` carries a `fork` tag saying how the child's forked session
@@ -285,7 +285,7 @@ standing defence, and the token stands behind it).
 `spawn()` has returned, and the desk enrols the child in the fleet only after
 reading the ack. There is no window in which an enrolled agent has no engine
 behind it — which is why the roster's `state` column is derived from the
-agent tree at listing time, and why `` agents `list `` reads as a fact rather
+agent tree at listing time, and why `` exarch-agents `list `` reads as a fact rather
 than as an intent.
 
 A spawn that fails leaves nothing to reconcile. A desk that refuses never
@@ -304,7 +304,7 @@ does in the in-process lattice.
 **The one snapshot law.** A wire seed cannot carry a `Value::Handle` binding —
 a handle is live authority over a parent-side resource, with no wire form —
 while a fork of a scope, left alone, would carry one unfiltered. Rather than
-let `` agents `start `` mean two different things depending on which seat
+let `` exarch-agents `start `` mean two different things depending on which seat
 answered it, the scrub lives at `Shell::fork_scrubbed`, the one fork both arms
 take: the identity arm is that fork parked in the nursery, the wire arm is that
 same fork packed into an `EngineSeed`, so neither snapshots more than the
@@ -317,7 +317,7 @@ fork a scope in memory, seed the same scope through `EngineSeed`, and the two
 children resolve every name to the same value or the same absence.
 
 Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
-`` agents `message ``, `` agents `cancel ``, and the idle-lease reaper all
+`` exarch-agents `message ``, `` exarch-agents `cancel ``, and the idle-lease reaper all
 resolve a descendant by name through the fleet, then scope-check it with a
 climb (`Agent::descendant`), whatever seat it sits on,
 and a wire helper's `message` crosses as an enquiry on its own connection
@@ -326,7 +326,7 @@ other's transport.
 
 ## Returning: the deliberate `reply`
 
-A returning agent hands back the argument of an explicit **`` agents `reply ``**
+A returning agent hands back the argument of an explicit **`` exarch-agents `reply ``**
 call ([[map/exarch/builtins|builtins]]) — never a scrape of whatever prose ended
 the run ([[decisions/260622_agent-reply-tool|agent-reply-tool]]). It is the
 *sole* return path: a returning agent that finishes without it is re-nudged
@@ -337,7 +337,7 @@ the harness as JSON through the `user_json` projection
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]);
 a child's is **deposited on its own `Agent`** (`Agent::deposit_reply`, the
 one write `Agent::status.reply` ever takes) and answered, as a value, to
-the parent's `` agents `read <name> ``
+the parent's `` exarch-agents `read <name> ``
 ([[decisions/260826_reply-parks|reply-parks]],
 [[decisions/260827_agent-and-avatar|agent-and-avatar]]). The parent learns of
 the reply from a one-line inbox notice, never the payload.
@@ -346,7 +346,7 @@ A child's `reply` does not end it. Once the enclosing `ral` call's batch
 drains, the child cancels and reaps its proper descendants — a parent may
 abandon unfinished children, but never leave live agents registered beneath a
 node that has answered — and **parks**, waiting for a message under its idle
-lease. `` agents `message `` wakes it into a new exchange; a later `reply`
+lease. `` exarch-agents `message `` wakes it into a new exchange; a later `reply`
 overwrites the deposit and notifies again. Only a non-reply finish — failure,
 turn cap, cancellation — settles the entry at once, with its one-line tag.
 
@@ -368,7 +368,7 @@ lease** the fleet arms at birth for every parented agent (`Fleet::enrol`; one
 hour, `AGENT_LEASE_IDLE`, a fleet-level bound rather than a per-agent field),
 not the human's attention: the one thing that renews it is a delivered
 *message* — a human's typed line (`Mailbox::steer`) or the parent's
-`` agents `message `` (`Agent::message`) — both of which stamp the recipient's
+`` exarch-agents `message `` (`Agent::message`) — both of which stamp the recipient's
 own inbox exchange clock before the item is pushed, so a child that is being
 talked to, and a child parked on a deposited reply, keep their lease fresh
 (`Agent::idle`, read off that same clock), while a lease that is never renewed
@@ -398,13 +398,13 @@ it — mere focus was never immunity.
 ## Descendant messages: marked notes, not shared memory
 
 An agent may send a **marked message** by **name** to a proper descendant
-through `` agents `message ``. The fleet resolves the name to the recipient's
+through `` exarch-agents `message ``. The fleet resolves the name to the recipient's
 `Agent`; `Agent::message` stamps its exchange clock and posts an
 `AgentMessage`; the recipient sees it at the
 next tool boundary as a marked note naming the sender, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
-`reply`; the durable cancellation path remains `` agents `cancel ``, addressed
+`reply`; the durable cancellation path remains `` exarch-agents `cancel ``, addressed
 by name the same way.
 
 ## Cancellation: a key interrupts one exchange; a terminator cascades the subtree
@@ -412,7 +412,7 @@ by name the same way.
 `Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
 tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
-but only behind the **lifecycle terminators**: the `` agents `cancel `` tag, the
+but only behind the **lifecycle terminators**: the `` exarch-agents `cancel `` tag, the
 per-agent idle-lease reaper, and `/clear`. They share one cascade over the
 agent tree itself (`Agent::parent`/`Agent::children`), so terminating a
 mid-tree agent (`Agent::cancel_tree`) reaps everything below it
@@ -487,7 +487,7 @@ child's `Capabilities` as an argument rather than cloning the parent's.
 [[design/exarch-architecture|exarch-architecture]] (the agent as a provider loop
 over one `ral` tool),
 [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
-(the record-spec `` agents `start `` tag, names as fleet-unique identity,
+(the record-spec `` exarch-agents `start `` tag, names as fleet-unique identity,
 schedule labels, commitments retired),
 [[design/grant|grant]] (the capability lattice the meet runs in),
 [[map/exarch/tools|tools]], [[map/exarch/agent|agent]],

@@ -662,7 +662,7 @@ mod tests {
         let mut root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, root.agent.id);
-        let root_result = root.run_shell("c1".into(), "agents `reply 1", 5, &emit);
+        let root_result = root.run_shell("c1".into(), "exarch-agents `reply 1", 5, &emit);
         let refusal = "you converse with the user; you do not return";
         assert!(
             root_result.content.contains(refusal),
@@ -675,7 +675,7 @@ mod tests {
         let mut branch = root
             .branch("branch".into())
             .expect("branch a conversing child");
-        let branch_result = branch.run_shell("c2".into(), "agents `reply 1", 5, &emit);
+        let branch_result = branch.run_shell("c2".into(), "exarch-agents `reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),
             "a /branch child must be refused with the same text, got: {}",
@@ -906,7 +906,7 @@ mod tests {
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell(
             "c0".into(),
-            r#"surface `pin [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
+            r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
             5,
             &emit,
         );
@@ -921,7 +921,10 @@ mod tests {
             "test-model",
             Script::new()
                 .then(Reply::text("done"))
-                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'x'")])),
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "exarch-agents `reply 'x'",
+                )])),
         ));
         session.seed("get on with it".into());
         let (outcome, _) = session.attend(&mut NoControl, &emit);
@@ -956,7 +959,7 @@ mod tests {
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell(
             "c0".into(),
-            r#"surface `pin [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
+            r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
             5,
             &emit,
         );

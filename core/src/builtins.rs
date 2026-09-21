@@ -26,6 +26,7 @@ mod fs;
 pub mod help;
 mod math;
 mod misc;
+pub use misc::builtin_surface;
 pub mod modules;
 mod predicates;
 mod print;
@@ -221,9 +222,6 @@ builtin_registry! {
     Exit { names: ["exit", "quit"], ty: scheme::exit,
         doc: "exit [status]  — exit the shell.",
         call: |args, _mooring, shell| misc::builtin_exit(args, shell), },
-    Surface { names: ["surface"], ty: scheme::surface_op,
-        doc: "surface <event>  — forward a tagged variant event to the host's structured-event sink; the identity when no host is installed.",
-        call: |args, mooring, shell| misc::builtin_surface(args, mooring, shell), },
     Warn { names: ["warn"], ty: scheme::string_to_unit,
         doc: "warn <message>  — write one diagnostic line to standard error: the message, then a newline. This is how a script says something to the human without putting it on the byte channel a caller might be binding; `2> f` files it, and a capture keeps it apart from the value. ral has no `1>&2` — diagnostics are this builtin, not fd plumbing.",
         call: |args, _mooring, shell| misc::builtin_warn(args, shell), },
@@ -463,6 +461,22 @@ static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     BuiltinBody::Static(concurrency::builtin_service),
 )];
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
+
+/// `surface` — forward a tagged variant event to the host's structured-event
+/// sink; the identity when no host is installed. Kept out of [`CORE_BUILTINS`]
+/// so the rail is named by its host, not by core.
+///
+/// The ral hosts install this static under `surface`; exarch declares its own
+/// entry over the same body (`scheme::surface_op`, `builtin_surface`,
+/// both `pub` for exactly this) as `exarch-surface`, with exarch's own doc —
+/// the rail, cards, the pin marks. No host's name enters core's vocabulary.
+static SURFACE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("surface"),
+    scheme::surface_op,
+    "surface <event>  — forward a tagged variant event to the host's structured-event sink; the identity when no host is installed.",
+    BuiltinBody::Static(misc::builtin_surface),
+)];
+pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 
 /// `detach` — a birth this session renounces: the process reparents to init.
 ///

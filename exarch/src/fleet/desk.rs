@@ -792,8 +792,7 @@ impl ExarchDesk {
         match label.as_str() {
             "agents" => self.agents(payload),
             "schedules" => self.schedules(payload),
-            "pin-read" => self.pin_read(payload),
-            "pin-list" => Ok(self.pin_list()),
+            "pins" => self.pins(payload),
             "context" => self.context(payload),
             "transcript" => self.transcript(payload),
             other => Err(Error::new(
@@ -803,7 +802,7 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `agents `` — the fleet, one class for the whole family.
+    /// `` `exarch-agents `` — the fleet, one class for the whole family.
     /// Every tag but `` `list `` and `` `read `` answers the summary, both
     /// spawn arms included: a wire spawn does not answer until its child
     /// exists, so it is counted by the time it answers.
@@ -820,14 +819,14 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `schedules `` — the wakeup table, one class for the whole family.
+    /// `` `exarch-schedules `` — the wakeup table, one class for the whole family.
     /// Every tag answers the table; the self-wakeup grant gates all three,
     /// each naming the tag the model typed.
     fn schedules(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "schedules")?;
         match tag.as_str() {
             "list" => {
-                self.require_schedule_grant("schedules `list")?;
+                self.require_schedule_grant("exarch-schedules `list")?;
                 Ok(self.schedule_table())
             }
             "add" => self.schedule(payload),
@@ -848,7 +847,7 @@ impl ExarchDesk {
         // `/clear` in another tab does not refuse a spawn here.
         if s.stamp.is_stale() {
             return Err(Error::new(
-                "`agents `start` refused: the agent tree was cleared while this call was still in \
+                "`exarch-agents `start` refused: the agent tree was cleared while this call was still in \
                  flight, so the fuel and permissions snapshot it captured are now stale — \
                  issue agent again on your next turn",
                 1,
@@ -859,10 +858,10 @@ impl ExarchDesk {
         // siblings are free and only a deep enough chain bottoms out.
         if s.agent.fuel() == 0 {
             return Err(Error::new(
-                "`agents `start` refused: no spawn fuel remains at this depth, so you cannot \
+                "`exarch-agents `start` refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
                  recurse, never how many children you may start at any one depth — starting \
-                 several agents here costs nothing extra. `agents `cancel` on any node stops \
+                 several agents here costs nothing extra. `exarch-agents `cancel` on any node stops \
                  its whole live subtree regardless of depth.",
                 1,
             ));
@@ -872,7 +871,10 @@ impl ExarchDesk {
         // checked this name, but a wire peer need not have come through one,
         // and `register` — the authority — only refuses after all that work.
         if let Err(why) = check_name(&spec.name) {
-            return Err(Error::new(format!("`agents `start` refused: {why}"), 1));
+            return Err(Error::new(
+                format!("`exarch-agents `start` refused: {why}"),
+                1,
+            ));
         }
 
         // Didactic, not race-free: `register` below re-checks under its own
@@ -880,7 +882,7 @@ impl ExarchDesk {
         if s.fleet.name_live(&spec.name) {
             return Err(Error::new(
                 format!(
-                    "`agents `start` refused: a live agent already bears the name '{}' — pick \
+                    "`exarch-agents `start` refused: a live agent already bears the name '{}' — pick \
                      another, or wait for it to settle. Names identify live agents; agents \
                      lists yours.",
                     spec.name
@@ -900,7 +902,7 @@ impl ExarchDesk {
 
         let ForkClaim::Parked(session) = spec.fork else {
             return Err(Error::new(
-                "`agents `start` refused: this host runs its children in its own process, so the \
+                "`exarch-agents `start` refused: this host runs its children in its own process, so the \
                  fork must be `parked <nursery id>` — a session that says it is listening for a \
                  dial is describing a wire this desk does not have",
                 1,
@@ -908,7 +910,7 @@ impl ExarchDesk {
         };
         let Some(shell) = s.nursery.adopt(session) else {
             return Err(Error::new(
-                "`agents `start`: no forked session parked under this id — it may already have \
+                "`exarch-agents `start`: no forked session parked under this id — it may already have \
                  started, or the run that forked it has ended",
                 1,
             ));
@@ -952,7 +954,7 @@ impl ExarchDesk {
             bureau: s.agent.bureau().clone(),
             reach,
         })
-        .map_err(|why| Error::new(format!("`agents `start` refused: {why}"), 1))?;
+        .map_err(|why| Error::new(format!("`exarch-agents `start` refused: {why}"), 1))?;
 
         self.spawn_child(child, spec.name, spec.prompt)
     }
@@ -972,7 +974,7 @@ impl ExarchDesk {
         ) {
             return Ok(current);
         }
-        let refused = |why: String| Error::new(format!("`agents `start` refused: {why}"), 1);
+        let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"), 1);
         let bureau = s.agent.bureau();
         let available = bureau.available();
         let account = match &spec.provider {
@@ -1061,7 +1063,7 @@ impl ExarchDesk {
         let s = &self.services;
         let ForkClaim::Listening { port, token } = spec.fork else {
             return Err(Error::new(
-                "`agents `start` refused: this host reaches its children across a wire, so the \
+                "`exarch-agents `start` refused: this host reaches its children across a wire, so the \
                  fork must be `listening [port, token]` — a session that says it is parked in \
                  process is naming a nursery this desk does not have",
                 1,
@@ -1069,7 +1071,7 @@ impl ExarchDesk {
         };
         let Some(dial) = s.agent.dial().cloned() else {
             return Err(Error::new(
-                "`agents `start` refused: this wire session has no dialler installed to reach a \
+                "`exarch-agents `start` refused: this wire session has no dialler installed to reach a \
                  helper engine's listener — a construction bug, since a fuelled wire trunk is \
                  refused at Avatar::root without one",
                 1,
@@ -1080,14 +1082,14 @@ impl ExarchDesk {
         let mut stream = dial.dial(port).map_err(|reason| {
             Error::new(
                 format!(
-                    "`agents `start` refused: could not dial the helper engine's listener on \
+                    "`exarch-agents `start` refused: could not dial the helper engine's listener on \
                      guest port {port} — {reason}"
                 ),
                 1,
             )
         })?;
         greet_hatch(&mut stream, token)
-            .map_err(|reason| Error::new(format!("`agents `start` refused: {reason}"), 1))?;
+            .map_err(|reason| Error::new(format!("`exarch-agents `start` refused: {reason}"), 1))?;
 
         // Past the ack the child is alive, so a refusal from here on simply
         // drops the stream: the child reads EOF on fd 3 and the guest's own
@@ -1098,7 +1100,7 @@ impl ExarchDesk {
         )
         .map_err(|e| {
             Error::new(
-                format!("`agents `start`: could not adopt the hatched wire: {e}"),
+                format!("`exarch-agents `start`: could not adopt the hatched wire: {e}"),
                 1,
             )
         })?;
@@ -1116,7 +1118,7 @@ impl ExarchDesk {
         .map_err(|s| {
             Error::new(
                 format!(
-                    "`agents `start` refused: {}",
+                    "`exarch-agents `start` refused: {}",
                     crate::agent::seat::EngineLost::starting(&s, hatching_run_dir)
                 ),
                 1,
@@ -1150,7 +1152,7 @@ impl ExarchDesk {
             bureau: s.agent.bureau().clone(),
             reach,
         })
-        .map_err(|why| Error::new(format!("`agents `start` refused: {why}"), 1))?;
+        .map_err(|why| Error::new(format!("`exarch-agents `start` refused: {why}"), 1))?;
 
         self.spawn_child(child, spec.name, spec.prompt)
     }
@@ -1182,10 +1184,10 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `start `` — the desk half of the `agents` builtin. The `spec` record
+    /// `` `start `` — the desk half of the `exarch-agents` builtin. The `spec` record
     /// is the model's own, read field by field; `fork` is the engine's.
     fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `start";
+        const CLASS: &str = "exarch-agents `start";
         let mut req = Fields::payload(payload, CLASS, "[spec: …, fork: …]", &["spec", "fork"])?;
         let mut spec = Fields::of(
             req.take("spec", "the model's own spawn record")?,
@@ -1341,7 +1343,7 @@ impl ExarchDesk {
     /// miss are both successful calls answering the roster; a name gone from it
     /// is the cancel, and only a scope violation raises.
     fn agent_cancel(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `cancel";
+        const CLASS: &str = "exarch-agents `cancel";
         let s = &self.services;
         let name = payload_value(payload, CLASS, "naming the descendant to cancel")?;
         let name = payload_string(name, CLASS, "name")?;
@@ -1369,7 +1371,7 @@ impl ExarchDesk {
             Err(()) => (
                 "refused: not a descendant".to_string(),
                 format!(
-                    "agent '{name}' is not an agent you started; `agents `cancel` may only reach a descendant of yours"
+                    "agent '{name}' is not an agent you started; `exarch-agents `cancel` may only reach a descendant of yours"
                 ),
                 true,
             ),
@@ -1390,7 +1392,7 @@ impl ExarchDesk {
     /// Unscoped, unlike `` `cancel ``: a note is the fleet's one way for a
     /// child to reach an ancestor or a sibling, and it only ever queues a turn.
     fn message(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `message";
+        const CLASS: &str = "exarch-agents `message";
         let s = &self.services;
         let mut spec = Fields::payload(payload, CLASS, "[to: …, text: …]", &["to", "text"])?;
         let name = payload_string(spec.take("to", "the recipient's name")?, CLASS, "to")?;
@@ -1411,7 +1413,7 @@ impl ExarchDesk {
             Some(to) if to.id == s.agent.id => (
                 "refused: that is you".to_string(),
                 format!(
-                    "agent '{name}' is you; `agents `message` reaches another agent — to wake yourself, arm a `schedules` fire"
+                    "agent '{name}' is you; `exarch-agents `message` reaches another agent — to wake yourself, arm a `exarch-schedules` fire"
                 ),
                 false,
             ),
@@ -1456,7 +1458,7 @@ impl ExarchDesk {
     /// The answer is the table it now appears in; its `next-s` column already
     /// says everything a receipt could.
     fn schedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "schedules `add";
+        const CLASS: &str = "exarch-schedules `add";
         self.require_schedule_grant(CLASS)?;
         let s = &self.services;
 
@@ -1505,7 +1507,7 @@ impl ExarchDesk {
         }
     }
 
-    /// A snapshot of this agent's live wakeups — every `` `schedules `` tag's
+    /// A snapshot of this agent's live wakeups — every `` `exarch-schedules `` tag's
     /// answer. Bare, unlike the roster: this family has only the one shape,
     /// so there is nothing for a tag to tell it apart from.
     fn schedule_table(&self) -> FOValue {
@@ -1543,7 +1545,7 @@ impl ExarchDesk {
     /// the grant refusal raises; a label that was never there is a successful
     /// call answering a table that does not carry it.
     fn unschedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "schedules `remove";
+        const CLASS: &str = "exarch-schedules `remove";
         self.require_schedule_grant(CLASS)?;
         let s = &self.services;
         let label = payload_value(payload, CLASS, "naming the wakeup to remove")?;
@@ -1567,21 +1569,21 @@ impl ExarchDesk {
 
     /// `` `reply `` — stage the payload into the cell [`Avatar::deliberate`] lifts
     /// into a deposit on this agent's own status once the batch drains:
-    /// it parks the agent and hands the value to the parent's `` agents `read ``,
+    /// it parks the agent and hands the value to the parent's `` exarch-agents `read ``,
     /// rather than ending the run. Refused on every non-returning agent, keyed
     /// on `returns` and never on trunk-ness.
     fn agent_reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
         if !s.agent.returns() {
             return Err(Error::new(
-                "agents `reply` refused: you converse with the user; you do not return. \
-                 `reply` parks you and hands your value to your parent's agents `read — \
+                "exarch-agents `reply` refused: you converse with the user; you do not return. \
+                 `reply` parks you and hands your value to your parent's exarch-agents `read — \
                  the interactive trunk and every /branch child instead keep talking, turn after \
                  turn, and hold no `reply` to call.",
                 1,
             ));
         }
-        let [value] = payload_list(payload, "agents `reply", "[value]")?;
+        let [value] = payload_list(payload, "exarch-agents `reply", "[value]")?;
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
         let payload = if display.is_empty() {
@@ -1602,7 +1604,7 @@ impl ExarchDesk {
     /// observation, not an act, so nothing is committed to [`DeskAct`] — it
     /// changes nothing, exactly like `` `list ``.
     fn agent_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `read";
+        const CLASS: &str = "exarch-agents `read";
         let s = &self.services;
         let name = payload_value(payload, CLASS, "naming the descendant to read")?;
         let name = payload_string(name, CLASS, "name")?;
@@ -1613,7 +1615,7 @@ impl ExarchDesk {
             )),
             Some(found) => match s.agent.descendant(&found) {
                 None => Err(format!(
-                    "agent '{name}' is not an agent you started; `agents `read` may only reach \
+                    "agent '{name}' is not an agent you started; `exarch-agents `read` may only reach \
                      a descendant of yours"
                 )),
                 // The deposit is left in place, so the fetch is idempotent
@@ -1645,15 +1647,87 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `pin-read `` — the card stored under `key` on this agent's own
+    /// `` `exarch-pins `` — one class for the whole register family:
+    /// `` `set ``/`` `clear `` write the slot and mirror the same forensic
+    /// row and transient [`absorb_surface`] draws for a `` `pin ``/
+    /// `` `unpin `` surface value, `` `read ``/`` `list `` answer the mirror.
+    fn pins(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let (tag, payload) = family_tag(payload, "exarch-pins")?;
+        match tag.as_str() {
+            "set" => self.pin_set(payload),
+            "clear" => self.pin_clear(payload),
+            "read" => self.pin_read(payload),
+            "list" => Ok(self.pin_list()),
+            other => Err(unknown_tag("exarch-pins", other)),
+        }
+    }
+
+    /// `` `set `` — overwrite the register slot under `key` with `body`.
+    /// An empty or unrecognised body clears the slot instead: a pin with
+    /// nothing left to show drops it.
+    fn pin_set(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        const CLASS: &str = "exarch-pins `set";
+        let mut spec = Fields::payload(payload, CLASS, "[key: Str, body: Card]", &["key", "body"])?;
+        let key = payload_string(
+            spec.take("key", "the register slot to write")?,
+            CLASS,
+            "key",
+        )?;
+        let body = spec.take("body", "the card to pin")?;
+        let card = crate::bus::card::value_to_card(&RalValue::from(body))
+            .filter(|c| !c.marks().is_empty());
+        self.apply_pin(key, card);
+        Ok(FOValue::Unit)
+    }
+
+    /// `` `clear `` — empty the register slot under `key`.
+    fn pin_clear(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        const CLASS: &str = "exarch-pins `clear";
+        let key = payload_string(
+            payload_value(payload, CLASS, "naming the slot to clear")?,
+            CLASS,
+            "key",
+        )?;
+        self.apply_pin(key, None);
+        Ok(FOValue::Unit)
+    }
+
+    /// The write half of [`Self::pin_set`]/[`Self::pin_clear`]: update the
+    /// mirror [`Self::pin_read`]/[`Self::pin_list`] answer from, then draw
+    /// the forensic row and transient through [`absorb_surface`].
+    fn apply_pin(&self, key: String, card: Option<crate::bus::card::Card>) {
+        {
+            let mut m = self.services.agent.pins.lock_ignore_poison();
+            match &card {
+                Some(card) => {
+                    m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
+                }
+                None => {
+                    m.remove(&key);
+                }
+            }
+        }
+        let recorder = self.services.log.lock().record_emitter();
+        let surface = match card {
+            Some(card) => Surface::Pin { key, card },
+            None => Surface::Unpin { key },
+        };
+        if let Err(error) = absorb_surface(&recorder, &surface) {
+            recorder.report_fault(&error);
+        }
+    }
+
+    /// `` `read `` — the card stored under `key` on this agent's own
     /// register, canonically re-encoded, or `()` on a miss. Read-after-write
-    /// within one run is sound because a surface frame the run wrote is
-    /// always applied before an enquiry raised after it — core's
-    /// `IdentityDesk` drains pending surfaces first under the identity
-    /// transport, and frame order alone guarantees it under the wire.
+    /// within one run is sound: `` `set ``/`` `clear `` write the mirror
+    /// synchronously, on this same enquiry desk.
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let [key] = payload_list(payload, "pin-read", "[key]")?;
-        let key = payload_string(key, "pin-read", "key")?;
+        const CLASS: &str = "exarch-pins `read";
+        let key = payload_string(
+            payload_value(payload, CLASS, "naming the slot to read")?,
+            CLASS,
+            "key",
+        )?;
         let m = self.services.agent.pins.lock_ignore_poison();
         match m.get(&key) {
             // A card value is always first-order, so this conversion never fails.
@@ -1662,7 +1736,7 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `pin-list `` — the keys currently occupied on this agent's own
+    /// `` `list `` — the keys currently occupied on this agent's own
     /// register, in `BTreeMap` order.
     fn pin_list(&self) -> FOValue {
         FOValue::List {
@@ -1677,7 +1751,7 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `context `` — what the provider is sent, one class for the whole
+    /// `` `exarch-context `` — what the provider is sent, one class for the whole
     /// family. Every tag answers the survey: an edit changes what is
     /// addressable, so what the model reads back is what its next edit must be
     /// written against, never a receipt for the one it just made.
@@ -1696,7 +1770,7 @@ impl ExarchDesk {
         self.services.log.lock().context_survey()
     }
 
-    /// `` `transcript `` — the record: every tag reads it and none writes it.
+    /// `` `exarch-transcript `` — the record: every tag reads it and none writes it.
     /// A read commits no act, so the verb string its trace line carries is a
     /// second mint outside [`DeskAct::verb`] on purpose.
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -1715,10 +1789,10 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `transcript `read `` — the turns the address names, as material:
+    /// `` `exarch-transcript `read `` — the turns the address names, as material:
     /// one record per turn, in transcript order.
     fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "transcript `read";
+        const CLASS: &str = "exarch-transcript `read";
         let mut spec = Fields::payload(payload, CLASS, "[turns: [Int]]", &["turns"])?;
         let turns = payload_turns(spec.take("turns", "the turns to read")?, CLASS)?;
         let subject = format!("read {}", turns_subject(&turns));
@@ -1729,11 +1803,11 @@ impl ExarchDesk {
         )
     }
 
-    /// `` `transcript `grep `` — a Rust regex over the transcript's text, the
+    /// `` `exarch-transcript `grep `` — a Rust regex over the transcript's text, the
     /// whole of it or the turns an address names. The pattern is compiled
     /// here, so an invalid one is refused in the regex crate's own words.
     fn transcript_grep(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "transcript `grep";
+        const CLASS: &str = "exarch-transcript `grep";
         let mut spec = Fields::payload(
             payload,
             CLASS,
@@ -1763,7 +1837,7 @@ impl ExarchDesk {
         )
     }
 
-    /// The tail every `` `transcript `` tag shares: `locate` under the session
+    /// The tail every `` `exarch-transcript `` tag shares: `locate` under the session
     /// lock, `read` once it is gone, and the call — refused or not — mirrored
     /// onto the trace under its own subject.
     fn traced<P>(
@@ -1791,12 +1865,12 @@ impl ExarchDesk {
     /// not a summary.
     const NOTE_CAP: usize = 240;
 
-    /// `` `context `evict `` — the turns the address names leave the context
+    /// `` `exarch-context `evict `` — the turns the address names leave the context
     /// at once, wherever they lie, but for a user turn whose answers still
     /// have a resident turn outside the set; the model's optional `note`
     /// stands in the marker left where they were.
     fn context_evict(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "context `evict";
+        const CLASS: &str = "exarch-context `evict";
         let mut spec = Fields::payload(
             payload,
             CLASS,
@@ -1884,7 +1958,7 @@ impl ExarchDesk {
     }
 }
 
-/// The `` `context `` family's one answer: one row per turn in the context,
+/// The `` `exarch-context `` family's one answer: one row per turn in the context,
 /// then what the whole of it weighs.
 fn survey_answer(survey: &ContextSurvey) -> FOValue {
     FOValue::Map {
@@ -1911,7 +1985,7 @@ fn survey_answer(survey: &ContextSurvey) -> FOValue {
     }
 }
 
-/// One turn as both `` context `survey `` and `` transcript `index `` name
+/// One turn as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
 /// it, so a row and an index line can never be two opinions.
 fn turn_row(turn: &crate::record::TurnRow) -> Vec<(String, FOValue)> {
     vec![
@@ -1933,7 +2007,7 @@ fn turn_row(turn: &crate::record::TurnRow) -> Vec<(String, FOValue)> {
     ]
 }
 
-/// `` `transcript `index ``'s answer: one row per turn the transcript holds,
+/// `` `exarch-transcript `index ``'s answer: one row per turn the transcript holds,
 /// oldest first, `held` saying which of them the model is still paying for.
 fn transcript_index_answer(turns: Vec<crate::record::TurnRow>) -> FOValue {
     FOValue::List {
@@ -1948,7 +2022,7 @@ fn transcript_index_answer(turns: Vec<crate::record::TurnRow>) -> FOValue {
     }
 }
 
-/// `` `transcript `grep ``'s answer: the hits it kept, and how many there
+/// `` `exarch-transcript `grep ``'s answer: the hits it kept, and how many there
 /// were in all.
 fn grep_answer(answer: GrepAnswer) -> FOValue {
     let hits = answer
@@ -1986,7 +2060,7 @@ fn grep_answer(answer: GrepAnswer) -> FOValue {
     }
 }
 
-/// `` `transcript `read ``'s answer: one record per turn the read named,
+/// `` `exarch-transcript `read ``'s answer: one record per turn the read named,
 /// each naming its role and carrying the model's own messages
 /// narrowed to variant parts — never a serialization of the provider's own
 /// content structs.
@@ -2391,7 +2465,7 @@ mod tests {
         family_req("context", "evict", Some(payload))
     }
 
-    /// The `` `context `survey `` call, shaped exactly as `builtin_context`
+    /// The `` `exarch-context `survey `` call, shaped exactly as `builtin_context`
     /// sends it: a bare tag, since the answer is the whole survey.
     fn context_survey_request() -> FOValue {
         family_req("context", "survey", None)
@@ -2470,7 +2544,7 @@ mod tests {
         }
     }
 
-    /// `` `agents `start ``: the model's own spec record beside whichever
+    /// `` `exarch-agents `start ``: the model's own spec record beside whichever
     /// `fork` tag the engine minted. Always `` `amnemon ``, the only kind the
     /// desk tests exercise, and `selection` is the `provider`/`model` pair —
     /// `` `inherit ``/`` `inherit `` for every test but the selection ones.
@@ -2539,7 +2613,7 @@ mod tests {
         }
     }
 
-    /// `` `agents `message ``: the model's record, by the surface's own names.
+    /// `` `exarch-agents `message ``: the model's record, by the surface's own names.
     pub(super) fn message_req(to: &str, body: &str) -> FOValue {
         family_req(
             "agents",
@@ -2553,7 +2627,7 @@ mod tests {
         )
     }
 
-    /// `` `schedules `add `` with an `` `after `` trigger — the only kind these
+    /// `` `exarch-schedules `add `` with an `` `after `` trigger — the only kind these
     /// tests arm, since a cron's first fire is not a fixed delay.
     fn add_req(after: &str, label: &str, prompt: &str) -> FOValue {
         family_req(
@@ -2582,7 +2656,7 @@ mod tests {
             payload: Some(payload),
         } = answer
         else {
-            panic!("every `agents tag answers a tagged variant")
+            panic!("every `exarch-agents tag answers a tagged variant")
         };
         assert_eq!(label, "summary", "a transition answers the summary");
         let FOValue::Map { entries } = *payload else {
@@ -2611,7 +2685,7 @@ mod tests {
             payload: Some(payload),
         } = answer
         else {
-            panic!("every `agents tag answers a tagged variant")
+            panic!("every `exarch-agents tag answers a tagged variant")
         };
         assert_eq!(label, "roster", "the answer must be the roster");
         let FOValue::List { items } = *payload else {
@@ -2620,10 +2694,10 @@ mod tests {
         items
     }
 
-    /// Unwrap a `` `schedules `` answer into its rows.
+    /// Unwrap a `` `exarch-schedules `` answer into its rows.
     fn table(answer: FOValue) -> Vec<FOValue> {
         let FOValue::List { items } = answer else {
-            panic!("every `schedules tag answers the bare table")
+            panic!("every `exarch-schedules tag answers the bare table")
         };
         items
     }
@@ -2789,9 +2863,9 @@ mod tests {
 
         let FOValue::List { items } = desk
             .handle(transcript_read_request(&[1, 2]))
-            .expect("transcript `read")
+            .expect("exarch-transcript `read")
         else {
-            panic!("transcript `read must answer a list, one record per turn")
+            panic!("exarch-transcript `read must answer a list, one record per turn")
         };
         let [first, second] = items.as_slice() else {
             panic!("two named turns must answer exactly two records, got {items:?}")
@@ -2869,7 +2943,7 @@ mod tests {
             .handle(transcript_read_request(&[2, 3]))
             .expect("closed turns are readable")
         else {
-            panic!("transcript `read must answer a list, one record per turn")
+            panic!("exarch-transcript `read must answer a list, one record per turn")
         };
         let reached = items
             .iter()
@@ -2952,7 +3026,7 @@ mod tests {
             .expect_err("`turn` is not a field `grep` reads");
         assert_eq!(
             err.message,
-            "`transcript `grep`: unknown field `turn` — the payload takes `pattern` and `turns` — did you mean `turns`?"
+            "`exarch-transcript `grep`: unknown field `turn` — the payload takes `pattern` and `turns` — did you mean `turns`?"
         );
         desk.handle(transcript_grep_request("answer", Some(&[1, 2])))
             .expect("the spelt field still narrows the search");
@@ -3080,7 +3154,7 @@ mod tests {
             .expect_err("an empty note is not a note");
         assert_eq!(
             err.message,
-            "`context `evict`: `note` must not be empty — omit it to leave none"
+            "`exarch-context `evict`: `note` must not be empty — omit it to leave none"
         );
     }
 
@@ -3100,7 +3174,7 @@ mod tests {
             .expect_err("241 bytes is over the 240-byte cap");
         assert_eq!(
             err.message,
-            "`context `evict`: `note` is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+            "`exarch-context `evict`: `note` is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
         );
     }
 
@@ -3121,7 +3195,7 @@ mod tests {
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`context `evict`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
+                "`exarch-context `evict`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
             );
         }
     }
@@ -3155,73 +3229,62 @@ mod tests {
             .expect_err("`through` is not a field `evict` reads");
         assert_eq!(
             err.message,
-            "`context `evict`: unknown field `through` — the payload takes `turns` and `note`"
+            "`exarch-context `evict`: unknown field `through` — the payload takes `turns` and `note`"
         );
         desk.handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
             .expect("the fields the tag does read still evict");
     }
 
-    /// A `` `pin [key, body] `` surface value carrying a one-span text card —
-    /// the minimal shape [`SurfaceApplier::live`] folds into the mirror.
+    /// The `[key: Str, body: Card]` payload `` `exarch-pins `set `` takes —
+    /// a one-span text card under `key`.
     fn pin_value(key: &str, text: &str) -> FOValue {
-        FOValue::Variant {
-            label: "pin".into(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    ("key".into(), FOValue::String { value: key.into() }),
-                    (
-                        "body".into(),
-                        FOValue::Variant {
-                            label: "text".into(),
-                            payload: Some(Box::new(FOValue::Map {
-                                entries: vec![(
-                                    "spans".into(),
-                                    FOValue::List {
-                                        items: vec![FOValue::Map {
-                                            entries: vec![(
-                                                "text".into(),
-                                                FOValue::String { value: text.into() },
-                                            )],
-                                        }],
-                                    },
-                                )],
-                            })),
-                        },
-                    ),
-                ],
-            })),
+        FOValue::Map {
+            entries: vec![
+                ("key".into(), FOValue::String { value: key.into() }),
+                (
+                    "body".into(),
+                    FOValue::Variant {
+                        label: "text".into(),
+                        payload: Some(Box::new(FOValue::Map {
+                            entries: vec![(
+                                "spans".into(),
+                                FOValue::List {
+                                    items: vec![FOValue::Map {
+                                        entries: vec![(
+                                            "text".into(),
+                                            FOValue::String { value: text.into() },
+                                        )],
+                                    }],
+                                },
+                            )],
+                        })),
+                    },
+                ),
+            ],
         }
     }
 
-    fn unpin_value(key: &str) -> FOValue {
-        FOValue::Variant {
-            label: "unpin".into(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![("key".into(), FOValue::String { value: key.into() })],
-            })),
-        }
+    fn pin_set_req(key: &str, text: &str) -> FOValue {
+        family_req("pins", "set", Some(pin_value(key, text)))
+    }
+
+    fn pin_clear_req(key: &str) -> FOValue {
+        family_req("pins", "clear", Some(text(key)))
     }
 
     fn pin_read_req(key: &str) -> FOValue {
-        FOValue::Variant {
-            label: "pin-read".into(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![FOValue::String { value: key.into() }],
-            })),
-        }
+        family_req("pins", "read", Some(text(key)))
     }
 
-    /// A pin applied through [`SurfaceApplier::live`] comes back from
-    /// `pin-read` as the canonical card — the readback and the pinned mark
-    /// agree on shape, which is the whole point of a readable register.
+    /// A pin written through `` `exarch-pins `set `` comes back from
+    /// `` `exarch-pins `read `` as the canonical card — the readback and the
+    /// pinned mark agree on shape, which is the whole point of a readable
+    /// register.
     #[test]
     fn pin_read_returns_the_canonical_card() {
         let d = desk();
-        SurfaceApplier {
-            pins: Some(d.services.agent.pins.clone()),
-            recorder: crate::record::Emitter::none(),
-        }
-        .live(pin_value("tasks", "hi"));
+        d.handle(pin_set_req("tasks", "hi"))
+            .expect("`exarch-pins `set` must answer Ok");
 
         let answer = d
             .handle(pin_read_req("tasks"))
@@ -3238,66 +3301,95 @@ mod tests {
         );
     }
 
+    /// `` `set ``/`` `clear `` write and empty the register mirror
+    /// `` `read ``/`` `list `` answer from.
+    #[test]
+    fn pin_set_and_clear_round_trip_through_the_desk() {
+        let d = desk();
+
+        assert!(
+            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            "an unset key must answer unit"
+        );
+
+        d.handle(pin_set_req("tasks", "hi"))
+            .expect("`exarch-pins `set` must answer Ok");
+        let answer = d
+            .handle(pin_read_req("tasks"))
+            .expect("a set key must read back");
+        let card = crate::bus::card::value_to_card(&RalValue::from(answer))
+            .expect("the readback must decode as a card");
+        assert!(
+            matches!(
+                card.marks(),
+                [crate::bus::card::Mark::Text { spans }]
+                    if spans.len() == 1 && spans[0].text == "hi"
+            ),
+            "`set` must write the canonical card, got {card:?}"
+        );
+
+        d.handle(pin_clear_req("tasks"))
+            .expect("`exarch-pins `clear` must answer Ok");
+        assert!(
+            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            "`clear` must empty the slot `set` wrote"
+        );
+    }
+
     /// A key never pinned, and a key unpinned after being pinned, both answer
-    /// `()` — a miss and a clear are the same absence to `pin-read`.
+    /// `()` — a miss and a clear are the same absence to `` `exarch-pins `read ``.
     #[test]
     fn pin_read_answers_unit_on_miss_and_after_unpin() {
         let d = desk();
-        let applier = SurfaceApplier {
-            pins: Some(d.services.agent.pins.clone()),
-            recorder: crate::record::Emitter::none(),
-        };
 
         assert!(
             matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "a key never pinned must answer unit"
         );
 
-        applier.live(pin_value("tasks", "hi"));
-        applier.live(unpin_value("tasks"));
+        d.handle(pin_set_req("tasks", "hi"))
+            .expect("`exarch-pins `set` must answer Ok");
+        d.handle(pin_clear_req("tasks"))
+            .expect("`exarch-pins `clear` must answer Ok");
         assert!(
             matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "an unpinned key must answer unit"
         );
     }
 
-    /// `pin-list` names exactly the occupied keys, in `BTreeMap` order, and
-    /// tracks a set/clear pair.
+    /// `` `exarch-pins `list `` names exactly the occupied keys, in
+    /// `BTreeMap` order, and tracks a set/clear pair.
     #[test]
     fn pin_list_tracks_set_and_clear() {
         let d = desk();
-        let applier = SurfaceApplier {
-            pins: Some(d.services.agent.pins.clone()),
-            recorder: crate::record::Emitter::none(),
-        };
         let keys = |d: &ExarchDesk| match d
-            .handle(FOValue::Variant {
-                label: "pin-list".into(),
-                payload: None,
-            })
-            .expect("pin-list must answer Ok")
+            .handle(family_req("pins", "list", None))
+            .expect("`exarch-pins `list` must answer Ok")
         {
             FOValue::List { items } => items
                 .into_iter()
                 .map(|v| match v {
                     FOValue::String { value } => value,
-                    other => panic!("pin-list must answer strings, got {other:?}"),
+                    other => panic!("`exarch-pins `list` must answer strings, got {other:?}"),
                 })
                 .collect::<Vec<_>>(),
-            other => panic!("pin-list must answer a list, got {other:?}"),
+            other => panic!("`exarch-pins `list` must answer a list, got {other:?}"),
         };
 
         assert!(keys(&d).is_empty(), "an empty register lists no keys");
 
-        applier.live(pin_value("b", "one"));
-        applier.live(pin_value("a", "two"));
+        d.handle(pin_set_req("b", "one"))
+            .expect("`exarch-pins `set` must answer Ok");
+        d.handle(pin_set_req("a", "two"))
+            .expect("`exarch-pins `set` must answer Ok");
         assert_eq!(
             keys(&d),
             vec!["a", "b"],
             "keys list in BTreeMap (lexicographic) order"
         );
 
-        applier.live(unpin_value("b"));
+        d.handle(pin_clear_req("b"))
+            .expect("`exarch-pins `clear` must answer Ok");
         assert_eq!(keys(&d), vec!["a"], "a clear drops its key from the list");
     }
 
@@ -3311,16 +3403,20 @@ mod tests {
         use crate::bus::Signal;
         use crate::record::{Display, Forensic, Record, Transient};
 
+        let d = desk();
         let (tx, rx) = channel();
-        let recorder = crate::record::Emitter::none();
-        recorder.attach(crate::record::FleetSink {
-            id: 0,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
+        d.services
+            .log
+            .lock()
+            .record_emitter()
+            .attach(crate::record::FleetSink {
+                id: 0,
+                tx: tx.downgrade(),
+                meter: crate::bus::UsageMeter::default(),
+            });
         let applier = SurfaceApplier {
-            pins: None,
-            recorder,
+            pins: Some(d.services.agent.pins.clone()),
+            recorder: d.services.log.lock().record_emitter(),
         };
 
         let read = ral_core::types::Observation::instant(
@@ -3381,8 +3477,10 @@ mod tests {
                 ],
             })),
         });
-        applier.live(pin_value("tasks", "hi"));
-        applier.live(unpin_value("tasks"));
+        d.handle(pin_set_req("tasks", "hi"))
+            .expect("`exarch-pins `set` must answer Ok");
+        d.handle(pin_clear_req("tasks"))
+            .expect("`exarch-pins `clear` must answer Ok");
 
         let mut facts: Vec<&'static str> = Vec::new();
         let mut transients: Vec<&'static str> = Vec::new();
@@ -3429,7 +3527,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'hi from child'",
+                "exarch-agents `reply 'hi from child'",
             )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
@@ -3487,7 +3585,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'read me'",
+                "exarch-agents `reply 'read me'",
             )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
@@ -3529,7 +3627,10 @@ mod tests {
             .provider_handle()
             .swap(Arc::new(Provider::scripted(
                 "test-model",
-                Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
+                Script::new().then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "exarch-agents `reply 'a'",
+                )])),
             )));
         // Held for the whole test, and with no worker behind it, so it never
         // settles out from under the assertion below.
@@ -3633,7 +3734,7 @@ mod tests {
             ))
             .expect_err("a scripted bureau must refuse to mint");
         assert!(
-            err.message.contains("`agents `start` refused"),
+            err.message.contains("`exarch-agents `start` refused"),
             "the refusal must name the tag it refused, got: {}",
             err.message
         );
@@ -3722,7 +3823,7 @@ mod tests {
             .expect_err("`nmae` is not a field the spec carries");
         assert_eq!(
             err.message,
-            "`agents `start`: unknown field `nmae` — `spec` takes `prompt`, `name`, `type`, \
+            "`exarch-agents `start`: unknown field `nmae` — `spec` takes `prompt`, `name`, `type`, \
              `grant`, `search`, `provider` and `model` — did you mean `name`?"
         );
     }
@@ -3740,7 +3841,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'done'",
+                "exarch-agents `reply 'done'",
             )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
@@ -3795,7 +3896,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "agents `reply 'hi from child'",
+                "exarch-agents `reply 'hi from child'",
             )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
@@ -3873,7 +3974,10 @@ mod tests {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "exarch-agents `reply 'a'",
+            )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
 
@@ -3944,9 +4048,18 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'b'")]))
-                .then(Reply::tool_calls(vec![ral_call("r3", "agents `reply 'c'")])),
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "exarch-agents `reply 'a'",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r2",
+                    "exarch-agents `reply 'b'",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r3",
+                    "exarch-agents `reply 'c'",
+                )])),
         ));
         desk.services.agent.provider_handle().swap(provider);
 
@@ -4047,7 +4160,7 @@ mod tests {
             .expect_err("a message to oneself must be refused");
         assert_eq!(
             err.message,
-            "agent 'mid' is you; `agents `message` reaches another agent — to wake yourself, arm a `schedules` fire"
+            "agent 'mid' is you; `exarch-agents `message` reaches another agent — to wake yourself, arm a `exarch-schedules` fire"
         );
 
         let cancel_err = desk1
@@ -4055,7 +4168,7 @@ mod tests {
             .expect_err("cancelling an ancestor must be refused");
         assert_eq!(
             cancel_err.message,
-            "agent 'parent' is not an agent you started; `agents `cancel` may only reach a descendant of yours"
+            "agent 'parent' is not an agent you started; `exarch-agents `cancel` may only reach a descendant of yours"
         );
 
         assert!(
@@ -4075,7 +4188,7 @@ mod tests {
         let emit = Emitter::new(tx, session.agent.id);
         let _ = session.run_shell(
             "call-1".to_string(),
-            r#"surface `unpin [key: "test-marker"]; agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
+            r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
             5,
             &emit,
         );
@@ -4111,11 +4224,14 @@ mod tests {
     #[test]
     fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
         for (request, tag) in [
-            (add_req("1s", "nightly", "wake"), "schedules `add"),
-            (family_req("schedules", "list", None), "schedules `list"),
+            (add_req("1s", "nightly", "wake"), "exarch-schedules `add"),
+            (
+                family_req("schedules", "list", None),
+                "exarch-schedules `list",
+            ),
             (
                 family_req("schedules", "remove", Some(text("sched-0"))),
-                "schedules `remove",
+                "exarch-schedules `remove",
             ),
         ] {
             let err = desk()
@@ -4493,7 +4609,7 @@ mod tests {
                 .then(Reply::text("first response, no reply yet"))
                 .then(Reply::tool_calls(vec![ral_call(
                     "r1",
-                    "agents `reply 'second response arrived'",
+                    "exarch-agents `reply 'second response arrived'",
                 )])),
         )));
         child.seed("say hi".into());
@@ -4805,7 +4921,7 @@ mod wire_tests {
         (desk, fleet, parent_inbox)
     }
 
-    /// `` `agents `start `` as a listening engine sends it: the port its
+    /// `` `exarch-agents `start `` as a listening engine sends it: the port its
     /// listener is bound to, and the token that listener will check the
     /// host's dial against.
     fn wire_start_req(name: &str, port: u32, token: u64) -> FOValue {

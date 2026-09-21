@@ -58,7 +58,7 @@ const TRUNK_NAME: &str = "main";
 )]
 pub(crate) struct Build {
     /// The tab-bar identity — known to every caller before construction, `/branch`'s
-    /// and `` agents `start ``'s own choice reached down to here.
+    /// and `` exarch-agents `start ``'s own choice reached down to here.
     pub(crate) name: String,
     /// The still-unresolved template, carrying the builtin-index placeholder
     /// so the constructed agent's own children resolve from it in turn.
@@ -101,7 +101,7 @@ pub(crate) struct Build {
     /// IT's network policy, audit ledger, and rate budget — likewise a host
     /// setting, inherited verbatim.
     pub(crate) egress: crate::egress::Egress,
-    /// Shared verbatim by every fork — `` agents `start ``'s wire arm reads it off
+    /// Shared verbatim by every fork — `` exarch-agents `start ``'s wire arm reads it off
     /// its own agent, never off a fresh construction.
     pub(crate) dial: Option<Arc<dyn Dial>>,
     /// The one owner of provider construction, likewise a host setting
@@ -373,7 +373,7 @@ impl Avatar {
         }
         // Stated, not discovered by a model calling `agent`: a fuelled wire
         // trunk with no dialler to reach helpers through cannot ever answer
-        // `` agents `start ``'s wire arm, so refuse the construction itself.
+        // `` exarch-agents `start ``'s wire arm, so refuse the construction itself.
         if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && dial.is_none() {
             return Err(io::Error::other(
                 "a wire trunk with spawn fuel needs a dialler to reach helper engines through — \
@@ -503,7 +503,7 @@ impl Avatar {
                 .log
                 .lock()
                 .import_note(genai::chat::ChatMessage::user(
-                    "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (pin-list and schedules `list to confirm), and any sub-agents from before have ended.",
+                    "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (exarch-pins `list and exarch-schedules `list to confirm), and any sub-agents from before have ended.",
                 ))
                 .map_err(io::Error::other)?;
         }

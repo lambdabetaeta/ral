@@ -263,7 +263,7 @@ impl TurnKind {
     }
 }
 
-/// `` context `survey ``'s answer: one row per turn in the context, beside
+/// `` exarch-context `survey ``'s answer: one row per turn in the context, beside
 /// the truth about what is sent.
 ///
 /// `total_bytes` is the assembled context's own weight, not the sum of the
@@ -274,7 +274,7 @@ pub struct ContextSurvey {
     pub total_bytes: usize,
 }
 
-/// One line of one message that matched `` transcript `grep ``'s pattern.
+/// One line of one message that matched `` exarch-transcript `grep ``'s pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrepHit {
     /// The turn the line lies in — the search walks turn by turn, so a hit
@@ -294,7 +294,7 @@ pub struct GrepAnswer {
     pub total: usize,
 }
 
-/// `` transcript `read ``'s answer: one element per turn, in transcript
+/// `` exarch-transcript `read ``'s answer: one element per turn, in transcript
 /// order, each naming whose turn it was.
 #[derive(Clone, Debug)]
 pub struct TranscriptTurn {
@@ -1571,8 +1571,9 @@ mod tests {
             "{marker}"
         );
         assert!(
-            marker
-                .contains("`transcript `read [turns: !{range 2 3}]` reads turn 2 back as material"),
+            marker.contains(
+                "`exarch-transcript `read [turns: !{range 2 3}]` reads turn 2 back as material"
+            ),
             "{marker}"
         );
         assert_eq!(done, "done");
@@ -1654,7 +1655,7 @@ mod tests {
             .unwrap();
         let marker = head_marker(&s).expect("a cut renders a marker");
         assert!(
-            marker.contains("1–48  (48 earlier turns — transcript `index)"),
+            marker.contains("1–48  (48 earlier turns — exarch-transcript `index)"),
             "the rows past the cap collapse to one line, got: {marker}"
         );
         assert!(

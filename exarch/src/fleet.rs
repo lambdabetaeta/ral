@@ -168,7 +168,7 @@ impl Fleet {
     }
 
     /// The cheap half of the spawn-uniqueness rule [`Self::enrol`] enforces
-    /// authoritatively: `` agents `start `` reads this before forking a nursery
+    /// authoritatively: `` exarch-agents `start `` reads this before forking a nursery
     /// session, so the ordinary duplicate refuses without a fork to unwind.
     pub fn name_live(&self, name: &str) -> bool {
         self.resolve(name).is_some()
@@ -375,7 +375,7 @@ mod tests {
     }
 
     /// The other reason the trunk must never carry a `DurableRoot`: a
-    /// terminate of the `cancel`/`` agents `cancel `` class landing on it must
+    /// terminate of the `cancel`/`` exarch-agents `cancel `` class landing on it must
     /// not poison the session.  A root states its reach pre-weakened, so a
     /// terminate never reaches the root that construction captured.
     #[test]
@@ -727,7 +727,7 @@ mod tests {
         );
     }
 
-    /// The tail of a spawn racing a `/clear` or `` agents `cancel `` on its
+    /// The tail of a spawn racing a `/clear` or `` exarch-agents `cancel `` on its
     /// parent is refused outright, rather than landing orphaned and
     /// uncancellable.  The cascade never drops an agent, so "gone" alone would
     /// miss this window.

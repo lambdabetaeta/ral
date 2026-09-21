@@ -49,7 +49,7 @@ pub enum AgentOutcome {
     Replied,
     /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
-    /// By `` agents `cancel ``, `/clear`, or the worker ceiling.
+    /// By `` exarch-agents `cancel ``, `/clear`, or the worker ceiling.
     Cancelled,
     /// A provider error or a panic.
     Failed(String),
@@ -78,7 +78,7 @@ impl AgentOutcome {
         let took = elapsed_phrase(elapsed);
         match self {
             Self::Replied => format!(
-                "[agent '{name}' replied after {took} — run agents `read '{name}' to read it]"
+                "[agent '{name}' replied after {took} — run exarch-agents `read '{name}' to read it]"
             ),
             Self::Stopped(r) => format!("[agent '{name}' stopped after {took}: {r}]"),
             Self::Cancelled => format!("[agent '{name}' was cancelled after {took}]"),
@@ -384,7 +384,7 @@ mod tests {
         let took = Duration::from_secs(72);
         assert_eq!(
             AgentOutcome::Replied.marked_item("helper", took),
-            "[agent 'helper' replied after 1 min 12 secs — run agents `read 'helper' to read it]"
+            "[agent 'helper' replied after 1 min 12 secs — run exarch-agents `read 'helper' to read it]"
         );
         assert_eq!(
             AgentOutcome::Failed("boom".into()).marked_item("helper", took),

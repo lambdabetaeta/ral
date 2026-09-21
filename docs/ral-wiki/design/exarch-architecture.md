@@ -3,7 +3,7 @@
 **exarch is a small LLM coding agent that embeds [[map/core|ral-core]] behind a
 deliberately thin architecture.** A model is given one `ral` tool, and every
 tool call is evaluated as a ral top-level run against a persistent in-process
-`Shell`. The `agents` and `fff` surface is provided by ral builtins inside that
+`Shell`. The `exarch-agents` and `fff` surface is provided by ral builtins inside that
 call, not by additional provider tools. The agent loop is just provider
 round-trips, repeated until the model emits no tool call
 ([[map/exarch/agent|agent]]):
@@ -29,7 +29,7 @@ that context bounded and isolated:
 - **persistence.** `let`, `cd`, and env carry across tool calls;
 - **eviction.** Long autonomous runs stay bounded — when the context fills,
   its older half leaves at the next **turn** boundary for the harness's index
-  of what went, and stays readable in the log through `transcript`
+  of what went, and stays readable in the log through `exarch-transcript`
   ([[decisions/260906_context-rollover|context-rollover]],
   [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]); a nudge
   policy decides whether to stop or loop with a synthetic next prompt;

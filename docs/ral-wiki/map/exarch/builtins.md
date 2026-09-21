@@ -150,19 +150,16 @@ Sourced into the shell at boot:
 - `view-text-around path line peek` / `view-hash-around path line peek` — the two
   thin helpers over the atoms: the `2*peek + 1` lines centred on `line`, clamped at the top of
   the file.
-- `pin-set <key> <card>` / `pin-clear <key>` — the model-facing write pair,
-  thin wrappers over `surface `` `pin ``/`` `unpin ``, completing the
-  `pin-*` family the two enquiries below start
-  ([[decisions/260803_register-is-read-write|register-is-read-write]]).
-- the **tasks kit** — `task-new`/`tasks-add`/`tasks-status` and friends, a
-  pure-ral task list that reads its own state back through `pin-read` and
-  writes the rendered rollup forward through `pin-set`/`pin-clear`
+- the **tasks kit** — `task-new` and friends, a pure-ral task list that
+  reads its own state back through `` exarch-pins `read `` and writes the
+  rendered rollup forward through `` exarch-pins `set ``/`` `clear ``
   (`tasks-sync`) rather than threading a bound list through every mutator;
-  `tasks-list` is the read point, and the kit ships no query functions —
-  `filter`/`first` over `tasks-list` is how you query
+  `exarch-tasks` `` `list `` is the read point, and the kit ships no query
+  functions — `filter`/`first` over it is how you query
   ([[map/exarch/cards|cards]]).
-- `goal-set` / `goal-clear` — `pin-set`/`pin-clear` under the `goal`
-  register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
+- `exarch-goal` `` `set ``/`` `clear `` — `exarch-pins` `` `set ``/`` `clear ``
+  under the `goal` register key, kept visible by the
+  [[map/exarch/agent|nudge]] reminder.
 
 ## Harness verbs — context, spawn, schedule, reply
 
@@ -182,13 +179,12 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
-**The desk answers six classes: four families and two singletons.**
-`` `agents ``, `` `schedules ``, `` `context `` and `` `transcript `` each carry
+**The desk answers five classes, each a tagged family.**
+`` `exarch-agents ``, `` `exarch-schedules ``, `` `exarch-context ``,
+`` `exarch-transcript `` and `` `exarch-pins `` each carry
 a tag naming what to do (`family_tag`), and an unrecognised tag is as loud one
 level down as an unrecognised class is at the top (`unknown_tag`) — never a
-silent default. The two singletons — `` `pin-read ``, `` `pin-list `` —
-take a bare payload read positionally (`payload_list` and the scalar
-accessors); a family tag's own **record** crosses by field name, through
+silent default. A family tag's own **record** crosses by field name, through
 `FOValue::try_from(&Value)` and out through `Fields`, `` `evict ``'s and
 `` `grep ``'s included. The desk's decode is not a
 duplicate of the builtin's door but the **trust boundary**: the door checks
@@ -198,12 +194,12 @@ the desk checks again because a guest can send whatever it likes — which is wh
 
 ### Context stewardship
 
-Two verbs over two things: `context` is **what the provider is sent** and the
-model pays for, and `transcript` is **the record**, every turn this session or
+Two verbs over two things: `exarch-context` is **what the provider is sent** and the
+model pays for, and `exarch-transcript` is **the record**, every turn this session or
 its ancestors ever recorded
 ([[decisions/260906_context-rollover|context-rollover]],
-[[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). `context`
-edits and surveys; `transcript` only reads. Both speak **turns**, and every
+[[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). `exarch-context`
+edits and surveys; `exarch-transcript` only reads. Both speak **turns**, and every
 turn carries a **role**: a `user` turn is a prompt (or an import's opening) and
 anything before the first reply, an `assistant` turn is the assistant message
 with the tool results it called for. The turns *answering* a prompt — those
@@ -213,7 +209,7 @@ where the survivor rule needs them and named in no answer
 Every `ral` tool result ends with `TURN: <id>`, the id of the turn it closes,
 so the model has the address before it asks for one.
 
-- **`context <tag>`** → `∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> →
+- **`exarch-context <tag>`** → `∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> →
   F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]],
   total-bytes: Int]`.
   One verb per addressable state: the tag selects the transition, and **every**
@@ -223,7 +219,7 @@ so the model has the address before it asks for one.
   stops being nameable — so the edit is also the resurvey the
   next edit must be written against.
   - `` `survey `` describes the context, one row per resident turn (`turn_row`,
-    the very shape `` transcript `index `` answers with), beside `total-bytes`,
+    the very shape `` exarch-transcript `index `` answers with), beside `total-bytes`,
     which is what is actually sent rather than the sum of the rows: a departed
     turn reports the weight it carried while the context carries only the
     marker standing where it was. Which turns have left is `` transcript
@@ -260,7 +256,7 @@ so the model has the address before it asks for one.
   as runs — `turns 41–43` (`record::model::runs`). There is no byte-delta
   receipt: the decision-relevant number is `total-bytes` now against the
   budget ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`transcript <tag>`** → `∀α ρ2 ρ3. <index | read [turns: [Int]] |
+- **`exarch-transcript <tag>`** → `∀α ρ2 ρ3. <index | read [turns: [Int]] |
   grep [pattern: Str | ρ2] | ρ3> → F α`. Read-only: no tag records a protocol
   event, though each
   records a `Display::HarnessCall` for the screen. The answer type is a bare
@@ -297,8 +293,8 @@ so the model has the address before it asks for one.
 
   `` `read `` is the one harness answer whose size is the size of the thing it
   describes: the survey spends a few hundred bytes to describe a 200 KB
-  context, and this returns the 200 KB. That is why it is a tag of `transcript`
-  and not of `context` — the distinct name is the cheapest safety mechanism a
+  context, and this returns the 200 KB. That is why it is a tag of `exarch-transcript`
+  and not of `exarch-context` — the distinct name is the cheapest safety mechanism a
   model-facing surface has, and the only one that acts before the call rather
   than after — and why the docstring points a long search at a `mnemon` child,
   which shares the transcript and spends its own context on it.
@@ -317,7 +313,7 @@ so the model has the address before it asks for one.
   an opaque continuation token, dropped rather than rendered. Narrowing this
   material — truncation, elision, byte caps — is deliberately not this
   builtin's job: it is `filter`/`take`/`view-text` over the records, the way
-  `tasks-list` puts querying on the caller rather than the kit
+  `` exarch-tasks `list `` puts querying on the caller rather than the kit
   ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
   for the transcript-as-value law this reads under: a turn's own recorded
   `Protocol` material, converted rather than re-rendered). `` `grep `` searches that
@@ -326,7 +322,7 @@ so the model has the address before it asks for one.
   and a provider extension carrying no text a pattern could mean — so nothing
   is searchable that is not readable.
 
-- **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
+- **`exarch-agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
   of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
   `` `reply <value> ``, `` `read <name> `` — each taking one argument. Every
   tag but `` `list `` and `` `read `` answers `` `summary [live: Int, replied:
@@ -342,7 +338,7 @@ so the model has the address before it asks for one.
   wider than what it spawned. The climb stops at a root, so one `/branch` tab
   never lists another's. `` `read `` answers `[name: Str, reply: α]`,
   the value a replied child deposited, which is why the family's answer type is
-  a bare `α` (the `pin-read` precedent) rather than the roster it once was
+  a bare `α` (the `` exarch-pins `read `` precedent) rather than the roster it once was
   ([[decisions/260826_reply-parks|reply-parks]]). `` `reply `` is the sole
   return path of a returning agent — first-orderness checked at the door,
   refused on every non-returning agent with the desk's own didactic text, last
@@ -395,7 +391,7 @@ so the model has the address before it asks for one.
   reach), so **a successful
   cancel answers with a roster that still lists the target** — a request, not a
   transaction, and the one place the rule needs a sentence of its own.
-- **`schedules <tag>`** → `F [[label: Str, trigger: Str, next-s: Int,
+- **`exarch-schedules <tag>`** → `F [[label: Str, trigger: Str, next-s: Int,
   fires: Int]]`. The same shape over `` `list ``, `` `add ``, `` `remove ``.
   `` `add [trigger: …, label: …, prompt: …] `` takes a closed record — a record
   literal infers an exact row, so a missing or surplus field is a static error
@@ -416,16 +412,23 @@ so the model has the address before it asks for one.
   imply nothing happened — the act may have landed and the re-read failed.
   The audit is unchanged: `` `list `` commits no `DeskAct` in either family,
   so each transition is still one act.
-- **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
-  register: the card pinned at `key`, canonically re-encoded
-  ([[map/exarch/cards|cards]]) so a kit can destructure it whether or not the
-  bytes it wrote match what comes back; `()` on a miss or an absent
-  register. Typed on the `from-json` precedent — trusted, not checked —
-  because the register is schemaless by design
-  ([[decisions/260803_register-is-read-write|register-is-read-write]]).
-- **`pin-list`** → `F [String]`. Silent; the keys currently occupied on the
-  caller's register, in `BTreeMap` order — a key names a slot for
-  `pin-read`, not its content.
+- **`exarch-pins <tag>`** → `∀α. F α`. One family over the caller's own pin
+  register: `` `set ``/`` `clear `` write it, `` `read ``/`` `list `` read it
+  back, and it is the register's only door — with the same
+  foreground-only discipline `exarch-agents` and `exarch-context` already have: a call
+  inside `spawn { … }` errors rather than degrading. `` `set `` was legal
+  there before the merge; the uniformity is now the point.
+  - `` `set [key: Str, body: Card] `` → `Unit`.
+  - `` `clear <key> `` → `Unit`.
+  - `` `read <key> `` → `∀α. F α`. The card pinned at `key`, canonically
+    re-encoded ([[map/exarch/cards|cards]]) so a kit can destructure it
+    whether or not the bytes it wrote match what comes back; `()` on a miss
+    or an absent register. Typed on the `from-json` precedent — trusted,
+    not checked — because the register is schemaless by design
+    ([[decisions/260803_register-is-read-write|register-is-read-write]]).
+  - `` `list `` → `F [String]`. Silent; the keys currently occupied on the
+    caller's register, in `BTreeMap` order — a key names a slot for
+    `` `read ``, not its content.
 
 Receipts and listings are ral records the model can bind, filter, and fan out
 over, rather than stringly-typed JSON it re-parses — the composability the

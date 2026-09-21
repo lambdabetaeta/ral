@@ -20,7 +20,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   states an agent is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Evicting`/
   `WaitingOnAgents` — a total state named on the status rule, never recorded:
   the model never sees it), riding as `Transient::State`. A decoded surface
-  class — a `Card` render document a kit raises through the `surface` builtin,
+  class — a `Card` render document a kit raises through the `exarch-surface` builtin,
   a structural observation, a housekeeping notice, a `Pin`/`Unpin`, or a
   worker's `done` — is decoded by [[map/exarch/shell-eval|shell-eval]]'s
   `decode_surface` into its own closed `Surface` vocabulary first, then
