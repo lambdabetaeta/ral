@@ -23,11 +23,11 @@ let ok = try { return 42 } { |_| return -1 }
 echo !{equal $ok 42}
 
 # try calls the handler on failure with a typed error record.
-let status = try { fail [status: 7] } { |e| return $e[status] }
+let status = try { fail [status: 7, message: 'typed error record test'] } { |e| return $e[status] }
 echo !{equal $status 7}
 
 # Inline form: handler can echo, return, or further dispatch.
-try { fail [status: 3] } { |err|
+try { fail [status: 3, message: 'inline dispatch test'] } { |err|
     echo "status is $err[status]"
 }
 

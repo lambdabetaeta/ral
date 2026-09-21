@@ -1,13 +1,14 @@
 //! RC file discovery, parsing, and application.
 //!
-//! An rc file is ral source whose return value is a map.  Recognised keys
-//! map to REPL state: `env`, `prompt`, `bindings`, `aliases`, `edit_mode`,
-//! `bell`, `surface`, `recursion_limit`, `plugins`, `startup`, `theme`.
-//! Unknown keys are silently ignored so future versions can add knobs without
-//! breaking older configs.  A recognised key with a malformed value is
-//! rejected with an error naming the key, while the rest of the map still
-//! applies.
+//! An rc file is ral source whose return value is a configuration record.
+//! Its eleven keys are declared once, in `Form::Rc`'s table, and the checker
+//! holds the file's inferred return row to them: an unknown key is a static
+//! error naming the list, whatever syntax produced it. A file returning a
+//! *map* has no row to check and meets the same keyset at `apply_rc_key`. A
+//! recognised key with a malformed value is rejected with an error naming the
+//! key, while the rest of the file still applies.
 
+use ral_core::typecheck::Form;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
 
@@ -47,7 +48,7 @@ impl Default for RcSettings {
 const DEFAULT_RC: &str = "\
 # ~/.config/ral/rc — ral shell configuration
 #
-# This file must return a map; all keys are optional.
+# This file must return a record or a map; all keys are optional.
 # Uncomment any section you want to customise.
 
 return [
@@ -144,31 +145,16 @@ pub(crate) fn apply_rc_config(
     (settings, startup)
 }
 
-/// Schema for the rc top-level record's scalar-typed keys.
-///
-/// The rc's [`ReturnContract`](ral_core::typecheck::ReturnContract), held
-/// against a literal rc return as it is checked — deliberately partial:
-/// `prompt:`/`aliases:`/`bindings:`/`plugins:`/`env:`/`theme:` hold handler
-/// values, or one type per key rather than one across the key, and no single
-/// `Ty` pins any of them. `apply_rc_key`'s own per-key check below is what
-/// still catches all of them, and every key here besides.
-pub(super) fn rc_field_ty(
-    key: &str,
-    _u: &mut ral_core::typecheck::Unifier,
-) -> Option<ral_core::typecheck::Ty> {
-    use ral_core::typecheck::Ty;
-    match key {
-        "edit_mode" | "surface" => Some(Ty::String),
-        "bell" => Some(Ty::Bool),
-        "recursion_limit" => Some(Ty::Int),
-        _ => None,
-    }
-}
-
 /// Apply a single rc top-level `key: val` pair.  An `Err` names the
 /// offending key and the shape it expected; the caller reports it and moves
 /// on to the next key, so one malformed entry does not block the rest of
 /// the rc file.
+///
+/// The keyset is [`Form::Rc`]'s declared table, which is also what the
+/// checker holds an rc file's returned row to; the shapes it leaves to the
+/// decoder — a map of hooks, a map of aliases, a theme — are the per-key
+/// checks below.  An rc that returns a *map* has no row to check, and this is
+/// where its unknown key is caught instead.
 fn apply_rc_key(
     key: &str,
     val: Value,
@@ -367,7 +353,13 @@ fn apply_rc_key(
                 1,
             )),
         },
-        _ => Ok(()),
+        other => Err(Error::new(
+            format!(
+                "rc: {}. The rest of the file is applied.",
+                ral_core::typecheck::contract::declared(Form::Rc).unknown_key(other)
+            ),
+            1,
+        )),
     }
 }
 
@@ -467,7 +459,7 @@ mod tests {
         };
         let Value::Map(pairs) = config else {
             panic!(
-                "test rc source must return a map; got {}",
+                "test rc source must return a record or a map; got {}",
                 config.type_name()
             );
         };

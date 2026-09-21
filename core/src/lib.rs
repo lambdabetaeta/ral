@@ -131,9 +131,10 @@ impl CompileOutcome {
 /// `$SCRIPT` in the body: self-location is lexical, fixed at elaboration,
 /// never read at eval time.
 ///
-/// `contract` is the form's hold on `source`'s own returned literal map —
-/// an rc file's top-level keys, a plugin manifest's fields — checked in the
-/// same pass as everything else; `None` for a program no form speaks about.
+/// `contract` is the form's hold on the row `source`'s last phrase returns —
+/// an rc file's top-level keys, a plugin manifest's fields.  The *inferred*
+/// row is what is checked, so a key misspelled inside a spread is caught with
+/// one written out; `None` for a program no form speaks about.
 pub fn compile_and_typecheck(
     source: &str,
     schemes: SessionSchemes,

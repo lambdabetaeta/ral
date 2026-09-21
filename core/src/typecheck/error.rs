@@ -205,6 +205,20 @@ pub enum TypeErrorKind {
     DuplicateField {
         label: String,
     },
+    /// A key the table knows and refuses: the advice it carries is the only
+    /// thing the message has to say, so it is not folded into "unknown key".
+    RefusedKey {
+        form: &'static str,
+        key: &'static str,
+        advice: &'static str,
+    },
+    /// Two declared tables name one label at two different ground types, which
+    /// the presence assignment cannot serve: a label has one absent type, so
+    /// the second table's absence would ask it to be both.
+    ContractClash {
+        label: &'static str,
+        forms: [&'static str; 2],
+    },
     /// A map where a form's options belong.  A form's options are fields and a
     /// map's keys are data, so the two have nothing in common but a bracket —
     /// and the mismatch of a row against `[String: α]` would say none of that.
@@ -265,11 +279,6 @@ pub enum TypeErrorKind {
     },
     /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
     FailStatusZero,
-    /// An error record's `message` is neither `String` nor `Bytes`: the one
-    /// part of the shape a row cannot state, so the checker states it.
-    ErrorRecordMessage {
-        actual: Ty,
-    },
     /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
     MalformedAlias {
         detail: &'static str,
@@ -314,6 +323,8 @@ impl TypeErrorKind {
             Self::RowMissingField { .. } => "T0021",
             Self::DuplicateField { .. } => "T0022",
             Self::MapAsOptions { .. } => "T0024",
+            Self::ContractClash { .. } => "T0025",
+            Self::RefusedKey { .. } => "T0026",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",
@@ -324,7 +335,6 @@ impl TypeErrorKind {
             Self::MalformedAlias { .. } => "T0052",
             Self::MalformedUnalias { .. } => "T0053",
             Self::DecoderTakesNoArgument { .. } => "T0054",
-            Self::ErrorRecordMessage { .. } => "T0055",
             Self::SpreadIntoApplication { .. } => "T0056",
             Self::ExecArgNotText { .. } => "T0057",
             Self::IndexIntoThunk => "T0060",

@@ -114,25 +114,61 @@ fn rc_bad_literal_key_fails_the_whole_file() {
     );
 }
 
-/// The same mistake through a *computed* rc return: the rc's return
-/// contract cannot see past the bound variable, so `apply_rc_key`'s own
-/// runtime check is what still catches it — reporting the bad key by name
-/// and applying the keys around it, exactly as before this file grew a
-/// static schema for the literal case.
+/// The same mistake through a *computed* rc return.  What the contract checks
+/// is the inferred row, not the syntax that produced it, so a bound record is
+/// held exactly as a written-out one is.
 #[test]
-fn rc_computed_bad_key_is_reported_and_the_rest_still_applies() {
+fn rc_computed_bad_key_fails_the_whole_file() {
     let (_dir, env) = rc_home("let cfg = [edit_mode: 42, bindings: [okname: 'yes']]\nreturn $cfg");
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
+        out.stderr.contains("skipped due to type errors"),
+        "a computed rc carries a row, and the row is checked: {}",
         out.stderr
-            .contains("rc 'edit_mode' must be a string; got Int"),
+    );
+}
+
+/// An unknown key is a static error naming the rc's list — and it is caught
+/// through a spread, which a literal-only rule would wave through.
+#[test]
+fn rc_unknown_key_behind_a_spread_is_a_static_error() {
+    let (_dir, env) = rc_home("let extra = [surfase: 'minimal']\nreturn [...$extra, env: [:]]");
+
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("surfase") && out.stderr.contains("skipped due to type errors"),
+        "the misspelling must be named before the file runs: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("alive"),
+        "a broken rc must not strand the user at no shell: {}",
+        out.stdout
+    );
+}
+
+/// An rc returning a *map* has no row to check, so the same keyset is met at
+/// `apply_rc_key` instead: the key is named, the list is offered, and the
+/// keys around it still apply.
+#[test]
+fn rc_unknown_key_in_a_mapped_rc_names_the_list_at_run_time() {
+    let (_dir, env) = rc_home("return [:, surfase: 'minimal', edit_mode: 'vi']");
+
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("unknown key 'surfase'"),
         "the bad key must name itself: {}",
         out.stderr
     );
     assert!(
-        out.stdout.contains("=> yes"),
-        "the good key must survive: {}",
+        out.stderr.contains("recursion_limit"),
+        "the refusal must offer the rc's own list: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("alive"),
+        "the rest of the file is applied: {}",
         out.stdout
     );
 }

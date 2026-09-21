@@ -11,7 +11,7 @@ echo !{commands $report}[1][argv][1]
 # try is transparent: it observes nothing of its own, so the failing `fail`
 # and the handler's `echo` land directly in the audit's trail
 let report2 = audit {
-    try { fail [status: 1] } { |_| echo 'handled' }
+    try { fail [status: 1, message: 'observed failure'] } { |_| echo 'handled' }
     echo 'continued'
 }
 echo !{succeeded $report2}

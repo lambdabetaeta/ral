@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 584ed719
+generated_at_commit: b1a0f280
 ---
 
 # A field is a flag and a type
@@ -112,3 +112,32 @@ no `Scheme`, are never quantified, printed or serialised, and
   construct putting a *ground* payload beside a *variable* flag is a declared
   option row — so it binds the declared tables and nothing else, and is checked
   where they register.
+
+## A correction, made while implementing
+
+The plan this decision came from claimed that two forms meeting in one list
+narrow *both* to the empty bundle, and asked for a diagnostic naming which two
+forms met. Neither holds, and the reason is this design's own.
+
+**Both forms stay usable at their own options.** In
+
+```ral
+let w = { |o| within $o { () } }
+let g = { |o| grant $o { () } }
+return [$w, $g]
+```
+
+each wrapper's presence flags are let-generalised, so the list merges two
+*fresh* instances and leaves `w` and `g` themselves alone: `w [dir: '/tmp']`
+still checks after the list, and so does `g [net: true]`. What the merge
+narrows is the merged value. `$both[0]` applied to `[dir: …]` is refused,
+naming the option the all-absent row no longer has, which is what
+`two_forms_in_one_list_narrow_to_the_empty_bundle` pins.
+
+**And no message can say which two forms met.** A row carries labels, fields
+and a tail; a flag carries a two-point value; neither carries provenance, and
+`Δ` records a label's type and not the tables that asked for it. Naming the two
+forms would mean adding provenance to a row or a flag, which is a second kind
+of data on the type and a cost this design declines to pay for a diagnostic.
+The refusal names the missing option instead, which is the fact the program
+tripped on.

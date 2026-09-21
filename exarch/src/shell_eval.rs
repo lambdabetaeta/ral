@@ -1366,7 +1366,7 @@ keep-bottom
         let r = run_shell_direct(
             &mut shell,
             &Capabilities::root(),
-            "fail [status: 7]",
+            "fail [status: 7, message: 'raised error']",
             10,
             &crate::record::Emitter::none(),
         );

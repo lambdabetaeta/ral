@@ -17,7 +17,7 @@ use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
 use super::super::errfmt::plugin_warning;
-use super::manifest::{LoadedPlugin, ManifestHandlers, manifest_field_ty};
+use super::manifest::{LoadedPlugin, ManifestHandlers};
 use super::{PluginRuntime, framed_run_request, load_err, lock};
 
 /// Load a plugin by name (or path) with its options map — empty for a
@@ -57,7 +57,9 @@ pub(crate) fn load_plugin(
             shell,
             &source,
             &path,
-            Some(("plugin manifest", manifest_field_ty)),
+            Some(ral_core::typecheck::contract::declared(
+                ral_core::typecheck::Form::Manifest,
+            )),
         )
     })?;
     let module = instantiate(value, options, name_or_path, shell)?;

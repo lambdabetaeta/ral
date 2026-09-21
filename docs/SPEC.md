@@ -1718,12 +1718,11 @@ error record:
 fail [status: 64, message: 'bad command line']
 ```
 
-A record must contain a nonzero integer `status` field. An optional `message`
-field may be `String` or `Bytes`; an absent message uses `explicit failure`.
-Bytes are decoded lossily for the diagnostic. The checker enforces this shape
-when it is statically known. If a dynamically obtained record contains a
-message of another kind, the runtime uses the default message. Other fields are
-ignored when `fail` raises the error.
+A record must contain a nonzero integer `status` field and a `String`
+`message`: the message is the text the failure carries. The checker enforces
+this shape. A record reaching `fail` from an unchecked boundary — a decoder's
+result, a module's asserted shape — is refused at run time instead. Other
+fields are ignored when `fail` raises the error.
 
 Status 0 is rejected: use `return` for success. A status must fit the runtime's
 signed exit-code range. Passing the error record received by `try` to `fail`
@@ -2914,8 +2913,7 @@ fail [status: 7, message: 'index is stale']
 ```
 
 The `status` field is required, must be an `Int`, must fit the process exit-code
-range, and must be nonzero. `message` is optional and may be a `String` or
-`Bytes`; absent or ill-typed messages become `explicit failure`. Extra fields
+range, and must be nonzero. `message` is required and is a `String`. Extra fields
 are allowed and ignored by `fail`, which permits a caught error record to be
 re-raised directly:
 
@@ -2952,7 +2950,7 @@ also be retained as evidence. This is the record `audit`'s `` `err `` outcome
 and `poll`'s settled `` `err `` outcome carry, so failure reads the same
 wherever it is met.
 
-Static checking rejects a literal `fail [status: 0]`. A dynamically computed
+Static checking rejects a literal zero `status`. A dynamically computed
 zero is rejected at runtime with a suggestion to use `return` for a clean
 result.
 
@@ -3596,11 +3594,10 @@ fail [status: 7, message: 'unavailable']
 ```
 
 The `status` field is required, must be an `Int` in the supported exit-code
-range, and must be nonzero. `message` is optional and may be a `String` or
-`Bytes`; it defaults to `"explicit failure"`. Additional fields are ignored,
-which lets `fail $err` re-raise the record supplied by `try`. Passing a bare
-integer, string, bytes value, a record without an integer `status`, or status 0
-is an error. `exit` and `quit` leave the current program rather than producing
+range, and must be nonzero. `message` is required and is a `String`. Additional
+fields are ignored, which lets `fail $err` re-raise the record supplied by
+`try`. Passing a bare integer, string, bytes value, a record without an integer
+`status` or a `String` `message`, or status 0 is an error. `exit` and `quit` leave the current program rather than producing
 a recoverable failure.
 
 `warn message` takes one `String` and writes it, followed by one newline, to
@@ -3752,9 +3749,9 @@ If neither exists, ral attempts to create a documented skeleton at the first
 available location. `--norc`, also accepted as `--noprofile`, skips both login
 profiles and the RC file.
 
-The RC file is ordinary ral source and its file-level result must be a `Map`.
-`Unit` and every other result shape are rejected rather than treated as an
-empty configuration. For example:
+The RC file is ordinary ral source and its file-level result must be a record
+of configuration keys. `Unit` and every other result shape are rejected rather
+than treated as an empty configuration. For example:
 
 ```ral
 return [
@@ -3788,11 +3785,31 @@ The recognized fields are:
 | `startup: Block` | A zero-argument block run once after the map is applied. |
 | `theme: Record` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
 
-Unknown top-level RC keys are ignored for forward compatibility. An unknown
-key inside `theme` produces a warning. Every recognized field is
-shape-checked without stringification or coercion: a wrong type or invalid
-value produces a diagnostic naming the field and expected shape, while the
-remaining top-level fields still apply.
+The eleven fields above are the RC file's whole keyset, and it is closed: an
+unknown top-level key is an error naming the key and the list. The check is
+over the file's *inferred* return row, not over its syntax, so a key
+misspelled inside a spread is caught exactly as one written out is:
+
+```ral
+let extra = [surfase: 'minimal']
+return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
+```
+
+A file whose return value carries no row — a `Map`, written `[:, k: v]` —
+cannot be checked that way, and meets the same keyset when the map is applied
+instead: the key is named, the list is offered, and the keys around it still
+apply. Every recognized field is shape-checked without stringification or
+coercion: a wrong type or invalid value produces a diagnostic naming the field
+and expected shape, while the remaining top-level fields still apply. An
+unknown key inside `theme` produces a warning.
+
+The same discipline holds of the other two files a host reads against a fixed
+keyset — a plugin manifest (§15.5) and a capability profile (§16) — and of the
+options `within` and `grant` take. Each is one declared table, and no label may
+be declared at two different types across all of them: an optional field is
+absent *at the type its label is assigned*, so a label has one such type across
+a whole check. A build whose tables break that is refused, naming both tables
+and the label.
 
 The prompt body may return a value, whose display form becomes the prompt. If
 it returns `Unit`, its captured standard output becomes the prompt, with one
@@ -3860,11 +3877,15 @@ The manifest schema is:
 ]
 ```
 
-`name` is required. The other fields default to empty collections. Each
-declared field is checked exactly: ral does not stringify a value of the wrong
-type or silently drop a malformed handler. Hook and keybinding handlers each
-take exactly one argument. Unknown hook names, wrong handler arity, invalid key
-notation, invalid guard regexes, and alias conflicts are load errors.
+`name` is required. The other fields default to empty collections, and those
+four are the manifest's whole keyset: an unknown top-level key is an error
+naming the key and the list. A manifest written out as a record is checked
+before the file runs; one a factory returns is checked as it is parsed, against
+the same table. Each declared field is checked exactly: ral does not stringify
+a value of the wrong type or silently drop a malformed handler. Hook and
+keybinding handlers each take exactly one argument. Unknown hook names, wrong
+handler arity, invalid key notation, invalid guard regexes, and alias conflicts
+are load errors.
 Validation and registration are atomic; a rejected load leaves no hooks,
 keybindings, or aliases installed.
 

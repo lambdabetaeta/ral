@@ -155,7 +155,7 @@ builtin_registry! {
         doc: "range <start> <end>  — generate a list of integers from start (inclusive) to end (exclusive).",
         call: |args, mooring, _| collections::builtin_range(args, mooring), },
     Fail { names: ["fail"], ty: scheme::fail,
-        doc: "fail [status: Int, message?: String|Bytes]  — raise an error. status must be nonzero; message defaults to \"explicit failure\". `fail $err` on a caught error re-raises it.",
+        doc: "fail [status: Int, message: String]  — raise an error. status must be nonzero, and the message is the text the failure carries. `fail $err` on a caught error re-raises it.",
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
     Len { names: ["length"], ty: scheme::length,

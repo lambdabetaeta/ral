@@ -59,9 +59,9 @@ pub fn evaluate_checked(
 ///
 /// The path is virtual: the caller owns the filesystem read; this only
 /// names the registered source and keys the cycle stack.  `contract` is the
-/// loading form's hold on `source`'s own returned literal map — the plugin
-/// loader's door, for a manifest's fields — held in the same check as the
-/// rest of the file.
+/// loading form's declared table, whose closed keyset `source`'s returned row
+/// is held to — the plugin loader's door, for a manifest's fields — in the
+/// same check as the rest of the file.
 ///
 /// # Errors
 /// Returns `Err` if `source` fails to compile, breaks `contract`, or for any

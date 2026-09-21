@@ -200,6 +200,10 @@ refactor.
 > - **T0055** — rehomed as `fail`'s post-check, run over the argument's
 >   inferred type once the row has been unified. It is the one thing here HM
 >   genuinely cannot say, and now the only thing that claims to be.
+>   *Superseded 2026-09-21:* a field became a flag paired with a type, so the
+>   row says it after all — `message` is a required `String` on
+>   `error_record_shape`, and the post-check and T0055 are deleted
+>   ([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
 > - **per-argument spans** — *this row was inverted.* `apply_builtin_sig` never
 >   wrapped an argument in a span and underlined the whole call;
 >   `apply_args` wraps each one. Unifying the paths therefore **gained** the

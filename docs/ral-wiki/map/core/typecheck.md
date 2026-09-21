@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: b1a0f280
+generated_at_date: 2026-09-21
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -112,7 +112,18 @@ Internals:
   variant, one arm per kind (`command`, `write`, `read`, `grep`, `check`,
   `worker`, `act`), each its own closed record — so reading a fact's fields is
   ordinary row typing rather than a `Map` lookup [[design/audit|audit]];
-- `scope.rs` — the five structural scope nodes.
+- `scope.rs` — the five structural scope nodes, and `check_declared_row`: the
+  one rule that holds a value's row to a declared table, whether that value is
+  a form's options or a contract file's return;
+- `contract.rs` — the declared tables themselves (`within`, `grant`, the rc
+  file, the plugin manifest), each a closed keyset whose labels are held at a
+  ground type, left to their decoder, or refused with a sentence of their own.
+  It is the single registration point, so the runtime doors that read the same
+  keysets — `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` —
+  dispatch off it rather than each keeping a copy; and it is where the one
+  condition the presence assignment owes is checked, that no two tables name a
+  label at two different ground types
+  ([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
 
 `infer.rs`'s `infer_case` is left whole by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Its one

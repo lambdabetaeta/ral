@@ -5,7 +5,7 @@
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
         warn "FAIL: $name expected: $expected actual: $actual"
-        fail [status: 1]
+        fail [status: 1, message: "assertion failed: $name"]
     }
 }
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a5b0a525
-generated_at_date: 2026-09-16
+generated_at_commit: b1a0f280
+generated_at_date: 2026-09-21
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -67,7 +67,10 @@ Submodules:
   `sigil::system_tool_roots`), and drops bundled-tool grants for coreutils a
   host does not ship (`COREUTILS_UNIX_ONLY_TOOLS`);
 - `load.rs` — `load_capabilities_from_path` / `_from_str` for `.ral`
-  capability profiles.
+  capability profiles, compiled under `grant`'s own declared table
+  (`typecheck::contract`, `Form::Grant`): a profile's dimensions *are* the
+  form's options, so a returned row is held to them statically and the walker
+  above is where a profile returning a map meets the same six keys.
 
 The capability *types* live in [[map/core/shell-state|types/capability]]: the
 single always-frozen `Capabilities`, resolved at decode by the freeze pass

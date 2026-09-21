@@ -170,7 +170,7 @@ fn if_one_armed_true_runs_body() {
 
 #[test]
 fn if_one_armed_false_skips_body() {
-    must_succeed("if false { fail [status: 1] }");
+    must_succeed("if false { fail [status: 1, message: 'unreachable branch'] }");
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn try_error_map_has_status() {
 
 #[test]
 fn fail_propagates_without_try() {
-    must_fail("fail [status: 1]");
+    must_fail("fail [status: 1, message: 'deliberate failure']");
 }
 
 // ── Functional builtins ──────────────────────────────────────────────────
@@ -1363,7 +1363,7 @@ fn a_value_arm_under_a_byte_head_is_refused() {
 #[test]
 fn an_open_route_arm_under_a_byte_head_is_refused() {
     let err = eval(
-        "let h = { |args| fold-lines { |a l| fail [status: 5] } 0 }; \
+        "let h = { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }; \
          within [handlers: [echo: $h]] { echo hi }",
     )
     .expect_err("a byte-routed pin leaves no room for an Int return");
@@ -1449,7 +1449,7 @@ fn empty_lambda_call() {
 #[test]
 fn assign_block_does_not_execute() {
     // Assigning a block should NOT execute it
-    must_succeed("let xv = { fail [status: 1] }\necho 'survived'");
+    must_succeed("let xv = { fail [status: 1, message: 'never forced'] }\necho 'survived'");
 }
 
 #[test]
@@ -1535,7 +1535,7 @@ fn exit_rejects_non_integer_status() {
 #[test]
 fn retry_exhaustion() {
     // false is a value, not a failure. Use fail for actual failure.
-    must_fail("retry 3 { fail [status: 1] }");
+    must_fail("retry 3 { fail [status: 1, message: 'always fails'] }");
 }
 
 // Variant-dispatch `case` coverage lives in core/tests/typecheck.rs and
@@ -1697,7 +1697,7 @@ const ASSERT_EQ_DEF: &str = "
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
         warn 'assert_eq mismatch'
-        fail [status: 1]
+        fail [status: 1, message: \"assert_eq mismatch: $name expected $expected, got $actual\"]
     }
 }";
 
@@ -2181,7 +2181,7 @@ fn cancel_completed_handle_is_noop() {
 #[test]
 fn spawn_error_propagates() {
     // A spawned block that fails — await surfaces the failure.
-    must_fail("let h = !{spawn { fail [status: 1] }}\n!{await $h}");
+    must_fail("let h = !{spawn { fail [status: 1, message: 'spawned task failed'] }}\n!{await $h}");
 }
 
 #[test]
@@ -2212,7 +2212,7 @@ fn spawn_deep_recursion_in_thread() {
 fn guard_propagates_original_error() {
     // The error from body propagates, not from cleanup.
     let result = must_succeed(
-        "let r = try { guard { fail [status: 42] } { echo cleanup } } { |e| return $e[status] }\n\
+        "let r = try { guard { fail [status: 42, message: 'original failure'] } { echo cleanup } } { |e| return $e[status] }\n\
          return $r",
     );
     assert_eq!(result, Value::Int(42));
@@ -3145,7 +3145,7 @@ fn expr_and_short_circuits_false_lhs() {
     // `&&` must not evaluate the RHS when the LHS is false; use a
     // force-of-failing-thunk on the RHS to verify laziness.
     let r = must_succeed(
-        "let boom = { fail [status: 1] }\n\
+        "let boom = { fail [status: 1, message: 'boom forced'] }\n\
          return $[false && !$boom]",
     );
     assert_eq!(r, Value::Bool(false));
@@ -3154,7 +3154,7 @@ fn expr_and_short_circuits_false_lhs() {
 #[test]
 fn expr_or_short_circuits_true_lhs() {
     let r = must_succeed(
-        "let boom = { fail [status: 1] }\n\
+        "let boom = { fail [status: 1, message: 'boom forced'] }\n\
          return $[true || !$boom]",
     );
     assert_eq!(r, Value::Bool(true));

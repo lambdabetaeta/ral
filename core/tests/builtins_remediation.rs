@@ -213,7 +213,10 @@ fn fail_status(source: &str) -> Status {
 fn fail_rejects_status_outside_i32() {
     // 2^32 truncates to 0 under `as i32`; the zero-status guard then saw a
     // success status it exists to forbid.  Range-check before truncating.
-    expect_error("fail [status: 4294967296]", "status");
+    expect_error(
+        "fail [status: 4294967296, message: 'status out of i32 range']",
+        "status",
+    );
 }
 
 /// A bare status never reaches `fail`'s body: the error-record shape is in the
@@ -227,7 +230,10 @@ fn fail_bare_forms_are_rejected() {
 
 #[test]
 fn fail_preserves_in_range_status() {
-    assert_eq!(fail_status("fail [status: 7]"), Status::Code(7));
+    assert_eq!(
+        fail_status("fail [status: 7, message: 'in-range status']"),
+        Status::Code(7)
+    );
 }
 
 #[test]

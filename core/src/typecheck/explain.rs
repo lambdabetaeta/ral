@@ -50,6 +50,13 @@ impl TypeErrorKind {
             Self::MapAsOptions { form, .. } => {
                 format!("`{form}` takes named options, and this is a map")
             }
+            Self::ContractClash {
+                label,
+                forms: [one, two],
+            } => format!("`{one}` and `{two}` both declare '{label}', and at two different types"),
+            Self::RefusedKey { form, key, .. } => {
+                format!("`{form}` does not take '{key}'")
+            }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -106,16 +113,7 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
-            Self::FailStatusZero => {
-                "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
-            }
-            Self::ErrorRecordMessage { actual } => {
-                let ctx = FmtCtx::for_value_types(&[actual]);
-                format!(
-                    "an error record's `message` must be a String or Bytes, but this one is {}",
-                    fmt_ty_ctx(actual, &ctx)
-                )
-            }
+            Self::FailStatusZero => "fail requires a nonzero status".into(),
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
             Self::IndexIntoThunk => {
@@ -171,6 +169,8 @@ impl TypeErrorKind {
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
             Self::MapAsOptions { form, .. } => format!("`{form}` names its options"),
+            Self::ContractClash { label, .. } => format!("'{label}' is declared twice over"),
+            Self::RefusedKey { key, .. } => format!("'{key}' is refused here"),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -182,7 +182,6 @@ impl TypeErrorKind {
                     _ => "case alternatives don't match the value".into(),
                 }
             }
-            Self::ErrorRecordMessage { .. } => "this `message` is not text".into(),
             Self::SpreadIntoApplication { .. } => "this spread has no argv to fill".into(),
             Self::ExecArgNotText { .. } => {
                 "an external's arguments are words, and this is not one".into()
@@ -316,6 +315,18 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              the map's entries into them",
             list = options.join(", "),
         )),
+        // Nothing the program did: this build's own tables disagree, and every
+        // check refuses while they do.
+        TypeErrorKind::ContractClash {
+            label,
+            forms: [one, two],
+        } => Some(format!(
+            "an optional field is absent at the type its label is assigned, so '{label}' \
+             has one such type across the whole check — and `{one}` and `{two}` ask for \
+             two. Give one of them a label of its own, or leave '{label}' to its decoder \
+             in both"
+        )),
+        TypeErrorKind::RefusedKey { advice, .. } => Some((*advice).to_string()),
         TypeErrorKind::ControlOperatorAsValue { name } => Some(format!(
             "did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"
         )),
@@ -367,11 +378,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             RefusedArg::of_ty(ty).map(|refusal| refusal.remedy(command))
         }
         TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
-        TypeErrorKind::ErrorRecordMessage { .. } => Some(
-            "the message is the text the failure carries — render the value first, \
-             as in `message: \"$[to-string $v]\"`"
-                .to_string(),
-        ),
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
         }
@@ -717,8 +723,8 @@ fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let is_error_record = |t: &Ty| matches!(t, Ty::Record(row) if row_has_status_int(row));
     if is_error_record(expected) || is_error_record(actual) {
         return Some(
-            "a failure is raised with an error record: at least `[status: Int]` with a \
-             nonzero status, optionally a `message` of String or Bytes, and any other \
+            "a failure is raised with an error record: at least \
+             `[status: Int, message: String]` with a nonzero status, and any other \
              fields you care to carry — `fail $e` re-raises a caught error as it stands"
                 .to_string(),
         );

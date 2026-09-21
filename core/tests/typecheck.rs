@@ -1367,12 +1367,13 @@ fn within_handler_for_echo_preserving_its_byte_mode_ok() {
 #[test]
 fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
     has_error(
-        "alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn ()",
+        "alias echo { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }\nreturn ()",
         "couldn't match",
     );
     // The diagnostic must name what the author did, not merely the clash.
-    let errs =
-        raw_errors("alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn ()");
+    let errs = raw_errors(
+        "alias echo { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }\nreturn ()",
+    );
     assert!(
         errs.iter().any(|e| e
             .hint()
@@ -1380,7 +1381,9 @@ fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
         "expected the WF-2 hint naming both sides, got: {errs:?}"
     );
     // The same arm returning `Unit` is consistent, and stays accepted.
-    ok("alias echo { |args| fold-lines { |a l| fail [status: 5] } () }\nreturn ()");
+    ok(
+        "alias echo { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } () }\nreturn ()",
+    );
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
@@ -1435,7 +1438,7 @@ fn catch_all_handler_value_arm_is_refused() {
 /// reason: it is byte-routed already.
 #[test]
 fn catch_all_diverging_or_byte_bodies_are_accepted() {
-    ok(r"within [handler: { |n a| fail [status: 1] }] { zzz }");
+    ok(r"within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] { zzz }");
     ok(r"within [handler: { |n a| echo caught }] { zzz }");
 }
 
@@ -1561,7 +1564,7 @@ fn a_catch_all_keeps_its_verdict_through_a_bound_bundle() {
     for arm in [
         r"{ |name args| cd ~ }",
         r"{ |n a| echo caught }",
-        r"{ |n a| fail [status: 1] }",
+        r"{ |n a| fail [status: 1, message: 'unhandled command'] }",
     ] {
         ok(&format!(r"within [handler: {arm}] {{ zzz }}"));
         ok(&format!(r"let o = [handler: {arm}]; within $o {{ zzz }}"));
@@ -1835,38 +1838,43 @@ fn builtin_command_signatures_are_explicit() {
     ok("range 1 3");
     has_error(r#"range "a" 3"#, "couldn't match");
     ok("from-lines");
-    has_error("fail [status: 0]", "fail requires a nonzero status");
+    has_error(
+        "fail [status: 0, message: 'zero status should be rejected']",
+        "fail requires a nonzero status",
+    );
 }
 
-/// `fail` takes an error record, so a bare status — or a record without one —
-/// is a static error rather than a runtime one.  The tail is open: a caught
-/// error re-raises with the fields `try` gave it, and extra fields are the
-/// point of the shape, not a violation of it.
+/// `fail` takes an error record, so a bare status — or a record missing one of
+/// the two fields it demands — is a static error rather than a runtime one.
+/// The tail is open: a caught error re-raises with the fields `try` gave it,
+/// and extra fields are the point of the shape, not a violation of it.
 #[test]
 fn fail_demands_an_error_record() {
-    ok("fail [status: 1]");
     ok(r#"fail [status: 2, message: "boom"]"#);
     ok(r#"fail [status: 2, message: "boom", cmd: "deploy", attempt: 3]"#);
-    ok("try { fail [status: 1] } { |e| fail $e }");
+    ok(r#"try { fail [status: 1, message: "boom"] } { |e| fail $e }"#);
 
     has_error("fail 1", "couldn't match");
     has_error(r#"fail "boom""#, "couldn't match");
     has_error(r#"fail [message: "boom"]"#, "no field named 'status'");
-    has_error(r#"fail [status: "one"]"#, "couldn't match");
+    has_error("fail [status: 3]", "missing a field named 'message'");
+    has_error(r#"fail [status: "one", message: "boom"]"#, "couldn't match");
 }
 
-/// The `message` field is `String` or `Bytes` — a union the row cannot spell,
-/// so the checker judges it once the record's shape is known.  An unresolved
-/// field is left alone: both spellings run, and picking one would be a guess.
+/// `message` is required, and it is `String`: the row states the field's type,
+/// so a `Bytes` message is a mismatch like any other.
 #[test]
 fn fail_message_must_be_text() {
-    ok("let m = !{ints-to-bytes [104, 105]}; fail [status: 1, message: $m]");
     ok("let f = { |m| fail [status: 1, message: $m] }; return ()");
 
-    has_error("fail [status: 1, message: 42]", "must be a String or Bytes");
     has_error(
-        "let e = try { fail [status: 1] } { |e| return $e }\nfail [...$e, message: 42]",
-        "must be a String or Bytes",
+        "let m = !{from-bytes}\nfail [status: 1, message: $m]",
+        "couldn't match",
+    );
+    has_error("fail [status: 1, message: 42]", "couldn't match");
+    has_error(
+        "let e = try { fail [status: 1, message: \"boom\"] } { |e| return $e }\nfail [...$e, message: 42]",
+        "couldn't match",
     );
 }
 
@@ -3293,16 +3301,49 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
     );
 }
 
-// ─── The return contract: the rc/manifest literal-return vet ─────────────────
+// ─── The return contract: a contract file's returned row ─────────────────────
 
-fn test_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<Ty> {
-    match key {
-        "n" => Some(Ty::Int),
-        _ => None,
-    }
-}
+/// A host's own table, held to the same condition the declared four are.
+static TEST_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
+    form: "test",
+    keys: &[
+        ral_core::typecheck::contract::Key {
+            label: "n",
+            holds: ral_core::typecheck::contract::Holds::At(Ty::Int),
+            reason: None,
+        },
+        ral_core::typecheck::contract::Key {
+            label: "loose",
+            holds: ral_core::typecheck::contract::Holds::Decoded,
+            reason: None,
+        },
+    ],
+};
 
-fn schema_errors(src: &str) -> Vec<TypeError> {
+/// A table with a key the row must have and a key it knows and refuses — the
+/// manifest's `name:` and `capabilities:` in miniature.
+static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
+    form: "required",
+    keys: &[
+        ral_core::typecheck::contract::Key {
+            label: "must",
+            holds: ral_core::typecheck::contract::Holds::Required(Ty::String),
+            reason: None,
+        },
+        ral_core::typecheck::contract::Key {
+            label: "loose",
+            holds: ral_core::typecheck::contract::Holds::Decoded,
+            reason: None,
+        },
+        ral_core::typecheck::contract::Key {
+            label: "banned",
+            holds: ral_core::typecheck::contract::Holds::Refused("write it somewhere else"),
+            reason: None,
+        },
+    ],
+};
+
+fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let top = elaborate(&ast, std::collections::HashSet::default(), "")
         .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
@@ -3312,10 +3353,29 @@ fn schema_errors(src: &str) -> Vec<TypeError> {
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
-        Some(("test", test_field_ty)),
+        Some(table),
     )
     .err()
     .unwrap_or_default()
+}
+
+fn schema_errors(src: &str) -> Vec<TypeError> {
+    contract_errors(&TEST_TABLE, src)
+}
+
+/// A key the row must have is demanded, and its absence is not an unknown
+/// key — the plugin manifest's `name:` is this shape.
+#[test]
+fn return_schema_demands_a_required_key() {
+    let errs = contract_errors(&REQUIRED_TABLE, "return [loose: 1]");
+    assert!(
+        errs.iter().any(|e| e.kind.code() == "T0021"),
+        "expected T0021, got: {errs:?}"
+    );
+    assert!(
+        contract_errors(&REQUIRED_TABLE, "return [must: 'here']").is_empty(),
+        "the required key, written, satisfies it"
+    );
 }
 
 #[test]
@@ -3330,16 +3390,51 @@ fn return_schema_accepts_a_correctly_typed_literal_field() {
     assert!(errs.is_empty(), "expected no schema errors, got: {errs:?}");
 }
 
-/// The return value is a bound variable, not a literal map: nothing for the
-/// contract to hold, so it must not fire at all — not even to (wrongly)
-/// reject the map `m` happens to hold.
+/// The row is what is checked, not the syntax that built it: a return the
+/// program computed is held exactly as one written out is.
 #[test]
-fn return_schema_skips_a_computed_return_value() {
-    let errs = schema_errors("let m = [n: \"x\"]\nreturn m");
+fn return_schema_checks_a_computed_return_value() {
+    let errs = schema_errors("let m = [n: \"x\"]\nreturn $m");
     assert!(
-        errs.is_empty(),
-        "a computed return must not be statically checked, got: {errs:?}"
+        !errs.is_empty(),
+        "a computed return carries a row, and the row is checked"
     );
+}
+
+/// §7's misspelling: the bad key arrives through a spread, which a
+/// literal-only rule would wave through.
+#[test]
+fn return_schema_catches_a_key_misspelled_behind_a_spread() {
+    let errs = schema_errors("let extra = [nn: 1]\nreturn [...$extra, loose: 1]");
+    assert!(
+        errs.iter().any(|e| e.kind.code() == "T0020"),
+        "expected T0020, got: {errs:?}"
+    );
+}
+
+/// A key the table knows and refuses says so in its own words: folding it into
+/// "unknown key, here is the list" would lose the only advice it carries.
+#[test]
+fn return_schema_keeps_a_refused_keys_own_sentence() {
+    let errs = contract_errors(&REQUIRED_TABLE, "return [must: 'here', banned: 1]");
+    let refusal = errs
+        .iter()
+        .find(|e| e.kind.code() == "T0026")
+        .unwrap_or_else(|| panic!("expected T0026, got: {errs:?}"));
+    assert_eq!(
+        refusal.hint().as_deref(),
+        Some("write it somewhere else"),
+        "the table's own advice is the message"
+    );
+    assert_eq!(errs.len(), 1, "and it is not also an unknown key: {errs:?}");
+}
+
+/// A return with no row — the empty `[:]` — has nothing to check, and stays
+/// on the runtime door that dispatches off the same table.
+#[test]
+fn return_schema_leaves_a_map_to_the_runtime_door() {
+    let errs = schema_errors("return [:, nn: 1]");
+    assert!(errs.is_empty(), "a map carries no row, got: {errs:?}");
 }
 
 /// `$x` is bound by an earlier top-level `let` — a separate `Phrase::Define`

@@ -3,7 +3,7 @@
 let assert_eq = { |name expected actual|
     if $[not !{equal $expected $actual}] {
         warn "FAIL: $name"
-        fail [status: 1]
+        fail [status: 1, message: "assertion failed: $name"]
     }
 }
 

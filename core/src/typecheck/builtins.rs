@@ -9,10 +9,8 @@
 //! needs no renaming pass.
 
 use super::env::TyEnv;
-use super::error::TypeErrorKind;
 use super::fmt::fmt_scheme;
 use super::generalize::generalize;
-use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
 use super::ty::{CompTy, Field, Label, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
@@ -199,21 +197,21 @@ fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
     Ty::Variant(row)
 }
 
-/// The error record a raising form demands of its argument: `status`, over a
-/// fresh tail.  Open, because re-raising a caught error carries `cmd`, `line`,
-/// `col` and whatever else the record picked up along the way; the tail is
-/// what makes [`try_error_record`] an instance of this shape.
-///
-/// `message` is absent by design: it is optional, and its type is `String` or
-/// `Bytes` — a union no row can spell.  [`Inferencer::check_error_message`]
-/// judges it once the row has been unified.  The caller quantifies the row
-/// itself — [`scheme::fail`] — so this takes it directly rather than minting
-/// one.
+/// The error record a raising form demands of its argument: `status` and
+/// `message`, over a fresh tail.  Open, because re-raising a caught error
+/// carries `cmd`, `line`, `col` and whatever else the record picked up along
+/// the way; the tail is what makes [`try_error_record`] an instance of this
+/// shape.  The caller quantifies the row itself — [`scheme::fail`] — so this
+/// takes it directly rather than minting one.
 pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     Ty::Record(Row::Extend(
         Label::Field("status".into()),
         Field::present(Ty::Int),
-        Box::new(Row::Var(row)),
+        Box::new(Row::Extend(
+            Label::Field("message".into()),
+            Field::present(Ty::String),
+            Box::new(Row::Var(row)),
+        )),
     ))
 }
 
@@ -863,7 +861,7 @@ pub mod scheme {
 
     // ── Divergence ───────────────────────────────────────────────────────
 
-    /// `fail :: ∀α ρ r. {status: Int | r} → F[ρ] α`.
+    /// `fail :: ∀α ρ r. {status: Int, message: String | r} → F[ρ] α`.
     ///
     /// An error record, open at the tail so a caught error re-raises with the
     /// fields `try` gave it.  Divergent, so its route and value join whatever
@@ -973,14 +971,6 @@ pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
     step
 }
 
-/// A per-key type schema, driving `check_record_entry_fields` in `super::infer`.
-///
-/// `None` for a key leaves that entry runtime-dispatched: still inferred for its
-/// side-effects, but unified against nothing. `pub`, not `pub(crate)`: a host
-/// crate's own rc/manifest schema — half of a
-/// [`ReturnContract`](super::ReturnContract) — is one of these too.
-pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
-
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
 /// `builtins::misc::builtin_fail` enforces at runtime can be diagnosed at
 /// typecheck time.
@@ -1003,40 +993,6 @@ pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
             ) if k == "status"
         ))
     )
-}
-
-impl Inferencer<'_> {
-    /// The half of the error-record shape the row cannot carry: a `message`,
-    /// if the record has one, is `String` or `Bytes`.  Read after unification,
-    /// so a field arriving through the open tail is judged too.  A field still
-    /// a variable stays free — the runtime takes either spelling, so pinning
-    /// one here would be a guess.
-    pub(super) fn check_error_message(&mut self, actual: &Ty) {
-        let Ty::Record(row) = self.ctx.unifier.apply_ty(actual) else {
-            return;
-        };
-        let mut rest = row;
-        let message = loop {
-            match rest {
-                // A field that may be there is judged at the type it would
-                // have; one the row says is absent carries no message at all.
-                Row::Extend(label, field, tail) => {
-                    if label == Label::Field("message".into()) {
-                        match field.payload() {
-                            Some(ty) => break ty.clone(),
-                            None => return,
-                        }
-                    }
-                    rest = *tail;
-                }
-                Row::Empty | Row::Var(_) => return,
-            }
-        };
-        if !matches!(message, Ty::String | Ty::Bytes | Ty::Var(_)) {
-            self.ctx
-                .diagnose(TypeErrorKind::ErrorRecordMessage { actual: message });
-        }
-    }
 }
 
 #[cfg(test)]

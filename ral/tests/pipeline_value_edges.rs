@@ -582,7 +582,7 @@ fn function_non_final_stdout_does_not_replace_return_value() {
 #[test]
 fn try_handler_final_stdout_can_be_recovery_value() {
     let o = run_pipe(
-        "let recovered = try { fail [status: 7] } { |_| echo caught }\necho \"x=$recovered\"",
+        "let recovered = try { fail [status: 7, message: 'caught by handler'] } { |_| echo caught }\necho \"x=$recovered\"",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "x=caught", "full stdout: {:?}", o.stdout);
@@ -866,7 +866,9 @@ fn try_relaxed_echo_body_binds_the_line_when_body_succeeds() {
 
 #[test]
 fn try_relaxed_echo_body_binds_the_handlers_unit_when_handler_taken() {
-    let o = run_pipe("let v = try { fail [status: 7] } { |_| return () }\necho \"[$v]\"");
+    let o = run_pipe(
+        "let v = try { fail [status: 7, message: 'handler discards this'] } { |_| return () }\necho \"[$v]\"",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "[()]");
 }

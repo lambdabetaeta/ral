@@ -27,7 +27,7 @@
 let for = { |list fn| each $fn $list }
 ## Reduce without an initial value; list must be non-empty.
 let reduce = { |f items|
-    if !{is-empty $items} { fail [status: 1] } else {
+    if !{is-empty $items} { fail [status: 1, message: "reduce: the list is empty; use fold if you have an initial value"] } else {
         let [head, ...tail] = $items
         fold $f $head $tail
     }

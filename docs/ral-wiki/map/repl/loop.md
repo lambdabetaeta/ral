@@ -1,6 +1,6 @@
 ---
-generated_at_commit: da423d0d
-generated_at_date: 2026-09-13
+generated_at_commit: b1a0f280
+generated_at_date: 2026-09-21
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -72,12 +72,13 @@ shell's current job. An rc file goes through `compile_and_typecheck` against
 the live session, against the `FileId` `evaluate_checked` registers its text
 with, so an alias or function it defines keeps naming the rc for the whole
 session. It compiles under a **return contract**
-(`ral_core::typecheck::ReturnContract`): `("rc", config.rs::rc_field_ty)`,
-which holds the rc's own returned literal map to that schema — the same
-static, spanned treatment `within`/`grant` options get, extended to a
-program's own return value. The contract is part of the one inference, not a
-pass after it: each field is pinned as the map is inferred, so there is no
-second reading of the return to disagree with the first. Both failing
+(`ral_core::typecheck::ReturnContract`): `contract::declared(Form::Rc)`, whose
+closed keyset the rc's own returned *row* is held to — the same rule
+`within`/`grant` options get, extended to a program's own return value. It is
+the inferred row and not the syntax that produced it, so a key misspelled
+inside a spread is caught with one written out; a return carrying no row (a
+`Map`) meets the same keyset at `apply_rc_key` instead. The contract is part of
+the one inference, not a pass after it. Both failing
 `CompileOutcome` arms — `Parse` and `Types`, a broken contract among the
 latter — are *reported and skipped*: the file has no runnable annotation,
 while the boot always survives
@@ -163,15 +164,16 @@ the structural worksheet projection, and completion live in
   terminal title is written separately. A failing prompt body
   falls back to the default `❯ ` beside its per-render diagnostic, and the
   session survives so the user can rebind it.
-- `config.rs` — rc is ral source returning a map; recognised keys (`env`,
-  `prompt` — registered as the `Session/"prompt"` hook — `bindings`,
-  `aliases`, `edit_mode`, `bell`, `surface`, `recursion_limit`, `plugins`,
-  `startup`, `theme`) map to REPL state, unknown keys ignored. A malformed
-  *literal* value for `edit_mode`/`surface`/`bell`/`recursion_limit`/`env`/
-  `theme` is now `rc_field_ty`'s static failure, above — this per-key
-  runtime check is what still catches a computed one, or any of those six
-  keys' own further shape rules (e.g. `edit_mode` must be `'emacs'`/`'vi'`,
-  not just a `String`), reporting it by name and applying the rest.
+- `config.rs` — rc is ral source returning a configuration record; its eleven
+  keys (`env`, `prompt` — registered as the `Session/"prompt"` hook —
+  `bindings`, `aliases`, `edit_mode`, `bell`, `surface`, `recursion_limit`,
+  `plugins`, `startup`, `theme`) are declared once, in `Form::Rc`'s table, and
+  `apply_rc_key` maps each to REPL state. A wrong type at one of the four
+  scalar keys is the table's static failure, above; this per-key runtime check
+  is what catches those keys' own further shape rules (e.g. `edit_mode` must be
+  `'emacs'`/`'vi'`, not just a `String`), and an unknown key in an rc that
+  returned a *map* — no row to check — reporting either by name and applying
+  the rest.
 - `theme.rs` — `OutputTheme` (the `value_prefix`, default `"=> "`, and an
   optional `value_color`, default yellow) governs value rendering;
   process-global behind an `RwLock`, set once from rc.

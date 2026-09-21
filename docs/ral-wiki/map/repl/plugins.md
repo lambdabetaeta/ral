@@ -1,6 +1,6 @@
 ---
-generated_at_commit: da423d0d
-generated_at_date: 2026-09-13
+generated_at_commit: b1a0f280
+generated_at_date: 2026-09-21
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -139,14 +139,19 @@ once, so the frontends cannot disagree.
   as an ordered match with the built-in as the final arm. A `capabilities:` key
   is a load error, not silent confinement
   — plugins run with host authority; to attenuate, wrap the invocation in
-  `grant { … }`. `manifest_field_ty` gives `name:` a static schema (below);
-  `hooks:`/`keybindings:`/`aliases:` stay on this file's own runtime parse,
-  their handler values having no one fixed shape to pin.
+  `grant { … }`. It is not an *unknown* key either: the manifest's declared
+  table (`typecheck::contract`, `Form::Manifest`) marks it refused, with that
+  advice as its own sentence. The table also closes the keyset — `name`
+  (required, `String`), `aliases`, `hooks`, `keybindings` — so an unknown key
+  is an error naming the list, here and in the checker both;
+  `hooks:`/`keybindings:`/`aliases:` stay on this file's own runtime parse for
+  their *shape*, their handler values having no one fixed type to pin.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
   `RAL_PATH`, typechecks and evaluates it through
   `modules::evaluate_source` under the return contract
-  `("plugin manifest", manifest::manifest_field_ty)`, held against a literal
-  manifest return inside that one check — instantiates a parameterised
+  `contract::declared(Form::Manifest)`, whose closed keyset the file's
+  *inferred* return row is held to inside that one check — instantiates a
+  parameterised
   plugin block through a framed hook run, registers its hooks into the
   shell's hook table (`register_plugin_hooks`), installs alias bindings, and
   records it (retaining the file source on the `LoadedPlugin`). Options

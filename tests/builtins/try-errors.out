@@ -5,8 +5,6 @@
 custom failure
 9
 boom
-3
-explicit failure
 caught status 1
 inner caught
 continued after inner

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: da423d0d
-verified_at_date: 2026-09-13
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, ReturnContract, FieldSchema, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
+verified_at_commit: b1a0f280
+verified_at_date: 2026-09-21
+anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
@@ -92,13 +92,15 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   `Unit` for a stage type. The verdict rides inside the comp;
   `CompileOutcome` is unchanged in shape. ([[map/core/typecheck|typecheck]])
 
-A loading form may also hand this rung a `ReturnContract` — a name to blame
-and a `FieldSchema` — and the checker holds the toplevel's own literal
-`return [k: v, …]` to it, pinning each field as that map is inferred. It is
-one inference under one contract: the rc's keys and a plugin manifest's
-fields are vetted in the same pass, with the same spans, as the rest of the
-file, and a program returning anything but a literal map carries nothing for
-a contract to hold and is left to its loader's runtime check.
+A loading form may also hand this rung a `ReturnContract` — one of the
+declared `typecheck::contract::Table`s — and the checker holds the toplevel's
+own returned *row* to that table's closed keyset. It is one inference under
+one contract: the rc's eleven keys, a plugin manifest's four and a capability
+profile's six are vetted in the same pass, with the same spans, as the rest of
+the file, and the row is what is checked rather than the syntax that built it,
+so a key misspelled inside a spread is caught with one written out. A program
+whose return carries no row — a `Map`, a plugin factory's `Thunk` — is left to
+its loader's runtime door, which dispatches off the same table.
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one

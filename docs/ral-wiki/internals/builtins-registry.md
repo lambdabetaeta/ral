@@ -32,7 +32,7 @@ well as the evaluator's application gate.
 The diagnostic facet is deliberately not a typing rule. It says what a wrong
 call *means* for this verb, which no polytype can state — that an argument
 written to a decoder is a misreading of where the bytes come from, or that
-`fail [status: 0]` wants `return`. Everything a type can state is in the
+a zero `status` on `fail` wants `return`. Everything a type can state is in the
 scheme. Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
 `concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, `misc.rs` for

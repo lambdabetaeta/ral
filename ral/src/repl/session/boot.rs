@@ -15,9 +15,7 @@ use ral_core::types::{Break, Closure, DefaultPolicy, Escape, HookName, HookSig, 
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use std::sync::{Arc, Mutex};
 
-use super::super::config::{
-    RcSettings, apply_rc_config, create_default_rc, find_ralrc, rc_field_ty,
-};
+use super::super::config::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
@@ -350,7 +348,7 @@ pub(super) fn create_frontend(
 // Two kinds of startup file, each with exactly one contract on its return
 // value: a login profile is a script sourced for its effects and must
 // return `()`; the rc file is a configuration expression and must
-// return a map.  Both share [`evaluate_startup_file`].
+// return a record or a map.  Both share [`evaluate_startup_file`].
 
 /// Source a login profile.  Anything other than `()` — a configuration
 /// map included — is rejected: silently discarding a returned map would
@@ -399,11 +397,18 @@ fn source_rc(path: &str, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>)
 /// Evaluate the rc file and check its contract: a configuration map.
 /// `Ok(None)` when `exit` escaped the file before it produced one.
 fn rc_config(path: &str, shell: &mut Shell) -> Result<Option<Map>, String> {
-    match evaluate_startup_file(path, shell, Some(("rc", rc_field_ty)))? {
+    match evaluate_startup_file(
+        path,
+        shell,
+        Some(ral_core::typecheck::contract::declared(
+            ral_core::typecheck::Form::Rc,
+        )),
+    )? {
         None => Ok(None),
         Some(Value::Map(pairs)) => Ok(Some(pairs)),
         Some(other) => Err(format!(
-            "{path}: rc file must return a map; got {}",
+            "{path}: rc file must return a record or a map, e.g. `[edit_mode: 'vi']` or `[:]`; \
+             got {} — does the file end with `return [...]`?",
             other.type_name()
         )),
     }
@@ -445,11 +450,11 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 /// returning its value for the caller's contract check.  `Ok(None)` means
 /// `exit` escaped the file — sourcing stops with no value to check.
 ///
-/// `contract`, when given, additionally holds the file's returned literal
-/// map to a field schema — the rc file's top-level keys — in the same check
-/// as the rest of the file, so a breach is reported and skipped exactly like
-/// any other type error: the login profiles pass `None`, having no such
-/// contract of their own.
+/// `contract`, when given, additionally holds the file's returned row to a
+/// declared table — the rc file's eleven keys — in the same check as the rest
+/// of the file, so a breach is reported and skipped exactly like any other
+/// type error: the login profiles pass `None`, having no such contract of
+/// their own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
@@ -559,7 +564,24 @@ mod tests {
     fn rc_returning_unit_is_rejected() {
         let (_dir, path) = startup_file("return ()\n");
         let err = rc_config(&path, &mut booted_shell()).unwrap_err();
-        assert!(err.contains("rc file must return a map; got Unit"), "{err}");
+        assert!(
+            err.contains("rc file must return a record or a map") && err.contains("got Unit"),
+            "{err}"
+        );
+    }
+
+    /// An rc file whose last phrase is a `let`, not a `return`, has no
+    /// value of its own kind: `run_phrase_define` yields `Unit` same as an
+    /// explicit `return ()`, so it hits the same refusal — the easy accident
+    /// of writing the config as a series of `let`s and forgetting `return`.
+    #[test]
+    fn rc_ending_in_let_is_rejected() {
+        let (_dir, path) = startup_file("let x = 1\n");
+        let err = rc_config(&path, &mut booted_shell()).unwrap_err();
+        assert!(
+            err.contains("rc file must return a record or a map") && err.contains("got Unit"),
+            "{err}"
+        );
     }
 
     /// A malformed literal rc key is a type error, caught before the file

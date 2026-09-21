@@ -1,10 +1,13 @@
 //! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
-//! nodes, plus the option rows of `within` and `grant`.  The sixth scope node,
-//! `CompKind::Redirect`, is typed inline in `infer.rs`.
+//! nodes.  The sixth scope node, `CompKind::Redirect`, is typed inline in
+//! `infer.rs`.
 //!
-//! A form's options are a closed row, minted fresh at every occurrence, and
-//! the options value — written out or arriving bound — is unified against it.
-//! One rule, one verdict, both spellings.
+//! A form's options are a closed row, minted fresh at every occurrence from
+//! the table it declares in [`super::contract`], and the options value —
+//! written out or arriving bound — is unified against it.  One rule, one
+//! verdict, both spellings.  `check_declared_row` is that rule, and a contract
+//! file's returned row goes through it too: an rc file and a plugin manifest
+//! are the same judgment over a different table.
 //!
 //! The runtime's own unknown-key refusals — `WithinScope::parse`'s and
 //! `decode_capability_map`'s — survive that, and are not dead code: `use`
@@ -16,6 +19,7 @@
 //! its caller to compose into `CompTy::Return(sig.route, Box::new(sig.value))`.
 
 use super::builtins::{audit_record, try_error_record};
+use super::contract::{Form, Holds, Key, Table, declared};
 use super::error::{Reason, TypeErrorKind};
 use super::infer::Inferencer;
 use super::route::PayloadRoute;
@@ -32,63 +36,54 @@ pub(super) struct ScopeSig {
     pub(super) route: PayloadRoute,
 }
 
-/// One option a form declares: the label, the type required there, and the
-/// sentence a clash at that label earns.
+/// One option a form declares, as this occurrence sees it: the label, the type
+/// required there, and the sentence a clash at that label earns.
 ///
 /// Built per occurrence, never shared: two `within`s sharing one row would
 /// unite their flags, so `within [dir: "/a"] { }` followed by `within [] { }`
 /// would demand that `dir` be present and absent at once.
-struct FormOption {
-    label: &'static str,
-    ty: Ty,
-    reason: Reason,
+pub(super) struct FormOption {
+    pub(super) label: &'static str,
+    pub(super) field: Field,
+    pub(super) reason: Reason,
 }
 
-/// `within`'s options.  `env:` is heterogeneous and `parse_env`'s to judge, so
-/// it is declared at a variable and stays the decoder's.
-///
-/// The catch-all declares a route *variable* and pins the value at `Unit`:
-/// `bytes_subsumes`' two branches both end in `value ~ Unit` and differ only
-/// in whether the route is left at `Value`, so `Unit` is the whole of WF-2's
-/// subsumption and leaving the route free is the rest.  Declaring `Bytes`
-/// here would commit a bound arm's route one occurrence at a time.
-fn within_options(u: &mut Unifier) -> Vec<FormOption> {
-    let env = u.fresh_ty();
-    let route = u.fresh_route();
-    let handler = Ty::Thunk(Box::new(CompTy::Fun(
-        Box::new(Ty::String),
-        Box::new(CompTy::Fun(
-            Box::new(Ty::argv()),
-            Box::new(CompTy::Return(route, Box::new(Ty::Unit))),
-        )),
-    )));
-    vec![
-        option("within", "dir", Ty::String),
-        option("within", "env", env),
-        FormOption {
-            label: "handler",
-            ty: handler,
-            reason: Reason::CatchAllRoutePin,
-        },
-    ]
-}
-
-/// `grant`'s options.  Everything but the two flags is
-/// `decode_capability_map`'s: a policy value may be a string or a list, and
-/// the two mix within one record.  Typing them to full depth would put one
-/// label at two ground types — `editor.read` beside `fs.read` — which is the
-/// one condition the assignment `Δ` owes.
-fn grant_options(u: &mut Unifier) -> Vec<FormOption> {
-    ["exec", "fs", "net", "detach", "editor", "shell"]
-        .into_iter()
-        .map(|label| {
-            let ty = match label {
-                "net" | "detach" => Ty::Bool,
-                _ => u.fresh_ty(),
+/// Mint one occurrence of `table`'s row.  A refused key is declared at a
+/// fresh flag over a fresh payload — nothing about its *type* is wrong, so the
+/// row absorbs it and the refusal is said in its own words elsewhere.
+pub(super) fn occurrence(table: &'static Table, u: &mut Unifier) -> Vec<FormOption> {
+    table
+        .keys
+        .iter()
+        .map(|key| {
+            let ty = match &key.holds {
+                Holds::At(ty) => ty.clone(),
+                Holds::Required(ty) => {
+                    return FormOption {
+                        label: key.label,
+                        field: Field::present(ty.clone()),
+                        reason: field_reason(table, key),
+                    };
+                }
+                // A refused key is declared like a decoded one: its refusal is
+                // about the key, never about the type under it.
+                Holds::Decoded | Holds::Refused(_) => u.fresh_ty(),
+                Holds::Shaped(shape) => shape(u),
             };
-            option("grant", label, ty)
+            FormOption {
+                label: key.label,
+                field: Field::Var(u.fresh_presence_var(), Box::new(ty)),
+                reason: field_reason(table, key),
+            }
         })
         .collect()
+}
+
+fn field_reason(table: &'static Table, key: &Key) -> Reason {
+    key.reason.clone().unwrap_or_else(|| Reason::OptionField {
+        form: table.form,
+        key: key.label.to_string(),
+    })
 }
 
 /// Where `label`'s value sits, when the options were written out.
@@ -102,60 +97,126 @@ fn written_at(opts: &Val, label: &str) -> Option<Span> {
     })
 }
 
-fn option(form: &'static str, label: &'static str, ty: Ty) -> FormOption {
-    FormOption {
-        label,
-        ty,
-        reason: Reason::OptionField {
-            form,
-            key: label.to_string(),
-        },
-    }
-}
-
 impl Inferencer<'_> {
-    /// Unify the options value against the form's own row — written out or
-    /// arriving bound, one rule and one verdict.
+    /// Unify `ty` against one occurrence of `table`'s row.
     ///
     /// Label by label, so a clash carries that label's own sentence, and
-    /// closed at the end: an option the form does not declare meets the empty
-    /// row there, and the refusal names the form's list.
-    fn check_options(&mut self, opts: &Val, form: &'static str, options: Vec<FormOption>) {
-        let opts_ty = self.infer_options_val(opts);
-        let labels: Vec<&'static str> = options.iter().map(|o| o.label).collect();
+    /// closed at the end: a label the table does not declare meets the empty
+    /// row there, and the refusal names the table's list.  `written`, when the
+    /// value was written out, puts each caret on the entry that earned it.
+    pub(super) fn check_declared_row(
+        &mut self,
+        ty: &Ty,
+        table: &'static Table,
+        written: Option<&Val>,
+    ) {
         let whole = Reason::FormOptions {
-            form,
-            options: labels.clone(),
+            form: table.form,
+            options: table.offered(),
         };
-        if matches!(self.ctx.unifier.resolve_ty(&opts_ty), Ty::Map(_)) {
-            self.ctx.diagnose(TypeErrorKind::MapAsOptions {
-                form,
-                options: labels,
-            });
-            return;
-        }
+        // The declared side goes first throughout, so every verdict reads from
+        // the table outwards: a declared type is what was expected, a label
+        // the table demands and the row lacks is *missing*, and a label left
+        // over when the table is exhausted is *extra*.
         let mut tail = self.ctx.unifier.fresh_row();
         self.ctx
-            .unify_ty(&opts_ty, &Ty::Record(tail.clone()), whole.clone());
-        for FormOption { label, ty, reason } in options {
+            .unify_ty(&Ty::Record(tail.clone()), ty, whole.clone());
+        // A required label is a demand on *membership*, which the row rule
+        // states as `Present ~ Absent` — reported from whichever side the
+        // fresh-tail rewrite left it on, and that is not reliably this one.
+        // So a row already closed is read here and the miss gets its own
+        // words; a row still open is left to the rule, which forces it
+        // present.  A label missed here is dropped from the declared row, so
+        // one absence earns one diagnostic.
+        //
+        // A refused label is read the same way and for the same reason: the
+        // row absorbs it silently, so the advice it carries is said here or
+        // not at all.
+        let live = self.live_labels(ty);
+        let mut missing = Vec::new();
+        for key in table.keys {
+            let written_out = live
+                .as_ref()
+                .is_some_and(|ls| ls.iter().any(|l| l == key.label));
+            match &key.holds {
+                Holds::Required(_) if live.is_some() && !written_out => {
+                    missing.push(key.label);
+                    self.ctx.diagnose(TypeErrorKind::RowMissingField {
+                        label: key.label.to_string(),
+                    });
+                }
+                Holds::Refused(advice) if written_out => {
+                    self.ctx.diagnose(TypeErrorKind::RefusedKey {
+                        form: table.form,
+                        key: key.label,
+                        advice,
+                    });
+                }
+                _ => {}
+            }
+        }
+        for FormOption {
+            label,
+            field,
+            reason,
+        } in occurrence(table, &mut self.ctx.unifier)
+            .into_iter()
+            .filter(|o| !missing.contains(&o.label))
+        {
             let rest = self.ctx.unifier.fresh_row();
-            let flag = self.ctx.unifier.fresh_presence_var();
             let declared = Row::Extend(
                 Label::Field(label.to_string()),
-                Field::Var(flag, Box::new(ty)),
+                field,
                 Box::new(rest.clone()),
             );
-            // Written out, the caret lands on the option's own value; a bundle
+            // Written out, the caret lands on the entry's own value; a bundle
             // in hand has only the form to point at.
-            self.with_span(written_at(opts, label), |this| {
+            let at = written.and_then(|opts| written_at(opts, label));
+            self.with_span(at, |this| {
                 this.ctx
-                    .unify_ty(&Ty::Record(tail), &Ty::Record(declared), reason);
+                    .unify_ty(&Ty::Record(declared), &Ty::Record(tail), reason);
             });
             tail = rest;
         }
-        // The empty row first, so what is left over is the *extra* field.
         self.ctx
             .unify_ty(&Ty::Record(Row::Empty), &Ty::Record(tail), whole);
+    }
+
+    /// The field labels `ty`'s row is known to carry, or `None` where it is
+    /// not known: a spine ending in a variable still admits any of them.
+    fn live_labels(&mut self, ty: &Ty) -> Option<Vec<String>> {
+        let Ty::Record(row) = self.ctx.unifier.apply_ty(ty) else {
+            return None;
+        };
+        let mut live = Vec::new();
+        let mut rest = row;
+        loop {
+            match rest {
+                Row::Extend(Label::Field(label), field, tail) => {
+                    if field.payload().is_some() {
+                        live.push(label);
+                    }
+                    rest = *tail;
+                }
+                Row::Extend(_, _, tail) => rest = *tail,
+                Row::Empty => return Some(live),
+                Row::Var(_) => return None,
+            }
+        }
+    }
+
+    /// The options value against the form's own row — written out or arriving
+    /// bound, one rule and one verdict.
+    fn check_options(&mut self, opts: &Val, table: &'static Table) {
+        let opts_ty = self.infer_options_val(opts);
+        if matches!(self.ctx.unifier.resolve_ty(&opts_ty), Ty::Map(_)) {
+            self.ctx.diagnose(TypeErrorKind::MapAsOptions {
+                form: table.form,
+                options: table.offered(),
+            });
+            return;
+        }
+        self.check_declared_row(&opts_ty, table, Some(opts));
     }
 
     /// Collect the schemes `handlers:` binds in the body.  A catch-all
@@ -178,8 +239,7 @@ impl Inferencer<'_> {
         handlers: Option<&[HandlerArmV]>,
         body: &Val,
     ) -> ScopeSig {
-        let options = within_options(&mut self.ctx.unifier);
-        self.check_options(opts, "within", options);
+        self.check_options(opts, declared(Form::Within));
         let bindings = self.handler_bindings(handlers);
 
         self.env.push();
@@ -197,8 +257,7 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_grant(&mut self, caps: &Val, body: &Val) -> ScopeSig {
-        let options = grant_options(&mut self.ctx.unifier);
-        self.check_options(caps, "grant", options);
+        self.check_options(caps, declared(Form::Grant));
         let body_cty = self.infer_scope_body_passthrough(body);
 
         let (value, route) = self.extract_return(&body_cty);

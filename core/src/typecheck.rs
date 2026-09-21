@@ -5,6 +5,7 @@
 
 mod annotate;
 pub mod builtins;
+pub mod contract;
 mod env;
 mod error;
 mod explain;
@@ -18,7 +19,8 @@ mod scope;
 mod ty;
 mod unify;
 
-pub use self::builtins::{FieldSchema, builtin_type_hint};
+pub use self::builtins::builtin_type_hint;
+pub use self::contract::{Form, Table};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{PinFailure, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{
@@ -34,13 +36,14 @@ pub use self::unify::Unifier;
 use self::generalize::generalize;
 use crate::ir::{Comp, Phrase, Toplevel};
 
-/// What a form holds its programs' own `return [k: v, …]` to.
+/// What a form holds its programs' own return value to: the declared
+/// [`Table`] whose closed keyset the returned row is checked against.
 ///
-/// The form's name, for blame, and the schema its keys are checked against —
-/// an rc file's top-level keys, a plugin manifest's fields.  Carried through
-/// [`typecheck`] so the contract pins each field during the one inference of
-/// that literal, never a second one that could disagree with it.
-pub type ReturnContract = (&'static str, FieldSchema);
+/// An rc file's top-level keys, a plugin manifest's fields, a capability
+/// profile's dimensions.  `&'static`, so a host crate with a table of its own
+/// passes it here — having first held it to
+/// [`check_one_optional_type`](contract::check_one_optional_type).
+pub type ReturnContract = &'static Table;
 
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
@@ -163,13 +166,12 @@ fn close_thunk_scheme(
 /// restart at zero, so an open scheme from run *N* would alias run
 /// *N+1*'s fresh variables.
 ///
-/// A [`ReturnContract`] additionally holds `top`'s own last phrase, when it
-/// is exactly a literal `return [k: v, …]`, to the form's schema — the same
-/// static, spanned treatment `within`/`grant` options get, extended to a
-/// program's own return value.  A return computed any other way (a bound
-/// variable, a call, a plugin factory's `return { |opts| … }`) carries no
-/// literal for the checker to hold, and stays on the caller's own runtime
-/// check.
+/// A [`ReturnContract`] additionally holds `top`'s own last phrase to the
+/// declared table's row — the same rule `within`/`grant` options get, over a
+/// program's own return value.  The *inferred* row is what is checked, so a
+/// key misspelled inside a spread is caught with one written out.  A return
+/// carrying no row (a `Map`, a plugin factory's `return { |opts| … }`) stays
+/// on the caller's own runtime door, which dispatches off the same table.
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
@@ -180,6 +182,19 @@ pub fn typecheck(
     schemes: SessionSchemes,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, Vec<TypeError>> {
+    // The door onto the declared tables: while two of them name one label at
+    // two different ground types, `δ_l` cannot serve both and no check in this
+    // build is trustworthy — so every check refuses, not merely the first.
+    if let Err(clash) = contract::condition() {
+        return Err(vec![TypeError {
+            pos: None,
+            kind: TypeErrorKind::ContractClash {
+                label: clash.label,
+                forms: clash.forms,
+            },
+            reason: None,
+        }]);
+    }
     let (mut ctx, mut env) = seeded_session(schemes);
 
     let phrase_schemes = infer::infer_toplevel(&mut ctx, &mut env, top, contract);

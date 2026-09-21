@@ -27,9 +27,17 @@ pub fn load_capabilities_from_str(
     virtual_path: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Settled<Capabilities> {
-    let value =
-        crate::builtins::modules::evaluate_source(mooring, shell, source, virtual_path, None)
-            .map_err(|e| wrap(virtual_path, e))?;
+    // A profile's dimensions are `grant`'s own options, so the file's returned
+    // row is held to the same table the form is.
+    let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
+    let value = crate::builtins::modules::evaluate_source(
+        mooring,
+        shell,
+        source,
+        virtual_path,
+        Some(contract),
+    )
+    .map_err(|e| wrap(virtual_path, e))?;
     let prefix = format!("capability file {virtual_path}");
     crate::capability::decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
@@ -186,23 +194,34 @@ mod tests {
         assert!(msg.contains("<test:nonmap>"), "should name the file: {msg}");
     }
 
-    /// The shared walker rejects a typo'd key rather than dropping it silently.
-    #[test]
-    fn unknown_top_level_key_errors() {
+    fn load_err_message(source: &str, path: &str) -> String {
         let mut shell = shell();
-        let err = load_capabilities_from_str(
-            &Mooring::adrift(),
-            &mut shell,
-            "return [fss: [read: ['/tmp']]]",
-            "<test:typo>",
-            &ctx(),
-        )
-        .unwrap_err();
-        let msg = match err {
+        let err = load_capabilities_from_str(&Mooring::adrift(), &mut shell, source, path, &ctx())
+            .unwrap_err();
+        match err {
             Break::Error(e) => e.message,
             other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
-        };
+        }
+    }
+
+    /// A profile that returns a record is held to `grant`'s declared table as
+    /// the form itself is, so the typo never reaches the walker.
+    #[test]
+    fn unknown_top_level_key_is_refused_before_the_file_runs() {
+        let msg = load_err_message("return [fss: [read: ['/tmp']]]", "<test:typo>");
+        assert!(msg.contains("'fss'"), "{msg}");
+    }
+
+    /// A profile returning a *map* has no row to check, and meets the walker's
+    /// refusal — off the same table — instead.
+    #[test]
+    fn unknown_key_in_a_mapped_profile_meets_the_walker() {
+        let msg = load_err_message("return [:, fss: [read: ['/tmp']]]", "<test:typo-map>");
         assert!(msg.contains("unknown key 'fss'"), "{msg}");
+        assert!(
+            msg.contains("exec, fs, net, detach, editor, shell"),
+            "{msg}"
+        );
     }
 
     #[test]

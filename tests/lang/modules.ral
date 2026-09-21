@@ -21,7 +21,7 @@ echo "let x = 9" > "$tmpdir/sub/inner.ral"
 echo #'let m = !{use 'sub/inner.ral'}
 let via_use = $m[x]'# > "$tmpdir/entry.ral"
 let entry = use "$tmpdir/entry.ral"
-if $[not !{equal $entry[via_use] 9}] { fail [status: 1] }
+if $[not !{equal $entry[via_use] 9}] { fail [status: 1, message: "module: caller-relative use did not resolve sub/inner.ral"] }
 
 # use is cacheless: each call re-reads the file, so rewriting a module
 # between two `use` calls surfaces the new bindings.
@@ -29,7 +29,7 @@ echo "let version = 1" > "$tmpdir/reload.ral"
 let m1 = use "$tmpdir/reload.ral"
 echo "let version = 2" > "$tmpdir/reload.ral"
 let mfresh = use "$tmpdir/reload.ral"
-if $[not !{equal $mfresh[version] 2}] { fail [status: 1] }
+if $[not !{equal $mfresh[version] 2}] { fail [status: 1, message: "module: reload did not pick up the rewritten file"] }
 
 # Cleanup
 rm -rf $tmpdir

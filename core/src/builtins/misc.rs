@@ -34,10 +34,13 @@ fn fail_status_code(status: i64) -> Result<i32, Break> {
     status_i32("fail", status)
 }
 
+/// The checker demands `[status: Int, message: String, ...]` of `fail`, so the
+/// shape refusals here answer only a record that reached the call through an
+/// unchecked boundary — a decoder's result, or a module's asserted shape.
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
     let Some(Value::Map(m)) = args.first() else {
         return Break::Error(Error::new(
-            "fail expects an error record [status: Int, message?: String|Bytes, ...]",
+            "fail expects an error record [status: Int, message: String, ...]",
             1,
         ));
     };
@@ -54,8 +57,12 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
     };
     let message = match lookup("message") {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => "explicit failure".to_string(),
+        _ => {
+            return Break::Error(Error::new(
+                "fail: this error record has no String `message` — the message is the text the failure carries",
+                1,
+            ));
+        }
     };
     Break::Error(Error::new(message, code))
 }

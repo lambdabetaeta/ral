@@ -190,8 +190,8 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
 /// `Phrase::Define`.  `contract`, when the caller's form imposes one, holds
-/// the last phrase's literal `return [k: v, …]` to its schema as that map is
-/// inferred.
+/// the last phrase's returned row to that table's own — an equation on the
+/// toplevel's value, stated once after the walk rather than inside it.
 pub(crate) fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
@@ -199,7 +199,11 @@ pub(crate) fn infer_toplevel(
     contract: Option<ReturnContract>,
 ) -> Vec<Vec<(String, Scheme)>> {
     let mut inferencer = Inferencer { ctx, env };
-    inferencer.infer_phrases(&top.phrases, contract)
+    let (schemes, tail) = inferencer.infer_phrases(&top.phrases);
+    if let Some(table) = contract {
+        inferencer.check_return_contract(top.phrases.last(), tail, table);
+    }
+    schemes
 }
 
 /// Every `Name` an `IrPattern` binds, in pattern order — the phrase-level
@@ -563,22 +567,15 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn apply_args(&mut self, cty: CompTy, args: &crate::ir::Args) -> CompTy {
-        self.apply_args_capped(cty, args, usize::MAX).0
+        self.apply_args_capped(cty, args, usize::MAX)
     }
 
     /// [`Self::apply_args`], applying no more than `cap` positionals: the
     /// surplus is still inferred, for the errors inside it, but unified
     /// against nothing — the same zip an over-applied builtin needs so its
     /// one arity diagnostic is not followed by an anonymous mismatch on the
-    /// surplus.  Returns the residual type and each *applied* argument's own
-    /// inferred type, the latter for a post-check that must see what was
-    /// actually passed (`fail`'s error-record `message` field).
-    fn apply_args_capped(
-        &mut self,
-        mut cty: CompTy,
-        args: &crate::ir::Args,
-        cap: usize,
-    ) -> (CompTy, Vec<Ty>) {
+    /// surplus.
+    fn apply_args_capped(&mut self, mut cty: CompTy, args: &crate::ir::Args, cap: usize) -> CompTy {
         // A value takes its arguments by application, at an arity its own type
         // declares, so it has no argv and `...` has nothing to spread into.
         // Both callers are value-side, so the refusal needs no test on the head:
@@ -591,9 +588,8 @@ impl Inferencer<'_> {
                 });
             }
             self.refuse_spread(args, super::error::SpreadHead::Applied);
-            return (self.peel_curry_spine(cty), Vec::new());
+            return self.peel_curry_spine(cty);
         };
-        let mut applied = Vec::with_capacity(positional.len().min(cap));
         let mut bodies = Vec::new();
         for (i, arg) in positional.into_iter().enumerate() {
             if i >= cap {
@@ -603,7 +599,7 @@ impl Inferencer<'_> {
             cty = self.autoderef_thunk_return(cty);
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
-            let (result, arg_ty) = self.with_span(args[i].slot().span, |this| {
+            let result = self.with_span(args[i].slot().span, |this| {
                 let arg_ty = match arg {
                     Val::Thunk(body) => {
                         let body_ty = this.ctx.unifier.fresh_comp_ty();
@@ -613,12 +609,11 @@ impl Inferencer<'_> {
                     _ => this.infer_val(arg),
                 };
                 let result = this.ctx.unifier.fresh_comp_ty();
-                let expected = CompTy::Fun(Box::new(arg_ty.clone()), Box::new(result.clone()));
+                let expected = CompTy::Fun(Box::new(arg_ty), Box::new(result.clone()));
                 this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
-                (result, arg_ty)
+                result
             });
             cty = result;
-            applied.push(arg_ty);
         }
         // A block argument's body is inferred once the whole spine is unified,
         // so a parameter a *later* argument determines — the element type in
@@ -632,7 +627,7 @@ impl Inferencer<'_> {
                     .unify_comp_ty(&inferred, &body_ty, Reason::Argument);
             });
         }
-        (cty, applied)
+        cty
     }
 
     /// One application path for every registered builtin, `Scheme` and `Sig`
@@ -695,18 +690,7 @@ impl Inferencer<'_> {
 
         let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let head_cty = self.instantiate_comp(&scheme);
-        let (result, applied) = self.apply_args_capped(head_cty, args, fixed_arity);
-
-        // `fail`'s error-record shape is unified above like any argument; its
-        // `message` field's type is the one part of the shape a row cannot
-        // state, so it needs its own pass over what was actually passed.
-        if entry.diagnostic == BuiltinDiagnostic::FailStatusNonzero
-            && let Some(arg_ty) = applied.first()
-        {
-            self.check_error_message(arg_ty);
-        }
-
-        result
+        self.apply_args_capped(head_cty, args, fixed_arity)
     }
 
     /// Peel `cty`'s whole curry spine, stopping at the first non-`Fun`: what a
@@ -742,26 +726,6 @@ impl Inferencer<'_> {
             },
             CompTy::Fun(_, _) | CompTy::Var(_) => None,
         }
-    }
-
-    /// Hold one entry's inferred value type to what the form's schema expects
-    /// of `key`.  A key no schema knows — and every computed or spread key,
-    /// which never reaches here — stays runtime-dispatched.
-    fn pin_field(&mut self, contract: Option<ReturnContract>, key: &str, actual: &Ty) {
-        let Some((form, schema)) = contract else {
-            return;
-        };
-        let Some(expected) = schema(key, &mut self.ctx.unifier) else {
-            return;
-        };
-        self.ctx.unify_ty(
-            actual,
-            &expected,
-            Reason::OptionField {
-                form,
-                key: key.to_string(),
-            },
-        );
     }
 
     /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
@@ -1150,36 +1114,41 @@ impl Inferencer<'_> {
 
     /// [`infer_toplevel`]'s walk: one phrase at a time, each under its own
     /// span, threading the extended `TyEnv` from one phrase to the next.
+    ///
+    /// The toplevel is a sequence, so it has no type of its own; what it has
+    /// is a value, and that value is its last `Run`'s.  The returned `CompTy`
+    /// is `None` when the last phrase is a `Define` — a file that ends
+    /// without producing a value.
     fn infer_phrases(
         &mut self,
         phrases: &[Spanned<Phrase>],
-        contract: Option<ReturnContract>,
-    ) -> Vec<Vec<(String, Scheme)>> {
+    ) -> (Vec<Vec<(String, Scheme)>>, Option<CompTy>) {
         let tail_index = phrases.len().saturating_sub(1);
-        phrases
-            .iter()
-            .enumerate()
-            .map(|(index, phrase)| {
-                let is_tail = index == tail_index;
-                self.with_span(phrase.span, |this| {
-                    this.infer_phrase(&phrase.item, is_tail, contract.filter(|_| is_tail))
-                })
-            })
-            .collect()
+        let mut schemes = Vec::with_capacity(phrases.len());
+        let mut tail = None;
+        for (index, phrase) in phrases.iter().enumerate() {
+            let is_tail = index == tail_index;
+            let (names, cty) =
+                self.with_span(phrase.span, |this| this.infer_phrase(&phrase.item, is_tail));
+            schemes.push(names);
+            if is_tail {
+                tail = cty;
+            }
+        }
+        (schemes, tail)
     }
 
     /// One phrase of §3.5.  `is_tail` marks the toplevel's own last phrase:
     /// every `Run`'s value is held to the discarded shape, tail included —
     /// its bytes are never captured into its own report — but the tail's
     /// arrow arity is additionally read, so S3's η-expansion can rebuild it
-    /// if it resolved to `Fun`.  `contract` reaches the tail alone, and holds
-    /// its returned literal map to the form's schema.
+    /// if it resolved to `Fun`.  Only a `Run` has a value, so only a `Run`
+    /// hands a `CompTy` back.
     fn infer_phrase(
         &mut self,
         phrase: &Phrase,
         is_tail: bool,
-        contract: Option<ReturnContract>,
-    ) -> Vec<(String, Scheme)> {
+    ) -> (Vec<(String, Scheme)>, Option<CompTy>) {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
                 let inner_ty = self.infer_comp(comp);
@@ -1191,7 +1160,7 @@ impl Inferencer<'_> {
 
                 let mut names = Vec::new();
                 collect_pattern_names(pattern, &mut names);
-                names
+                let schemes = names
                     .into_iter()
                     .map(|name| {
                         let scheme = self
@@ -1201,7 +1170,8 @@ impl Inferencer<'_> {
                             .expect("bind_pattern just bound every collected name");
                         (name.to_string(), scheme)
                     })
-                    .collect()
+                    .collect();
+                (schemes, None)
             }
             Phrase::Run(comp) => {
                 let mut alias_already_typed = false;
@@ -1230,7 +1200,7 @@ impl Inferencer<'_> {
                 let cty = if alias_already_typed {
                     super::builtins::pure(Ty::Unit)
                 } else {
-                    self.infer_comp_under_contract(comp, contract)
+                    self.infer_comp(comp)
                 };
                 if is_tail {
                     // The run's value is reported (S3's η-expansion may
@@ -1243,9 +1213,43 @@ impl Inferencer<'_> {
                     self.record_arrow_arity(comp, &cty);
                 }
                 self.force_discarded_shape(comp, &cty);
-                Vec::new()
+                (Vec::new(), Some(cty))
             }
         }
+    }
+
+    /// Hold the program's own return value to the contract its host declared.
+    ///
+    /// The *inferred* row is what is checked, whatever syntax produced it, so
+    /// a key misspelled inside a spread is caught exactly as one written out
+    /// is.  A return that is no record carries no row: the empty rc `[:]` is a
+    /// `Map`, a plugin factory is a `Thunk`, and both stay on the runtime door
+    /// that dispatches off the same table.
+    fn check_return_contract(
+        &mut self,
+        tail: Option<&Spanned<Phrase>>,
+        cty: Option<CompTy>,
+        table: ReturnContract,
+    ) {
+        let (Some(phrase), Some(cty)) = (tail, cty) else {
+            return;
+        };
+        let Phrase::Run(comp) = &phrase.item else {
+            return;
+        };
+        let CompTy::Return(_, value) = self.ctx.unifier.resolve_comp_ty(&cty) else {
+            return;
+        };
+        if !matches!(self.ctx.unifier.resolve_ty(&value), Ty::Record(_)) {
+            return;
+        }
+        let written = match &comp.item {
+            CompKind::Return(record @ Val::Record(_)) => Some(record),
+            _ => None,
+        };
+        self.with_span(phrase.span, |this| {
+            this.check_declared_row(&value, table, written);
+        });
     }
 
     /// The type of a form's options value.  Ordinary inference, save for a
@@ -1255,22 +1259,15 @@ impl Inferencer<'_> {
     /// a bound arm cannot have, and the option row is what it gains instead.
     pub(super) fn infer_options_val(&mut self, opts: &Val) -> Ty {
         match opts {
-            Val::Record(entries) => self.infer_record_val(entries, None, Some("handler")),
+            Val::Record(entries) => self.infer_record_val(entries, Some("handler")),
             other => self.infer_val(other),
         }
     }
 
-    /// A record literal, with each field pinned to what `contract`'s schema
-    /// expects of that label.  `None` is the ordinary record: no form speaks
-    /// about its fields.  `arm` names the one label whose written thunk is
+    /// A record literal.  `arm` names the one label whose written thunk is
     /// inferred as a handler arm rather than a value — see
     /// [`Self::infer_options_val`].
-    fn infer_record_val(
-        &mut self,
-        entries: &[ValRecordEntry],
-        contract: Option<ReturnContract>,
-        arm: Option<&str>,
-    ) -> Ty {
+    fn infer_record_val(&mut self, entries: &[ValRecordEntry], arm: Option<&str>) -> Ty {
         let mut fields: Vec<(String, Ty)> = Vec::new();
         let mut bases: Vec<(Option<Span>, Ty)> = Vec::new();
         for entry in entries {
@@ -1281,14 +1278,12 @@ impl Inferencer<'_> {
                             this.ctx
                                 .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
                         }
-                        let ty = match (&value.item, arm) {
+                        match (&value.item, arm) {
                             (Val::Thunk(comp), Some(arm)) if arm == key => {
                                 Ty::Thunk(Box::new(this.infer_catch_all(comp)))
                             }
                             _ => this.infer_val(&value.item),
-                        };
-                        this.pin_field(contract, key, &ty);
-                        ty
+                        }
                     });
                     fields.push((key.clone(), ty));
                 }
@@ -1334,9 +1329,7 @@ impl Inferencer<'_> {
     }
 
     /// A map literal: `Map<elem>`, one `elem` shared by every value and spread.
-    /// A key written out is still data, yet `contract`'s schema pins it as a
-    /// record's field would be.
-    fn infer_map_val(&mut self, entries: &[ValMapEntry], contract: Option<ReturnContract>) -> Ty {
+    fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
         // Keys must be `String`: the runtime's status-1 refusal, lifted here.
         let elem = self.ctx.unifier.fresh_ty();
         for entry in entries {
@@ -1346,9 +1339,6 @@ impl Inferencer<'_> {
                     self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
                     self.with_span(value.span, |this| {
                         let value_ty = this.infer_val(&value.item);
-                        if let Val::String(key) = key {
-                            this.pin_field(contract, key, &value_ty);
-                        }
                         this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     });
                 }
@@ -1435,8 +1425,8 @@ impl Inferencer<'_> {
                 }
                 Ty::List(Box::new(elem))
             }
-            Val::Record(entries) => self.infer_record_val(entries, None, None),
-            Val::Map(entries) => self.infer_map_val(entries, None),
+            Val::Record(entries) => self.infer_record_val(entries, None),
+            Val::Map(entries) => self.infer_map_val(entries),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.
                 let payload_ty = match payload {
@@ -1761,31 +1751,11 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
-        self.infer_comp_under_contract(comp, None)
-    }
-
-    /// [`Self::infer_comp`], under the form's return contract when `comp` is
-    /// exactly the literal `return [k: v, …]` that contract speaks about: the
-    /// schema pins each key as the literal is inferred, so the contract rides
-    /// the one inference of it rather than a second one that could disagree.
-    /// Anything else the return could be carries no literal to hold, and is
-    /// inferred as it always is.
-    fn infer_comp_under_contract(
-        &mut self,
-        comp: &Comp,
-        contract: Option<ReturnContract>,
-    ) -> CompTy {
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
 
         let cty = match &comp.item {
-            CompKind::Return(Val::Record(entries)) if contract.is_some() => {
-                CompTy::pure(self.infer_record_val(entries, contract, None))
-            }
-            CompKind::Return(Val::Map(entries)) if contract.is_some() => {
-                CompTy::pure(self.infer_map_val(entries, contract))
-            }
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
             CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
             CompKind::Force(value) => {

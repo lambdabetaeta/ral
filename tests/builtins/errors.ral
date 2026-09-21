@@ -9,7 +9,7 @@ try {
 
 # ? chain stops on first success
 try {
-    fail [status: 1] ? fail [status: 2] ? echo 'recovered'
+    fail [status: 1, message: 'first stage'] ? fail [status: 2, message: 'second stage'] ? echo 'recovered'
 } { |err|
     echo "chain failed at $err[cmd]"
 }

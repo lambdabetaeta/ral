@@ -11,6 +11,7 @@
 //! Windows cannot back.
 
 use crate::path::NormalizedPrefix;
+use crate::typecheck::contract::{Form as ContractForm, declared};
 use crate::types::{
     Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, List, PolicyError, ShellPolicy,
     Value, as_map, as_map_ref,
@@ -167,7 +168,8 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyEr
 /// capability-file loader in `capability::load`; both callers are
 /// in-crate, so "a `Capabilities` has every path already resolved" holds
 /// by construction.  Unknown keys error here and in each dimension's
-/// decoder rather than being silently dropped.
+/// decoder rather than being silently dropped; the keyset is `grant`'s own
+/// declared table, so this door and the checker cannot drift apart.
 pub(crate) fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
@@ -186,7 +188,13 @@ pub(crate) fn decode_capability_map(
             "detach" => caps.detach = Some(decode_bool(v, &format!("{err_prefix} detach"))?),
             "editor" => caps.editor = Some(decode_editor(v, &format!("{err_prefix} editor"))?),
             "shell" => caps.shell = Some(decode_shell(v, &format!("{err_prefix} shell"))?),
-            _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
+            other => {
+                let table = declared(ContractForm::Grant);
+                return Err(PolicyError::new(format!(
+                    "{err_prefix}: {}",
+                    table.unknown_key(other)
+                )));
+            }
         }
     }
     Ok(caps)

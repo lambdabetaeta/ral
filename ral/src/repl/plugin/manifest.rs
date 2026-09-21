@@ -69,25 +69,6 @@ pub(super) struct ManifestHandlers {
     pub(super) aliases: Vec<(String, Value)>,
 }
 
-/// Schema for the manifest map's one scalar-typed field.
-///
-/// The plugin loader's [`ReturnContract`](ral_core::typecheck::ReturnContract),
-/// held against a literal manifest return as it is checked. `hooks:`,
-/// `keybindings:`, and `aliases:` hold
-/// handler values of varying shape, validated at load instead, by
-/// `parse_hooks`/`parse_keybindings`/`parse_aliases` below; `capabilities:`
-/// is rejected outright rather than type-checked, so it has no schema entry
-/// either.
-pub(super) fn manifest_field_ty(
-    key: &str,
-    _u: &mut ral_core::typecheck::Unifier,
-) -> Option<ral_core::typecheck::Ty> {
-    match key {
-        "name" => Some(ral_core::typecheck::Ty::String),
-        _ => None,
-    }
-}
-
 impl LoadedPlugin {
     /// Parse a plugin manifest value into the plugin record plus the
     /// handler values the caller registers into the hook table and env.
@@ -98,12 +79,19 @@ impl LoadedPlugin {
                 val.type_name()
             )));
         };
-        if map.get("capabilities").is_some() {
-            return Err(load_err(
-                "manifest 'capabilities:' is not enforced — plugins run with host \
-                 authority. Remove the key; to confine a plugin invocation, wrap it \
-                 in `grant { ... }`.",
-            ));
+        // The keyset is `Form::Manifest`'s declared table, the same one the
+        // checker holds a manifest's returned row to.  A manifest arriving
+        // from a factory has no row to check, so this door meets it here — and
+        // a key with a refusal of its own says that rather than "unknown key".
+        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
+        for key in map.keys() {
+            match table.holds(key) {
+                Some(ral_core::typecheck::contract::Holds::Refused(advice)) => {
+                    return Err(load_err(*advice));
+                }
+                Some(_) => {}
+                None => return Err(load_err(format!("manifest: {}", table.unknown_key(key)))),
+            }
         }
         let name = match map.get("name") {
             Some(Value::String(s)) => s.clone(),
@@ -286,6 +274,31 @@ mod tests {
             "error should name the key and point at grant, got: {}",
             err.message
         );
+    }
+
+    /// A key the table does not name is refused with the table's own list —
+    /// the door a manifest arriving from a factory meets, having no row for
+    /// the checker to hold.
+    #[test]
+    fn unknown_key_names_the_manifests_list() {
+        let manifest = Value::map(vec![
+            ("name".into(), Value::String("p".into())),
+            ("hookz".into(), Value::map(vec![])),
+        ]);
+        let err = LoadedPlugin::parse(&manifest).expect_err("an unknown key must be rejected");
+        assert!(
+            err.message.contains("'hookz'") && err.message.contains("name, aliases, hooks"),
+            "error should name the key and the list, got: {}",
+            err.message
+        );
+    }
+
+    /// `name` is required, and its absence is not an unknown key.
+    #[test]
+    fn a_manifest_without_a_name_is_refused() {
+        let err = LoadedPlugin::parse(&Value::map(vec![]))
+            .expect_err("a manifest without a name must be rejected");
+        assert!(err.message.contains("name"), "got: {}", err.message);
     }
 
     /// A manifest with no `capabilities:` key parses into a clean plugin
