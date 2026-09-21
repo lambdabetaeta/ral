@@ -31,6 +31,10 @@ pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);
 /// The recessed machine-text panel: an areal mark, so background here means
 /// "machine", as against the model's prose and the human's fence.
 pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
+/// A call's observed effects sit one stratum below its source: same areal
+/// meaning, a darker plane, so what the script *was* and what it *did* are
+/// told apart without a rule between them.
+pub(super) const EFFECT_BG: Color = Color::Rgb(28, 30, 37);
 
 /// Syntax inks for ral code washed into [`CODE_BG`] ([`super::highlight`]),
 /// held apart from the chrome roles, [`PROMPT_INK`] and [`AGENT_HUES`] so a

@@ -22,11 +22,11 @@ use super::block::Detail;
 use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::md;
-use super::palette::{CODE_BG, SLATE};
+use super::palette::{CODE_BG, EFFECT_BG, SLATE};
 use crate::bus::card::{execs_card, greps_card, reads_card};
 use crate::record::Seq;
 use ral_core::types::Observed;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -155,11 +155,12 @@ const BAR_PAD: usize = 4;
 /// Most bars the sparkline draws; a longer run keeps only its tail.
 const MAX_SPARKLINE: usize = 30;
 
-/// A list intent's indent, and the least gap between an intent and its bar.
-const INTENT_INDENT: &str = "  ";
+/// The least gap between an intent and its bar.
 const GAP: usize = 2;
 
-const BODY_INDENT: &str = "    ";
+/// Every intent opens in the content column the rail glyph addresses; what a
+/// call *is made of* — its source, then its effects — steps in by one indent.
+const BODY_INDENT: &str = "  ";
 
 fn bar_col(width: usize) -> usize {
     width.saturating_sub(BAR_PAD)
@@ -207,7 +208,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ));
     // The effects open in the intent's own column, so each reads as belonging
     // to the call above it.
-    ls.extend(indent_rows(effect_rows(tip, width), "", width));
+    ls.extend(indent_rows(effect_rows(tip, width), "", width, EFFECT_BG));
     ls
 }
 
@@ -259,29 +260,23 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         if i > 0 {
             ls.push(Line::default());
         }
-        ls.extend(intent_row(call, i == 0, width));
+        ls.extend(intent_row(call, width));
         ls.extend(source_rows(call, width));
-        ls.extend(indent_rows(effect_rows(call, body_w), BODY_INDENT, body_w));
+        ls.extend(indent_rows(
+            effect_rows(call, body_w),
+            BODY_INDENT,
+            body_w,
+            EFFECT_BG,
+        ));
     }
     ls
 }
 
-/// One call's intent rows, wrapped under a hanging indent with its bar pinned to
-/// the shared column.  The `railed` row is the one the scrollback seats the glyph
-/// on, so it drops its own indent and lets the margin be its indent.
-fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
-    let lead: Vec<Span<'static>> = if railed {
-        Vec::new()
-    } else {
-        vec![Span::raw(INTENT_INDENT)]
-    };
-    pinned_intent(
-        &lead,
-        &call.intent,
-        call.context,
-        &bar(call.magnitude),
-        width,
-    )
+/// One call's intent rows, with its bar pinned to the shared column.  Every
+/// intent opens flush in content space — the margin is the only indent, and the
+/// rail glyph the first call wears is seated in it.
+fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
+    pinned_intent(&[], &call.intent, call.context, &bar(call.magnitude), width)
 }
 
 /// Lay one intent out as a left text block with its `bars` pinned right, in
@@ -335,7 +330,7 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let mut ls = Vec::new();
     for line in highlight_ral(&call.cmd) {
         for vrow in wrap_line(&line, body_w) {
-            wash_inset(&mut ls, vrow, BODY_INDENT, body_w);
+            wash_inset(&mut ls, vrow, BODY_INDENT, body_w, CODE_BG);
         }
     }
     ls
@@ -371,21 +366,32 @@ fn inset_w(indent: &str, width: usize) -> usize {
 /// [`CODE_BG`] panel at `indent`; the list passes the script's own margin, so
 /// the two read as one rectangle.  `body_w` is the width the rows were built
 /// at, so each is already one visual row.
-fn indent_rows(rows: Vec<Line<'static>>, indent: &str, body_w: usize) -> Vec<Line<'static>> {
+fn indent_rows(
+    rows: Vec<Line<'static>>,
+    indent: &str,
+    body_w: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in rows.into_iter().filter(|l| !line::is_blank(l)) {
-        wash_inset(&mut out, l, indent, body_w);
+        wash_inset(&mut out, l, indent, body_w, bg);
     }
     out
 }
 
-/// Inset `body` under `indent` and wash its content into the recessed
-/// [`CODE_BG`] panel: one row in, one row out.  The indent stays unwashed so
-/// the panel's left edge aligns with the content, but the wash runs the whole
-/// `body_w` so the region reads as a stratum, not a swatch.
-fn wash_inset(out: &mut Vec<Line<'static>>, body: Line<'static>, indent: &str, body_w: usize) {
+/// Inset `body` under `indent` and wash its content into the recessed `bg`
+/// plane: one row in, one row out.  The indent stays unwashed so the panel's
+/// left edge aligns with the content, but the wash runs the whole `body_w` so
+/// the region reads as a stratum, not a swatch.
+fn wash_inset(
+    out: &mut Vec<Line<'static>>,
+    body: Line<'static>,
+    indent: &str,
+    body_w: usize,
+    bg: Color,
+) {
     let mut spans = vec![Span::raw(indent.to_string())];
-    spans.extend(wash(body, CODE_BG, Some(body_w)).spans);
+    spans.extend(wash(body, bg, Some(body_w)).spans);
     out.push(Line::from(spans));
 }
 

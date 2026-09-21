@@ -199,7 +199,10 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
             ),
             (
                 "effects",
-                swatch("what that script read, ran and searched", Some(EFFECT_BG)),
+                swatch(
+                    "what it read, ran and searched, that panel one deeper",
+                    Some(EFFECT_BG),
+                ),
             ),
             (
                 "prose",

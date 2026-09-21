@@ -123,7 +123,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         arg: Some("[name]"),
         rewrites: false,
         any_tab: false,
-        help: "Fork this conversation into a new tab, with the same context.",
+        help: "Fork this conversation into a new tab (same context).",
     },
     SlashCommand {
         name: "/close",

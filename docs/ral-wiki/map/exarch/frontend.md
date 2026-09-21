@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e326e2c2
+generated_at_commit: d767eb5a
 generated_at_date: 2026-09-21
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -208,11 +208,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    orthogonal channels so neither competes with the other.* The agent owns the
    chromatic foreground (the rail hues); the background plane carries one
    distinction only — machine text. A run of script or observation output is
-   washed into a recessed `CODE_BG` panel (`group::wash_inset`): a *left-inset*
+   washed into a recessed panel (`group::wash_inset`): a *left-inset*
    rectangle whose left edge aligns with the content — so it nests under its
    intent, and script and output share one margin to read as a single region —
    and whose right edge still runs to the margin, so the wash reads as a stratum
-   rather than a content-hugging swatch; model prose sits unwashed at
+   rather than a content-hugging swatch. The two are told apart by depth alone:
+   the script a call ran wears `CODE_BG`, what it read, ran and searched wears
+   the darker `EFFECT_BG`, one plane below. Every intent in a run opens flush in
+   content space — the rail's margin is its only indent, so the head call's
+   intent no longer sits a column left of its siblings — and both panels step in
+   by one `BODY_INDENT` of two columns. Model prose sits unwashed at
    the base; the human's submitted prompt is opened by a full-width
    `PROMPT_INK` rule fence (`line::prompt_fence`) and neutral prompt ink, found
    at a glance by boundary and tone rather than by reverse video, which stays
