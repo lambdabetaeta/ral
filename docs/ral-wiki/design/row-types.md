@@ -19,17 +19,15 @@ further fields:
 two-point union-find. A slot prints `l: τ`, `l?: τ`, or nothing at all.
 Several consequences follow:
 
-- **`Empty` says something.** It means *every label off the spine is absent, at
-  the type the ambient assignment gives that label* — the assignment `Δ` maps a
-  label to `δ_l`, minted the first time that label is retired, and retiring a
-  field unifies its payload with it. That is what makes the algebra unitary:
-  the solution that kills a field constrains `δ_l` rather than discarding
-  information, so it is an instance of the eager one and the eager one is the
-  most general unifier
-  ([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
-- **`Absent` stores nothing.** A dead payload is recoverable from its label, so
-  `Δ`'s variables appear in no type, row or scheme — never quantified, never
-  printed, never serialised.
+- **`Empty` says something.** It means *every label off the spine is absent*,
+  and meeting a field there retires it rather than erroring. It does not make
+  the algebra unitary, and does not have to: order-independence is a theorem
+  about the term rules plus the one-optional-type condition on the declared
+  tables
+  ([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]).
+- **`Absent` stores nothing**, because nothing can read it: presence has no
+  elimination form, so no rule looks under an absent flag and there is no
+  payload beside an absent field to quantify, print or serialise.
 - **Absence before `Empty` is an equation** — `(l: Absent ; Empty) = Empty` —
   and absence before a *variable* tail is not: exclusion is an invariant of row
   introduction here rather than data on the variable, as it is in Rémy.

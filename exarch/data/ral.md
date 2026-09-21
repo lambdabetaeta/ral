@@ -179,6 +179,8 @@ Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g.
 
 A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if it opens with `[:` — `[:]` is the empty one, `[:, a: 1, b: 2]` a map on keys written out — or if any key is computed (`[$k: 1]`); otherwise static keys make a record. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
 
+When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit_mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return [:, edit_mode: 'vi']` is a map, not a record, and there is no empty-record literal to fall back to (`[]` is the empty *list*), so a config emptied down to nothing has nowhere to go but `[:]`. That still gets checked — an unknown key or a bad value refuses the whole file either way — but only once the file has already run and the returned value is applied, not before.
+
 A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 
     let probe = { |p|

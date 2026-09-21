@@ -13,8 +13,9 @@ superseded_by: decisions/260921_a-field-is-a-flag-and-a-type
 > gone, and a second base is refused at parse instead. What that decision
 > bought — a presence flag per field — is the very thing this page records as
 > rejected, and the price it feared is paid differently: the flag is a fifth
-> unifier sort, but absence is remembered *at a type* (`δ_l`), which is what
-> keeps the algebra unitary and the `Scheme` free of a predicate slot. The
+> unifier sort, and what keeps the verdict order-independent is a confinement
+> invariant on the term rules rather than a predicate slot on `Scheme`
+> ([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]). The
 > reading below is kept for its account of why concatenation has no mgu, which
 > stands.
 

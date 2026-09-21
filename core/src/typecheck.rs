@@ -182,9 +182,10 @@ pub fn typecheck(
     schemes: SessionSchemes,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, Vec<TypeError>> {
-    // The door onto the declared tables: while two of them name one label at
-    // two different ground types, `δ_l` cannot serve both and no check in this
-    // build is trustworthy — so every check refuses, not merely the first.
+    // The door onto the declared tables: while two of them disagree at one
+    // label, the order two constraints arrive in decides the verdict and no
+    // check in this build is trustworthy — so every check refuses, not merely
+    // the first.
     if let Err(clash) = contract::condition() {
         return Err(vec![TypeError {
             pos: None,

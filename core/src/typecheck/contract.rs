@@ -1,4 +1,4 @@
-//! The declared tables, and the one condition the presence assignment owes.
+//! The declared tables, and the one condition a variable flag owes.
 //!
 //! A form's options and a contract file's return value are the same thing: a
 //! closed set of labels, each held at what its table says.  `within` and
@@ -8,13 +8,18 @@
 //! off the same tables, so a keyset is written once.
 //!
 //! §3's condition is why they are gathered here rather than left where they
-//! are used.  Retiring a field unifies its payload with the label's assignment
-//! variable `δ_l`, so a label may not be optional at two different ground
-//! types within one check.  An ordinary program cannot reach that — the put
-//! rule mints a variable flag over a *fresh* payload, and every other rule
-//! pins `Present` — so a declared table is the only construct that puts a
-//! ground payload beside a variable flag.  [`check_one_optional_type`] is the
-//! refusal at the door, and [`declared`] is that door.
+//! are used: a label may not be optional at two irreconcilable types within one
+//! check.  Two tables that disagree at one label would make the order two
+//! constraints arrive in decide the verdict, and order-independence is a
+//! theorem about the term rules plus this door — so the door is load-bearing,
+//! and must be re-established for every new site that introduces a variable
+//! flag.
+//!
+//! An ordinary program cannot reach the condition — the put rule mints a
+//! variable flag over a *fresh* payload, and every other rule pins `Present` —
+//! so a declared table is the only construct that puts a ground payload beside
+//! a variable flag.  [`check_one_optional_type`] is the refusal at the door,
+//! and [`declared`] is that door.
 
 use std::sync::OnceLock;
 
@@ -33,15 +38,14 @@ pub enum Form {
 
 /// What a table holds one of its labels to.
 pub enum Holds {
-    /// Held at this ground type.  Two tables naming one label at two different
-    /// ones is the condition's refusal.
+    /// Held at this ground type.  Two tables naming one label at two types that
+    /// will not unify is the condition's refusal.
     At(Ty),
     /// Held at this ground type, and the row must have it.
     Required(Ty),
     /// The decoders': a fresh variable per occurrence, nothing imposed.
     Decoded,
-    /// A shape minted fresh per occurrence, variables and all — so nothing
-    /// ground, and nothing for the condition to compare.
+    /// A shape minted fresh per occurrence, variables and all.
     Shaped(fn(&mut Unifier) -> Ty),
     /// Known, and refused, with advice of its own rather than "unknown key".
     Refused(&'static str),
@@ -134,7 +138,7 @@ static WITHIN: Table = Table {
 /// Everything but the two flags is `decode_capability_map`'s: a policy value
 /// may be a string or a list, and the two mix within one record.  Typing them
 /// to full depth would put one label at two ground types — `editor.read`
-/// beside `fs.read` — which is the one condition the assignment owes.
+/// beside `fs.read` — which is the one condition a variable flag owes.
 static GRANT: Table = Table {
     form: "grant",
     keys: &[
@@ -302,7 +306,7 @@ pub fn declared(form: Form) -> &'static Table {
 }
 
 /// §3's condition over the declared set, computed once: within one check, a
-/// label may not be optional at two different ground types.
+/// label may not be optional at two types that will not unify.
 ///
 /// # Errors
 /// The clash, if this build's tables have one.
@@ -318,22 +322,23 @@ pub fn condition() -> Result<(), &'static Clash> {
 /// runs, exposed so a host crate's own table can be held to it too.
 ///
 /// # Errors
-/// The first label two tables name at two different ground types.
+/// The first label two tables name at two types that will not unify.
 pub fn check_one_optional_type(tables: &[&'static Table]) -> Result<(), Clash> {
-    let ground = |table: &'static Table| {
-        table.keys.iter().filter_map(move |key| match &key.holds {
-            Holds::At(ty) | Holds::Required(ty) => Some((key.label, ty, table.form)),
-            Holds::Decoded | Holds::Shaped(_) | Holds::Refused(_) => None,
-        })
-    };
     for (i, table) in tables.iter().enumerate() {
-        for (label, ty, form) in ground(table) {
+        for key in table.keys {
             for other in &tables[i + 1..] {
-                for (other_label, other_ty, other_form) in ground(other) {
-                    if other_label == label && other_ty != ty {
+                for twin in other.keys.iter().filter(|k| k.label == key.label) {
+                    let mut u = Unifier::new();
+                    let (Some(a), Some(b)) = (
+                        declaration_ty(&mut u, &key.holds),
+                        declaration_ty(&mut u, &twin.holds),
+                    ) else {
+                        continue;
+                    };
+                    if u.unify_ty(&a, &b).is_err() {
                         return Err(Clash {
-                            label,
-                            forms: [form, other_form],
+                            label: key.label,
+                            forms: [table.form, other.form],
                         });
                     }
                 }
@@ -341,6 +346,19 @@ pub fn check_one_optional_type(tables: &[&'static Table]) -> Result<(), Clash> {
         }
     }
     Ok(())
+}
+
+/// What one occurrence of this declaration mints, or `None` for a label that
+/// carries no type at all.  Minting is what makes the comparison right:
+/// `Decoded` and `Shaped` are fresh per occurrence, so two of them meet as the
+/// occurrences would rather than as written text.
+fn declaration_ty(u: &mut Unifier, holds: &Holds) -> Option<Ty> {
+    match holds {
+        Holds::At(ty) | Holds::Required(ty) => Some(ty.clone()),
+        Holds::Decoded => Some(u.fresh_ty()),
+        Holds::Shaped(mint) => Some(mint(u)),
+        Holds::Refused(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +412,32 @@ mod tests {
             }],
         };
         assert_eq!(check_one_optional_type(&[&LEFT, &RIGHT]), Ok(()));
+    }
+
+    /// A shape at a label another table holds at a ground type is the same
+    /// order-dependence as two ground types, so the door compares
+    /// unifiability rather than equality and `Shaped` is not exempt.
+    #[test]
+    fn a_shape_against_a_ground_type_is_refused() {
+        static LEFT: Table = Table {
+            form: "left",
+            keys: &[Key {
+                label: "handler",
+                holds: Holds::Shaped(catch_all_ty),
+                reason: None,
+            }],
+        };
+        static RIGHT: Table = Table {
+            form: "right",
+            keys: &[Key {
+                label: "handler",
+                holds: Holds::At(Ty::String),
+                reason: None,
+            }],
+        };
+        let clash = check_one_optional_type(&[&LEFT, &RIGHT]).expect_err("a thunk is not a string");
+        assert_eq!(clash.label, "handler");
+        assert_eq!(clash.forms, ["left", "right"]);
     }
 
     /// The labels the four share today — `env` across `within` and the rc,

@@ -83,9 +83,8 @@ impl Ty {
 /// `Unifier::unify_row` follows the Rémy (1989) rewrite: two `Extend` nodes
 /// with different labels are swapped past each other into a shared fresh tail.
 ///
-/// `Empty` says *every label not on the spine is absent, at the type the
-/// ambient assignment gives that label* — the same sentence [`Field::Absent`]
-/// makes about one label.
+/// `Empty` says *every label not on the spine is absent*, full stop — the same
+/// sentence [`Field::Absent`] makes about one label.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
@@ -95,10 +94,10 @@ pub enum Row {
 
 /// A slot on a row: whether the record has this label, and what it holds.
 ///
-/// `Absent` stores nothing: a dead payload is `δ_l`, recoverable from the
-/// label, so there is none beside an absent field to read, key, quantify or
-/// occurs-check.  A field whose presence is still unknown does carry its
-/// type: `Var(θ, τ)` reads "a `τ`, if it is there".
+/// `Absent` stores nothing because nothing can read it: no rule looks under an
+/// absent flag, so there is no payload beside an absent field to read, key,
+/// quantify or occurs-check.  A field whose presence is still unknown does
+/// carry its type: `Var(θ, τ)` reads "a `τ`, if it is there".
 ///
 /// The payload is boxed because `Ty → Row → Field → Ty` has no indirection
 /// anywhere else on the cycle.
@@ -115,8 +114,7 @@ impl Field {
         Self::Present(Box::new(ty))
     }
 
-    /// What the field holds, or `None` for an absent one — whose payload is
-    /// `δ_l`, and so the label's to name rather than the field's.
+    /// What the field holds, or `None` for an absent one, which holds nothing.
     pub fn payload(&self) -> Option<&Ty> {
         match self {
             Self::Present(t) | Self::Var(_, t) => Some(t),

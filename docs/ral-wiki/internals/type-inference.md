@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 584ed719
+verified_at_commit: f06a5056
 verified_at_date: 2026-09-21
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_field, resolve_field, Field, Presence, PresenceVar, CachedFreeVars, unify_route, infer_record_val, infer_map_val, infer_field_read, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
@@ -57,16 +57,17 @@ push inwards and is inferred as ever, the caller unifying.
   tail variable, then mismatched labels are permuted past one another into a
   shared fresh tail ([[design/row-types|row-types]]). The `Empty`-against-
   `Extend` arms are a **peel**, not an error: `Empty` says every label off the
-  spine is absent at the type the assignment gives it, so meeting a field there
-  retires it — flag to `Absent`, payload to `δ_l` — and carries on. The two
+  spine is absent, so meeting a field there retires it — flag to `Absent`, the
+  payload beside it left untouched — and carries on. The two
   arms are symmetric, and with the field rule meeting an `Absent` they are the
   three sites that retire a label; a one-sided edit to any of them leaves an
   absence with two spellings, which is the one thing the equational theory
   cannot survive.
 - *Presence flags* are a two-point union-find (`presences`), read through
   `resolve_field` — `resolve_row`'s twin, called from the same traversals.
-  The field rule unifies flags and then payloads, **always**: there is no
-  conditional, because the eager answer is the mgu (below). A `Present`
+  The field rule unifies flags and then payloads when both sides have one;
+  there is no conditional on a flag, and dropping a payload whose partner is
+  absent loses nothing because no rule reads under an absent flag (below). A `Present`
   against an `Absent` has no solution, and the row arm that matched the pair
   owns the message, being the only frame that knows the label.
 - *Payload routes* unify **by equality** (`unify_route`): `Value`, `Bytes`, and
@@ -246,24 +247,38 @@ sit outside the claim; they are introduction-rule choices, not joins. See
 [[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]
 for the architecture, narrowed to this one constraint.
 
-**The row algebra is unitary, and that is what carries principality over
-rows.** The equation the design turns on is
-`[x: θ·α] ≐ [x: θ'·String]`. Under an `Empty` that carried nothing it had two
-incomparable solutions — `θ := Absent`, leaving `α` free, and `α := String`,
-leaving the flags open — so there was no most general unifier and an eager
-algorithm guessed. Under an `Empty` that means *absent at the type the
-assignment gives this label*, it has one: `θ := Absent` retires the other side
-too, and retiring it asks `String ~ δ_l`, so the killing solution *says
-something* and is reachable from the eager one by instantiation. The eager
-answer is therefore the mgu, the field rule may unify payloads unconditionally,
-and principality over rows is the standard Hindley–Milner result over a unitary
-algebra. Transitivity comes with it: a label has exactly one dead type, so two
-rows cannot disagree about a dead payload and there is no second spelling of an
-absence for a third row to disagree with. What this costs is one condition,
-discharged as a rule rather than proved — *within one check, a label may not be
-optional at two different ground types* — which binds the declared option rows
-and nothing a program can write, a payload meeting `δ_l` only when its flag
-dies.
+**The row algebra is *not* unitary on its own, and that is fine.** The equation
+the design turns on is `[x: θ·α] ≐ [x: θ'·String]`. It has two incomparable
+solutions — `θ := Absent`, leaving `α` free, and `α := String`, leaving the
+flags open — so an eager algorithm picks one, and there is no theorem about the
+bare algebra that says which. An earlier design bought unitarity with an
+assignment `Δ`, an ambient type per label that every retired payload was
+unified with; that made the killing solution *say something* and the eager
+answer the mgu. It was withdrawn
+([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]),
+because unitarity of the algebra quantifies over every row the datatype can
+spell, including rows no rule mints — more than a checker owes.
+
+What a checker owes is that the *programs a user can write* get one verdict
+whichever order their statements are in, and that is carried by two facts
+together. The first is **confinement**, an invariant of the term rules: every
+variable in the payload of a `Field::Var(θ, τ)` slot at `l` occurs nowhere but
+in payloads of slots whose flag is in `θ`'s class. `Field::Var` is minted in
+exactly two places — the put rule, a fresh flag over a fresh payload, and
+`scope::occurrence`, a fresh flag over a declared table's type — and only
+`unify_field` touches such a payload. So the two solutions above differ only in
+the binding of a variable nothing else names, and no term can tell them apart.
+The second is the **one-optional-type condition**, discharged as a rule rather
+than proved — *within one check, a label may not be optional at two types that
+will not unify* — checked where the declared tables register
+(`typecheck/contract.rs`). It is what rules out the one shape confinement does
+not cover: two tables disagreeing at one label, where the order of two
+independent constraints really would decide the verdict.
+
+So the condition is **load-bearing rather than incidental**, and confinement
+must be re-established for every new site that introduces a variable flag.
+Principality over rows then reads as the standard Hindley–Milner result,
+relative to those two facts rather than to a unitary algebra.
 
 **Two obligations are carried rather than discharged, and neither is a
 theorem.** *Erasure* — that forgetting a payload behind an absent field lets no
@@ -297,13 +312,10 @@ became, so the guard keeps recognising one obligation across the change. The
 half they do not is *depth*, in both directions. `unify_ty_inner` fingerprints
 its structural operand before resolving the other side, so an obligation can
 spend the budget on a payload whose flag would have died had the absence
-constraint been taken first; and retiring a field is itself the equation
-`τ ~ δ_l`, so a payload nested past the ceiling cannot be retired at all —
-unifying any structure against a variable fingerprints it, which is the cost
-every rule pays and not one presence added. A resolved-absent slot holding an
-over-deep payload is therefore unreachable: the budget refuses to build one.
-What is guaranteed throughout is a graceful `TypeTooDeep` rather than a blown
-stack.
+constraint been taken first. Retirement itself spends none of the budget: it is
+one presence equation and no type equation, so a payload nested far past the
+ceiling retires as cheaply as a shallow one. What is guaranteed throughout is a
+graceful `TypeTooDeep` rather than a blown stack.
 
 **A route variable is quantified only in a declared slot or a forwarded pair.**
 A builtin's computation-typed argument (`spawn`, `watch`, `service`, and the
@@ -353,15 +365,13 @@ rendered text.
   so two uses of one recursive scheme never share a cycle root.
 - Because the prefix is nominal-by-listing, an open scheme leaving its minting
   unifier aliases another's variables: see [[invariants/schemes-leave-closed|schemes-leave-closed]].
-- *A cached residual can be re-homed, so the cache's own check is narrower than
-  its sorts.* `CachedFreeVars` holds the free variables a scheme did **not**
-  quantify, and `env_free_vars` trusts it rather than re-walking. Erasure kills
-  no variable — a retired payload is *united* with `δ_l` rather than dropped —
-  but that union is what moves it: a residual `α` stops being its own canonical
-  root the moment a flag beside it resolves to `Absent`. So the standing
-  `debug_assert` that residuals are live roots covers the computation, route and
-  presence sorts, and states the value sort's exclusion rather than asserting a
-  property retirement can take away.
+- *The residual cache is checked across all five sorts.* `CachedFreeVars` holds
+  the free variables a scheme did **not** quantify, and `env_free_vars` trusts
+  it rather than re-walking. That holds by construction: residuals come from
+  monomorphic environment bindings that outlive every scheme mentioning them, so
+  no later step moves or binds one. Retiring a field imposes no equation on the
+  payload that dies, so it cannot re-home a cached root either, and the standing
+  `debug_assert` covers the value sort with the rest.
 
 **The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto

@@ -669,6 +669,16 @@ literal every one of whose entries has a static key is a record; a literal
 with any computed key is a map, because a keyset settled at run time cannot
 carry a type per key; a literal with no entry at all is a list.
 
+There is no empty-record literal: `[]` is the empty list, not `[a: 1]` with
+its fields removed. Emptying a record config therefore does not shrink the
+record — it changes the value's type, from a record to the map `[:]`, and
+with it changes *when* a misspelled key is caught. §12.12, §15.3, and §15.5
+depend on exactly this: a contract file (an rc file, a plugin manifest, a
+capability profile) that returns a record is checked against its declared
+keyset before the file runs at all, while one that returns `[:, …]` is
+checked only when the file is applied. Losing the row by deleting the last
+field is easy to do without meaning to switch types.
+
 ```ral
 let record = [host: 'db', port: 5432]
 let by_data = [:, host: 'db', port: 'https']
@@ -2853,9 +2863,21 @@ ral --capabilities base.ral,offline.ral script.ral
 
 The loader parses, elaborates, type-checks, and evaluates each profile, then
 decodes that terminal value. Bindings created by the script are not projected
-into a policy as `use` bindings would be: the value itself must be the record.
-`return [...]` is the direct way to make that contract explicit. A profile
-that ends in `Unit`, a scalar, a list, or any other non-record value is rejected.
+into a policy as `use` bindings would be: the value itself must be the
+returned record or map. `return [...]` is the direct way to make that
+contract explicit. A profile that ends in `Unit`, a scalar, a list, or any
+other non-collection value is rejected.
+
+The same record-versus-map cliff applies here as at the rc file (§15.3) and
+the plugin manifest (§15.5). `return [exec: …, net: false]` is a record, so
+`exec`'s misspelling as `exect` is caught statically, before the profile
+script runs at all. `return [:, exec: …, net: false]` is a map: the script
+runs to completion first, and only its returned map's keys are then checked
+against the same table, at the moment the profile is decoded. Either way an
+unknown key or a badly-shaped value refuses the whole profile — the session
+never starts under it — but a map spelling can have already run arbitrary
+effects (reading a file, running a command to compute a policy) before that
+refusal is reported.
 
 All listed profiles use the same load-time home and working directory. They
 are decoded by the same strict decoder as inline grants. Each decoded profile
@@ -3802,8 +3824,21 @@ value both name the mistake and refuse the whole rc, agreeing with the
 static check above — the shell starts with defaults. An unknown key inside
 `theme` produces a warning rather than a refusal.
 
+The two spellings fail alike but not at the same *time*. `return [edit_mde:
+'vi']` never runs the rest of the file: a record's keyset is part of its
+type, so a misspelling is a compile error and the rc is skipped before its
+first statement executes. `return [:, edit_mde: 'vi']` is a map, carries no
+row, and so has nothing for the checker to compare against the keyset; the
+file runs — any `echo`, any binding, any side effect earlier in it takes
+effect — and only once the returned map is applied does the same
+misspelling surface, at which point the rc as a whole is still discarded.
+Because there is no empty-record literal (§4.5), deleting a config's last
+field to leave `[:]` is exactly how a record silently becomes a map: the
+keyset stops being checked before the file runs and starts being checked
+only once it has.
+
 The same discipline holds of the other two files a host reads against a fixed
-keyset — a plugin manifest (§15.5) and a capability profile (§16) — and of the
+keyset — a plugin manifest (§15.5) and a capability profile (§12.12) — and of the
 options `within` and `grant` take. Each is one declared table, and no label may
 be declared at two different types across all of them: an optional field is
 absent *at the type its label is assigned*, so a label has one such type across
@@ -3880,11 +3915,16 @@ The manifest schema is:
 four are the manifest's whole keyset: an unknown top-level key is an error
 naming the key and the list. A manifest written out as a record is checked
 before the file runs; one a factory returns is checked as it is parsed, against
-the same table. Each declared field is checked exactly: ral does not stringify
-a value of the wrong type or silently drop a malformed handler. Hook and
-keybinding handlers each take exactly one argument. Unknown hook names, wrong
-handler arity, invalid key notation, invalid guard regexes, and alias conflicts
-are load errors.
+the same table. This is the same record-versus-map cliff as the rc file's
+(§15.3): `return [nam: 'example']` is a record, so the misspelled `name` is
+caught statically and the plugin file never runs; `return [:, nam: 'example']`
+is a map, so the file runs first — any statement before the `return` has
+already taken effect — and only the returned manifest's application is
+refused. Each
+declared field is checked exactly: ral does not stringify a value of the wrong
+type or silently drop a malformed handler. Hook and keybinding handlers each
+take exactly one argument. Unknown hook names, wrong handler arity, invalid
+key notation, invalid guard regexes, and alias conflicts are load errors.
 Validation and registration are atomic; a rejected load leaves no hooks,
 keybindings, or aliases installed.
 

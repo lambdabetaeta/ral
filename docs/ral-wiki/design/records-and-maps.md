@@ -190,7 +190,47 @@ carrying no information — written `[:, alice: (), bob: ()]`, with `has` for
 membership and `union` / `intersection` / `difference` in the prelude
 (`docs/SPEC.md` §4.5).
 
+## The empty-record gap
+
+There is no empty-record literal. `[]` is the empty *list* — no entries means
+no keys, static or computed, so the parser has nothing to classify by and
+falls back to the third literal kind rather than to either keyed one
+(`core/src/syntax/parser.rs`). A record with its fields removed one at a time
+does not converge on `[]`; it converges on the empty map `[:]`, because
+`[a: 1]` losing its last field has, at that point, no static key left to be
+a record *of*. The gap is real, not a documentation oversight: there is
+nothing to add to the grammar that would make `[]` mean "record, zero
+fields" without also making it ambiguous with "list, zero elements" at every
+other use of `[]` in the language — the list reading is needed far more
+often, and disambiguating by expected type would make a literal's kind
+depend on where it appears rather than on what it says, which is exactly the
+property [[design/row-types|row-types]] classification does not have.
+
+This is not a cosmetic asymmetry. A record's keyset is part of its *type* —
+that is the entire content of the record/map split above — so a record with
+no keyset is not a smaller record, it is a value with no type to check
+statically. Concretely: shrinking `[edit_mode: 'vi']` to nothing does not
+leave a `[]` a checker could still hold to a table; it leaves `[:]`, a map,
+which meets that table only when something applies it at run time. Three
+places in `ral` hand a script's returned value straight to a fixed table
+this way — an rc file, a plugin manifest, a capability profile
+(`docs/SPEC.md` §15.3, §15.5, §12.12) — and in each one, emptying the
+returned record is indistinguishable, at the keystroke that does it, from
+opting the whole file out of static checking. A user who deletes a config's
+last field to "leave it empty" has, without any warning at the deletion
+site, also decided that every key they type next is checked only when the
+file is next applied, not when it is next read.
+
+The user has chosen to leave this as-is rather than special-case `[]` in a
+contract file's return position, the way it is already special-cased inside
+a form's option bracket (`within []`, `grant []`). That exception is local to
+one syntactic position a form owns outright; a contract file's return
+position is an ordinary expression whose value flows through the same
+record/map classification as everywhere else, and giving it a second,
+context-dependent meaning for `[]` would reopen exactly the ambiguity the
+form-bracket exception was built to avoid in the first place, one level up.
+
 **Realised in** [[internals/type-inference|type-inference]] (literal inference
 and the record/map projection split).
 
-Cite: `docs/SPEC.md` §4.5; `core/src/typecheck/{ty,infer,unify,builtins}.rs`.
+Cite: `docs/SPEC.md` §4.5, §12.12, §15.3, §15.5; `core/src/typecheck/{ty,infer,unify,builtins,contract}.rs`.

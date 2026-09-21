@@ -1649,6 +1649,31 @@ fn two_forms_in_one_list_narrow_to_the_empty_bundle() {
     );
 }
 
+/// Order-independence is a theorem about the term rules plus the declared
+/// tables' door, not a property of the unifier's field rule alone — so the
+/// sharpest permutation is one bundle constrained by two declared rows, and
+/// both statement orders must reach the same verdict.
+#[test]
+fn two_forms_over_one_bundle_agree_in_either_order() {
+    let wrapper = |first, second| {
+        format!(
+            r"let f = {{ |o|
+                 {first} $o {{ () }}
+                 {second} $o {{ () }}
+               }}"
+        )
+    };
+    let (wg, gw) = (wrapper("within", "grant"), wrapper("grant", "within"));
+    ok(&format!("{wg}\nreturn $f"));
+    ok(&format!("{gw}\nreturn $f"));
+    // And the narrowing both orders impose is the same one: each row's labels
+    // meet the other's empty tail, so the bundle admits no option at all.
+    for src in [&wg, &gw] {
+        has_error(&format!("{src}\nf [dir: \"/tmp\"]"), "'dir'");
+        has_error(&format!("{src}\nf [net: true]"), "'net'");
+    }
+}
+
 /// A form's options are fields; a map's keys are data.  The refusal is the
 /// form's own sentence and not a row against `[String: α]`.
 #[test]

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b1a0f280
+generated_at_commit: f06a5056
 generated_at_date: 2026-09-21
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -121,9 +121,10 @@ Internals:
   It is the single registration point, so the runtime doors that read the same
   keysets — `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` —
   dispatch off it rather than each keeping a copy; and it is where the one
-  condition the presence assignment owes is checked, that no two tables name a
-  label at two different ground types
-  ([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+  condition a variable flag owes is checked, that no two tables name a label at
+  two types that will not unify — the door carrying order-independence now that
+  the assignment is gone
+  ([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]).
 
 `infer.rs`'s `infer_case` is left whole by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Its one

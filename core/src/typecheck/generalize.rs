@@ -119,9 +119,9 @@ fn free_row_inner(u: &mut Unifier, row: &Row, out: &mut FreeVars, visited: &mut 
         Row::Var(v) => {
             out.rows.insert(v);
         }
-        // Through `resolve_field`, because a retired payload was united with
-        // `δ_l`: walking it would put an assignment variable in the free set
-        // and let `generalize` quantify one.
+        // Through `resolve_field`, because a retired field's payload is not
+        // part of the type: walking it would put a dead variable in the free
+        // set and let `generalize` quantify one.
         Row::Extend(_, f, rest) => {
             match u.resolve_field(&f) {
                 Field::Present(ty) => free_ty_inner(u, &ty, out, visited),
@@ -203,11 +203,8 @@ pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     // Cached so later `env_free_vars` calls read the sets instead of re-walking
     // this scheme's type tree.  Empty for top-level bindings.
     let residuals = fvs.intersect_into_cached(&env_fvs);
-    // Holds for the sorts checked: residuals come from monomorphic env
-    // bindings that outlive every scheme mentioning them, so no later step
-    // moves or binds one.  *Value* residuals are excluded, because retiring a
-    // field unites its payload with `δ_l` and can re-home a cached `α` that
-    // way — erasure kills no variable, but the union that saves it moves it.
+    // Holds by construction: residuals come from monomorphic env bindings that
+    // outlive every scheme mentioning them, so no later step moves or binds one.
     #[allow(
         clippy::debug_assert_with_mut_call,
         reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
@@ -276,14 +273,20 @@ pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
 }
 
 fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFreeVars) -> bool {
-    residuals.comp_fv.iter().all(|v| {
-        u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
-    }) && residuals.route_fv.iter().all(
-        |v| matches!(u.resolve_route(PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v),
-    ) && residuals
-        .row_fv
+    residuals
+        .ty_fv
         .iter()
-        .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
+        .all(|v| u.ty_root(v.0) == v.0 && matches!(u.resolve_ty(&Ty::Var(*v)), Ty::Var(_)))
+        && residuals.comp_fv.iter().all(|v| {
+            u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
+        })
+        && residuals.route_fv.iter().all(
+            |v| matches!(u.resolve_route(PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v),
+        )
+        && residuals
+            .row_fv
+            .iter()
+            .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
         && residuals
             .presence_fv
             .iter()

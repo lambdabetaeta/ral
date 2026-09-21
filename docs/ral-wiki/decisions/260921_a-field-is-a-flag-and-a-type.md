@@ -1,15 +1,19 @@
 ---
 status: active
-generated_at_commit: b1a0f280
+generated_at_commit: f06a5056
 ---
 
 # A field is a flag and a type
 
-**A record field is a presence flag paired with a type, the flag may be a
-variable, and a field the row says is absent is absent *at the type its label
-is assigned*.** Killing a field is therefore a constraint rather than a loss of
-information, which is what makes row unification unitary; and a record literal
-stops being a concatenation of its parts and becomes a **put** over one base.
+**A record field is a presence flag paired with a type, and the flag may be a
+variable.** A form's options are then sayable in a type, so `within $o` has a
+verdict; and a record literal stops being a concatenation of its parts and
+becomes a **put** over one base.
+
+The assignment `Δ` this decision introduced, which made an absent field absent
+*at the type its label is assigned*, was withdrawn four commits later:
+[[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]].
+The paragraphs below are written as they now stand.
 
 ## Context
 
@@ -44,28 +48,18 @@ this line of work started from.
 **A field is `Present τ`, `Absent`, or `Var(θ, τ)`** — "a `τ`, if it is
 there" — over a two-point flag store beside the four the unifier already had.
 
-**`Empty` means every label off the spine is absent *at the type the ambient
-assignment gives that label*.** The assignment `Δ` maps a label to a type
-variable `δ_l`, minted the first time that label is retired, and retiring a
-field unifies its payload with `δ_l`:
+**`Empty` means every label off the spine is absent**, full stop:
 
 ```
-Empty ~ (l : π·τ ; r)        π ~ Absent ;  τ ~ δ_l ;  Empty ~ r
+Empty ~ (l : π·τ ; r)        π ~ Absent ;  Empty ~ r
 ```
 
-That is what makes the algebra unitary. The solution that kills a field no
-longer throws information away — `θ := Absent` retires the other side too, and
-retiring it asks `String ~ δ_l` — so it is reachable from the eager one by
-instantiation, and the eager answer is the mgu. The field rule may therefore
-unify flags and payloads unconditionally: **no rule branches on a flag.**
-
-**`Δ` is indexed by label rather than shared per row.** Rémy's closed tail
-`∂(Absent·δ)` gives one `δ` to a whole row, which couples every absent payload
-in it: an rc file writing only `surface:` would retire `bell` and
-`recursion_limit` against one variable and demand `δ ~ Bool` and `δ ~ Int` at
-once. Indexing by label dodges that because `Δ` is *generated*, not stored —
-finite at every moment, total in effect — and every site that retires a field
-has the label in hand.
+The field rule unifies flags, then payloads when both sides have one:
+**no rule branches on a flag.** The eager answer is not the mgu of the deciding
+equation on its own — that is what `Δ` bought and what its withdrawal gives
+back — but it is order-independent on the terms the rules can build, which is
+the claim that was actually wanted. See
+[[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]].
 
 **A record literal is a put over one base.** `[...b, l̄: v̄]` demands of `b` only
 a *slot* at each written label — `Record(l̄: θ̄·β̄ ; ρ)`, flags and payloads
@@ -73,10 +67,10 @@ fresh, nothing imposed — and yields `Record(l̄: Present·τ̄ ; ρ)` over tha
 tail. `[...[x: "old"], x: 1]` is now `[x: 1]` in the type as it always was at
 run time, and a second base is refused where it is written.
 
-**`Field::Absent` stays nullary.** A dead payload is recoverable from its
-label, so no type stores one: `Δ`'s variables appear in no `Ty`, no `Row` and
-no `Scheme`, are never quantified, printed or serialised, and
-[[invariants/schemes-leave-closed|schemes-leave-closed]] is untouched.
+**`Field::Absent` stays nullary.** Nothing can read under an absent flag, so
+there is nothing beside an absent field to read, key, quantify or
+occurs-check, and no traversal has to invent a payload where the row says there
+is none. [[invariants/schemes-leave-closed|schemes-leave-closed]] is untouched.
 
 ## Consequences
 
@@ -107,11 +101,12 @@ no `Scheme`, are never quantified, printed or serialised, and
   written down in [[internals/type-inference|type-inference]]; neither is
   claimed as a theorem.
 - **One condition is owed and is a rule, not a result**: within one check, a
-  label may not be optional at two different ground types. Ordinary programs
-  cannot reach it — a payload meets `δ_l` only when its flag dies, and the only
-  construct putting a *ground* payload beside a *variable* flag is a declared
-  option row — so it binds the declared tables and nothing else, and is checked
-  where they register.
+  label may not be optional at two types that will not unify. Ordinary programs
+  cannot reach it — the only construct putting a *ground* payload beside a
+  *variable* flag is a declared option row — so it binds the declared tables
+  and nothing else, and is checked where they register. With `Δ` withdrawn this
+  condition is what carries order-independence, so it is load-bearing rather
+  than incidental.
 
 ## A correction, made while implementing
 
@@ -136,7 +131,7 @@ naming the option the all-absent row no longer has, which is what
 
 **And no message can say which two forms met.** A row carries labels, fields
 and a tail; a flag carries a two-point value; neither carries provenance, and
-`Δ` records a label's type and not the tables that asked for it. Naming the two
+no side table records which form asked for a label. Naming the two
 forms would mean adding provenance to a row or a flag, which is a second kind
 of data on the type and a cost this design declines to pay for a diagnostic.
 The refusal names the missing option instead, which is the fact the program

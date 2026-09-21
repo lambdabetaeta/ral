@@ -12,7 +12,7 @@ use super::ty::{
     CompTy, CompTyVar, Field, Label, PayloadRoute, PayloadVar, Presence, PresenceVar, Row, RowVar,
     Ty, TyVar,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
 /// `generalize.rs`.  `tys`/`comps` are a stack for `apply_*` and a set for
@@ -281,11 +281,6 @@ pub struct Unifier {
     /// constructor, so this store is read through `resolve_presence` rather
     /// than the `Unifiable` chase the other four share.
     presences: Store<Presence>,
-    /// `Δ`: the type variable at which a label's retired payloads are all
-    /// identified, minted the first time that label is retired.  Generated
-    /// rather than stored, and global to one check: nothing here appears in a
-    /// `Ty`, a `Row` or a `Scheme`, so nothing crosses a REPL line.
-    assignment: HashMap<Label, TyVar>,
 }
 
 impl Unifier {
@@ -296,7 +291,6 @@ impl Unifier {
             routes: Store::new(),
             rows: Store::new(),
             presences: Store::new(),
-            assignment: HashMap::new(),
         }
     }
 
@@ -351,19 +345,6 @@ impl Unifier {
             },
             other => other.clone(),
         }
-    }
-
-    /// `δ_l`, the one type at which every payload retired at `l` is
-    /// identified (§2.3 of the presence design): minted on first retirement,
-    /// and never quantified, printed or serialised, because no `Field::Absent`
-    /// stores it.
-    fn dead_ty(&mut self, label: &Label) -> Ty {
-        if let Some(v) = self.assignment.get(label) {
-            return Ty::Var(*v);
-        }
-        let v = self.fresh_tyvar();
-        self.assignment.insert(label.clone(), v);
-        Ty::Var(v)
     }
 
     /// Canonical comp-var root under union-find, for the cycle-aware traversals
@@ -595,9 +576,8 @@ impl Unifier {
             Row::Empty => Row::Empty,
             Row::Var(v) => Row::Var(v),
             Row::Extend(l, f, rest) => {
-                // The rewrite drops a payload; it never invents one.  A
-                // retired payload was united with `δ_l` when it died, so
-                // dropping it here loses nothing anything can reach.
+                // The rewrite drops a payload; it never invents one.  No rule
+                // reads under an absent flag, so dropping it loses nothing.
                 let f2 = match self.resolve_field(&f) {
                     Field::Present(ty) => {
                         Field::Present(Box::new(self.apply_ty_inner(&ty, visited)))
@@ -945,10 +925,10 @@ impl Unifier {
 
             match (a, b) {
                 (Row::Empty, Row::Empty) => return Ok(()),
-                // `Empty` says every label off the spine is absent at the type
-                // the assignment gives it, so these two arms are a *peel*, not
-                // an error: they retire the field and carry on.  They are the
-                // symmetric pair a one-sided edit would leave half-done.
+                // `Empty` says every label off the spine is absent, so these two
+                // arms are a *peel*, not an error: they retire the field and
+                // carry on.  They are the symmetric pair a one-sided edit would
+                // leave half-done.
                 (Row::Empty, Row::Extend(l, f, rest)) => {
                     self.unify_field(&l, &Field::Absent, &f, pairs, depth)?;
                     b = self.resolve_row(&rest);
@@ -1019,14 +999,14 @@ impl Unifier {
         }
     }
 
-    /// The field rule: unify the flags, then the payloads, always.  It is no
-    /// conditional — the eager answer is the most general unifier, because the
-    /// solution that kills a field says something too (it constrains `δ_l`),
-    /// so there is nothing to choose and nothing the order can change.
+    /// The field rule: unify the flags, then the payloads when both sides have
+    /// one.  Dropping a payload whose partner is absent loses nothing, because
+    /// no rule reads under an absent flag; order-independence is then a theorem
+    /// about the term rules (confinement) plus the one-optional-type door in
+    /// `contract.rs`, not a property of this equation alone.
     ///
-    /// A field that is *already* absent has no stored payload, so the rule
-    /// reads `δ_l` for that side.  `Present` against `Absent` has no solution,
-    /// and this frame owns the message because it is the one holding `label`.
+    /// `Present` against `Absent` has no solution, and this frame owns the
+    /// message because it is the one holding `label`.
     fn unify_field(
         &mut self,
         label: &Label,
@@ -1064,17 +1044,10 @@ impl Unifier {
             }
             (Field::Present(_), Field::Present(_)) | (Field::Absent, Field::Absent) => {}
         }
-        let dead = (a.payload().is_none() || b.payload().is_none()).then(|| self.dead_ty(label));
-        // `δ_l` on the left of each union so it, and never a payload some
-        // scheme still names, is the side that stops being canonical.
-        let (left, right) = match (a.payload(), b.payload()) {
-            (Some(t1), Some(t2)) => (t1.clone(), t2.clone()),
-            (Some(t), None) | (None, Some(t)) => {
-                (dead.expect("an absent side mints δ_l"), t.clone())
-            }
-            (None, None) => return Ok(()),
-        };
-        self.unify_ty_inner(&left, &right, pairs, deeper(depth)?)
+        match (a.payload(), b.payload()) {
+            (Some(t1), Some(t2)) => self.unify_ty_inner(t1, t2, pairs, deeper(depth)?),
+            _ => Ok(()),
+        }
     }
 
     /// Unify computation types `a` and `b`, binding variables in place.
@@ -1626,47 +1599,52 @@ mod tests {
         )
     }
 
-    /// Retire `x` by `sides`, then ask whether the label's assignment now
-    /// holds what was retired into it: a second retirement at `x`, of an
-    /// `Int`, must meet the `String` the first left there.
-    fn retires_into_the_assignment(sides: fn(PresenceVar) -> (Row, Row)) {
+    /// Retire `x` by `sides`: the flag dies and the payload beside it is left
+    /// exactly as it was, an unbound root nothing constrained.  Nothing can
+    /// read under an absent flag, so the payload equation is not merely
+    /// unnecessary — imposing one would be the only thing making a retirement
+    /// observable.
+    fn retirement_kills_the_flag_and_spares_the_payload(sides: fn(PresenceVar, Ty) -> (Row, Row)) {
         let mut u = Unifier::new();
         let flag = u.fresh_presence_var();
-        let (a, b) = sides(flag);
+        let alpha = u.fresh_ty();
+        let Ty::Var(TyVar(i)) = alpha else {
+            unreachable!("fresh_ty is a variable")
+        };
+        let (a, b) = sides(flag, alpha.clone());
         u.unify_row(&a, &b).expect("retiring a field succeeds");
         assert_eq!(
             u.resolve_presence(flag),
             Some(Presence::Absent),
             "retirement resolves the flag to absent"
         );
-        let second = u.fresh_presence_var();
-        let probe = optional_row("x", second, Ty::Int, Row::Empty);
-        u.unify_row(&Row::Empty, &probe).expect_err(
-            "a second retirement at one label meets the first's payload, so an \
-             `Int` against the `String` already retired there is refused",
-        );
+        assert_eq!(u.ty_root(i), i, "the dead payload is still its own root");
+        assert_eq!(u.apply_ty(&alpha), alpha, "and is still unbound");
     }
 
     /// Retirement is one equation from three sides: a field peeled off the
     /// right, one peeled off the left, and one meeting an `Absent` at a
-    /// matched label.  All three send the payload to `δ_l`, so no spelling of
-    /// an absence is one-sided — which is what lets `Empty` carry information
-    /// at all, and what a one-sided edit would leave half-done.
+    /// matched label.  All three must spare the payload alike, which is what a
+    /// one-sided edit would leave half-done.
     #[test]
-    fn a_field_retired_from_the_right_reaches_the_assignment() {
-        retires_into_the_assignment(|f| (Row::Empty, optional_row("x", f, Ty::String, Row::Empty)));
+    fn a_field_retired_from_the_right_spares_its_payload() {
+        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
+            (Row::Empty, optional_row("x", f, t, Row::Empty))
+        });
     }
 
     #[test]
-    fn a_field_retired_from_the_left_reaches_the_assignment() {
-        retires_into_the_assignment(|f| (optional_row("x", f, Ty::String, Row::Empty), Row::Empty));
+    fn a_field_retired_from_the_left_spares_its_payload() {
+        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
+            (optional_row("x", f, t, Row::Empty), Row::Empty)
+        });
     }
 
     #[test]
-    fn a_field_meeting_an_absent_reaches_the_assignment() {
-        retires_into_the_assignment(|f| {
+    fn a_field_meeting_an_absent_spares_its_payload() {
+        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
             (
-                optional_row("x", f, Ty::String, Row::Empty),
+                optional_row("x", f, t, Row::Empty),
                 Row::Extend(
                     Label::Field("x".into()),
                     Field::Absent,
@@ -1747,9 +1725,8 @@ mod tests {
         );
     }
 
-    /// Retirement erases a *flag*, never a type: the payload is united with
-    /// `δ_l`, so a payload the dying field shared with a live one is still
-    /// there to be constrained afterwards.
+    /// Retirement erases a *flag*, never a type: a payload the dying field
+    /// shared with a live one is still there to be constrained afterwards.
     #[test]
     fn a_payload_shared_with_a_live_field_survives_the_retirement() {
         let mut u = Unifier::new();
@@ -1773,42 +1750,36 @@ mod tests {
         assert_eq!(fields.get("x"), None, "a dead field offers no payload");
     }
 
-    /// Presence-aware keys fix the *resolved* half only; the other half is a
-    /// **resource bound, not a termination result**.  Retiring a field is the
-    /// equation `τ ~ δ_l`, and unifying any structure against a variable
-    /// fingerprints it for the one-sided obligation guard — the pre-existing
-    /// cost `deeply_nested_ty_key_is_too_deep_not_a_stack_overflow` pins — so
-    /// a payload nested past the ceiling cannot be retired, exactly as it
-    /// cannot be bound to a fresh variable by any other rule.  The budget is
-    /// order-sensitive both ways and no key closes that; the guarantee is that
-    /// it is a graceful refusal rather than a blown stack.
+    /// Retiring a field is one presence equation and no type equation, so the
+    /// payload's depth is never walked: a payload nested far past the ceiling
+    /// retires as cheaply as a shallow one.  The budget stays order-sensitive
+    /// elsewhere — that is the standing resource bound
+    /// `deeply_nested_ty_key_is_too_deep_not_a_stack_overflow` pins — but a
+    /// retirement does not spend any of it.
     #[test]
-    fn retiring_a_payload_past_the_ceiling_is_a_resource_bound() {
+    fn retiring_a_field_spends_no_depth_on_its_payload() {
         on_deep_stack(|| {
             let mut u = Unifier::new();
             let flag = u.fresh_presence_var();
             let row = optional_row("x", flag, deep_list(MAX_UNIFY_DEPTH + 100), Row::Empty);
-            let err = u
-                .unify_row(&Row::Empty, &row)
-                .expect_err("a too-deep payload cannot be sent to the assignment");
-            assert!(
-                matches!(err, TypeErrorKind::TypeTooDeep),
-                "expected TypeTooDeep, got {err:?}"
-            );
+            u.unify_row(&Row::Empty, &row)
+                .expect("a retirement reads no payload, however deep");
+            assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
         });
     }
 
-    /// The equation §2.4 turns on: `(x: θ·α)` against `(x: θ'·String)`.  The
-    /// eager answer — unify the flags, then the payloads — is the most general
-    /// unifier, so solving it in either order gives one solution, and the
-    /// order two independent constraints arrive in cannot move the verdict.
+    /// The equation the design turns on: `(x: θ·α)` against `(x: θ'·String)`.
+    /// It has two solutions, and which one an eager algorithm reaches depends
+    /// on the order — but they differ only in the binding of a *dead* payload,
+    /// which is not an observable.  What can be observed is asserted: both
+    /// flags, and both rows as applied.
     #[test]
-    fn the_deciding_equation_has_one_solution_in_either_order() {
+    fn the_deciding_equation_agrees_on_observables_in_either_order() {
         let solve = |kill_first: bool| {
             let mut u = Unifier::new();
             let (t, tp) = (u.fresh_presence_var(), u.fresh_presence_var());
             let alpha = u.fresh_ty();
-            let left = optional_row("x", t, alpha.clone(), Row::Empty);
+            let left = optional_row("x", t, alpha, Row::Empty);
             let right = optional_row("x", tp, Ty::String, Row::Empty);
             if kill_first {
                 u.unify_row(&Row::Empty, &left).expect("kill the field");
@@ -1818,21 +1789,29 @@ mod tests {
                 u.unify_row(&Row::Empty, &left)
                     .expect("then kill the field");
             }
-            (u.resolve_presence(t), u.apply_ty(&alpha))
+            (
+                u.resolve_presence(t),
+                u.resolve_presence(tp),
+                u.apply_row(&left),
+                u.apply_row(&right),
+            )
         };
         assert_eq!(
             solve(true),
             solve(false),
-            "the solution that kills the field constrains the assignment too, \
-             so it is reachable from the eager one and the two agree"
+            "the two orders agree on everything a later rule can read"
         );
-        assert_eq!(solve(true).1, Ty::String, "`α` is still pinned to `String`");
+        assert_eq!(
+            solve(true).0,
+            Some(Presence::Absent),
+            "both fields are retired either way"
+        );
     }
 
     /// Absence before `Empty` is the equation `(l: Absent ; Empty) = Empty`,
     /// so two ground rows differing only in a retired field's type are equal:
-    /// a label has exactly one dead type, and there is no second spelling of
-    /// an absence for a third row to disagree with.
+    /// an absence has one spelling, carrying nothing, and there is no second
+    /// for a third row to disagree with.
     #[test]
     fn rows_differing_only_beside_a_resolved_absence_are_equal() {
         let mut u = Unifier::new();

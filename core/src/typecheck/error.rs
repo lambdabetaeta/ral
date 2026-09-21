@@ -212,9 +212,9 @@ pub enum TypeErrorKind {
         key: &'static str,
         advice: &'static str,
     },
-    /// Two declared tables name one label at two different ground types, which
-    /// the presence assignment cannot serve: a label has one absent type, so
-    /// the second table's absence would ask it to be both.
+    /// Two declared tables name one label at two types that will not unify,
+    /// which would make the order two constraints arrive in decide the verdict
+    /// — the one thing order-independence is owed by the term rules.
     ContractClash {
         label: &'static str,
         forms: [&'static str; 2],
