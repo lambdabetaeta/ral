@@ -1,4 +1,4 @@
-import { renderAssistantMarkdown } from "./math.js";
+import { growProse } from "./prose.js";
 import {
   blocks,
   streamingProse,
@@ -18,13 +18,8 @@ import {
 import { renderMarkCard } from "./card-renderer.js";
 import { transcriptEl, pinTranscript } from "./core.js";
 import { setFacts, setStatus } from "./conversation.js";
-import { highlightRal } from "./ral-highlight.js";
 
 // ---- The projector ----------------------------------------------------
-
-// How long the streaming bubble may stay raw before it is re-parsed.
-const FLUSH_MS = 100;
-let parsedAt = 0;
 
 // Per block: the element last built for it and the revision it shows.
 // An untouched block keeps its element across renders — same node, same
@@ -36,6 +31,14 @@ const memo = new WeakMap();
 function projectBlock(block) {
   const known = memo.get(block);
   if (known && known.rev === block.rev) return known.el;
+  // Prose grows rather than changes: its bubble is brought up to date in
+  // place, so settled markdown — and the mathematics already laid out in
+  // it — is never rebuilt under the reader.
+  if (block.kind === "assistant" && known) {
+    growProse(/** @type {HTMLElement} */ (known.el.firstElementChild), block);
+    memo.set(block, { el: known.el, rev: block.rev });
+    return known.el;
+  }
   const el = renderBlock(block);
   // renderBlock's switch covers every kind chat-document.js ever creates,
   // so it always returns — TS just can't see that without a default arm.
@@ -97,16 +100,9 @@ function renderBlock(block) {
       bubble.textContent = block.text;
       return msg;
     }
-    // Plain between flushes: re-parsing per token is quadratic in the
-    // message (measured: 3.3s of main thread by 8,000 tokens).
     case "assistant": {
       const { msg, bubble } = messageShell("msg assistant");
-      if (block.plain) {
-        bubble.textContent = block.raw;
-      } else {
-        bubble.innerHTML = renderAssistantMarkdown(block.raw);
-        for (const code of bubble.querySelectorAll("code.language-ral")) highlightRal(code);
-      }
+      growProse(bubble, block);
       return msg;
     }
     case "system": {
@@ -166,21 +162,19 @@ export function onSynodEvent(p) {
       if (!streamingProse && !p.text.trim()) break;
       if (streamingProse) {
         streamingProse.raw += p.text;
-        // On a cadence: `boundary` arrives only once the turn has sealed.
-        const now = performance.now();
-        streamingProse.plain = now - parsedAt < FLUSH_MS;
-        if (!streamingProse.plain) parsedAt = now;
+        streamingProse.open = true;
         bump(streamingProse);
       } else {
         clearOpenDial();
-        parsedAt = performance.now();
         openStreamingProse(p.text);
       }
       break;
+    // The turn has sealed, so the bubble's last block is closed too: it
+    // settles with the rest, rather than waiting on a following block to
+    // prove it finished.
     case "boundary":
       if (streamingProse) {
-        streamingProse.plain = false;
-        parsedAt = performance.now();
+        streamingProse.open = false;
         bump(streamingProse);
       }
       break;

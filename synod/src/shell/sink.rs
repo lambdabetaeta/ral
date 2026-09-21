@@ -198,8 +198,8 @@ pub enum SynodEvent {
     },
     /// The streaming flush boundary — where the trunk's own reasoning fold
     /// would have cut a block.  Carries no payload: the window's own use is
-    /// to know when to re-render the streaming bubble as markdown instead of
-    /// plain text, not to draw anything itself.
+    /// to know that the bubble's last markdown block is closed, and so may
+    /// settle without waiting on a following one, not to draw anything itself.
     Boundary,
     /// The session's whole state, not a passing label: the status bar names
     /// this one until the next arrives, and `pending` says whether anything is

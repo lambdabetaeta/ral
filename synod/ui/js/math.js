@@ -117,7 +117,7 @@ function findOutsideCode(src, code, needle, from) {
 
 // Where a `$` is only a dollar sign: fenced code blocks and inline code
 // spans, which is where this app's own shell examples keep theirs.
-function codeMask(src) {
+export function codeMask(src) {
   const code = new Uint8Array(src.length);
   let fence = null;                    // the ``` or ~~~ run that opened the block
   let at = 0;
@@ -208,8 +208,8 @@ function fillMath(root, formulae) {
   }
 }
 
-// Streaming rebuilds the whole bubble on every token, so a formula the
-// reader is already looking at is typeset once and then remembered.
+// A formula in the block still being written is typeset afresh on every
+// token, so each one is remembered by its own source.
 const typesetCache = new Map();
 
 function typeset(formula) {

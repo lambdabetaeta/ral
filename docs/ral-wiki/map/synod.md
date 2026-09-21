@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d0e5d30c
-generated_at_date: 2026-09-18
+generated_at_commit: 64a3a121
+generated_at_date: 2026-09-21
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -302,9 +302,9 @@ as one process line inside the dial's rung; `WaitingOnAgents` maps to a
 status-bar label. `sink.rs` also folds `ProviderErrorRecord` at the seam:
 `SynodEvent::ProviderError`/`Stalled` carry `{ text, severity }` — the
 sentence composed once, where the module's deny reaches the fold — and
-`Transient::Boundary` is carried across as `SynodEvent::Boundary`, letting
-the window render the streaming bubble as plain text between flush
-boundaries. Every enum on this wire is `#[serde(rename_all = "snake_case")]`
+`Transient::Boundary` is carried across as `SynodEvent::Boundary`, which
+tells the window that the turn has sealed and so the streaming bubble's last
+markdown block is closed. Every enum on this wire is `#[serde(rename_all = "snake_case")]`
 — the JSON seam speaks `snake_case` throughout, matching exarch, with no
 `camelCase` renaming anywhere on it. Every type that crosses the seam derives
 `ts_rs::TS` beside its `Serialize`, so the TypeScript the window is checked
@@ -339,7 +339,7 @@ report against another's folder.
 
 The frontend is `synod/ui/`: `index.html` holds the markup and its tags,
 `css/*.css` the sections the stylesheet's own comments already delimited, and
-`js/*.js` the ten concerns as ES modules — `type="module"`, no bundler, which
+`js/*.js` the frontend's concerns as ES modules, one per file — `type="module"`, no bundler, which
 is the whole reason the frontend is hand-written. `js/core.js` is what every
 other module imports (`$`, `invoke`, `listen`, `state`, `show`); `app.js` is
 the only file `index.html` names, and its `render()` is the first paint, after
@@ -368,6 +368,28 @@ backticks — whether four spaces open a code block or continue a list item is
 a question only a block parser can answer — so a sentinel that marked put
 inside a `<code>` is handed back as the text it was written as. No message
 wears a name above it — who spoke is said by the bubble's side and colour.
+
+A bubble that is still arriving is not re-rendered whole. `prose.js` treats
+it as what it is — a document with a **settled prefix and one open block** —
+and cuts the source at markdown block boundaries: `marked.lexer` runs over
+the unsettled tail alone, everything before the block still open is rendered
+once into the bubble and never touched again, and only the tail is rebuilt as
+tokens land. That is what makes rendering *every* token affordable, where
+re-parsing the whole message per token is quadratic in it (3.3s of main
+thread by 8,000 tokens, measured): the window no longer shows raw markdown
+between flushes, and settled prose — with its coloured ral and its laid-out
+KaTeX — never reflows under the reader. Two facts decide where the cut may
+fall. A list or an indented code block is *rejoined* across a blank line by a
+later one of its kind rather than followed by it, so a trailing run of those
+stays open together; every other block closes the moment another follows it.
+And because `renderAssistantMarkdown` lifts formulae out before marked sees
+them, a cut must never fall between a formula's delimiters, so a chunk
+settles only once the multi-line mathematics opened inside it has closed
+there too — judged with the same `codeMask` that decides where a `$` is only
+a dollar sign. `SynodEvent::Boundary` and the close of a bubble both settle
+the tail outright, having the turn's own word that nothing can join it. The
+open block ends in a `caret`: the writing front as a mark at a fixed place in
+the text, not an animation played over prose already read.
 
 A ral listing — a ```` ```ral ```` fence in the prose, or the script on a dial
 row — is coloured by `ral-highlight.js`, which asks the shell

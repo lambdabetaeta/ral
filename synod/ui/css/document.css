@@ -55,6 +55,27 @@
       white-space: normal;
       > :first-child { margin-top: 0; }
       > :last-child { margin-bottom: 0; }
+
+      /* The block still being written. It is a handle for the DOM, not a
+         box: `display: contents` lets its children lay out as the
+         bubble's own, so the two rules above still need saying of it. */
+      .live { display: contents; }
+      .live > :last-child { margin-bottom: 0; }
+      > .live:first-child > :first-child { margin-top: 0; }
+
+      /* The writing front, standing where the next character will go. It
+         is the one thing in the bubble that moves, and it moves only at
+         the tail — never over prose already read. */
+      .caret {
+        display: inline-block;
+        width: 0.42em;
+        height: 1em;
+        margin-left: 0.09em;
+        vertical-align: text-bottom;
+        border-radius: 1px;
+        background: var(--accent);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
       p { margin: 0 0 0.7em; }
       h1, h2, h3, h4, h5, h6 {
         font-family: var(--serif);

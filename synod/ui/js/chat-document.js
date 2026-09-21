@@ -13,9 +13,9 @@ import { highlightRal } from "./ral-highlight.js";
 // cards, and dials.
 // Everything under #transcript is a projection of this list; no block
 // holds an element, and no handler writes to the transcript directly.
-// An assistant block keeps the raw markdown of its whole bubble, so each
-// token re-renders from the full source rather than patching rendered
-// HTML.
+// An assistant block keeps the raw markdown of its whole bubble and says
+// whether it is still `open` — being written — which is all `prose.js`
+// needs to decide how much of it has settled.
 export let blocks = [];
 
 // The blocks still receiving input, held as data. `streamingProse` is
@@ -23,7 +23,7 @@ export let blocks = [];
 // cards, and notes land in. Never both at once — each opens by closing
 // the other — and closing one (dropping the ref to null) leaves the
 // block itself in the document.
-/** @type {{ kind: "assistant", raw: string, plain: boolean, rev: number } | null} */
+/** @type {{ kind: "assistant", raw: string, open: boolean, rev: number } | null} */
 export let streamingProse = null;
 let openDial = null;
 
@@ -48,7 +48,7 @@ export function clearOpenDial() {
 // write projector.js's onSynodEvent needs when a token arrives with no
 // bubble already open.
 export function openStreamingProse(text) {
-  streamingProse = pushBlock({ kind: "assistant", raw: text, plain: true });
+  streamingProse = pushBlock({ kind: "assistant", raw: text, open: true });
 }
 
 // Every mutation runs through these two and ends in the one projector
@@ -67,12 +67,11 @@ export function bump(block) {
 }
 
 // The streaming bubble's stream has closed — a card, a dial, or the
-// exchange itself — so this is its last word: flip it out of plain-text
-// mode and bump once more, so it settles as markdown rather than
-// freezing mid-stream in the cheap rendering.
+// exchange itself — so this is its last word: nothing more can join its
+// final block, and the whole bubble settles.
 export function closeStreamingProse() {
   if (!streamingProse) return;
-  streamingProse.plain = false;
+  streamingProse.open = false;
   bump(streamingProse);
   streamingProse = null;
 }
