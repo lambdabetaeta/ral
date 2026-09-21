@@ -373,9 +373,10 @@ fn source_profile_inner(path: &str, shell: &mut Shell) -> Result<(), String> {
 
 /// Source the rc file: evaluate it, apply the returned map, and run its
 /// `startup` block if present.  Each stage's failure is reported where
-/// the right amount of state survives it — a broken file or contract
-/// leaves the default settings; a failed `startup` block keeps the
-/// settings the map already applied.
+/// the right amount of state survives it — a broken file, an unmet
+/// contract, or an unknown key in a *mapped* rc all leave the default
+/// settings; a failed `startup` block keeps the settings the map already
+/// applied.
 fn source_rc(path: &str, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> RcSettings {
     let pairs = match rc_config(path, shell) {
         Ok(Some(pairs)) => pairs,
@@ -385,7 +386,13 @@ fn source_rc(path: &str, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>)
             return RcSettings::default();
         }
     };
-    let (settings, startup) = apply_rc_config(pairs, shell, runtime);
+    let (settings, startup) = match apply_rc_config(pairs, shell, runtime) {
+        Ok(result) => result,
+        Err(msg) => {
+            diagnostic::cmd_error("ral", &format!("{path}: {msg}"));
+            return RcSettings::default();
+        }
+    };
     if let Some(block) = startup
         && let Err(msg) = run_startup(path, block, shell)
     {

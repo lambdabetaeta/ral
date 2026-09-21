@@ -1273,8 +1273,9 @@ impl Inferencer<'_> {
         for entry in entries {
             match entry {
                 ValRecordEntry::Field(key, value) => {
+                    let duplicate = fields.iter().any(|(seen, _)| seen == key);
                     let ty = self.with_span(value.span, |this| {
-                        if fields.iter().any(|(seen, _)| seen == key) {
+                        if duplicate {
                             this.ctx
                                 .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
                         }
@@ -1285,7 +1286,11 @@ impl Inferencer<'_> {
                             _ => this.infer_val(&value.item),
                         }
                     });
-                    fields.push((key.clone(), ty));
+                    // A repeat is inferred for the errors inside it, then dropped:
+                    // one label, one slot, or the row carries it twice.
+                    if !duplicate {
+                        fields.push((key.clone(), ty));
+                    }
                 }
                 ValRecordEntry::Spread(value) => {
                     let base_ty = self.with_span(value.span, |this| this.infer_val(&value.item));

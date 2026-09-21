@@ -86,7 +86,9 @@ while the boot always survives
 whole rc unapplied rather than only the offending key. The contract only
 sees a literal `return [...]`; a *computed* rc return (a bound variable, a
 call) is invisible to it, and stays on `config.rs`'s own per-key runtime
-check below, which still applies the keys around a bad one.
+check below — `apply_rc_config`, which meets the same keyset and the same
+field types before applying anything, and refuses the whole rc on an
+unknown key or a malformed value alike, the same way the static check does.
 An rc `startup` block registers as the
 `Session/"startup"` hook and runs through a **framed hook run** under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak —

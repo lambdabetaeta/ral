@@ -2,11 +2,12 @@
 //!
 //! An rc file is ral source whose return value is a configuration record.
 //! Its eleven keys are declared once, in `Form::Rc`'s table, and the checker
-//! holds the file's inferred return row to them: an unknown key is a static
-//! error naming the list, whatever syntax produced it. A file returning a
-//! *map* has no row to check and meets the same keyset at `apply_rc_key`. A
-//! recognised key with a malformed value is rejected with an error naming the
-//! key, while the rest of the file still applies.
+//! holds the file's inferred return row to them — unknown key or wrong
+//! field type alike — to a static error, whatever syntax produced it, and
+//! the whole file is skipped. A file returning a *map* has no row to check,
+//! so `apply_rc_config` meets the same keyset and the same field types
+//! itself, before applying anything: either mistake refuses the whole rc
+//! there too, agreeing with what the static check already does.
 
 use ral_core::typecheck::Form;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
@@ -122,39 +123,137 @@ pub(super) fn create_default_rc() -> Option<String> {
 
 // ── RC config application ────────────────────────────────────────────────
 
+/// The trailer every runtime refusal of a *mapped* rc carries: a bad key or
+/// a bad value both mean the whole rc is refused, not applied piecemeal, so
+/// the reader is told plainly that defaults are what actually took effect.
+fn refuse(reason: impl std::fmt::Display) -> String {
+    format!("rc: {reason}. The rc was not applied; the shell started with defaults.")
+}
+
 /// Apply the RC config map to the shell and plugin runtime.  Returns the
 /// resolved frontend settings and the `startup` block, if any, so the
 /// caller can execute it in the right context.  The rc's map contract
 /// (and the diagnostic for breaking it) lives with the sourcing in
 /// `session::boot`; this function only ever sees a map.
+///
+/// A map has no row for the checker to hold to the rc's keyset or its
+/// fields' types, so both are met here instead, agreeing with what a
+/// record return is held to statically: an unknown key, or a known key
+/// whose value is the wrong shape, refuses the whole rc rather than the
+/// keys around it landing first.
+///
+/// Refusing *before* mutating anything is only fully honest for the seven
+/// keys [`rc_value_shape_error`] can judge from the value alone; `prompt`,
+/// `aliases`, and `theme` each judge more than that (a block's arity, a
+/// thunk's route, a nested key `apply_rc_key`'s own decoder warns about),
+/// so those three run first — if any refuses, nothing else has been
+/// touched yet — and everything left, already shape-checked or (`startup`)
+/// unconditional, cannot fail behind them.
 pub(crate) fn apply_rc_config(
     pairs: Map,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
-) -> (RcSettings, Option<Value>) {
+) -> Result<(RcSettings, Option<Value>), String> {
+    let table = ral_core::typecheck::contract::declared(Form::Rc);
+    if let Some(key) = pairs.keys().find(|k| table.holds(k).is_none()) {
+        return Err(refuse(table.unknown_key(key)));
+    }
+    if let Some(err) = pairs.iter().find_map(|(k, v)| rc_value_shape_error(k, v)) {
+        return Err(refuse(err.message));
+    }
+
     let mut settings = RcSettings::default();
     let mut startup: Option<Value> = None;
-    for (key, val) in pairs {
-        if let Err(err) = apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup) {
-            eprint!(
-                "{}",
-                ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
-            );
+    for key in ["prompt", "aliases", "theme"] {
+        if let Some(val) = pairs.get(key) {
+            apply_rc_key(
+                key,
+                val.clone(),
+                shell,
+                runtime,
+                &mut settings,
+                &mut startup,
+            )
+            .map_err(|err| refuse(err.message))?;
         }
     }
-    (settings, startup)
+    for (key, val) in pairs {
+        if matches!(key.as_str(), "prompt" | "aliases" | "theme") {
+            continue;
+        }
+        // Every other key was shape-checked above, so this cannot fail.
+        apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup)
+            .map_err(|err| refuse(err.message))?;
+    }
+    Ok((settings, startup))
 }
 
-/// Apply a single rc top-level `key: val` pair.  An `Err` names the
-/// offending key and the shape it expected; the caller reports it and moves
-/// on to the next key, so one malformed entry does not block the rest of
-/// the rc file.
+/// What [`apply_rc_key`] would reject about `val` before it applies
+/// anything: the same shape checks, read-only.  `prompt` and `aliases`
+/// judge more than a value's shape (a block's arity, a thunk's route), and
+/// `theme`'s own decoder warns on an unknown nested key as a side effect of
+/// judging it — a second, pure call here would print that warning twice —
+/// so all three are left to `apply_rc_key` itself, run first in
+/// `apply_rc_config` so nothing else has landed if they refuse. Every other
+/// key's failure is exactly a shape mismatch, so checking it here first is
+/// what lets `apply_rc_config` refuse a bad value without touching the shell.
+fn rc_value_shape_error(key: &str, val: &Value) -> Option<Error> {
+    let err = |msg: String| Some(Error::new(msg, 1));
+    match key {
+        "env" | "bindings" if !matches!(val, Value::Map(_)) => {
+            err(format!("rc '{key}' must be a map; got {}", val.type_name()))
+        }
+        "edit_mode" => match val {
+            Value::String(s) if matches!(s.to_ascii_lowercase().as_str(), "vi" | "emacs") => None,
+            Value::String(s) => err(format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'")),
+            other => err(format!(
+                "rc 'edit_mode' must be a string; got {}",
+                other.type_name()
+            )),
+        },
+        "bell" if !matches!(val, Value::Bool(_)) => {
+            err(format!("rc 'bell' must be a bool; got {}", val.type_name()))
+        }
+        "surface" => match val {
+            Value::String(s) if <Surface as clap::ValueEnum>::from_str(s, true).is_ok() => None,
+            Value::String(s) => err(format!(
+                "rc 'surface' must be minimal, readline, or structural; got '{s}'"
+            )),
+            other => err(format!(
+                "rc 'surface' must be a string; got {}",
+                other.type_name()
+            )),
+        },
+        "recursion_limit" => match val.as_int() {
+            Some(n) if n > 0 => None,
+            Some(n) => err(format!("rc 'recursion_limit' must be positive; got {n}")),
+            None => err(format!(
+                "rc 'recursion_limit' must be a positive int; got {}",
+                val.type_name()
+            )),
+        },
+        "plugins" if !matches!(val, Value::Map(_)) => err(format!(
+            "rc 'plugins' must be a map from plugin name to its options, \
+             e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]; got {}",
+            val.type_name()
+        )),
+        _ => None,
+    }
+}
+
+/// Apply a single rc top-level `key: val` pair.  Called only for a key
+/// `apply_rc_config` has already found in the keyset; an `Err` here now
+/// refuses the whole rc at the caller, same as an unknown key, so this
+/// function's only job is to judge and apply — not to soften a refusal into
+/// "reported, the rest still applies".
 ///
 /// The keyset is [`Form::Rc`]'s declared table, which is also what the
 /// checker holds an rc file's returned row to; the shapes it leaves to the
 /// decoder — a map of hooks, a map of aliases, a theme — are the per-key
-/// checks below.  An rc that returns a *map* has no row to check, and this is
-/// where its unknown key is caught instead.
+/// checks below, mirrored read-only in [`rc_value_shape_error`] so the
+/// caller can refuse most of them before this function ever mutates
+/// anything. The catch-all arm is unreachable in practice: it exists only
+/// because `key: &str` is not the enum the caller's keyset pre-check reads.
 fn apply_rc_key(
     key: &str,
     val: Value,
@@ -354,10 +453,7 @@ fn apply_rc_key(
             )),
         },
         other => Err(Error::new(
-            format!(
-                "rc: {}. The rest of the file is applied.",
-                ral_core::typecheck::contract::declared(Form::Rc).unknown_key(other)
-            ),
+            ral_core::typecheck::contract::declared(Form::Rc).unknown_key(other),
             1,
         )),
     }
@@ -464,7 +560,8 @@ mod tests {
             );
         };
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        let (settings, _) = apply_rc_config(pairs, &mut shell, &runtime);
+        let (settings, _) =
+            apply_rc_config(pairs, &mut shell, &runtime).expect("test rc must satisfy the keyset");
         (shell, settings, runtime)
     }
 
@@ -550,48 +647,54 @@ mod tests {
         assert_eq!(shell.stack_limit(), 256);
     }
 
-    /// A non-positive `recursion_limit` is refused with a diagnostic; the
-    /// default stays in place rather than letting `0` through to disable
-    /// the cap.
+    /// A non-positive `recursion_limit` refuses the whole map — agreeing
+    /// with the record spelling, which fails the same way statically —
+    /// naming the field rather than letting `0` through to disable the cap.
     #[test]
     fn rc_recursion_limit_zero_rejected() {
-        let shell = apply_rc("return [recursion_limit: 0]\n");
+        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
+            "recursion_limit".into(),
+            Value::Int(0),
+        )]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert!(err.contains("recursion_limit") && err.contains("not applied"));
     }
 
-    /// A wrong-typed `recursion_limit` is rejected; the default stays.
+    /// A wrong-typed `recursion_limit` refuses the whole map; the default
+    /// stays untouched.
     #[test]
     fn rc_recursion_limit_wrong_type_rejected() {
-        let shell = apply_to_fresh_env(Value::map(vec![(
+        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "recursion_limit".into(),
             Value::String("lots".into()),
         )]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert!(err.contains("recursion_limit"));
     }
 
-    /// Both an unrecognised string and a wrong-typed `edit_mode` are
-    /// rejected; the default `EditMode::Emacs` stays in place.
+    /// Both an unrecognised string and a wrong-typed `edit_mode` refuse the
+    /// whole map, naming the field.
     #[test]
     fn rc_edit_mode_invalid_rejected() {
-        let (_, settings, _) = apply_to_fresh_env_full(Value::map(vec![(
+        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "edit_mode".into(),
             Value::String("typo".into()),
         )]));
-        assert_eq!(settings.edit_mode, EditMode::Emacs);
+        assert!(err.contains("edit_mode"));
 
-        let (_, settings, _) =
-            apply_to_fresh_env_full(Value::map(vec![("edit_mode".into(), Value::Int(3))]));
-        assert_eq!(settings.edit_mode, EditMode::Emacs);
+        let (_, err) =
+            apply_to_fresh_env_rejected(Value::map(vec![("edit_mode".into(), Value::Int(3))]));
+        assert!(err.contains("edit_mode"));
     }
 
-    /// A wrong-typed `bell` is rejected; the default `BellStyle::None` stays.
+    /// A wrong-typed `bell` refuses the whole map, naming the field.
     #[test]
     fn rc_bell_wrong_type_rejected() {
-        let (_, settings, _) = apply_to_fresh_env_full(Value::map(vec![(
+        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "bell".into(),
             Value::String("yes".into()),
         )]));
-        assert_eq!(settings.bell, BellStyle::None);
+        assert!(err.contains("bell"));
     }
 
     // ── apply_rc_config: bindings / aliases routing ───────────────────────
@@ -610,8 +713,25 @@ mod tests {
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let (settings, _) = apply_rc_config(pairs, &mut shell, &runtime);
+        let (settings, _) =
+            apply_rc_config(pairs, &mut shell, &runtime).expect("test rc must satisfy the keyset");
         (shell, settings, runtime)
+    }
+
+    /// Apply `config` to a fresh shell, expecting `apply_rc_config` to
+    /// refuse it — the map spelling's contract door, exercised the way
+    /// `apply_to_fresh_env_full` exercises success.  Returns the shell
+    /// (untouched by the refused keys) and the refusal text.
+    fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        let Value::Map(pairs) = config else {
+            panic!("test rc config must be a map; got {}", config.type_name());
+        };
+        let Err(err) = apply_rc_config(pairs, &mut shell, &runtime) else {
+            panic!("test rc must fail its contract");
+        };
+        (shell, err)
     }
 
     /// Apply an rc map and return the resolved [`Surface`] (the default
@@ -638,26 +758,26 @@ mod tests {
     }
 
     /// An unset `surface:` leaves the default in place; an unrecognised
-    /// name is rejected loudly rather than silently ignored, and the
-    /// default is retained either way.
+    /// name refuses the whole map rather than being silently ignored.
     #[test]
     fn rc_surface_unknown_rejected_default_retained() {
         assert_eq!(
             apply_rc_surface("return [env: [X: 'y']]\n"),
             Surface::default()
         );
-        assert_eq!(
-            apply_rc_surface("return [surface: 'bogus']\n"),
-            Surface::default()
-        );
+        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
+            "surface".into(),
+            Value::String("bogus".into()),
+        )]));
+        assert!(err.contains("surface"));
     }
 
-    /// A wrong-typed `surface:` is rejected; the default stays.
+    /// A wrong-typed `surface:` refuses the whole map, naming the field.
     #[test]
     fn rc_surface_wrong_type_rejected() {
-        let (_, settings, _) =
-            apply_to_fresh_env_full(Value::map(vec![("surface".into(), Value::Int(7))]));
-        assert_eq!(settings.surface, Surface::default());
+        let (_, err) =
+            apply_to_fresh_env_rejected(Value::map(vec![("surface".into(), Value::Int(7))]));
+        assert!(err.contains("surface"));
     }
 
     #[test]
@@ -689,20 +809,20 @@ mod tests {
         assert!(!shell.has_alias("ll"));
     }
 
-    /// A wrong-typed `plugins:` value is rejected; the runtime plugin list
-    /// stays empty.
+    /// A wrong-typed `plugins:` value refuses the whole map before any
+    /// plugin load is even attempted.
     #[test]
     fn rc_plugins_wrong_type_rejected() {
-        let (_, _, runtime) =
-            apply_to_fresh_env_full(Value::map(vec![("plugins".into(), Value::Int(7))]));
-        assert!(runtime.lock().unwrap().plugins.is_empty());
+        let (_, err) =
+            apply_to_fresh_env_rejected(Value::map(vec![("plugins".into(), Value::Int(7))]));
+        assert!(err.contains("plugins"));
     }
 
-    /// Wrong-typed `env:`, `aliases:`, and `bindings:` values are each
-    /// rejected; no alias installs and neither scope lookup resolves.
+    /// Wrong-typed `env:`, `aliases:`, and `bindings:` values each refuse
+    /// the whole map; no alias installs and neither scope lookup resolves.
     #[test]
     fn rc_env_aliases_bindings_wrong_type_rejected() {
-        let shell = apply_to_fresh_env(Value::map(vec![
+        let (shell, _) = apply_to_fresh_env_rejected(Value::map(vec![
             ("env".into(), Value::Int(7)),
             ("aliases".into(), Value::String("x".into())),
             ("bindings".into(), Value::Bool(true)),
@@ -711,16 +831,16 @@ mod tests {
         assert!(shell.scope_lookup("x").is_none());
     }
 
-    /// A malformed key in the rc map does not block the other keys in the
-    /// same map from applying.
+    /// A malformed *value* on a known key refuses the whole map, exactly as
+    /// an unknown key does: a key around it does not survive either.
     #[test]
-    fn rc_bad_key_does_not_block_other_keys() {
-        let (shell, settings, _) = apply_to_fresh_env_full(Value::map(vec![
+    fn rc_bad_value_fails_the_whole_map() {
+        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![
             ("edit_mode".into(), Value::Int(42)),
             ("recursion_limit".into(), Value::Int(256)),
         ]));
-        assert_eq!(shell.stack_limit(), 256);
-        assert_eq!(settings.edit_mode, EditMode::Emacs);
+        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert!(err.contains("edit_mode") && err.contains("not applied"));
     }
 
     /// Typecheck `src` against `shell`'s live session schemes — the same

@@ -3796,12 +3796,11 @@ return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
 ```
 
 A file whose return value carries no row — a `Map`, written `[:, k: v]` —
-cannot be checked that way, and meets the same keyset when the map is applied
-instead: the key is named, the list is offered, and the keys around it still
-apply. Every recognized field is shape-checked without stringification or
-coercion: a wrong type or invalid value produces a diagnostic naming the field
-and expected shape, while the remaining top-level fields still apply. An
-unknown key inside `theme` produces a warning.
+cannot be checked that way, and meets the same keyset, and the same field
+types, when the map is applied instead: an unknown key or a wrongly-typed
+value both name the mistake and refuse the whole rc, agreeing with the
+static check above — the shell starts with defaults. An unknown key inside
+`theme` produces a warning rather than a refusal.
 
 The same discipline holds of the other two files a host reads against a fixed
 keyset — a plugin manifest (§15.5) and a capability profile (§16) — and of the

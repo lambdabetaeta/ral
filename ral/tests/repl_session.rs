@@ -93,10 +93,10 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 
 /// A malformed *literal* rc key is a type error, caught before the file
 /// runs at all: the whole rc is skipped, not merely that one key — the
-/// keys around it do not survive either.
-/// `rc_computed_bad_key_is_reported_and_the_rest_still_applies`, below, is
-/// the same mistake through a computed rc, where today's tolerant, per-key
-/// runtime check is still the only one that can see it.
+/// keys around it do not survive either. `rc_computed_bad_key_fails_the_whole_file`,
+/// below, is the same mistake through a computed rc; `rc_unknown_key_in_a_mapped_rc_fails_the_whole_file`
+/// is the same mistake again through a *map* rc, where the checker has no row
+/// to hold and the runtime door refuses the file instead.
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
     let (_dir, env) = rc_home("return [edit_mode: 42, bindings: [okname: 'yes']]");
@@ -149,10 +149,12 @@ fn rc_unknown_key_behind_a_spread_is_a_static_error() {
 }
 
 /// An rc returning a *map* has no row to check, so the same keyset is met at
-/// `apply_rc_key` instead: the key is named, the list is offered, and the
-/// keys around it still apply.
+/// `apply_rc_config` instead: the key is named, the list is offered — and,
+/// agreeing with the record spelling above, the whole rc is refused rather
+/// than the keys around the bad one landing first. The shell still starts,
+/// with defaults, and the refusal says so.
 #[test]
-fn rc_unknown_key_in_a_mapped_rc_names_the_list_at_run_time() {
+fn rc_unknown_key_in_a_mapped_rc_fails_the_whole_file() {
     let (_dir, env) = rc_home("return [:, surfase: 'minimal', edit_mode: 'vi']");
 
     let out = repl(&["-i"], &env, "echo alive\n");
@@ -167,8 +169,38 @@ fn rc_unknown_key_in_a_mapped_rc_names_the_list_at_run_time() {
         out.stderr
     );
     assert!(
+        out.stderr.contains("not applied"),
+        "the refusal must say the rc did not take effect: {}",
+        out.stderr
+    );
+    assert!(
         out.stdout.contains("alive"),
-        "the rest of the file is applied: {}",
+        "a refused rc must not strand the user at no shell: {}",
+        out.stdout
+    );
+}
+
+/// A malformed *value* on a known key, through a mapped rc, refuses the
+/// whole file exactly as an unknown key does — agreeing with the record
+/// spelling, which fails the same way statically on the same mistake.
+#[test]
+fn rc_bad_value_in_a_mapped_rc_fails_the_whole_file() {
+    let (_dir, env) = rc_home("return [:, edit_mode: 3, recursion_limit: 4096]");
+
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("'edit_mode'") && out.stderr.contains("must be a string"),
+        "the bad value must name the field and what was wrong with it: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("not applied"),
+        "the refusal must say the rc did not take effect: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("alive"),
+        "a refused rc must not strand the user at no shell: {}",
         out.stdout
     );
 }
