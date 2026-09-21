@@ -184,7 +184,7 @@ impl<'a> Fault<'a> {
                 .map_or(Fault::Terminal(None), |status| Fault::Status {
                     status,
                     headers: None,
-                    body: Some(Box::new(body.clone())),
+                    body: Some(Box::new(unwrap_relay(body.clone()))),
                 }),
             _ => Fault::Terminal(None),
         }
@@ -233,7 +233,9 @@ impl<'a> Fault<'a> {
         Fault::Status {
             status,
             headers,
-            body: serde_json::from_str(body).ok(),
+            body: serde_json::from_str(body)
+                .ok()
+                .map(|b| Box::new(unwrap_relay(b))),
         }
     }
 }
@@ -262,6 +264,47 @@ pub(crate) fn error_object(
     body.get("error")
         .and_then(serde_json::Value::as_object)
         .or_else(|| body.as_object())
+}
+
+/// The error-detail object of a body being rewritten, found by the same
+/// nest-or-flat convention [`error_object`] reads.
+fn error_object_mut(
+    body: &mut serde_json::Value,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    if body.get("error").is_some_and(serde_json::Value::is_object) {
+        return body
+            .get_mut("error")
+            .and_then(serde_json::Value::as_object_mut);
+    }
+    body.as_object_mut()
+}
+
+/// A gateway's relay envelope, replaced by the upstream body it carries.
+/// `OpenRouter` answers an upstream provider's failure with a frame of its own
+/// — `{"error":{"message":"Provider returned error","metadata":{"raw":"…"}}}` —
+/// whose `raw` is that provider's own body, verbatim, as a JSON string.  The
+/// envelope names no fault the inner body does not, so the boundary keeps the
+/// inner body and carries the upstream provider's name across as `provider`;
+/// otherwise every reader — the classifier, `summary`, the TUI readout — gets
+/// "Provider returned error" and a wall of escaped JSON.
+fn unwrap_relay(body: serde_json::Value) -> serde_json::Value {
+    let Some(metadata) = error_object(&body).and_then(|o| o.get("metadata")) else {
+        return body;
+    };
+    let Some(inner) = metadata
+        .get("raw")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object)
+    else {
+        return body;
+    };
+    let provider = metadata.get("provider_name").cloned();
+    let mut inner = unwrap_relay(inner);
+    if let (Some(name), Some(obj)) = (provider, error_object_mut(&mut inner)) {
+        obj.insert("provider".to_string(), name);
+    }
+    inner
 }
 
 /// The status code in a provider JSON error body, nested or flat.
@@ -542,6 +585,36 @@ mod tests {
                 headers: Box::new(headers),
             }),
         }
+    }
+
+    /// A gateway's envelope is not the error: the upstream body inside
+    /// `metadata.raw` is, and the relaying provider's name survives with it.
+    #[test]
+    fn from_genai_unwraps_gateway_relay_envelope() {
+        let e = ProviderError::from_genai(
+            &genai::Error::HttpError {
+                status: StatusCode::BAD_REQUEST,
+                canonical_reason: "Bad Request".into(),
+                body: r#"{"error":{"code":"400","message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"unsupported schema keyword\",\"param\":\"tools\",\"type\":\"invalid_request_error\"}}","provider_name":"ModelRun"}}}"#.into(),
+                headers: Box::new(HeaderMap::new()),
+            },
+            "m",
+        );
+        assert_eq!(
+            e.summary(),
+            "api error 400: unsupported schema keyword",
+            "the relayed message should replace the envelope's"
+        );
+        let ProviderError::Api { body: Some(b), .. } = &e else {
+            panic!("expected Api with a body, got {e:?}")
+        };
+        let obj = error_object(b).expect("unwrapped body keeps an error object");
+        assert_eq!(obj.get("param").and_then(serde_json::Value::as_str), Some("tools"));
+        assert_eq!(
+            obj.get("provider").and_then(serde_json::Value::as_str),
+            Some("ModelRun"),
+            "the relaying provider's name is the one thing the envelope owns"
+        );
     }
 
     /// A boxed cause with no typed leaf must not be retried on a
