@@ -16,4 +16,6 @@ builtin runs normally
 handler-cat
 hi
 env=scoped
+bound
+no options
 within tests done

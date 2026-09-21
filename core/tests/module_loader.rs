@@ -367,3 +367,30 @@ fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// `use` *asserts* a module's row rather than checking it, so a bundle
+/// arriving from a module can still name an option no form declares — and the
+/// runtime's own unknown-key refusal is what meets it.  That is why
+/// `WithinScope::parse`'s refusal is not dead code now that the options are
+/// typed.
+#[test]
+fn a_modules_bundle_with_an_unknown_option_meets_the_runtime_refusal() {
+    let path = write_module("ral_use_within_opts.ral", "let dirr = 'x'\n");
+    let p = path.to_string_lossy().into_owned();
+    let mut shell = fresh_shell();
+
+    let e = match top_level(
+        &mut shell,
+        &format!("let m = use '{p}'\nwithin $m {{ return () }}"),
+    ) {
+        Err(Break::Error(e)) => e,
+        other => panic!("expected the runtime's unknown-key refusal, got {other:?}"),
+    };
+    assert!(
+        e.message.contains("within: unknown key 'dirr'"),
+        "expected the runtime's own refusal, got: {}",
+        e.message
+    );
+
+    std::fs::remove_file(&path).ok();
+}

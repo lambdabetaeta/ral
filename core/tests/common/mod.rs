@@ -91,11 +91,21 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             body: a,
             cleanup: b,
         }
-        | CompKind::Within { opts: a, body: b }
         | CompKind::Grant { caps: a, body: b } => {
             for v in [a, b] {
                 walk_val(v, visit);
             }
+        }
+        CompKind::Within {
+            opts,
+            handlers,
+            body,
+        } => {
+            walk_val(opts, visit);
+            for arm in handlers.iter().flatten() {
+                walk_val(&arm.value.item, visit);
+            }
+            walk_val(body, visit);
         }
         CompKind::Audit { body } => walk_val(body, visit),
         _ => {}

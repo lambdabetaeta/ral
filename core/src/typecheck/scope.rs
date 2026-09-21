@@ -1,23 +1,29 @@
 //! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
-//! nodes, plus the field schemas for the `within`/`grant` option records.  The
-//! sixth scope node, `CompKind::Redirect`, is typed inline in `infer.rs`.
+//! nodes, plus the option rows of `within` and `grant`.  The sixth scope node,
+//! `CompKind::Redirect`, is typed inline in `infer.rs`.
 //!
-//! Unknown option keys are rejected at runtime — by `WithinScope::parse` and
-//! `decode_capability_map` — not by the schemas here.
+//! A form's options are a closed row, minted fresh at every occurrence, and
+//! the options value — written out or arriving bound — is unified against it.
+//! One rule, one verdict, both spellings.
+//!
+//! The runtime's own unknown-key refusals — `WithinScope::parse`'s and
+//! `decode_capability_map`'s — survive that, and are not dead code: `use`
+//! *asserts* a module's row rather than checking it, so a module's bindings
+//! can still put a key in a bundle that no rule here ever saw.
 //!
 //! No rule here builds a `CompTy` directly: each states the value a scope
 //! produces and the route that carries it, and returns a [`ScopeSig`] for
 //! its caller to compose into `CompTy::Return(sig.route, Box::new(sig.value))`.
 
-use super::builtins::{FieldSchema, audit_record, try_error_record};
-use super::error::{CompDiff, Reason, TypeErrorKind};
+use super::builtins::{audit_record, try_error_record};
+use super::error::{Reason, TypeErrorKind};
 use super::infer::Inferencer;
 use super::route::PayloadRoute;
 use super::scheme::Scheme;
-use super::ty::{CompTy, Ty};
+use super::ty::{CompTy, Field, Label, Row, Ty};
 use super::unify::Unifier;
-use crate::ir::{Val, ValRecordEntry};
-use crate::source::{Spanned, WithSpan};
+use crate::ir::{HandlerArmV, Val, ValRecordEntry};
+use crate::source::{Span, WithSpan};
 
 /// What a scope rule knows before its computation type exists: the value the
 /// scope produces and the route that carries it.
@@ -26,95 +32,155 @@ pub(super) struct ScopeSig {
     pub(super) route: PayloadRoute,
 }
 
+/// One option a form declares: the label, the type required there, and the
+/// sentence a clash at that label earns.
+///
+/// Built per occurrence, never shared: two `within`s sharing one row would
+/// unite their flags, so `within [dir: "/a"] { }` followed by `within [] { }`
+/// would demand that `dir` be present and absent at once.
+struct FormOption {
+    label: &'static str,
+    ty: Ty,
+    reason: Reason,
+}
+
+/// `within`'s options.  `env:` is heterogeneous and `parse_env`'s to judge, so
+/// it is declared at a variable and stays the decoder's.
+///
+/// The catch-all declares a route *variable* and pins the value at `Unit`:
+/// `bytes_subsumes`' two branches both end in `value ~ Unit` and differ only
+/// in whether the route is left at `Value`, so `Unit` is the whole of WF-2's
+/// subsumption and leaving the route free is the rest.  Declaring `Bytes`
+/// here would commit a bound arm's route one occurrence at a time.
+fn within_options(u: &mut Unifier) -> Vec<FormOption> {
+    let env = u.fresh_ty();
+    let route = u.fresh_route();
+    let handler = Ty::Thunk(Box::new(CompTy::Fun(
+        Box::new(Ty::String),
+        Box::new(CompTy::Fun(
+            Box::new(Ty::argv()),
+            Box::new(CompTy::Return(route, Box::new(Ty::Unit))),
+        )),
+    )));
+    vec![
+        option("within", "dir", Ty::String),
+        option("within", "env", env),
+        FormOption {
+            label: "handler",
+            ty: handler,
+            reason: Reason::CatchAllRoutePin,
+        },
+    ]
+}
+
+/// `grant`'s options.  Everything but the two flags is
+/// `decode_capability_map`'s: a policy value may be a string or a list, and
+/// the two mix within one record.  Typing them to full depth would put one
+/// label at two ground types — `editor.read` beside `fs.read` — which is the
+/// one condition the assignment `Δ` owes.
+fn grant_options(u: &mut Unifier) -> Vec<FormOption> {
+    ["exec", "fs", "net", "detach", "editor", "shell"]
+        .into_iter()
+        .map(|label| {
+            let ty = match label {
+                "net" | "detach" => Ty::Bool,
+                _ => u.fresh_ty(),
+            };
+            option("grant", label, ty)
+        })
+        .collect()
+}
+
+/// Where `label`'s value sits, when the options were written out.
+fn written_at(opts: &Val, label: &str) -> Option<Span> {
+    let Val::Record(entries) = opts else {
+        return None;
+    };
+    entries.iter().find_map(|entry| match entry {
+        ValRecordEntry::Field(key, value) if key == label => value.span,
+        ValRecordEntry::Field(..) | ValRecordEntry::Spread(_) => None,
+    })
+}
+
+fn option(form: &'static str, label: &'static str, ty: Ty) -> FormOption {
+    FormOption {
+        label,
+        ty,
+        reason: Reason::OptionField {
+            form,
+            key: label.to_string(),
+        },
+    }
+}
+
 impl Inferencer<'_> {
-    /// Collect handler schemes from literal `handlers: [name: { … }]` entries;
-    /// everything else is inferred for its errors and binds nothing — a
-    /// catch-all `handler:` matches every name, so no one name can be bound.
-    /// Each thunk is inferred exactly once, so an error inside is reported once.
-    fn infer_within_opts(&mut self, opts: &Val) -> Vec<(String, Scheme)> {
-        let Val::Record(outer_entries) = opts else {
-            let _ = self.infer_val(opts);
-            return Vec::new();
+    /// Unify the options value against the form's own row — written out or
+    /// arriving bound, one rule and one verdict.
+    ///
+    /// Label by label, so a clash carries that label's own sentence, and
+    /// closed at the end: an option the form does not declare meets the empty
+    /// row there, and the refusal names the form's list.
+    fn check_options(&mut self, opts: &Val, form: &'static str, options: Vec<FormOption>) {
+        let opts_ty = self.infer_options_val(opts);
+        let labels: Vec<&'static str> = options.iter().map(|o| o.label).collect();
+        let whole = Reason::FormOptions {
+            form,
+            options: labels.clone(),
         };
-
-        let mut bindings = Vec::new();
-
-        for outer_entry in outer_entries {
-            match outer_entry {
-                ValRecordEntry::Field(
-                    key,
-                    Spanned {
-                        item: Val::Record(inner_entries),
-                        ..
-                    },
-                ) if key == "handlers" => {
-                    for inner_entry in inner_entries {
-                        match inner_entry {
-                            ValRecordEntry::Field(
-                                name,
-                                value @ Spanned {
-                                    item: Val::Thunk(comp),
-                                    ..
-                                },
-                            ) => {
-                                let scheme = self.with_span(value.span, |this| {
-                                    this.handler_comp_scheme(name, comp)
-                                });
-                                bindings.push((name.clone(), scheme));
-                            }
-                            ValRecordEntry::Field(_, val_val) => {
-                                let _ = self.infer_val(&val_val.item);
-                            }
-                            ValRecordEntry::Spread(val) => {
-                                let _ = self.infer_val(&val.item);
-                            }
-                        }
-                    }
-                }
-
-                ValRecordEntry::Field(
-                    key,
-                    value @ Spanned {
-                        item: Val::Thunk(comp),
-                        ..
-                    },
-                ) if key == "handler" => {
-                    self.with_span(value.span, |this| {
-                        let cty = this.infer_catch_all(comp);
-                        let arm_return = this.alias_arm_body(&cty);
-                        let (value, route) = this.extract_return(&arm_return);
-                        if let Err(actual) = this.check_bytes_route(route, &value) {
-                            let kind = TypeErrorKind::CompTyMismatch {
-                                expected: CompTy::bytes(),
-                                actual: CompTy::Return(
-                                    PayloadRoute::Bytes,
-                                    Box::new(actual.clone()),
-                                ),
-                                diffs: vec![CompDiff::ReturnType {
-                                    expected: Ty::Unit,
-                                    actual,
-                                }],
-                            };
-                            this.ctx.report(kind, Reason::CatchAllRoutePin);
-                        }
-                    });
-                }
-
-                entry => {
-                    self.check_record_entry_fields(
-                        std::slice::from_ref(entry),
-                        "within",
-                        within_field_ty,
-                    );
-                }
-            }
+        if matches!(self.ctx.unifier.resolve_ty(&opts_ty), Ty::Map(_)) {
+            self.ctx.diagnose(TypeErrorKind::MapAsOptions {
+                form,
+                options: labels,
+            });
+            return;
         }
-
-        bindings
+        let mut tail = self.ctx.unifier.fresh_row();
+        self.ctx
+            .unify_ty(&opts_ty, &Ty::Record(tail.clone()), whole.clone());
+        for FormOption { label, ty, reason } in options {
+            let rest = self.ctx.unifier.fresh_row();
+            let flag = self.ctx.unifier.fresh_presence_var();
+            let declared = Row::Extend(
+                Label::Field(label.to_string()),
+                Field::Var(flag, Box::new(ty)),
+                Box::new(rest.clone()),
+            );
+            // Written out, the caret lands on the option's own value; a bundle
+            // in hand has only the form to point at.
+            self.with_span(written_at(opts, label), |this| {
+                this.ctx
+                    .unify_ty(&Ty::Record(tail), &Ty::Record(declared), reason);
+            });
+            tail = rest;
+        }
+        // The empty row first, so what is left over is the *extra* field.
+        self.ctx
+            .unify_ty(&Ty::Record(Row::Empty), &Ty::Record(tail), whole);
     }
 
-    pub(super) fn infer_within(&mut self, opts: &Val, body: &Val) -> ScopeSig {
-        let bindings = self.infer_within_opts(opts);
+    /// Collect the schemes `handlers:` binds in the body.  A catch-all
+    /// `handler:` matches every name, so no one name can be bound by it.
+    fn handler_bindings(&mut self, arms: Option<&[HandlerArmV]>) -> Vec<(String, Scheme)> {
+        arms.unwrap_or_default()
+            .iter()
+            .map(|arm| {
+                let scheme = self.with_span(arm.value.span, |this| {
+                    this.handler_arm_scheme(&arm.name, &arm.value.item)
+                });
+                (arm.name.clone(), scheme)
+            })
+            .collect()
+    }
+
+    pub(super) fn infer_within(
+        &mut self,
+        opts: &Val,
+        handlers: Option<&[HandlerArmV]>,
+        body: &Val,
+    ) -> ScopeSig {
+        let options = within_options(&mut self.ctx.unifier);
+        self.check_options(opts, "within", options);
+        let bindings = self.handler_bindings(handlers);
 
         self.env.push();
         for (name, scheme) in bindings {
@@ -131,7 +197,8 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_grant(&mut self, caps: &Val, body: &Val) -> ScopeSig {
-        self.infer_scope_opts(caps, "grant", grant_field_ty);
+        let options = grant_options(&mut self.ctx.unifier);
+        self.check_options(caps, "grant", options);
         let body_cty = self.infer_scope_body_passthrough(body);
 
         let (value, route) = self.extract_return(&body_cty);
@@ -207,15 +274,6 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_scope_opts(&mut self, opts: &Val, form: &'static str, schema: FieldSchema) {
-        match opts {
-            Val::Record(entries) => self.check_record_entry_fields(entries, form, schema),
-            _ => {
-                let _ = self.infer_val(opts);
-            }
-        }
-    }
-
     /// Constrain `body` to `Thunk(c)` for a bare fresh comp var `c`, and
     /// return `c`; callers read it back with `extract_return` once resolved.
     fn infer_scope_body_passthrough(&mut self, body: &Val) -> CompTy {
@@ -227,24 +285,5 @@ impl Inferencer<'_> {
             Reason::ScopeBody,
         );
         body_cty
-    }
-}
-
-/// Schema for the `within` options record. `handlers:`/`handler:` hold thunks
-/// and dispatch at runtime; `env:` is heterogeneous and `parse_env`'s to judge.
-fn within_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
-    match key {
-        "dir" => Some(Ty::String),
-        _ => None,
-    }
-}
-
-/// Schema for the `grant` options record. Everything but the two flags is
-/// `decode_capability_map`'s: a policy value may be a string or a list, and
-/// the two mix within one record. Their values are still inferred.
-fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
-    match key {
-        "net" | "detach" => Some(Ty::Bool),
-        _ => None,
     }
 }

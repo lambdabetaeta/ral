@@ -83,6 +83,24 @@ later frame can name the process to widen it. Only the envelope's tie to this
 process's death is dropped, which is what makes it a survivor rather than a
 receipt for something already killed.
 
+**The dimensions are a type, and the bracket is the form's.** `grant` declares
+its six as a closed row — `net` and `detach` at `Bool`, the four structured
+ones at a variable each, their interiors staying the decoder's — minted fresh
+at every occurrence, and the bundle it is handed is unified against it. So a
+misspelled dimension is refused before the program runs, naming `grant` and its
+own six; a bundle computed elsewhere gets the same verdict as one written out,
+at a *fixed* set of dimensions (the branches of an `if` must agree on a type,
+so a bundle whose membership varies has no type — lift the condition to the
+form); a map is refused by name, a map's keys being data
+([[design/records-and-maps|records-and-maps]]); and `[]` is the empty grant
+rather than the empty list, the bracket being read by the form.
+
+Typing the four structured dimensions to full depth is what the row does *not*
+do, and the reason is the one condition the presence discipline owes: within
+one check a label may not be optional at two different ground types, and
+`editor.read: Bool` beside `fs.read: [String]` is exactly that
+([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
 frozen `Capabilities`, so configuration is the grant value written as source,

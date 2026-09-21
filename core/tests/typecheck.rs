@@ -1507,26 +1507,157 @@ fn within_handler_arity_mismatch_is_static_error() {
     );
 }
 
-/// Non-literal handler value falls through gracefully.
-///
-/// The value `$h` is a `Val::Variable`, not a literal `Val::Thunk`, so
-/// `infer_within_opts` produces no binding for `foo`.  The
-/// body's call `foo 1` falls through to the builtin registry / external
-/// path and typechecks without error (the name is unrecognised so a fresh
-/// type is assigned).
+/// An arm bound elsewhere is checked against the argv convention, where once
+/// it fell through unchecked.  A lambda at a `let` takes a fresh parameter, so
+/// `x` is `Integer` here; unification imposes the convention after the fact
+/// and `List String` is what the arm needs.
 #[test]
-fn within_handler_non_literal_value_falls_through() {
-    ok(r"let h = { |x| return $[$x + 1] }; within [handlers: [foo: $h]] { foo 1 }");
+fn a_bound_arm_meets_the_argv_convention() {
+    has_error(
+        r"let h = { |x| return $[$x + 1] }; within [handlers: [foo: $h]] { foo 1 }",
+        "couldn't match",
+    );
 }
 
-/// `dir:` is the one `within` option a single `Ty` states, so it is the one
-/// the schema pins; `env:` is a record of whatever each variable is worth and
-/// `parse_env` owns it, heterogeneous values included.
+/// One verdict per option, whichever spelling the bundle arrives in: `dir` is
+/// a `String`, an unknown label is refused naming the form's own options, and
+/// `env` is heterogeneous and `parse_env`'s to judge.
 #[test]
-fn within_pins_dir_and_leaves_env_to_the_runtime() {
+fn within_options_get_one_verdict_in_both_spellings() {
     ok(r#"within [env: [KEY: "val"], dir: "/tmp"] { return "ok" }"#);
     ok(r#"within [env: [MODE: 'test', RETRIES: 3]] { return "ok" }"#);
     has_error(r#"within [dir: 42] { return "ok" }"#, "couldn't match");
+    has_error(
+        r#"let o = [dir: 42]; within $o { return "ok" }"#,
+        "couldn't match",
+    );
+    has_error(r#"within [dirr: "x"] { return "ok" }"#, "dirr");
+    has_error(r#"let o = [dirr: "x"]; within $o { return "ok" }"#, "dirr");
+    assert!(
+        has_hint(
+            &raw_errors(r#"let o = [dirr: "x"]; within $o { return "ok" }"#),
+            "`within` takes these options, each written by name: dir, env, handler",
+        ),
+        "an unknown option is refused naming the form and its own options",
+    );
+}
+
+/// A fixed-membership bundle computed elsewhere has a verdict at last, and
+/// `grant []` — the empty bundle, written at the form — is a record rather
+/// than the empty list.
+#[test]
+fn a_bound_option_bundle_is_accepted() {
+    ok(r#"let o = [dir: "/tmp", env: [KEY: "val"]]; within $o { return "ok" }"#);
+    ok(r"grant [] { return 1 }");
+    ok(r"within [] { return 1 }");
+}
+
+/// The three catch-alls the corpus pins keep their verdict through a bound
+/// bundle, and through a *function* over one — which is what a route
+/// commitment at the form would break, pinning `w`'s handler to `Bytes` while
+/// inferring `w` and refusing the `Value Unit` arm at the call.
+#[test]
+fn a_catch_all_keeps_its_verdict_through_a_bound_bundle() {
+    for arm in [
+        r"{ |name args| cd ~ }",
+        r"{ |n a| echo caught }",
+        r"{ |n a| fail [status: 1] }",
+    ] {
+        ok(&format!(r"within [handler: {arm}] {{ zzz }}"));
+        ok(&format!(r"let o = [handler: {arm}]; within $o {{ zzz }}"));
+        ok(&format!(
+            r"let w = {{ |o| within $o {{ () }} }}; w [handler: {arm}]"
+        ));
+    }
+    has_error(
+        r#"let o = [handler: { |n a| return "x" }]; within $o { zzz }"#,
+        "couldn't match",
+    );
+    assert!(
+        has_hint(
+            &raw_errors(r#"let o = [handler: { |n a| return "x" }]; within $o { zzz }"#),
+            "the catch-all `handler:` stands in for every external command",
+        ),
+        "a bound catch-all's refusal carries the catch-all's own sentence",
+    );
+}
+
+/// A catch-all written out is checked *in context* — its name and its argv are
+/// bound before its body — and one arriving bound is not.  That is the
+/// inline/extracted gap the deferral keeps, pinned as it stands rather than
+/// claimed closed.
+#[test]
+fn a_written_catch_all_is_checked_against_its_own_parameters() {
+    has_error(
+        r"within [handler: { |n a| let bad = $a[$a]; return () }] { zzz }",
+        "couldn't match type [String] with type Integer",
+    );
+    ok(r"let h = { |n a| let bad = $a[$a]; return () }; within [handler: $h] { zzz }");
+}
+
+/// Presence lets a bundle's *types* be checked; it does not let its
+/// *membership* vary.  Branch merging is equality, so a field would have to be
+/// present on one side and absent on the other — and an accumulator's input
+/// and output types must agree, so seeding without a field and putting it in
+/// the step cannot type either.  What is bought is a bundle of fixed
+/// membership: bound, returned from a function, used at several call sites.
+#[test]
+fn a_bundles_membership_cannot_vary() {
+    has_error(
+        r#"let c = true
+           let o = if $c { return [dir: "/tmp", env: [:]] } else { return [env: [:]] }
+           within $o { return "ok" }"#,
+        "'dir'",
+    );
+    has_error(
+        r#"let f = { |c| if $c { return [dir: "/tmp", env: [:]] } else { return [env: [:]] } }
+           within !{f true} { return "ok" }"#,
+        "'dir'",
+    );
+    has_error(
+        r#"let step = { |acc x| return [...$acc, dir: "/tmp"] }
+           let o = fold $step [env: [:]] [1]
+           within $o { return "ok" }"#,
+        "'dir'",
+    );
+    ok(r#"let f = { |d| return [dir: $d, env: [:]] }
+          within !{f "/tmp"} { return "ok" }"#);
+}
+
+/// Two forms' rows meet at the *empty* bundle rather than at an error: every
+/// flag on both sides is a variable, so each label meets the other row's empty
+/// tail and resolves absent.  That is the most general unifier, and the user
+/// meets it as a missing option at the first call that needs one.
+#[test]
+fn two_forms_in_one_list_narrow_to_the_empty_bundle() {
+    let both = r"let w = { |o| within $o { () } }
+                 let g = { |o| grant $o { () } }
+                 let both = [$w, $g]
+                 let first = $both[0]";
+    ok(&format!("{both}\nreturn $both"));
+    // Each form keeps its own options: `let` generalises the flags, so the
+    // merge narrows the two *instances* in the list and neither wrapper.
+    ok(&format!(r"{both}{}", "\nw [dir: \"/tmp\"]"));
+    // What the merge narrows is the list's own element, and the user meets it
+    // at the first call that needs a field.
+    has_error(
+        &format!(r"{both}{}", "\n!{$first [dir: \"/tmp\"]}"),
+        "'dir'",
+    );
+}
+
+/// A form's options are fields; a map's keys are data.  The refusal is the
+/// form's own sentence and not a row against `[String: α]`.
+#[test]
+fn a_map_is_refused_as_options() {
+    has_error(
+        r#"let m = [:, dir: "/tmp"]; within $m { return "ok" }"#,
+        "takes named options",
+    );
+    has_error(
+        r#"let m = [:, net: true]; grant $m { return "ok" }"#,
+        "takes named options",
+    );
 }
 
 // ─── alias handler bindings in Seq ───────────────────────────────────────────

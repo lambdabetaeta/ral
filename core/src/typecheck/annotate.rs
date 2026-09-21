@@ -13,8 +13,8 @@ use super::env::InferCtx;
 use super::scheme::Scheme;
 use super::ty::GroundRoute;
 use crate::ir::{
-    Args, CaseArm, Comp, CompKind, Exec, IrPattern, Phrase, PipeYield, RedirectV, Toplevel, Val,
-    ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
+    Args, CaseArm, Comp, CompKind, Exec, HandlerArmV, IrPattern, Phrase, PipeYield, RedirectV,
+    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -517,8 +517,23 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
             body: annotate_scope_val(comp, body, ctx, false, demand),
             cleanup: annotate_val(cleanup, ctx),
         },
-        CompKind::Within { opts, body } => CompKind::Within {
+        CompKind::Within {
+            opts,
+            handlers,
+            body,
+        } => CompKind::Within {
             opts: annotate_val(opts, ctx),
+            handlers: handlers.as_ref().map(|arms| {
+                arms.iter()
+                    .map(|arm| HandlerArmV {
+                        name: arm.name.clone(),
+                        value: Spanned::with_span(
+                            arm.value.span,
+                            annotate_val(&arm.value.item, ctx),
+                        ),
+                    })
+                    .collect()
+            }),
             body: annotate_scope_val(comp, body, ctx, false, demand),
         },
         CompKind::Grant { caps, body } => CompKind::Grant {

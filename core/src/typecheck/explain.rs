@@ -47,6 +47,9 @@ impl TypeErrorKind {
             Self::DuplicateField { label } => {
                 format!("this record literal writes the field '{label}' twice")
             }
+            Self::MapAsOptions { form, .. } => {
+                format!("`{form}` takes named options, and this is a map")
+            }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -167,6 +170,7 @@ impl TypeErrorKind {
             Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
+            Self::MapAsOptions { form, .. } => format!("`{form}` names its options"),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -306,6 +310,12 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              as an argument, or wrap it in a function instead"
                 .to_string(),
         ),
+        TypeErrorKind::MapAsOptions { form, options } => Some(format!(
+            "`{form}` takes named options — {list} — not a map of keys, whose keys are \
+             data and whose values must all be one type; write the options out, or read \
+             the map's entries into them",
+            list = options.join(", "),
+        )),
         TypeErrorKind::ControlOperatorAsValue { name } => Some(format!(
             "did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"
         )),
@@ -543,6 +553,24 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                 .to_string(),
         ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
+        // A bundle can carry the options that are data, and never the one that
+        // is syntax — so the label it tripped on decides which thing to say.
+        Reason::FormOptions { form, options } => Some({
+            let list = options.join(", ");
+            match kind {
+                TypeErrorKind::RowExtraField { label, .. } if label == "handlers" => format!(
+                    "`handlers:` names the commands it binds in the block, so it is written \
+                     at the form — `{form} [handlers: [deploy: {{ |args| … }}]] {{ … }}` — \
+                     and no bundle can carry it; a bundle carries {list}"
+                ),
+                _ => format!("`{form}` takes these options, each written by name: {list}"),
+            }
+        }),
+        Reason::HandlerArm => Some(
+            "an arm installed under a name stands in for that command, so it is a block \
+             the call runs — `[handlers: [deploy: { |args| … }]]`, or a name bound to one"
+                .to_string(),
+        ),
         // The same pin fails two different ways.  A route clash is about
         // *where* the payload lives; a WF-2 failure is about the arm having a
         // returned value at all, and telling that author to "add a codec"

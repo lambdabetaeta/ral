@@ -420,23 +420,60 @@ pub enum ScopeAst {
     /// `guard BODY CLEANUP` — run `body`, then unconditionally `cleanup`.
     Guard { body: Box<Ast>, cleanup: Box<Ast> },
     /// `within OPTS BODY` — install option overrides for the duration of `body`.
-    Within { opts: Box<Ast>, body: Box<Ast> },
+    /// `handlers:` is not among `opts`: its labels are the names it binds in
+    /// `body`, so it is an arm list the form reads, not data the options carry.
+    Within {
+        opts: Box<Ast>,
+        handlers: Option<Vec<HandlerArm>>,
+        body: Box<Ast>,
+    },
     /// `grant CAPS BODY` — attenuate active capabilities across `body`.
     Grant { caps: Box<Ast>, body: Box<Ast> },
     /// `audit BODY` — run `body` while recording an audit subtree.
     Audit { body: Box<Ast> },
 }
 
+/// One arm of `within [handlers: …]`: the command name it stands in for, and
+/// the value installed under it.
+///
+/// Arms are syntax, as `case`'s are: the labels are the names bound in the
+/// body, so a table assembled elsewhere could never spell them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlerArm {
+    pub name: String,
+    pub value: Spanned<Ast>,
+}
+
+/// How a control operator reads the operand at one position.
+///
+/// Not every operand is an expression: a form's option bracket is the form's
+/// own syntax, where `[]` is the empty option set rather than a list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Operand {
+    Atom,
+    /// `[]`, `[l: v, …]`, `[...b, l: v, …]`, or an atom naming a bundle.
+    /// `arms` marks the form whose options include the `handlers:` arm list.
+    Options {
+        arms: bool,
+    },
+}
+
 /// Everything the parser needs for one control-operator keyword.
 ///
-/// The surface name, the operand arity, a description of the operands for
-/// the arity-mismatch message, and a constructor from the validated operand
-/// vector.
+/// The surface name, how each operand position is read, a description of the
+/// operands for the arity-mismatch message, and a constructor from the
+/// validated operands and whatever arm list an option bracket lifted out.
 pub(crate) struct ScopeKeyword {
     pub name: &'static str,
-    pub(crate) arity: usize,
+    pub(crate) operands: &'static [Operand],
     pub(crate) operand_desc: &'static str,
-    pub(crate) build: fn(Vec<Ast>) -> ScopeAst,
+    pub(crate) build: fn(Vec<Ast>, Option<Vec<HandlerArm>>) -> ScopeAst,
+}
+
+impl ScopeKeyword {
+    pub(crate) fn arity(&self) -> usize {
+        self.operands.len()
+    }
 }
 
 impl ScopeAst {
@@ -446,9 +483,9 @@ impl ScopeAst {
     pub(crate) const KEYWORDS: &'static [ScopeKeyword] = &[
         ScopeKeyword {
             name: "try",
-            arity: 2,
+            operands: &[Operand::Atom, Operand::Atom],
             operand_desc: "body, handler",
-            build: |ops| {
+            build: |ops, _| {
                 let [body, handler]: [Ast; 2] = ops.try_into().expect("arity validated");
                 Self::Try {
                     body: Box::new(body),
@@ -458,9 +495,9 @@ impl ScopeAst {
         },
         ScopeKeyword {
             name: "guard",
-            arity: 2,
+            operands: &[Operand::Atom, Operand::Atom],
             operand_desc: "body, cleanup",
-            build: |ops| {
+            build: |ops, _| {
                 let [body, cleanup]: [Ast; 2] = ops.try_into().expect("arity validated");
                 Self::Guard {
                     body: Box::new(body),
@@ -470,21 +507,22 @@ impl ScopeAst {
         },
         ScopeKeyword {
             name: "within",
-            arity: 2,
+            operands: &[Operand::Options { arms: true }, Operand::Atom],
             operand_desc: "options, body",
-            build: |ops| {
+            build: |ops, handlers| {
                 let [opts, body]: [Ast; 2] = ops.try_into().expect("arity validated");
                 Self::Within {
                     opts: Box::new(opts),
+                    handlers,
                     body: Box::new(body),
                 }
             },
         },
         ScopeKeyword {
             name: "grant",
-            arity: 2,
+            operands: &[Operand::Options { arms: false }, Operand::Atom],
             operand_desc: "capabilities, body",
-            build: |ops| {
+            build: |ops, _| {
                 let [caps, body]: [Ast; 2] = ops.try_into().expect("arity validated");
                 Self::Grant {
                     caps: Box::new(caps),
@@ -494,9 +532,9 @@ impl ScopeAst {
         },
         ScopeKeyword {
             name: "audit",
-            arity: 1,
+            operands: &[Operand::Atom],
             operand_desc: "body",
-            build: |ops| {
+            build: |ops, _| {
                 let [body]: [Ast; 1] = ops.try_into().expect("arity validated");
                 Self::Audit {
                     body: Box::new(body),
@@ -618,13 +656,24 @@ impl Ast {
 }
 
 impl ScopeAst {
-    /// Operands in source order, matching the arity in [`Self::KEYWORDS`].
-    /// Free-variable collection walks them.
+    /// Every sub-expression in source order: the operands of
+    /// [`Self::KEYWORDS`], plus `within`'s handler arms, which are syntax and
+    /// so sit beside the operands rather than inside one.  Free-variable
+    /// collection walks them.
     pub(crate) fn operands(&self) -> Vec<&Ast> {
         match self {
             Self::Try { body, handler } => vec![body, handler],
             Self::Guard { body, cleanup } => vec![body, cleanup],
-            Self::Within { opts, body } => vec![opts, body],
+            Self::Within {
+                opts,
+                handlers,
+                body,
+            } => {
+                let mut ops = vec![opts.as_ref()];
+                ops.extend(handlers.iter().flatten().map(|arm| &arm.value.item));
+                ops.push(body);
+                ops
+            }
             Self::Grant { caps, body } => vec![caps, body],
             Self::Audit { body } => vec![body],
         }

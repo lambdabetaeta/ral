@@ -1227,35 +1227,53 @@ fn unalias_does_not_remove_a_within_installed_handler() {
     );
 }
 
-// ── handler / alias route preservation at install ────────────────────────────
+// ── handler / alias route preservation ───────────────────────────────────────
 //
-// A computed `within [handlers: $h]` opts map and a runtime-installed alias
-// are invisible to the static check, so their arms' payload routes are pinned
-// to the head's at install instead — the same uniform rule (A), just vetted
-// here rather than during `--check`: every unseen head is byte-routed, so an
-// arm returning anything but `Unit` is refused at install regardless.
+// Every arm's payload route is pinned to its head's, whichever spelling the
+// arm arrives in — the same uniform rule (A): every unseen head is
+// byte-routed, so an arm returning anything but `Unit` is refused. A
+// runtime-installed alias is invisible to the static check and is vetted at
+// install instead; a `within` arm is checked before it ever runs, the arm
+// list being syntax.
 
-/// A computed (non-literal) `within` opts map carrying a value-returning arm
-/// is refused at install (uniform A), vetted here since a computed map is
-/// invisible to the static check.
+/// An arm bound elsewhere and named in the list is checked like a written
+/// one: a value-returning arm under an unseen head is refused (uniform A).
 #[test]
-fn computed_within_value_arm_is_refused_at_install() {
-    let err = eval("let h = [foo: { |args| return 3 }]; within [handlers: $h] { foo }")
-        .expect_err("a value-returning arm cannot be installed under a computed map either");
+fn a_bound_within_arm_returning_a_value_is_refused() {
+    let err = eval("let h = { |args| return 3 }; within [handlers: [foo: $h]] { foo }")
+        .expect_err("a value-returning arm cannot be installed under an unseen head");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("Integer") && msg.contains("Unit"),
-        "expected `vet` to name the arm's type against Unit, got: {msg}"
+        "expected the arm's type named against Unit, got: {msg}"
     );
 }
 
-/// A computed `within` opts map carrying a byte-routed arm defines the unknown
-/// head as byte-routed and runs.
+/// The empty option bundle, written at the form: `[]` in a form's bracket is
+/// no more the empty list than `[dir: 'p']` is a map, so the specification's
+/// own `grant [] { … }` runs.
 #[test]
-fn computed_within_byte_arm_runs() {
+fn the_empty_option_bundle_runs() {
+    assert_eq!(must_succeed("grant [] { return 1 }"), Value::Int(1));
+    assert_eq!(must_succeed("within [] { return 1 }"), Value::Int(1));
+}
+
+/// A bundle computed elsewhere installs its options exactly as a written one
+/// does — the requirement the option row exists for.
+#[test]
+fn a_bound_option_bundle_installs() {
+    assert_eq!(
+        must_succeed("let o = [env: [MY_VAR: scoped]]; within $o { printenv MY_VAR }"),
+        Value::Unit
+    );
+}
+
+/// A bound byte-routed arm defines the unknown head as byte-routed and runs.
+#[test]
+fn a_bound_within_arm_emitting_bytes_runs() {
     // `foo` emits bytes; the block captures nothing and yields unit.
     assert_eq!(
-        must_succeed("let h = [foo: { |args| echo hi }]; within [handlers: $h] { foo }"),
+        must_succeed("let h = { |args| echo hi }; within [handlers: [foo: $h]] { foo }"),
         Value::Unit
     );
 }
@@ -1275,17 +1293,17 @@ fn value_alias_is_refused() {
     );
 }
 
-/// A-3: the computed catch-all is vetted at install too, symmetric with a
-/// computed per-name arm above — a literal catch-all is caught statically
-/// (A-2), a computed one only here.
+/// A-3: a catch-all bound elsewhere gets the literal one's verdict, the
+/// option row declaring `handler:` at a value of `Unit` — so the refusal is
+/// static in both spellings, and carries the catch-all's own sentence.
 #[test]
-fn computed_value_catch_all_is_refused_at_install() {
+fn a_bound_value_catch_all_is_refused() {
     let err = eval("let k = { |n a| return 'x' }; within [handler: $k] { zzz }")
-        .expect_err("a value-returning computed catch-all is refused");
+        .expect_err("a value-returning bound catch-all is refused");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("no separate value to return") && msg.contains("String"),
-        "expected the byte-side wording, got: {msg}"
+        msg.contains("must emit bytes, not return a value") && msg.contains("String"),
+        "expected the catch-all's own sentence, got: {msg}"
     );
 }
 
@@ -1319,21 +1337,20 @@ fn caret_reaches_the_external_in_lockstep_with_the_runtime() {
     );
 }
 
-/// `vet` is the install path, and a computed handler map is the only way to
-/// reach it — a literal one is checked statically first.  Its two failures say
-/// different things, and both are only reachable here.
+/// Reinterpreting a *known* byte-routed head fails two different ways, and
+/// the arm's own spelling does not change which.
 ///
 /// The route clash: `echo`'s payload is its stdout, and this arm returns a
 /// value instead.
 #[test]
-fn a_value_arm_under_a_byte_head_is_refused_at_install() {
+fn a_value_arm_under_a_byte_head_is_refused() {
     let err =
-        eval(r#"let h = [echo: { |args| return "not bytes" }]; within [handlers: $h] { echo hi }"#)
+        eval(r#"let h = { |args| return "not bytes" }; within [handlers: [echo: $h]] { echo hi }"#)
             .expect_err("a value-returning arm cannot be installed under `echo`");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("String") && msg.contains("Unit"),
-        "expected `vet` to name the arm's type against Unit, got: {msg}"
+        "expected the arm's type named against Unit, got: {msg}"
     );
 }
 
@@ -1344,16 +1361,16 @@ fn a_value_arm_under_a_byte_head_is_refused_at_install() {
 /// exited 0 printing `""` where the checker said `Int` — because the only
 /// tripwire was a `debug_assert!` inside `Capture`.
 #[test]
-fn an_open_route_arm_under_a_byte_head_is_refused_at_install() {
+fn an_open_route_arm_under_a_byte_head_is_refused() {
     let err = eval(
-        "let h = [echo: { |args| fold-lines { |a l| fail [status: 5] } 0 }]; \
-         within [handlers: $h] { echo hi }",
+        "let h = { |args| fold-lines { |a l| fail [status: 5] } 0 }; \
+         within [handlers: [echo: $h]] { echo hi }",
     )
     .expect_err("a byte-routed pin leaves no room for an Int return");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("no separate value to return"),
-        "expected `vet`'s WF-2 wording, got: {msg}"
+        "expected the WF-2 wording, got: {msg}"
     );
 }
 

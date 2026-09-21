@@ -379,8 +379,15 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(body, out);
             walk_val(cleanup, out);
         }
-        CompKind::Within { opts, body } => {
+        CompKind::Within {
+            opts,
+            handlers,
+            body,
+        } => {
             walk_val(opts, out);
+            for arm in handlers.iter().flatten() {
+                walk_val(&arm.value.item, out);
+            }
             walk_val(body, out);
         }
         CompKind::Grant { caps, body } => {
@@ -565,8 +572,14 @@ pub enum CompKind {
     /// `[status, value, error, children]` record.
     Audit { body: Val },
     /// `within OPTS BODY` — install the option overrides in `opts`, a map
-    /// evaluated at runtime, for the duration of `body`.
-    Within { opts: Val, body: Val },
+    /// evaluated at runtime, for the duration of `body`.  `handlers` is not
+    /// among them: its labels are the names it binds in `body`, so the arms
+    /// are syntax and `None` is a `within` that wrote none.
+    Within {
+        opts: Val,
+        handlers: Option<Vec<HandlerArmV>>,
+        body: Val,
+    },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant { caps: Val, body: Val },
     /// Redirect frame for a body that cannot fuse its own redirects — a
@@ -591,6 +604,14 @@ pub enum CompKind {
     /// checker writes it: no name is looked up, and no frame the user can
     /// install stands between the bytes and their reading. No surface syntax.
     Decode(Val),
+}
+
+/// One arm of a `within [handlers: …]`: the command name it stands in for,
+/// and the value installed under it.  Arms are syntax, as [`CaseArm`]s are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlerArmV {
+    pub name: String,
+    pub value: Spanned<Val>,
 }
 
 /// One arm of a [`CompKind::Case`]: a tag, the pattern its payload binds,
@@ -825,6 +846,10 @@ mod tests {
         });
         let scope_within = Spanned::synthetic(CompKind::Within {
             opts: var("r_within_opts"),
+            handlers: Some(vec![HandlerArmV {
+                name: "deploy".into(),
+                value: Spanned::synthetic(var("r_within_arm")),
+            }]),
             body: var("r_within_body"),
         });
         let scope_grant = Spanned::synthetic(CompKind::Grant {
@@ -945,6 +970,7 @@ mod tests {
             "r_guard_body",
             "r_guard_cleanup",
             "r_within_opts",
+            "r_within_arm",
             "r_within_body",
             "r_grant_caps",
             "r_grant_body",

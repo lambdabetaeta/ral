@@ -83,24 +83,27 @@ pub(crate) struct WithinScope {
 impl WithinScope {
     /// `shell` resolves and permission-checks `dir:`; handler validation
     /// reads its schemes off `env`, the lexical environment the `within`
-    /// itself closes under, not the shell's mutable scope.
-    pub(crate) fn parse(opts: &Map, env: &Env, shell: &mut Shell) -> Settled<Self> {
+    /// itself closes under, not the shell's mutable scope.  `arms` are the
+    /// `handlers:` list, which is syntax and so arrives beside `opts` rather
+    /// than in it.
+    pub(crate) fn parse(
+        opts: &Map,
+        arms: Option<Vec<(String, Value)>>,
+        env: &Env,
+        shell: &mut Shell,
+    ) -> Settled<Self> {
         let mut env_overrides = None;
         let mut cwd = None;
-        let mut entries: Vec<HandlerEntry> = Vec::new();
         let mut catch_all: Option<Value> = None;
-        let mut saw_handlers = false;
+        // `handlers` and `handler` are independent: naming either installs a
+        // frame, naming neither leaves the stack alone.
+        let mut saw_handlers = arms.is_some();
+        let entries = parse_handlers(arms.unwrap_or_default(), env, shell)?;
 
         for (k, v) in opts {
             match k.as_str() {
                 "env" => env_overrides = Some(parse_env(v)?),
                 "dir" => cwd = Some(parse_dir(v, shell)?),
-                // `handlers` and `handler` are independent: naming either
-                // installs a frame, naming neither leaves the stack alone.
-                "handlers" => {
-                    entries = parse_handlers(v, env, shell)?;
-                    saw_handlers = true;
-                }
                 "handler" => {
                     catch_all = Some(parse_catch_all(v, env, shell)?);
                     saw_handlers = true;
@@ -203,10 +206,13 @@ fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes
 
 /// `handlers:` — one named handler per entry, each vetted against its
 /// command's scheme.
-fn parse_handlers(v: &Value, env: &Env, shell: &Shell) -> Settled<Vec<HandlerEntry>> {
+fn parse_handlers(
+    arms: Vec<(String, Value)>,
+    env: &Env,
+    shell: &Shell,
+) -> Settled<Vec<HandlerEntry>> {
     let schemes = handler_schemes(env, shell);
-    as_map(v, "within handlers")?
-        .into_iter()
+    arms.into_iter()
         .map(|(cmd, thunk)| HandlerEntry::vet(cmd, thunk, schemes.clone(), HandlerRole::Scoped))
         .collect()
 }

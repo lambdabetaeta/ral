@@ -2,7 +2,7 @@
 //! `CompTy`, mutually recursive through thunks.
 
 use super::ReturnContract;
-use super::builtins::{BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal};
+use super::builtins::{BuiltinDiagnostic, fail_status_is_zero_literal};
 use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
@@ -764,32 +764,6 @@ impl Inferencer<'_> {
         );
     }
 
-    /// Check an options record's entries against a per-key `schema`: every
-    /// value is inferred, and a field the schema knows also pins its value's
-    /// type.  Unknown and spread keys stay runtime-dispatched.  The options
-    /// record of `within` and `grant` in `typecheck/scope.rs`, whose own type
-    /// nobody reads; a program's *return* record is held to its form by
-    /// [`Self::infer_record_val`], which builds that type too.
-    pub(super) fn check_record_entry_fields(
-        &mut self,
-        entries: &[ValRecordEntry],
-        form: &'static str,
-        schema: FieldSchema,
-    ) {
-        for entry in entries {
-            let (key, val) = match entry {
-                ValRecordEntry::Field(k, v) => (Some(k.as_str()), v),
-                ValRecordEntry::Spread(v) => (None, v),
-            };
-            self.with_span(val.span, |this| {
-                let actual = this.infer_val(&val.item);
-                if let Some(key) = key {
-                    this.pin_field(Some((form, schema)), key, &actual);
-                }
-            });
-        }
-    }
-
     /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
     /// `args`.  Instantiating here is what keeps quantified variables from
     /// being shared between call sites, so callers hand in a `Scheme` as is.
@@ -809,6 +783,33 @@ impl Inferencer<'_> {
     /// arm defines.
     pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
         let cty = self.infer_handler_comp(comp);
+        self.install_arm_scheme(name, cty)
+    }
+
+    /// The scheme a `handlers:` arm is bound at.  An arm written out is
+    /// *inferred* under the argv convention, so its body is checked against
+    /// the parameters its call sites will hand it; an arm in hand as a value
+    /// was inferred under the ordinary one, whose parameter is a fresh
+    /// variable, and unification imposes the convention after the fact.  So
+    /// the two agree on the arm's type and the written one is stronger on its
+    /// body.
+    pub(super) fn handler_arm_scheme(&mut self, name: &str, arm: &Val) -> Scheme {
+        match arm {
+            Val::Thunk(comp) => self.handler_comp_scheme(name, comp),
+            value => {
+                let ty = self.infer_val(value);
+                let cty = self.ctx.unifier.fresh_comp_ty();
+                self.ctx
+                    .unify_ty(&ty, &Ty::Thunk(Box::new(cty.clone())), Reason::HandlerArm);
+                self.pin_arm_params_to_argv(&cty);
+                self.install_arm_scheme(name, cty)
+            }
+        }
+    }
+
+    /// Pin `cty` to head `name` and generalise — the tail both spellings of an
+    /// arm share.
+    fn install_arm_scheme(&mut self, name: &str, cty: CompTy) -> Scheme {
         if let Err(failure) = self.pin_arm_to_head(name, &cty) {
             let kind = match failure {
                 PinFailure::Route(m) => TypeErrorKind::RouteMismatch {
@@ -844,6 +845,17 @@ impl Inferencer<'_> {
                 (self.comp_route(&cty), true)
             }
             None => (PayloadRoute::Bytes, false),
+        }
+    }
+
+    /// Force the argv convention on an arm's parameters.  A written arm is
+    /// *inferred* under it ([`Self::infer_alias_arm`]); an arm in hand as a
+    /// value has its own parameter type already, and only unification can
+    /// impose the convention on that.
+    fn pin_arm_params_to_argv(&mut self, cty: &CompTy) {
+        if let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(cty) {
+            self.ctx.unify_ty(&param, &Ty::argv(), Reason::AliasParam);
+            self.pin_arm_params_to_argv(&body);
         }
     }
 
@@ -1236,13 +1248,28 @@ impl Inferencer<'_> {
         }
     }
 
+    /// The type of a form's options value.  Ordinary inference, save for a
+    /// written catch-all arm: `handler: { |n a| … }` is checked with its name
+    /// and its argv bound before its body, as a named arm is, so the body is
+    /// checked against the parameters the runtime will hand it.  That is what
+    /// a bound arm cannot have, and the option row is what it gains instead.
+    pub(super) fn infer_options_val(&mut self, opts: &Val) -> Ty {
+        match opts {
+            Val::Record(entries) => self.infer_record_val(entries, None, Some("handler")),
+            other => self.infer_val(other),
+        }
+    }
+
     /// A record literal, with each field pinned to what `contract`'s schema
     /// expects of that label.  `None` is the ordinary record: no form speaks
-    /// about its fields.
+    /// about its fields.  `arm` names the one label whose written thunk is
+    /// inferred as a handler arm rather than a value — see
+    /// [`Self::infer_options_val`].
     fn infer_record_val(
         &mut self,
         entries: &[ValRecordEntry],
         contract: Option<ReturnContract>,
+        arm: Option<&str>,
     ) -> Ty {
         let mut fields: Vec<(String, Ty)> = Vec::new();
         let mut bases: Vec<(Option<Span>, Ty)> = Vec::new();
@@ -1254,7 +1281,12 @@ impl Inferencer<'_> {
                             this.ctx
                                 .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
                         }
-                        let ty = this.infer_val(&value.item);
+                        let ty = match (&value.item, arm) {
+                            (Val::Thunk(comp), Some(arm)) if arm == key => {
+                                Ty::Thunk(Box::new(this.infer_catch_all(comp)))
+                            }
+                            _ => this.infer_val(&value.item),
+                        };
                         this.pin_field(contract, key, &ty);
                         ty
                     });
@@ -1403,7 +1435,7 @@ impl Inferencer<'_> {
                 }
                 Ty::List(Box::new(elem))
             }
-            Val::Record(entries) => self.infer_record_val(entries, None),
+            Val::Record(entries) => self.infer_record_val(entries, None, None),
             Val::Map(entries) => self.infer_map_val(entries, None),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.
@@ -1749,7 +1781,7 @@ impl Inferencer<'_> {
 
         let cty = match &comp.item {
             CompKind::Return(Val::Record(entries)) if contract.is_some() => {
-                CompTy::pure(self.infer_record_val(entries, contract))
+                CompTy::pure(self.infer_record_val(entries, contract, None))
             }
             CompKind::Return(Val::Map(entries)) if contract.is_some() => {
                 CompTy::pure(self.infer_map_val(entries, contract))
@@ -1899,8 +1931,12 @@ impl Inferencer<'_> {
                 self.merge_branches(vec![then_cty, else_cty], &Reason::IfBranches)
             }
             CompKind::Case { scrutinee, arms } => self.infer_case(scrutinee, arms),
-            CompKind::Within { opts, body } => {
-                let sig = self.infer_within(opts, body);
+            CompKind::Within {
+                opts,
+                handlers,
+                body,
+            } => {
+                let sig = self.infer_within(opts, handlers.as_deref(), body);
                 CompTy::Return(sig.route, Box::new(sig.value))
             }
             CompKind::Grant { caps, body } => {

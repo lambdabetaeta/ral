@@ -15,9 +15,9 @@
 
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
-    Ast, BinaryOp, BinaryOpKind, CaseArm, Head, IfBranch, ListElem, MapEntry, MapPatternEntry,
-    Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt,
-    Word, WordLiteral,
+    Ast, BinaryOp, BinaryOpKind, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry,
+    MapPatternEntry, Operand, Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget,
+    ScopeAst, ScopeKeyword, Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -451,13 +451,15 @@ impl Parser {
         )))
     }
 
-    /// Parse the keyword `kw` names, then exactly `kw.arity` operands and any
-    /// trailing redirects, into an [`Ast::Scope`].  Operands are atoms, not
-    /// arguments: `parse_arg` would admit an `Ast::Spread` that these fixed
-    /// positions have no lowering for.
+    /// Parse the keyword `kw` names, then exactly `kw.arity()` operands and any
+    /// trailing redirects, into an [`Ast::Scope`].  Each position is read the
+    /// way [`ScopeKeyword::operands`] declares: an atom, not an argument —
+    /// `parse_arg` would admit an `Ast::Spread` that these fixed positions have
+    /// no lowering for — or the form's own option bracket.
     fn parse_control_op(&mut self, kw: &ScopeKeyword) -> Result<Ast, ParseError> {
         self.advance(); // consume the head name
-        let mut operands = Vec::with_capacity(kw.arity);
+        let mut operands = Vec::with_capacity(kw.arity());
+        let mut handlers = None;
         while !self.at_cmd_end() && !matches!(self.peek(), Token::Redirect { .. }) {
             if self.peek() == &Token::Spread {
                 return Err(self.error(format!(
@@ -467,21 +469,178 @@ impl Parser {
                     operands_desc = kw.operand_desc,
                 )));
             }
-            operands.push(self.parse_atom()?);
+            match kw.operands.get(operands.len()) {
+                Some(Operand::Options { arms }) => {
+                    let (opts, parsed) = self.parse_options(kw, *arms)?;
+                    handlers = parsed;
+                    operands.push(opts);
+                }
+                // A surplus operand is an atom, and the arity check below is
+                // what it meets.
+                Some(Operand::Atom) | None => operands.push(self.parse_atom()?),
+            }
         }
-        if operands.len() != kw.arity {
+        if operands.len() != kw.arity() {
             return Err(self.error(format!(
                 "{name} requires {arity} argument{plural} ({operands_desc}); got {got}",
                 name = kw.name,
-                arity = kw.arity,
-                plural = if kw.arity == 1 { "" } else { "s" },
+                arity = kw.arity(),
+                plural = if kw.arity() == 1 { "" } else { "s" },
                 operands_desc = kw.operand_desc,
                 got = operands.len(),
             )));
         }
         let redirects = self.collect_trailing_redirects()?;
-        let op = (kw.build)(operands);
+        let op = (kw.build)(operands, handlers);
         Ok(Ast::Scope { op, redirects })
+    }
+
+    /// `options = atom | '[' ']' | '[' item (',' item)* ']'`
+    ///
+    /// A form's option bracket, which is the form's syntax and not a
+    /// collection literal: `[]` here is the empty option set rather than the
+    /// empty list, and `[:]` — a map — names no options at all.  An atom in
+    /// its place is a bundle computed elsewhere, checked against the same
+    /// options the bracket writes out.
+    ///
+    /// Where the form takes arms, `handlers:` is lifted out of the bracket:
+    /// its labels are the names it binds in the body, so they are syntax and
+    /// no computed table can spell them.
+    fn parse_options(
+        &mut self,
+        kw: &ScopeKeyword,
+        arms: bool,
+    ) -> Result<(Ast, Option<Vec<HandlerArm>>), ParseError> {
+        if self.peek() != &Token::LBracket {
+            return Ok((self.parse_atom()?, None));
+        }
+        self.advance(); // consume `[`
+        if self.peek() == &Token::RBracket {
+            self.advance();
+            return Ok((Ast::Record(Vec::new()), None));
+        }
+        if self.peek() == &Token::Colon {
+            return Err(self.error(format!(
+                "`{name}` takes its options by name ({operands_desc}), so `[:]` — a map, \
+                 whose keys are data — names none of them; write `[]` for no options",
+                name = kw.name,
+                operands_desc = kw.operand_desc,
+            )));
+        }
+        let mut items = Vec::new();
+        self.parse_separated_until(&Token::RBracket, "the options", |p| {
+            items.push(p.parse_collection_item()?);
+            Ok(SepFlow::Cont)
+        })?;
+
+        let mut entries = Vec::new();
+        let mut handlers = None;
+        for item in items {
+            match item {
+                CollectionItem::Spread(base) => entries.push(RecordEntry::Spread(base)),
+                CollectionItem::Entry {
+                    key: MapKeyForm::Static(key),
+                    value,
+                } if arms && key == "handlers" => {
+                    if handlers.is_some() {
+                        return Err(elem_error(
+                            &value,
+                            "`handlers:` is written once; put every arm in the one list",
+                        ));
+                    }
+                    handlers = Some(Self::handler_arms(kw, value)?);
+                }
+                CollectionItem::Entry {
+                    key: MapKeyForm::Static(key),
+                    value,
+                } => entries.push(RecordEntry::Field { key, value }),
+                CollectionItem::Entry {
+                    key: MapKeyForm::Deref(name),
+                    value,
+                } => {
+                    return Err(elem_error(
+                        &value,
+                        &format!(
+                            "`{kw_name}` names its options ({operands_desc}), so a key computed \
+                             from `${name}` cannot be one of them; write the option out",
+                            kw_name = kw.name,
+                            operands_desc = kw.operand_desc,
+                        ),
+                    ));
+                }
+                CollectionItem::Elem(item) => {
+                    return Err(elem_error(
+                        &item,
+                        &format!(
+                            "`{name}` takes `option: value` entries ({operands_desc}); \
+                             this one has no name",
+                            name = kw.name,
+                            operands_desc = kw.operand_desc,
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok((record_literal(entries)?, handlers))
+    }
+
+    /// `handlers: [name: arm, …]` — the arm list, read as syntax.  The table
+    /// is written out here for the same reason `case`'s arms are: the labels
+    /// are the names bound in the body, and a table assembled elsewhere hides
+    /// them.  An arm's *value* is any atom, the name being what is syntax.
+    fn handler_arms(kw: &ScopeKeyword, value: Spanned<Ast>) -> Result<Vec<HandlerArm>, ParseError> {
+        let spelling = format!(
+            "write the arms out — `{name} [handlers: [deploy: {{ |args| … }}]] …` — \
+             since each name is bound in the body",
+            name = kw.name,
+        );
+        let entries = match value.item {
+            Ast::List(ref elems) if elems.is_empty() => Vec::new(),
+            Ast::Record(entries) => entries,
+            // `[:]` spelled the empty handler set while the options were a
+            // map; the arm list has its own empty, and this is where a reader
+            // of the old spelling is told so.
+            Ast::Map(ref entries) if entries.is_empty() => {
+                return Err(error_at(
+                    value.span,
+                    "the empty handler set is `handlers: []` — `[:]` is a map, \
+                     and an arm's name is not data",
+                ));
+            }
+            Ast::Map(_) => {
+                return Err(error_at(
+                    value.span,
+                    format!("`handlers:` takes named arms, not a map; {spelling}"),
+                ));
+            }
+            _ => {
+                return Err(error_at(
+                    value.span,
+                    format!("`handlers:` is an arm list, not a value; {spelling}"),
+                ));
+            }
+        };
+        let mut arms: Vec<HandlerArm> = Vec::new();
+        for entry in entries {
+            match entry {
+                RecordEntry::Field { key, value } => {
+                    if arms.iter().any(|arm| arm.name == key) {
+                        return Err(elem_error(
+                            &value,
+                            &format!("`{key}` already has an arm; one name, one arm"),
+                        ));
+                    }
+                    arms.push(HandlerArm { name: key, value });
+                }
+                RecordEntry::Spread(base) => {
+                    return Err(elem_error(
+                        &base,
+                        &format!("`handlers:` spreads no other table; {spelling}"),
+                    ));
+                }
+            }
+        }
+        Ok(arms)
     }
 
     /// Only a fixed-arity form can collect redirects at the end like this;
@@ -1561,40 +1720,42 @@ impl Literal {
     fn into_ast(self) -> Result<Ast, ParseError> {
         match self {
             Self::List(elems) => Ok(Ast::List(elems)),
-            Self::Record(items) => {
-                // A record literal is a *put* over one base: the written
-                // entries overwrite that base's fields and the base supplies
-                // the rest.  Two bases would be a merge, and which of two
-                // unknown remainders wins is a question the literal cannot
-                // answer.
-                if let Some(second) = items
-                    .iter()
-                    .filter_map(|i| match i {
-                        StaticItem::Spread(a) => Some(a),
-                        StaticItem::Field { .. } => None,
+            Self::Record(items) => record_literal(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        StaticItem::Spread(a) => RecordEntry::Spread(a),
+                        StaticItem::Field { key, value } => RecordEntry::Field { key, value },
                     })
-                    .nth(1)
-                {
-                    return Err(elem_error(
-                        second,
-                        "a record can be written over one other record, not two — \
-                         write out the fields you need from this one, as in \
-                         `[...$base, y: $other[y]]`, or merge them in a block",
-                    ));
-                }
-                Ok(Ast::Record(
-                    items
-                        .into_iter()
-                        .map(|item| match item {
-                            StaticItem::Spread(a) => RecordEntry::Spread(a),
-                            StaticItem::Field { key, value } => RecordEntry::Field { key, value },
-                        })
-                        .collect(),
-                ))
-            }
+                    .collect(),
+            ),
             Self::Map { entries, .. } => Ok(Ast::Map(entries)),
         }
     }
+}
+
+/// A record literal is a *put* over one base: the written entries overwrite
+/// that base's fields and the base supplies the rest.  Two bases would be a
+/// merge, and which of two unknown remainders wins is a question the literal
+/// cannot answer.  Shared with a form's option bracket, whose entries are a
+/// record's too.
+fn record_literal(entries: Vec<RecordEntry>) -> Result<Ast, ParseError> {
+    if let Some(second) = entries
+        .iter()
+        .filter_map(|e| match e {
+            RecordEntry::Spread(a) => Some(a),
+            RecordEntry::Field { .. } => None,
+        })
+        .nth(1)
+    {
+        return Err(elem_error(
+            second,
+            "a record can be written over one other record, not two — \
+             write out the fields you need from this one, as in \
+             `[...$base, y: $other[y]]`, or merge them in a block",
+        ));
+    }
+    Ok(Ast::Record(entries))
 }
 
 fn map_entry(key: MapKeyForm, value: Spanned<Ast>) -> MapEntry {
@@ -1604,13 +1765,17 @@ fn map_entry(key: MapKeyForm, value: Spanned<Ast>) -> MapEntry {
     }
 }
 
-fn elem_error(item: &Spanned<Ast>, message: &str) -> ParseError {
+fn error_at(span: Option<Span>, message: impl Into<String>) -> ParseError {
     ParseError {
         message: message.into(),
-        span: item.span,
+        span,
         lex_kind: None,
         incomplete: false,
     }
+}
+
+fn elem_error(item: &Spanned<Ast>, message: &str) -> ParseError {
+    error_at(item.span, message)
 }
 
 /// What a token the parse never reached means for a whole program or a
@@ -1892,8 +2057,20 @@ mod tests {
                 body: s(body),
                 cleanup: s(cleanup),
             },
-            ScopeAst::Within { opts, body } => ScopeAst::Within {
+            ScopeAst::Within {
+                opts,
+                handlers,
+                body,
+            } => ScopeAst::Within {
                 opts: s(opts),
+                handlers: handlers.map(|arms| {
+                    arms.into_iter()
+                        .map(|arm| HandlerArm {
+                            name: arm.name,
+                            value: Spanned::synthetic(strip_one(arm.value.item)),
+                        })
+                        .collect()
+                }),
                 body: s(body),
             },
             ScopeAst::Grant { caps, body } => ScopeAst::Grant {
@@ -3645,12 +3822,111 @@ mod tests {
     fn parse_within_opts_and_body() {
         let (op, _) = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
         match op {
-            ScopeAst::Within { opts, body } => {
+            ScopeAst::Within { opts, body, .. } => {
                 assert!(matches!(*opts, Ast::Record(_)));
                 assert!(matches!(*body, Ast::Block(_)));
             }
             _ => panic!("expected ScopeAst::Within, got {op:?}"),
         }
+    }
+
+    /// The form's bracket is the form's own: `[]` there is the empty option
+    /// set rather than the empty list, which is what makes `grant [] { … }`
+    /// mean what it reads as.
+    #[test]
+    fn an_empty_option_bracket_is_an_empty_record() {
+        for src in ["within [] { body }", "grant [] { body }"] {
+            let (op, _) = unwrap_single_scope(parse(src).unwrap());
+            let opts = match op {
+                ScopeAst::Within { opts, .. } | ScopeAst::Grant { caps: opts, .. } => opts,
+                other => panic!("expected an option-taking form, got {other:?}"),
+            };
+            assert_eq!(*opts, Ast::Record(Vec::new()), "in {src}");
+        }
+    }
+
+    /// `[:]` is a map, whose keys are data, so it names no options at all.
+    #[test]
+    fn a_map_bracket_is_not_an_option_list() {
+        let err = parse("within [:] { body }").unwrap_err();
+        assert!(
+            err.message.contains("write `[]` for no options"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// An option is named, so a computed key cannot be one.
+    #[test]
+    fn a_computed_option_key_is_refused() {
+        let err = parse("within [$k: 1] { body }").unwrap_err();
+        assert!(
+            err.message.contains("cannot be one of them"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// `handlers:` binds the names it lists in the body, so the list is
+    /// syntax: a table assembled elsewhere could never spell them.
+    #[test]
+    fn a_computed_handler_table_is_refused() {
+        for src in [
+            "within [handlers: $hs] { body }",
+            "within [handlers: [:, foo: { echo }]] { body }",
+            "within [handlers: [...$hs]] { body }",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("handlers:"),
+                "unexpected message for {src}: {err}"
+            );
+        }
+        // `[:]` spelled the empty set while the options were a map, and does
+        // not simply stop parsing: it says where the empty set went.
+        let err = parse("within [handlers: [:]] { body }").unwrap_err();
+        assert!(
+            err.message
+                .contains("the empty handler set is `handlers: []`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The arms leave the options bracket: their labels are names, not data.
+    /// `[]` keeps the empty handler set, which `[:]` used to spell.
+    #[test]
+    fn handler_arms_are_lifted_out_of_the_options() {
+        let (op, _) = unwrap_single_scope(
+            parse("within [dir: '/tmp', handlers: [deploy: { echo hi }]] { body }").unwrap(),
+        );
+        match op {
+            ScopeAst::Within { opts, handlers, .. } => {
+                assert_eq!(
+                    handlers.as_deref().map(<[HandlerArm]>::len),
+                    Some(1),
+                    "the one arm is lifted out"
+                );
+                let Ast::Record(entries) = *opts else {
+                    panic!("options are a record")
+                };
+                assert_eq!(entries.len(), 1, "only `dir` is left among the options");
+            }
+            other => panic!("expected ScopeAst::Within, got {other:?}"),
+        }
+        let (op, _) = unwrap_single_scope(parse("within [handlers: []] { body }").unwrap());
+        match op {
+            ScopeAst::Within { handlers, .. } => assert_eq!(handlers, Some(Vec::new())),
+            other => panic!("expected ScopeAst::Within, got {other:?}"),
+        }
+    }
+
+    /// One name, one arm — as `case` refuses a repeated tag.
+    #[test]
+    fn a_repeated_handler_name_is_refused() {
+        let err =
+            parse("within [handlers: [foo: { echo a }, foo: { echo b }]] { body }").unwrap_err();
+        assert!(
+            err.message.contains("already has an arm"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

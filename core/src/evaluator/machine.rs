@@ -657,9 +657,21 @@ impl Machine {
                 })
             }
 
-            CompKind::Within { opts, body } => {
+            CompKind::Within {
+                opts,
+                handlers,
+                body,
+            } => {
                 let opts = close(opts, &env)?;
-                let scope = WithinScope::parse(&as_map(&opts, "within")?, &env, shell)?;
+                let arms = handlers
+                    .as_ref()
+                    .map(|arms| {
+                        arms.iter()
+                            .map(|arm| Ok((arm.name.clone(), close(&arm.value.item, &env)?)))
+                            .collect::<Settled<Vec<_>>>()
+                    })
+                    .transpose()?;
+                let scope = WithinScope::parse(&as_map(&opts, "within")?, arms, &env, shell)?;
                 let body = close(body, &env)?;
                 self.reserve(shell)?;
                 let undo = scope.enter(shell);

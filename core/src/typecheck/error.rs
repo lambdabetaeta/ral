@@ -98,11 +98,19 @@ pub enum Reason {
     RecordSpread,
     /// A `...x` inside a map literal, which copies entries.
     MapSpread,
-    /// An options-record entry against its schema-declared field type, under `form`.
+    /// An options-record entry against the type the form declares at `key`.
     OptionField {
         form: &'static str,
         key: String,
     },
+    /// A form's options value against the form's own row: what it is at all,
+    /// and that it names no option the form does not declare.
+    FormOptions {
+        form: &'static str,
+        options: Vec<&'static str>,
+    },
+    /// A `handlers:` arm that arrived as a value, against the block an arm is.
+    HandlerArm,
     /// The `!` operator's operand against the block shape it forces.
     ForceOperand,
     /// `Capture`'s operand against the `Unit` value WF-2 demands, at
@@ -196,6 +204,13 @@ pub enum TypeErrorKind {
     /// last-wins, so it is refused rather than given a direction.
     DuplicateField {
         label: String,
+    },
+    /// A map where a form's options belong.  A form's options are fields and a
+    /// map's keys are data, so the two have nothing in common but a bracket —
+    /// and the mismatch of a row against `[String: α]` would say none of that.
+    MapAsOptions {
+        form: &'static str,
+        options: Vec<&'static str>,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     /// The flag marks a head/args shape suggesting a string split by a stray quote.
@@ -298,6 +313,7 @@ impl TypeErrorKind {
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
             Self::DuplicateField { .. } => "T0022",
+            Self::MapAsOptions { .. } => "T0024",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",

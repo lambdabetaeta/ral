@@ -15,9 +15,9 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, Phrase,
-    PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
-    ValRedirectTarget,
+    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV, IrPattern,
+    Phrase, PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry,
+    ValRecordEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -583,13 +583,32 @@ impl Elaborator {
                             cleanup: self.to_val(cleanup, binds),
                         }
                     ),
-                    ScopeAst::Within { opts, body } => comp!(
-                        self,
-                        CompKind::Within {
-                            opts: self.to_val(opts, binds),
-                            body: self.to_val(body, binds),
-                        }
-                    ),
+                    ScopeAst::Within {
+                        opts,
+                        handlers,
+                        body,
+                    } => {
+                        let opts = self.to_val(opts, binds);
+                        let handlers = handlers.as_ref().map(|arms| {
+                            arms.iter()
+                                .map(|arm| HandlerArmV {
+                                    name: arm.name.clone(),
+                                    value: Spanned::with_span(
+                                        arm.value.span,
+                                        self.to_val(&arm.value.item, binds),
+                                    ),
+                                })
+                                .collect()
+                        });
+                        comp!(
+                            self,
+                            CompKind::Within {
+                                opts,
+                                handlers,
+                                body: self.to_val(body, binds),
+                            }
+                        )
+                    }
                     ScopeAst::Grant { caps, body } => comp!(
                         self,
                         CompKind::Grant {

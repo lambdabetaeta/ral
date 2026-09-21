@@ -279,7 +279,7 @@ builtin_registry! {
         doc: "ask <prompt>  — prompt for interactive input, return string.",
         call: |args, _mooring, _shell| misc::builtin_ask(args).map_err(Break::from), },
     Use { names: ["use"], ty: scheme::use_op,
-        doc: "use <file>  — load a .ral module, returning its bindings as a map.",
+        doc: "use <file>  — load a .ral module, returning its bindings as a record.",
         call: |args, mooring, shell| modules::builtin_use(args, mooring, shell), },
     Cwd { names: ["cwd"], ty: scheme::pure_string,
         doc: "cwd  — return the current working directory as a String.",

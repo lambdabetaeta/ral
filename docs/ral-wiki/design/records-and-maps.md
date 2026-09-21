@@ -66,6 +66,11 @@ its own entry type, so a record literal cannot hold a computed key:
 
 - **`[:` marks a map.** `[:]` is the empty one and `[:, a: 1, b: 2]` a map whose
   keys are written out: `Map<Int>`.
+- **A form's bracket is the form's own.** `within`'s and `grant`'s first
+  operand is read by the form, not by the collection rule, so `[]` there is the
+  empty *option set* and `[:]` names no options at all. That is the one place
+  the `[]`/`[:]` ambiguity bites, and closing it there is what makes
+  `grant [] { … }` mean what it reads as.
 - **Every key a static label** → `Record`. `[host: "db", port: 5432]` infers
   `[host: String, port: Int]`.
 - **Any key computed** → `Map<α>`. `[$k: 1, $j: 2]` infers `Map<Int>` — one
@@ -122,6 +127,17 @@ A record and a map never unify — not directly, and not under `List`, `Thunk`,
 `has :: ∀α. Map<α> → Str → F Bool` (`core/src/typecheck/builtins.rs`) — so they
 take a map and only a map: `keys [a: 1, b: 2]` is a type error and
 `keys [:, a: 1, b: 2]` is the program that was meant.
+
+**A form's options are fields, so a map is not one.** `within` and `grant`
+declare their options as a closed row — `dir`, `env` and `handler`; `exec`,
+`fs`, `net`, `detach`, `editor` and `shell` — and the bundle they are handed is
+unified against it, written out or arriving bound. A genuine map, one off
+`from-json` or a plugin's configuration, has no labels to meet that row, and
+gets its own sentence rather than a row-against-`[String: α]` mismatch:
+*`within` takes named options — dir, env, handler — not a map of keys.* The
+runtime still takes a `Map`, records being maps at run time; this is a
+statement about the type, and it is the price of giving a computed bundle a
+verdict at all.
 
 A forgetful `Record → Map` reading is definable — collapse every field type onto
 one element and forget the labels — but it is a *coercion*, and a unifier

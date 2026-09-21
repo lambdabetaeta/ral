@@ -1910,14 +1910,40 @@ within [
 }
 ```
 
-The options value must be a map. It accepts exactly four keys:
+The options are written in `within`'s own bracket, and it accepts exactly four
+names:
 
 - `dir` — the effective working directory;
 - `env` — environment-variable overrides;
 - `handlers` — named command handlers;
 - `handler` — one catch-all command handler.
 
-Unknown keys are errors. All options are evaluated and validated before the body begins. The environment scope is installed outermost, then the directory scope, then the handler frame. This makes the environment visible while commands resolve beneath the directory and handler scopes.
+Unknown names are errors, reported before the program runs. `[]` is the empty
+option set — the form's bracket is not a collection literal, so `[]` there is
+no more the empty list than `[dir: 'p']` is a map, and `[:]` names no options
+at all.
+
+Three of the four are data, and a bundle computed elsewhere may carry them:
+
+```ral
+let opts = [dir: 'project', env: [MODE: 'test']]
+within $opts { build }
+```
+
+Such a bundle is checked exactly as a written one is, and its field set is
+fixed: a bundle whose *membership* depends on a condition cannot be built, the
+two branches of an `if` having to agree on a type. Lift the condition to the
+form instead — `if $c { within [dir: $d] { … } } else { within [] { … } }`.
+
+`handlers` is the fourth, and it is syntax rather than data: its labels are the
+command names it binds in the body, so they must be written out. A bundle
+cannot carry it, and `handlers: $table` is a parse error.
+
+A form's options are fields; a map's keys are data. So a genuine map — one off
+`from-json`, a plugin's configuration — is not an options bundle, and is
+refused by name.
+
+All options are evaluated and validated before the body begins. The environment scope is installed outermost, then the directory scope, then the handler frame. This makes the environment visible while commands resolve beneath the directory and handler scopes.
 
 Validation uses the incoming dynamic context. Options in the same map do not
 take effect one by one: for example, `dir` is resolved before the new `env`
@@ -2569,7 +2595,7 @@ A denial at any layer remains a denial.
 
 ### 12.1. Capability fields
 
-A capability record accepts exactly these keys:
+A capability record accepts exactly these names:
 
 - `exec`
 - `fs`
@@ -2578,7 +2604,13 @@ A capability record accepts exactly these keys:
 - `editor`
 - `shell`
 
-Unknown keys are errors.
+Unknown names are errors, reported before the program runs. `net` and `detach`
+are Boolean; the other four are structured, and their interiors are the
+decoder's to judge.
+
+`grant`'s bracket is the form's own, as `within`'s is: `[]` is the empty
+grant, a bundle computed elsewhere may stand in its place at a fixed field
+set, and a map is refused by name.
 
 Omitting a whole field inherits that dimension. Once a structured field such as `fs`, `editor`, or `shell` is present, omitted members inside it take their restrictive default.
 
