@@ -411,6 +411,10 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-only FreezeCtx cwd; no resolution rule to centralise"
+)]
 mod tests {
     use super::*;
 
@@ -481,6 +485,42 @@ mod tests {
             msg.contains("'allow'") && msg.contains("'deny'") && msg.contains("subcommand list"),
             "{msg}"
         );
+    }
+
+    /// Every key `Form::Grant`'s table declares reaches its own arm in
+    /// `decode_capability_map` rather than falling to the catch-all: fed a
+    /// deliberately wrong-shaped value, a handled key refuses with its own
+    /// per-key message, never the table's `unknown_key` wording.  A
+    /// `Holds::Refused` key is not reachable in `Form::Grant` today, but the
+    /// loop honours it the same way the other two doors' drift tests do, so
+    /// adding one here needs no new test.
+    #[test]
+    fn every_declared_grant_key_is_handled_by_decode_capability_map() {
+        let table = declared(ContractForm::Grant);
+        let ctx = crate::path::sigil::FreezeCtx {
+            home: None,
+            cwd: std::path::Path::new("/"),
+        };
+        for key in table.keys {
+            let map = exec_map(&[(key.label, Value::Unit)]);
+            let result = decode_capability_map(&map, "test", &ctx);
+            let unknown = table.unknown_key(key.label);
+            match &key.holds {
+                crate::typecheck::contract::Holds::Refused(advice) => {
+                    let err = result.expect_err("refused key must error");
+                    assert_eq!(&err.message, *advice);
+                }
+                _ => {
+                    if let Err(err) = &result {
+                        assert_ne!(
+                            err.message, unknown,
+                            "key '{}' fell through to decode_capability_map's unknown arm",
+                            key.label
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Order-independence is what keeps a reorder or a resigil of

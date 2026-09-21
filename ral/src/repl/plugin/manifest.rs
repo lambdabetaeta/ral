@@ -293,6 +293,45 @@ mod tests {
         );
     }
 
+    /// Every key `Form::Manifest`'s table declares reaches its own handling
+    /// in `LoadedPlugin::parse`: a `Holds::Refused` key errors with its own
+    /// advice, and every other key parses with a minimal value of its
+    /// declared shape rather than being refused as unknown or silently
+    /// dropped.
+    #[test]
+    fn every_declared_manifest_key_is_handled_by_parse() {
+        use ral_core::typecheck::contract::Holds;
+
+        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
+        for key in table.keys {
+            let mut fields = vec![("name".into(), Value::String("p".into()))];
+            if key.label != "name" {
+                let value = if key.label == "keybindings" {
+                    Value::list(vec![])
+                } else {
+                    Value::map(vec![])
+                };
+                fields.push((key.label.into(), value));
+            }
+            let manifest = Value::map(fields);
+            let result = LoadedPlugin::parse(&manifest);
+            match &key.holds {
+                Holds::Refused(advice) => {
+                    let err = result.expect_err("refused key must error");
+                    assert_eq!(&err.message, *advice);
+                }
+                _ => {
+                    result.unwrap_or_else(|err| {
+                        panic!(
+                            "key '{}' should parse cleanly, got: {}",
+                            key.label, err.message
+                        )
+                    });
+                }
+            }
+        }
+    }
+
     /// `name` is required, and its absence is not an unknown key.
     #[test]
     fn a_manifest_without_a_name_is_refused() {

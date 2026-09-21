@@ -569,7 +569,16 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                      at the form — `{form} [handlers: [deploy: {{ |args| … }}]] {{ … }}` — \
                      and no bundle can carry it; a bundle carries {list}"
                 ),
-                _ => format!("`{form}` takes these options, each written by name: {list}"),
+                _ => {
+                    // `handlers:` is the parser's, not the table's, so `offered` cannot
+                    // name it and a near-miss spelling would see only `handler`.
+                    let syntax = if *form == "within" {
+                        ", and `handlers:` written at the form"
+                    } else {
+                        ""
+                    };
+                    format!("`{form}` takes these options, each written by name: {list}{syntax}")
+                }
             }
         }),
         Reason::HandlerArm => Some(
@@ -732,8 +741,10 @@ fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     byte_writer_hint(expected, actual)
 }
 
-/// Whether a row carries `status: Int`.  Only the fields written are visible:
-/// a `Row::Var` tail may still hide one, and this reads as absent.
+/// Whether a row carries `status: Int`.  An error carries the row as it stood
+/// when the constraint failed, and nothing re-applies it here, so a `Var` tail
+/// or a flag that resolved later both read as absent.  That only ever withholds
+/// a hint, never asserts one.
 fn row_has_status_int(row: &Row) -> bool {
     let mut rest = row;
     loop {

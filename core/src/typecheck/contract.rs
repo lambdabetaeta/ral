@@ -4,8 +4,17 @@
 //! closed set of labels, each held at what its table says.  `within` and
 //! `grant` check theirs as a row at the form; an rc file and a plugin manifest
 //! check theirs as the row their program returns.  The runtime doors —
-//! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — dispatch
-//! off the same tables, so a keyset is written once.
+//! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — each keep
+//! their own `match` over the values; a table gives them only the *keyset*
+//! and the unknown-key wording, so that much is written once.  A door's own
+//! arm is per-key by nature and stays hand-written; what would let a table
+//! and a door drift apart — a key declared but unhandled, refused at run
+//! time by a message that lists it as offered — is caught instead by a test
+//! at each door that walks its table asking whether every key reaches a
+//! specific arm rather than falling to `unknown_key`:
+//! `every_declared_rc_key_is_handled_by_apply_rc_key`,
+//! `every_declared_manifest_key_is_handled_by_parse`, and
+//! `every_declared_grant_key_is_handled_by_decode_capability_map`.
 //!
 //! §3's condition is why they are gathered here rather than left where they
 //! are used: a label may not be optional at two irreconcilable types within one

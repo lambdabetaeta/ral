@@ -895,4 +895,46 @@ mod tests {
             );
         }
     }
+
+    /// Every key `Form::Rc`'s table declares reaches its own arm in
+    /// `apply_rc_key`: fed a value of the wrong shape (`Unit`), a handled
+    /// key refuses — or, like `startup`, accepts anything — with its own
+    /// message, never the table's `unknown_key` wording.  A `Holds::Refused`
+    /// key is not reachable in `Form::Rc` today, but the loop honours it the
+    /// same way the other two doors' drift tests do, so adding one here
+    /// needs no new test.
+    #[test]
+    fn every_declared_rc_key_is_handled_by_apply_rc_key() {
+        let table = ral_core::typecheck::contract::declared(Form::Rc);
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        for key in table.keys {
+            let mut settings = RcSettings::default();
+            let mut startup = None;
+            let result = apply_rc_key(
+                key.label,
+                Value::Unit,
+                &mut shell,
+                &runtime,
+                &mut settings,
+                &mut startup,
+            );
+            let unknown = table.unknown_key(key.label);
+            match &key.holds {
+                ral_core::typecheck::contract::Holds::Refused(advice) => {
+                    let err = result.expect_err("refused key must error");
+                    assert_eq!(&err.message, *advice);
+                }
+                _ => {
+                    if let Err(err) = &result {
+                        assert_ne!(
+                            err.message, unknown,
+                            "key '{}' fell through to apply_rc_key's unknown arm",
+                            key.label
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
