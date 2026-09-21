@@ -601,6 +601,9 @@ struct Cols {
 }
 
 impl Cols {
+    /// Every mark is asked what it seats in the shared columns, exhaustively:
+    /// a mark added to the set must answer here as it must in [`render_mark`],
+    /// or it would draw rows the card never measured.
     fn of(marks: &[Mark]) -> Self {
         let mut cols = Self::default();
         for mark in marks {
@@ -614,7 +617,10 @@ impl Cols {
                         }
                     }
                 }
-                _ => {}
+                // A diff seats its line numbers in a gutter of its own,
+                // measured over its own hunks: that column belongs to the patch
+                // block, not to the card.  Prose and bytes seat nothing.
+                Mark::Diff { .. } | Mark::Text { .. } | Mark::Raw { .. } => {}
             }
         }
         cols
