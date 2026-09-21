@@ -8,8 +8,7 @@
 
 use super::error::{CompDiff, TypeErrorKind};
 use super::route::RouteMismatch;
-use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
-use crate::syntax::tag::is_tag_label;
+use super::ty::{CompTy, CompTyVar, Label, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use std::collections::HashSet;
 
 /// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
@@ -92,7 +91,7 @@ enum CompTyKey {
 enum RowKey {
     Empty,
     Var(u32),
-    Extend(String, Box<TyKey>, Box<Self>),
+    Extend(Label, Box<TyKey>, Box<Self>),
 }
 
 enum Slot<T> {
@@ -384,7 +383,7 @@ impl Unifier {
     /// Every `Extend` label, unsorted, and the terminal — `Some(v)` for an open
     /// row, `None` for one closed by `Empty`.  The loop needs no cycle guard:
     /// the occurs check rejects a cyclic row binding before it is installed.
-    fn row_spine(&mut self, row: &Row) -> (Vec<String>, Option<RowVar>) {
+    fn row_spine(&mut self, row: &Row) -> (Vec<Label>, Option<RowVar>) {
         let mut labels = Vec::new();
         let mut cur = self.resolve_row(row);
         loop {
@@ -791,10 +790,11 @@ impl Unifier {
             return Err(TypeErrorKind::RowExtraField { label, known });
         }
         let (a_labels, _) = self.row_spine(a);
-        let known = if a_labels.contains(&label) {
-            self.row_spine(b).0
+        let names = |ls: Vec<Label>| ls.iter().map(Label::to_string).collect::<Vec<_>>();
+        let known = if names(a_labels.clone()).contains(&label) {
+            names(self.row_spine(b).0)
         } else {
-            a_labels
+            names(a_labels)
         };
         Err(TypeErrorKind::RowExtraField { label, known })
     }
@@ -842,12 +842,14 @@ impl Unifier {
                     // The alternatives are named by whoever still holds the
                     // original rows; the rewrite below has consumed them here.
                     return Err(TypeErrorKind::RowExtraField {
-                        label: l,
+                        label: l.to_string(),
                         known: Vec::new(),
                     });
                 }
                 (Row::Extend(l, _, _), Row::Empty) => {
-                    return Err(TypeErrorKind::RowMissingField { label: l });
+                    return Err(TypeErrorKind::RowMissingField {
+                        label: l.to_string(),
+                    });
                 }
                 (Row::Extend(l1, t1, r1), Row::Extend(l2, t2, r2)) => {
                     if l1 == l2 {
@@ -858,9 +860,10 @@ impl Unifier {
                         b = self.resolve_row(&r2);
                         continue;
                     }
-                    // Tag and bare labels are disjoint alphabets: a row mixing
-                    // them typechecks against neither pure form.
-                    if is_tag_label(&l1) != is_tag_label(&l2) {
+                    // A field name and a constructor are different labels
+                    // however they are spelled, so a row carrying both
+                    // typechecks against neither pure form.
+                    if std::mem::discriminant(&l1) != std::mem::discriminant(&l2) {
                         return Err(TypeErrorKind::TyMismatch {
                             expected: Ty::Record(Row::Extend(l1, t1.clone(), Box::new(Row::Empty))),
                             actual: Ty::Record(Row::Extend(l2, t2.clone(), Box::new(Row::Empty))),
@@ -1086,24 +1089,24 @@ fn guard_expansion<K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
+    use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
 
     /// ``Variant{`more: {head: String, tail: Thunk(tail)}, `done: Unit}``.
     fn step(tail: CompTy) -> Ty {
         let payload = Ty::Record(Row::Extend(
-            HEAD_FIELD.into(),
+            Label::Field(HEAD_FIELD.into()),
             Box::new(Ty::String),
             Box::new(Row::Extend(
-                TAIL_FIELD.into(),
+                Label::Field(TAIL_FIELD.into()),
                 Box::new(Ty::Thunk(Box::new(tail))),
                 Box::new(Row::Empty),
             )),
         ));
         Ty::Variant(Row::Extend(
-            more_tag(),
+            Label::Case(MORE_LABEL.into()),
             Box::new(payload),
             Box::new(Row::Extend(
-                done_tag(),
+                Label::Case(DONE_LABEL.into()),
                 Box::new(Ty::Unit),
                 Box::new(Row::Empty),
             )),
@@ -1231,7 +1234,7 @@ mod tests {
             let mut u = Unifier::new();
             let rho = u.fresh_row_var();
             let row = Row::Extend(
-                "x".into(),
+                Label::Field("x".into()),
                 Box::new(deep_list(MAX_UNIFY_DEPTH + 100)),
                 Box::new(Row::Empty),
             );
@@ -1247,13 +1250,21 @@ mod tests {
 
     fn record_row(fields: &[(&str, Ty)]) -> Row {
         fields.iter().rev().fold(Row::Empty, |rest, (l, t)| {
-            Row::Extend((*l).into(), Box::new(t.clone()), Box::new(rest))
+            Row::Extend(
+                Label::Field((*l).into()),
+                Box::new(t.clone()),
+                Box::new(rest),
+            )
         })
     }
 
     fn open_row(fields: &[(&str, Ty)], tail: RowVar) -> Row {
         fields.iter().rev().fold(Row::Var(tail), |rest, (l, t)| {
-            Row::Extend((*l).into(), Box::new(t.clone()), Box::new(rest))
+            Row::Extend(
+                Label::Field((*l).into()),
+                Box::new(t.clone()),
+                Box::new(rest),
+            )
         })
     }
 
@@ -1263,7 +1274,7 @@ mod tests {
         loop {
             match cur {
                 Row::Extend(l, t, rest) => {
-                    out.insert(l, *t);
+                    out.insert(l.to_string(), *t);
                     cur = *rest;
                 }
                 _ => return out,

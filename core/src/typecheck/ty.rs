@@ -9,6 +9,8 @@
 pub(in crate::typecheck) use super::route::GroundRoute;
 pub use super::route::{PayloadRoute, PayloadVar};
 
+use crate::syntax::tag::TAG_PREFIX;
+
 /// Unification variable for value types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -40,9 +42,9 @@ pub enum Ty {
     List(Box<Self>),
     Map(Box<Self>), // String-keyed
     Record(Row),
-    /// Tagged sum, dual to `Record` and over the same `Row`.  Its labels carry
-    /// the leading `` ` `` that `syntax::tag` stamps on a tag, a `Record`'s do
-    /// not, and `Unifier::unify_row` refuses to unify across the two alphabets.
+    /// Tagged sum, dual to `Record` and over the same `Row`.  Which alphabet a
+    /// row's labels are drawn from is [`Label`]'s to say, and `unify_row`
+    /// refuses a row that mixes the two.
     Variant(Row),
     Thunk(Box<CompTy>),
     /// A running concurrent block; `await` of a `Handle α` gives a record with
@@ -68,8 +70,39 @@ impl Ty {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
-    Extend(String, Box<Ty>, Box<Self>),
+    Extend(Label, Box<Ty>, Box<Self>),
     Var(RowVar),
+}
+
+/// A row label together with the alphabet it is drawn from.
+///
+/// A record's field names and a variant's constructors are different labels
+/// however they are spelled, so no spelling of one can pass for the other.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum Label {
+    Field(String),
+    Case(String),
+}
+
+impl Label {
+    /// The label as written, without the backtick a tag is printed with.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Field(s) | Self::Case(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Display for Label {
+    /// How a label reads back to the user: a tag wears its sigil.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Field(s) => write!(f, "{s}"),
+            Self::Case(s) => write!(f, "{TAG_PREFIX}{s}"),
+        }
+    }
 }
 
 /// Computation types (`B` in CBPV).

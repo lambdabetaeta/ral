@@ -178,7 +178,7 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> Str
             Row::Extend(l, ty, rest) => {
                 // Row unification walks the spine head-first and matches the
                 // first occurrence of a label, so show only that one.
-                if seen.insert(l.as_str()) {
+                if seen.insert(l.clone()) {
                     parts.push(format!("{l}: {}", fmt_ty_ctx(ty, ctx)));
                 }
                 cur = rest;

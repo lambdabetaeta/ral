@@ -14,7 +14,7 @@ use super::fmt::fmt_scheme;
 use super::generalize::generalize;
 use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
-use super::ty::{CompTy, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, Label, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
@@ -174,7 +174,11 @@ macro_rules! curry_bytes {
 pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     let mut row = Row::Empty;
     for (l, t) in fields.iter().rev() {
-        row = Row::Extend(l.to_string(), Box::new(t.clone()), Box::new(row));
+        row = Row::Extend(
+            Label::Field((*l).to_string()),
+            Box::new(t.clone()),
+            Box::new(row),
+        );
     }
     Ty::Record(row)
 }
@@ -186,7 +190,7 @@ fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
     let mut row = Row::Empty;
     for (l, t) in arms.iter().rev() {
         row = Row::Extend(
-            crate::syntax::tag::tag_row_label(l),
+            Label::Case((*l).to_string()),
             Box::new(t.clone()),
             Box::new(row),
         );
@@ -206,7 +210,7 @@ fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
 /// one.
 pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     Ty::Record(Row::Extend(
-        "status".into(),
+        Label::Field("status".into()),
         Box::new(Ty::Int),
         Box::new(Row::Var(row)),
     ))
@@ -943,22 +947,22 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 /// Never: the self-referential unification it performs is between a fresh
 /// comp var and the type built from it, which cannot fail.
 pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
-    use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
+    use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
     let tail_comp = u.fresh_comp_ty();
     let payload = Ty::Record(Row::Extend(
-        HEAD_FIELD.into(),
+        Label::Field(HEAD_FIELD.into()),
         Box::new(Ty::String),
         Box::new(Row::Extend(
-            TAIL_FIELD.into(),
+            Label::Field(TAIL_FIELD.into()),
             Box::new(Ty::Thunk(Box::new(tail_comp.clone()))),
             Box::new(Row::Empty),
         )),
     ));
     let step = Ty::Variant(Row::Extend(
-        more_tag(),
+        Label::Case(MORE_LABEL.into()),
         Box::new(payload),
         Box::new(Row::Extend(
-            done_tag(),
+            Label::Case(DONE_LABEL.into()),
             Box::new(Ty::Unit),
             Box::new(Row::Empty),
         )),
@@ -1014,7 +1018,7 @@ impl Inferencer<'_> {
         let message = loop {
             match rest {
                 Row::Extend(label, ty, tail) => {
-                    if label == "message" {
+                    if label == Label::Field("message".into()) {
                         break *ty;
                     }
                     rest = *tail;

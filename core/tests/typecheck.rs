@@ -685,7 +685,7 @@ fn pipeline_ending_in_audit_binds_the_audit_record() {
     let mut labels = Vec::new();
     let mut cur = &row;
     while let ral_core::typecheck::Row::Extend(label, _, rest) = cur {
-        labels.push(label.clone());
+        labels.push(label.to_string());
         cur = rest;
     }
     labels.sort();
@@ -1024,6 +1024,18 @@ fn case_missing_arm_when_variant_has_more() {
     has_error(
         "let r = if true { return `ok 1 } else { return `err hello }\nlet x = case $r [`ok: { |i| return $i }]\nreturn $x",
         "no arm for `err",
+    );
+}
+
+#[test]
+fn case_missing_arm_is_named_from_the_value() {
+    // The value produces `ok and the only arm takes `err.  Which side a row
+    // error names is an artefact of the Rémy rewrite, which swaps labels past
+    // each other, so the verdict is read off the two label sets: the tag left
+    // uncovered is `ok.
+    has_error(
+        "let r = `ok 1\nlet x = case $r [`err: { |e| return 1 }]\nreturn $x",
+        "no arm for `ok",
     );
 }
 

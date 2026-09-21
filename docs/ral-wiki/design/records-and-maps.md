@@ -53,7 +53,10 @@ The first two are *labels*: known at elaboration, so they make a record. They
 are the **bare** alphabet, and it is the only one a key may draw on. Backtick
 labels are the *tag* alphabet, and a tag names a constructor rather than a
 part, so it keys nothing. Each alphabet belongs to one type former: bare to
-`Record`, tag to `Variant` and to the `case` arms that eliminate one.
+`Record`, tag to `Variant` and to the `case` arms that eliminate one. In the
+row that carries them the alphabet is a constructor of `Label`
+([[design/row-types|row-types]]), so a field's *spelling* cannot make it a
+tag.
 
 ## Which one a literal becomes
 

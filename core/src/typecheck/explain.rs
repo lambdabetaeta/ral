@@ -4,7 +4,7 @@
 
 use super::error::{CompDiff, Reason, SpreadHead, TypeErrorKind};
 use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
-use super::ty::{Row, Ty};
+use super::ty::{Label, Row, Ty};
 use crate::serial::plural;
 use crate::syntax::ast::BinaryOpKind;
 use crate::types::RefusedArg;
@@ -739,7 +739,7 @@ fn row_has_status_int(row: &Row) -> bool {
     loop {
         match rest {
             Row::Extend(label, ty, tail) => {
-                if label == "status" {
+                if *label == Label::Field("status".into()) {
                     return matches!(**ty, Ty::Int);
                 }
                 rest = tail;

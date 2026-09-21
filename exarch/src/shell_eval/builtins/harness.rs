@@ -23,7 +23,7 @@ use crate::fleet::desk::Selection;
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
-use ral_core::typecheck::{Row, RowVar, Scheme, Ty, Unifier};
+use ral_core::typecheck::{Label, Row, RowVar, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
@@ -839,10 +839,13 @@ pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
 
 /// A variant over a row of tags with stated payloads, ending in `tail`.
 fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
-    use ral_core::syntax::tag::tag_row_label;
     let mut row = tail;
     for (label, ty) in tags.iter().rev() {
-        row = Row::Extend(tag_row_label(label), Box::new(ty.clone()), Box::new(row));
+        row = Row::Extend(
+            Label::Case((*label).to_string()),
+            Box::new(ty.clone()),
+            Box::new(row),
+        );
     }
     Ty::Variant(row)
 }
@@ -858,7 +861,11 @@ fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
 fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
     let mut row = Row::Var(tail);
     for (label, ty) in fields.iter().rev() {
-        row = Row::Extend((*label).to_string(), Box::new(ty.clone()), Box::new(row));
+        row = Row::Extend(
+            Label::Field((*label).to_string()),
+            Box::new(ty.clone()),
+            Box::new(row),
+        );
     }
     Ty::Record(row)
 }

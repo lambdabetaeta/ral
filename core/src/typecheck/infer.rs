@@ -7,7 +7,7 @@ use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
-use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
+use super::ty::{CompTy, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
     ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Phrase, Register,
     Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
@@ -16,7 +16,6 @@ use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode, ScopeAst};
-use crate::syntax::tag::tag_row_label;
 use crate::types::{BuiltinEntry, RefusedArg};
 use std::sync::Arc;
 
@@ -34,10 +33,48 @@ enum ArgvBoundary<'a> {
 }
 
 /// Labels of a *resolved* row spine in first-appearance order, stopping at the
+/// Which tags the arms and the value disagree about: a tag the value produces
+/// with no arm to take it, and — only where the value's row is closed, an open
+/// tail being free to absorb one — an arm for a tag it never produces.
+///
+/// `None` when the two sets agree, which leaves the row error to speak for
+/// itself: the rows then differ in a payload rather than in coverage.
+fn coverage_verdict(scrutinee: &Row, arms: &[Label]) -> Option<TypeErrorKind> {
+    let produced: Vec<Label> = collect_extends(scrutinee).into_iter().map(|(l, _)| l).collect();
+    let missing: Vec<String> = produced
+        .iter()
+        .filter(|l| !arms.contains(l))
+        .map(Label::to_string)
+        .collect();
+    let extra: Vec<String> = if row_is_open(scrutinee) {
+        Vec::new()
+    } else {
+        arms.iter()
+            .filter(|l| !produced.contains(l))
+            .map(Label::to_string)
+            .collect()
+    };
+    (!missing.is_empty() || !extra.is_empty())
+        .then_some(TypeErrorKind::CaseNotExhaustive { missing, extra })
+}
+
+/// True while the row still ends in a tail variable, so a label it does not
+/// name may yet turn out to be there.
+fn row_is_open(row: &Row) -> bool {
+    let mut cur = row;
+    loop {
+        match cur {
+            Row::Extend(_, _, rest) => cur = rest,
+            Row::Var(_) => return true,
+            Row::Empty => return false,
+        }
+    }
+}
+
 /// first non-`Extend`.  A repeated label keeps the head payload, as selection
 /// and `unify_row` both do.
-fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
-    let mut out: Vec<(String, Ty)> = Vec::new();
+fn collect_extends(row: &Row) -> Vec<(Label, Ty)> {
+    let mut out: Vec<(Label, Ty)> = Vec::new();
     let mut cur = row;
     loop {
         match cur {
@@ -275,7 +312,7 @@ impl Inferencer<'_> {
                         .rev()
                         .fold(tail, |row, (entry, field_ty)| {
                             Row::Extend(
-                                entry.key.clone(),
+                                Label::Field(entry.key.clone()),
                                 Box::new(field_ty.clone()),
                                 Box::new(row),
                             )
@@ -1246,7 +1283,7 @@ impl Inferencer<'_> {
                 self.with_span(span, |this| this.splice(&spread, rest))
             });
         let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
-            Row::Extend(key, Box::new(ty), Box::new(rest))
+            Row::Extend(Label::Field(key), Box::new(ty), Box::new(rest))
         });
         Ty::Record(row)
     }
@@ -1308,7 +1345,10 @@ impl Inferencer<'_> {
                 // record to whatever the reader goes on to demand would report
                 // the same fault a second time against an innocent caller.
                 Row::Var(_) => {
-                    let unreachable = collect_extends(&rest).into_iter().map(|(l, _)| l).collect();
+                    let unreachable = collect_extends(&rest)
+                        .into_iter()
+                        .map(|(l, _)| l.to_string())
+                        .collect();
                     let mut tail = self.ctx.unifier.resolve_row(&rest);
                     while let Row::Extend(_, _, next) = tail {
                         tail = self.ctx.unifier.resolve_row(&next);
@@ -1397,16 +1437,14 @@ impl Inferencer<'_> {
             Val::Record(entries) => self.infer_record_val(entries, None),
             Val::Map(entries) => self.infer_map_val(entries, None),
             Val::Variant { label, payload } => {
-                // Construction is open: `` `ok 5 `` gets a fresh row tail.  The
-                // label keeps its backtick so unification reads it as a tag —
-                // the tag and bare alphabets do not unify.
+                // Construction is open: `` `ok 5 `` gets a fresh row tail.
                 let payload_ty = match payload {
                     Some(p) => self.infer_val(p),
                     None => Ty::Unit,
                 };
                 let rest = self.ctx.unifier.fresh_row();
                 Ty::Variant(Row::Extend(
-                    tag_row_label(label),
+                    Label::Case(label.clone()),
                     Box::new(payload_ty),
                     Box::new(rest),
                 ))
@@ -1535,7 +1573,7 @@ impl Inferencer<'_> {
             Ty::Record(_) | Ty::Var(_) => {
                 let tail_row = self.ctx.unifier.fresh_row();
                 let record_ty = Ty::Record(Row::Extend(
-                    label.to_string(),
+                    Label::Field(label.to_string()),
                     Box::new(field_ty.clone()),
                     Box::new(tail_row),
                 ));
@@ -1564,8 +1602,8 @@ impl Inferencer<'_> {
     fn infer_case_arm(
         &mut self,
         arm: &CaseArm,
-        label: &str,
-        scrut_payloads: &std::collections::HashMap<String, Ty>,
+        label: &Label,
+        scrut_payloads: &std::collections::HashMap<Label, Ty>,
     ) -> (CompTy, Ty) {
         let payload_ty = self.ctx.unifier.fresh_ty();
         let arm_cty = self.with_scope(|this| {
@@ -1634,7 +1672,7 @@ impl Inferencer<'_> {
         // Pre-resolved so each arm can unify its payload under its own pos; a
         // residual `Var` here waits for the final row-unify.
         let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
-        let scrut_payloads: std::collections::HashMap<String, Ty> =
+        let scrut_payloads: std::collections::HashMap<Label, Ty> =
             collect_extends(&scrut_resolved_row).into_iter().collect();
 
         // Every arm has its own computation type: exactly one runs, so the
@@ -1645,11 +1683,12 @@ impl Inferencer<'_> {
         let mut arm_ctys = Vec::with_capacity(arms.len());
         let mut payloads = Vec::with_capacity(arms.len());
         for arm in arms {
-            let label = tag_row_label(&arm.tag.item);
+            let label = Label::Case(arm.tag.item.clone());
             let (arm_cty, closed_payload) = self.infer_case_arm(arm, &label, &scrut_payloads);
             arm_ctys.push(arm_cty);
             payloads.push((label, closed_payload));
         }
+        let arm_labels: Vec<Label> = payloads.iter().map(|(l, _)| l.clone()).collect();
         let closed_scrut = payloads
             .into_iter()
             .rev()
@@ -1669,14 +1708,12 @@ impl Inferencer<'_> {
             .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
         {
             let translated = match kind {
-                TypeErrorKind::RowExtraField { label, .. } => TypeErrorKind::CaseNotExhaustive {
-                    missing: vec![],
-                    extra: vec![label],
-                },
-                TypeErrorKind::RowMissingField { label } => TypeErrorKind::CaseNotExhaustive {
-                    missing: vec![label],
-                    extra: vec![],
-                },
+                // Which side a row error names is an artefact of the Rémy
+                // rewrite, which swaps labels past each other, so the verdict
+                // is read off the two label sets rather than off the error.
+                TypeErrorKind::RowExtraField { .. } | TypeErrorKind::RowMissingField { .. } => {
+                    coverage_verdict(&scrut_resolved_row, &arm_labels).unwrap_or(kind)
+                }
                 other => other,
             };
             self.ctx.diagnose(translated);

@@ -18,12 +18,13 @@ consequences follow:
   `$base : [host: String | ρ]` infers `[port: Int, host: String | ρ]`.
 - **No restriction operator (`Pre` / `Abs`) is needed.** The rewrite already
   preserves the relative order of same-label entries, so shadowing is coherent.
-- **Two label alphabets, one per type former** — bare for `Record`,
-  backtick-prefixed for `Variant` — and the two never unify. A tag keys no
-  record, so nothing writes a tag label into a record row; the alphabet is
-  still carried on the label itself (`tag_row_label`, `core/src/syntax/tag.rs`)
-  and `unify_row` refuses a row whose spine mixes the two, which is what stops
-  a record row and a variant row meeting through a shared tail.
+- **Two label alphabets, one per type former** — `Label::Field` for `Record`,
+  `Label::Case` for `Variant` (`core/src/typecheck/ty.rs`) — and the two never
+  unify. The alphabet is a constructor, not a character: a field named
+  `` '`dev' `` is `Field("`dev")` and no spelling of it reaches
+  `Case("dev")`. `unify_row` refuses a row whose spine carries both, which is
+  what stops a record row and a variant row meeting through a shared tail; the
+  backtick is added when a label is shown.
 - **Structural equality of closed records is order-insensitive:**
   `[a: 1, b: 2] == [b: 2, a: 1]`.
 

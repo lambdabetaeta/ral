@@ -743,7 +743,7 @@ impl Machine {
         let Some(arm) = arms.iter().find(|arm| arm.tag.item == label) else {
             let handled: Vec<String> = arms
                 .iter()
-                .map(|a| crate::syntax::tag::tag_row_label(&a.tag.item))
+                .map(|a| format!("{}{}", crate::syntax::tag::TAG_PREFIX, a.tag.item))
                 .collect();
             return Err(Break::Error(Error::new(
                 format!(
