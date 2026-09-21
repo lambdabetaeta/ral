@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 7b4ee036
 generated_at_date: 2026-09-21
-covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
+covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -143,8 +143,8 @@ standing alone, measures its own. A card is never laid out at a fixed budget and
 lives** for kit content, so the kit can name a role but never a colour, and
 magnitude can never land on hue — the encoding is correct by construction. The quantitative encoders are reused, not duplicated: `measure`
 calls the generalised `size_bar`/`progress_bar` through `measure_value_spans`,
-`diff` calls the patch body (`diff_body`), and `fields` plus `provider_error`
-both feed the shared `render_field_rows`/`push_field` matrix primitive — so
+`diff` calls the patch body (`diff_body`, the one subject with a module of its own, `tui/diff.rs`), and `fields` plus `provider_error`
+both feed the shared `render_field_rows` matrix primitive — so
 `provider_error` is one internal caller of the `fields` path, not a duplicate
 label-column. The diff header label reads `diff`. What `provider_error` lays
 out it does not compose: the headline and fields come from
