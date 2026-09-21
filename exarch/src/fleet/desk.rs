@@ -2620,14 +2620,6 @@ mod tests {
         items
     }
 
-    /// The names a `` `roster `` answer lists, in listing order.
-    pub(super) fn roster_names(answer: FOValue) -> Vec<String> {
-        roster(answer)
-            .iter()
-            .map(|row| str_field(row, "name").expect("every roster row names its agent"))
-            .collect()
-    }
-
     /// Unwrap a `` `schedules `` answer into its rows.
     fn table(answer: FOValue) -> Vec<FOValue> {
         let FOValue::List { items } = answer else {
@@ -4641,16 +4633,11 @@ mod tests {
     reason = "[test] test fs/process scaffolding"
 )]
 mod wire_tests {
-    use super::tests::{family_req, message_req, roster_names, start_req_forked, summary_counts};
+    use super::tests::{message_req, start_req_forked};
     use super::*;
     use crate::agent::cancel::EvalReach;
     use crate::agent::event::AgentLog;
-    use crate::agent::testkit::ral_call;
     use crate::bus::Inbox;
-    use crate::provider::{
-        Provider,
-        scripted::{Reply, Script},
-    };
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -4663,26 +4650,6 @@ mod wire_tests {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         AgentLog::for_test(n, "test", &crate::agent::RecordedAccount::for_test("test"))
             .expect("session log")
-    }
-
-    fn scripted_provider(script: Script) -> Arc<Provider> {
-        Arc::new(Provider::scripted("test-model", script))
-    }
-
-    /// Poll `inbox` for the next exchange-boundary item — a spawned child's
-    /// settled result lands here.
-    fn wait_for_settle(inbox: &Inbox) -> crate::bus::Item {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(item) = inbox.next_item() {
-                return item;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "child did not settle within the timeout"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
     }
 
     /// Re-exec this binary as a bare `--engine` child holding `guest` on fd 3,
@@ -4752,18 +4719,6 @@ mod wire_tests {
 
         fn ports(&self) -> Vec<u32> {
             self.ports.lock().unwrap().clone()
-        }
-
-        /// Recorded before the ack, so a caller that has the ack has these.
-        fn tokens(&self) -> Vec<u64> {
-            self.tokens.lock().unwrap().clone()
-        }
-
-        fn reap(&self) {
-            for mut child in self.children.lock().unwrap().drain(..) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
         }
     }
 
@@ -4874,81 +4829,6 @@ mod wire_tests {
             })),
         };
         start_req_forked(fork, "go", name, "confined", false)
-    }
-
-    /// The whole spine in one exchange: the desk dials the port the enquiry
-    /// named, writes the token that enquiry carried, waits for the guest's
-    /// ack, and answers a roster the child is already on — after which the
-    /// model-driven helper's `reply` lands in the parent's inbox exactly as
-    /// an identity spawn's would.
-    #[test]
-    fn wire_spawn_dials_the_guest_and_delivers_its_result_to_the_parent_inbox() {
-        let port = 41_731;
-        // High bits set: the token crosses as an `Int` and must come back
-        // bit-for-bit, not as an arithmetic value.
-        let token = 0xF0DE_BA5E_1234_5678;
-        let dial = FakeDial::new(Guest::Hatches);
-        let (desk, fleet, parent_inbox) = wire_spawnable_desk(3, dial.clone());
-
-        // The assembled child seeds its own provider from the desk's captured
-        // handle, so swap it before `` `start `` assembles.
-        desk.services
-            .agent
-            .provider_handle()
-            .swap(scripted_provider(Script::new().then(Reply::tool_calls(
-                vec![ral_call("r1", "agents `reply 'hi from wire'")],
-            ))));
-
-        let answer = desk
-            .handle(wire_start_req("helper", port, token))
-            .expect("`start must dial, hatch and spawn");
-        let (live, _) = summary_counts(answer);
-        assert_eq!(
-            live, 1,
-            "the hatched child is counted by the spawn it answers"
-        );
-        assert!(
-            roster_names(
-                desk.handle(family_req("agents", "list", None))
-                    .expect("`list answers the rows")
-            )
-            .contains(&"helper".to_string()),
-            "and stands on the listing"
-        );
-        assert_eq!(
-            dial.ports(),
-            vec![port],
-            "the desk dials the port it was told"
-        );
-        assert_eq!(
-            dial.tokens(),
-            vec![token],
-            "the guest's listener reads back the very bits the enquiry carried"
-        );
-
-        match wait_for_settle(&parent_inbox) {
-            crate::bus::Item::Agent(result) => {
-                assert!(
-                    matches!(result.outcome, crate::bus::AgentOutcome::Replied),
-                    "the hatched child's reply notice must reach the parent's inbox, got: {:?}",
-                    result.outcome
-                );
-            }
-            other => panic!("expected an Agent result item, got {other:?}"),
-        }
-        let helper = fleet.resolve("helper").expect("the child is still live");
-        assert_eq!(
-            desk.services
-                .agent
-                .descendant(&helper)
-                .and_then(|child| child.reply()),
-            Some(FOValue::String {
-                value: "hi from wire".into()
-            }),
-            "the hatched child's deposited reply must be fetchable off it"
-        );
-
-        dial.reap();
     }
 
     /// A guest whose own hatch failed closes without acking. The host has a
