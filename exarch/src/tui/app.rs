@@ -373,8 +373,7 @@ impl App {
                 bytes: bus.bytes() as u64,
             },
         );
-        card.0
-            .push(crate::agent::resources::section_mark("frontend"));
+        card.0.push(crate::bus::card::Mark::heading("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
         self.push_chrome(id, Chrome::Framed(card));
     }

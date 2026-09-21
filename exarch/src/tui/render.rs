@@ -259,6 +259,8 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         if let Some(toast) = gesture.toast() {
             let msg = match toast {
                 Toast::Copied(n) => format!("[{n} characters copied]"),
+                Toast::Reply(n) => format!("[copied the latest reply — {n} lines]"),
+                Toast::ReplyTail(n) => format!("[reply too long — copied its last {n} bytes]"),
                 Toast::CopyFailed => "[copy failed]".to_owned(),
             };
             let w = u16::try_from(msg.len())

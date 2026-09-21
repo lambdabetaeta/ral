@@ -99,8 +99,15 @@ enum Phase {
     },
 }
 
+/// The corner readout for a copy's outcome: every copy reports here, whether
+/// the gesture was a drag or `/copy`, and none of them lands in the scrollback.
 pub(super) enum Toast {
+    /// A drag-selection, counted in characters.
     Copied(usize),
+    /// `/copy`, counted in lines of the reply.
+    Reply(usize),
+    /// `/copy` of a reply past the clipboard limit: only its last bytes went.
+    ReplyTail(usize),
     CopyFailed,
 }
 
@@ -224,7 +231,11 @@ impl GestureState {
 
     /// Record the outcome of an [`Effect::Copy`]: the count copied, or failure.
     pub(super) fn note_copy(&mut self, outcome: io::Result<usize>) {
-        let toast = outcome.map_or(Toast::CopyFailed, Toast::Copied);
+        self.note(outcome.map_or(Toast::CopyFailed, Toast::Copied));
+    }
+
+    /// Post a copy outcome reached elsewhere, `/copy`'s among them.
+    pub(super) fn note(&mut self, toast: Toast) {
         self.toast = Some((toast, Instant::now()));
     }
 

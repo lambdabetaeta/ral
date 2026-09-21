@@ -6,7 +6,7 @@
 
 mod meters;
 
-use crate::agent::resources::{hms, section_mark};
+use crate::agent::resources::hms;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Measure, Span};
 use crate::provider::credential::Roster;
 use crate::provider::identity::{AccountId, Meter};
@@ -234,7 +234,7 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
                 spans: vec![Span::plain(format!("{label}: {reason}"))],
             },
         };
-        marks.push(section_mark(label));
+        marks.push(Mark::heading(label));
         marks.push(mark);
     }
     Card(marks)

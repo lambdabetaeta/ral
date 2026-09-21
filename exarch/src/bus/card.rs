@@ -175,6 +175,15 @@ pub enum Mark {
     Raw { bytes: Vec<u8> },
 }
 
+impl Mark {
+    /// A strong one-line heading, titling the run of rows under it.
+    pub(crate) fn heading(title: &str) -> Self {
+        Self::Text {
+            spans: vec![Span::new(Role::Strong, title)],
+        }
+    }
+}
+
 /// An ordered stack of [`Mark`]s rendered top-to-bottom as one scrollback
 /// block — the document `surface` carries.
 #[derive(Clone, Debug, Serialize, Deserialize)]

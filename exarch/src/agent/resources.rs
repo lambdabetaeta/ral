@@ -94,21 +94,11 @@ pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
     Mark::Fields { rows: fields }
 }
 
-/// A strong one-line section heading, titling a run of rows.
-pub fn section_mark(title: &str) -> Mark {
-    Mark::Text {
-        spans: vec![Span {
-            role: Some(Role::Strong),
-            text: title.to_string(),
-        }],
-    }
-}
-
 /// Compose the agent's rows into the `/resources` card: a heading over one
 /// [`rows_mark`] matrix. The frontend appends its own section at render
 /// time; the raw rows ride beside the card on the bus.
 pub fn resources_card(rows: &[ProbeRow]) -> Card {
-    Card(vec![section_mark("resources"), rows_mark(rows)])
+    Card(vec![Mark::heading("resources"), rows_mark(rows)])
 }
 
 /// The probed agent's scrollback: its figures beside the one window that bounds

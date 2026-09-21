@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use super::App;
 use super::banner::SessionInfo;
 use super::block::Chrome;
+use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
+use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
 use super::scrollback;
@@ -275,26 +277,28 @@ pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
     ral_core::path::resolve_str(Some(cwd), &expanded)
 }
 
+/// The registry as a framed card: one `(command, gloss)` row per entry, so the
+/// listing is one block with the card's own column alignment rather than a
+/// column of notes.
 pub(super) fn cmd_help(app: &mut App) {
-    let id = app.tabs.root();
-    let names: Vec<String> = SLASH_COMMANDS
+    let rows = SLASH_COMMANDS
         .iter()
         .map(|c| {
-            let mut s = c.name.to_string();
+            let mut label = c.name.to_string();
             if let Some(arg) = c.arg {
-                s.push(' ');
-                s.push_str(arg);
+                let _ = write!(label, " {arg}");
             }
             if !c.aliases.is_empty() {
-                let _ = write!(s, " ({})", c.aliases.join(", "));
+                let _ = write!(label, " ({})", c.aliases.join(", "));
             }
-            s
+            Field {
+                label,
+                value: FieldVal::Inline(vec![Span::plain(c.help)]),
+            }
         })
         .collect();
-    let col = super::palette::Col::of(names.iter().map(String::as_str));
-    for (n, c) in names.iter().zip(SLASH_COMMANDS) {
-        app.push_note(id, &format!("{}   {}", col.left(n), c.help));
-    }
+    let card = Card(vec![Mark::heading("commands"), Mark::Fields { rows }]);
+    app.push_chrome(app.tabs.root(), Chrome::Framed(card));
 }
 
 pub(super) fn cmd_legend(app: &mut App) {
@@ -310,7 +314,9 @@ pub(super) fn cmd_thinking(app: &mut App) {
 
 /// Copy the latest reply, as raw markdown, to the clipboard via OSC 52.  A reply
 /// past the terminal's per-sequence limit is copied tail-first and announced,
-/// since the terminal would otherwise drop the sequence and copy nothing.
+/// since the terminal would otherwise drop the sequence and copy nothing.  The
+/// outcome is a corner toast, as a drag-selection's copy is: a copy is a
+/// gesture on the transcript, not an event in it.
 pub(super) fn cmd_copy(app: &mut App) {
     let id = app.tabs.root();
     let reply = app.latest_reply();
@@ -319,19 +325,14 @@ pub(super) fn cmd_copy(app: &mut App) {
         return;
     }
     let payload = tail_bytes(&reply, YANK_CAP);
-    if let Err(e) = osc52_copy(payload) {
-        app.push_error(id, &format!("clipboard write failed: {e}"));
-        return;
-    }
-    let note = if payload.len() < reply.len() {
-        format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
+    let toast = if osc52_copy(payload).is_err() {
+        Toast::CopyFailed
+    } else if payload.len() < reply.len() {
+        Toast::ReplyTail(payload.len())
     } else {
-        format!(
-            "[copied the latest reply — {} lines]",
-            reply.lines().count()
-        )
+        Toast::Reply(reply.lines().count())
     };
-    app.push_note(id, &note);
+    app.gesture.note(toast);
 }
 
 /// Write the focused tab's rendered `user.log` to `arg`, never over an existing
