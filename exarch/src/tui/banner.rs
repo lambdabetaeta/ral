@@ -20,21 +20,18 @@ const ART: &str = include_str!("../../data/banner.txt");
 const EAGLE: &str = include_str!("../../data/eagle.txt");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Left inset of the opening block, in columns — the wordmark and the session
-/// card share it, so the card's frame lands on the `E`'s own left edge.  The art
-/// files carry no pad of their own; this is the only thing that positions them.
-pub(super) const OPENING_INDENT: usize = 1;
-
 /// The wordmark and eagle over the session card, the card filling their width
 /// so the opening's two edges form one block.  The art sits outside Bertin's
 /// data variables, so this alone keeps the saturated palette and carries no
 /// rail.
+///
+/// Neither the art nor the card pays an inset of its own: the rail margin every
+/// row already carries is the column the session's own first words start in, so
+/// the wordmark's `E`, the card's frame and a typed prompt share one left edge.
 pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
-    let inset = " ".repeat(OPENING_INDENT);
     let mut lines = vec![Line::default()];
     lines.extend(ART.lines().zip(EAGLE.lines()).map(|(a, e)| {
         Line::from(vec![
-            Span::raw(inset.clone()),
             line::bold(a.to_string(), BANNER_PINK),
             Span::raw("  "),
             line::bold(e.to_string(), BANNER_GOLD),
@@ -42,12 +39,7 @@ pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
     }));
     let art_w = lines.iter().map(Line::width).max().unwrap_or_default();
     let card_w = u16::try_from(art_w).unwrap_or(u16::MAX).min(width);
-    lines.extend(line::render_filled_card(
-        card,
-        OPENING_INDENT,
-        card_w,
-        Detail::Full,
-    ));
+    lines.extend(line::render_filled_card(card, 0, card_w, Detail::Full));
     lines
 }
 

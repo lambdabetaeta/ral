@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b0920374
+generated_at_commit: 34e2af03
 generated_at_date: 2026-09-21
 covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
@@ -156,9 +156,10 @@ pane's, capped once by `Scrollback::render_window`, never re-applied per
 builder. It takes the box's left indent rather than owning one, so where a card
 sits is a property of the placement that asks for it: `CARD_INDENT` (2, prose's
 column, so the text inside lands level with a call's effect rows) for the
-transcript, `banner::OPENING_INDENT` for the session card, which shares the
-constant with the wordmark so the two align by construction rather than by a pad
-baked into `data/banner.txt`. The opening is one rail-free `Chrome::Opening`
+transcript, and none at all for the session card, which starts — like the
+wordmark above it, and like the human's own first typed line — in the column
+the rail margin every row carries already opens, rather than in a pad baked
+into `data/banner.txt`. The opening is one rail-free `Chrome::Opening`
 (`banner::opening`): the session card fills the wordmark-and-eagle's measured
 width, so its two edges form one block. `render_pin` is the third
 placement, framing in its agent's hue at the register's own margin.
