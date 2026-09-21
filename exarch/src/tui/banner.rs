@@ -12,9 +12,11 @@ use super::block::{AgentSlot, Detail};
 use super::fidelity::Fidelity;
 use super::line;
 use super::md;
-use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, SLATE};
+use super::palette::{
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, EFFECT_BG, QUEUED_PROMPT_BG, SLATE,
+};
 use super::rail::{self, RailKind};
-use super::status::{ctx_ramp, wait_bar};
+use super::status::{ctx_ramp, scroll_text, wait_bar};
 
 const ART: &str = include_str!("../../data/banner.txt");
 const EAGLE: &str = include_str!("../../data/eagle.txt");
@@ -133,7 +135,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
 
     let mut ls: Vec<Line<'static>> = vec![
         Line::default(),
-        head("legend — the transcript as a graphic"),
+        head("legend · external identification: what every mark means"),
     ];
 
     ls.push(Line::default());
@@ -146,28 +148,28 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
         width,
     ));
     ls.push(Line::default());
-    ls.push(head("rail · hue = which agent (constant down a tab)"));
+    ls.push(head("rail · hue = which agent"));
+    // One row, not one per hue: a transcript wears a single hue throughout, so
+    // the set is a scale to be read across, like the value ramp below.
     ls.extend(line::legend_rows(
-        (0..AGENT_HUES.len())
-            .map(|slot| {
-                let label = if slot == 0 { "root" } else { "subagent" };
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "slot indexes AGENT_HUES (len 6), fits u8"
-                )]
-                let agent_slot = slot as u8;
-                (
-                    label,
-                    vec![rail::span(
-                        RailKind::ToolCall(false),
-                        AgentSlot(agent_slot),
-                        None,
-                    )],
-                )
-            })
-            .collect(),
+        vec![(
+            "root, then subagents",
+            (0..AGENT_HUES.len())
+                .map(|slot| {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "slot indexes AGENT_HUES (len 6), fits u8"
+                    )]
+                    let agent_slot = slot as u8;
+                    rail::span(RailKind::ToolCall(false), AgentSlot(agent_slot), None)
+                })
+                .collect(),
+        )],
         width,
     ));
+    ls.push(Line::from(note(
+        "  constant down a tab; the hues stand side by side only in the agent strip above",
+    )));
     ls.push(Line::default());
     ls.push(head("rail · value = magnitude (brighter is bigger)"));
     // One magnitude per `rail::value_step` bucket, so the row is the ramp
@@ -184,10 +186,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
     ));
 
     ls.push(Line::default());
-    ls.push(head("strata · background = machine region"));
-    // Two rows because there are two strata: background belongs to machine
-    // text, prose sits at the base, and the human's turn is fenced by the
-    // rail's `❖` rather than a fill.
+    ls.push(head("strata · background = which region, never magnitude"));
     let swatch = |text: &str, bg: Option<Color>| match bg {
         Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
         None => vec![note(text)],
@@ -196,18 +195,32 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
         vec![
             (
                 "code",
-                swatch("scripts and shell output — a recessed panel", Some(CODE_BG)),
+                swatch("the script a call ran, a recessed panel", Some(CODE_BG)),
+            ),
+            (
+                "effects",
+                swatch("what that script read, ran and searched", Some(EFFECT_BG)),
             ),
             (
                 "prose",
-                swatch("model narration and replies — the base", None),
+                swatch("model narration and replies, the base", None),
+            ),
+            (
+                "queued",
+                swatch(
+                    "a prompt typed while the agent works, not yet sent",
+                    Some(QUEUED_PROMPT_BG),
+                ),
             ),
         ],
         width,
     ));
+    ls.push(Line::from(note(
+        "  one more field colour exists, the echo wash, glossed under fidelity",
+    )));
 
     ls.push(Line::default());
-    ls.push(head("bars · length and texture, beside a collapsed header"));
+    ls.push(head("bars · length and texture"));
     ls.extend(line::legend_rows(
         vec![
             (
@@ -218,7 +231,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
                 "grain",
                 vec![
                     line::grain_run(9, 1),
-                    note("  diff density: ⣿ all adds → ⣀ all deletes"),
+                    note("  diff: ⣿ all adds to ⣀ all deletes; thinking: thought against what it became"),
                 ],
             ),
             (
@@ -239,7 +252,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
     ));
 
     ls.push(Line::default());
-    ls.push(head("status line · the two bars under the transcript"));
+    ls.push(head("status line"));
     ls.extend(line::legend_rows(
         vec![
             ("window", {
@@ -249,35 +262,40 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
             }),
             ("elapsed", {
                 let mut v = wait_bar(Some(Duration::from_secs(18)));
-                v.push(note("grows with the time spent in the current state"));
+                v.push(note(
+                    "grows while a turn is outstanding; an empty track is the scale at rest",
+                ));
                 v
             }),
+            (
+                "scroll",
+                vec![
+                    Span::styled(scroll_text(42), Style::default().fg(SLATE)),
+                    note("  how far down the buffer the view sits, absent when it all fits"),
+                ],
+            ),
         ],
         width,
     ));
 
     ls.push(Line::default());
-    ls.push(head(
-        "fidelity · a shaky answer renders drained, not authoritative",
-    ));
+    ls.push(head("fidelity"));
     let prose = "An answer the model committed to the transcript.";
-    let sample = |f: Fidelity| {
-        md::render_md(prose, width, 0, f)
+    let first = |lines: Vec<Line<'static>>| {
+        lines
             .into_iter()
             .next()
             .map(|line| line.spans)
             .unwrap_or_default()
     };
+    let sample = |f: Fidelity| first(md::render_md(prose, width, 0, f));
+    let pressed = |context: u8| sample(Fidelity { context, echo: 0 });
     ls.extend(line::legend_rows(
         vec![
-            ("sound", sample(Fidelity::default())),
-            (
-                "drained",
-                sample(Fidelity {
-                    context: 2,
-                    echo: 0,
-                }),
-            ),
+            ("sound", pressed(0)),
+            ("pressed", pressed(1)),
+            ("drained", pressed(2)),
+            ("distressed", pressed(3)),
             (
                 "echoed",
                 sample(Fidelity {
@@ -285,17 +303,12 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
                     echo: 2,
                 }),
             ),
+            ("thinking", first(md::render_thinking(prose, width, 0))),
         ],
         width,
     ));
     ls.push(Line::from(note(
-        "  context pressure drains the ink; echoing its own script washes the field behind it",
-    )));
-
-    ls.push(Line::default());
-    ls.push(head("disclosure · click the rail to dial detail"));
-    ls.push(Line::from(note(
-        "  tally · summary · full — a run of work and a diff reach their tally, thinking and acts stop at summary; prose always renders whole",
+        "  context pressure drains the ink by degrees; echoing the script just run washes the field behind it; thinking is drained always, being provisional",
     )));
 
     ls

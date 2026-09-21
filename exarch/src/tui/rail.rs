@@ -35,7 +35,8 @@ pub(super) enum RailKind {
     Error,
     /// The human's turn — the one kind not tinted by an agent's hue.
     Prompt,
-    /// Any other chrome notice: a model switch, a stall, an eviction.
+    /// Any other chrome notice: a model switch, a stop reason, an eviction.
+    /// A stall is not one of them; it wears [`Self::Error`].
     Note,
 }
 impl RailKind {
@@ -65,20 +66,20 @@ impl RailKind {
 /// against.  Copy is no longer coupled to this list — a
 /// [`super::row::Row`]'s margin is a field, not a span copy must recognise.
 pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
-    (RailKind::Patch, "file change — diff or write"),
-    (RailKind::ToolCall(false), "tool call, shut"),
-    (RailKind::ToolCall(true), "tool call, open"),
-    (RailKind::Markdown, "model prose"),
-    (RailKind::Thinking, "thinking trace"),
-    (RailKind::Subagent, "subagent result"),
+    (RailKind::Patch, "file edit"),
+    (RailKind::ToolCall(false), "shell script (collapsed)"),
+    (RailKind::ToolCall(true), "shell script (expanded)"),
+    (RailKind::Markdown, "assistant text"),
+    (RailKind::Thinking, "thinking"),
+    (RailKind::Subagent, "agent notification"),
     (
         RailKind::FleetAct,
-        "fleet act — spawn, cancel, message, reply",
+        "agent action (spawn, message, cancel, reply)",
     ),
-    (RailKind::TimeAct, "time act — schedule, unschedule"),
+    (RailKind::TimeAct, "scheduling"),
     (RailKind::Turn, "turn boundary"),
-    (RailKind::Error, "error, or a turn you stopped"),
-    (RailKind::Prompt, "your prompt — the fence"),
+    (RailKind::Error, "error/stop"),
+    (RailKind::Prompt, "user prompt"),
     (RailKind::Note, "system note"),
 ];
 

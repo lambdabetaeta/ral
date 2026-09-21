@@ -149,7 +149,7 @@ impl GestureState {
     }
 
     /// Recompute the hover target.  `App::mouse` calls this before dispatch, so
-    /// `press` and its wheel-dial sibling both read the event in hand.
+    /// `press` reads the event in hand.
     pub(super) fn update_hover(&mut self, me: MouseEvent, sb: Option<&Scrollback>) {
         self.hover = sb.and_then(|sb| self.hover_block(me, sb));
     }

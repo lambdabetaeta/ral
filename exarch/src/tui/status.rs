@@ -1,6 +1,6 @@
 //! The status rule under the transcript: two value-ramp bars — elapsed wait and
-//! context fill — around the state label, with usage right-aligned. `/legend` in
-//! `super::banner` draws the same two bars as samples.
+//! context fill — around the state label, with usage right-aligned, then the
+//! scroll readout. `/legend` in `super::banner` draws the same marks as samples.
 
 use super::line::usage_text;
 use super::palette::{CYAN, Col, PURPLE, SLATE};
@@ -73,15 +73,12 @@ pub(super) fn rule_line(
         spans.push(Span::styled(format!(" {pct}%"), Style::default().fg(SLATE)));
     }
 
-    // A magnitude in a fixed slot, standing in for a right-margin scrollbar;
-    // absent when the whole buffer fits, which is what `None` means here.
+    // Absent when the whole buffer fits, which is what `None` means here.
     if let Some(pct) = scroll_pct {
-        let text = if pct >= 100 {
-            " · ⇣ end".to_string()
-        } else {
-            format!(" · ⇣ {pct}%")
-        };
-        spans.push(Span::styled(text, Style::default().fg(SLATE)));
+        spans.push(Span::styled(
+            format!("{SEP}{}", scroll_text(pct)),
+            Style::default().fg(SLATE),
+        ));
     }
 
     let left_w: usize = spans.iter().map(Span::width).sum();
@@ -97,6 +94,16 @@ pub(super) fn rule_line(
     }
     spans.extend(right);
     Line::from(spans)
+}
+
+/// The scroll readout: a magnitude in a fixed slot, standing in for a
+/// right-margin scrollbar.  `/legend` draws the same text as its sample.
+pub(super) fn scroll_text(pct: u16) -> String {
+    if pct >= 100 {
+        "⇣ end".to_owned()
+    } else {
+        format!("⇣ {pct}%")
+    }
 }
 
 /// The state's name in slate — except [`AgentState::AwaitingModel`], which is

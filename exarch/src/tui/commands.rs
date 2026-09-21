@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use super::App;
 use super::banner::SessionInfo;
 use super::block::Chrome;
-use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
 use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
 use super::scrollback;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
+use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
 use crate::bus::{Mailbox, Post};
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
@@ -123,7 +123,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         arg: Some("[name]"),
         rewrites: false,
         any_tab: false,
-        help: "Fork this conversation into a new tab (same context), under a name you choose.",
+        help: "Fork this conversation into a new tab, with the same context.",
     },
     SlashCommand {
         name: "/close",
