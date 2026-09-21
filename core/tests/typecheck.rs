@@ -976,7 +976,7 @@ fn index_on_thunk_hint_is_followable() {
     );
 }
 
-// ─── Variants and tag-keyed records (Phase A) ────────────────────────────────
+// ─── Variants (Phase A) ─────────────────────────────────────────────────────
 
 #[test]
 fn variant_construction_with_payload() {
@@ -993,11 +993,6 @@ fn variant_list_unifies_open_row() {
     // Each `ok / `err in a list extends the same open row.  The list is
     // homogeneous because the rows unify against a shared element type.
     ok("return [`ok 1, `err hello]");
-}
-
-#[test]
-fn tag_keyed_record_literal() {
-    ok("let r = [`dev: 8080, `prod: 443]\nreturn $r");
 }
 
 #[test]

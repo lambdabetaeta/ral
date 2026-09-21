@@ -44,29 +44,25 @@ A key is a `String` either way (`docs/SPEC.md` §4.5). The *form* you write it i
 decides which type the literal takes:
 
 - **Bare word** — `host: 5432` — a static label.
-- **Quoted string** — `"content-type": "json"` — a static label that may carry
+- **Quoted string** — `'content-type': "json"` — a static label that may carry
   characters a bare word cannot.
-- **Tag** — `` `dev: 8080 `` — a static label in the *tag* alphabet (leading
-  backtick).
 - **Deref / computed** — `[$k: $v]` — the key is evaluated at run time and must
   be a `String`.
 
-The first three are *labels*: known at elaboration, so they make a record. A
-record draws its labels from two alphabets — **bare** for ordinary records,
-**tag** (backtick) for tag-keyed records and [[invariants/optionality-via-variants|variants]].
-The two do not unify, and mixing them in one literal is a parse error
-(`docs/SPEC.md` §4.5).
+The first two are *labels*: known at elaboration, so they make a record. They
+are the **bare** alphabet, and it is the only one a key may draw on. Backtick
+labels are the *tag* alphabet, and a tag names a constructor rather than a
+part, so it keys nothing. Each alphabet belongs to one type former: bare to
+`Record`, tag to `Variant` and to the `case` arms that eliminate one.
 
 ## Which one a literal becomes
 
 **The classification is syntax, not inference.** The parser reads the keys and
 emits `Ast::Record` or `Ast::Map` (`core/src/syntax/parser.rs`), and each has
-its own entry type, so a record literal cannot hold a computed key nor a map
-literal a tag:
+its own entry type, so a record literal cannot hold a computed key:
 
 - **`[:` marks a map.** `[:]` is the empty one and `[:, a: 1, b: 2]` a map whose
-  keys are written out: `Map<Int>`. A tag key there is a parse error — a tag is
-  a label, and a map has no labels.
+  keys are written out: `Map<Int>`.
 - **Every key a static label** → `Record`. `[host: "db", port: 5432]` infers
   `[host: String, port: Int]`.
 - **Any key computed** → `Map<α>`. `[$k: 1, $j: 2]` infers `Map<Int>` — one

@@ -291,7 +291,7 @@ fn fmt_param(p: &crate::ir::IrPattern) -> String {
             let parts: Vec<String> = entries
                 .iter()
                 .map(|entry| {
-                    let label = entry.key.row_label();
+                    let label = entry.key.clone();
                     let v = fmt_param(&entry.pattern);
                     if matches!(&entry.pattern, crate::ir::IrPattern::Name(n) if n == &label) {
                         label

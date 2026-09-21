@@ -275,7 +275,7 @@ impl Inferencer<'_> {
                         .rev()
                         .fold(tail, |row, (entry, field_ty)| {
                             Row::Extend(
-                                entry.key.row_label(),
+                                entry.key.clone(),
                                 Box::new(field_ty.clone()),
                                 Box::new(row),
                             )

@@ -231,11 +231,8 @@ impl Conversation {
         // error path below drops the baseline, whose own `Drop` stops and
         // joins the walk, so none is ever left running past the
         // conversation that started it.
-        let baseline = Baseline::spawn(
-            grant.root().to_path_buf(),
-            baseline_stop,
-            baseline_progress,
-        );
+        let baseline =
+            Baseline::spawn(grant.root().to_path_buf(), baseline_stop, baseline_progress);
 
         let machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
             format!(

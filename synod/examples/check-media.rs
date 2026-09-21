@@ -29,7 +29,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let path = manifest.display().to_string();
-    for check in [ral_daemon::boot::check_media, ral_core::protocol::check_media] {
+    for check in [
+        ral_daemon::boot::check_media,
+        ral_core::protocol::check_media,
+    ] {
         if let Err(refusal) = check(&text, &path) {
             eprintln!("synod cannot be packaged with this guest media: {refusal}");
             return ExitCode::FAILURE;

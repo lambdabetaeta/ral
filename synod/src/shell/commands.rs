@@ -422,26 +422,20 @@ fn converse(
             );
         }
     });
-    let (mut conversation, opening) = match Conversation::begin(
-        picked,
-        store,
-        catalog,
-        choice,
-        baseline_stop,
-        report_walk,
-    ) {
-        Ok(begun) => begun,
-        Err(e) => {
-            emitter.emit(
-                "synod-event",
-                super::sink::SynodEvent::Failure { message: e },
-            );
-            return ConversationEnded {
-                stopped: false,
-                explained: true,
-            };
-        }
-    };
+    let (mut conversation, opening) =
+        match Conversation::begin(picked, store, catalog, choice, baseline_stop, report_walk) {
+            Ok(begun) => begun,
+            Err(e) => {
+                emitter.emit(
+                    "synod-event",
+                    super::sink::SynodEvent::Failure { message: e },
+                );
+                return ConversationEnded {
+                    stopped: false,
+                    explained: true,
+                };
+            }
+        };
 
     emitter.emit("synod-opening", opening);
     emitter.state("ready", false);

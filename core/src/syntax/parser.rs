@@ -15,9 +15,9 @@
 
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
-    Ast, BinaryOp, BinaryOpKind, CaseArm, Head, IfBranch, ListElem, MapEntry, MapKey,
-    MapPatternEntry, Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget, ScopeAst,
-    ScopeKeyword, Stmt, Word, WordLiteral,
+    Ast, BinaryOp, BinaryOpKind, CaseArm, Head, IfBranch, ListElem, MapEntry, MapPatternEntry,
+    Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt,
+    Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -496,12 +496,12 @@ impl Parser {
 
     /// case = 'case' atom '[' arm (',' arm)* trailing-comma? ']'
     ///
-    /// The scrutinee is any atom; the arms are not an atom at all.  They look
-    /// like a tag-keyed record and are none: each is a literal label paired
-    /// with a body, so the set of alternatives is a fact the parser establishes
-    /// and nothing downstream can widen.  Everything that would hide that set —
-    /// a computed table in place of the list, a spread, a repeated tag — is
-    /// refused here, where no payload is yet in flight.
+    /// The scrutinee is any atom; the arms are not an atom at all: each is a
+    /// literal label paired with a body, so the set of alternatives is a fact
+    /// the parser establishes and nothing downstream can widen.  Everything
+    /// that would hide that set — a computed table in place of the list, a
+    /// spread, a repeated tag — is refused here, where no payload is yet in
+    /// flight.
     fn parse_case(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume `case`
         self.skip_newlines();
@@ -822,18 +822,9 @@ impl Parser {
 
     fn parse_map_pattern(&mut self) -> Result<Pattern, ParseError> {
         let mut entries = Vec::new();
-        // Mirrors the literal side: bare and tag alphabets cannot mix.
-        let mut alphabet: Option<bool> = None;
 
         self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
-            let key_span = p.span();
             let key = p.parse_static_key()?;
-            check_key_alphabet(
-                &mut alphabet,
-                key.is_tag(),
-                key_span,
-                "map pattern mixes bare and tag keys — pick one alphabet",
-            )?;
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
             entries.push(MapPatternEntry { key, pattern });
@@ -843,27 +834,29 @@ impl Parser {
         Ok(Pattern::Map(entries))
     }
 
-    /// pkey = IDENT | QUOTED | TAG — the map-*pattern* key alphabet.  Literals
-    /// additionally admit `$deref`, which is [`Self::parse_map_key`]'s job.
-    fn parse_static_key(&mut self) -> Result<MapKey, ParseError> {
+    /// pkey = IDENT | QUOTED — the static key alphabet.  Literals additionally
+    /// admit `$deref`, which is [`Self::parse_map_key`]'s job.
+    fn parse_static_key(&mut self) -> Result<String, ParseError> {
         match self.peek().clone() {
             Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
                 self.advance();
-                Ok(MapKey::Bare(k))
+                Ok(k)
             }
             Token::SingleQuoted(k) => {
                 self.advance();
-                Ok(MapKey::Bare(k))
+                Ok(k)
             }
-            Token::Tag(label) => {
-                self.advance();
-                Ok(MapKey::Tag(label))
-            }
-            _ => Err(self.error("expected map pattern key: name, 'quoted', or backtick tag")),
+            Token::Tag(label) => Err(self.error(format!(
+                "`` `{label} `` names a variant, so it cannot be a key: a tag says \
+                 *which of* several alternatives, and a key says *which part of* one \
+                 value. Write the field as `{label}`, or, if these are the arms of a \
+                 match, write them as case $x [`{label}: {{ |p| … }}, …]."
+            ))),
+            _ => Err(self.error("expected a key: a name or a 'quoted string'")),
         }
     }
 
-    /// mapkey = IDENT | QUOTED | deref | TAG — the map-*literal* key alphabet.
+    /// mapkey = IDENT | QUOTED | deref — a literal's key alphabet.
     /// The form is returned rather than the entry, because which [`MapEntry`]
     /// to build is only settled once the `:` and value are consumed.
     fn parse_map_key(&mut self) -> Result<MapKeyForm, ParseError> {
@@ -881,7 +874,7 @@ impl Parser {
             Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self.error(
                 "map keys must be identifiers or quoted strings, not numbers; use '0': val",
             )),
-            _ => Err(self.error("expected map key: name, 'quoted', backtick tag, or $var")),
+            _ => Err(self.error("expected a key: a name, a 'quoted string', or $var")),
         }
     }
 
@@ -1249,13 +1242,11 @@ impl Parser {
             return Ok(CollectionItem::Spread(Spanned::new(sp, a)));
         }
         if self.key_colon_at(self.pos, /*allow_deref=*/ true) {
-            let key_span = self.span();
             let key = self.parse_map_key()?;
             self.expect(&Token::Colon)?;
             let (sp, a) = self.capture_span(Self::parse_atom)?;
             return Ok(CollectionItem::Entry {
                 key,
-                key_span,
                 value: Spanned::new(sp, a),
             });
         }
@@ -1266,7 +1257,8 @@ impl Parser {
     /// True when `tokens[i]` is a map key followed by `:`.  The one shape test
     /// behind literal and pattern alike, so the two cannot drift on what a key
     /// is; a literal admits a dynamic `$var` key, a pattern cannot bind
-    /// through one.
+    /// through one.  A tag is key-*shaped* but is no key: it is admitted only
+    /// so [`Self::parse_static_key`] gets to say why.
     fn key_colon_at(&self, i: usize, allow_deref: bool) -> bool {
         let is_key = matches!(
             self.tokens.get(i).map(|(t, _)| t),
@@ -1437,26 +1429,16 @@ const KEYED_ELEM_ERROR: &str = "this collection has `key: value` entries, so eve
 /// own kind along list < record < map, so no item meets a kind already ruled out.
 enum Literal {
     List(Vec<ListElem>),
-    Record {
-        items: Vec<StaticItem>,
-        /// Bare `name` versus tag `` `name ``.
-        tags: Option<bool>,
-    },
+    Record(Vec<StaticItem>),
     Map {
         entries: Vec<MapEntry>,
         marker: MapMarker,
     },
 }
 
-/// A record item; the key's span is kept for the tag error a later computed
-/// key may raise.
 enum StaticItem {
     Spread(Spanned<Ast>),
-    Field {
-        key: MapKey,
-        key_span: Span,
-        value: Spanned<Ast>,
-    },
+    Field { key: String, value: Spanned<Ast> },
 }
 
 /// What made the literal a map, which is what its errors point at.
@@ -1474,13 +1456,6 @@ impl MapMarker {
                  a `key: value` or a `...` spread"
             }
             Self::ComputedKey => KEYED_ELEM_ERROR,
-        }
-    }
-
-    fn record_fix(self) -> &'static str {
-        match self {
-            Self::Colon => "drop the `:,`",
-            Self::ComputedKey => "give the computed key a static name",
         }
     }
 }
@@ -1504,58 +1479,43 @@ impl Literal {
                         ListElem::Single(a) => Err(elem_error(&a, KEYED_ELEM_ERROR)),
                     })
                     .collect::<Result<_, _>>()?;
-                Self::Record { items, tags: None }.push(entry)
+                Self::Record(items).push(entry)
             }
-            (Self::Record { mut items, tags }, CollectionItem::Spread(a)) => {
+            (Self::Record(mut items), CollectionItem::Spread(a)) => {
                 items.push(StaticItem::Spread(a));
-                Ok(Self::Record { items, tags })
+                Ok(Self::Record(items))
             }
             (
-                Self::Record {
-                    mut items,
-                    mut tags,
-                },
+                Self::Record(mut items),
                 CollectionItem::Entry {
                     key: MapKeyForm::Static(key),
-                    key_span,
                     value,
                 },
             ) => {
-                check_key_alphabet(
-                    &mut tags,
-                    key.is_tag(),
-                    key_span,
-                    "record literal mixes bare and tag keys — pick one alphabet",
-                )?;
-                items.push(StaticItem::Field {
-                    key,
-                    key_span,
-                    value,
-                });
-                Ok(Self::Record { items, tags })
+                items.push(StaticItem::Field { key, value });
+                Ok(Self::Record(items))
             }
             (
-                Self::Record { items, .. },
+                Self::Record(items),
                 entry @ CollectionItem::Entry {
                     key: MapKeyForm::Deref(_),
                     ..
                 },
             ) => {
-                let marker = MapMarker::ComputedKey;
                 let entries = items
                     .into_iter()
                     .map(|item| match item {
-                        StaticItem::Spread(a) => Ok(MapEntry::Spread(a)),
-                        StaticItem::Field {
-                            key,
-                            key_span,
-                            value,
-                        } => map_entry(MapKeyForm::Static(key), key_span, value, marker),
+                        StaticItem::Spread(a) => MapEntry::Spread(a),
+                        StaticItem::Field { key, value } => MapEntry::Entry { key, value },
                     })
-                    .collect::<Result<_, _>>()?;
-                Self::Map { entries, marker }.push(entry)
+                    .collect();
+                Self::Map {
+                    entries,
+                    marker: MapMarker::ComputedKey,
+                }
+                .push(entry)
             }
-            (Self::Record { .. }, CollectionItem::Elem(a)) => Err(elem_error(&a, KEYED_ELEM_ERROR)),
+            (Self::Record(_), CollectionItem::Elem(a)) => Err(elem_error(&a, KEYED_ELEM_ERROR)),
             (
                 Self::Map {
                     mut entries,
@@ -1571,13 +1531,9 @@ impl Literal {
                     mut entries,
                     marker,
                 },
-                CollectionItem::Entry {
-                    key,
-                    key_span,
-                    value,
-                },
+                CollectionItem::Entry { key, value },
             ) => {
-                entries.push(map_entry(key, key_span, value, marker)?);
+                entries.push(map_entry(key, value));
                 Ok(Self::Map { entries, marker })
             }
             (Self::Map { marker, .. }, CollectionItem::Elem(a)) => {
@@ -1589,12 +1545,12 @@ impl Literal {
     fn into_ast(self) -> Ast {
         match self {
             Self::List(elems) => Ast::List(elems),
-            Self::Record { items, .. } => Ast::Record(
+            Self::Record(items) => Ast::Record(
                 items
                     .into_iter()
                     .map(|item| match item {
                         StaticItem::Spread(a) => RecordEntry::Spread(a),
-                        StaticItem::Field { key, value, .. } => RecordEntry::Field { key, value },
+                        StaticItem::Field { key, value } => RecordEntry::Field { key, value },
                     })
                     .collect(),
             ),
@@ -1603,24 +1559,10 @@ impl Literal {
     }
 }
 
-/// A map's keys are data, so a tag — a label — is refused.
-fn map_entry(
-    key: MapKeyForm,
-    key_span: Span,
-    value: Spanned<Ast>,
-    marker: MapMarker,
-) -> Result<MapEntry, ParseError> {
+fn map_entry(key: MapKeyForm, value: Spanned<Ast>) -> MapEntry {
     match key {
-        MapKeyForm::Static(MapKey::Bare(key)) => Ok(MapEntry::Entry { key, value }),
-        MapKeyForm::Deref(name) => Ok(MapEntry::Deref { name, value }),
-        MapKeyForm::Static(MapKey::Tag(label)) => Err(Parser::error_at(
-            key_span,
-            format!(
-                "`` `{label} `` is a tag, and a map's keys are data — write the key as a \
-                 bare word or a quoted string, or make this a record: {}",
-                marker.record_fix()
-            ),
-        )),
+        MapKeyForm::Static(key) => MapEntry::Entry { key, value },
+        MapKeyForm::Deref(name) => MapEntry::Deref { name, value },
     }
 }
 
@@ -1631,24 +1573,6 @@ fn elem_error(item: &Spanned<Ast>, message: &str) -> ParseError {
         lex_kind: None,
         incomplete: false,
     }
-}
-
-/// The first key fixes the alphabet and every later one must match, so
-/// `` [host: …, `dev: …] `` is rejected in literal and pattern alike.
-fn check_key_alphabet(
-    seen_is_tag: &mut Option<bool>,
-    this_is_tag: bool,
-    key_span: Span,
-    mismatch_msg: &str,
-) -> Result<(), ParseError> {
-    match seen_is_tag {
-        None => *seen_is_tag = Some(this_is_tag),
-        Some(prev) if *prev != this_is_tag => {
-            return Err(Parser::error_at(key_span, mismatch_msg));
-        }
-        Some(_) => {}
-    }
-    Ok(())
 }
 
 /// What a token the parse never reached means for a whole program or a
@@ -1684,7 +1608,7 @@ fn is_reserved(s: &str) -> bool {
 /// A map-literal key before its entry is built: a static label or a `$name`
 /// resolved at runtime.
 enum MapKeyForm {
-    Static(MapKey),
+    Static(String),
     Deref(String),
 }
 
@@ -1694,7 +1618,6 @@ enum CollectionItem {
     Elem(Spanned<Ast>),
     Entry {
         key: MapKeyForm,
-        key_span: Span,
         value: Spanned<Ast>,
     },
 }
@@ -2325,11 +2248,11 @@ mod tests {
             vec![Ast::Return(Some(Spanned::synthetic_boxed(Ast::Record(
                 vec![
                     RecordEntry::Field {
-                        key: MapKey::Bare("host".into()),
+                        key: "host".into(),
                         value: sp(plain("localhost")),
                     },
                     RecordEntry::Field {
-                        key: MapKey::Bare("port".into()),
+                        key: "port".into(),
                         value: sp(plain("8080")),
                     },
                 ]
@@ -2358,12 +2281,23 @@ mod tests {
         );
     }
 
-    /// A tag is a label, and a map has keys rather than labels.
+    /// A tag names a variant, so it keys nothing: not a record, not a map,
+    /// not a pattern.
     #[test]
-    fn parse_tag_key_in_map_literal_errors() {
-        let err = parse("[:, `dev: 8080]").unwrap_err();
-        assert!(err.message.contains("is a tag"), "{}", err.message);
-        assert!(parse("[$k: 1, `dev: 2]").is_err());
+    fn parse_tag_key_errors_everywhere() {
+        for src in [
+            "[`dev: 8080]",
+            "[:, `dev: 8080]",
+            "[$k: 1, `dev: 2]",
+            "let [`dev: p] = $x",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("names a variant"),
+                "{src}: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
@@ -2740,7 +2674,7 @@ mod tests {
             vec![Ast::Record(vec![
                 RecordEntry::Spread(sp(Ast::Variable("d".into()))),
                 RecordEntry::Field {
-                    key: MapKey::Bare("k".into()),
+                    key: "k".into(),
                     value: sp(Ast::Literal("v".into())),
                 },
             ])]
@@ -2756,11 +2690,11 @@ mod tests {
             ast,
             vec![Ast::Record(vec![
                 RecordEntry::Spread(sp(Ast::Record(vec![RecordEntry::Field {
-                    key: MapKey::Bare("a".into()),
+                    key: "a".into(),
                     value: sp(plain("1")),
                 }]))),
                 RecordEntry::Field {
-                    key: MapKey::Bare("b".into()),
+                    key: "b".into(),
                     value: sp(plain("2")),
                 },
             ])]
@@ -2980,7 +2914,7 @@ mod tests {
         assert_eq!(
             param.item,
             Pattern::Map(vec![MapPatternEntry {
-                key: MapKey::Bare("head".into()),
+                key: "head".into(),
                 pattern: Pattern::Name("h".into()),
             }])
         );

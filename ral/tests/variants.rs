@@ -1,4 +1,4 @@
-//! End-to-end tests for variants and tag-keyed records (Phase A).
+//! End-to-end tests for variants (Phase A).
 //!
 //! These exercise the parser, elaborator, and runtime.  Pure typing
 //! behaviour (e.g. variant inference at an open row) is in
@@ -21,16 +21,6 @@ fn variant_nullary_displays_as_backtick_label() {
 }
 
 #[test]
-fn tag_keyed_record_displays_with_backtick_keys() {
-    let out = common::run(
-        "tag_keyed_record",
-        "let res = [`dev: 8080, `prod: 443]\necho $res\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "[`dev: 8080, `prod: 443]");
-}
-
-#[test]
 fn list_of_variants_round_trips() {
     let out = common::run("variant_list", "echo [`ok 1, `err hello]\n");
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
@@ -38,13 +28,13 @@ fn list_of_variants_round_trips() {
 }
 
 #[test]
-fn mixed_alphabet_record_is_parse_error() {
-    let out = common::run("mixed_alphabet", "let res = [host: x, `dev: 8080]\n");
+fn tag_key_is_a_parse_error() {
+    let out = common::run("tag_key", "let res = [`dev: 8080, `prod: 443]\n");
     assert_ne!(out.status, 0, "expected failure, got success");
     let combined = format!("{}{}", out.stdout, out.stderr);
     assert!(
-        combined.contains("mixes bare and tag keys"),
-        "expected mixed-alphabet message in output, got:\n{combined}"
+        combined.contains("names a variant"),
+        "expected the tag-is-not-a-key message in output, got:\n{combined}"
     );
 }
 

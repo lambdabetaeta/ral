@@ -69,9 +69,7 @@ pub fn check_media(manifest: &str, path: &str) -> Result<(), String> {
     };
     let recorded = recorded.trim();
     let recorded: u32 = recorded.parse().map_err(|err| {
-        format!(
-            "{path} records `{MEDIA_KEY}={recorded}`, which is not a protocol version: {err}."
-        )
+        format!("{path} records `{MEDIA_KEY}={recorded}`, which is not a protocol version: {err}.")
     })?;
 
     if recorded != PROTOCOL_VERSION {
@@ -3205,8 +3203,11 @@ mod media_protocol {
     /// than blaming a version it cannot know.
     #[test]
     fn media_predating_the_line_gets_its_own_sentence() {
-        let err = check_media("arch=amd64\nral_git_hash=7c1c8ae6\n", "out/boot-manifest.txt")
-            .expect_err("a manifest with no protocol line must not be packaged");
+        let err = check_media(
+            "arch=amd64\nral_git_hash=7c1c8ae6\n",
+            "out/boot-manifest.txt",
+        )
+        .expect_err("a manifest with no protocol line must not be packaged");
         assert!(err.contains(&format!("no `{MEDIA_KEY}=` line")), "{err}");
         assert!(err.contains("just guest-boot"), "{err}");
     }

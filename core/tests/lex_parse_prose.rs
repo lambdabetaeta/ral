@@ -541,15 +541,16 @@ const REACHABLE: &[Reachable] = &[
     r("parse_rest_bad_name", "let [a, ...42] = $xs", "name"),
     r("parse_map_pattern_bad_key", "let [42: a] = m", "key"),
     r("parse_map_literal_bad_key", "[42: 1]", "key"),
+    r("parse_map_tag_key", "[:, `b: 2]", "names a variant"),
     r(
-        "parse_map_mix_alphabets",
-        "[a: 1, `b: 2]",
-        "bare and tag keys",
+        "parse_record_tag_key",
+        "return [a: 1, `b: 2]",
+        "names a variant",
     ),
     r(
-        "parse_record_mix_alphabets",
-        "return [a: 1, `b: 2]",
-        "bare and tag keys",
+        "parse_pattern_tag_key",
+        "let [`b: x] = $r",
+        "names a variant",
     ),
     r(
         "parse_lambda_empty_params",

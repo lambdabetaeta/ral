@@ -202,8 +202,8 @@ fn stage_pattern(
                 );
             };
             for entry in entries {
-                let key_label = entry.key.row_label();
-                let Some(val) = m.get(&key_label) else {
+                let key_label = &entry.key;
+                let Some(val) = m.get(key_label) else {
                     let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
                     return Err(Error::new(format!("key '{key_label}' not found"), 1)
                         .with_hint(format!("available: {}", ks.join(", ")))

@@ -660,7 +660,8 @@ let empty_map = [:]
 
 A static key can be a bare name or a quoted string. A computed key uses a
 string value such as `$key`. Any computed key that is not a `String` is an
-error. Keys are unique in the resulting value and iterate in sorted order.
+error. Keys are unique in the resulting value and iterate in sorted order. A
+tag is not a key, in a literal or in a pattern (§4.6).
 
 A bracketed literal that opens with `:` is a map: `[:]` is the empty one and
 `[:, a: 1, b: 2]` a map on keys written out. Otherwise its keys decide. A
@@ -673,8 +674,6 @@ let record = [host: 'db', port: 5432]
 let by_data = [:, host: 'db', port: 'https']
 let computed = [$key: 5432]
 ```
-
-A tag is a label, so a tag key in a map literal is an error.
 
 Every explicit entry wins over every spread entry, regardless of position. If
 spread entries conflict with each other, the first spread entry wins. Writing
@@ -691,16 +690,6 @@ absence over an unknown record travels as a variant.
 Spreading a value that is not a record or map is an error. Spreading does not
 change the source value.
 
-A tag can also be a static record key:
-
-```ral
-return [`development: 8080, `production: 443]
-```
-
-One record literal cannot mix ordinary static keys and tag keys. Field names
-and tags are two distinct label alphabets that never unify, so a record is
-keyed by one or by the other.
-
 ### 4.6. Variants
 
 A variant records one named outcome. It can carry no payload or one value:
@@ -714,6 +703,12 @@ let problem = `error [message: 'not found']
 The tag takes the next value atom as its payload. A statement boundary, comma,
 closing bracket, pipe, `?`, or redirect leaves it without a payload.
 Section 8 defines `case`, which chooses one arm by tag.
+
+A tag says *which of* several alternatives, and a key says *which part of* one
+value, so the two alphabets belong to different type formers and never meet. A
+tag keys nothing: `` [`dev: 8080] `` is a parse error, in a literal and in a
+pattern alike. The one place a tag stands before a `:` is a `case` arm (§8.3),
+which is syntax rather than a record.
 
 ### 4.7. Indexing
 
@@ -4212,6 +4207,7 @@ conditional   ::= "if" atom atom
 case          ::= "case" atom "[" case-arm ("," case-arm)* ","? "]"
 case-arm      ::= tag-key ":" (arm-body | atom)
 arm-body      ::= "{" "|" pattern "|" program "}"
+tag-key       ::= "`" identifier
 
 scope-form    ::= "try" atom atom redirects
                 | "guard" atom atom redirects
@@ -4264,7 +4260,7 @@ pattern-list  ::= pattern ("," pattern)* ("," "..." identifier)?
 map-pattern   ::= "[" map-pattern-entry
                   ("," map-pattern-entry)* ","? "]"
 map-pattern-entry ::= static-key ":" pattern
-static-key    ::= identifier | quoted-string | tag-key
+static-key    ::= identifier | quoted-string
 
 redirects     ::= redirect*
 redirect      ::= fd? ">" word-value
@@ -4280,12 +4276,12 @@ descriptor must not be 1 when the target is 2: `1>&2` and its short spelling
 `>&2` are rejected in favour of `warn` (§7.4). `[]` is the empty
 list and `[:]` the empty map. Otherwise a collection's entries decide: any
 computed key makes it a map, static keys alone a record, no entry at all a
-list (§4.5). A record literal or a pattern may use bare keys or tag keys, but
-may not mix the two static key alphabets. A map literal may additionally use a
-dynamic `$name` key, and may use no tag key; a pattern may use neither.
+list (§4.5). A map literal may additionally use a dynamic `$name` key, which a
+pattern cannot bind through. A tag is no key at all: `tag-key` occurs only in
+a `case` arm.
 
-A `case`'s arm list resembles a tag-keyed map literal but is a production of
-its own, and no expression may stand in its place: a spread among the arms and
+A `case`'s arm list is a production of its own, and no expression may stand in
+its place: a spread among the arms and
 a repeated tag are both rejected, and the list may not be empty. This is what
 makes the set of alternatives a fact the parser establishes (§8.3).
 

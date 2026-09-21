@@ -182,8 +182,8 @@ fn scenarios() -> Vec<Scenario> {
         // ─── Adversarial inputs that should not crash ────────────────────
         s("return [`ok 1, `err 2, `ok hello]", "variant-row-clash"),
         s(
-            "let r = [`a: 1, `b: hello]\nreturn $r[`a]",
-            "tag-keyed-bad-mix",
+            "let r = [a: 1, b: hello]\nreturn $r[`a]",
+            "tag-as-index-key",
         ),
         s("return [1, hello, true, (), [a: 1]]", "all-mismatched-list"),
         s(

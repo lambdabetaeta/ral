@@ -30,7 +30,9 @@ sees raw bytes and bare words.
   carries a `FileId`. A `||` after a pipe is refused naming `?`. A bracketed
   literal that opens with `:` is a map (`[:]`, or `[:, …]`); otherwise its
   keys decide — any computed key makes a map, static keys alone an
-  `Ast::Record`, no entry at all a list. The items are read in one pass, each
+  `Ast::Record`, no entry at all a list. `parse_static_key` admits a name or a
+  quoted string; a tag is refused there for literal and pattern alike, since a
+  tag keys nothing. The items are read in one pass, each
   lifting the literal to at least its own kind, so no token-level lookahead has
   to skip a spread's nested brackets. The `$[…]`
   body is a Pratt parser whose operands are

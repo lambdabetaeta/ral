@@ -707,7 +707,7 @@ impl Elaborator {
                         .iter()
                         .map(|e| match e {
                             RecordEntry::Field { key, value } => ValRecordEntry::Field(
-                                key.row_label(),
+                                key.clone(),
                                 Spanned::with_span(
                                     value.span,
                                     self.with_span(value.span, |this| {

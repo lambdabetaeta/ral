@@ -9,7 +9,6 @@
 
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::syntax::tag::tag_row_label;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -92,8 +91,7 @@ pub enum Ast {
     /// `"hello $name"`, one segment per literal fragment or `$…` insertion.
     Interpolation(Vec<Spanned<Self>>),
     /// `` `label `` or `` `label payload ``, where the payload is the next
-    /// adjacent atom and `label` drops its backtick. Tag-*keyed* records are
-    /// not this: they are [`RecordEntry::Field`]s with [`MapKey::Tag`] keys.
+    /// adjacent atom and `label` drops its backtick.
     Tag {
         label: String,
         payload: Option<Spanned<Box<Self>>>,
@@ -205,7 +203,7 @@ pub enum Pattern {
 /// that field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapPatternEntry {
-    pub(crate) key: MapKey,
+    pub(crate) key: String,
     pub(crate) pattern: Pattern,
 }
 
@@ -223,8 +221,8 @@ pub enum ListElem {
 /// Entry of a record literal; no variant can carry a computed key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RecordEntry {
-    /// `key: value` with a label known statically — see [`MapKey`].
-    Field { key: MapKey, value: Spanned<Ast> },
+    /// `key: value` or `'key': value` — a label known statically.
+    Field { key: String, value: Spanned<Ast> },
     /// `...expr` — splice another record's fields into this one.
     Spread(Spanned<Ast>),
 }
@@ -238,34 +236,6 @@ pub enum MapEntry {
     Deref { name: String, value: Spanned<Ast> },
     /// `...expr` — splice another map's entries into this one.
     Spread(Spanned<Ast>),
-}
-
-/// Static record key. Both `host` and `'host'` parse to [`MapKey::Bare`];
-/// `` `host `` parses to [`MapKey::Tag`] carrying the label without its sigil.
-///
-/// Holding the alphabet on the variant spares every reader from sniffing the
-/// leading character of a stringly-typed key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MapKey {
-    Bare(String),
-    Tag(String),
-}
-
-impl MapKey {
-    /// The single-string row label the IR and typechecker want: bare unchanged,
-    /// tag prefixed by [`crate::syntax::tag::tag_row_label`].
-    pub(crate) fn row_label(&self) -> String {
-        match self {
-            Self::Bare(s) => s.clone(),
-            Self::Tag(label) => tag_row_label(label),
-        }
-    }
-
-    /// True for tag-alphabet keys. The parser reads it to bar a single map
-    /// literal or pattern from mixing the two alphabets.
-    pub(crate) fn is_tag(&self) -> bool {
-        matches!(self, Self::Tag(_))
-    }
 }
 
 /// Binary primitive on values: arithmetic, ordering, equality.
