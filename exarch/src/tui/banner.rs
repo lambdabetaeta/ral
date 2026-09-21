@@ -248,7 +248,7 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
                 v
             }),
             ("elapsed", {
-                let mut v = wait_bar(Duration::from_secs(18));
+                let mut v = wait_bar(Some(Duration::from_secs(18)));
                 v.push(note("grows with the time spent in the current state"));
                 v
             }),

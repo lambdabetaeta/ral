@@ -11,6 +11,7 @@ use crate::provider::Usage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 pub(super) fn rule_line(
     width: usize,
@@ -26,28 +27,25 @@ pub(super) fn rule_line(
     // The `Ns` digit ticks once a second, and the clock runs from the state's
     // own start: a streamed count that freezes under a wait reading minutes is
     // a stalled stream, which a per-event reset could never show.  `Ready` is
-    // settled, so it reads as a clock at rest rather than a clock removed: the
-    // empty track stands — it is the scale the filled cells are read against,
-    // and a scale that disappears between turns takes the row's left edge with
-    // it — while the readout and its separator go blank, nothing being timed.
-    if state.state.pending() {
-        spans.extend(wait_bar(state.elapsed()));
-        // The clock and the streamed count are both magnitudes: without the
-        // rule's own separator between them they read as one field, or worse as
-        // two clocks.
-        spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
-    } else {
-        spans.extend(bar_cells(0, WAIT_BAR_W, SLATE));
-        spans.push(Span::styled(
-            " ".repeat(WAIT_READOUT_W + 3),
-            Style::default().fg(SLATE),
-        ));
-    }
+    // settled, so it reads as a clock at rest rather than a clock removed.
+    let timing = state.state.pending().then(|| state.elapsed());
+    spans.extend(wait_bar(timing));
+    // The clock and the streamed count are both magnitudes: without the rule's
+    // own separator between them they read as one field, or worse as two
+    // clocks.  It blanks with the clock, keeping its column either way.
+    spans.push(Span::styled(
+        if timing.is_some() {
+            SEP.to_string()
+        } else {
+            Col::wide(UnicodeWidthStr::width(SEP)).left("")
+        },
+        Style::default().fg(SLATE),
+    ));
     spans.push(state_label(state));
     // The state slot is padded to a fixed width, so this separator stands in one
     // column whatever the state — the eye finds the model name at the same place
     // every frame.
-    spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
+    spans.push(Span::styled(SEP, Style::default().fg(SLATE)));
     spans.push(Span::styled(
         if status_model.is_empty() {
             "…".to_owned()
@@ -56,7 +54,7 @@ pub(super) fn rule_line(
         },
         Style::default().fg(SLATE),
     ));
-    spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
+    spans.push(Span::styled(SEP, Style::default().fg(SLATE)));
 
     // `None` is a catalog miss in `provider::pricing`, not a zero-size window:
     // drop the segment rather than ramp against a guessed denominator.
@@ -90,7 +88,7 @@ pub(super) fn rule_line(
     // The usage block is right-aligned, so the space before it is elastic.  It
     // still takes the separator every other field takes, or a narrow terminal
     // that squeezes that space to nothing runs the scroll reading into the counts.
-    let mut right = vec![Span::styled(" · ", Style::default().fg(SLATE))];
+    let mut right = vec![Span::styled(SEP, Style::default().fg(SLATE))];
     right.extend(usage_text(usage));
     let rw: usize = right.iter().map(Span::width).sum();
     let gap = width.saturating_sub(left_w + rw);
@@ -178,11 +176,16 @@ pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
     spans
 }
 
+/// The rule's own separator: every field of the status line is parted from the
+/// next by this and nothing else.
+const SEP: &str = " · ";
+
 /// Width of the elapsed-wait bar, in cells.
 pub(super) const WAIT_BAR_W: usize = 10;
-/// Width of the ` NNNs` readout that follows the bar — see [`clock_text`], whose
-/// three columns are what keeps it fixed.
-const WAIT_READOUT_W: usize = 5;
+/// The readout that follows the bar: [`clock_text`]'s figures and unit letter,
+/// and a column of air off the track.  The clock sits flush right in it, so it
+/// is the same field whether or not a clock is running in it.
+const WAIT_READOUT: Col = Col::wide(CLOCK_FIGURES.cells() + 2);
 /// The state-label slot, wide enough for the longest label (`waiting on
 /// agents`): a state change never shifts the fields after it, and the separator
 /// that follows stands in one column always.
@@ -200,9 +203,18 @@ pub(super) fn wait_step(secs: u64) -> u8 {
 }
 
 /// The elapsed-wait bar: [`WAIT_BAR_W`] cells growing with the seconds spent in
-/// the current state and lightening as the wait drags, then a ` Ns ` readout. [`PURPLE`]
-/// rather than the ctx ramp's cyan, so the two bars stay apart.
-pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
+/// the current state and lightening as the wait drags, then a ` Ns ` readout.
+/// [`PURPLE`] rather than the ctx ramp's cyan, so the two bars stay apart.
+///
+/// `None` is nothing being timed: the empty track stands — it is the scale the
+/// filled cells are read against, and a scale that disappears between turns
+/// takes the row's left edge with it — and the readout blanks.
+pub(super) fn wait_bar(elapsed: Option<Duration>) -> Vec<Span<'static>> {
+    let Some(elapsed) = elapsed else {
+        let mut spans = bar_cells(0, WAIT_BAR_W, SLATE);
+        spans.push(Span::raw(WAIT_READOUT.left("")));
+        return spans;
+    };
     let secs = elapsed.as_secs();
     // log2 fill, scaled so a minute reaches the edge: 0s → 0 cells, 16s → ~7.
     #[allow(
@@ -215,7 +227,7 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     let fill_col = rail::lighten(PURPLE, wait_step(secs));
     let mut spans = bar_cells(filled, WAIT_BAR_W, fill_col);
     spans.push(Span::styled(
-        format!(" {}", clock_text(secs)),
+        WAIT_READOUT.right(&clock_text(secs)),
         Style::default().fg(SLATE),
     ));
     spans
