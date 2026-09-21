@@ -422,10 +422,7 @@ impl MatrixRow {
         // The caret is the human's mark, so it takes the human's ink.
         let caret = Style::default().fg(PROMPT_INK).add_modifier(Modifier::BOLD);
         let turns = if self.idle.is_some() {
-            Span::styled(
-                widths.turns.right(&self.turns),
-                Style::default().fg(SLATE),
-            )
+            Span::styled(widths.turns.right(&self.turns), Style::default().fg(SLATE))
         } else {
             Span::styled(
                 widths.turns.left(&self.turns),
