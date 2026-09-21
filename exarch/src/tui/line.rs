@@ -433,7 +433,7 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
 /// handed.
 #[derive(Clone, Copy)]
 struct DiffCols {
-    gutter: usize,
+    gutter: Col,
     width: usize,
 }
 
@@ -446,15 +446,9 @@ fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> 
     let total: usize = hunks.iter().map(|h| h.rows.len()).sum();
     let mut left = cap.unwrap_or(total).min(total);
     let cut = left < total;
+    let widest = hunks.iter().map(hunk_max_lineno).max().unwrap_or(0);
     let cols = DiffCols {
-        gutter: hunks
-            .iter()
-            .map(hunk_max_lineno)
-            .max()
-            .unwrap_or(0)
-            .to_string()
-            .len()
-            .max(3),
+        gutter: Col::of([widest.to_string().as_str()]).at_least(3),
         width,
     };
     for (i, h) in hunks.iter().enumerate() {
@@ -475,9 +469,9 @@ fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> 
 /// The "there is more below" row: a bare `⋮` right-aligned in `gutter`, drawn
 /// by [`diff_capped`] both between hunks and at its cap, so a break in the
 /// middle of a diff and a diff cut short read alike.
-fn elision_row(gutter: usize) -> Line<'static> {
+fn elision_row(gutter: Col) -> Line<'static> {
     Line::from(Span::styled(
-        format!("{:>gutter$} ", "⋮"),
+        format!("{} ", gutter.right("⋮")),
         Style::default().fg(SLATE),
     ))
 }
@@ -560,7 +554,10 @@ fn push_gutter_row(
         })
         .collect();
     let head = vec![
-        Span::styled(format!("{lineno:>gutter$} "), Style::default().fg(SLATE)),
+        Span::styled(
+            format!("{} ", gutter.right(&lineno.to_string())),
+            Style::default().fg(SLATE),
+        ),
         Span::styled(format!("{sign} "), Style::default().fg(base)),
     ];
     ls.extend(hang(&head, body, width));
@@ -594,18 +591,48 @@ fn span_style(role: Option<Role>) -> Style {
     role.map_or_else(|| Style::default().fg(Color::White), role_style)
 }
 
+/// The columns every field row of one card shares: the widest label, and the
+/// widest measure readout.  Measured over the whole card rather than each mark,
+/// so two accounts' rations line up instead of each section starting afresh.
+#[derive(Clone, Copy, Default)]
+struct Cols {
+    label: Col,
+    readout: Col,
+}
+
+impl Cols {
+    fn of(marks: &[Mark]) -> Self {
+        let mut cols = Self::default();
+        for mark in marks {
+            match mark {
+                Mark::Measure(m) => cols.readout = cols.readout.seeing(&measure_readout(m)),
+                Mark::Fields { rows } => {
+                    for row in rows {
+                        cols.label = cols.label.seeing(&row.label);
+                        if let FieldVal::Measure(m) = &row.value {
+                            cols.readout = cols.readout.seeing(&measure_readout(m));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        cols
+    }
+}
+
 /// The one dispatch every [`Mark`] variant routes through, shared by
 /// [`render_card_unframed`] and [`render_framed`], so a new variant cannot be
 /// wired into one interpreter and forgotten in the other.  Every arm lays out
 /// at `width`, so a mark's rows are already the rows it is shown as.
-fn render_mark(mark: &Mark, width: usize, at: Detail) -> Vec<Line<'static>> {
+fn render_mark(mark: &Mark, cols: Cols, width: usize, at: Detail) -> Vec<Line<'static>> {
     match mark {
         Mark::Text { spans } => render_text(spans)
             .iter()
             .flat_map(|l| wrap_line(l, width))
             .collect(),
-        Mark::Measure(m) => vec![render_measure(m)],
-        Mark::Fields { rows } => render_fields(rows, width),
+        Mark::Measure(m) => vec![render_measure(m, cols.readout)],
+        Mark::Fields { rows } => render_fields(rows, cols, width),
         Mark::Diff { path, hunks } => diff_body(path, hunks, width, at),
         // Bytes are an image, not an encoding: folding them would be a lie
         // about the payload, so a long row runs past the measure.
@@ -618,8 +645,9 @@ fn render_mark(mark: &Mark, width: usize, at: Detail) -> Vec<Line<'static>> {
 /// intent, where a nested frame would be redundant.
 pub(super) fn render_card_unframed(card: &Card, width: usize, at: Detail) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
+    let cols = Cols::of(card.marks());
     for mark in card.marks() {
-        ls.extend(render_mark(mark, width, at));
+        ls.extend(render_mark(mark, cols, width, at));
     }
     ls
 }
@@ -708,8 +736,9 @@ fn render_framed(
     };
 
     let mut body: Vec<Line<'static>> = Vec::new();
+    let cols = Cols::of(body_marks);
     for mark in body_marks {
-        body.extend(render_mark(mark, max_inner, at));
+        body.extend(render_mark(mark, cols, max_inner, at));
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
@@ -771,6 +800,45 @@ pub(super) fn render_register(
     pins.iter()
         .flat_map(|(_key, card)| render_pin(card, width, hue))
         .collect()
+}
+
+/// A column shared by rows that must line up: the display width of the widest
+/// cell put to it, and the padding that seats a cell in it.  Unicode-aware,
+/// where `format!("{cell:<w$}")` counts chars and leaves a row carrying a wide
+/// glyph a column short of its neighbours.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Col(usize);
+
+impl Col {
+    /// The column every one of `cells` fits in.
+    pub(super) fn of<'a>(cells: impl IntoIterator<Item = &'a str>) -> Self {
+        cells.into_iter().fold(Self::default(), Self::seeing)
+    }
+
+    /// Widened to fit `cell` too.
+    fn seeing(self, cell: &str) -> Self {
+        Self(self.0.max(UnicodeWidthStr::width(cell)))
+    }
+
+    /// Widened to `w`, for a column with a floor of its own: a diff gutter
+    /// stays three wide under a two-digit file.
+    fn at_least(self, w: usize) -> Self {
+        Self(self.0.max(w))
+    }
+
+    /// `cell` flush left in the column — words, which read from the left.
+    pub(super) fn left(self, cell: &str) -> String {
+        format!("{cell}{}", self.air(cell))
+    }
+
+    /// `cell` flush right — figures, whose digits must end level.
+    fn right(self, cell: &str) -> String {
+        format!("{}{cell}", self.air(cell))
+    }
+
+    fn air(self, cell: &str) -> String {
+        " ".repeat(self.0.saturating_sub(UnicodeWidthStr::width(cell)))
+    }
 }
 
 /// Total display width of a span run, unicode-aware.
@@ -850,37 +918,37 @@ pub(super) fn fold_styled_lines(
 }
 
 /// A `measure` mark as one line: slate label, then the readout and its bar.
-fn render_measure(m: &Measure) -> Line<'static> {
+fn render_measure(m: &Measure, readout: Col) -> Line<'static> {
     let mut spans = vec![
         Span::styled(m.label.clone(), Style::default().fg(SLATE)),
         Span::raw("  "),
     ];
-    spans.extend(measure_value_spans(m));
+    spans.extend(measure_value_spans(m, readout));
     Line::from(spans)
 }
 
 /// A [`Measure`]'s value without its label, since a fields row supplies its
 /// own: bounded (`max` present) reads `value/max` with a proportional
 /// [`progress_bar`], unbounded reads `value[unit]` with a `log2` [`size_bar`].
-fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
-    let white = Style::default().fg(Color::White);
-    if let Some(max) = m.max {
-        let mut spans = vec![
-            Span::styled(format!("{}/{}", m.value, max), white),
-            Span::raw("  "),
-        ];
-        spans.extend(progress_bar(m.value, max));
-        spans
-    } else {
-        let readout = match &m.unit {
-            Some(u) => format!("{}{u}", m.value),
-            None => m.value.to_string(),
-        };
-        vec![
-            Span::styled(readout, white),
-            Span::raw("  "),
-            size_bar(m.value),
-        ]
+fn measure_value_spans(m: &Measure, readout: Col) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(readout.right(&measure_readout(m)), Style::default().fg(Color::White)),
+        Span::raw("  "),
+    ];
+    match m.max {
+        Some(max) => spans.extend(progress_bar(m.value, max)),
+        None => spans.push(size_bar(m.value)),
+    }
+    spans
+}
+
+/// The figures a [`Measure`] reads as, ahead of any column: `value/max` when
+/// bounded, else `value[unit]`.
+fn measure_readout(m: &Measure) -> String {
+    match (m.max, &m.unit) {
+        (Some(max), _) => format!("{}/{max}", m.value),
+        (None, Some(u)) => format!("{}{u}", m.value),
+        (None, None) => m.value.to_string(),
     }
 }
 
@@ -908,7 +976,7 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
 
 /// A `fields` mark at `width` — selective alignment: every value lands in one
 /// shared column and folds under it, roles bound to ink on the way in.
-fn render_fields(rows: &[CardField], width: usize) -> Vec<Line<'static>> {
+fn render_fields(rows: &[CardField], cols: Cols, width: usize) -> Vec<Line<'static>> {
     let field_rows: Vec<FieldRow> = rows
         .iter()
         .map(|f| FieldRow {
@@ -918,11 +986,11 @@ fn render_fields(rows: &[CardField], width: usize) -> Vec<Line<'static>> {
                     .iter()
                     .map(|s| Span::styled(s.text.clone(), span_style(s.role)))
                     .collect(),
-                FieldVal::Measure(m) => measure_value_spans(m),
+                FieldVal::Measure(m) => measure_value_spans(m, cols.readout),
             },
         })
         .collect();
-    render_field_rows(&field_rows, width)
+    render_field_rows(&field_rows, cols.label, width)
 }
 
 /// A `raw` mark — bytes appended verbatim as lossy UTF-8, unstyled: it is an
@@ -1037,25 +1105,21 @@ fn text_field(label: impl Into<String>, value: impl Into<String>) -> FieldRow {
     }
 }
 
-/// The slate-bold label lead, padded into the shared `label_w` column.
-fn field_label(label: &str, label_w: usize) -> Span<'static> {
+/// The slate-bold label lead: the label in the shared column, then the two
+/// columns of air that separate it from the value.
+fn field_label(label: &str, col: Col) -> Span<'static> {
     Span::styled(
-        format!("{label:<label_w$}"),
+        format!("{}  ", col.left(label)),
         Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
     )
 }
 
-/// Aligned `(label, value)` rows in one shared column — the primitive
-/// [`render_fields`], [`provider_error`] and [`legend_rows`] all feed.  The
-/// column is measured once from the longest label, so every value starts alike,
-/// and each value hangs under it.
-fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
-    let Some(label_w) = rows.iter().map(|r| r.label.chars().count()).max() else {
-        return Vec::new();
-    };
-    let label_w = label_w + 2; // "<label>  "
+/// Aligned `(label, value)` rows in one shared `label_w` column — the primitive
+/// [`render_fields`], [`provider_error`] and [`legend_rows`] all feed.  Every
+/// value starts alike, and each value hangs under its label.
+fn render_field_rows(rows: &[FieldRow], label: Col, width: usize) -> Vec<Line<'static>> {
     rows.iter()
-        .flat_map(|r| hang(&[field_label(&r.label, label_w)], r.value.clone(), width))
+        .flat_map(|r| hang(&[field_label(&r.label, label)], r.value.clone(), width))
         .collect()
 }
 
@@ -1071,7 +1135,13 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>, width: u16) -> 
             value: spans,
         })
         .collect();
-    render_field_rows(&rows, width.into())
+    render_field_rows(&rows, label_col(&rows), width.into())
+}
+
+/// The label column of a row set that stands alone — a legend, a readout —
+/// rather than sharing a card's [`Cols`].
+fn label_col(rows: &[FieldRow]) -> Col {
+    Col::of(rows.iter().map(|r| r.label.as_str()))
 }
 
 // ── Provider-error rendering ────────────────────────────────────────────────
@@ -1096,7 +1166,7 @@ pub(super) fn stalled(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>>
 fn render_readout(readout: Readout, width: u16) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default(), headline(&readout.headline)];
     let rows: Vec<FieldRow> = readout.fields.into_iter().map(field_row).collect();
-    ls.extend(render_field_rows(&rows, width.into()));
+    ls.extend(render_field_rows(&rows, label_col(&rows), width.into()));
     ls
 }
 

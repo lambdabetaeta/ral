@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 745c5233
-generated_at_date: 2026-09-15
+generated_at_commit: b0920374
+generated_at_date: 2026-09-21
 covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -32,7 +32,9 @@ A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
   proportional fill bar; unbounded → a `log2` size bar.
 - **`fields`** — the matrix mark: an aligned `(label, value)` table in one shared
   label column (Bertin's selective alignment). A value nests a `text` or
-  `measure` mark.
+  `measure` mark. The columns are the *card's*, not the mark's: a card of
+  several `fields` marks — `/limits`, one section per account — aligns as one
+  table, since a selective alignment that restarts per section selects nothing.
 - **`diff`** `[path, hunks]` — the dense composite, binding four variables exarch
   already computes: size (magnitude bar), grain (add/del texture), value (rail
   lightness), shape (`▎`). The one mark that earns graded disclosure and
@@ -121,9 +123,14 @@ recorded ([[map/exarch/agent|agent]]).
 
 `render_card_unframed(&Card, width, level)` (`tui/line.rs`) walks the marks at
 the width the block is shown at: `render_mark` hands that width to every arm, so
-a `text` folds to it, a `fields` mark aligns its column within it, and a `diff`
-measures its line-number gutter against it and wraps each body into what is
-left. A card is never laid out at a fixed budget and wrapped a second time.
+a `text` folds to it, a `fields` mark seats its rows in the card's columns, and
+a `diff` measures its line-number gutter against it and wraps each body into
+what is left. Every such column is one primitive, `Col`: the display width of
+the widest cell put to it, and the padding that seats a cell flush left (words)
+or flush right (figures, whose digits must end level, so the bars beside them
+start level). `Cols::of(marks)` measures a card's label and readout columns
+once, over every row of every mark; a legend or a fault readout, standing
+alone, measures its own. A card is never laid out at a fixed budget and wrapped a second time.
 `role_style(Role)`
 (over the palette constants in `tui/palette.rs`) is the **single place hue
 lives** for kit content, so the kit can name a role but never a colour, and
