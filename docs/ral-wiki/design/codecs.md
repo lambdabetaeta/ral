@@ -80,8 +80,8 @@ record. The columns are the first record's keys in sorted order, because maps
 are key-ordered and hold no original column order. A record that misses a
 column contributes an empty field.
 
-`to-json` maps a ral value to JSON structurally. A record or a `[String:A]`
-map becomes an object; a list becomes an array; `Unit` becomes `null`. A
+`to-json` maps a ral value to JSON structurally. A record or a `Map A`
+becomes an object; a list becomes an array; `Unit` becomes `null`. A
 variant `` `tag payload `` becomes `{"tag": "tag", "payload": …}`, and the
 `payload` key is absent for a niladic tag. A `Bytes` value serialises as an
 array of byte integers. A `Lambda`, a `Block`, or a `Handle` has no JSON image

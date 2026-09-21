@@ -221,7 +221,7 @@ pub enum TypeErrorKind {
     },
     /// A map where a form's options belong.  A form's options are fields and a
     /// map's keys are data, so the two have nothing in common but a bracket —
-    /// and the mismatch of a row against `[String: α]` would say none of that.
+    /// and the mismatch of a row against `Map α` would say none of that.
     MapAsOptions {
         form: &'static str,
         options: Vec<&'static str>,

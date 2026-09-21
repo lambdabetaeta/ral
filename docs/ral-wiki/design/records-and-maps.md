@@ -128,12 +128,19 @@ A record and a map never unify — not directly, and not under `List`, `Thunk`,
 take a map and only a map: `keys [a: 1, b: 2]` is a type error and
 `keys [:, a: 1, b: 2]` is the program that was meant.
 
+The refusal is derived from the two types' shapes rather than from the site
+that raised it (`core/src/typecheck/explain.rs`), so the same sentence answers
+an argument, a spread and a branch join alike — the last being the commonest
+way in, as in `if c { [:, k: $v] } else { [k: ''] }`, where the fix is `[:]`
+for the empty map, there being no empty-record literal. A map type prints as
+`Map α`, so the diagnosis names the two kinds before the help does.
+
 **A form's options are fields, so a map is not one.** `within` and `grant`
 declare their options as a closed row — `dir`, `env` and `handler`; `exec`,
 `fs`, `net`, `detach`, `editor` and `shell` — and the bundle they are handed is
 unified against it, written out or arriving bound. A genuine map, one off
 `from-json` or a plugin's configuration, has no labels to meet that row, and
-gets its own sentence rather than a row-against-`[String: α]` mismatch:
+gets its own sentence rather than a row-against-`Map α` mismatch:
 *`within` takes named options — dir, env, handler — not a map of keys.* The
 runtime still takes a `Map`, records being maps at run time; this is a
 statement about the type, and it is the price of giving a computed bundle a

@@ -9,7 +9,7 @@ call-by-push-value [[map/core/ir|IR]] after [[map/core/elaboration|elaboration]]
 - **computation types** `C` describe effectful computations.
 
 The value types are `Unit`, `Bytes`, `Bool`, `Int`, `Float`, `String`,
-homogeneous lists `[A]` and maps `[String:A]`, closed and open records, the
+homogeneous lists `[A]` and maps `Map A`, closed and open records, the
 thunk `{B}`, the opaque `Handle`, and type/row variables. Records are
 open-row-polymorphic; that fragment is its own page,
 [[design/row-types|row-types]]. Records and maps share one runtime carrier but

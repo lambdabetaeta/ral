@@ -143,7 +143,7 @@ pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
         Ty::Handle(a) => format!("Handle {}", fmt_ty_ctx(a, ctx)),
         Ty::Var(v) => ctx.ty_name(*v),
         Ty::List(a) => format!("[{}]", fmt_ty_ctx(a, ctx)),
-        Ty::Map(a) => format!("[String:{}]", fmt_ty_ctx(a, ctx)),
+        Ty::Map(a) => format!("Map {}", fmt_ty_ctx(a, ctx)),
         Ty::Record(r) => format!("[{}]", fmt_row_ctx(r, ctx)),
         Ty::Variant(r) => format!("[{}]", fmt_variant_row_ctx(r, ctx)),
         Ty::Thunk(b) => format!("{{{}}}", fmt_comp_ty_ctx(b, ctx)),

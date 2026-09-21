@@ -485,6 +485,23 @@ fn a_map_is_refused_where_a_record_is_expected() {
     );
 }
 
+/// A branch join between a map and a record names the confusion itself,
+/// rather than the generic advice to convert one branch to the other's type.
+#[test]
+fn a_branch_join_between_a_map_and_a_record_names_the_confusion() {
+    let src = "let k = if true { [:, a: \"x\"] } else { [a: \"\"] }\nreturn $k";
+    has_error(src, "couldn't match");
+    let errs = raw_errors(src);
+    assert!(
+        has_hint(&errs, "a record and a map are different types"),
+        "expected the record-vs-map sentence, got: {errs:?}"
+    );
+    assert!(
+        has_hint(&errs, "`[:]` for the empty one"),
+        "expected the empty-map spelling, got: {errs:?}"
+    );
+}
+
 /// `[:, …]` is the map literal, whatever its keys are written like.
 #[test]
 fn a_marked_literal_is_a_map() {
@@ -1675,7 +1692,7 @@ fn two_forms_over_one_bundle_agree_in_either_order() {
 }
 
 /// A form's options are fields; a map's keys are data.  The refusal is the
-/// form's own sentence and not a row against `[String: α]`.
+/// form's own sentence and not a row against `Map α`.
 #[test]
 fn a_map_is_refused_as_options() {
     has_error(

@@ -415,6 +415,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
     if from_kind.is_some() {
         return from_kind;
     }
+    if reason.is_some_and(meets_as_peers)
+        && let Some(shape) = shape_hint(kind)
+    {
+        return Some(shape);
+    }
 
     match reason? {
         Reason::ListPattern => Some(
@@ -428,14 +433,12 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              with at least the named fields"
                 .to_string(),
         ),
-        Reason::Argument => argument_shape_hint(kind).or_else(|| {
-            Some(
-                "the function's parameter type and the argument's type \
-                 must agree — check what the function expects and what \
-                 you're passing in"
-                    .to_string(),
-            )
-        }),
+        Reason::Argument => Some(
+            "the function's parameter type and the argument's type \
+             must agree — check what the function expects and what \
+             you're passing in"
+                .to_string(),
+        ),
         Reason::NotOperand => Some(
             "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),
@@ -693,12 +696,28 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     })
 }
 
-/// Help for a `TyMismatch` derived from the expected type's shape, not from
-/// which reason raised it — a `Ty::Thunk` parameter, an error-record `[status:
-/// Int | r]`, and a byte/list confusion each name what the mismatch *is*.
-/// Which side lands in `expected` is an accident of the call site, so every
-/// test here considers both orders.
-fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
+/// Reasons where two types meet on equal footing, so a hint read off
+/// their shapes beats the reason's own sentence.
+fn meets_as_peers(reason: &Reason) -> bool {
+    matches!(
+        reason,
+        Reason::Argument
+            | Reason::IfBranches
+            | Reason::IfBranchValues
+            | Reason::CaseArms
+            | Reason::CaseArmValues
+            | Reason::TryArms
+            | Reason::TryArmValues
+    )
+}
+
+/// Help for a `TyMismatch` derived from the types' own shapes, not from which
+/// reason raised it — a `Ty::Thunk` parameter, an error-record `[status: Int |
+/// r]`, and a byte/list confusion each name what the mismatch *is*, whether it
+/// arose at an argument, a spread, or a branch join. Which side lands in
+/// `expected` is an accident of the call site, so every test here considers
+/// both orders.
+fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
@@ -708,7 +727,8 @@ fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return Some(
             "a record and a map are different types over the same pairs: a record's \
              fields are reached by name (`$r[a]`), while a map's keys are data. If these \
-             keys are data, write the literal as a map — `[:, a: 1, b: 2]` or `[$k: v]`"
+             keys are data, write each literal as a map — `[:, a: 1, b: 2]`, \
+             `[$k: v]`, and `[:]` for the empty one, there being no empty-record literal"
                 .to_string(),
         );
     }
