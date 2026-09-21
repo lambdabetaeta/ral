@@ -4,7 +4,7 @@
 
 use super::error::{CompDiff, Reason, SpreadHead, TypeErrorKind};
 use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
-use super::ty::{Label, Row, Ty};
+use super::ty::{Field, Label, Row, Ty};
 use crate::serial::plural;
 use crate::syntax::ast::BinaryOpKind;
 use crate::types::RefusedArg;
@@ -46,9 +46,6 @@ impl TypeErrorKind {
             }
             Self::DuplicateField { label } => {
                 format!("this record literal writes the field '{label}' twice")
-            }
-            Self::OpenSpreadNotLast { .. } => {
-                "this spread has to come last, because nothing here says what fields it has".into()
             }
             Self::CommandNotFunction { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -170,7 +167,6 @@ impl TypeErrorKind {
             Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
-            Self::OpenSpreadNotLast { .. } => "fields not known here".into(),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {only}"),
@@ -350,36 +346,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             "available: {} — did you mean one of those?",
             known.join(", ")
         )),
-        // A row has one open end, so the remedy is to move the unknown part to
-        // it — unless the remainder is open too, when no order exists and the
-        // fields have to be named.
-        TypeErrorKind::OpenSpreadNotLast {
-            unreachable,
-            rest_open,
-        } => {
-            const NAME_THEM: &str = "Only one of them can come last, so reordering cannot \
-                                     help: write out the fields you need from each, or give \
-                                     each record a field of its own.";
-            let behind = match unreachable.as_slice() {
-                [] => String::new(),
-                [only] => format!("'{only}'"),
-                [rest @ .., last] => format!("'{}' or '{last}'", rest.join("', '")),
-            };
-            Some(if behind.is_empty() {
-                format!("Two records here, and nothing says which fields either one has. {NAME_THEM}")
-            } else {
-                format!(
-                    "Nothing here says which fields this record has. If it has {behind} — written \
-                     after it — this spread wins, and what you wrote there is never read. {}",
-                    if *rest_open {
-                        format!("Another record here has unknown fields too. {NAME_THEM}")
-                    } else {
-                        "Move the spread to the end, or write out the fields you need from it."
-                            .to_string()
-                    }
-                )
-            })
-        }
         TypeErrorKind::DuplicateField { label } => Some(format!(
             "a record has one value per field, so keep whichever '{label}' you meant; \
              to override a field a spread supplies, write it out once and it wins \
@@ -676,7 +642,7 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
-    (matches!(expected, Ty::Record(_)) || matches!(actual, Ty::Record(_))).then(|| {
+    (matches!(**expected, Ty::Record(_)) || matches!(**actual, Ty::Record(_))).then(|| {
         "this is a list literal, and `...` here copies list elements — a record \
          merge is written as a record literal (`[...$a, port: 1]`), a map merge as a \
          map literal (`[:, ...a, ...b]`)"
@@ -738,9 +704,9 @@ fn row_has_status_int(row: &Row) -> bool {
     let mut rest = row;
     loop {
         match rest {
-            Row::Extend(label, ty, tail) => {
+            Row::Extend(label, field, tail) => {
                 if *label == Label::Field("status".into()) {
-                    return matches!(**ty, Ty::Int);
+                    return matches!(field, Field::Present(ty) if **ty == Ty::Int);
                 }
                 rest = tail;
             }

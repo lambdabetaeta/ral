@@ -17,7 +17,7 @@ use ral_core::builtins::util::arg0_str;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
-use ral_core::typecheck::{CompTy, Label, PayloadRoute, Row, Scheme, Ty, Unifier};
+use ral_core::typecheck::{CompTy, Field, Label, PayloadRoute, Row, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map, sig};
 use ral_core::{Shell, Value};
@@ -608,10 +608,10 @@ fn scheme_ed_set(u: &mut Unifier) -> Scheme {
     let rho = u.fresh_row_var();
     let record = Ty::Record(Row::Extend(
         Label::Field("text".into()),
-        Box::new(Ty::String),
+        Field::present(Ty::String),
         Box::new(Row::Extend(
             Label::Field("cursor".into()),
-            Box::new(Ty::Int),
+            Field::present(Ty::Int),
             Box::new(Row::Var(rho)),
         )),
     ));

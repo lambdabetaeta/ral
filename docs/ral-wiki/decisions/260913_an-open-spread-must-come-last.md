@@ -1,9 +1,22 @@
 ---
-status: active
+status: superseded
 generated_at_commit: 07b87759
+superseded_by: decisions/260921_a-field-is-a-flag-and-a-type
 ---
 
 # An open spread must come last
+
+> **Superseded** by
+> [[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]].
+> A record literal is no longer the concatenation of its parts but a **put**
+> over one base, so there is no last part for an open spread to be, `T0023` is
+> gone, and a second base is refused at parse instead. What that decision
+> bought — a presence flag per field — is the very thing this page records as
+> rejected, and the price it feared is paid differently: the flag is a fifth
+> unifier sort, but absence is remembered *at a type* (`δ_l`), which is what
+> keeps the algebra unitary and the `Scheme` free of a predicate slot. The
+> reading below is kept for its account of why concatenation has no mgu, which
+> stands.
 
 **A record literal's row is the concatenation of its parts, and a spread whose
 own row is still open may therefore be the last part only.** Anything written

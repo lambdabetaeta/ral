@@ -455,26 +455,19 @@ fn map_spread_non_overlapping_fields_accessible() {
 }
 
 #[test]
-fn map_multiple_spreads_explicit_wins() {
-    // With two spreads, the explicit field must still take priority.
-    let v = must_succeed(
-        "let a = [x: 1, z: 10]\nlet bb = [y: 2, z: 20]\nlet r = [...$a, ...$bb, z: 99]\nreturn $r[z]",
-    );
+fn record_put_overwrites_the_base() {
+    // A written entry beats the base at that label, wherever it sits.
+    let v = must_succeed("let a = [x: 1, z: 10]\nlet r = [...$a, z: 99]\nreturn $r[z]");
     assert_eq!(v, Value::Int(99));
 }
 
 #[test]
-fn record_merge_first_spread_wins() {
-    // A record merge is a record literal: the explicit field settles its
-    // shape, and the first spread's fields win, so defaults go last.
-    let v = must_succeed(
-        "let dflt = [host: 'local', port: 80]\n\
-         let given = [host: 'prod']\n\
-         return [tier: 'a', ...$given, ...$dflt]",
-    );
+fn a_put_is_flat() {
+    // `[...b, l: v]` is the record `b` is, with `l` overwritten — no second
+    // entry survives for the base's old value to hide behind.
     assert_eq!(
-        v,
-        must_succeed("return [tier: 'a', host: 'prod', port: 80]"),
+        must_succeed("return [...[x: 'old', y: 2], x: 1]"),
+        must_succeed("return [x: 1, y: 2]"),
     );
 }
 
@@ -505,14 +498,12 @@ fn record_with_explicit_entry_and_spread() {
 }
 
 #[test]
-fn record_merge_destructures_to_each_winner() {
-    // A merge is assembled where the records are known; the pattern then reads
-    // the winner of each field — the given value where it has one, the default
-    // where it does not.
+fn a_put_destructures_to_each_winner() {
+    // The pattern reads the winner of each field — the written value where
+    // there is one, the base's where there is not.
     let v = must_succeed(
         "let dflt = [host: 'local', port: 80]\n\
-         let given = [host: 'prod']\n\
-         let [host: hn, port: pn] = [tier: 'a', ...$given, ...$dflt]\n\
+         let [host: hn, port: pn] = [tier: 'a', ...$dflt, host: 'prod']\n\
          return [h: $hn, p: $pn]",
     );
     assert_eq!(v, must_succeed("return [h: 'prod', p: 80]"));

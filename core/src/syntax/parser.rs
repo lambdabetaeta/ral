@@ -824,7 +824,20 @@ impl Parser {
         let mut entries = Vec::new();
 
         self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
-            let key = p.parse_static_key()?;
+            let (key_span, key) = p.capture_span(Self::parse_static_key)?;
+            // Parsed keys, not token spellings: `[a: x, 'a': y]` repeats and
+            // `[a: [a: x]]` does not.  A record has one value per field, so a
+            // repeated label is a mistake about the pattern, not about the
+            // value it is matched against — and it needs no types to see.
+            if entries.iter().any(|e: &MapPatternEntry| e.key == key) {
+                return Err(Self::error_at(
+                    key_span,
+                    format!(
+                        "this pattern binds '{key}' twice, and a record has one value per \
+                         field — keep whichever '{key}' you meant"
+                    ),
+                ));
+            }
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
             entries.push(MapPatternEntry { key, pattern });
@@ -1228,10 +1241,10 @@ impl Parser {
             items.push(p.parse_collection_item()?);
             Ok(SepFlow::Cont)
         })?;
-        Ok(items
+        items
             .into_iter()
             .try_fold(literal, Literal::push)?
-            .into_ast())
+            .into_ast()
     }
 
     /// item = '...' atom | mapkey ':' atom | atom
@@ -1542,19 +1555,44 @@ impl Literal {
         }
     }
 
-    fn into_ast(self) -> Ast {
+    /// Read against the bracket's *final* classification, never while it is
+    /// being built: `push` walks list → record → map, so `[...[:], ...[:], x:
+    /// 1, $k: 2]` is a map and its two spreads are entries, not bases.
+    fn into_ast(self) -> Result<Ast, ParseError> {
         match self {
-            Self::List(elems) => Ast::List(elems),
-            Self::Record(items) => Ast::Record(
-                items
-                    .into_iter()
-                    .map(|item| match item {
-                        StaticItem::Spread(a) => RecordEntry::Spread(a),
-                        StaticItem::Field { key, value } => RecordEntry::Field { key, value },
+            Self::List(elems) => Ok(Ast::List(elems)),
+            Self::Record(items) => {
+                // A record literal is a *put* over one base: the written
+                // entries overwrite that base's fields and the base supplies
+                // the rest.  Two bases would be a merge, and which of two
+                // unknown remainders wins is a question the literal cannot
+                // answer.
+                if let Some(second) = items
+                    .iter()
+                    .filter_map(|i| match i {
+                        StaticItem::Spread(a) => Some(a),
+                        StaticItem::Field { .. } => None,
                     })
-                    .collect(),
-            ),
-            Self::Map { entries, .. } => Ast::Map(entries),
+                    .nth(1)
+                {
+                    return Err(elem_error(
+                        second,
+                        "a record can be written over one other record, not two — \
+                         write out the fields you need from this one, as in \
+                         `[...$base, y: $other[y]]`, or merge them in a block",
+                    ));
+                }
+                Ok(Ast::Record(
+                    items
+                        .into_iter()
+                        .map(|item| match item {
+                            StaticItem::Spread(a) => RecordEntry::Spread(a),
+                            StaticItem::Field { key, value } => RecordEntry::Field { key, value },
+                        })
+                        .collect(),
+                ))
+            }
+            Self::Map { entries, .. } => Ok(Ast::Map(entries)),
         }
     }
 }

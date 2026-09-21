@@ -17,14 +17,20 @@ A variant makes the two cases distinct in the type and forces the consumer to
 handle both.
 
 Record fields give a second route to the same end, but only so far:
-[[design/row-types|scoped labels]] and spread shadowing express defaults at the
+[[design/row-types|scoped labels]] and the put rule express defaults at the
 level of data **when the records being merged are known where the merge is
 written**. Over a record whose fields are not known there — a row-polymorphic
-parameter — no merge can supply a default, because a spread wins on any field
-it turns out to carry and nothing behind it could then be read
-([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
-A field that may or may not be there is therefore a variant, like any other
-absence.
+parameter — no merge can supply a default, and the reason is no longer that the
+type cannot *say* a field may be missing. It can: a row's slot carries a
+presence flag, and `l?: τ` reads "a `τ`, if it is there"
+([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+What there is no way to write is the *elimination*. **Presence has no
+elimination form**: no rule branches on a flag and no term asks whether a field
+is there, which is what keeps the flag parametric and makes forgetting an
+absent field's payload lossless — no program could have read what the
+traversals stop at. Presence exists to type a form's options and to give the
+put rule a polymorphic type, not to be observed by ral code. A field that may or
+may not be there is therefore still a variant, like any other absence.
 
 This is a hard rule: do not add an `Option`/`Maybe` builtin or a null literal;
 reach for an open variant.

@@ -166,9 +166,11 @@ pub enum TypeErrorKind {
     RecursiveRow,
     /// Nesting past the unifier's depth ceiling — a stack-overflow guard.
     TypeTooDeep,
+    /// Boxed: two `Ty`s inline make this enum the largest thing every
+    /// `Result` in the unifier carries, and a mismatch is the cold path.
     TyMismatch {
-        expected: Ty,
-        actual: Ty,
+        expected: Box<Ty>,
+        actual: Box<Ty>,
     },
     CompTyMismatch {
         expected: CompTy,
@@ -194,16 +196,6 @@ pub enum TypeErrorKind {
     /// last-wins, so it is refused rather than given a direction.
     DuplicateField {
         label: String,
-    },
-    /// A spread whose row is still open, with lower-precedence entries behind
-    /// it.  A row has one open end, so nothing can be placed after an unknown
-    /// remainder — and the spread would win on any field it happened to carry,
-    /// which is why `unreachable` can never be read.  `rest_open` marks a
-    /// remainder that is itself open: two spreads cannot both come last, so
-    /// the remedy is to name fields, not to reorder.
-    OpenSpreadNotLast {
-        unreachable: Vec<String>,
-        rest_open: bool,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     /// The flag marks a head/args shape suggesting a string split by a stray quote.
@@ -306,7 +298,6 @@ impl TypeErrorKind {
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
             Self::DuplicateField { .. } => "T0022",
-            Self::OpenSpreadNotLast { .. } => "T0023",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",

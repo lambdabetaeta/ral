@@ -1,9 +1,19 @@
 ---
-status: active
+status: superseded in part
 generated_at_commit: a3ff030d
+superseded_by: decisions/260921_a-field-is-a-flag-and-a-type
 ---
 
 # Absence is merged, not defaulted
+
+> **Superseded in part** by
+> [[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]].
+> The deletion of map-pattern defaults stands, and so does the reason for it.
+> What does not is the *migration spelling*: a record literal is now a put over
+> **one** base, so `[tier: 'a', ...$given, ...$dflt]` no longer parses.
+> Write the put — `[...$dflt, ...]` with the given fields written out, or a
+> block, whose merge is application — and over a record whose fields are not
+> known where the merge is written, absence still travels as a variant.
 
 **A missing field is filled by merging in a record that supplies it, not by
 attaching a fallback expression to the pattern that reads it.** Two changes

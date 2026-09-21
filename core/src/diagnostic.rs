@@ -581,8 +581,8 @@ mod tests {
         let err = TypeError {
             pos: Some(sp),
             kind: TypeErrorKind::TyMismatch {
-                expected: crate::typecheck::Ty::Int,
-                actual: crate::typecheck::Ty::String,
+                expected: Box::new(crate::typecheck::Ty::Int),
+                actual: Box::new(crate::typecheck::Ty::String),
             },
             reason: Some(crate::typecheck::Reason::IfCond),
         };

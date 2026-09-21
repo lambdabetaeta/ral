@@ -23,7 +23,7 @@ use crate::fleet::desk::Selection;
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
-use ral_core::typecheck::{Label, Row, RowVar, Scheme, Ty, Unifier};
+use ral_core::typecheck::{Field, Label, Row, RowVar, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
@@ -843,7 +843,7 @@ fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
     for (label, ty) in tags.iter().rev() {
         row = Row::Extend(
             Label::Case((*label).to_string()),
-            Box::new(ty.clone()),
+            Field::present(ty.clone()),
             Box::new(row),
         );
     }
@@ -863,7 +863,7 @@ fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
     for (label, ty) in fields.iter().rev() {
         row = Row::Extend(
             Label::Field((*label).to_string()),
-            Box::new(ty.clone()),
+            Field::present(ty.clone()),
             Box::new(row),
         );
     }

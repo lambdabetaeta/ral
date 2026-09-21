@@ -6,7 +6,7 @@
 //! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::Scheme;
-use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, Field, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use std::collections::HashMap;
 
 // One alphabet per kind of unification variable, kept disjoint so a letter
@@ -109,8 +109,10 @@ impl FmtCtx {
                     self.row_names.insert(*v, pick(ROW_LETTERS, idx));
                 }
             }
-            Row::Extend(_, ty, rest) => {
-                self.absorb_ty(ty);
+            Row::Extend(_, f, rest) => {
+                if let Some(ty) = f.payload() {
+                    self.absorb_ty(ty);
+                }
                 self.absorb_row(rest);
             }
         }
@@ -158,6 +160,18 @@ pub(crate) fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
     fmt_row_with_sep(row, ctx, ", ", "")
 }
 
+/// Whether a row ends in a tail variable rather than `Empty`.
+fn row_ends_open(row: &Row) -> bool {
+    let mut cur = row;
+    loop {
+        match cur {
+            Row::Empty => return false,
+            Row::Var(_) => return true,
+            Row::Extend(_, _, rest) => cur = rest,
+        }
+    }
+}
+
 /// Shared body for record and variant rows. `tail_sigil` marks an open tail as
 /// belonging to that row kind; a named tail appends its row variable.
 fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> String {
@@ -175,11 +189,23 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> Str
                 });
                 break;
             }
-            Row::Extend(l, ty, rest) => {
+            // `l: τ` present, `l?: τ` present-or-not, nothing at all for an
+            // absent field before `Empty` — which is the equation
+            // `(l : Absent ; Empty) = Empty`.  Before an open tail that
+            // equation does not hold and no rule produces the shape, so it is
+            // printed `l: ∅` where a bug would otherwise be invisible.
+            Row::Extend(l, f, rest) => {
                 // Row unification walks the spine head-first and matches the
                 // first occurrence of a label, so show only that one.
                 if seen.insert(l.clone()) {
-                    parts.push(format!("{l}: {}", fmt_ty_ctx(ty, ctx)));
+                    match f {
+                        Field::Present(ty) => parts.push(format!("{l}: {}", fmt_ty_ctx(ty, ctx))),
+                        Field::Var(_, ty) => {
+                            parts.push(format!("{l}?: {}", fmt_ty_ctx(ty, ctx)));
+                        }
+                        Field::Absent if row_ends_open(rest) => parts.push(format!("{l}: ∅")),
+                        Field::Absent => {}
+                    }
                 }
                 cur = rest;
             }
@@ -260,6 +286,10 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
         row_names: names_in_order(&scheme.row_vars, ROW_LETTERS),
     };
 
+    // Presence variables are quantified but deliberately unnamed: a flag has
+    // no structure to say anything about, and `l?: τ` already reads "a τ, if
+    // it is there".  Where sharing between two instantiations matters, the
+    // test asserts on unifier roots rather than on this text.
     let quant_parts: Vec<String> = ty_order
         .iter()
         .map(|v| ctx.ty_names[v].clone())
@@ -293,6 +323,7 @@ mod tests {
             comp_ty_vars: vec![],
             route_vars: vec![],
             row_vars: vec![],
+            presence_vars: vec![],
             ty: Ty::List(Box::new(Ty::Var(root))),
             comp_ty_bindings: vec![],
             ty_bindings: vec![(root.0, Ty::List(Box::new(Ty::Var(root))))],

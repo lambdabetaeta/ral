@@ -6,16 +6,19 @@
 
 use super::env::TyEnv;
 use super::scheme::Scheme;
-use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use super::ty::{
+    CompTy, CompTyVar, Field, PayloadRoute, PayloadVar, PresenceVar, Row, RowVar, Ty, TyVar,
+};
 use super::unify::{Unifier, Visited};
 use std::collections::{HashMap, HashSet};
 
-/// All four variable kinds, collected in one traversal.
+/// All five variable kinds, collected in one traversal.
 pub(crate) struct FreeVars {
     pub(crate) tys: HashSet<TyVar>,
     pub(crate) comps: HashSet<CompTyVar>,
     pub(crate) routes: HashSet<PayloadVar>,
     pub(crate) rows: HashSet<RowVar>,
+    pub(crate) presences: HashSet<PresenceVar>,
 }
 
 impl FreeVars {
@@ -25,6 +28,7 @@ impl FreeVars {
             comps: HashSet::new(),
             routes: HashSet::new(),
             rows: HashSet::new(),
+            presences: HashSet::new(),
         }
     }
 
@@ -33,6 +37,7 @@ impl FreeVars {
         self.comps.extend(&cached.comp_fv);
         self.routes.extend(&cached.route_fv);
         self.rows.extend(&cached.row_fv);
+        self.presences.extend(&cached.presence_fv);
     }
 
     pub(crate) fn merge_into(self, target: &mut Self) {
@@ -40,6 +45,7 @@ impl FreeVars {
         target.comps.extend(self.comps);
         target.routes.extend(self.routes);
         target.rows.extend(self.rows);
+        target.presences.extend(self.presences);
     }
 
     /// Instantiation mints these fresh, so they are not free in the environment.
@@ -56,6 +62,9 @@ impl FreeVars {
         for v in &s.row_vars {
             self.rows.remove(v);
         }
+        for v in &s.presence_vars {
+            self.presences.remove(v);
+        }
     }
 
     /// The *residual* free vars — mentioned by `env`, so left unquantified.
@@ -65,6 +74,11 @@ impl FreeVars {
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
             route_fv: self.routes.intersection(&env.routes).copied().collect(),
             row_fv: self.rows.intersection(&env.rows).copied().collect(),
+            presence_fv: self
+                .presences
+                .intersection(&env.presences)
+                .copied()
+                .collect(),
         }
     }
 }
@@ -105,8 +119,18 @@ fn free_row_inner(u: &mut Unifier, row: &Row, out: &mut FreeVars, visited: &mut 
         Row::Var(v) => {
             out.rows.insert(v);
         }
-        Row::Extend(_, ty, rest) => {
-            free_ty_inner(u, &ty, out, visited);
+        // Through `resolve_field`, because a retired payload was united with
+        // `δ_l`: walking it would put an assignment variable in the free set
+        // and let `generalize` quantify one.
+        Row::Extend(_, f, rest) => {
+            match u.resolve_field(&f) {
+                Field::Present(ty) => free_ty_inner(u, &ty, out, visited),
+                Field::Var(v, ty) => {
+                    out.presences.insert(v);
+                    free_ty_inner(u, &ty, out, visited);
+                }
+                Field::Absent => {}
+            }
             free_row_inner(u, &rest, out, visited);
         }
     }
@@ -170,12 +194,20 @@ pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     let comp_ty_vars = fvs.comps.difference(&env_fvs.comps).copied();
     let route_vars: Vec<PayloadVar> = fvs.routes.difference(&env_fvs.routes).copied().collect();
     let row_vars: Vec<RowVar> = fvs.rows.difference(&env_fvs.rows).copied().collect();
+    let presence_vars: Vec<PresenceVar> = fvs
+        .presences
+        .difference(&env_fvs.presences)
+        .copied()
+        .collect();
 
     // Cached so later `env_free_vars` calls read the sets instead of re-walking
     // this scheme's type tree.  Empty for top-level bindings.
     let residuals = fvs.intersect_into_cached(&env_fvs);
-    // Holds by construction: residuals come from monomorphic env bindings that
-    // outlive every scheme mentioning them, so no later step moves or binds one.
+    // Holds for the sorts checked: residuals come from monomorphic env
+    // bindings that outlive every scheme mentioning them, so no later step
+    // moves or binds one.  *Value* residuals are excluded, because retiring a
+    // field unites its payload with `δ_l` and can re-home a cached `α` that
+    // way — erasure kills no variable, but the union that saves it moves it.
     #[allow(
         clippy::debug_assert_with_mut_call,
         reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
@@ -235,6 +267,7 @@ pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
         comp_ty_vars,
         route_vars,
         row_vars,
+        presence_vars,
         ty: applied,
         comp_ty_bindings,
         ty_bindings,
@@ -243,20 +276,18 @@ pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
 }
 
 fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFreeVars) -> bool {
-    residuals
-        .ty_fv
+    residuals.comp_fv.iter().all(|v| {
+        u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
+    }) && residuals.route_fv.iter().all(
+        |v| matches!(u.resolve_route(PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v),
+    ) && residuals
+        .row_fv
         .iter()
-        .all(|v| u.ty_root(v.0) == v.0 && matches!(u.resolve_ty(&Ty::Var(*v)), Ty::Var(_)))
-        && residuals.comp_fv.iter().all(|v| {
-            u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
-        })
-        && residuals.route_fv.iter().all(
-            |v| matches!(u.resolve_route(PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v),
-        )
+        .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
         && residuals
-            .row_fv
+            .presence_fv
             .iter()
-            .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
+            .all(|v| u.presence_root(v.0) == v.0 && u.resolve_presence(*v).is_none())
 }
 
 /// A scheme is *closed* when every free variable in its body is quantified or
@@ -279,6 +310,10 @@ pub(crate) fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
             .all(|v| scheme.comp_ty_vars.contains(v) || comp_roots.contains(&v.0))
         && fvs.routes.iter().all(|v| scheme.route_vars.contains(v))
         && fvs.rows.iter().all(|v| scheme.row_vars.contains(v))
+        && fvs
+            .presences
+            .iter()
+            .all(|v| scheme.presence_vars.contains(v))
 }
 
 /// Guards closure at the three empty-environment generalisation sites —
@@ -324,6 +359,11 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
             .iter()
             .map(|&v| (v, u.fresh_row_var()))
             .collect(),
+        pm: scheme
+            .presence_vars
+            .iter()
+            .map(|&v| (v, u.fresh_presence_var()))
+            .collect(),
         cm: cm.clone(),
         tcm: tcm.clone(),
     };
@@ -341,12 +381,13 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     sm.ty(&scheme.ty)
 }
 
-/// Simultaneous substitution over all four variable kinds.  `cm` and `tcm`
+/// Simultaneous substitution over all five variable kinds.  `cm` and `tcm`
 /// carry the cyclic back-edge roots — empty for non-recursive schemes.
 struct SubstMap {
     tm: HashMap<TyVar, TyVar>,
     rtm: HashMap<PayloadVar, PayloadVar>,
     rm: HashMap<RowVar, RowVar>,
+    pm: HashMap<PresenceVar, PresenceVar>,
     cm: HashMap<u32, u32>,
     tcm: HashMap<u32, u32>,
 }
@@ -378,8 +419,19 @@ impl SubstMap {
         match row {
             Row::Empty => Row::Empty,
             Row::Var(v) => self.rm.get(v).map_or_else(|| row.clone(), |&f| Row::Var(f)),
-            Row::Extend(l, ty, rest) => {
-                Row::Extend(l.clone(), Box::new(self.ty(ty)), Box::new(self.row(rest)))
+            Row::Extend(l, f, rest) => {
+                Row::Extend(l.clone(), self.field(f), Box::new(self.row(rest)))
+            }
+        }
+    }
+
+    fn field(&self, field: &Field) -> Field {
+        match field {
+            Field::Present(ty) => Field::Present(Box::new(self.ty(ty))),
+            Field::Absent => Field::Absent,
+            Field::Var(v, ty) => {
+                let fresh = self.pm.get(v).copied().unwrap_or(*v);
+                Field::Var(fresh, Box::new(self.ty(ty)))
             }
         }
     }

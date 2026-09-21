@@ -343,9 +343,12 @@ fn map_spread_field_absent_from_closed_source_is_error() {
 }
 
 #[test]
-fn map_multiple_spreads_no_crash() {
-    // Multiple spreads fall back to an imprecise open tail but must not crash.
-    ok("let a = [x: 1]; let b = [y: 2]; let r = [...$a, ...$b, z: 3]; return $r[z]");
+fn a_record_literal_is_a_put_over_one_base() {
+    // The base's other fields survive the put, and the written one wins at
+    // the type written whatever the base held there.
+    ok("let base = [host: localhost, port: 80]\n\
+        let r = [...$base, port: 'nine']\n\
+        return [$r[host], $r[port]]");
 }
 
 // ─── Pattern binding ──────────────────────────────────────────────────────────
@@ -2772,27 +2775,25 @@ fn caret_echo_is_exec_gated_like_any_path_binary() {
 
 // ─── Row termination, precedence, and duplicate keys ──────────────────────────
 //
-// These pin four row-subsystem repairs: row unification must terminate with an
-// infinite-row error, rather than looping forever, when a row cycle has no
-// finite or rational solution — whether the cycle sits at the row spine or is
-// reached through a field type; a record literal's row must stay constrained by
-// every spread it is built from, in precedence order; and a label written twice
-// in one literal, record or case, must be refused rather than resolved.  Before
-// the fix, the first two overflowed the host stack during `--check`.
+// Row unification must terminate with an infinite-row error, rather than
+// looping forever, when a row cycle has no finite or rational solution — and
+// the occurs check reaches a cycle through a field type as well as one along
+// the spine.  A record literal's row must stay constrained by the base it is
+// put over, one base only, and a label written twice — in a literal, a pattern
+// or a `case` — must be refused rather than resolved.  Before the fix, the
+// cycle cases overflowed the host stack during `--check`.
 
-/// Both branches spread the *same* parameter row, so `merge_branches`
-/// unifies `{x: Int | ρ}` against `{y: Int | ρ}` over one shared tail ρ.  The
-/// Rémy rewrite has no finite or rational solution for mismatched heads over a
-/// shared tail; the unifier must report the infinite-row error rather than
-/// re-entering with a fresh tail forever.
+/// Both branches put over the *same* parameter row, and under the put rule
+/// that has a solution: each branch demands a slot at both labels — `x` and
+/// `y` at variable flags over fresh payloads — and writes one of them, so the
+/// two results agree at `(x: Int, y: Int | ρ)` with no recursion anywhere.
+/// Under row *extension* this program reported an infinite row, and the change
+/// of verdict is the put rule's, not a regression.
 #[test]
-fn row_shared_tail_mismatched_heads_is_recursive_row_error() {
-    has_error(
-        "let c = true\n\
-         let f = { |r| if $c { return [x: 1, ...$r] } else { return [y: 2, ...$r] } }\n\
-         return $f",
-        "infinite row",
-    );
+fn a_put_in_both_branches_over_one_tail_has_a_solution() {
+    ok("let c = true\n\
+        let f = { |r| if $c { return [x: 1, ...$r] } else { return [y: 2, ...$r] } }\n\
+        return $f");
 }
 
 /// The else branch builds a record whose field type is itself a record
@@ -2809,74 +2810,99 @@ fn row_cycle_through_field_type_is_recursive_row_error() {
     );
 }
 
-/// Several spreads in one literal each keep constraining the result: the row
-/// is their concatenation in precedence order, not a fresh variable that
-/// believes whatever it is later asked to.  Reading a known field at the wrong
-/// type is an error, and a field no spread supplies does not exist.
+/// The base keeps constraining the result: reading one of its fields at the
+/// wrong type is an error, and a field it does not supply does not exist.
 #[test]
-fn multiple_spreads_keep_constraining_the_result() {
+fn the_base_keeps_constraining_the_result() {
     has_error(
-        "let r = [dummy: 0, ...[flag: 1], ...[other: 2]]\nreturn $[$r[flag] + true]",
+        "let r = [dummy: 0, ...[flag: 1]]\nreturn $[$r[flag] + true]",
         "couldn't match",
     );
     has_error(
-        "let r = [dummy: 0, ...[flag: 1], ...[other: 2]]\nreturn $r[nope]",
+        "let r = [dummy: 0, ...[flag: 1]]\nreturn $r[nope]",
         "no field named 'nope'",
     );
 }
 
-/// Precedence is chain position: the earlier spread wins, so its field type is
-/// the one the result reports.
+/// A record literal is written over one other record, and two bases are
+/// refused where they are written: which of two unknown remainders wins is a
+/// question a literal cannot answer, and selecting on inference state is how a
+/// verdict comes to depend on where a statement was written.  The refusal
+/// needs no types, so it is the parser's.
 #[test]
-fn first_spread_wins_in_the_type() {
-    ok("let r = [x: 0, ...[p: 1], ...[p: \"s\"]]\nreturn $[$r[p] + 1]");
-    has_error(
-        "let r = [x: 0, ...[p: \"s\"], ...[p: 1]]\nreturn $[$r[p] + 1]",
-        "couldn't match",
-    );
+fn a_second_base_is_refused() {
+    for src in [
+        "let a = [x: 1]\nlet b = [y: 's']\nreturn [...$a, ...$b, z: true]",
+        "let f = { |a b| return [x: 0, ...$a, ...$b] }\nreturn $f",
+    ] {
+        let err = parse(src).expect_err("a record over two bases must not parse");
+        assert!(
+            err.message.contains("one other record, not two"),
+            "expected the one-base refusal, got: {}",
+            err.message
+        );
+    }
+    // The rule is read against the bracket's final classification: a computed
+    // key makes this a map, whose spreads are entries and not bases.
+    ok("let k = 'a'\nreturn [...[:], ...[:], x: 1, $k: 2]");
+    // And a list's spreads were never bases either.
+    ok("let xs = [1]\nlet ys = [2]\nreturn [...$xs, ...$ys, 5]");
 }
 
-/// A row has one open end, so a spread whose fields are not known here can have
-/// nothing placed behind it — and since such a spread wins on any field it
-/// turns out to carry, those entries could never be read.  This is why defaults
-/// cannot be merged behind an unknown record: absence is a variant's job
-/// (`optionality-via-variants`), not a record's.  The mirror order, where the
-/// known record takes precedence, is exact and stays legal.
+/// A put over a base whose fields are not known here is exact: the written
+/// entry overwrites that label's slot whatever the base holds, and the base's
+/// own tail carries the rest through.
 #[test]
-fn an_open_spread_must_come_last() {
-    has_error(
-        "let dflt = [host: 'local', port: 80]\n\
-         let f = { |g| return [x: 0, ...$g, ...$dflt] }\n\
-         return $f",
-        "has to come last",
-    );
-    has_error(
-        "let f = { |a b| return [x: 0, ...$a, ...$b] }\nreturn $f",
-        "has to come last",
-    );
-    ok("let f = { |g| return [x: 0, ...[tag: 1], ...$g] }\nreturn $f");
-    ok("let dflt = [host: 'local', port: 80]\n\
-        let given = [host: 'prod']\n\
-        let r = [x: 0, ...$given, ...$dflt]\n\
-        return $[$r[port] + 1]");
+fn a_put_over_an_unknown_base_is_polymorphic() {
+    ok("let f = { |g| return [x: 0, ...$g] }\n\
+        let a = $f [x: 'shadowed']\n\
+        let b = $f [y: 1]\n\
+        return [$a[x], $b[x], $b[y]]");
 }
 
 /// A block's parameter is not open when the call determines it: the body is
 /// checked after the spine is unified, so `map`'s element type is known before
-/// the literal inside decides whether its spreads are open.  Two spreads of
-/// such a parameter therefore compose exactly, as two known records do.
+/// the literal inside puts over it, and the put's result is exact.
 #[test]
 fn a_block_parameter_is_known_from_its_call() {
     ok("let vs = [[w: 'n', b: 'b']]\n\
-        let ps = [[a: 'P', k: false]]\n\
-        let o = flat-map { |v| map { |p| [...$v, ...$p, n: \"x\"] } $ps } $vs\n\
-        return $o[0][a]");
+        let o = map { |v| [...$v, n: \"x\"] } $vs\n\
+        return $o[0][b]");
     // The element type reaches the body, so a field the list has not got is
     // still refused there.
     has_error(
         "let vs = [[w: 'n']]\nlet o = map { |v| [...$v, n: \"x\"] } $vs\nreturn $o[0][nope]",
         "no field named 'nope'",
     );
+}
+
+/// A record pattern binding one label twice is refused where it is written.
+/// It needs no types to see, so a repeat must not arrive as a complaint about
+/// the value being matched — which is what it used to be.  The comparison is
+/// of parsed keys, not token spellings, and it does not reach into a nested
+/// pattern.
+#[test]
+fn a_repeated_pattern_label_is_refused_at_parse() {
+    for src in ["let [a: x, a: y] = [a: 1]", "let [a: x, 'a': y] = [a: 1]"] {
+        let err = parse(src).expect_err("a repeated pattern label must not parse");
+        assert!(
+            err.message.contains("binds 'a' twice"),
+            "expected the repeated-label refusal, got: {}",
+            err.message
+        );
+    }
+    ok("let [a: [a: x]] = [a: [a: 1]]\nreturn $x");
+}
+
+/// Deferred block checking is what gives an inline lambda's parameter a type
+/// before its body is checked; an extracted one is inferred on its own, where
+/// nothing constrains the index, and unifying afterwards cannot recover it.
+/// That gap is a known soundness hole, pinned here as it stands rather than
+/// claimed closed: deleting the deferral would widen it, not repair it.
+#[test]
+fn an_inline_body_is_checked_where_an_extracted_one_is_not() {
+    has_error("map { |x| $x[$x] } [1]", "index a value of type Integer");
+    ok("let f = { |x| $x[$x] }\nmap $f [1]");
 }
 
 /// A field written twice in one literal is refused, in either order: every

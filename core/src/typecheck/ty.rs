@@ -23,6 +23,21 @@ pub struct TyVar(pub u32);
 )]
 pub struct RowVar(pub u32);
 
+/// Unification variable for a field's presence flag.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct PresenceVar(pub u32);
+
+/// Whether a presence variable turned out to name a field that is there.
+/// Two constants: a variable standing for another variable is the store's
+/// business, not this type's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Presence {
+    Present,
+    Absent,
+}
+
 /// Unification variable for computation types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -62,16 +77,52 @@ impl Ty {
     }
 }
 
-/// A finite sequence of labelled types, closed by `Empty` or left open by a
+/// A finite sequence of labelled fields, closed by `Empty` or left open by a
 /// tail variable.
 ///
 /// `Unifier::unify_row` follows the Rémy (1989) rewrite: two `Extend` nodes
 /// with different labels are swapped past each other into a shared fresh tail.
+///
+/// `Empty` says *every label not on the spine is absent, at the type the
+/// ambient assignment gives that label* — the same sentence [`Field::Absent`]
+/// makes about one label.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
-    Extend(Label, Box<Ty>, Box<Self>),
+    Extend(Label, Field, Box<Self>),
     Var(RowVar),
+}
+
+/// A slot on a row: whether the record has this label, and what it holds.
+///
+/// `Absent` stores nothing: a dead payload is `δ_l`, recoverable from the
+/// label, so there is none beside an absent field to read, key, quantify or
+/// occurs-check.  A field whose presence is still unknown does carry its
+/// type: `Var(θ, τ)` reads "a `τ`, if it is there".
+///
+/// The payload is boxed because `Ty → Row → Field → Ty` has no indirection
+/// anywhere else on the cycle.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Field {
+    Present(Box<Ty>),
+    Absent,
+    Var(PresenceVar, Box<Ty>),
+}
+
+impl Field {
+    /// The one field every term rule builds: one the program wrote down.
+    pub fn present(ty: Ty) -> Self {
+        Self::Present(Box::new(ty))
+    }
+
+    /// What the field holds, or `None` for an absent one — whose payload is
+    /// `δ_l`, and so the label's to name rather than the field's.
+    pub fn payload(&self) -> Option<&Ty> {
+        match self {
+            Self::Present(t) | Self::Var(_, t) => Some(t),
+            Self::Absent => None,
+        }
+    }
 }
 
 /// A row label together with the alphabet it is drawn from.

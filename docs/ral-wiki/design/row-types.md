@@ -1,23 +1,38 @@
 # Row-typed records
 
 **ral records are open-row-polymorphic maps with scoped-label typing**
-([[related/scoped-labels|Leijen 2005]]). `[host: String, port: Int]` has type `[host: String, port: Int | ρ]`,
-where the tail variable `ρ` stands for unknown further fields:
+([[related/scoped-labels|Leijen 2005]]), over rows whose slots carry a
+**presence flag** beside a type. `[host: String, port: Int]` has type
+`[host: String, port: Int | ρ]`, where the tail variable `ρ` stands for unknown
+further fields:
 
-- **Field selection** unifies the target with `[label: α | ρ]` and returns `α`.
+- **Field selection** unifies the target with `[label: α | ρ]` at `Present` and
+  returns `α`.
 - **Label mismatch** permutes labels past each other into a shared fresh tail
   (the Rémy 1989 rewrite).
 - **Open rows compose.** A block `{ |opts| ... }` accepts
-  `[host: String, port: Int | ρ]` and adds or overrides fields without knowing
-  the tail, so record-passing composes.
+  `[host: String, port: Int | ρ]` and overwrites fields without knowing the
+  tail, so record-passing composes.
 
-**Duplicate labels are permitted; selection takes the first.** Several
-consequences follow:
+**A slot is `Present τ`, `Absent`, or `θ·τ` — "a `τ`, if it is there"**
+(`Field` in `core/src/typecheck/ty.rs`), the flag being a variable in a
+two-point union-find. A slot prints `l: τ`, `l?: τ`, or nothing at all.
+Several consequences follow:
 
-- **A spread prepends and thus shadows.** `[...$base, port: 9090]` over
-  `$base : [host: String | ρ]` infers `[port: Int, host: String | ρ]`.
-- **No restriction operator (`Pre` / `Abs`) is needed.** The rewrite already
-  preserves the relative order of same-label entries, so shadowing is coherent.
+- **`Empty` says something.** It means *every label off the spine is absent, at
+  the type the ambient assignment gives that label* — the assignment `Δ` maps a
+  label to `δ_l`, minted the first time that label is retired, and retiring a
+  field unifies its payload with it. That is what makes the algebra unitary:
+  the solution that kills a field constrains `δ_l` rather than discarding
+  information, so it is an instance of the eager one and the eager one is the
+  most general unifier
+  ([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+- **`Absent` stores nothing.** A dead payload is recoverable from its label, so
+  `Δ`'s variables appear in no type, row or scheme — never quantified, never
+  printed, never serialised.
+- **Absence before `Empty` is an equation** — `(l: Absent ; Empty) = Empty` —
+  and absence before a *variable* tail is not: exclusion is an invariant of row
+  introduction here rather than data on the variable, as it is in Rémy.
 - **Two label alphabets, one per type former** — `Label::Field` for `Record`,
   `Label::Case` for `Variant` (`core/src/typecheck/ty.rs`) — and the two never
   unify. The alphabet is a constructor, not a character: a field named
@@ -28,36 +43,28 @@ consequences follow:
 - **Structural equality of closed records is order-insensitive:**
   `[a: 1, b: 2] == [b: 2, a: 1]`.
 
-**Explicit beats spread regardless of position, because a row is a chain and
-only one end of it is open.** A row is `Extend(label, type, rest)` ending in
-`Empty` (closed) or `Var(ρ)` (open, the unknown remainder), and
-selection-takes-first means "X beats Y" is "X sits earlier in the chain." An
-explicit entry can always be prepended onto a spread's chain, whatever that
-chain holds and however it ends — so the rule holds regardless of position,
-because position is never in question. The reverse would need the spread's
-fields to come first, i.e. the explicit entry appended after the spread's
-chain: fine if that chain ends in `Empty`, impossible if it ends in `Var(ρ)`,
-since there is no position after the remainder to append into. Making the
-reverse work for open rows needs a presence flag per field (Rémy-style
-`Pre`/`Abs`) — exactly the restriction operator the bullet above says ral does
-not have.
+**A record literal is a put over one base, not a concatenation of parts.**
+`[...b, l̄: v̄]` demands of `b` only a *slot* at each written label —
+`Record(l̄: θ̄·β̄ ; ρ)` with flags, payloads and tail fresh, nothing imposed on
+any of them — and yields `Record(l̄: Present·τ̄ ; ρ)` over that same tail. So an
+explicit entry beats the base at its label whatever the base holds there and
+wherever in the bracket it sits, position never being in question; and the
+result is *flat*, `[...[x: "old"], x: 1]` being `[x: 1]` in the type as it
+always was at run time.
 
-**The same argument binds spread against spread, and that is what the missing
-flag costs.** `[...$cfg, ...[port: 8080]]` prepends one whole chain onto
-another, so a duplicate label survives and selection-takes-first resolves it —
-but only while `$cfg`'s chain ends in `Empty`. If it ends in `Var(ρ)` there is
-again no position after the remainder, and a spread that wins on any field it
-turns out to carry would make the defaults behind it unreadable, so the literal
-is refused
-([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
-So a `Pre`/`Abs` flag buys exactly one thing scoped labels cannot: "the
-spread's value here, or this default if it lacks one" over a record whose
-fields are *not* known here. ral declines to buy it — over an unknown record,
-absence travels as a variant
-([[invariants/optionality-via-variants|optionality-via-variants]]). Reversing the
-precedence convention buys nothing either: it moves the open spread to the front,
-and the unknown operand still sits at the open end, which is still the end every
-other entry beats.
+**One base is the restriction the put rule carries.** Two bases would be a
+merge, and which of two unknown remainders wins is a question a literal cannot
+answer — selecting on how much the store happens to know is exactly how a
+verdict comes to depend on where a statement was written. So `[...$a, ...$b,
+z: true]` is refused where it is written, against the bracket's *final*
+classification: a computed key makes the bracket a map, whose spreads are
+entries and never bases, and a list's spreads never were. What a presence flag
+does **not** buy back is the merge: "the base's value here, or this default if
+it lacks one" over a record whose fields are not known here is still not
+sayable, because no rule branches on a flag. Over an unknown record, absence
+travels as a variant
+([[invariants/optionality-via-variants|optionality-via-variants]]); a record
+that exists to be merged should be a block, where the merge is application.
 
 **A `case` closes a variant row, and the syntax is what lets it.** The arms are
 written out at the `case`, so the label set is known when the rule fires: the
@@ -68,9 +75,17 @@ An *open* scrutinee row absorbs an arm label it has not been seen to construct
 principal row inference and not a gap in the proof: the row records what the
 program has shown, and the `case` is one more such showing.
 
-Scoped labels and spread shadowing are how ral expresses defaults at the level
-of data rather than argument lists, wherever the records in hand are known;
-where they are not, optionality is a variant's job — see
+**Variants share the machinery and acquire nothing.** Every flag a rule builds
+on a variant row is `Present`; the only way one acquires `Absent` is a peel,
+and a peel against a `Present` tag is the error `case` and injection want. So
+no variant row holds a resolved `Absent` and the retirement rule is a no-op
+there — but a variant shares the occurs check, the recursion guards and the key
+machinery with records, and a variant's payload may itself be a record with an
+optional field.
+
+Scoped labels and the put rule are how ral expresses defaults at the level of
+data rather than argument lists, wherever the records in hand are known; where
+they are not, optionality is a variant's job — see
 [[invariants/optionality-via-variants|optionality-via-variants]],
 [[invariants/fields-are-reached-by-name|fields-are-reached-by-name]] and [[invariants/fixed-arity|fixed-arity]].
 Rows type data only, never effects — that refusal is argued against the

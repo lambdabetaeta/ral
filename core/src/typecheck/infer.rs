@@ -7,7 +7,7 @@ use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
-use super::ty::{CompTy, GroundRoute, Label, PayloadRoute, Row, Ty};
+use super::ty::{CompTy, Field, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
     ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Phrase, Register,
     Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
@@ -40,7 +40,10 @@ enum ArgvBoundary<'a> {
 /// `None` when the two sets agree, which leaves the row error to speak for
 /// itself: the rows then differ in a payload rather than in coverage.
 fn coverage_verdict(scrutinee: &Row, arms: &[Label]) -> Option<TypeErrorKind> {
-    let produced: Vec<Label> = collect_extends(scrutinee).into_iter().map(|(l, _)| l).collect();
+    let produced: Vec<Label> = collect_extends(scrutinee)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
     let missing: Vec<String> = produced
         .iter()
         .filter(|l| !arms.contains(l))
@@ -72,15 +75,18 @@ fn row_is_open(row: &Row) -> bool {
 }
 
 /// first non-`Extend`.  A repeated label keeps the head payload, as selection
-/// and `unify_row` both do.
+/// and `unify_row` both do; a label the row says is absent carries no payload
+/// and is no more on offer than one the spine never named.
 fn collect_extends(row: &Row) -> Vec<(Label, Ty)> {
     let mut out: Vec<(Label, Ty)> = Vec::new();
     let mut cur = row;
     loop {
         match cur {
-            Row::Extend(l, ty, rest) => {
-                if !out.iter().any(|(k, _)| k == l) {
-                    out.push((l.clone(), (**ty).clone()));
+            Row::Extend(l, f, rest) => {
+                if let Some(ty) = f.payload()
+                    && !out.iter().any(|(k, _)| k == l)
+                {
+                    out.push((l.clone(), ty.clone()));
                 }
                 cur = rest;
             }
@@ -313,7 +319,7 @@ impl Inferencer<'_> {
                         .fold(tail, |row, (entry, field_ty)| {
                             Row::Extend(
                                 Label::Field(entry.key.clone()),
-                                Box::new(field_ty.clone()),
+                                Field::present(field_ty.clone()),
                                 Box::new(row),
                             )
                         });
@@ -1239,7 +1245,7 @@ impl Inferencer<'_> {
         contract: Option<ReturnContract>,
     ) -> Ty {
         let mut fields: Vec<(String, Ty)> = Vec::new();
-        let mut spreads: Vec<(Option<Span>, Row)> = Vec::new();
+        let mut bases: Vec<(Option<Span>, Ty)> = Vec::new();
         for entry in entries {
             match entry {
                 ValRecordEntry::Field(key, value) => {
@@ -1255,35 +1261,42 @@ impl Inferencer<'_> {
                     fields.push((key.clone(), ty));
                 }
                 ValRecordEntry::Spread(value) => {
-                    let row = self.with_span(value.span, |this| {
-                        let spread_ty = this.infer_val(&value.item);
-                        let row = Row::Var(this.ctx.unifier.fresh_row_var());
-                        this.ctx.unify_ty(
-                            &spread_ty,
-                            &Ty::Record(row.clone()),
-                            Reason::RecordSpread,
-                        );
-                        row
-                    });
-                    spreads.push((value.span, row));
+                    let base_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                    bases.push((value.span, base_ty));
                 }
             }
         }
 
-        // Chain order is precedence order: an explicit entry beats every
-        // spread and an earlier spread a later one, which is the runtime's
-        // own two passes, and selection-takes-first does the shadowing.  So
-        // build from the low-precedence end, splicing each spread's row in
-        // whole — a literal's row is the concatenation of its parts, and
-        // nothing here may forget what a part already knows.
-        let row = spreads
-            .into_iter()
-            .rev()
-            .fold(Row::Empty, |rest, (span, spread)| {
-                self.with_span(span, |this| this.splice(&spread, rest))
+        // The put rule.  A written entry overwrites the base's slot at that
+        // label whatever the base held there, so the base is demanded only to
+        // *have a slot*: each written label at a fresh flag over a fresh
+        // payload, nothing imposed on either.  The result keeps the base's own
+        // tail and pins the written labels present at the types written.  The
+        // parser admits one base (`...` twice in a record is refused), so the
+        // whole literal shares one tail, which is what makes the row a put and
+        // not a concatenation.
+        let tail = if bases.is_empty() {
+            Row::Empty
+        } else {
+            self.ctx.unifier.fresh_row()
+        };
+        for (span, base_ty) in bases {
+            let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
+                let flag = self.ctx.unifier.fresh_presence_var();
+                let payload = self.ctx.unifier.fresh_ty();
+                Row::Extend(
+                    Label::Field(key.clone()),
+                    Field::Var(flag, Box::new(payload)),
+                    Box::new(rest),
+                )
             });
-        let row = fields.into_iter().rev().fold(row, |rest, (key, ty)| {
-            Row::Extend(Label::Field(key), Box::new(ty), Box::new(rest))
+            self.with_span(span, |this| {
+                this.ctx
+                    .unify_ty(&base_ty, &Ty::Record(probe), Reason::RecordSpread);
+            });
+        }
+        let row = fields.into_iter().rev().fold(tail, |rest, (key, ty)| {
+            Row::Extend(Label::Field(key), Field::present(ty), Box::new(rest))
         });
         Ty::Record(row)
     }
@@ -1320,50 +1333,6 @@ impl Inferencer<'_> {
             }
         }
         Ty::Map(Box::new(elem))
-    }
-
-    /// One spread's row in front of `rest`, everything the literal holds of
-    /// lower precedence.  A spread whose fields are known contributes exactly
-    /// them.  One whose row is still open can have nothing placed behind it —
-    /// a row has one open end — and since such a spread wins on any field it
-    /// turns out to carry, `rest` could never be read: the literal is refused
-    /// rather than given a tail the row algebra cannot honour.
-    fn splice(&mut self, spread: &Row, rest: Row) -> Row {
-        let rest_is_empty = matches!(rest, Row::Empty);
-        let mut known = Vec::new();
-        let mut cur = self.ctx.unifier.resolve_row(spread);
-        let tail = loop {
-            match cur {
-                Row::Extend(label, ty, next) => {
-                    known.push((label, ty));
-                    cur = self.ctx.unifier.resolve_row(&next);
-                }
-                Row::Empty => break rest,
-                Row::Var(v) if rest_is_empty => break Row::Var(v),
-                // Recovery mints a tail of its own rather than reusing the
-                // spread's: the literal is already refused, and binding this
-                // record to whatever the reader goes on to demand would report
-                // the same fault a second time against an innocent caller.
-                Row::Var(_) => {
-                    let unreachable = collect_extends(&rest)
-                        .into_iter()
-                        .map(|(l, _)| l.to_string())
-                        .collect();
-                    let mut tail = self.ctx.unifier.resolve_row(&rest);
-                    while let Row::Extend(_, _, next) = tail {
-                        tail = self.ctx.unifier.resolve_row(&next);
-                    }
-                    self.ctx.diagnose(TypeErrorKind::OpenSpreadNotLast {
-                        unreachable,
-                        rest_open: matches!(tail, Row::Var(_)),
-                    });
-                    break Row::Var(self.ctx.unifier.fresh_row_var());
-                }
-            }
-        };
-        known.into_iter().rev().fold(tail, |row, (label, ty)| {
-            Row::Extend(label, ty, Box::new(row))
-        })
     }
 
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
@@ -1445,7 +1414,7 @@ impl Inferencer<'_> {
                 let rest = self.ctx.unifier.fresh_row();
                 Ty::Variant(Row::Extend(
                     Label::Case(label.clone()),
-                    Box::new(payload_ty),
+                    Field::present(payload_ty),
                     Box::new(rest),
                 ))
             }
@@ -1574,7 +1543,7 @@ impl Inferencer<'_> {
                 let tail_row = self.ctx.unifier.fresh_row();
                 let record_ty = Ty::Record(Row::Extend(
                     Label::Field(label.to_string()),
-                    Box::new(field_ty.clone()),
+                    Field::present(field_ty.clone()),
                     Box::new(tail_row),
                 ));
                 self.ctx
@@ -1639,7 +1608,10 @@ impl Inferencer<'_> {
             let expected = this.ctx.unifier.apply_ty(scrut_payload);
             let actual = this.ctx.unifier.apply_ty(&payload_ty);
             this.ctx.report(
-                TypeErrorKind::TyMismatch { expected, actual },
+                TypeErrorKind::TyMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
+                },
                 Reason::CaseArmPayload,
             );
             this.ctx.unifier.fresh_ty()
@@ -1693,7 +1665,7 @@ impl Inferencer<'_> {
             .into_iter()
             .rev()
             .fold(Row::Empty, |rest, (l, ty)| {
-                Row::Extend(l, Box::new(ty), Box::new(rest))
+                Row::Extend(l, Field::present(ty), Box::new(rest))
             });
 
         // Force the scrutinee row to exactly the arms' label set, restating a

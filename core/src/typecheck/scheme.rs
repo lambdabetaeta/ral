@@ -3,7 +3,7 @@
 //! `generalize.rs` builds these at `let` bindings and instantiates them with
 //! fresh unification variables at each use site, giving let-polymorphism.
 
-use super::ty::{CompTy, CompTyVar, PayloadVar, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, PayloadVar, PresenceVar, RowVar, Ty, TyVar};
 use std::collections::BTreeSet;
 
 /// The free variables a scheme did *not* quantify, being already free in the
@@ -17,12 +17,17 @@ pub struct CachedFreeVars {
     pub(crate) comp_fv: BTreeSet<CompTyVar>,
     pub(crate) route_fv: BTreeSet<PayloadVar>,
     pub(crate) row_fv: BTreeSet<RowVar>,
+    #[serde(default)]
+    pub(crate) presence_fv: BTreeSet<PresenceVar>,
 }
 
-/// A polymorphic type scheme: `forall alpha_1 ... alpha_n, gamma_1 ... gamma_l, rho_1 ... rho_k, mu_1 ... mu_m. A`.
+/// A polymorphic type scheme: `forall alpha_1 ... alpha_n, gamma_1 ... gamma_l, rho_1 ... rho_k, mu_1 ... mu_m, theta_1 ... theta_j. A`.
 ///
-/// Quantifies value types, computation types, rows, and payload routes at
-/// once.  A variable caught in a cycle cannot be a plain quantifier, so
+/// Quantifies value types, computation types, rows, payload routes and
+/// presence flags at once.  A flag has no structure, so it needs no bindings
+/// map beside the two below.
+///
+/// A variable caught in a cycle cannot be a plain quantifier, so
 /// `comp_ty_bindings` and `ty_bindings` snapshot it as `(original root id,
 /// applied binding)`; instantiation mints a fresh id per entry and re-binds
 /// it, so two instantiations never share the cycle's union-find slot.
@@ -33,6 +38,8 @@ pub struct Scheme {
     pub(crate) comp_ty_vars: Vec<CompTyVar>,
     pub(crate) route_vars: Vec<PayloadVar>,
     pub(crate) row_vars: Vec<RowVar>,
+    #[serde(default)]
+    pub(crate) presence_vars: Vec<PresenceVar>,
     pub(crate) ty: Ty,
     #[serde(default)]
     pub(crate) comp_ty_bindings: Vec<(u32, CompTy)>,
@@ -52,6 +59,7 @@ impl Scheme {
             comp_ty_vars: vec![],
             route_vars: vec![],
             row_vars: vec![],
+            presence_vars: vec![],
             ty,
             comp_ty_bindings: vec![],
             ty_bindings: vec![],
@@ -65,6 +73,7 @@ impl Scheme {
             || !self.comp_ty_vars.is_empty()
             || !self.route_vars.is_empty()
             || !self.row_vars.is_empty()
+            || !self.presence_vars.is_empty()
             || !self.comp_ty_bindings.is_empty()
             || !self.ty_bindings.is_empty()
     }

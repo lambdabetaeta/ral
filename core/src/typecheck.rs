@@ -26,7 +26,9 @@ pub use self::fmt::{
 };
 pub use self::route::{PayloadRoute, PayloadVar, RouteMismatch};
 pub use self::scheme::Scheme;
-pub use self::ty::{CompTy, CompTyVar, Label, Row, RowVar, Ty, TyVar};
+pub use self::ty::{
+    CompTy, CompTyVar, Field, Label, Presence, PresenceVar, Row, RowVar, Ty, TyVar,
+};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;

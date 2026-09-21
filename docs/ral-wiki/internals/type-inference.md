@@ -1,7 +1,7 @@
 ---
-verified_at_commit: fb9107b8
-verified_at_date: 2026-09-17
-anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, infer_record_val, infer_map_val, infer_field_read, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
+verified_at_commit: 584ed719
+verified_at_date: 2026-09-21
+anchors: [Inferencer, Unifier, Pairs, unify_row, unify_field, resolve_field, Field, Presence, PresenceVar, CachedFreeVars, unify_route, infer_record_val, infer_map_val, infer_field_read, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
 # Type inference: the algorithm
@@ -29,13 +29,14 @@ the loop, against the `α` the spine has since ground. `check_comp` then pushes
 that expectation inwards: a `Lam` met with a known `Fun` binds the parameter to
 the type the expectation names instead of a fresh variable. Synthesis in source
 order would check the body of `map { |x| … } $xs` while the element type was
-still free, which is a difference the body can *observe* — a spread of `$x`
-decides then whether its row is open
-([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
-Everything else has nothing to push inwards and is inferred as ever, the caller
-unifying.
+still free, which is a difference the body can *observe* — the computed-key
+index arm below is the rule that observes it, so `map { |x| $x[$x] } [1]` is
+refused where the same lambda extracted into a `let` is not. That gap is a
+known soundness hole and the deferral is what keeps it from widening; it is
+pinned as it stands rather than claimed closed. Everything else has nothing to
+push inwards and is inferred as ever, the caller unifying.
 
-**The Unifier solves three sorts at once** (`unify.rs`):
+**The Unifier solves four sorts at once** (`unify.rs`):
 
 - *Value and computation types* are equi-recursive — unified with **no** occurs
   check, so cyclic types are admitted rather than rejected. Termination rests on
@@ -47,11 +48,27 @@ unifying.
   rather than overflowing the stack
   ([[decisions/260606_unify-one-sided-obligations|unify-one-sided-obligations]]).
   `CompTyKey::Return` fingerprints the payload route beside the return type, so
-  two obligations differing only in route are never conflated.
-- *Rows* unify by the Rémy rewrite (`unify_row`): a row-spine occurs check guards
-  the tail variable, then mismatched labels are permuted past one another into a
-  shared fresh tail — which is what makes scoped-label shadowing coherent without
-  a restriction operator ([[design/row-types|row-types]]).
+  two obligations differing only in route are never conflated, and `row_key`
+  fingerprints a field *after* resolving its flag, so a slot keys the same once
+  its absence resolves as the `Absent` it became — otherwise the guard stops
+  recognising two types the field rule calls equal. That is the resolution
+  half; the depth half is a resource bound no key closes (below).
+- *Rows* unify by the Rémy rewrite (`unify_row`): an occurs check guards the
+  tail variable, then mismatched labels are permuted past one another into a
+  shared fresh tail ([[design/row-types|row-types]]). The `Empty`-against-
+  `Extend` arms are a **peel**, not an error: `Empty` says every label off the
+  spine is absent at the type the assignment gives it, so meeting a field there
+  retires it — flag to `Absent`, payload to `δ_l` — and carries on. The two
+  arms are symmetric, and with the field rule meeting an `Absent` they are the
+  three sites that retire a label; a one-sided edit to any of them leaves an
+  absence with two spellings, which is the one thing the equational theory
+  cannot survive.
+- *Presence flags* are a two-point union-find (`presences`), read through
+  `resolve_field` — `resolve_row`'s twin, called from the same traversals.
+  The field rule unifies flags and then payloads, **always**: there is no
+  conditional, because the eager answer is the mgu (below). A `Present`
+  against an `Absent` has no solution, and the row arm that matched the pair
+  owns the message, being the only frame that knows the label.
 - *Payload routes* unify **by equality** (`unify_route`): `Value`, `Bytes`, and
   route variables are first-class unification variables under one rule, and a
   ground `Value` does not unify with a ground `Bytes`. A clash is a live
@@ -63,9 +80,14 @@ unifying.
 **A literal's kind is syntax, and a key's form picks the projection rule.**
 The parser classifies a bracketed literal, so the checker has one rule per IR
 constructor — `infer_record_val` and `infer_map_val`: a record's fields each
-keep their own type in a row, a map's values share one element type, and the
+keep their own slot in a row, a map's values share one element type, and the
 two types unify only with their own kind
-([[design/records-and-maps|records-and-maps]]). Indexing splits the same way,
+([[design/records-and-maps|records-and-maps]]). A record literal is a **put**
+over one base: it demands of the base a slot at each written label, at a fresh
+flag over a fresh payload with nothing imposed on either, and returns those
+labels `Present` at the types written over the base's own tail. So the rule
+imposes nothing it does not need, an entry beats the base wherever it sits, and
+the result is flat. Indexing splits the same way,
 on the key rather than the target: a `Val::String` key is
 `infer_field_read`, which unifies the target with `[label: α | ρ]` whatever its
 current inference state, so an inline read and the same read extracted into a
@@ -224,6 +246,65 @@ sit outside the claim; they are introduction-rule choices, not joins. See
 [[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]
 for the architecture, narrowed to this one constraint.
 
+**The row algebra is unitary, and that is what carries principality over
+rows.** The equation the design turns on is
+`[x: θ·α] ≐ [x: θ'·String]`. Under an `Empty` that carried nothing it had two
+incomparable solutions — `θ := Absent`, leaving `α` free, and `α := String`,
+leaving the flags open — so there was no most general unifier and an eager
+algorithm guessed. Under an `Empty` that means *absent at the type the
+assignment gives this label*, it has one: `θ := Absent` retires the other side
+too, and retiring it asks `String ~ δ_l`, so the killing solution *says
+something* and is reachable from the eager one by instantiation. The eager
+answer is therefore the mgu, the field rule may unify payloads unconditionally,
+and principality over rows is the standard Hindley–Milner result over a unitary
+algebra. Transitivity comes with it: a label has exactly one dead type, so two
+rows cannot disagree about a dead payload and there is no second spelling of an
+absence for a third row to disagree with. What this costs is one condition,
+discharged as a rule rather than proved — *within one check, a label may not be
+optional at two different ground types* — which binds the declared option rows
+and nothing a program can write, a payload meeting `δ_l` only when its flag
+dies.
+
+**Two obligations are carried rather than discharged, and neither is a
+theorem.** *Erasure* — that forgetting a payload behind an absent field lets no
+program go wrong — rests on there being no elimination form for presence: `$r[l]`
+demands `Present`, both pattern contexts demand fields, a put overwrites rather
+than reads, and `has` / `get` / `keys` / `union` are map operations, so for a
+value whose runtime shape its type describes the erased type describes exactly
+what the unerased one did. The condition is not decoration: ral has operations
+that traverse the *runtime* record rather than its type (`to-json`,
+`values_equal`, `value_ordering`) and boundaries that hand out values no rule
+has checked — `from-json` and `from-csv`, `use`'s asserted row, `$ENV`, session
+values restored without a scheme. So the claim is *erasure is sound relative to
+shape-correct values*, with those boundaries named as the assumption. Erasure
+adds no reflective operation and widens no boundary; it inherits the ones there
+([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+
+*Recursion* is the second, and here the **policy is chosen and the proof is
+owed**. The occurs check descends through payloads as well as along the spine.
+The alternative — occurs along the spine only — would admit
+`ρ = (x: Present·Record(ρ) ; Empty)`, a cycle anchored at no type or
+computation variable: `apply_row_inner` carries no row-root guard,
+`cyclic_roots_in_ty` cannot find it, and `Scheme` has no `row_bindings` to
+snapshot it into. So spine-only is not an edit to the occurs check but a third
+recursive sort, and this tree takes the descending policy. Presence changes
+only that the descent consults `resolve_field` first.
+
+`MAX_UNIFY_DEPTH` is a **resource bound and not a termination result**, and
+presence-aware keys close only half of what it touches. The half they close is
+*resolution*: a slot keys the same once its flag is dead as the `Absent` it
+became, so the guard keeps recognising one obligation across the change. The
+half they do not is *depth*, in both directions. `unify_ty_inner` fingerprints
+its structural operand before resolving the other side, so an obligation can
+spend the budget on a payload whose flag would have died had the absence
+constraint been taken first; and retiring a field is itself the equation
+`τ ~ δ_l`, so a payload nested past the ceiling cannot be retired at all —
+unifying any structure against a variable fingerprints it, which is the cost
+every rule pays and not one presence added. A resolved-absent slot holding an
+over-deep payload is therefore unreachable: the budget refuses to build one.
+What is guaranteed throughout is a graceful `TypeTooDeep` rather than a blown
+stack.
+
 **A route variable is quantified only in a declared slot or a forwarded pair.**
 A builtin's computation-typed argument (`spawn`, `watch`, `service`, and the
 `map`/`filter`/`each`/`fold` callback family), a scope's expected arm shape, and
@@ -252,10 +333,15 @@ expected-vs-inferred message (`fmt.rs`), where a byte-routed computation reads
 `Command captured from stdout` and every other reads `Command A`.
 
 **The quantifier is the prefix, not a binder.** A `Scheme` is the body's
-ordinary `Ty` under a ∀-prefix of four `Vec`s of variable ids — value
-(`ty_vars`), computation (`comp_ty_vars`), route (`route_vars`), row (`row_vars`)
-sorts, each a `u32`-tagged unifier root (`scheme.rs`). There is no binder node
-and no de Bruijn index: a variable is **bound iff it is listed**.
+ordinary `Ty` under a ∀-prefix of five `Vec`s of variable ids — value
+(`ty_vars`), computation (`comp_ty_vars`), route (`route_vars`), row
+(`row_vars`) and presence (`presence_vars`) sorts, each a `u32`-tagged unifier
+root (`scheme.rs`). A flag has no structure, so the presence sort needs no
+bindings map. There is no binder node and no de Bruijn index: a variable is
+**bound iff it is listed**. A presence variable is not *named* in the printed
+prefix — it has nothing a reader could say about it — so where sharing between
+two instantiations matters, the test asserts on unifier roots rather than on
+rendered text.
 
 - *Elimination is substitution-with-freshening.* `instantiate` mints a fresh id
   in the current unifier for every listed variable and substitutes it through
@@ -267,6 +353,15 @@ and no de Bruijn index: a variable is **bound iff it is listed**.
   so two uses of one recursive scheme never share a cycle root.
 - Because the prefix is nominal-by-listing, an open scheme leaving its minting
   unifier aliases another's variables: see [[invariants/schemes-leave-closed|schemes-leave-closed]].
+- *A cached residual can be re-homed, so the cache's own check is narrower than
+  its sorts.* `CachedFreeVars` holds the free variables a scheme did **not**
+  quantify, and `env_free_vars` trusts it rather than re-walking. Erasure kills
+  no variable — a retired payload is *united* with `δ_l` rather than dropped —
+  but that union is what moves it: a residual `α` stops being its own canonical
+  root the moment a flag beside it resolves to `Absent`. So the standing
+  `debug_assert` that residuals are live roots covers the computation, route and
+  presence sorts, and states the value sort's exclusion rather than asserting a
+  property retirement can take away.
 
 **The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto

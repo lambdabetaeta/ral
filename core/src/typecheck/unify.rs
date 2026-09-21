@@ -8,8 +8,11 @@
 
 use super::error::{CompDiff, TypeErrorKind};
 use super::route::RouteMismatch;
-use super::ty::{CompTy, CompTyVar, Label, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
-use std::collections::HashSet;
+use super::ty::{
+    CompTy, CompTyVar, Field, Label, PayloadRoute, PayloadVar, Presence, PresenceVar, Row, RowVar,
+    Ty, TyVar,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
 /// `generalize.rs`.  `tys`/`comps` are a stack for `apply_*` and a set for
@@ -91,7 +94,22 @@ enum CompTyKey {
 enum RowKey {
     Empty,
     Var(u32),
-    Extend(Label, Box<TyKey>, Box<Self>),
+    Extend(Label, FieldKey, Box<Self>),
+}
+
+/// Fingerprint of a field.  Taken *after* [`Unifier::resolve_field`], so a raw
+/// `Field::Var(θ, τ)` and the `Absent` its applied form becomes key alike —
+/// `unify_ty_inner` keys before it resolves and `Pairs` retains what it gets,
+/// so a slot keying one way while the flag lives and another once it is dead
+/// would stop the guard recognising two types the field rule calls equal.
+/// That is the *resolution* half; the depth half is a resource bound no key
+/// closes, and `retiring_a_payload_past_the_ceiling_is_a_resource_bound` says
+/// so.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum FieldKey {
+    Present(Box<TyKey>),
+    Absent,
+    Var(u32, Box<TyKey>),
 }
 
 enum Slot<T> {
@@ -259,6 +277,15 @@ pub struct Unifier {
     ctys: Store<CompTy>,
     routes: Store<PayloadRoute>,
     rows: Store<Row>,
+    /// Flags are a two-point union-find; `Presence` has no variable
+    /// constructor, so this store is read through `resolve_presence` rather
+    /// than the `Unifiable` chase the other four share.
+    presences: Store<Presence>,
+    /// `Δ`: the type variable at which a label's retired payloads are all
+    /// identified, minted the first time that label is retired.  Generated
+    /// rather than stored, and global to one check: nothing here appears in a
+    /// `Ty`, a `Row` or a `Scheme`, so nothing crosses a REPL line.
+    assignment: HashMap<Label, TyVar>,
 }
 
 impl Unifier {
@@ -268,6 +295,8 @@ impl Unifier {
             ctys: Store::new(),
             routes: Store::new(),
             rows: Store::new(),
+            presences: Store::new(),
+            assignment: HashMap::new(),
         }
     }
 
@@ -295,6 +324,46 @@ impl Unifier {
     }
     pub(crate) fn fresh_row(&mut self) -> Row {
         Row::Var(self.fresh_row_var())
+    }
+
+    pub fn fresh_presence_var(&mut self) -> PresenceVar {
+        PresenceVar(self.presences.fresh())
+    }
+
+    /// Canonical presence-var root under union-find.  Mirror of `ty_root`.
+    pub(crate) fn presence_root(&mut self, i: u32) -> u32 {
+        self.presences.find(i)
+    }
+
+    /// What a flag has turned out to be, or `None` while it is still open.
+    pub(crate) fn resolve_presence(&mut self, v: PresenceVar) -> Option<Presence> {
+        self.presences.get(v.0)
+    }
+
+    /// A field's presence resolves exactly as a row's spine does: the twin of
+    /// [`Self::resolve_row`], called from the same places.
+    pub(crate) fn resolve_field(&mut self, field: &Field) -> Field {
+        match field {
+            Field::Var(v, ty) => match self.presences.get(v.0) {
+                Some(Presence::Present) => Field::Present(ty.clone()),
+                Some(Presence::Absent) => Field::Absent,
+                None => Field::Var(PresenceVar(self.presences.find(v.0)), ty.clone()),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// `δ_l`, the one type at which every payload retired at `l` is
+    /// identified (§2.3 of the presence design): minted on first retirement,
+    /// and never quantified, printed or serialised, because no `Field::Absent`
+    /// stores it.
+    fn dead_ty(&mut self, label: &Label) -> Ty {
+        if let Some(v) = self.assignment.get(label) {
+            return Ty::Var(*v);
+        }
+        let v = self.fresh_tyvar();
+        self.assignment.insert(label.clone(), v);
+        Ty::Var(v)
     }
 
     /// Canonical comp-var root under union-find, for the cycle-aware traversals
@@ -380,16 +449,19 @@ impl Unifier {
         self.rows.resolve(row)
     }
 
-    /// Every `Extend` label, unsorted, and the terminal — `Some(v)` for an open
-    /// row, `None` for one closed by `Empty`.  The loop needs no cycle guard:
-    /// the occurs check rejects a cyclic row binding before it is installed.
-    fn row_spine(&mut self, row: &Row) -> (Vec<Label>, Option<RowVar>) {
+    /// Every `Extend` label, unsorted, paired with whether the field is *live*
+    /// — a resolved `Absent` sits on the spine but names nothing a program
+    /// could read — and the terminal: `Some(v)` for an open row, `None` for
+    /// one closed by `Empty`.  The loop needs no cycle guard: the occurs check
+    /// rejects a cyclic row binding before it is installed.
+    fn row_spine(&mut self, row: &Row) -> (Vec<(Label, bool)>, Option<RowVar>) {
         let mut labels = Vec::new();
         let mut cur = self.resolve_row(row);
         loop {
             match cur {
-                Row::Extend(l, _, rest) => {
-                    labels.push(l);
+                Row::Extend(l, f, rest) => {
+                    let live = !matches!(self.resolve_field(&f), Field::Absent);
+                    labels.push((l, live));
                     cur = self.resolve_row(&rest);
                 }
                 Row::Var(v) => return (labels, Some(v)),
@@ -522,10 +594,19 @@ impl Unifier {
         match self.resolve_row(row) {
             Row::Empty => Row::Empty,
             Row::Var(v) => Row::Var(v),
-            Row::Extend(l, ty, rest) => {
-                let ty2 = self.apply_ty_inner(&ty, visited);
+            Row::Extend(l, f, rest) => {
+                // The rewrite drops a payload; it never invents one.  A
+                // retired payload was united with `δ_l` when it died, so
+                // dropping it here loses nothing anything can reach.
+                let f2 = match self.resolve_field(&f) {
+                    Field::Present(ty) => {
+                        Field::Present(Box::new(self.apply_ty_inner(&ty, visited)))
+                    }
+                    Field::Var(v, ty) => Field::Var(v, Box::new(self.apply_ty_inner(&ty, visited))),
+                    Field::Absent => Field::Absent,
+                };
                 let rest2 = self.apply_row_inner(&rest, visited);
-                Row::Extend(l, Box::new(ty2), Box::new(rest2))
+                Row::Extend(l, f2, Box::new(rest2))
             }
         }
     }
@@ -551,8 +632,19 @@ impl Unifier {
         match self.resolve_row(row) {
             Row::Empty => Ok(false),
             Row::Var(u) => Ok(u == v),
-            Row::Extend(_, ty, rest) => Ok(self.ty_occurs_row(v, &ty, visited, deeper(depth)?)?
-                || self.row_occurs_inner(v, &rest, visited, depth)?),
+            // Through the payload, not only along the spine: a spine-only
+            // check admits a cycle anchored at no type or computation
+            // variable, which nothing here could apply, snapshot or re-anchor.
+            // A dead payload has none to descend into.
+            Row::Extend(_, f, rest) => {
+                let live = match self.resolve_field(&f) {
+                    Field::Present(ty) | Field::Var(_, ty) => {
+                        self.ty_occurs_row(v, &ty, visited, deeper(depth)?)?
+                    }
+                    Field::Absent => false,
+                };
+                Ok(live || self.row_occurs_inner(v, &rest, visited, depth)?)
+            }
         }
     }
 
@@ -651,11 +743,19 @@ impl Unifier {
         Ok(match row {
             Row::Empty => RowKey::Empty,
             Row::Var(RowVar(i)) => RowKey::Var(self.rows.find(*i)),
-            Row::Extend(l, t, rest) => RowKey::Extend(
+            Row::Extend(l, f, rest) => RowKey::Extend(
                 l.clone(),
-                Box::new(self.ty_key(t, deeper(depth)?)?),
+                self.field_key(f, deeper(depth)?)?,
                 Box::new(self.row_key(rest, depth)?),
             ),
+        })
+    }
+
+    fn field_key(&mut self, field: &Field, depth: u32) -> Result<FieldKey, TypeErrorKind> {
+        Ok(match self.resolve_field(field) {
+            Field::Present(t) => FieldKey::Present(Box::new(self.ty_key(&t, depth)?)),
+            Field::Absent => FieldKey::Absent,
+            Field::Var(v, t) => FieldKey::Var(v.0, Box::new(self.ty_key(&t, depth)?)),
         })
     }
 
@@ -749,8 +849,8 @@ impl Unifier {
                 | Ty::Var(_)),
                 b,
             ) => Err(TypeErrorKind::TyMismatch {
-                expected: a,
-                actual: b,
+                expected: Box::new(a),
+                actual: Box::new(b),
             }),
         }
     }
@@ -789,12 +889,19 @@ impl Unifier {
         if !known.is_empty() {
             return Err(TypeErrorKind::RowExtraField { label, known });
         }
-        let (a_labels, _) = self.row_spine(a);
-        let names = |ls: Vec<Label>| ls.iter().map(Label::to_string).collect::<Vec<_>>();
-        let known = if names(a_labels.clone()).contains(&label) {
+        // Only live fields are on offer: a label the row resolved to absent is
+        // not one the reader could have meant.
+        let names = |ls: Vec<(Label, bool)>| {
+            ls.iter()
+                .filter(|(_, live)| *live)
+                .map(|(l, _)| l.to_string())
+                .collect::<Vec<_>>()
+        };
+        let a_names = names(self.row_spine(a).0);
+        let known = if a_names.contains(&label) {
             names(self.row_spine(b).0)
         } else {
-            names(a_labels)
+            a_names
         };
         Err(TypeErrorKind::RowExtraField { label, known })
     }
@@ -838,23 +945,23 @@ impl Unifier {
 
             match (a, b) {
                 (Row::Empty, Row::Empty) => return Ok(()),
-                (Row::Empty, Row::Extend(l, _, _)) => {
-                    // The alternatives are named by whoever still holds the
-                    // original rows; the rewrite below has consumed them here.
-                    return Err(TypeErrorKind::RowExtraField {
-                        label: l.to_string(),
-                        known: Vec::new(),
-                    });
+                // `Empty` says every label off the spine is absent at the type
+                // the assignment gives it, so these two arms are a *peel*, not
+                // an error: they retire the field and carry on.  They are the
+                // symmetric pair a one-sided edit would leave half-done.
+                (Row::Empty, Row::Extend(l, f, rest)) => {
+                    self.unify_field(&l, &Field::Absent, &f, pairs, depth)?;
+                    b = self.resolve_row(&rest);
+                    a = Row::Empty;
                 }
-                (Row::Extend(l, _, _), Row::Empty) => {
-                    return Err(TypeErrorKind::RowMissingField {
-                        label: l.to_string(),
-                    });
+                (Row::Extend(l, f, rest), Row::Empty) => {
+                    self.unify_field(&l, &f, &Field::Absent, pairs, depth)?;
+                    a = self.resolve_row(&rest);
+                    b = Row::Empty;
                 }
-                (Row::Extend(l1, t1, r1), Row::Extend(l2, t2, r2)) => {
+                (Row::Extend(l1, f1, r1), Row::Extend(l2, f2, r2)) => {
                     if l1 == l2 {
-                        let (t1, t2) = (*t1, *t2);
-                        self.unify_ty_inner(&t1, &t2, pairs, deeper(depth)?)?;
+                        self.unify_field(&l1, &f1, &f2, pairs, depth)?;
                         // In place, not a deeper frame: a wide row is O(1) stack.
                         a = self.resolve_row(&r1);
                         b = self.resolve_row(&r2);
@@ -865,8 +972,12 @@ impl Unifier {
                     // typechecks against neither pure form.
                     if std::mem::discriminant(&l1) != std::mem::discriminant(&l2) {
                         return Err(TypeErrorKind::TyMismatch {
-                            expected: Ty::Record(Row::Extend(l1, t1.clone(), Box::new(Row::Empty))),
-                            actual: Ty::Record(Row::Extend(l2, t2.clone(), Box::new(Row::Empty))),
+                            expected: Box::new(Ty::Record(Row::Extend(
+                                l1,
+                                f1,
+                                Box::new(Row::Empty),
+                            ))),
+                            actual: Box::new(Ty::Record(Row::Extend(l2, f2, Box::new(Row::Empty)))),
                         });
                     }
                     // Scoped-labels side condition (Gaster–Jones, Leijen): two
@@ -876,8 +987,14 @@ impl Unifier {
                     // each turn.  The disagreement can sit below the head, so
                     // compare whole spines; a permutation does have a solution
                     // and must still take it.
-                    let (mut left, left_tail) = self.row_spine(&r1);
-                    let (mut right, right_tail) = self.row_spine(&r2);
+                    let (left_spine, left_tail) = self.row_spine(&r1);
+                    let (right_spine, right_tail) = self.row_spine(&r2);
+                    // Every label, live or not: absence before a *variable*
+                    // tail is no equation here (exclusion is an invariant of
+                    // row introduction, not data on the variable), so an
+                    // absent field still counts against the multiset.
+                    let mut left: Vec<Label> = left_spine.into_iter().map(|(l, _)| l).collect();
+                    let mut right: Vec<Label> = right_spine.into_iter().map(|(l, _)| l).collect();
                     left.push(l1.clone());
                     right.push(l2.clone());
                     if let (Some(t1), Some(t2)) = (left_tail, right_tail)
@@ -890,8 +1007,8 @@ impl Unifier {
                         }
                     }
                     let rho = self.fresh_row_var();
-                    let new_r1 = Row::Extend(l2, t2.clone(), Box::new(Row::Var(rho)));
-                    let new_r2 = Row::Extend(l1, t1.clone(), Box::new(Row::Var(rho)));
+                    let new_r1 = Row::Extend(l2, f2, Box::new(Row::Var(rho)));
+                    let new_r2 = Row::Extend(l1, f1, Box::new(Row::Var(rho)));
                     self.unify_row_inner(&r1, &new_r1, pairs, depth)?;
                     return self.unify_row_inner(&r2, &new_r2, pairs, depth);
                 }
@@ -900,6 +1017,64 @@ impl Unifier {
                 }
             }
         }
+    }
+
+    /// The field rule: unify the flags, then the payloads, always.  It is no
+    /// conditional — the eager answer is the most general unifier, because the
+    /// solution that kills a field says something too (it constrains `δ_l`),
+    /// so there is nothing to choose and nothing the order can change.
+    ///
+    /// A field that is *already* absent has no stored payload, so the rule
+    /// reads `δ_l` for that side.  `Present` against `Absent` has no solution,
+    /// and this frame owns the message because it is the one holding `label`.
+    fn unify_field(
+        &mut self,
+        label: &Label,
+        a: &Field,
+        b: &Field,
+        pairs: &mut Pairs,
+        depth: u32,
+    ) -> Result<(), TypeErrorKind> {
+        let a = self.resolve_field(a);
+        let b = self.resolve_field(b);
+        // The record that lacks the label is the one the message is about.
+        let clash = |absent_left: bool| {
+            if absent_left {
+                Err(TypeErrorKind::RowExtraField {
+                    label: label.to_string(),
+                    known: Vec::new(),
+                })
+            } else {
+                Err(TypeErrorKind::RowMissingField {
+                    label: label.to_string(),
+                })
+            }
+        };
+        match (&a, &b) {
+            (Field::Present(_), Field::Absent) => return clash(false),
+            (Field::Absent, Field::Present(_)) => return clash(true),
+            (Field::Var(v, _), Field::Var(w, _)) => self.presences.unite(v.0, w.0),
+            (Field::Var(v, _), Field::Present(_)) | (Field::Present(_), Field::Var(v, _)) => {
+                let r = self.presences.find(v.0);
+                self.presences.bind(r, Presence::Present);
+            }
+            (Field::Var(v, _), Field::Absent) | (Field::Absent, Field::Var(v, _)) => {
+                let r = self.presences.find(v.0);
+                self.presences.bind(r, Presence::Absent);
+            }
+            (Field::Present(_), Field::Present(_)) | (Field::Absent, Field::Absent) => {}
+        }
+        let dead = (a.payload().is_none() || b.payload().is_none()).then(|| self.dead_ty(label));
+        // `δ_l` on the left of each union so it, and never a payload some
+        // scheme still names, is the side that stops being canonical.
+        let (left, right) = match (a.payload(), b.payload()) {
+            (Some(t1), Some(t2)) => (t1.clone(), t2.clone()),
+            (Some(t), None) | (None, Some(t)) => {
+                (dead.expect("an absent side mints δ_l"), t.clone())
+            }
+            (None, None) => return Ok(()),
+        };
+        self.unify_ty_inner(&left, &right, pairs, deeper(depth)?)
     }
 
     /// Unify computation types `a` and `b`, binding variables in place.
@@ -1095,19 +1270,19 @@ mod tests {
     fn step(tail: CompTy) -> Ty {
         let payload = Ty::Record(Row::Extend(
             Label::Field(HEAD_FIELD.into()),
-            Box::new(Ty::String),
+            Field::present(Ty::String),
             Box::new(Row::Extend(
                 Label::Field(TAIL_FIELD.into()),
-                Box::new(Ty::Thunk(Box::new(tail))),
+                Field::present(Ty::Thunk(Box::new(tail))),
                 Box::new(Row::Empty),
             )),
         ));
         Ty::Variant(Row::Extend(
             Label::Case(MORE_LABEL.into()),
-            Box::new(payload),
+            Field::present(payload),
             Box::new(Row::Extend(
                 Label::Case(DONE_LABEL.into()),
-                Box::new(Ty::Unit),
+                Field::present(Ty::Unit),
                 Box::new(Row::Empty),
             )),
         ))
@@ -1235,7 +1410,7 @@ mod tests {
             let rho = u.fresh_row_var();
             let row = Row::Extend(
                 Label::Field("x".into()),
-                Box::new(deep_list(MAX_UNIFY_DEPTH + 100)),
+                Field::present(deep_list(MAX_UNIFY_DEPTH + 100)),
                 Box::new(Row::Empty),
             );
             let err = u.unify_row(&Row::Var(rho), &row).expect_err(
@@ -1252,7 +1427,7 @@ mod tests {
         fields.iter().rev().fold(Row::Empty, |rest, (l, t)| {
             Row::Extend(
                 Label::Field((*l).into()),
-                Box::new(t.clone()),
+                Field::present(t.clone()),
                 Box::new(rest),
             )
         })
@@ -1262,7 +1437,7 @@ mod tests {
         fields.iter().rev().fold(Row::Var(tail), |rest, (l, t)| {
             Row::Extend(
                 Label::Field((*l).into()),
-                Box::new(t.clone()),
+                Field::present(t.clone()),
                 Box::new(rest),
             )
         })
@@ -1273,8 +1448,10 @@ mod tests {
         let mut cur = u.apply_row(row);
         loop {
             match cur {
-                Row::Extend(l, t, rest) => {
-                    out.insert(l.to_string(), *t);
+                Row::Extend(l, f, rest) => {
+                    if let Some(t) = f.payload() {
+                        out.insert(l.to_string(), t.clone());
+                    }
                     cur = *rest;
                 }
                 _ => return out,
@@ -1438,5 +1615,233 @@ mod tests {
             Ty::Int,
             "probe binds to the head (first) occurrence"
         );
+    }
+
+    /// A row with one slot at a variable flag over `ty`.
+    fn optional_row(label: &str, flag: PresenceVar, ty: Ty, rest: Row) -> Row {
+        Row::Extend(
+            Label::Field(label.into()),
+            Field::Var(flag, Box::new(ty)),
+            Box::new(rest),
+        )
+    }
+
+    /// Retire `x` by `sides`, then ask whether the label's assignment now
+    /// holds what was retired into it: a second retirement at `x`, of an
+    /// `Int`, must meet the `String` the first left there.
+    fn retires_into_the_assignment(sides: fn(PresenceVar) -> (Row, Row)) {
+        let mut u = Unifier::new();
+        let flag = u.fresh_presence_var();
+        let (a, b) = sides(flag);
+        u.unify_row(&a, &b).expect("retiring a field succeeds");
+        assert_eq!(
+            u.resolve_presence(flag),
+            Some(Presence::Absent),
+            "retirement resolves the flag to absent"
+        );
+        let second = u.fresh_presence_var();
+        let probe = optional_row("x", second, Ty::Int, Row::Empty);
+        u.unify_row(&Row::Empty, &probe).expect_err(
+            "a second retirement at one label meets the first's payload, so an \
+             `Int` against the `String` already retired there is refused",
+        );
+    }
+
+    /// Retirement is one equation from three sides: a field peeled off the
+    /// right, one peeled off the left, and one meeting an `Absent` at a
+    /// matched label.  All three send the payload to `δ_l`, so no spelling of
+    /// an absence is one-sided — which is what lets `Empty` carry information
+    /// at all, and what a one-sided edit would leave half-done.
+    #[test]
+    fn a_field_retired_from_the_right_reaches_the_assignment() {
+        retires_into_the_assignment(|f| (Row::Empty, optional_row("x", f, Ty::String, Row::Empty)));
+    }
+
+    #[test]
+    fn a_field_retired_from_the_left_reaches_the_assignment() {
+        retires_into_the_assignment(|f| (optional_row("x", f, Ty::String, Row::Empty), Row::Empty));
+    }
+
+    #[test]
+    fn a_field_meeting_an_absent_reaches_the_assignment() {
+        retires_into_the_assignment(|f| {
+            (
+                optional_row("x", f, Ty::String, Row::Empty),
+                Row::Extend(
+                    Label::Field("x".into()),
+                    Field::Absent,
+                    Box::new(Row::Empty),
+                ),
+            )
+        });
+    }
+
+    /// Two instantiations of one optional field get independent flags:
+    /// resolving one to absent must erase no other's payload.  `Store::unite`
+    /// does not by itself protect a bound root, so this is asserted and not
+    /// attributed to union-find in general.
+    #[test]
+    fn independent_flags_do_not_share_a_resolution() {
+        let mut u = Unifier::new();
+        let (one, two) = (u.fresh_presence_var(), u.fresh_presence_var());
+        let alpha = u.fresh_ty();
+        let left = optional_row("x", one, Ty::Int, Row::Empty);
+        let right = optional_row("x", two, alpha.clone(), Row::Var(u.fresh_row_var()));
+        u.unify_row(&Row::Empty, &left).expect("retire the first");
+        assert_eq!(u.resolve_presence(one), Some(Presence::Absent));
+        assert_eq!(
+            u.resolve_presence(two),
+            None,
+            "an unrelated flag stays open when another resolves"
+        );
+        let fields = resolved_fields(&mut u, &right);
+        assert_eq!(
+            fields.get("x"),
+            Some(&u.apply_ty(&alpha)),
+            "the other instance keeps its payload"
+        );
+    }
+
+    /// A key fingerprints the term *before* the operands resolve, so a field
+    /// whose flag later dies must key as the `Absent` its applied form becomes:
+    /// `unify_ty_inner` calls `ty_key` ahead of resolving its operands and
+    /// `Pairs::ty_expansions` retains what it gets, so a slot keying one way
+    /// while the flag lives and another once it is dead would stop the
+    /// co-inductive guard recognising two types the field rule calls equal.
+    #[test]
+    fn a_field_keys_as_the_absence_it_resolves_to() {
+        let mut u = Unifier::new();
+        let flag = u.fresh_presence_var();
+        let row = optional_row("x", flag, Ty::List(Box::new(Ty::Int)), Row::Empty);
+        let absent = u
+            .row_key(
+                &Row::Extend(
+                    Label::Field("x".into()),
+                    Field::Absent,
+                    Box::new(Row::Empty),
+                ),
+                0,
+            )
+            .expect("an absent field keys without a payload");
+
+        let before = u.row_key(&row, 0).expect("a live payload keys");
+        assert!(
+            before != absent,
+            "while the flag lives the slot is its own obligation, payload and all"
+        );
+
+        u.unify_row(&Row::Empty, &row).expect("retire the field");
+        let after = u
+            .row_key(&row, 0)
+            .expect("keys again once the flag is dead");
+        assert!(
+            after == absent,
+            "the raw slot and the `Absent` it resolves to are one obligation"
+        );
+        // And the applied row, which is what a storeless consumer sees, keys
+        // with them: resolution is the only difference between the three.
+        let applied = u.apply_row(&row);
+        assert!(
+            u.row_key(&applied, 0).expect("an applied row keys") == absent,
+            "applying the row changes nothing the guard can see"
+        );
+    }
+
+    /// Retirement erases a *flag*, never a type: the payload is united with
+    /// `δ_l`, so a payload the dying field shared with a live one is still
+    /// there to be constrained afterwards.
+    #[test]
+    fn a_payload_shared_with_a_live_field_survives_the_retirement() {
+        let mut u = Unifier::new();
+        let flag = u.fresh_presence_var();
+        let alpha = u.fresh_ty();
+        let shared = Row::Extend(
+            Label::Field("x".into()),
+            Field::Var(flag, Box::new(alpha.clone())),
+            Box::new(record_row(&[("y", alpha.clone())])),
+        );
+        u.unify_row(&shared, &record_row(&[("y", Ty::Int)]))
+            .expect("`x` retires against a row that does not have it");
+        assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
+        assert_eq!(
+            u.apply_ty(&alpha),
+            Ty::Int,
+            "the live field pins the payload the dead one shared"
+        );
+        let fields = resolved_fields(&mut u, &shared);
+        assert_eq!(fields.get("y"), Some(&Ty::Int));
+        assert_eq!(fields.get("x"), None, "a dead field offers no payload");
+    }
+
+    /// Presence-aware keys fix the *resolved* half only; the other half is a
+    /// **resource bound, not a termination result**.  Retiring a field is the
+    /// equation `τ ~ δ_l`, and unifying any structure against a variable
+    /// fingerprints it for the one-sided obligation guard — the pre-existing
+    /// cost `deeply_nested_ty_key_is_too_deep_not_a_stack_overflow` pins — so
+    /// a payload nested past the ceiling cannot be retired, exactly as it
+    /// cannot be bound to a fresh variable by any other rule.  The budget is
+    /// order-sensitive both ways and no key closes that; the guarantee is that
+    /// it is a graceful refusal rather than a blown stack.
+    #[test]
+    fn retiring_a_payload_past_the_ceiling_is_a_resource_bound() {
+        on_deep_stack(|| {
+            let mut u = Unifier::new();
+            let flag = u.fresh_presence_var();
+            let row = optional_row("x", flag, deep_list(MAX_UNIFY_DEPTH + 100), Row::Empty);
+            let err = u
+                .unify_row(&Row::Empty, &row)
+                .expect_err("a too-deep payload cannot be sent to the assignment");
+            assert!(
+                matches!(err, TypeErrorKind::TypeTooDeep),
+                "expected TypeTooDeep, got {err:?}"
+            );
+        });
+    }
+
+    /// The equation §2.4 turns on: `(x: θ·α)` against `(x: θ'·String)`.  The
+    /// eager answer — unify the flags, then the payloads — is the most general
+    /// unifier, so solving it in either order gives one solution, and the
+    /// order two independent constraints arrive in cannot move the verdict.
+    #[test]
+    fn the_deciding_equation_has_one_solution_in_either_order() {
+        let solve = |kill_first: bool| {
+            let mut u = Unifier::new();
+            let (t, tp) = (u.fresh_presence_var(), u.fresh_presence_var());
+            let alpha = u.fresh_ty();
+            let left = optional_row("x", t, alpha.clone(), Row::Empty);
+            let right = optional_row("x", tp, Ty::String, Row::Empty);
+            if kill_first {
+                u.unify_row(&Row::Empty, &left).expect("kill the field");
+                u.unify_row(&left, &right).expect("then equate the rows");
+            } else {
+                u.unify_row(&left, &right).expect("equate the rows");
+                u.unify_row(&Row::Empty, &left)
+                    .expect("then kill the field");
+            }
+            (u.resolve_presence(t), u.apply_ty(&alpha))
+        };
+        assert_eq!(
+            solve(true),
+            solve(false),
+            "the solution that kills the field constrains the assignment too, \
+             so it is reachable from the eager one and the two agree"
+        );
+        assert_eq!(solve(true).1, Ty::String, "`α` is still pinned to `String`");
+    }
+
+    /// Absence before `Empty` is the equation `(l: Absent ; Empty) = Empty`,
+    /// so two ground rows differing only in a retired field's type are equal:
+    /// a label has exactly one dead type, and there is no second spelling of
+    /// an absence for a third row to disagree with.
+    #[test]
+    fn rows_differing_only_beside_a_resolved_absence_are_equal() {
+        let mut u = Unifier::new();
+        let flag = u.fresh_presence_var();
+        let left = optional_row("x", flag, Ty::Int, record_row(&[("y", Ty::Bool)]));
+        u.unify_row(&left, &record_row(&[("y", Ty::Bool)]))
+            .expect("a row without `x` retires it in the row that has it");
+        assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
+        u.unify_row(&left, &record_row(&[("y", Ty::Bool)]))
+            .expect("and the two stay equal afterwards");
     }
 }
