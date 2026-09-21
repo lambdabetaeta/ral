@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 34e2af03
+generated_at_commit: 7b4ee036
 generated_at_date: 2026-09-21
 covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
@@ -125,12 +125,19 @@ recorded ([[map/exarch/agent|agent]]).
 the width the block is shown at: `render_mark` hands that width to every arm, so
 a `text` folds to it, a `fields` mark seats its rows in the card's columns, and
 a `diff` measures its line-number gutter against it and wraps each body into
-what is left. Every such column is one primitive, `Col`: the display width of
-the widest cell put to it, and the padding that seats a cell flush left (words)
-or flush right (figures, whose digits must end level, so the bars beside them
-start level). `Cols::of(marks)` measures a card's label and readout columns
-once, over every row of every mark; a legend or a fault readout, standing
-alone, measures its own. A card is never laid out at a fixed budget and wrapped a second time.
+what is left. Every such column is one primitive, `Col` (`tui/palette.rs`,
+beside the widths it belongs with): a width in display cells, and the padding
+that seats a cell flush left (words) or flush right (figures, whose digits must
+end level, so the bars beside them start level). A column is *declared*
+(`Col::wide`, where the rows arrive one at a time and could only align with
+themselves — an act's verb, a picker's labels, the status line's state slot) or
+*measured* (`Col::of`/`seeing`, where they arrive together — field labels,
+measure readouts, a diff's line numbers, the fleet matrix's four); the two
+differ in provenance alone, and no gutter in the TUI pads by hand. Pure
+indentation — the rail margin, a card's inset — is not a column: it holds
+nothing. `Cols::of(marks)` measures a card's label and readout columns once,
+over every row of every mark, exhaustively; a legend or a fault readout,
+standing alone, measures its own. A card is never laid out at a fixed budget and wrapped a second time.
 `role_style(Role)`
 (over the palette constants in `tui/palette.rs`) is the **single place hue
 lives** for kit content, so the kit can name a role but never a colour, and

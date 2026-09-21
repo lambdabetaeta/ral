@@ -2,6 +2,7 @@
 //! and the sibling render modules, kept apart so they read as one table.
 
 use ratatui::style::Color;
+use unicode_width::UnicodeWidthStr;
 
 // ── Color palette ────────────────────────────────────────────────────────────
 
@@ -65,6 +66,56 @@ pub(super) const BANNER_PINK: Color = Color::Rgb(255, 20, 147);
 pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
 
 // ── Layout constants ─────────────────────────────────────────────────────────
+
+/// A column that rows share: its width in display cells, and the padding that
+/// seats a cell in it.  A column is either *declared* ([`Col::wide`], where the
+/// rows arrive one at a time and could only align with themselves) or
+/// *measured* ([`Col::of`], where they arrive together); the two differ in
+/// provenance alone, so every gutter in the TUI that holds a cell is one of
+/// these and none pads by hand.  Pure indentation — the rail margin, a card's
+/// inset — is not a column: it holds nothing.
+///
+/// Padding is by display width, where `format!("{cell:<w$}")` counts chars and
+/// leaves a row carrying a wide glyph short of its neighbours.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Col(usize);
+
+impl Col {
+    /// A column of a declared width.
+    pub(super) const fn wide(cells: usize) -> Self {
+        Self(cells)
+    }
+
+    /// The column's width, for a budget that must subtract it.
+    pub(super) const fn cells(self) -> usize {
+        self.0
+    }
+
+    /// The column every one of `cells` fits in.
+    pub(super) fn of<'a>(cells: impl IntoIterator<Item = &'a str>) -> Self {
+        cells.into_iter().fold(Self::default(), Self::seeing)
+    }
+
+    /// Widened to fit `cell` too — measuring on from a declared floor, or over
+    /// rows that are not in one collection.
+    pub(super) fn seeing(self, cell: &str) -> Self {
+        Self(self.0.max(UnicodeWidthStr::width(cell)))
+    }
+
+    /// `cell` flush left in the column — words, which read from the left.
+    pub(super) fn left(self, cell: &str) -> String {
+        format!("{cell}{}", self.air(cell))
+    }
+
+    /// `cell` flush right — figures, whose digits must end level.
+    pub(super) fn right(self, cell: &str) -> String {
+        format!("{}{cell}", self.air(cell))
+    }
+
+    fn air(self, cell: &str) -> String {
+        " ".repeat(self.0.saturating_sub(UnicodeWidthStr::width(cell)))
+    }
+}
 
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;

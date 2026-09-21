@@ -8,7 +8,7 @@
 use super::block::Detail;
 use super::highlight::highlight_ral_spans;
 use super::palette::{
-    CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
+    CYAN, Col, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
 };
 use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
@@ -253,11 +253,10 @@ pub(super) fn tool_call_static(cmd: &str, width: u16) -> Vec<Line<'static>> {
     ls
 }
 
-/// The verb column of an act row, pinned to the longest verb
-/// (`context-evict`) plus a space, so verbs align across blocks.
-/// [`render_field_rows`] cannot supply it: it sizes from the rows it is
-/// handed, and an act block is one row.
-pub(super) const ACT_VERB_W: usize = 14;
+/// The verb column of an act row: declared rather than measured, at the longest
+/// verb (`context-evict`) plus a space, because an act block is one row and a
+/// measured column would align it with itself alone.
+const ACT_VERB: Col = Col::wide(14);
 
 /// How an act's payload reads, which is the whole of how it is inked.  An act
 /// row is chrome rather than card data, so this names the palette directly
@@ -289,7 +288,7 @@ pub(super) fn act_row(
     full: bool,
 ) -> Vec<Line<'static>> {
     let mut head = vec![Span::styled(
-        format!("{verb:<ACT_VERB_W$}"),
+        ACT_VERB.left(verb),
         Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
     )];
     // No separator after a subject that ends the row, so a landed `cancel`
@@ -448,7 +447,9 @@ fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> 
     let cut = left < total;
     let widest = hunks.iter().map(hunk_max_lineno).max().unwrap_or(0);
     let cols = DiffCols {
-        gutter: Col::of([widest.to_string().as_str()]).at_least(3),
+        // Three columns even for a two-digit file, so a short patch's gutter is
+        // the one a long patch wears.
+        gutter: Col::wide(3).seeing(&widest.to_string()),
         width,
     };
     for (i, h) in hunks.iter().enumerate() {
@@ -806,45 +807,6 @@ pub(super) fn render_register(
     pins.iter()
         .flat_map(|(_key, card)| render_pin(card, width, hue))
         .collect()
-}
-
-/// A column shared by rows that must line up: the display width of the widest
-/// cell put to it, and the padding that seats a cell in it.  Unicode-aware,
-/// where `format!("{cell:<w$}")` counts chars and leaves a row carrying a wide
-/// glyph a column short of its neighbours.
-#[derive(Clone, Copy, Default)]
-pub(super) struct Col(usize);
-
-impl Col {
-    /// The column every one of `cells` fits in.
-    pub(super) fn of<'a>(cells: impl IntoIterator<Item = &'a str>) -> Self {
-        cells.into_iter().fold(Self::default(), Self::seeing)
-    }
-
-    /// Widened to fit `cell` too.
-    fn seeing(self, cell: &str) -> Self {
-        Self(self.0.max(UnicodeWidthStr::width(cell)))
-    }
-
-    /// Widened to `w`, for a column with a floor of its own: a diff gutter
-    /// stays three wide under a two-digit file.
-    fn at_least(self, w: usize) -> Self {
-        Self(self.0.max(w))
-    }
-
-    /// `cell` flush left in the column — words, which read from the left.
-    pub(super) fn left(self, cell: &str) -> String {
-        format!("{cell}{}", self.air(cell))
-    }
-
-    /// `cell` flush right — figures, whose digits must end level.
-    fn right(self, cell: &str) -> String {
-        format!("{}{cell}", self.air(cell))
-    }
-
-    fn air(self, cell: &str) -> String {
-        " ".repeat(self.0.saturating_sub(UnicodeWidthStr::width(cell)))
-    }
 }
 
 /// Total display width of a span run, unicode-aware.

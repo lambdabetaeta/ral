@@ -3,7 +3,7 @@
 //! `super::banner` draws the same two bars as samples.
 
 use super::line::usage_text;
-use super::palette::{CYAN, PURPLE, SLATE};
+use super::palette::{CYAN, Col, PURPLE, SLATE};
 use super::rail;
 use super::scrollback::StateSpan;
 use crate::bus::AgentState;
@@ -11,7 +11,6 @@ use crate::provider::Usage;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
-use unicode_width::UnicodeWidthStr;
 
 pub(super) fn rule_line(
     width: usize,
@@ -111,17 +110,13 @@ pub(super) fn rule_line(
 /// outstanding, and an ellipsis would only say it again.
 fn state_label(span: StateSpan) -> Span<'static> {
     let streaming = span.state == AgentState::AwaitingModel;
-    let mut label = if streaming {
+    let label = if streaming {
         streamed_count(span.streamed)
     } else {
         span.state.label().to_owned()
     };
-    // Pad by display width, not by `len`: a multi-byte glyph would otherwise
-    // leave the slot short and shift every field after it.
-    let label_w = UnicodeWidthStr::width(label.as_str());
-    label.push_str(&" ".repeat(STATE_SLOT_W.saturating_sub(label_w)));
     let ink = if streaming { PURPLE } else { SLATE };
-    Span::styled(label, Style::default().fg(ink))
+    Span::styled(STATE_SLOT.left(&label), Style::default().fg(ink))
 }
 
 /// A character count in at most four columns, carrying its unit: `938 chars`,
@@ -188,10 +183,10 @@ pub(super) const WAIT_BAR_W: usize = 10;
 /// Width of the ` NNNs` readout that follows the bar — see [`clock_text`], whose
 /// three columns are what keeps it fixed.
 const WAIT_READOUT_W: usize = 5;
-/// Fixed state-label slot, wide enough for the longest label (`waiting on
+/// The state-label slot, wide enough for the longest label (`waiting on
 /// agents`): a state change never shifts the fields after it, and the separator
 /// that follows stands in one column always.
-pub(super) const STATE_SLOT_W: usize = 17;
+const STATE_SLOT: Col = Col::wide(17);
 /// Elapsed seconds to a `0..=3` lightness step. Not [`rail::value_step`], whose
 /// 4/20/80 thresholds are calibrated for line counts and would burn this bar
 /// white on nearly every turn.
@@ -231,9 +226,14 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
 /// resolution that still fits, and past a quarter hour the only one that still
 /// says anything.
 fn clock_text(secs: u64) -> String {
-    if secs < 1_000 {
-        format!("{secs:>3}s")
+    let (count, unit) = if secs < 1_000 {
+        (secs, 's')
     } else {
-        format!("{:>3}m", (secs / 60).min(999))
-    }
+        ((secs / 60).min(999), 'm')
+    };
+    format!("{}{unit}", CLOCK_FIGURES.right(&count.to_string()))
 }
+
+/// The clock's figures — three columns, so no field after it shifts as the wait
+/// grows.
+const CLOCK_FIGURES: Col = Col::wide(3);

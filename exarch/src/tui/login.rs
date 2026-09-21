@@ -8,7 +8,7 @@
 
 use super::app::Overlay;
 use super::line;
-use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
+use super::palette::{BANNER_GOLD, CYAN, Col, OVERLAY_BG, RED, SLATE};
 use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
@@ -30,9 +30,11 @@ const BODY_W: usize = OVERLAY_W as usize - 2 - 2 * PAD_X as usize;
 const INDENT: &str = "  ";
 /// The column every row's value starts after, so that no value is placed by
 /// a hand-counted literal.  Two wider than the longest label.
-const LABEL_W: usize = 8;
+const LABEL: Col = Col::wide(8);
+/// The method-name column beside it.
+const METHOD: Col = Col::wide(7);
 /// What a labelled row leaves for its value.
-const VALUE_W: usize = BODY_W - INDENT.len() - LABEL_W;
+const VALUE_W: usize = BODY_W - INDENT.len() - LABEL.cells();
 
 /// Success closes the overlay, so there is no resting "done" mode.
 enum Mode {
@@ -215,8 +217,8 @@ impl LoginOverlay {
         let lead = if show_field_label { "method" } else { "" };
         let marker = if active { "▸ " } else { "  " };
         Line::from(vec![
-            Span::styled(format!("{INDENT}{lead:<LABEL_W$}{marker}"), dim()),
-            Span::styled(format!("{label:<7}"), name_style),
+            Span::styled(format!("{INDENT}{}{marker}", LABEL.left(lead)), dim()),
+            Span::styled(METHOD.left(label), name_style),
             Span::styled(format!("  {blurb}"), dim()),
         ])
     }
@@ -227,7 +229,7 @@ impl LoginOverlay {
     fn phase_line(&self) -> Line<'static> {
         let (start, sign_in, exchange) = self.stations();
         Line::from(vec![
-            Span::styled(format!("{INDENT}{:<LABEL_W$}", "step"), dim()),
+            Span::styled(format!("{INDENT}{}", LABEL.left("step")), dim()),
             start.span(),
             Span::styled(" start   ", start.style()),
             sign_in.span(),
@@ -265,7 +267,7 @@ impl LoginOverlay {
                 expires_in,
             })) => {
                 let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{INDENT}{:<LABEL_W$}", "code"), dim()),
+                    Span::styled(format!("{INDENT}{}", LABEL.left("code")), dim()),
                     Span::styled(
                         user_code.clone(),
                         Style::default()
@@ -296,7 +298,7 @@ fn field(label: &str, text: &str, style: Style) -> Vec<Line<'static>> {
     line::push_wrapped(&mut lines, text, VALUE_W, |chunk, first| {
         let lead = if first { label } else { "" };
         Line::from(vec![
-            Span::styled(format!("{INDENT}{lead:<LABEL_W$}"), dim()),
+            Span::styled(format!("{INDENT}{}", LABEL.left(lead)), dim()),
             Span::styled(chunk, style),
         ])
     });

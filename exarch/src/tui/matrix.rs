@@ -4,7 +4,7 @@
 //! value, and it holds an agent identity, never a row number.
 
 use super::line;
-use super::palette::{AGENT_HUES, PROMPT_INK, SLATE};
+use super::palette::{AGENT_HUES, Col, PROMPT_INK, SLATE};
 use super::rail;
 use super::scrollback::Scrollback;
 use super::tabs::TabRow;
@@ -305,26 +305,26 @@ pub(super) fn neighbour(
 
 #[derive(Clone, Copy)]
 struct MatrixWidths {
-    label: usize,
-    turns: usize,
-    tokens: usize,
-    bar: usize,
+    label: Col,
+    turns: Col,
+    tokens: Col,
+    bar: Col,
 }
 
 impl MatrixWidths {
     fn measure(rows: &[MatrixRow]) -> Self {
         rows.iter().fold(
             Self {
-                label: 0,
-                turns: 0,
-                tokens: 0,
-                bar: 0,
+                label: Col::default(),
+                turns: Col::default(),
+                tokens: Col::default(),
+                bar: Col::default(),
             },
             |w, row| Self {
-                label: w.label.max(row.label.chars().count()),
-                turns: w.turns.max(row.turns.chars().count()),
-                tokens: w.tokens.max(row.tokens.chars().count()),
-                bar: w.bar.max(row.bar.chars().count()),
+                label: w.label.seeing(&row.label),
+                turns: w.turns.seeing(&row.turns),
+                tokens: w.tokens.seeing(&row.tokens),
+                bar: w.bar.seeing(&row.bar),
             },
         )
     }
@@ -419,30 +419,28 @@ impl MatrixRow {
         } else {
             Modifier::empty()
         });
-        let (label_w, turns_w, tokens_w, bar_w) =
-            (widths.label, widths.turns, widths.tokens, widths.bar);
         // The caret is the human's mark, so it takes the human's ink.
         let caret = Style::default().fg(PROMPT_INK).add_modifier(Modifier::BOLD);
         let turns = if self.idle.is_some() {
             Span::styled(
-                format!("{:>turns_w$}", self.turns),
+                widths.turns.right(&self.turns),
                 Style::default().fg(SLATE),
             )
         } else {
             Span::styled(
-                format!("{:<turns_w$}", self.turns),
+                widths.turns.left(&self.turns),
                 Style::default().fg(self.hue),
             )
         };
         Line::from(vec![
             Span::styled(if self.cursor { "›" } else { " " }, caret),
-            Span::styled(format!("{:<label_w$}", self.label), self.label_style),
+            Span::styled(widths.label.left(&self.label), self.label_style),
             Span::raw("  "),
             turns,
             Span::raw("  "),
-            Span::styled(format!("{:>tokens_w$}", self.tokens), self.token_style),
+            Span::styled(widths.tokens.right(&self.tokens), self.token_style),
             Span::raw("  "),
-            Span::styled(format!("{:<bar_w$}", self.bar), slate),
+            Span::styled(widths.bar.left(&self.bar), slate),
         ])
     }
 }

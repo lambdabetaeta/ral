@@ -28,7 +28,10 @@
 //! providers only once the provider control is focused on it.
 
 use super::line;
-use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
+use super::palette::{BANNER_GOLD, CYAN, Col, OVERLAY_BG, RED, SLATE};
+
+/// The label gutter every row of the picker aligns to.
+const FIELD_LABEL: Col = Col::wide(7);
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::{EFFORT_LADDER, Tuning};
@@ -698,15 +701,15 @@ impl Picker {
         }
     }
 
-    /// A field label in the seven-column gutter every row aligns to, bright when
-    /// focused, so the eye finds the live control by lightness alone.
+    /// A field label in the gutter every row aligns to, bright when focused, so
+    /// the eye finds the live control by lightness alone.
     fn field_label(&self, text: &str, field: Focus) -> Span<'static> {
         let style = if self.focus == field {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(SLATE).add_modifier(Modifier::DIM)
         };
-        Span::styled(format!("{text:<7}"), style)
+        Span::styled(FIELD_LABEL.left(text), style)
     }
 
     fn search_line(&self) -> Line<'static> {
@@ -732,7 +735,7 @@ impl Picker {
             format!("{n} match{}", if n == 1 { "" } else { "es" })
         };
         Line::from(Span::styled(
-            format!("{:<7}{text}", ""),
+            format!("{}{text}", FIELD_LABEL.left("")),
             Style::default().fg(SLATE).add_modifier(Modifier::DIM),
         ))
     }
@@ -793,7 +796,7 @@ impl Picker {
     fn unsupported_row(label: &str) -> Line<'static> {
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
         Line::from(vec![
-            Span::styled(format!("{label:<7}"), dim),
+            Span::styled(FIELD_LABEL.left(label), dim),
             Span::styled(
                 "— not supported by this model",
                 dim.add_modifier(Modifier::ITALIC),

@@ -291,7 +291,7 @@ pub(super) fn cmd_help(app: &mut App) {
             s
         })
         .collect();
-    let col = super::line::Col::of(names.iter().map(String::as_str));
+    let col = super::palette::Col::of(names.iter().map(String::as_str));
     for (n, c) in names.iter().zip(SLASH_COMMANDS) {
         app.push_note(id, &format!("{}   {}", col.left(n), c.help));
     }
