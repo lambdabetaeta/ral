@@ -2,9 +2,9 @@
 //! `OpenRouter`'s `GET /api/v1/models` and cached.
 //!
 //! OR republishes the upstream cards verbatim, so the one catalog prices
-//! Anthropic, `OpenAI` and the OR wire alike.  `DeepSeek` is the exception:
-//! OR publishes its generic aliases at $0, so native `DeepSeek` traffic bills
-//! off the hardcoded table in `deepseek_price`.
+//! Anthropic, `OpenAI` and the OR wire alike.  `DeepSeek` is the exception: its
+//! entries there are third-party routes at their own rates, and its own API
+//! bills by a clock, so native `DeepSeek` traffic prices off `deepseek_price`.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -118,8 +118,9 @@ pub(crate) fn lookup(model: &str) -> Option<ModelPricing> {
     CATALOG.get()?.prices.get(model).copied()
 }
 
-/// One side (regular or peak) of a `DeepSeek` rate card, in dollars per
-/// 1M tokens.
+/// A `DeepSeek` rate card in dollars per 1M tokens, quoted off-peak; every
+/// figure doubles inside a peak window.  `input` is the cache-miss rate, the
+/// cache-hit tokens billing at `cache_read` instead.
 #[derive(Clone, Copy)]
 struct DeepSeekRates {
     input: f64,
@@ -127,65 +128,51 @@ struct DeepSeekRates {
     cache_read: f64,
 }
 
-/// `DeepSeek`'s peak-pricing windows, 01:00-04:00 and 06:00-10:00, on `hour`
-/// in 0..=23 UTC.  Both ends are half-open, as `DeepSeek` states them.
-fn is_peak_hour(hour: i8) -> bool {
-    (1..4).contains(&hour) || (6..10).contains(&hour)
+/// Is `at` inside a `DeepSeek` peak window — 01:00-04:00 and 06:00-10:00 UTC,
+/// Monday to Friday, each end half-open?
+///
+/// `DeepSeek` also makes Chinese public holidays off-peak in full, which no
+/// calendar here knows; such a turn bills at the peak rate, overstating its
+/// cost rather than understating it.
+fn is_peak(at: jiff::Timestamp) -> bool {
+    let utc = at.to_zoned(jiff::tz::TimeZone::UTC);
+    let weekday = utc.weekday().to_monday_zero_offset() < 5;
+    let hour = utc.hour();
+    weekday && ((1..4).contains(&hour) || (6..10).contains(&hour))
 }
 
-/// `DeepSeek`'s own API rates, which double inside the peak windows.  OR
-/// publishes many `DeepSeek` aliases at $0 and `build_snapshot` drops
-/// zero-rate entries, so the catalog would price this traffic at nothing.
+/// `DeepSeek`'s own API rates, as its pricing page states them.  The catalog
+/// prices `DeepSeek` models as OR's third-party hosts charge for them, which
+/// is neither the first-party rate nor sensitive to the clock below.
 fn deepseek_price(model: &str) -> Option<ModelPricing> {
-    // `deepseek-chat` and `deepseek-reasoner` are the non-thinking and
-    // thinking faces of `deepseek-v4-flash`, priced alike.
     const FLASH: DeepSeekRates = DeepSeekRates {
-        input: 0.14,
-        output: 0.28,
-        cache_read: 0.0028,
-    };
-    const FLASH_PEAK: DeepSeekRates = DeepSeekRates {
-        input: 0.28,
-        output: 0.56,
-        cache_read: 0.0056,
+        input: 0.15,
+        output: 0.6,
+        cache_read: 0.003,
     };
     const PRO: DeepSeekRates = DeepSeekRates {
-        input: 0.435,
-        output: 0.87,
-        cache_read: 0.003_625,
-    };
-    const PRO_PEAK: DeepSeekRates = DeepSeekRates {
-        input: 0.87,
-        output: 1.74,
-        cache_read: 0.00725,
+        input: 0.66,
+        output: 1.98,
+        cache_read: 0.022,
     };
 
-    let peak = is_peak_hour(
-        jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .hour(),
-    );
-    let r = match model {
-        "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => {
-            if peak {
-                FLASH_PEAK
-            } else {
-                FLASH
-            }
-        }
-        "deepseek-v4-pro" => {
-            if peak {
-                PRO_PEAK
-            } else {
-                PRO
-            }
-        }
+    let rates = match model {
+        // The retired flash names the API still accepts: both are served by
+        // `deepseek-flash` and billed at its price.
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => FLASH,
+        "deepseek-v4-pro" => PRO,
         _ => return None,
     };
+    let per_token = if is_peak(jiff::Timestamp::now()) {
+        2.0 / 1_000_000.0
+    } else {
+        1.0 / 1_000_000.0
+    };
     Some(ModelPricing {
-        input: r.input / 1_000_000.0,
-        output: r.output / 1_000_000.0,
-        cache_read: r.cache_read / 1_000_000.0,
+        input: rates.input * per_token,
+        output: rates.output * per_token,
+        cache_read: rates.cache_read * per_token,
+        // No cache-write charge: a cache miss is plain input.
         cache_write: 0.0,
     })
 }
@@ -374,12 +361,38 @@ struct Pricing {
 mod tests {
     use super::*;
 
+    /// 2026-09-21 is a Monday, 2026-09-19 the Saturday before it.
     #[test]
-    fn is_peak_hour_matches_documented_windows() {
-        for h in 0i8..24 {
-            let expected = matches!(h, 1..=3 | 6..=9);
-            assert_eq!(is_peak_hour(h), expected, "hour {h}");
+    fn is_peak_matches_documented_windows() {
+        let at = |day: &str, hour: i8| {
+            format!("{day}T{hour:02}:30:00Z")
+                .parse::<jiff::Timestamp>()
+                .expect("a literal UTC timestamp parses")
+        };
+        for hour in 0i8..24 {
+            let expected = matches!(hour, 1..=3 | 6..=9);
+            assert_eq!(is_peak(at("2026-09-21", hour)), expected, "Monday {hour}h");
+            assert!(!is_peak(at("2026-09-19", hour)), "Saturday {hour}h");
         }
+    }
+
+    /// The names `DeepSeek` still accepts all reach the flash card, and the
+    /// peak window only scales it.
+    #[test]
+    fn deepseek_prices_every_live_name() {
+        for model in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-pro",
+        ] {
+            let p = deepseek_price(model).expect("a live name is priced");
+            assert!(
+                p.input > 0.0 && p.output > 0.0 && p.cache_read > 0.0,
+                "{model}"
+            );
+        }
+        assert!(deepseek_price("deepseek-chat").is_none());
     }
 
     #[test]

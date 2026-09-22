@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7f1b5097
-generated_at_date: 2026-09-15
+generated_at_commit: fef4bf2b
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -387,10 +387,12 @@ cannot land mid-character and panic (X8).
   and caches it; `ModelPricing::dollars` strips the cache counts out of `input`
   and bills uncached/cache-creation/cache-read/output each at its rate, falling
   back to the base input rate when no separate cache rate is published. Native
-  DeepSeek models use the local rate table (including its UTC peak windows)
-  before any OpenRouter alias; other providers use the catalog. The catalog
-  also supplies `ModelCaps` (context window and supported request parameters)
-  for startup and picker decisions. Offline starts degrade to `—`.
+  DeepSeek models use the local rate table — DeepSeek's own first-party card,
+  doubling inside its weekday UTC peak windows, where the catalog would price
+  a third-party OpenRouter host — before any OpenRouter alias; other providers
+  use the catalog. The catalog also supplies `ModelCaps` (context window and
+  supported request parameters) for startup and picker decisions. Offline
+  starts degrade to `—`.
 
 ## The wire door
 
