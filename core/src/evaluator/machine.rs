@@ -784,8 +784,14 @@ impl Machine {
         crate::process::check(mooring)?;
         let argv = close_args(&exec.args, env)?;
         let redirs = close_redirects(&exec.redirects, env)?;
-        if !matches!(exec.head.name().bare(), Some(name) if name.starts_with('_')) {
-            shell.local.audit.call_site = span;
+        // A span outside the session's sources — the baked prelude's — keeps
+        // the user's site, so `defer`'s inner `spawn` is stamped where
+        // `defer` was written.
+        if !matches!(exec.head.name().bare(), Some(name) if name.starts_with('_'))
+            && let Some(span) = span
+            && shell.session.sources.get(span.file).is_some()
+        {
+            shell.local.audit.call_site = Some(span);
         }
         Ok(
             match command_call::classify_command(&exec.head, env, mooring, shell)? {

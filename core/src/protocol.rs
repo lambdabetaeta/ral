@@ -23,7 +23,7 @@ use std::time::Duration;
 // socketpair end inherited on fd 3. The frame protocol itself is not.
 #[cfg(unix)]
 use crate::process::ChildHandle;
-use crate::serial::FOValue;
+use crate::serial::{FOValue, NotData};
 use crate::sync::{CondvarExt as _, LockExt};
 use crate::types::CapturePolicy;
 use crate::types::DeferredSink;
@@ -395,6 +395,12 @@ pub enum Ending {
         rendered: String,
         status: FailureStatus,
     },
+    /// The run settled, but on a value that is not data — a handle, a block,
+    /// a function — which the protocol cannot carry. Nothing failed, yet the
+    /// value is lost, so it ends as a failure of its own kind.
+    Unreturnable {
+        rendered: String,
+    },
     Exited(i32),
 }
 
@@ -406,8 +412,41 @@ impl Ending {
         match self {
             Self::Settled { status, .. } | Self::Exited(status) => *status,
             Self::Raised { status, .. } | Self::Walled { status, .. } => status.get(),
+            Self::Unreturnable { .. } => 1,
         }
     }
+}
+
+/// Why a settled `value` has no wire form, and what the author likely meant.
+fn render_unreturnable(value: &crate::types::Value, found: NotData) -> String {
+    let (message, hint) = if crate::serial::no_wire_form(value) {
+        let hint = match found {
+            NotData::Handle => {
+                "did you mean to keep it? bind it — `let h = defer { … }` — and `await $h` \
+                 when you need its value"
+            }
+            NotData::Block => "did you mean to run it? force it with `!{ … }`",
+            NotData::Function => "did you mean to apply it? pass it its arguments",
+        };
+        (
+            format!("the result is {found}, and a run can return only data"),
+            hint,
+        )
+    } else {
+        let hint = match found {
+            NotData::Handle => "bind the handle with `let h = …`, and return only data",
+            NotData::Block | NotData::Function => {
+                "return only data: force a block with `!{ … }`, or bind it with `let`"
+            }
+        };
+        (
+            format!("the result holds {found}, and a run can return only data"),
+            hint,
+        )
+    };
+    let mut error = crate::types::Error::new(message, 1);
+    error.hint = Some(hint.into());
+    crate::diagnostic::format_runtime_error_compact(&error)
 }
 
 /// Project an engine [`Ending`](crate::run::Ending) onto the wire, rendering
@@ -417,24 +456,18 @@ impl Ending {
 fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) -> Ending {
     use crate::run::Ending as Raw;
     match ending {
-        Raw::Settled { value, status } => {
-            let status = status.clamp(0, 255);
-            // A top-level result is not an `Observation` — it has no
-            // placeholder vocabulary of its own — so a value the wire cannot
-            // carry (a live `Handle`, say) is reported as an error instead of
-            // silently dropped.
-            match FOValue::try_from(&value) {
-                Ok(value) => Ending::Settled { value, status },
-                // The settled status cannot carry over: this ending is a
-                // failure, and `FailureStatus` will not spell one as success.
-                Err(_) => Ending::Raised {
-                    rendered: "run result is not transportable across the engine protocol".into(),
-                    command_exit: false,
-                    single_command: false,
-                    status: status.into(),
-                },
-            }
-        }
+        // A top-level result is not an `Observation` — it has no placeholder
+        // vocabulary of its own — so a value the wire cannot carry is
+        // reported, never silently dropped.
+        Raw::Settled { value, status } => match FOValue::try_from(&value) {
+            Ok(fo) => Ending::Settled {
+                value: fo,
+                status: status.clamp(0, 255),
+            },
+            Err(found) => Ending::Unreturnable {
+                rendered: render_unreturnable(&value, found),
+            },
+        },
         Raw::Raised {
             error,
             single_command,
@@ -571,13 +604,11 @@ mod ending_wire_round_trip_tests {
     }
 
     /// A failure never reports success, however it was built and whatever a
-    /// peer sends: the projection of a settled run whose value has no wire
-    /// form once reused that run's own status — normally `0` — and a host
-    /// printed an error while reporting the run as having succeeded.
+    /// peer sends.
     #[test]
     fn a_failing_ending_never_carries_a_success_status() {
         let raised = Ending::Raised {
-            rendered: "run result is not transportable across the engine protocol".into(),
+            rendered: "error: boom\n".into(),
             command_exit: false,
             single_command: false,
             status: 0.into(),

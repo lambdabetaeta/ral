@@ -254,8 +254,7 @@ fn instantiate(val: Value, options: &Map, name: &str, shell: &mut Shell) -> Sett
                 Ok(fo) => fo,
                 Err(e) => {
                     return Err(Break::Error(load_err(format!(
-                        "plugin '{name}' options are not first-order: {}",
-                        e.message
+                        "plugin '{name}' options hold {e}, but options must be data"
                     ))));
                 }
             };

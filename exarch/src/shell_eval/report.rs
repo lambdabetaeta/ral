@@ -6,13 +6,14 @@
 //! it reads is handed in, so it never touches a transport or a registry
 //! itself.
 
+use super::TOOL_SCRIPT;
 use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::Value as RalValue;
 use ral_core::protocol::Ending;
 use ral_core::serial::FOValue;
-use ral_core::types::{Observation, Observed};
-use std::collections::HashSet;
+use ral_core::types::{CallSite, Observation, Observed};
+use std::collections::HashMap;
 
 /// Enough of one call's fan-out to name without crowding the stderr it rides
 /// on; the rest is counted aloud, never dropped in silence.
@@ -56,13 +57,17 @@ pub(crate) fn render(
             }
             status.get()
         }
+        Ending::Unreturnable { rendered } => {
+            out.push_str(rendered);
+            ending.status()
+        }
         Ending::Exited(code) => *code,
     };
 
     if let Some(audit) = fragment.audit() {
         out.push_str(&audit);
     }
-    if let Some(orphans) = orphan_note(trail, workers) {
+    if let Some(orphans) = orphan_note(ending, trail, workers) {
         out.push_str(&orphans);
     }
     (out, exit)
@@ -103,17 +108,27 @@ fn exit_tip(single_command: bool) -> String {
     tip
 }
 
-/// The [`WorkerId`](ral_core::types::WorkerId)s this dispatch's own trail gave
-/// birth to.
-fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
+/// Where each worker this dispatch's own trail gave birth to was spawned, by
+/// [`WorkerId`](ral_core::types::WorkerId).
+fn trail_births(trail: &[FOValue]) -> HashMap<u64, CallSite> {
     trail
         .iter()
         .filter_map(|fov| Observation::from_value(&RalValue::from(fov.clone())))
         .filter_map(|obs| match obs.what {
-            Observed::Worker { id, .. } => Some(id.0),
+            Observed::Worker { id, .. } => Some((id.0, obs.site)),
             _ => None,
         })
         .collect()
+}
+
+/// A worker as the model can find it: its command, and the line that spawned
+/// it when the birth carries one.
+fn worker_name(cmd: &str, site: &CallSite) -> String {
+    match (site.line, site.script.as_str()) {
+        (0, _) => format!("`{cmd}`"),
+        (line, TOOL_SCRIPT) => format!("`{cmd}` (spawned at line {line})"),
+        (line, script) => format!("`{cmd}` (spawned at {script}:{line})"),
+    }
 }
 
 /// The sentence a failed ending owes the model about work that outlived it: a
@@ -121,12 +136,11 @@ fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
 /// settled-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
-fn orphan_note(trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
-    let births = trail_worker_ids(trail);
+fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
+    let births = trail_births(trail);
     let mut cmds: Vec<String> = workers
         .iter()
-        .filter(|w| births.contains(&w.id))
-        .map(|w| format!("`{}`", w.cmd))
+        .filter_map(|w| births.get(&w.id).map(|site| worker_name(&w.cmd, site)))
         .collect();
     if cmds.is_empty() {
         return None;
@@ -138,10 +152,19 @@ fn orphan_note(trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
         0 => String::new(),
         n => format!(", and {n} more not named here"),
     };
+    let fate = match ending {
+        Ending::Unreturnable { .. } => {
+            "A handle this call bound with `let` is still bound — `await $h` reaches it; \
+             one it only returned was lost with the result, so that work is orphaned."
+        }
+        _ => {
+            "A handle bound by a step that completed before the failure is still bound — \
+             `await $h` reaches it; one the failing step would have bound never landed, so \
+             that work is orphaned."
+        }
+    };
     Some(format!(
-        "\nwork this call spawned outlived it: {named}{overflow}. A handle bound by a \
-         step that completed before the failure is still bound — `await $h` reaches it; \
-         one the failing step would have bound never landed, so that work is orphaned.\n"
+        "\nwork this call spawned outlived it: {named}{overflow}. {fate}\n"
     ))
 }
 
@@ -151,8 +174,12 @@ mod tests {
     use ral_core::types::{CallSite, LeaseClass, WorkerId};
 
     fn worker_birth(id: u64, cmd: &str) -> FOValue {
+        worker_birth_at(id, cmd, CallSite::default())
+    }
+
+    fn worker_birth_at(id: u64, cmd: &str, site: CallSite) -> FOValue {
         let obs = Observation::instant(
-            CallSite::default(),
+            site,
             Some("test".into()),
             Observed::Worker {
                 id: WorkerId(id),
@@ -266,6 +293,48 @@ mod tests {
     }
 
     #[test]
+    fn an_orphan_is_named_by_the_line_that_spawned_it() {
+        let at = |script: &str, line| CallSite {
+            script: script.into(),
+            line,
+            col: 9,
+        };
+        let trail = vec![
+            worker_birth_at(1, "<block>", at(TOOL_SCRIPT, 3)),
+            worker_birth_at(2, "<block>", at("lib.ral", 7)),
+        ];
+        let workers = vec![
+            worker_row(1, "<block>", true),
+            worker_row(2, "<block>", true),
+        ];
+        let (out, _) = render(
+            &Ending::Exited(1),
+            &trail,
+            &ActFragment::default(),
+            &workers,
+            5,
+        );
+        assert!(out.contains("`<block>` (spawned at line 3)"), "{out:?}");
+        assert!(out.contains("`<block>` (spawned at lib.ral:7)"), "{out:?}");
+    }
+
+    /// A handle that was only the result was not stranded by a failing step:
+    /// the note says it went with the result.
+    #[test]
+    fn an_unreturnable_result_says_its_handle_was_lost_with_it() {
+        let ending = Ending::Unreturnable {
+            rendered: "error: the result is a handle, and a run can return only data\n".into(),
+        };
+        let trail = vec![worker_birth(4, "<block>")];
+        let workers = vec![worker_row(4, "<block>", true)];
+        let (out, exit) = render(&ending, &trail, &ActFragment::default(), &workers, 5);
+        assert_eq!(exit, 1);
+        assert!(out.starts_with("error: the result is a handle"), "{out:?}");
+        assert!(out.contains("lost with the result"), "{out:?}");
+        assert!(!out.contains("failing step"), "nothing failed: {out:?}");
+    }
+
+    #[test]
     fn overflow_past_named_is_counted_not_dropped() {
         let trail: Vec<FOValue> = (0..NAMED as u64 + 2)
             .map(|id| worker_birth(id, "job"))
@@ -293,7 +362,7 @@ mod tests {
         let committed = ActFragment::from_acts(vec![committed_act("spawn", Some("helper"))]);
         let refused = ActFragment::default();
 
-        let endings: [(&str, Ending, i32); 4] = [
+        let endings: [(&str, Ending, i32); 5] = [
             ("ok", settled_ending(), 0),
             (
                 "raise",
@@ -312,6 +381,13 @@ mod tests {
                     status: 143.into(),
                 },
                 124,
+            ),
+            (
+                "unreturnable",
+                Ending::Unreturnable {
+                    rendered: "error: the result is a block\n".into(),
+                },
+                1,
             ),
             ("exit", Ending::Exited(3), 3),
         ];

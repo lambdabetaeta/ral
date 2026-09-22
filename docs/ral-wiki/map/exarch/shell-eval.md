@@ -173,7 +173,10 @@ order, and exits 124:
    splits: a handle bound by a step that *completed* before the failure is
    still bound, so the `recovery:` line's `await $h` reaches it; one the
    failing step would have bound never landed — `bind_pattern` is
-   all-or-nothing — and that work is orphaned. Which workers outlived the call
+   all-or-nothing — and that work is orphaned. An `Ending::Unreturnable` —
+   the run settled on a handle, block, or function, which the wire cannot
+   carry — failed no step, so there the sentence says instead that a handle
+   only *returned* was lost with the result. Which workers outlived the call
    is a different fact from a committed act, so it is its own sentence and the
    desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
    across the seam: the dispatch's own trail carries an `Observed::Worker`
@@ -184,8 +187,9 @@ order, and exits 124:
    still present in the registry, running or settled-unclaimed, is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
    registry and is nobody's orphan. The sentence names each survivor by its
-   `cmd`, up to five, and counts aloud whatever it does not name — a silent
-   truncation would read as "that was all of them".
+   `cmd` and the line its birth's `CallSite` records — an anonymous `defer`'s
+   `cmd` is only `<block>` — up to five, and counts aloud whatever it does not
+   name — a silent truncation would read as "that was all of them".
 
 The per-stage journal exists but goes unrendered: `run_shell` asks with
 `trail: Some(CapturePolicy::Off)`, so every dispatch's `Report::Ran.trail`

@@ -154,7 +154,8 @@ pub(super) fn execute_input(
                     None
                 }
                 protocol::Ending::Raised { rendered, .. }
-                | protocol::Ending::Walled { rendered, .. } => {
+                | protocol::Ending::Walled { rendered, .. }
+                | protocol::Ending::Unreturnable { rendered } => {
                     eprint!("{rendered}");
                     None
                 }

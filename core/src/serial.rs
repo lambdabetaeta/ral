@@ -539,12 +539,39 @@ impl FOValue<SerialClosure> {
     }
 }
 
+/// The first leaf [`FOValue::try_from`] met that is not data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotData {
+    Block,
+    Function,
+    Handle,
+}
+
+impl std::fmt::Display for NotData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Block => "a block",
+            Self::Function => "a function",
+            Self::Handle => "a handle",
+        })
+    }
+}
+
+impl From<NotData> for Error {
+    fn from(found: NotData) -> Self {
+        Self::new(
+            format!("{found} is not data: the protocol carries only data"),
+            1,
+        )
+    }
+}
+
 impl TryFrom<&Value> for FOValue {
-    type Error = Error;
+    type Error = NotData;
 
     /// Recursion over the data variants *is* the protocol's first-orderness
     /// check, rather than a separate test followed by a hopeful re-encode.
-    fn try_from(v: &Value) -> Result<Self, Error> {
+    fn try_from(v: &Value) -> Result<Self, NotData> {
         Ok(match v {
             Value::Unit => Self::Unit,
             Value::Bool(v) => Self::Bool { value: *v },
@@ -559,7 +586,7 @@ impl TryFrom<&Value> for FOValue {
                 entries: items
                     .iter()
                     .map(|(k, v)| Ok((k.clone(), Self::try_from(v)?)))
-                    .collect::<Result<_, Error>>()?,
+                    .collect::<Result<_, NotData>>()?,
             },
             Value::Variant { label, payload } => Self::Variant {
                 label: label.clone(),
@@ -568,13 +595,9 @@ impl TryFrom<&Value> for FOValue {
                     None => None,
                 },
             },
-            Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
-                return Err(Error::new(
-                    "value is not first-order: the protocol carries only data, \
-                     not closures or handles",
-                    1,
-                ));
-            }
+            Value::Thunk(c) if c.comp.arrow().is_none() => return Err(NotData::Block),
+            Value::Thunk(_) | Value::Native { .. } => return Err(NotData::Function),
+            Value::Handle(_) => return Err(NotData::Handle),
         })
     }
 }

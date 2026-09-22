@@ -1073,8 +1073,8 @@ impl Parser {
             return Ok(Ast::Unit);
         }
         Err(self.error(
-            "`(` opens the unit literal `()` and nothing else here — for arithmetic \
-             write `$[…]`, and to run a command inline write `!{…}`",
+            "parentheses group only inside `$[…]`; here `()` is the unit value. Did you \
+             mean `$[…]` for arithmetic, or `!{…}` to run a command inline?",
         ))
     }
 
@@ -2323,9 +2323,9 @@ mod tests {
         assert!(err.message.contains("no `||`"), "got: {}", err.message);
     }
 
-    /// `(` opens the unit literal and nothing else, so a reader reaching for
-    /// grouping must be sent to the form that has it rather than told a token
-    /// was unexpected.
+    /// Outside `$[…]` parentheses only spell unit, so a reader reaching for
+    /// grouping is sent to the forms that group rather than told a token was
+    /// unexpected.
     #[test]
     fn a_lone_paren_names_the_unit_literal_and_the_expression_form() {
         let err = parse("echo (1)").unwrap_err();

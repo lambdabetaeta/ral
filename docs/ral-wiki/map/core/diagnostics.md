@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4d859c3
-generated_at_date: 2026-09-16
+generated_at_commit: 6049f131
+generated_at_date: 2026-09-22
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -51,7 +51,10 @@ indexing an unrelated text. ([[decisions/260614_structural-bug-prevention|struct
 *to* — script name plus 1-indexed `(line, col)` — which hosts read off every
 observation, command or capability check alike. It rides the
 [[map/core/shell-state|audit collector]] rather than the run frame, so an
-observation carries the position of the dispatch that produced it.
+observation carries the position of the dispatch that produced it. A dispatch
+whose span resolves outside the session's sources — the baked prelude's —
+leaves the register alone, so `defer`'s inner `spawn` is stamped at the line
+that wrote `defer`, not at no line at all.
 
 Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is

@@ -420,7 +420,7 @@ pub(super) fn call_plugin_hook(
                 }
                 Err(e) => RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(ral_core::types::Error::new(
-                        format!("hook '{hook}' argument is not first-order: {}", e.message),
+                        format!("hook '{hook}' was handed {e}, but its arguments must be data"),
                         1,
                     )),
                 },

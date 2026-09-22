@@ -36,6 +36,9 @@ pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 /// lingering under retention does not.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
+/// The script name every tool call runs under.
+pub(crate) const TOOL_SCRIPT: &str = "<tool>";
+
 /// Birth budget on `detach` per session shell.
 ///
 /// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap
@@ -245,8 +248,6 @@ pub(crate) fn run_shell(
     timeout_secs: u64,
     host: Arc<dyn ral_core::protocol::Host>,
 ) -> Outcome {
-    let name = "<tool>";
-
     // Trace-only timing.
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
@@ -257,7 +258,7 @@ pub(crate) fn run_shell(
 
     let run = Run {
         program: Program::Source(cmd.to_string()),
-        script_name: name.to_string(),
+        script_name: TOOL_SCRIPT.to_string(),
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {

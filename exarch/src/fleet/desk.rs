@@ -1775,7 +1775,9 @@ impl ExarchDesk {
         let m = self.services.agent.pins.lock_ignore_poison();
         match m.get(&key) {
             // A card value is always first-order, so this conversion never fails.
-            Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card)),
+            Some(digest) => Ok(FOValue::try_from(&crate::bus::card::encode_card(
+                &digest.card,
+            ))?),
             None => Ok(FOValue::Unit),
         }
     }

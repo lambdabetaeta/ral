@@ -196,9 +196,7 @@ pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
         .run_shell(format!("probe-{name}"), &format!("${name}"), 5, &emit)
         .content;
     // A closure-valued binding never crosses the seam, but it did resolve.
-    if content.contains("VALUE:")
-        || content.contains("not transportable across the engine protocol")
-    {
+    if content.contains("VALUE:") || content.contains("a run can return only data") {
         return true;
     }
     assert!(

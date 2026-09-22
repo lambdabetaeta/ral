@@ -1606,6 +1606,36 @@ pub(crate) mod tests {
         }
     }
 
+    /// A result the wire cannot carry names what it is or holds, and the
+    /// remedy that kind of value suggests.
+    #[test]
+    fn a_result_that_is_not_data_says_what_it_holds() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        for (src, says, hint) in [
+            ("spawn { echo hi }", "the result is a handle", "let h ="),
+            ("{ echo hi }", "the result is a block", "!{ … }"),
+            ("{ |x| echo $x }", "the result is a function", "arguments"),
+            (
+                "[n: 1, h: !{spawn { echo hi }}]",
+                "the result holds a handle",
+                "let h =",
+            ),
+            ("[k: { echo hi }]", "the result holds a block", "!{ … }"),
+        ] {
+            let report = shell.run(capture_req(src)).into_report(shell.sources());
+            let crate::protocol::Report::Ran { ending, .. } = report else {
+                panic!("{src:?} must reach evaluation");
+            };
+            let crate::protocol::Ending::Unreturnable { rendered } = &ending else {
+                panic!("{src:?} must end unreturnable, got {ending:?}");
+            };
+            assert!(rendered.contains(says), "{src:?}: {rendered:?}");
+            assert!(rendered.contains(hint), "{src:?}: {rendered:?}");
+            assert_eq!(ending.status(), 1, "{src:?} must not report success");
+        }
+    }
+
     /// A lambda compiled by one run and called by the next draws its caret into
     /// the text that defined it: the registry only grows, so a run boundary
     /// costs a value nothing of its origin.
