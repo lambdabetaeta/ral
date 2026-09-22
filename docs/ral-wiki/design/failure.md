@@ -19,7 +19,7 @@ share one return type.
 
 **`try` turns failure into data, and is ral's only `||`.** `try B H` runs `B`;
 on success it returns `B`'s value, on failure it calls the handler `H` with an
-error record `[status, cmd, message, line, col]` and returns *its* value,
+error record `[status, cmd, message, site]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
 nothing else — `exit`, `Escape`'s one variant, bypasses it. When a
 command encodes its result in its exit status rather than a value — an external

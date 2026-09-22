@@ -483,9 +483,9 @@ stops the current computation unless something handles it.
     }
 
 Keep the handler on the same line as the body's closing brace: `} {`.
-The handler receives an error record with `status`, `cmd`, `message`, `line`,
-and `col` fields. `message` describes the failure; it is not the command's
-stderr.
+The handler receives an error record with `status`, `cmd`, `message` and
+`site` fields, where `site` is `` `just [script: String, line: Int, col: Int] ``
+or `` `none ``. `message` describes the failure; it is not the command's stderr.
 
 Raise and re-raise with an error record:
 

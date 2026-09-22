@@ -226,6 +226,7 @@ pub enum Display {
         card: Card,
     },
     Done {
+        cmd: String,
         outcome: DoneOutcome,
     },
     Notice {
@@ -250,7 +251,7 @@ pub enum Display {
 
 /// A detached worker's `` `done `` completion, minus the one-line card the
 /// view fold rebuilds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DoneOutcome {
     Ok,

@@ -285,10 +285,9 @@ fn surface_notice(values: &[Value]) -> String {
         .iter()
         .rev()
         .find_map(crate::bus::card::value_to_done)
-        .as_ref()
         .map_or_else(
             || "background block settled".to_string(),
-            crate::bus::card::settled_text,
+            |(cmd, outcome)| crate::bus::card::settled_text(&cmd, &outcome),
         );
     format!("{settled}. Await its handle for the value.")
 }

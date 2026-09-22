@@ -285,8 +285,8 @@ mod tests {
         let ending = Ending::Unreturnable {
             rendered: "error: the result is a handle, and a run can return only data\n".into(),
         };
-        let trail = vec![worker_birth(4, "block at line 1")];
-        let workers = vec![worker_row(4, "block at line 1", true)];
+        let trail = vec![worker_birth(4, "block at turn 1, line 1")];
+        let workers = vec![worker_row(4, "block at turn 1, line 1", true)];
         let (out, exit) = render(&ending, &trail, &ActFragment::default(), &workers, 5);
         assert_eq!(exit, 1);
         assert!(out.starts_with("error: the result is a handle"), "{out:?}");

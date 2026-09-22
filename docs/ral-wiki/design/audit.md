@@ -25,8 +25,8 @@ report is data. An ordinary failure settles into `` `err ``; an `exit` escape
 is not a failure and walks past the report entirely
 ([[design/failure|failure]]).
 
-**The kind is the tag.** An observation is an envelope — `script`, `line`,
-`col`, `start`, `end`, `principal` — around one `what`, a variant over
+**The kind is the tag.** An observation is an envelope — an optional `site`,
+`start`, `end`, `principal` — around one `what`, a variant over
 `` `command | `write | `read | `grep | `check | `worker | `act ``. There is no
 `kind` string beside it, so there is no second place for the kind to be
 recorded and nowhere for the two to disagree; a reader dispatches with `case`

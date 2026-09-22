@@ -249,18 +249,6 @@ impl Shell {
         self.site_of(self.local.audit.call_site)
     }
 
-    /// The call site as this run's reader names it: `line 3` in the run's own
-    /// source, `lib.ral:7` in another.
-    pub(crate) fn call_site_label(&self) -> Option<String> {
-        let span = self.local.audit.call_site?;
-        let site = self.site_of(Some(span))?;
-        Some(if span.file == self.session.root_file {
-            format!("line {}", site.line)
-        } else {
-            format!("{}:{}", site.script, site.line)
-        })
-    }
-
     /// Put one enquiry to `mooring`'s host desk and block for the answer.  The
     /// absent-desk error is the honest answer of a host that answers none.
     ///

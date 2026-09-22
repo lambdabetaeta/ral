@@ -1034,9 +1034,7 @@ impl Scrollback {
             // holds however it settled: `╳` is the turn's own failure (a
             // provider error, a stall), never a nonzero exit, which reads as a
             // red status in the row here just as it does on an exec.
-            K::Done { outcome } => chrome(Chrome::Settled(card::settled_spans(
-                &card::to_card_done(outcome),
-            ))),
+            K::Done { cmd, outcome } => chrome(Chrome::Settled(card::settled_spans(cmd, outcome))),
             K::Notice { notice } => {
                 vec![surfaced(card::notice_card(&card::to_card_notice(notice)))]
             }

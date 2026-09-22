@@ -1,7 +1,7 @@
 # Test: §10.1 try / handler dispatch
 #
 # `try body handler` runs body and returns its value; on failure it
-# calls handler with an ErrorRec [cmd, status, message, line, col] and
+# calls handler with an ErrorRec [cmd, status, message, site] and
 # returns the handler's value instead.
 
 # Success: handler is not called.

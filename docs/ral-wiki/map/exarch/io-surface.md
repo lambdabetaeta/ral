@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: 7e38e2e9
+generated_at_date: 2026-09-22
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
@@ -130,8 +130,8 @@ its true timestamp.
 
 ## The observation — a Value, not a card
 
-Every observation carries a common envelope — `script`, `line`, `col`,
-`start`, `end`, `principal` — around one `what`, a variant whose **tag is the
+Every observation carries a common envelope — an optional `site`, `start`,
+`end`, `principal` — around one `what`, a variant whose **tag is the
 kind**. There is no `kind` field: the tag is the only place the kind is
 recorded, so nothing can disagree with it, and a reader dispatches with `case`
 over a row the typechecker closes.

@@ -333,12 +333,8 @@ impl Headless<'_> {
             K::Stalled { error } => self.print_readout(&record::fault::Readout::stall(error)),
             K::Observation { value } => self.print_observation(value.clone()),
             K::Card { card } => self.print_card(card),
-            K::Done { outcome } => {
-                let _ = writeln!(
-                    self.err,
-                    "{}",
-                    card::settled_text(&card::to_card_done(outcome))
-                );
+            K::Done { cmd, outcome } => {
+                let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
             }
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));

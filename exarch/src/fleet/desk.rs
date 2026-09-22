@@ -2310,9 +2310,10 @@ pub(crate) fn absorb_surface(
             let _recorded = recorder.emit(crate::record::Display::Card { card: card.clone() })?;
             Ok(())
         }
-        Surface::Done(outcome) => {
+        Surface::Done { cmd, outcome } => {
             let _recorded = recorder.emit(crate::record::Display::Done {
-                outcome: done_fact(outcome),
+                cmd: cmd.clone(),
+                outcome: outcome.clone(),
             })?;
             Ok(())
         }
@@ -2336,21 +2337,6 @@ pub(crate) fn absorb_surface(
             recorder.transient(crate::record::Transient::Unpin { key: key.clone() });
             Ok(())
         }
-    }
-}
-
-/// The data half of a settled worker's `` `done `` card, in the record's own
-/// spelling of the same three outcomes.
-fn done_fact(outcome: &crate::bus::card::DoneOutcome) -> crate::record::DoneOutcome {
-    match outcome {
-        crate::bus::card::DoneOutcome::Ok => crate::record::DoneOutcome::Ok,
-        crate::bus::card::DoneOutcome::Err { message, status } => crate::record::DoneOutcome::Err {
-            message: message.clone(),
-            status: *status,
-        },
-        crate::bus::card::DoneOutcome::Panic { message } => crate::record::DoneOutcome::Panic {
-            message: message.clone(),
-        },
     }
 }
 
@@ -3549,6 +3535,7 @@ mod tests {
                     Record::Display(Display::Card { .. }) => "card",
                     Record::Display(Display::Done {
                         outcome: crate::record::DoneOutcome::Ok,
+                        ..
                     }) => "done",
                     Record::Display(Display::Notice {
                         notice: crate::record::NoticeFact::Reap { cause, .. },

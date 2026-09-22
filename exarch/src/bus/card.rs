@@ -30,7 +30,6 @@ mod testkit;
 mod value;
 
 pub use diff::{Hunk, Row, Seg};
-pub use done::DoneOutcome;
 pub use notice::Notice;
 
 pub(crate) use decode::value_to_card;
@@ -45,10 +44,9 @@ pub(crate) use observation::{Landing, landing};
 pub(crate) use observation::{execs_card, greps_card, reads_card};
 
 /// `done` and `notice` each word one class of event core surfaces, `pub`
-/// alongside [`to_card_done`] and [`to_card_notice`], the two record-type
-/// converters that hand them their argument. A notice is a card; a settlement
-/// is a line on the rail, so `done` exports spans and their flattening rather
-/// than a [`Card`] nothing would draw.
+/// alongside [`to_card_notice`], the record-type converter a notice needs. A
+/// notice is a card; a settlement is a line on the rail, so `done` exports
+/// spans and their flattening rather than a [`Card`] nothing would draw.
 pub use done::{settled_spans, settled_text};
 pub use notice::notice_card;
 pub use observation::{observation_card, observation_from_wire, observation_spans};
@@ -238,24 +236,6 @@ impl Card {
             [Mark::Diff { path, hunks }] => Some((path, hunks)),
             _ => None,
         }
-    }
-}
-
-/// `record::DoneOutcome` → [`DoneOutcome`]: identical shapes.
-///
-/// Kept as two types per `record.rs`'s own rule of carrying no rendering
-/// vocabulary in what it durably records.  Shared by `tui` and `headless`,
-/// and `pub` so synod's own fold can draw the same card a scrollback would.
-pub fn to_card_done(outcome: &crate::record::DoneOutcome) -> DoneOutcome {
-    match outcome {
-        crate::record::DoneOutcome::Ok => DoneOutcome::Ok,
-        crate::record::DoneOutcome::Err { message, status } => DoneOutcome::Err {
-            message: message.clone(),
-            status: *status,
-        },
-        crate::record::DoneOutcome::Panic { message } => DoneOutcome::Panic {
-            message: message.clone(),
-        },
     }
 }
 

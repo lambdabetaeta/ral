@@ -763,6 +763,7 @@ mod tests {
     fn a_settled_background_block_reaches_the_window_not_at_all() {
         assert!(
             project(&Record::Display(Display::Done {
+                cmd: "block at turn 1, line 1".into(),
                 outcome: DoneOutcome::Ok,
             }))
             .is_none()

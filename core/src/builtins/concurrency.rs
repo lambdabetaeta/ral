@@ -412,8 +412,8 @@ fn spawn_buffered(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let name = shell
-        .call_site_label()
-        .map_or_else(|| "block".into(), |at| format!("block at {at}"));
+        .call_site()
+        .map_or_else(|| "block".into(), |site| format!("block at {site}"));
     Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
@@ -787,9 +787,9 @@ fn escape_exit_code(esc: &Escape) -> i32 {
     *code
 }
 
-/// `poll`'s `` `err `` payload — the same `{cmd, status, message, line, col}`
+/// `poll`'s `` `err `` payload — the same `{cmd, status, message, site}`
 /// record `try` hands its handler thunk.  An `Escape` carries no located
-/// message and names no command, so its position is zero.
+/// message and names no command, so it has no site.
 fn break_record(e: &Break, shell: &Shell) -> Value {
     match e {
         Break::Error(err) => error_record_of(err, shell),
@@ -797,7 +797,7 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
             let message = match esc {
                 Escape::Exit(_) => "block exited".to_string(),
             };
-            error_record("<runtime>", escape_exit_code(esc), &message, 0, 0)
+            error_record("<runtime>", escape_exit_code(esc), &message, None)
         }
     }
 }
@@ -1608,7 +1608,7 @@ mod tests {
         let birth = only_birth(trail_of(&report));
         assert_eq!(
             birth.get("cmd"),
-            Some(&Value::String("block at line 1".into()))
+            Some(&Value::String("block at <test>, line 1".into()))
         );
         assert_eq!(birth.get("class"), Some(&Value::String("worker".into())));
         assert!(
@@ -1634,7 +1634,7 @@ mod tests {
         let birth = only_birth(trail_of(&report));
         assert_eq!(
             birth.get("cmd"),
-            Some(&Value::String("block at line 3".into()))
+            Some(&Value::String("block at <test>, line 3".into()))
         );
     }
 

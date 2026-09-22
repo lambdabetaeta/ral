@@ -25,6 +25,12 @@ pub struct CallSite {
     pub col: usize,
 }
 
+impl std::fmt::Display for CallSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}, line {}", self.script, self.line)
+    }
+}
+
 // ── Palette and spanless fallback ─────────────────────────────────────────
 
 /// `(error, hint, reset)` — empty strings when colour is off, so one

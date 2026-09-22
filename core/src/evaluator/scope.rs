@@ -4,8 +4,8 @@
 //! body's result into the record `try` and `poll` hand their handler.
 
 use crate::types::{
-    Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
-    as_map, sig, validate_handler_arity,
+    CallSite, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell,
+    Value, as_map, sig, site_value, validate_handler_arity,
 };
 
 use std::collections::HashMap;
@@ -16,49 +16,37 @@ pub(crate) struct Outcome {
     pub status: i32,
     pub message: String,
     pub cmd: String,
-    pub line: usize,
-    pub col: usize,
+    pub site: Option<CallSite>,
 }
 
-/// The `{cmd, status, message, line, col}` record `try` hands its handler and
+/// The `{cmd, status, message, site}` record `try` hands its handler and
 /// `poll` its `` `err `` payload.  Bytes are absent by design; `audit` is the
 /// forensic path.  Mirrors `typecheck::builtins::try_error_record`.
 pub(crate) fn error_record(
     cmd: &str,
     status: i32,
     message: &str,
-    line: usize,
-    col: usize,
+    site: Option<&CallSite>,
 ) -> Value {
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "line/col are source positions bounded by source size, far below i64::MAX"
-    )]
     Value::map(vec![
         ("cmd".into(), Value::String(cmd.to_string())),
         ("status".into(), Value::Int(i64::from(status))),
         ("message".into(), Value::String(message.to_string())),
-        ("line".into(), Value::Int(line as i64)),
-        ("col".into(), Value::Int(col as i64)),
+        ("site".into(), site_value(site)),
     ])
 }
 
 /// A failed body's position comes from the error's own span; one outside the
-/// session's sources falls back to the run's call site, and no position at all
-/// is line 0.  The failing command is the one the innermost dispatch stamped
-/// onto the error (`evaluator::audit`'s `frame_call`); `<runtime>` names a
-/// failure no dispatch owns.
+/// session's sources falls back to the run's call site.  The failing command
+/// is the one the innermost dispatch stamped onto the error
+/// (`evaluator::audit`'s `frame_call`); `<runtime>` names a failure no
+/// dispatch owns.
 pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
-    let (line, col) = shell
-        .site_of(e.span)
-        .or_else(|| shell.call_site())
-        .map_or((0, 0), |s| (s.line, s.col));
     Outcome {
         status: e.exit_code(),
         message: e.message.clone(),
         cmd: e.command.clone().unwrap_or_else(|| "<runtime>".into()),
-        line,
-        col,
+        site: shell.site_of(e.span).or_else(|| shell.call_site()),
     }
 }
 
@@ -69,10 +57,9 @@ pub fn error_record_of(e: &Error, shell: &Shell) -> Value {
         status,
         message,
         cmd,
-        line,
-        col,
+        site,
     } = classify(e, shell);
-    error_record(&cmd, status, &message, line, col)
+    error_record(&cmd, status, &message, site.as_ref())
 }
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.

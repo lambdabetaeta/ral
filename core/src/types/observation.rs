@@ -3,8 +3,8 @@
 //! The surface rail, the audit trail, `--audit`, and the wire all speak this
 //! vocabulary: [`Observation::to_value`] is the single projection, and
 //! [`Observation::from_value`] its inverse, so a host decodes exactly what
-//! core built.  The envelope is a record of `script`, `line`, `col`, `start`,
-//! `end` and `principal`; the fact itself is `what`, a variant whose tag is
+//! core built.  The envelope is a record of `site`, `start`, `end` and
+//! `principal`; the fact itself is `what`, a variant whose tag is
 //! the kind, so no separate `kind` field can disagree with the payload beside
 //! it.
 
@@ -235,6 +235,36 @@ fn optional(v: Option<Value>) -> Value {
     }
 }
 
+/// A source position as ral sees it: `` `just [script, line, col] `` or
+/// `` `none ``, shared by the trail and `try`'s error record.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "line/col are source positions bounded by source size, far below i64::MAX"
+)]
+pub(crate) fn site_value(site: Option<&CallSite>) -> Value {
+    optional(site.map(|s| {
+        Value::map(vec![
+            ("script".into(), Value::String(s.script.clone())),
+            ("line".into(), Value::Int(s.line as i64)),
+            ("col".into(), Value::Int(s.col as i64)),
+        ])
+    }))
+}
+
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "line/col were projected from usize source positions"
+)]
+fn site_of(v: &Value) -> Option<CallSite> {
+    let Value::Map(m) = v else { return None };
+    Some(CallSite {
+        script: str_at(m, "script")?,
+        line: int_at(m, "line")? as usize,
+        col: int_at(m, "col")? as usize,
+    })
+}
+
 impl Observation {
     /// An instantaneous door: the observation is stamped now, and its window
     /// has no width.
@@ -272,21 +302,10 @@ impl Observation {
     /// strings, empty when the command did not fail and when nothing named a
     /// principal — a record field is always present, and neither a runtime
     /// error message nor a user name is ever legitimately empty.  An absent
-    /// site is likewise an empty script at line 0, lines being 1-indexed.  An
-    /// absent byte field or subject is `` `none ``, never a missing key.
+    /// site, byte field or subject is `` `none ``, never a missing key.
     pub fn to_value(&self) -> Value {
-        let (script, line, col) = self
-            .site
-            .as_ref()
-            .map_or(("", 0, 0), |s| (s.script.as_str(), s.line, s.col));
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "line/col are source positions bounded by source size, far below i64::MAX"
-        )]
         Value::map(vec![
-            ("script".into(), Value::String(script.to_string())),
-            ("line".into(), Value::Int(line as i64)),
-            ("col".into(), Value::Int(col as i64)),
+            ("site".into(), site_value(self.site.as_ref())),
             ("start".into(), Value::Int(self.start)),
             ("end".into(), Value::Int(self.end)),
             (
@@ -321,19 +340,8 @@ impl Observation {
             return None;
         };
         let what = Observed::from_payload(label, fact)?;
-        #[allow(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "line/col were projected from usize source positions"
-        )]
-        let site = Some(CallSite {
-            script: str_at(m, "script")?,
-            line: int_at(m, "line")? as usize,
-            col: int_at(m, "col")? as usize,
-        })
-        .filter(|s| s.line > 0);
         Some(Self {
-            site,
+            site: optional_at(m, "site", site_of)?,
             start: int_at(m, "start")?,
             end: int_at(m, "end")?,
             principal: Some(str_at(m, "principal")?).filter(|p| !p.is_empty()),
@@ -600,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_site_round_trips() {
+    fn an_absent_site_projects_as_none_and_round_trips() {
         let obs = Observation::instant(
             None,
             None,
@@ -609,7 +617,12 @@ mod tests {
                 pattern: "x".into(),
             },
         );
-        assert_eq!(Observation::from_value(&obs.to_value()), Some(obs));
+        let value = obs.to_value();
+        let Value::Map(m) = &value else {
+            panic!("an observation projects as a record")
+        };
+        assert_eq!(m.get("site"), Some(&optional(None)));
+        assert_eq!(Observation::from_value(&value), Some(obs));
     }
 
     /// The tag and the record behind it, out of a projection's `what`.

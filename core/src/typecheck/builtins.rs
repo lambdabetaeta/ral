@@ -224,7 +224,7 @@ pub fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
 
 /// The error record a raising form demands of its argument: `status` and
 /// `message`, over a fresh tail.  Open, because re-raising a caught error
-/// carries `cmd`, `line`, `col` and whatever else the record picked up along
+/// carries `cmd`, `site` and whatever else the record picked up along
 /// the way; the tail is what makes [`try_error_record`] an instance of this
 /// shape.  The caller quantifies the row itself — [`scheme::fail`] — so this
 /// takes it directly rather than minting one.
@@ -249,8 +249,7 @@ pub(super) fn try_error_record() -> Ty {
         ("status", Ty::Int),
         ("cmd", Ty::String),
         ("message", Ty::String),
-        ("line", Ty::Int),
-        ("col", Ty::Int),
+        ("site", site_ty()),
     ])
 }
 
@@ -258,6 +257,16 @@ pub(super) fn try_error_record() -> Ty {
 /// before-image is a fact, not a missing key.
 fn optional_ty(payload: Ty) -> Ty {
     closed_variant(&[("just", payload), ("none", Ty::Unit)])
+}
+
+/// A source position, mirrored at runtime by `site_value` in
+/// `core/src/types/observation.rs`.
+fn site_ty() -> Ty {
+    optional_ty(closed_record(&[
+        ("script", Ty::String),
+        ("line", Ty::Int),
+        ("col", Ty::Int),
+    ]))
 }
 
 /// One arm per [`Observed`](crate::types::Observed) variant, tagged by the
@@ -319,9 +328,7 @@ fn observed_ty() -> Ty {
 /// `Observation::to_value`: the envelope, and the fact as a tagged `what`.
 fn observation_ty() -> Ty {
     closed_record(&[
-        ("script", Ty::String),
-        ("line", Ty::Int),
-        ("col", Ty::Int),
+        ("site", site_ty()),
         ("start", Ty::Int),
         ("end", Ty::Int),
         ("principal", Ty::String),

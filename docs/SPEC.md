@@ -1765,16 +1765,15 @@ receives this record:
   cmd: String,
   status: Int,
   message: String,
-  line: Int,
-  col: Int,
+  site: `just [script: String, line: Int, col: Int] | `none,
 ]
 ```
 
 `cmd` names the command whose dispatch failed — a builtin call included — and
 is `<runtime>` when the failure came from no command. The dispatch stamps its
 own name on the error as the error passes through, so the innermost failing
-dispatch wins, exactly as the innermost source span does. `line` and `col`
-identify the failure's source position. The body and handler must produce
+dispatch wins, exactly as the innermost source span does. `site` is the
+failure's source position, `` `none `` when it has none. The body and handler must produce
 compatible results.
 
 `try` is control flow, not output capture, and it observes nothing: it reads no
@@ -2958,14 +2957,13 @@ do not abbreviate an error record.
     cmd:     String,
     status:  Int,
     message: String,
-    line:    Int,
-    col:     Int,
+    site:    `just [script: String, line: Int, col: Int] | `none,
 ]
 ```
 
 `cmd` is the name the failing dispatch stamped on the error, and `<runtime>`
-when no command was involved. `line` and `col` are one-based source
-coordinates, or zero when no position is available. The record deliberately
+when no command was involved. `site` holds the script and one-based source
+coordinates, or is `` `none `` when no position is available. The record deliberately
 contains no output bytes. The failed command's raw fd 1 and fd 2 bytes have
 already followed their ordinary destinations; use `audit` when those bytes must
 also be retained as evidence. This is the record `audit`'s `` `err `` outcome
@@ -3071,7 +3069,8 @@ The report is not itself an observation. It has two fields:
 ```text
 [
     outcome: <`ok A | `err [cmd: String, status: Int, message: String,
-                            line: Int, col: Int]>,
+                            site: `just [script: String, line: Int,
+                                         col: Int] | `none]>,
     trail:   [Observation],
 ]
 ```
@@ -3127,9 +3126,7 @@ Every observation shares this common shape:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `script` | `String` | source or run name |
-| `line` | `Int` | one-based source line; zero for a run root |
-| `col` | `Int` | one-based source column; zero for a run root |
+| `site` | `` `just [script: String, line: Int, col: Int] \| `none `` | one-based source position; `` `none `` for a run root |
 | `start` | `Int` | microseconds since the Unix epoch |
 | `end` | `Int` | microseconds since the Unix epoch |
 | `principal` | `String` | shell principal when the observation was recorded; empty where nothing named one |
@@ -4796,7 +4793,8 @@ scope-body, handler-shape, and arm-result constraints retain ordinary
 diagnostic provenance and source spans.
 
 Let `E` be the closed error record
-`{cmd:String, status:Int, message:String, line:Int, col:Int}` — the one
+`` {cmd:String, status:Int, message:String, site:S} ``, where
+`` S = `just {script:String, line:Int, col:Int} | `none `` — the one
 vocabulary `try`, `poll`, and `audit` all report failure in. The implemented
 scope signatures are:
 

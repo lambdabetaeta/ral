@@ -74,6 +74,7 @@ mod audit;
 pub use audit::{Audit, AuditFragment, AuditIo, CapturePolicy, TrailScope, epoch_us, report_value};
 
 mod observation;
+pub(crate) use observation::site_value;
 pub use observation::{CommandOrigin, Decision, Observation, Observed, WriteOutcome};
 
 // Here because every observation carries one.

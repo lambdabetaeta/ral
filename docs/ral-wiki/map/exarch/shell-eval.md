@@ -188,7 +188,8 @@ order, and exits 124:
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
    registry and is nobody's orphan. The sentence names each survivor by its
    `cmd` — a `watch`'s label, a `service`'s description, and for an anonymous
-   `spawn` or `defer` the line that wrote it, `block at line 3` — up to five,
+   `spawn` or `defer` where it was written, `block at turn 41, line 3`, each
+   tool call's source being named after its turn — up to five,
    and counts aloud whatever it does not name — a silent truncation would read
    as "that was all of them".
 

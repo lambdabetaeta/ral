@@ -154,6 +154,10 @@ impl Avatar {
         self.couple(emit);
         // At entry, so a call that fails to evaluate still ages the clock.
         self.ral_epoch += 1;
+        // The assistant turn is recorded before its results are built, so this
+        // is the id of the turn this result closes — and the call's source name.
+        let turn = self.log.lock().current_turn();
+        let source = turn.map_or_else(|| "tool call".to_string(), |turn| format!("turn {turn}"));
         // The adoption end of a handler's body-side `Shell::fork_into_nursery`,
         // read back by `RunHost::fork`.
         let nursery = ral_core::types::Nursery::default();
@@ -182,6 +186,7 @@ impl Avatar {
         let outcome = shell_eval::run_shell(
             self.seat.transport(),
             &self.agent.caps,
+            &source,
             cmd,
             timeout_secs,
             host.clone() as Arc<dyn ral_core::protocol::Host>,
@@ -225,9 +230,6 @@ impl Avatar {
         if let Some(payload) = reply_cell.take() {
             self.reply = Some(payload);
         }
-        // The assistant turn is recorded before its results are built, so this
-        // is the id of the turn this result closes.
-        let turn = self.log.lock().current_turn();
         if let Some(turn) = turn {
             let _ = write!(content, "\nTURN: {turn}");
         }
@@ -512,7 +514,7 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("`block at line 1`"),
+            result.content.contains("`block at tool call, line 1`"),
             "the surviving worker is named by the line that deferred it; content was: {}",
             result.content
         );
@@ -529,7 +531,7 @@ mod tests {
         let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
 
         assert!(
-            !result.content.contains("`block at line 1`"),
+            !result.content.contains("`block at tool call, line 1`"),
             "a call that returned holds its own handle; content was: {}",
             result.content
         );
@@ -558,7 +560,7 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("`block at line 1`"),
+            result.content.contains("`block at tool call, line 1`"),
             "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {}",
             result.content
         );
@@ -693,7 +695,7 @@ mod tests {
                     continue;
                 };
                 assert_eq!(
-                    cmd, "block at line 1",
+                    cmd, "block at tool call, line 1",
                     "the reap names the spawned body by its line"
                 );
                 assert_eq!(

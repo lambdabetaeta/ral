@@ -56,6 +56,7 @@ pub enum BlockKind {
         card: Card,
     },
     Done {
+        cmd: String,
         outcome: DoneOutcome,
     },
     Notice {
@@ -298,7 +299,7 @@ impl Blocks {
             ),
             Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
             Display::Card { card } => self.push(seq, BlockKind::Card { card }),
-            Display::Done { outcome } => self.push(seq, BlockKind::Done { outcome }),
+            Display::Done { cmd, outcome } => self.push(seq, BlockKind::Done { cmd, outcome }),
             Display::Notice { notice } => self.push(seq, BlockKind::Notice { notice }),
             Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
             Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),

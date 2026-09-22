@@ -602,12 +602,23 @@ fn is_file_on_dir() {
 
 #[test]
 fn try_error_map_has_status() {
-    // try's handler receives a flat record: [cmd, status, message, line, col].
+    // try's handler receives a flat record: [cmd, status, message, site].
     assert_eq!(
         must_succeed(
             "try { cat /nonexistent 2> /dev/null | from-string } { |err| return \"$err[status]\" }"
         ),
         Value::String("1".into())
+    );
+}
+
+#[test]
+fn try_error_record_carries_the_script() {
+    assert_eq!(
+        must_succeed(
+            "try { fail [status: 1, message: 'x'] } { |err| \
+             case $err[site] [`just: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
+        ),
+        Value::String("<test>:1".into())
     );
 }
 
@@ -2520,7 +2531,7 @@ fn interpolation_renders_unit_as_its_literal() {
 // ── §11.4  audit: capability-check recording ─────────────────────────────
 //
 // `audit { … }` returns a report `[outcome: `ok v | `err rec, trail: [obs]]`,
-// each observation `[script, line, col, start, end, principal, what: `tag […]]`
+// each observation `[site, start, end, principal, what: `tag […]]`
 // — so a fact is read by its tag, and the trail is flat.
 
 fn map_field(v: &Value, key: &str) -> Value {

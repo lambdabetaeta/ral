@@ -7,29 +7,12 @@ use ral_core::Value as RalValue;
 
 use super::value::{int_field, map_of, str_field};
 use super::{Role, Span};
+use crate::record::DoneOutcome;
 
-/// How a detached `spawn` worker settled: the decoded form of the `` `done ``
-/// event core appends to the worker's deferred buffer at completion.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum DoneOutcome {
-    Ok,
-    /// The same `{status, message}` a caught error hands `try` and `poll`.
-    Err {
-        message: String,
-        status: i64,
-    },
-    Panic {
-        message: String,
-    },
-}
-
-/// Decode a `` `done `` value into its [`DoneOutcome`], `None` for anything
-/// else — and since `decode_surface` in `shell_eval.rs` tries this branch last,
-/// `None` drops the value rather than passing it on.
-///
-/// The record's sibling `cmd` field goes unread: core spells it `<block>` for
-/// every `spawn`, so it names no worker in particular.
-pub(crate) fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
+/// Decode a `` `done `` value into the worker's `cmd` and how it settled,
+/// `None` for anything else — and since `decode_surface` in `shell_eval.rs`
+/// tries this branch last, `None` drops the value rather than passing it on.
+pub(crate) fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
     let RalValue::Variant { label, payload } = v else {
         return None;
     };
@@ -57,19 +40,15 @@ pub(crate) fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
         },
         _ => return None,
     };
-    Some(outcome)
+    Some((str_field(m, "cmd")?, outcome))
 }
 
-/// How a settled block reads: muted prose around the outcome.
+/// How a settled worker reads: its name, and muted prose around the outcome.
 ///
 /// The outcome alone carries a level, roled `ok`/`bad` exactly as the
 /// `$ cmd → status` exec row roles an exit code — which is what a settled
 /// block's is.
-///
-/// It names no worker: a `defer`'s `cmd` is core's constant `<block>`
-/// (`prelude.ral`'s `defer` is `spawn`, which passes it), so there is nothing
-/// yet to distinguish one settlement from another.
-pub fn settled_spans(outcome: &DoneOutcome) -> Vec<Span> {
+pub fn settled_spans(cmd: &str, outcome: &DoneOutcome) -> Vec<Span> {
     let (role, how, message) = match outcome {
         DoneOutcome::Ok => (Role::Ok, "exit 0".to_string(), ""),
         DoneOutcome::Err { message, status } => {
@@ -78,7 +57,9 @@ pub fn settled_spans(outcome: &DoneOutcome) -> Vec<Span> {
         DoneOutcome::Panic { message } => (Role::Bad, "panic".to_string(), message.as_str()),
     };
     let mut spans = vec![
-        Span::new(Role::Muted, "background block settled ("),
+        Span::new(Role::Muted, "background "),
+        Span::new(Role::Strong, cmd),
+        Span::new(Role::Muted, " settled ("),
         Span::new(role, how),
         Span::new(Role::Muted, ")"),
     ];
@@ -91,8 +72,8 @@ pub fn settled_spans(outcome: &DoneOutcome) -> Vec<Span> {
 /// [`settled_spans`] flattened, for the two sinks that have no ink to spend:
 /// the headless stderr tee and the model's wake-up notice (`surface_notice` in
 /// `bus/post.rs`).
-pub fn settled_text(outcome: &DoneOutcome) -> String {
-    settled_spans(outcome)
+pub fn settled_text(cmd: &str, outcome: &DoneOutcome) -> String {
+    settled_spans(cmd, outcome)
         .iter()
         .map(|s| s.text.as_str())
         .collect()
@@ -122,9 +103,13 @@ mod tests {
 
     #[test]
     fn value_to_done_decodes_each_outcome() {
+        let named = |outcome| Some(("block at turn 1, line 1".to_string(), outcome));
         assert_eq!(
-            value_to_done(&done_value("<block>", variant("ok", RalValue::Unit))),
-            Some(DoneOutcome::Ok)
+            value_to_done(&done_value(
+                "block at turn 1, line 1",
+                variant("ok", RalValue::Unit)
+            )),
+            named(DoneOutcome::Ok)
         );
         let err = variant(
             "err",
@@ -132,20 +117,28 @@ mod tests {
                 ("cmd".into(), s("<runtime>")),
                 ("status".into(), RalValue::Int(2)),
                 ("message".into(), s("boom")),
-                ("line".into(), RalValue::Int(3)),
-                ("col".into(), RalValue::Int(1)),
+                (
+                    "site".into(),
+                    RalValue::Variant {
+                        label: "none".into(),
+                        payload: None,
+                    },
+                ),
             ]),
         );
         assert_eq!(
-            value_to_done(&done_value("<block>", err)),
-            Some(DoneOutcome::Err {
+            value_to_done(&done_value("block at turn 1, line 1", err)),
+            named(DoneOutcome::Err {
                 message: "boom".into(),
                 status: 2,
             })
         );
         assert_eq!(
-            value_to_done(&done_value("<block>", variant("panic", s("kaput")))),
-            Some(DoneOutcome::Panic {
+            value_to_done(&done_value(
+                "block at turn 1, line 1",
+                variant("panic", s("kaput"))
+            )),
+            named(DoneOutcome::Panic {
                 message: "kaput".into(),
             })
         );

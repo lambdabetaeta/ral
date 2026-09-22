@@ -206,7 +206,7 @@ A nullary tag still binds a value (`()`) — ignore it with `_`. An arm's body m
 
 A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`. Definitions that completed before the failure are still bound. Resume from the step that failed; do not replay the script from the top, which re-runs the writes and spawns that already happened.
 
-`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col` — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
+`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `site` (`` `just [script, line, col] `` or `` `none ``) — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
 
     let log =
       try { sort in.txt 2>&1 | from-string } { |err| 

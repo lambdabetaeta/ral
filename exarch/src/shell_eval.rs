@@ -127,7 +127,10 @@ pub enum Surface {
     Observation(Box<Observation>),
     Card(crate::bus::card::Card),
     Notice(crate::bus::card::Notice),
-    Done(crate::bus::card::DoneOutcome),
+    Done {
+        cmd: String,
+        outcome: crate::record::DoneOutcome,
+    },
     Pin {
         key: String,
         card: crate::bus::card::Card,
@@ -176,8 +179,8 @@ pub fn decode_surface(ev: &RalValue) -> Decoded {
         Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
         Decoded::Surface(Surface::Card(card))
-    } else if let Some(outcome) = value_to_done(ev) {
-        Decoded::Surface(Surface::Done(outcome))
+    } else if let Some((cmd, outcome)) = value_to_done(ev) {
+        Decoded::Surface(Surface::Done { cmd, outcome })
     } else {
         Decoded::Unknown
     }
@@ -235,12 +238,15 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// stderr.  Everything crosses the engine protocol: a `Source` `Run` out, a
 /// stream of surface events drained to the bus, one terminal `Report` back.
 ///
-/// `host` is the host's side of this run — the test harness's bare
-/// `IdentityTransport` hands a pin-less, desk-less [`crate::fleet::desk::SurfaceApplier`],
-/// every real caller a [`crate::fleet::desk::RunHost`].
+/// `source` names the call's text wherever a position is shown — a
+/// diagnostic, a trail site, a worker spawned from it.  `host` is the host's
+/// side of this run — the test harness's bare `IdentityTransport` hands a
+/// pin-less, desk-less [`crate::fleet::desk::SurfaceApplier`], every real
+/// caller a [`crate::fleet::desk::RunHost`].
 pub(crate) fn run_shell(
     transport: &dyn ral_core::protocol::Transport,
     caps: &ral_core::types::GrantStack,
+    source: &str,
     cmd: &str,
     timeout_secs: u64,
     host: Arc<dyn ral_core::protocol::Host>,
@@ -255,7 +261,7 @@ pub(crate) fn run_shell(
 
     let run = Run {
         program: Program::Source(cmd.to_string()),
-        script_name: "<tool>".to_string(),
+        script_name: source.to_string(),
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {
@@ -469,6 +475,7 @@ mod tests {
         let outcome = run_shell(
             &transport,
             &ral_core::types::GrantStack::of(caps.clone()),
+            "turn 1",
             cmd,
             timeout_secs,
             applier,
@@ -1127,7 +1134,7 @@ keep-bottom
             decode_surface(&RalValue::Variant {
                 label: "done".into(),
                 payload: Some(Box::new(RalValue::map(vec![
-                    ("cmd".into(), RalValue::String("<block>".into())),
+                    ("cmd".into(), RalValue::String("block at turn 1, line 1".into())),
                     (
                         "outcome".into(),
                         RalValue::Variant {
@@ -1137,7 +1144,10 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Decoded::Surface(Surface::Done(crate::bus::card::DoneOutcome::Ok))
+            Decoded::Surface(Surface::Done {
+                cmd,
+                outcome: crate::record::DoneOutcome::Ok,
+            }) if cmd == "block at turn 1, line 1"
         ));
         assert!(matches!(
             decode_surface(&RalValue::String("nope".into())),

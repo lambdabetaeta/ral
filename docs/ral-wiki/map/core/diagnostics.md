@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6049f131
+generated_at_commit: 7e38e2e9
 generated_at_date: 2026-09-22
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
@@ -55,9 +55,9 @@ observation carries the position of the dispatch that produced it. Both a
 command and a function application stamp it, but one whose span resolves
 outside the session's sources — the baked prelude's — leaves it alone, so
 `defer`'s inner `spawn` is stamped at the line that applied `defer`. A dispatch with no position is
-`None` (`Shell::site_of`, `Observation.site`); only the ral records that
-project it — a trail entry, `try`'s error — spell that as line 0, by the same
-always-present-field rule that renders an absent `principal` empty.
+`None` (`Shell::site_of`, `Observation.site`), and the ral records that
+project it — a trail entry, `try`'s error — carry an optional
+`` site: `just [script, line, col] | `none ``.
 
 Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is
