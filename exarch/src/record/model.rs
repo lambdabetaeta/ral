@@ -29,7 +29,7 @@ pub(crate) use transcript::TranscriptRead;
 
 use super::{Fold, Locus, Protocol, Record, Recorded, Refusal};
 use crate::agent::event::{ContextSurvey, Role, TurnKind};
-use genai::chat::{ChatMessage, ChatRole, ToolResponse};
+use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
 use serde::{Deserialize, Serialize};
 use state::{State, admissible_prefix};
 use std::path::PathBuf;
@@ -434,8 +434,37 @@ pub fn runs(ids: &[u64]) -> String {
         .join(", ")
 }
 
+/// A turn's label: the message's opening line, or — where a call opened the
+/// message and no prose did — the intent that call declared.
 fn message_label(message: &ChatMessage) -> String {
-    opening_line(message.content.first_text().unwrap_or_default())
+    let line = opening_line(message.content.first_text().unwrap_or_default());
+    if line.is_empty() {
+        opening_line(&message_intent(message))
+    } else {
+        line
+    }
+}
+
+/// The intent a call-first message declared: the first tool call's `description`
+/// argument — the one field a tool schema reserves for what the call is for.
+fn message_intent(message: &ChatMessage) -> String {
+    message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::ToolCall(call) => call
+                .fn_arguments
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            ContentPart::Text(_)
+            | ContentPart::ToolResponse(_)
+            | ContentPart::ReasoningContent(_)
+            | ContentPart::Binary(_)
+            | ContentPart::Custom(_)
+            | ContentPart::ThoughtSignature(_) => None,
+        })
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Whose turn an imported message opens: a tool result answers the assistant's
@@ -532,6 +561,38 @@ mod tests {
 
     fn resident_ids(context: &Context) -> Vec<u64> {
         context.resident().map(|turn| turn.id).collect()
+    }
+
+    fn called(desc: Option<&str>) -> ChatMessage {
+        let mut args = serde_json::json!({ "cmd": "ls" });
+        if let Some(desc) = desc {
+            args["description"] = serde_json::json!(desc);
+        }
+        ChatMessage::assistant(vec![ContentPart::ToolCall(crate::provider::ToolCall {
+            call_id: "t1".into(),
+            fn_name: "ral".into(),
+            fn_arguments: args,
+            thought_signatures: None,
+        })])
+    }
+
+    /// A call-first message still states what it is for: where no prose opened
+    /// the turn, the declared intent is its label.
+    #[test]
+    fn a_call_first_message_takes_its_label_from_the_declared_intent() {
+        assert_eq!(
+            message_label(&called(Some("sweep the tree"))),
+            "sweep the tree"
+        );
+    }
+
+    /// Prose keeps precedence, and a call that declared nothing leaves the label
+    /// exactly as empty as before.
+    #[test]
+    fn prose_beats_intent_and_an_undeclared_call_stays_unlabelled() {
+        assert_eq!(message_label(&called(None)), "");
+        let prose = ChatMessage::assistant("now the write\nsecond line".to_string());
+        assert_eq!(message_label(&prose), "now the write");
     }
 
     /// Every hole's marker, in the order [`Context::rendered`] stands them.

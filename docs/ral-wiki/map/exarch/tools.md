@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: 6049f131
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
@@ -71,7 +71,8 @@ They are rendered as **acts** — verb, subject, payload rows that never fold in
 an observation run
 ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; spawns
 additionally derive a child tab) — while listings stay silent since
-their value *is* the returned record. There is no `Gate`/`tools_for` axis any
+their value *is* the returned record, the whole read-only
+`` `exarch-transcript `` family among them. There is no `Gate`/`tools_for` axis any
 more — a fresh model never even sees a verb the desk would certainly refuse:
 `agents` is dropped from the per-agent builtin index when the agent neither
 spawns nor returns (its `` `reply `` needs only `returns`, so a fuelless

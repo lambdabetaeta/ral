@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d767eb5a
-generated_at_date: 2026-09-21
+generated_at_commit: 6049f131
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -277,7 +277,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    two rungs are its grain header or the whole thing. The `∴` part also
    answers to one standing rung, `/thinking`'s datum: `Tabs::thinking` holds it
    because it outlives any one view, and `Scrollback::set_thinking_level` moves
-   every group on screen while every group still to arrive is born there.
+   every group on screen while every group still to arrive is born there. That
+   rung starts at `Detail::Summary`, so a session opens with deliberation read
+   as its grain and bulk — including the live one, whose header is a magnitude
+   growing in place rather than text streaming past.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as a box indented `CARD_INDENT`

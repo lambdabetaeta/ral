@@ -102,7 +102,7 @@ impl DeskAct {
             Self::Schedule => "schedule",
             Self::Unschedule => "unschedule",
             Self::Reply => "reply",
-            Self::ContextEvict => "context-evict",
+            Self::ContextEvict => "evict",
         }
     }
 
@@ -116,7 +116,7 @@ impl DeskAct {
             "schedule" => Self::Schedule,
             "unschedule" => Self::Unschedule,
             "reply" => Self::Reply,
-            "context-evict" => Self::ContextEvict,
+            "evict" => Self::ContextEvict,
             other => unreachable!("desk act fragment carries an unknown verb `{other}`"),
         }
     }
@@ -376,8 +376,8 @@ fn payload_turns(v: FOValue, class: &str) -> Result<Vec<u64>, Error> {
         .collect()
 }
 
-/// The rail subject a cut or a read mints from a turn address, as runs:
-/// `"turns 41–43, 50"`. Sorted here, since the model's own list need not be.
+/// The rail subject a cut mints from a turn address, as runs: `"turns 41–43,
+/// 50"`. Sorted here, since the model's own list need not be.
 fn turns_subject(turns: &[u64]) -> String {
     let mut sorted = turns.to_vec();
     sorted.sort_unstable();
@@ -1822,8 +1822,7 @@ impl ExarchDesk {
         match tag.as_str() {
             // The index stays whole under the lock: it is a projection of
             // rows the structure already holds, touching no file.
-            "index" => self.traced(
-                "index".to_string(),
+            "index" => self.locate_then_read(
                 |log| Ok(transcript_index_answer(log.transcript_index())),
                 Ok,
             ),
@@ -1839,9 +1838,7 @@ impl ExarchDesk {
         const CLASS: &str = "exarch-transcript `read";
         let mut spec = Fields::payload(payload, CLASS, "[turns: [Int]]", &["turns"])?;
         let turns = payload_turns(spec.take("turns", "the turns to read")?, CLASS)?;
-        let subject = format!("read {}", turns_subject(&turns));
-        self.traced(
-            subject,
+        self.locate_then_read(
             |log| log.locate_read(&turns),
             |read| read.turns().map(transcript_answer),
         )
@@ -1867,12 +1864,7 @@ impl ExarchDesk {
             .optional("turns")
             .map(|value| payload_turns(value, CLASS))
             .transpose()?;
-        let subject = match &turns {
-            Some(turns) => format!("grep {pattern} in {}", turns_subject(turns)),
-            None => format!("grep {pattern}"),
-        };
-        self.traced(
-            subject,
+        self.locate_then_read(
             |log| {
                 let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
                 Ok((log.locate_grep(turns.as_deref())?, regex))
@@ -1881,27 +1873,18 @@ impl ExarchDesk {
         )
     }
 
-    /// The tail every `` `exarch-transcript `` tag shares: `locate` under the session
-    /// lock, `read` once it is gone, and the call — refused or not — mirrored
-    /// onto the trace under its own subject.
-    fn traced<P>(
+    /// The tail every `` `exarch-transcript `` tag shares: `locate` under the
+    /// session lock, `read` once it is gone.  The family draws no row: a read
+    /// is a listing, and a listing's telling is the record it answers with.
+    fn locate_then_read<P>(
         &self,
-        subject: String,
         locate: impl FnOnce(&mut AgentLog) -> Result<P, String>,
         read: impl FnOnce(P) -> Result<FOValue, String>,
     ) -> Result<FOValue, Error> {
         // Its own statement: the guard dies at this semicolon, so a long read
         // never holds the seam, the bus and `/resources` behind it.
         let located = locate(&mut self.services.log.lock());
-        let result = located.and_then(read);
-        self.services
-            .record_display(crate::record::Display::HarnessCall {
-                verb: "transcript".to_string(),
-                subject: Some(subject.clone()),
-                payload: subject,
-                failed: result.is_err(),
-            });
-        result.map_err(|error| Error::new(error, 1))
+        located.and_then(read).map_err(|error| Error::new(error, 1))
     }
 
     /// What a note may weigh. It lands in the marker that stands where the
@@ -1953,12 +1936,11 @@ impl ExarchDesk {
             }
             None => None,
         };
-        let subject = turns_subject(&turns);
         let payload = match &note {
-            Some(note) => format!("{subject}, note {note}"),
-            None => subject.clone(),
+            Some(note) => format!("note {note}"),
+            None => String::new(),
         };
-        self.context_edit(Some(&subject), payload, &turns, note)
+        self.context_edit(&turns_subject(&turns), payload, &turns, note)
     }
 
     /// The eviction's tail: apply the cut, commit the act under `refused` on
@@ -1966,7 +1948,7 @@ impl ExarchDesk {
     /// the trace before answering the survey.
     fn context_edit(
         &self,
-        subject: Option<&str>,
+        subject: &str,
         payload: String,
         turns: &[u64],
         note: Option<String>,
@@ -1982,7 +1964,7 @@ impl ExarchDesk {
             // here.
             Ok(()) => {
                 self.services
-                    .commit_act(DeskAct::ContextEvict, subject, payload, false);
+                    .commit_act(DeskAct::ContextEvict, Some(subject), payload, false);
                 let survey = self.context_survey();
                 let text = format!("context is now {} serialized bytes", survey.total_bytes);
                 self.services
@@ -1991,7 +1973,7 @@ impl ExarchDesk {
             }
             Err(error) => {
                 self.services
-                    .commit_act(DeskAct::ContextEvict, subject, payload, true);
+                    .commit_act(DeskAct::ContextEvict, Some(subject), payload, true);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult {
                         text: error.clone(),
@@ -2889,7 +2871,7 @@ mod tests {
 
     /// One record per turn the read named, not one concatenated blob: the
     /// list is the shape the doc's own "read in slices" advice needs to be
-    /// sayable.
+    /// sayable.  A read is a listing, so it commits no act and draws no row.
     #[test]
     fn transcript_answers_one_record_per_turn_without_committing_an_act() {
         let mut desk = desk();
@@ -2939,37 +2921,17 @@ mod tests {
             "the second record is the turn asked for after it"
         );
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
-        let record = crate::bus::drain_records(&rx)
-            .into_iter()
-            .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
-            .expect("the read must reach the trace");
-        // The address renders as runs; how a run reads is `model::runs`'s own
-        // fact, and what the desk owns is the line it builds around it.
-        let traced = format!("read turns {}", crate::record::model::runs(&[1, 2]));
-        assert!(matches!(
-            record,
-            Record::Display(Display::HarnessCall {
-                verb,
-                subject: Some(subject),
-                payload,
-                failed: false,
-            }) if verb == "transcript" && subject == traced && payload == traced
-        ));
 
         desk.handle(transcript_read_request(&[]))
             .expect_err("a read that names no turn is not meaningful");
-        let record = crate::bus::drain_records(&rx)
+        let drawn = crate::bus::drain_records(&rx)
             .into_iter()
-            .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
-            .expect("a refused read still reaches the trace");
-        assert!(matches!(
-            record,
-            Record::Display(Display::HarnessCall {
-                verb,
-                failed: true,
-                ..
-            }) if verb == "transcript"
-        ));
+            .filter(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
+            .count();
+        assert_eq!(
+            drawn, 0,
+            "neither the read nor its refusal draws an act row: a listing's telling is its answer"
+        );
     }
 
     /// A read answers the turns it named wherever they lie, each naming the

@@ -66,6 +66,10 @@ pub fn assemble(
         Some("Script style"),
         include_str!("../data/script-style.md").into(),
     ));
+    sections.push((
+        Some("Context management"),
+        include_str!("../data/context.md").into(),
+    ));
     sections.push((Some("Host"), host_section(caps, scratch)));
     let agents = discover_agents(cwd, config_dir);
     if !agents.is_empty() {

@@ -1030,30 +1030,30 @@ mod tests {
                 Some("hunter"),
                 "audit every unwrap() in exarch/src"
             ),
-            "spawn         [hunter] audit every unwrap() in exarch/src"
+            "spawn      [hunter] audit every unwrap() in exarch/src"
         );
         assert_eq!(
             rendered("unschedule", Some("nightly"), ""),
-            "unschedule    [nightly]",
+            "unschedule [nightly]",
             "a landed act with no argument leaves the payload cell empty"
         );
         assert_eq!(
             rendered("schedule", Some("nightly"), "0 9 * * 1-5"),
-            "schedule      [nightly] 0 9 * * 1-5"
+            "schedule   [nightly] 0 9 * * 1-5"
         );
         assert_eq!(
             rendered("reply", None, "[status: \"clean\", findings: 0]"),
-            "reply         [status: \"clean\", findings: 0]",
+            "reply      [status: \"clean\", findings: 0]",
             "a subject-less act opens its payload at the verb column"
         );
         assert_eq!(
-            rendered("context-evict", Some("hunter"), "3 turns"),
-            "context-evict [hunter] 3 turns",
+            rendered("unschedule", Some("hunter"), "3 turns"),
+            "unschedule [hunter] 3 turns",
             "the longest verb still clears its column by a space"
         );
         assert_eq!(
             rendered("spawn", Some("a-name-of-the-full-24-ch"), "go"),
-            "spawn         [a-name-of-the-full-24-ch] go",
+            "spawn      [a-name-of-the-full-24-ch] go",
             "a name is an identity, and an identity is never cut"
         );
     }
@@ -1117,7 +1117,7 @@ mod tests {
         let row = lines.last().expect("an act renders one content row");
         assert_eq!(
             line::text(row),
-            "cancel        [hunter] refused: not a descendant"
+            "cancel     [hunter] refused: not a descendant"
         );
         let outcome = row.spans.last().expect("the payload span");
         assert_eq!(outcome.style.fg, Some(super::super::palette::RED_HOT));

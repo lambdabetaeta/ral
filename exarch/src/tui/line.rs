@@ -252,9 +252,9 @@ pub(super) fn tool_call_static(cmd: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 /// The verb column of an act row: declared rather than measured, at the longest
-/// verb (`context-evict`) plus a space, because an act block is one row and a
+/// verb (`unschedule`) plus a space, because an act block is one row and a
 /// measured column would align it with itself alone.
-const ACT_VERB: Col = Col::wide(14);
+const ACT_VERB: Col = Col::wide(11);
 
 /// How an act's payload reads, which is the whole of how it is inked.  An act
 /// row is chrome rather than card data, so this names the palette directly

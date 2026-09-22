@@ -96,7 +96,9 @@ pub(super) struct Tabs {
 
 impl Tabs {
     pub fn new(root: &Arc<Agent>, append: bool) -> Self {
-        let thinking = Detail::Full;
+        // Born collapsed: deliberation reads as its grain and bulk, and `/thinking`
+        // opens the text for whoever wants it.
+        let thinking = Detail::Summary;
         Self {
             tabs: vec![Tab {
                 id: root.id,

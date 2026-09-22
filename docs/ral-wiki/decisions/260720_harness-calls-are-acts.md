@@ -282,6 +282,29 @@ the string on the row is ral source, lexed and coloured by `highlight_ral_spans`
 like any other ral the TUI shows. A refusal stays prose and stays hot whatever
 the verb.
 
+## Amendment (2026-09-22): a read is not an act, and a verb is one word
+
+Two ways the vocabulary had drifted from its own law.
+
+`` `exarch-transcript `` — `` `index ``, `` `read ``, `` `grep `` — drew an act
+row, under a verb minted outside `DeskAct` because no act existed to name it. A
+read of the record changes nothing outside the turn, so by the distinction above
+it is an observation; the ral script that reached the desk is already on screen
+as the call it was, and the act row told it a second time, in `↗`, the shape
+reserved for an act on the fleet landing now. Worse, an act is a barrier: the
+one operation most likely to happen mid-burst cleaved the run of work in two.
+The row goes. What a listing has to say is the record it answers with, which is
+the rule `` `agents `list `` and the rest already kept.
+
+`context-evict` was the family and the tag of `` `exarch-context `evict `` glued
+with a hyphen — the desk's own addressing surfacing in the reader's column, next
+to six verbs that are each one word. The act is `evict`, nothing else in the
+vocabulary evicts anything, and the audit sentence already read "evicted
+context". With the compound gone `ACT_VERB` falls from 14 to 11 — `unschedule`
+plus a space — so every act row in the session gets three columns back, which
+is the drift this decision warned about, caught from the other side: a column
+sized against a vocabulary must move when the vocabulary does.
+
 ## Out of scope
 
 Headless (`exarch/src/headless.rs`) is untouched behaviourally. A stderr line has

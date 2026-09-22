@@ -309,7 +309,8 @@ mod tests {
             )
             .unwrap();
         }
-        let (tx, rx) = crate::bus::channel();
+        // Held, not read: the emitter's far end must outlive the call.
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
@@ -328,19 +329,6 @@ mod tests {
             result.content.ends_with("\nTURN: 2"),
             "every tool result closes with the id of the turn it closes: {}",
             result.content
-        );
-        assert!(
-            crate::bus::drain_records(&rx)
-                .into_iter()
-                .any(|rec| matches!(
-                    rec,
-                    crate::record::Record::Display(crate::record::Display::HarnessCall {
-                        verb,
-                        failed: false,
-                        ..
-                    }) if verb == "transcript"
-                )),
-            "the probe still records its harness call"
         );
     }
 

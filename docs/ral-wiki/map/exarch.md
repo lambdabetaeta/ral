@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 451d1ab5
 generated_at_date: 2026-09-22
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
 # Map: exarch
@@ -159,8 +159,9 @@ can inherit a live key.**
 
 `prompt::assemble` builds an agent-invariant base from `(heading, body)` sections
 walked by one uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`,
-`Tasks`, `Script style`, `Host`, [`Workspace`], [`Skills`], [`Surfacing`]**. The
-builtin placeholder and the late sections are resolved once per constructed
+`Tasks`, `Script style`, `Context management`, `Host`, [`Workspace`], [`Skills`],
+[`Surfacing`]**. The builtin placeholder and the late sections are resolved
+once per constructed
 agent, so a root, identity fork, and wire child each receive their own surface.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
@@ -190,6 +191,10 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   blocks as policy, long-running work behind `defer`/`await`, and work that must
   outlive the session behind `detach`
   ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+- **`Context management`** (`data/context.md`) is the three-tier memory model: turns
+  are the working set, bindings and the register the durable memory, the transcript
+  the complete record — promote to survive, evict with a note, search `grep`-first
+  and read by probed shape, and rewind a failed run by cutting it and resuming.
 - **`Host`** opens by naming the reader — the one host fact that is not the
   host's, since a name is what every other agent addresses it by and the only
   way it picks its own row out of a roster — then gives the environment snapshot
@@ -274,9 +279,10 @@ indefinitely is real authority. The inbox/reaper mechanics live on the
 
 ## Where to look
 
-- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agents.md, reply.md, agent.ral}` —
+- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, context.md, grant-legend.md, surface.md, agents.md, reply.md, agent.ral}` —
   the persona rules, ral reference, editing schemes, task kit, reusable-script
-  guide, grant legend, surfacing guidance, returning-agent and spawn contracts,
+  guide, context discipline, grant legend, surfacing guidance, returning-agent
+  and spawn contracts,
   and the embedded agent helper library.
 - Provider configuration — a famous provider auto-populates from its env key, an
   unusual one from a hand-written XDG `config.ral`

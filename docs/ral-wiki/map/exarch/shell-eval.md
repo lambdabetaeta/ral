@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: 6049f131
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -159,13 +159,14 @@ order, and exits 124:
    fragment *only* when `refused` is `false`. A refused attempt leaves no
    fragment entry: it answers one question — what stands — and an entry for
    work that never happened would blunt it. Because one datum feeds both
-   readers, a seventh act cannot reach one and miss the other by construction,
+   readers, an eighth act cannot reach one and miss the other by construction,
    with no enum-adjacency discipline to maintain
    ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]). A
    `schedule` call's subject is always the caller's own label — `schedule`
    requires one, so there is no minted default that could ever disagree with
-   it. `DeskAct` still names the six acts and yields both spellings, the
-   rail's `verb` column and the audit's past tense.
+   it. `DeskAct` still names the seven acts and yields both spellings, the
+   rail's `verb` column — one word per act, so `evict` and not the family and
+   tag it is reached by — and the audit's past tense.
 4. **the workers that outlived the call**, named. A `defer`red worker is
    moored by `Mooring::for_worker` onto the session root precisely so a
    foreground cancel cannot reach it, so a raise, the wall, or an `exit`
