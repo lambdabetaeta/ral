@@ -602,8 +602,8 @@ impl Agent {
     }
 
     /// `/clear`: abandon the subtree the rebuilt context no longer owns, and
-    /// forget what it was awaiting.  The fence is no longer here — the drain
-    /// in `Avatar::clear` bumps it.
+    /// forget what it was awaiting.  The fence itself is bumped by the drain
+    /// in `Avatar::clear`, not here.
     pub(crate) fn clear_subtree(&self) {
         self.cancel_descendants(CancelCause::Explicit);
         self.status.lock_ignore_poison().awaiting.clear();

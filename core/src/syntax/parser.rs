@@ -597,9 +597,8 @@ impl Parser {
         let entries = match value.item {
             Ast::List(ref elems) if elems.is_empty() => Vec::new(),
             Ast::Record(entries) => entries,
-            // `[:]` spelled the empty handler set while the options were a
-            // map; the arm list has its own empty, and this is where a reader
-            // of the old spelling is told so.
+            // `[:]` is a map, not the arm list's own empty; give an explicit
+            // error rather than let it fall through as a type mismatch.
             Ast::Map(ref entries) if entries.is_empty() => {
                 return Err(error_at(
                     value.span,
@@ -2207,7 +2206,7 @@ mod tests {
     }
 
     /// The bash-backgrounding reflex earns an error naming `spawn`, in every
-    /// position the old sugar reached: statement, chain arm, pipeline tail,
+    /// position trailing `&` can appear: statement, chain arm, pipeline tail,
     /// `let` RHS.
     #[test]
     fn trailing_amp_is_rejected_for_spawn() {
@@ -3891,7 +3890,7 @@ mod tests {
     }
 
     /// The arms leave the options bracket: their labels are names, not data.
-    /// `[]` keeps the empty handler set, which `[:]` used to spell.
+    /// `[]` keeps the empty handler set.
     #[test]
     fn handler_arms_are_lifted_out_of_the_options() {
         let (op, _) = unwrap_single_scope(

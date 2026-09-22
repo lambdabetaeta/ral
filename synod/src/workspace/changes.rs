@@ -25,7 +25,7 @@ pub enum Change {
     },
     /// The timestamp moved but nothing else did.  Something wrote to this
     /// file; whether the bytes differ cannot be known without reading them,
-    /// and synod no longer reads them.  Reported as its own thing precisely
+    /// and synod does not read them.  Reported as its own thing precisely
     /// so it is never presented as an edit: a backup agent, a sync client,
     /// or a tool that rewrote a file with the bytes it already had lands
     /// here too.

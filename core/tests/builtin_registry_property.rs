@@ -1,11 +1,10 @@
-//! Registry-driven property test (rec. A9): the sixth, previously
-//! unchecked facet — *a reducer's returned value inhabits its declared
-//! return type*.  Nothing asserted that running the reducer on
-//! inhabitants of its argument types yields an inhabitant of its return
-//! type.  That gap is where B1 (`equal`'s missing arms returned the wrong
-//! shape), B2 (`lt`/`gt` typed `Bool` but compared `to_string`), B5
-//! (arity-1 string builtins silently accepting zero args), and `echo`'s
-//! String-vs-Unit reconciliation lived.
+//! Registry-driven property test (rec. A9): *a reducer's returned value
+//! inhabits its declared return type*.  Nothing else asserts that running
+//! a reducer on inhabitants of its argument types yields an inhabitant of
+//! its return type — the gap where a builtin's missing arms return the
+//! wrong shape (B1), a builtin typed `Bool` but compares `to_string` (B2),
+//! an arity-1 string builtin silently accepts zero args (B5), or `echo`'s
+//! String-vs-Unit reconciliation goes wrong would hide.
 //!
 //! Runtime values are first-order, so inhabitation is a direct structural
 //! match.  For every builtin whose argument and return types are drawn from

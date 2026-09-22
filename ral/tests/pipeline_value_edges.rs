@@ -487,9 +487,8 @@ fn a_spawn_handle_crosses_the_final_report_boundary() {
     assert_eq!(o.stdout.trim(), "1", "stdout: {}", o.stdout);
 }
 
-/// The single most important new behaviour this plan buys: a pipeline stage
-/// closing over a `spawn` handle and awaiting it in place, something a
-/// `Value::Handle` could never do across the old helper wire.
+/// A pipeline stage can close over a `spawn` handle from outside and await
+/// it in place.
 #[test]
 fn a_pipeline_stage_awaits_a_handle_closed_over_from_outside() {
     let o = run_pipe(
@@ -594,8 +593,6 @@ fn try_handler_final_stdout_can_be_recovery_value() {
 fn warn_writes_stderr_and_stays_out_of_the_capture() {
     // `warn` is the whole diagnostic surface, and its route is Value: the line
     // reaches standard error while the capture binds the byte channel alone.
-    // The retired `1>&2` could not do this — it worked by making the two
-    // streams one, so the message went wherever the payload went.
     let o = run_pipe("let payload = !{ warn 'note'; echo carried }\necho \"[$payload]\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "[carried]", "full stdout: {:?}", o.stdout);
@@ -794,12 +791,8 @@ fn audit_receives_upstream_piped_bytes() {
 
 /// Pins: `v` binds the record `audit` returns — its payload — while `cat`'s
 /// bytes go where `cat` was already writing them, the pipeline's own stdout.
-///
-/// This test used to pin the opposite, and the reason is the whole of the
-/// WF-1 repeal: an audit-tailed pipeline had `output = Bytes`, the runtime
-/// read that field as "the payload is bytes", and so threw the record away.
-/// The two facts now live in two fields and neither is mistaken for the
-/// other.
+/// The pipeline's byte output and the audit record are tracked as two
+/// separate fields, so neither is mistaken for the other.
 #[test]
 fn pipeline_ending_in_audit_binds_the_audit_record() {
     let o = run_pipe("let v = echo hi | audit { cat }\necho !{succeeded $v}");

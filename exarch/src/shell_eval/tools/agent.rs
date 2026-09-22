@@ -30,7 +30,7 @@ pub(crate) fn spawn_branch(
         str::to_string,
     );
     let child = session.branch(name.clone()).map_err(|e| e.to_string())?;
-    // The branch row's display commit, authored beside the legacy rail row
+    // The branch row's display commit, authored beside the rail row
     // `spawn_async` emits from the same inputs; a harness spawn's recorded
     // row is the desk's own HarnessCall commit instead.
     if let Err(error) = session.recorder().emit(crate::record::Display::ToolCall {

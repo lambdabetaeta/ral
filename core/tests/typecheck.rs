@@ -980,9 +980,8 @@ fn head_not_invocable_bare_args_keeps_generic_hint() {
 
 /// F7: indexing a thunk-returning-record directly (`!$f[a]` parses as
 /// `Force(Index($f, a))`, which indexes the thunk `$f`) must point at a
-/// *followable* fix.  The old hint suggested `!$t[field]` — the exact
-/// text that just failed.  The hint now names the working form
-/// `!{!$t}[field]` (force `$f`, then index its result).
+/// *followable* fix: the hint names the working form `!{!$t}[field]`
+/// (force `$f`, then index its result).
 #[test]
 fn index_on_thunk_hint_is_followable() {
     let errs = raw_errors("let f = { return [a: 1] }\necho !$f[a]");
@@ -1163,8 +1162,8 @@ fn stream_combinator_taking_value_unifies() {
     // A stream `map` written to take a `Stream` *value* (`case $s`, recursing
     // through `!$p[tail]`) is the same equi-recursive type as `from-lines`'
     // producer — but anchored at a ty-var rather than a comp-var.  Unifying
-    // the two used to overflow the typechecker's stack; the one-sided
-    // co-inductive obligations let it terminate and unify the two anchorings.
+    // the two terminates via one-sided co-inductive obligations, which
+    // unify the two anchorings without overflowing the typechecker's stack.
     ok(
         "let smap = { |f s| case $s [`more: { |p| stream-cons !{$f $p[head]} { !{smap $f !$p[tail]} } }, `done: { |_| stream-nil }] }\n\
          let s = !{ from-lines }\n\
@@ -1206,12 +1205,11 @@ fn a_stream_piped_whole_is_accepted_and_simply_discarded() {
 
 // ─── Control operators in value position ─────────────────────────────────────
 //
-// After the scope-base refactor, `within`, `try`, `guard`, `grant`, and
-// `audit` are structural `CompKind` variants — no longer string-keyed
-// builtins.  The parser keeps them reserved in bare-head and `let`-binding
-// positions, but the user can still write `$try` (a variable reference to
-// the name `try`).  That dereference would silently get a fresh type
-// variable under the old `Val::Variable` arm; the typechecker now flags it.
+// `within`, `try`, `guard`, `grant`, and `audit` are structural `CompKind`
+// variants, not string-keyed builtins.  The parser keeps them reserved in
+// bare-head and `let`-binding positions, but the user can still write
+// `$try` (a variable reference to the name `try`); the typechecker flags
+// that dereference rather than silently assigning it a fresh type variable.
 
 #[test]
 fn control_op_within_in_value_position_errors() {
@@ -1771,11 +1769,11 @@ fn alias_parameter_receives_argv_list() {
 /// on an element is an error at the arm, which no call site can repair —
 /// whatever was written, the arm consumes the rendering.
 ///
-/// Uniform A withdraws the capability this test used to pin: parsing the
-/// argv and *returning* the parsed number is no longer expressible at all —
-/// an alias arm is byte-routed regardless, so the parsed-and-well-typed arm
-/// below is refused at install now, whether or not the text parses. The
-/// value-world replacement is a binding: `let inc = { |n| $[!{int $n} + 1] }`.
+/// Uniform A withdraws the capability of parsing the argv and *returning*
+/// the parsed number: an alias arm is byte-routed regardless, so the
+/// parsed-and-well-typed arm below is refused at install, whether or not
+/// the text parses. The value-world replacement is a binding:
+/// `let inc = { |n| $[!{int $n} + 1] }`.
 #[test]
 fn an_alias_arm_parses_its_argv_to_get_a_number() {
     for call in ["inc 5", "inc hello"] {
@@ -1863,9 +1861,8 @@ fn alias_ir_shape_round_trips() {
 ///
 /// The companion case — a `within [handlers:]`-installed frame survives an
 /// `unalias` that names it, since only an alias frame is
-/// `removable_by_unalias` — used to be visible statically too (the arm's own
-/// value type flowed through), but every arm decodes to `String` alike now
-/// (uniform A), so that half moves to run time:
+/// `removable_by_unalias` — is exercised at run time, since every arm
+/// decodes to `String` alike (uniform A):
 /// `eval_fuzz.rs::unalias_does_not_remove_a_within_installed_handler`.
 #[test]
 fn unalias_removes_only_static_alias_binding() {
@@ -2373,8 +2370,8 @@ fn late_byte_arm_beside_value_payload_arm_is_a_conduit_mismatch_under_try_arms()
 
 #[test]
 fn traced_mixed_join_under_opaque_force_is_now_rejected() {
-    // Pins: the soundness hole this pass closes — a mixed join under an
-    // opaque force is now a static error, not a silent runtime mismatch.
+    // Pins: a mixed join under an opaque force is a static error, not a
+    // silent runtime mismatch.
     has_error(
         "let v = !{ echo pre; if true { echo hi } else { return 'other' } }",
         "payload route",
@@ -2391,9 +2388,8 @@ fn chain_return_string_then_return_int_is_static_mismatch() {
 
 #[test]
 fn try_relaxation_echo_body_unit_handler_accepted() {
-    // Previously rejected (observed String vs raw Unit): the body's `echo`
-    // and the handler's `return ()` now observe under their joined Bytes
-    // output, both landing on String.
+    // The body's `echo` and the handler's `return ()` observe under their
+    // joined Bytes output, both landing on String.
     ok("try { echo x } { |_| return () }");
 }
 
@@ -2521,10 +2517,9 @@ fn decoder_is_a_first_class_nullary_native() {
 // argument from the channel or from an upstream stage.
 
 /// One T0050 per encoder in the bare form: the missing argument is the whole
-/// story, a program whose value is a discarded function.  `echo !{name}`,
-/// once tested here too, no longer is one: under currying, `!{to-json}` is
-/// the function itself, handed to `echo`, which renders it like any other
-/// native (`echo !{length}` always has).
+/// story, a program whose value is a discarded function.  Under currying,
+/// `!{to-json}` is the function itself, handed to `echo`, which renders it
+/// like any other native (`echo !{length}` always has).
 #[test]
 fn encoder_without_its_value_is_an_arity_error() {
     for name in [
@@ -2961,8 +2956,7 @@ fn caret_echo_is_exec_gated_like_any_path_binary() {
 // the occurs check reaches a cycle through a field type as well as one along
 // the spine.  A record literal's row must stay constrained by the base it is
 // put over, one base only, and a label written twice — in a literal, a pattern
-// or a `case` — must be refused rather than resolved.  Before the fix, the
-// cycle cases overflowed the host stack during `--check`.
+// or a `case` — must be refused rather than resolved.
 
 /// Both branches put over the *same* parameter row, and under the put rule
 /// that has a solution: each branch demands a slot at both labels — `x` and
@@ -3059,9 +3053,8 @@ fn a_block_parameter_is_known_from_its_call() {
 
 /// A record pattern binding one label twice is refused where it is written.
 /// It needs no types to see, so a repeat must not arrive as a complaint about
-/// the value being matched — which is what it used to be.  The comparison is
-/// of parsed keys, not token spellings, and it does not reach into a nested
-/// pattern.
+/// the value being matched.  The comparison is of parsed keys, not token
+/// spellings, and it does not reach into a nested pattern.
 #[test]
 fn a_repeated_pattern_label_is_refused_at_parse() {
     for src in ["let [a: x, a: y] = [a: 1]", "let [a: x, 'a': y] = [a: 1]"] {
@@ -3195,9 +3188,8 @@ fn toplevel_define_destructuring_generalises_each_name() {
 }
 
 /// A nested `let` inside a `!{ … }` block right-nests into a `Bind` chain
-/// (`stmts_nested`) — never a flat `Seq`, which no longer exists — and,
-/// unlike the `Define` around it, `Bind` carries no scheme field at all: it
-/// never generalises (§3.5).
+/// (`stmts_nested`), not a flat `Seq` — and, unlike the `Define` around it,
+/// `Bind` carries no scheme field at all: it never generalises (§3.5).
 #[test]
 fn toplevel_nested_bind_never_generalises() {
     let top = toplevel_ok("let result = !{ let y = 1; return $y }");
@@ -3249,9 +3241,9 @@ fn toplevel_self_recursive_rec_monomorphic_within_body() {
     );
 }
 
-/// A two-member recursive group generalises each member on its own type —
-/// the n-ary `Rec` no longer forces every member through one shared `Map`
-/// shape (revision-2 fix, §0.3 item 1).
+/// A two-member recursive group generalises each member on its own type:
+/// the n-ary `Rec` types each member independently, not through one shared
+/// `Map` shape (§0.3 item 1).
 #[test]
 fn toplevel_rec_group_members_generalise_independently() {
     let top = toplevel_ok(

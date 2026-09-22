@@ -54,8 +54,7 @@ fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
 }
 
 /// Move a torn tail to `record.jsonl.crash` and trim the live file back to
-/// its last complete line, exactly mirroring the retired `events.jsonl`
-/// quarantine.
+/// its last complete line.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:model-fold-crash-quarantine] sidecars and trims a torn record.jsonl tail before resume folds it; output infra, not turn-time data I/O"

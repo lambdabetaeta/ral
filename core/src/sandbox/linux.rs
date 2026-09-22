@@ -688,10 +688,11 @@ mod tests {
 
     /// One rule under either bind, for two reasons that meet in it: a mask is
     /// a mount, a mount over an absent name needs a mountpoint bwrap must
-    /// `mkdir`, and that `mkdir` fails with `EROFS` under a read-only bind —
-    /// killing the envelope, as `xdg:config/gcloud` denied on a host with no
-    /// gcloud once did — while under a writable identity bind it succeeds on
-    /// the host, and the deny creates the name it forbids.
+    /// `mkdir`, and that `mkdir` fails with `EROFS` under a read-only bind,
+    /// killing the envelope — the failure mode a denied-but-absent path like
+    /// `xdg:config/gcloud` triggers on a host with no gcloud — while under a
+    /// writable identity bind it succeeds on the host, and the deny creates
+    /// the name it forbids.
     #[test]
     fn an_absent_deny_is_never_mounted_over() {
         let dir = workdir("deny-absent");

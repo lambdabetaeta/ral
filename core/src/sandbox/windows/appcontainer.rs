@@ -12,7 +12,7 @@
 //! derives every SID a confined spawn's `SECURITY_CAPABILITIES` names.
 //!
 //! The profile SID keys the `AppContainer` itself — deny-by-default token, own
-//! named-object namespace — and no longer carries any filesystem reach: that
+//! named-object namespace — and carries no filesystem reach of its own: that
 //! rides per-`(path, kind)` capability SIDs, derived here by
 //! [`OwnedCapabilitySid::from_capability_name`] from the names `dacl` mints and
 //! stamps persistently. So a token's reach is exactly the capability set
@@ -177,10 +177,10 @@ impl AppContainerProfile {
         &self.name
     }
 
-    /// The SID in `S-1-15-2-…` string form. No ACE names it any more — fs reach
-    /// moved to the capability SIDs below — so this is now the profile's
-    /// identity witness: the tests read it to show that a name and its SID
-    /// determine each other across delete and re-create.
+    /// The SID in `S-1-15-2-…` string form. No ACE names it; fs reach lives on
+    /// the capability SIDs below. This is the profile's identity witness: the
+    /// tests read it to show that a name and its SID determine each other
+    /// across delete and re-create.
     #[allow(
         dead_code,
         reason = "the profile SID's string form has no caller left in the lib now that stamps target capability SIDs; the round-trip test reads it, and it is the natural spelling of a profile's identity should one be needed again"

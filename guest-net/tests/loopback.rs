@@ -367,8 +367,8 @@ fn a_denied_connect_never_dials() {
         .unwrap();
 }
 
-/// The authority-confusion string that bypassed the old intercepting
-/// proxy: `decode` must refuse it before policy or DNS is consulted.
+/// An authority-confusion string must be refused by `decode` before policy
+/// or DNS is consulted.
 #[test]
 #[serial_test::serial]
 fn the_authority_confusion_regression_is_refused_before_any_dial() {

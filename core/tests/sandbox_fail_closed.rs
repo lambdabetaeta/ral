@@ -154,8 +154,7 @@ fn external_write_outside_grant_denied_at_top_level() {
 /// The same denial through the **block boundary**: the projection comes
 /// from a `grant [fs: …] { … }` block (not an outer `with_capabilities`),
 /// and the external launched inside the forced grant body is confined just
-/// the same. This is the surviving analogue of the old block-entry
-/// fail-closed test — the grant body runs locally, but the child it spawns
+/// the same. The grant body runs locally, but the child it spawns
 /// is confined.
 #[test]
 fn external_write_outside_grant_denied_in_block_body() {

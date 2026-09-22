@@ -7,9 +7,10 @@
 //! rather than re-deriving it.  `Redirect::new` is the single place the rule
 //! lives; these tests read it from outside.
 //!
-//! `1< f` in particular used to file as a *write* door still carrying the read
-//! mode, and panicked the interpreter the moment an audit trail or surface
-//! sink was listening.
+//! `1< f` and other fd-prefixed reads are refused at the parser: standard
+//! input always feeds fd 0, so letting one through would file it as a
+//! *write* door still carrying the read mode, a shape that panics the
+//! interpreter the moment an audit trail or surface sink is listening.
 
 mod common;
 
@@ -54,9 +55,9 @@ fn parse_error(shell: &mut Shell, source: &str) -> String {
     }
 }
 
-/// The audit trail is what made §1.4 bite: with an ear listening, the write
-/// observation for the bogus door reached `mode_str`.  Refused at the parser,
-/// the run never starts and the session is still usable afterwards.
+/// With an ear listening, the write observation for a fd-prefixed read
+/// would reach `mode_str` were it not refused at the parser first: the run
+/// never starts, and the session is still usable afterwards.
 #[test]
 fn fd_prefixed_read_is_a_parse_error_and_the_session_survives() {
     let mut shell = fresh_shell();

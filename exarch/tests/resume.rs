@@ -217,8 +217,7 @@ fn the_view_folds_render_is_a_pure_function_of_the_log() {
 
 /// A record the fold does not recognise refuses the whole session rather
 /// than silently dropping the line or panicking — the versioned display
-/// vocabulary's own law (`admissible_event`'s old `_ => true` catch-all dies
-/// with this move).
+/// vocabulary's own law.
 #[test]
 fn replay_refuses_a_ledger_line_it_does_not_recognise() {
     let root = tempfile::tempdir().expect("scratch dir");

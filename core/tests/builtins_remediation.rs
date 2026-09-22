@@ -136,9 +136,9 @@ fn dedent_preserves_blank_lines_verbatim() {
 
 #[test]
 fn dedent_keeps_interior_crlf_but_trims_the_trailing_one() {
-    // `s.lines()` + `join("\n")` silently rewrote CRLF to LF; splitting on
-    // `\n` keeps the `\r` of an interior CRLF terminator, while the trailing
-    // framing line removes the final terminator.
+    // Splitting on `\n` keeps the `\r` of an interior CRLF terminator
+    // (`s.lines()` + `join("\n")` would silently rewrite CRLF to LF), while
+    // the trailing framing line removes the final terminator.
     expect_string("dedent \"  a\r\n  b\r\n\"", "a\r\nb");
 }
 
@@ -152,8 +152,8 @@ fn dedent_trims_the_opening_and_trailing_newline() {
 
 #[test]
 fn dedent_preserves_relative_indent_on_first_content_line() {
-    // The old final `.trim()` erased these two spaces after the common
-    // four-space margin was removed, so only the first line was wrong.
+    // Dedent removes only the common margin; indentation beyond it on the
+    // first content line is preserved.
     expect_string(
         "return !{dedent #'\n      let x = 1\n    let y = 2\n'#}",
         "  let x = 1\nlet y = 2",
@@ -173,7 +173,6 @@ fn dedent_preserves_trailing_spaces_on_last_content_line() {
 fn dedent_single_line_preserves_indentation() {
     // A single content line has no peers to share a common indent with,
     // so its leading whitespace is not a "common prefix" to strip.
-    // Before the fix, `dedent "  hello"` returned "hello" (all indent gone).
     expect_string("dedent \"  hello\"", "  hello");
 }
 
@@ -404,7 +403,7 @@ fn captured_encoders_without_a_value_are_the_function_itself() {
     }
 }
 
-// ── B14 — coverage for previously untested builtins ───────────────────────
+// ── B14 — coverage for builtins without a dedicated test ───────────────────
 
 #[test]
 fn sort_list_by_orders_by_key_numerically() {

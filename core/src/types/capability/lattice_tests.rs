@@ -533,13 +533,11 @@ fn join_exec_widens_policies_and_unions_names() {
     }
 }
 
-/// The stack keeps a one-sided `Subcommands` restriction that
-/// `Capabilities::meet` used to discard: layer A restricts `git` to
-/// `status` over an allowed binary directory, layer B repeats only the
-/// directory allow.  Flattening the two (the old `ExecMap::meet`) dropped A's literal
-/// restriction the moment B's map had no `git` key; the stack's per-layer
-/// fold (`evaluate_exec`) never flattens, so the restriction survives
-/// whichever layer sits on top.
+/// The stack keeps a one-sided `Subcommands` restriction: layer A restricts
+/// `git` to `status` over an allowed binary directory, layer B repeats only
+/// the directory allow.  The stack's per-layer fold (`evaluate_exec`) never
+/// flattens the two, so the restriction survives whichever layer sits on
+/// top.
 #[test]
 fn stack_keeps_a_one_sided_subcommand_restriction() {
     // `longest_dir_match` only considers an absolute candidate, and what

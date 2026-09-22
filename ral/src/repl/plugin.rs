@@ -836,7 +836,7 @@ mod tests {
     use super::*;
 
     /// `Keymap` is the neutral reduction of rustyline's `EditMode`, and names
-    /// the keymap for the `_ed-keymap` query the same way the old code did.
+    /// the keymap for the `_ed-keymap` query.
     #[test]
     fn keymap_reduces_edit_mode_and_names_it() {
         assert_eq!(Keymap::from(EditMode::Vi), Keymap::Vi);

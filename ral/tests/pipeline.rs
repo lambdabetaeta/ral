@@ -1389,10 +1389,10 @@ fn grant_exec_explicit_path_allows_scoped_path_command() {
 
 #[test]
 fn pipeline_external_stage_expands_empty_spread_to_zero_args() {
-    // Regression: external pipeline stages used to stringify each raw Val,
-    // so `...$xs` with an empty list became a single "" argv entry — and
-    // trailing `""` confused commands like fzf ("unknown option:").
-    // `resolve_launch` must expand spreads the same way eval_call_args does.
+    // Regression: `...$xs` with an empty list must contribute zero argv
+    // entries, not a stringified "" that confuses commands like fzf
+    // ("unknown option:").  `resolve_launch` must expand spreads the same
+    // way `eval_call_args` does.
     let o = run("let ee = []; echo hi | /usr/bin/printf '[%s]\\n' --flag '' ...$ee");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "[--flag]\n[]\n");

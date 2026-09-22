@@ -213,8 +213,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/provider/oauth/mod.rs", "silent:token-read"),
     ("exarch/src/provider/oauth/mod.rs", "silent:token-remove"),
     // The owner-only secret writer the ChatGPT token store and the credential
-    // fallback file share; moved here out of `oauth`, where the two sites
-    // above it used to live.
+    // fallback file share.
     ("exarch/src/provider/secret_file.rs", "silent:secret-write"),
     (
         "exarch/src/provider/secret_file.rs",

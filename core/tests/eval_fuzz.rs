@@ -715,7 +715,7 @@ fn replace_basic() {
 #[test]
 fn string_replace_passes_regex_metacharacters_through() {
     // `{` would be a regex error under re-replace, but string-replace
-    // takes it as a literal — this is the bug file-replace-string ran into.
+    // takes it as a literal.
     assert_eq!(
         must_succeed("!{string-replace '{x}' '<x>' 'a {x} b'}"),
         Value::String("a <x> b".into())
@@ -1192,10 +1192,8 @@ fn within_catch_all_skips_builtins() {
 
 #[test]
 fn alias_inside_within_shadows_within_per_name() {
-    // Last-pushed wins now: an alias installed inside a within body sits
-    // above the within frame and shadows its per-name entry.  Before the
-    // FrameOrigin removal, the [Layer*, Alias*, Within*] invariant put
-    // the alias under the within and the within's entry won.
+    // Last-pushed wins: an alias installed inside a within body sits
+    // above the within frame and shadows its per-name entry.
     assert_eq!(
         must_succeed(
             "within [handlers: [foo: { |args| echo A }]] { alias foo { |args| echo B }; let r = foo; return $r }"
@@ -1204,10 +1202,9 @@ fn alias_inside_within_shadows_within_per_name() {
     );
 }
 
-/// Last-pushed alias shadows earlier alias at run time — moved from
-/// `typecheck.rs::alias_last_pushed_shadows_earlier`, which can no longer
-/// distinguish the two arms statically: every arm is byte-routed alike
-/// (uniform A), so which one answered is a content question.
+/// Last-pushed alias shadows earlier alias at run time: under uniform A
+/// every arm is byte-routed alike, so which one answered is a content
+/// question that only a runtime check can distinguish.
 #[test]
 fn alias_last_pushed_shadows_earlier_at_runtime() {
     assert_eq!(
@@ -1219,10 +1216,10 @@ fn alias_last_pushed_shadows_earlier_at_runtime() {
 }
 
 /// `unalias` removes only a static `alias` binding, not a
-/// `within [handlers:]`-installed frame (`removable_by_unalias` excludes it)
-/// — moved from `typecheck.rs::unalias_removes_only_static_alias_binding`,
-/// which can no longer distinguish "still installed" from "fell through to
-/// an unrelated external" statically now that both decode to `String` alike.
+/// `within [handlers:]`-installed frame (`removable_by_unalias` excludes it).
+/// Both decode to `String` alike, so distinguishing "still installed" from
+/// "fell through to an unrelated external" is a content question only a
+/// runtime check answers.
 ///
 /// The `unalias` refuses, as it does for any name no run frame holds
 /// (`detach.rs::unalias_detach_refuses_because_no_run_frame_holds_it`); the
@@ -2687,9 +2684,7 @@ fn hoist_inside_untaken_chain_arm_does_not_run() {
     // A `?` arm is a conditional context: anything a non-taken arm hoists
     // must not run.  The elaborator isolates each arm's binds
     // (`elab_guarded`), so the `!{fail …}` hoisted inside the fallback is
-    // wrapped inside that arm, not outside the chain.  Review F3: the
-    // chain used to share the caller's binds accumulator, running the
-    // fallback's hoists unconditionally before the chain itself.
+    // wrapped inside that arm, not outside the chain.
     assert_eq!(
         must_succeed("return 1 ? return !{fail [status: 1, message: \"untaken arm's hoist ran\"]}"),
         Value::Int(1)
@@ -2701,7 +2696,7 @@ fn earlier_use_of_a_later_non_thunk_let_is_not_shadowed() {
     // Forward declaration covers only the binding shapes group.rs knots
     // (thunk RHS, which can be mutually recursive).  A later `let upper = 5`
     // must not shadow line 1's builtin `upper` into an undefined-variable
-    // error.  Review F8: `stmts` used to forward-declare every named let.
+    // error.
     must_succeed("upper hi\nlet upper = 5");
 }
 

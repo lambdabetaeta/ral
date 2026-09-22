@@ -39,9 +39,8 @@ fn repl_stderr(config: &Path, args: &[&str], line: &str) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// The reported bug: `boom` at the prompt is one command, so the compact
-/// one-liner used to be all the user got — but the fault is inside the rc,
-/// where only a caret can point.
+/// `boom` at the prompt is one command, but the fault is inside the rc,
+/// so the caret must point there rather than at the compact one-liner.
 #[test]
 fn an_rc_alias_faults_against_the_rc_file() {
     let dir = common::fresh_tmp_path("ral_rc_alias_fault", "d");

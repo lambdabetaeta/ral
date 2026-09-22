@@ -139,7 +139,7 @@ struct PathScan {
 
 impl SourceCache {
     /// A cache that has touched no disk: constructing a frontend must not walk
-    /// `PATH`, or startup pays what the prompt used to.
+    /// `PATH`, or startup pays the disk-walk cost each prompt otherwise avoids.
     pub(super) fn new() -> Self {
         Self {
             shell_commands: Vec::new(),

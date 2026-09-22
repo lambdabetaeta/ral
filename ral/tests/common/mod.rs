@@ -2,10 +2,9 @@
 
 //! Shared scaffolding for `ral` integration tests.
 //!
-//! Each integration file used to rebuild the same skeleton: locate the
-//! `ral` binary built by cargo, generate a fresh temp script path,
-//! spawn the binary on it, capture stdout/stderr, propagate the exit
-//! code.  The helpers below collect that scaffolding in one place.
+//! Locates the `ral` binary built by cargo, generates a fresh temp script
+//! path, spawns the binary on it, captures stdout/stderr, and propagates
+//! the exit code.  The helpers below collect that scaffolding in one place.
 //!
 //! Cargo treats `tests/common/mod.rs` as a module rather than its own
 //! integration test target — that is why it lives here and not in

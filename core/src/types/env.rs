@@ -416,8 +416,7 @@ mod tests {
 
     /// A name a `let` shadows over a prelude binding of the same spelling
     /// round-trips as the user's value, and `unset` reveals the prelude's
-    /// underneath — the same behaviour the old scope stack gave, now from a
-    /// flat map with no scope to pop.
+    /// underneath — from a flat map with no scope to pop.
     #[test]
     fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
         let mut prelude = PreludeMap::default();

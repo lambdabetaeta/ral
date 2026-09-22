@@ -78,9 +78,10 @@ fn a_byte_routed_let_binds_the_decoded_text() {
     );
 }
 
-/// An alias spelled like the machinery the coercion used to call cannot be
-/// reached by it: the captured `let` still binds `"hi"`, the `String` the
-/// checker promised, and not the alias's own value.
+/// An alias named `__decode-captured`, as if it were the coercion's own
+/// decoding machinery, cannot be reached by it: the captured `let` still
+/// binds `"hi"`, the `String` the checker promised, and not the alias's
+/// own value.
 ///
 /// The binder is spelled out rather than held to one letter because ral keeps
 /// value and command names disjoint, and what is on `PATH` is the host's
@@ -148,9 +149,9 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
     );
 }
 
-/// The coercion's own binder is invisible outside it, so a user binding of
-/// the name it once synthesized keeps its value across a byte-routed `let`
-/// — which once overwrote it with the captured bytes.
+/// The coercion's own synthesized binder is invisible outside it, so a
+/// user binding of that same name keeps its value across a byte-routed
+/// `let`.
 #[test]
 fn a_binding_named_like_the_old_synthesized_binder_survives() {
     let mut shell = fresh_shell();
@@ -178,9 +179,9 @@ fn the_coercion_leaves_no_binding_in_scope() {
     );
 }
 
-/// The decoding step is not a command, so no program can call it — with a
-/// spread argument list, which is how the old builtin was reached past its
-/// static arity, least of all. The session survives the refusal, which is the
+/// The decoding step is not a command, so no program can call it — not
+/// even with a spread argument list, which for an ordinary builtin would
+/// bypass its static arity. The session survives the refusal, which is the
 /// point: an error, not a torn-down run.
 #[test]
 fn the_coercion_is_not_a_command_a_program_can_call() {

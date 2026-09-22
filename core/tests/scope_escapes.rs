@@ -1,7 +1,6 @@
-//! Regression tests for two distinct bugs in the scope-wrapper machinery
-//! (`try`, `audit`, `grant`, `within`, `guard`).  Both were fixed earlier
-//! in the same refactor series that introduced the `Escape` / `BodyResult`
-//! split; see the commit messages below for the exact pre-fix behavior.
+//! Regression tests for two invariants in the scope-wrapper machinery
+//! (`try`, `audit`, `grant`, `within`, `guard`), observable through the
+//! `Escape` / `BodyResult` split.
 //!
 //! The harness mirrors `top_level_vs_block.rs` exactly — bootstrap a
 //! `Shell` with the prelude registered, then drive each source string
@@ -71,16 +70,11 @@ fn statically_rejected(source: &str) -> bool {
 
 // ── (1) `try` must not swallow `exit` ────────────────────────────────────
 
-/// Regression for: `try { exit 7 } { |_| return () }` used to exit 0
-/// because `classify` (then in `core/src/builtins/control.rs`, now in
-/// `core/src/evaluator/scope.rs`) mapped
-/// `Err(Break::Escape(Escape::Exit(_)))` to `Outcome { ok: true, value: Unit }`,
-/// and the `try` builtin then took the success branch.  After the audit-scope
-/// refactor (commit `refactor(audit): record_scope returns
-/// Result<ScopeRecord, Escape>; fix try swallows exit`), `classify`
-/// consumes `&BodyResult`, whose variants are Value or Error only —
-/// `Exit` is split off in `record_scope` via `split` and propagates
-/// upward as `Escape` before ever reaching `classify`.
+/// Regression for: `try { exit 7 } { |_| return () }` exits with code 7.
+/// `classify` (in `core/src/evaluator/scope.rs`) consumes `&BodyResult`,
+/// whose variants are Value or Error only — `Exit` is split off in
+/// `record_scope` via `split` and propagates upward as `Escape` before
+/// ever reaching `classify`, so `try` cannot rewrite an escaping exit code.
 #[test]
 fn try_does_not_swallow_exit() {
     let mut shell = fresh_shell();
@@ -108,13 +102,10 @@ fn try_does_not_swallow_exit() {
 // ── (2) `grant` must attenuate caps across tail-recursive iterations ────
 
 /// Regression for: a tail-recursive function inside
-/// `grant [shell: [chdir: false]] { ... }` could run `cd` on iterations
-/// after the first because `Control::Tail` escaped
-/// `with_capabilities` before the trampoline resumed it.  After commit
-/// `fix(grant): preserve capability attenuation across tail-recursive
-/// bodies`, `grant` invokes its body via `call_value` whose trampoline
-/// lives inside `with_capabilities`, so `TailCall` is absorbed locally
-/// and the narrowed cap frame is in force on every iteration.
+/// `grant [shell: [chdir: false]] { ... }` runs every iteration under the
+/// narrowed cap frame.  `grant` invokes its body via `call_value` whose
+/// trampoline lives inside `with_capabilities`, so `TailCall` is absorbed
+/// locally and the narrowed cap frame is in force on every iteration.
 ///
 /// The repro is the exact program from the fix commit's body: `f` runs
 /// `cd /tmp` only when `$n <= 0`, so depth >= 1 is needed to make the
@@ -188,24 +179,11 @@ fn within_overrides_survive_tail_recursion() {
 
 // ── (3) consecutive audit blocks must not drop the next inner command ────
 
-/// Regression for: `audit::with_scope` used to call `Audit::push_scope`,
-/// which pushed the wrapping scope node *and* set `scope_pushed=true`.
-/// The dispatcher consumes that flag in `finish_command`'s early-return
-/// path — but only when the trail is active.  When an `audit { … }`
-/// block whose body went through `with_scope` (i.e. contained a
-/// `grant` / `within` / `guard`) ended, the trail went inactive while
-/// the flag stayed set.  Inside the *next* `audit { … }` block the
-/// dispatcher saw `take_scope_pushed() == true` for the first
-/// dispatched command and dropped its observation before recording —
-/// silently, with the rest of the program unaffected.
-///
-/// Fixed in commit `2646ccf` (elaborator: flip control-operator
-/// lowering onto structural IR), which switched `with_scope` to
-/// `Audit::push` (the flag-less variant).  Commit `c323f32` then
-/// removed the `scope_pushed` field, `push_scope`, `mark_scope_pushed`,
-/// and `take_scope_pushed` outright; reintroducing the bug would
-/// require restoring at least the flag and the flag-setting variant of
-/// `push_scope`.
+/// Regression for: a dispatched command right after a consecutive
+/// `audit { … }` block, whose own body went through `with_scope` (i.e.
+/// contained a `grant` / `within` / `guard`), must still be recorded —
+/// an audit trail that goes inactive between blocks must not drop the
+/// next block's first observation.
 ///
 /// The observable assertion is on the audit trail shape: the second
 /// `audit { echo hi }` must record echo's own command observation as a
@@ -214,9 +192,8 @@ fn within_overrides_survive_tail_recursion() {
 fn audit_recording_survives_consecutive_audit_blocks() {
     let mut shell = fresh_shell();
     // First audit block: body runs through `with_scope` via `guard`.
-    // Pre-fix this set the dispatcher flag.  We discard the returned
-    // report — the bug it leaves behind is observable in the *next*
-    // block.
+    // We discard the returned report; only the next block's trail is
+    // asserted on.
     let _ = top_level(&mut shell, "audit { guard { return () } { return () } }");
     // Second audit block: the first dispatched command inside the
     // body would be eaten by the stale flag.
@@ -240,14 +217,10 @@ fn audit_recording_survives_consecutive_audit_blocks() {
 
 // ── (4) tail-emission is granted, not ambient (findings E1, E4; rec. A1) ──
 //
-// Before A1, tail-ness was an ambient bit on `shell.mobile.control`
-// (`in_tail_position`) that every eliminator had to remember to clear.
-// One eliminator forgot: a non-final fallback-chain arm ran under the
-// caller's tail flag, so a tail call inside it escaped as `Control::Tail`
-// and abandoned the rest of the chain (finding E1). After A1, `Tail` is a
-// parameter of `eval_comp`, granted only to the final sub-computation;
-// a non-final stage / arm receives `Tail::No` by construction, so its
-// tail call stays a catchable application.
+// `Tail` is a parameter of `eval_comp`, granted only to the final
+// sub-computation; a non-final stage / arm receives `Tail::No` by
+// construction, so its tail call stays a catchable application rather
+// than escaping as `Control::Tail` and abandoning the rest of the chain.
 //
 // Value application is written explicitly, so a value-looking pipeline is a
 // checker error. The first test pins that rejection; the second still pins
@@ -266,7 +239,7 @@ fn int_result(shell: &mut Shell, source: &str) -> i64 {
 }
 
 /// E1 site 1 — a value-looking pipeline is rejected before any stage can
-/// emit or tail-call.  The former pure-pipe fold (`f 1 | f`) no longer exists.
+/// emit or tail-call.
 #[test]
 fn value_pipeline_is_rejected_before_tail_emission() {
     assert!(
@@ -276,11 +249,9 @@ fn value_pipeline_is_rejected_before_tail_emission() {
 }
 
 /// E1 site 2 — a fallback chain inside a function must run its fallback,
-/// exactly as the same chain at top level.  Pre-fix, the non-final arm's
-/// tail call escaped as `Control::Tail`, so the chain never saw its
-/// failure and the fallback was structurally dead: `f $y ? echo
-/// fallback` inside a function propagated the error (exit 1) where the
-/// top-level `f 1 ? echo fallback` ran the fallback (exit 0).
+/// exactly as the same chain at top level: `f $y ? echo fallback` inside
+/// a function runs the fallback just as the top-level `f 1 ? echo
+/// fallback` does.
 #[test]
 fn chain_non_final_arm_failure_is_catchable() {
     let mut shell = fresh_shell();
@@ -471,8 +442,9 @@ fn guard_cleanup_error_pre_empts_the_body() {
 }
 
 /// E3 sibling — a normal `guard` (no escape anywhere) must still run its
-/// cleanup and return the body's value.  This pins that the fix did not
-/// over-rotate: the ordinary finalizer path is unchanged.  The body's
+/// cleanup and return the body's value.  This pins that the ordinary
+/// finalizer path is unaffected: an escaping cleanup pre-empts the body,
+/// but a normal one does not.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
 /// is read from the audit trail, where the cleanup `echo` shows up as a
 /// real command observation (`guard` is transparent — it owns no
@@ -547,16 +519,12 @@ fn audit_trail_has_command(report: &Value, name: &str) -> bool {
 //
 // `machine::apply_handler` lifts the matched handler frame off the stack for the
 // dynamic extent of the body (so a same-name call from inside reaches
-// the next outer match), then re-inserts it.  Pre-A4 the re-insertion
-// was straight-line code skipped on an unwind: a Rust panic from inside
-// the handler body left the stripped frame dropped — and a stripped
-// *alias* frame is a permanently deleted user alias, the one piece of
-// dynamic context with no save elsewhere to rebuild from.  exarch
-// `catch_unwind`s evaluation and continues the session on the same
-// `Shell`, so a caught panic must not silently delete the user's alias.
-//
-// After A4, the strip/restore is an RAII guard whose `Drop` re-inserts
-// the frame, panic or otherwise.
+// the next outer match), then re-inserts it via an RAII guard whose
+// `Drop` runs on any exit, panic or otherwise.  A stripped *alias* frame
+// is a permanently deleted user alias, the one piece of dynamic context
+// with no save elsewhere to rebuild from, and exarch `catch_unwind`s
+// evaluation and continues the session on the same `Shell`, so a caught
+// panic must not silently delete the user's alias.
 
 /// A nullary host builtin whose reducer raises a Rust panic.  Registered
 /// only by the test below, it is the panic trigger the RAII guard needs:
@@ -585,8 +553,7 @@ static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 /// mid-handler-body would do, and a dedicated trigger keeps the test
 /// independent of which shipped builtin happens to be panic-prone.  The
 /// `catch_unwind` stands in for exarch's `pump`, which catches and
-/// continues on the same `Shell`.  Pre-A4 the stripped alias frame was
-/// dropped on the unwind and `has_alias` returned false afterward.
+/// continues on the same `Shell`.
 #[test]
 fn handler_self_mask_survives_panic_mid_body() {
     let mut shell = fresh_shell();

@@ -6,7 +6,7 @@
 //! evaluator's result.  What *does* need saying is which of the two a value
 //! boundary should observe when it demands the computation as a value — a
 //! `let`, a branch join, the final report of a pipeline.  That is the payload
-//! route, and it is the whole of what survives of the old three-mode lattice.
+//! route.
 //!
 //! The route is not an output predicate.  A `Value`-routed computation may
 //! write any number of bytes; a `Bytes`-routed one may write none.

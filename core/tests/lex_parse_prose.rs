@@ -609,11 +609,10 @@ const REACHABLE: &[Reachable] = &[
         "not a number",
     ),
     // ─── Parser: sub-stream completion contract ──────────────────────
-    // No sub-parse may stop short and drop what follows.  These pin the
-    // three shapes that used to truncate silently: an expression block
-    // with extra operands (named as a missing operator), index keys with
-    // a second word, and a stray top-level `}` (named as an unmatched
-    // brace rather than generic trailing input).
+    // No sub-parse may stop short and drop what follows.  These pin three
+    // shapes: an expression block with extra operands (named as a missing
+    // operator), index keys with a second word, and a stray top-level `}`
+    // (named as an unmatched brace rather than generic trailing input).
     r(
         "parse_trailing_expr_block",
         "echo $[1 2 3]",

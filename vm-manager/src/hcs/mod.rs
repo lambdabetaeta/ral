@@ -955,8 +955,8 @@ mod tests {
     /// the handle closes.
     ///
     /// The share mode is the point of the fixture — read and write shared,
-    /// *delete* not — because that is how `vmwp` holds a disk, and it is exactly
-    /// what the one-attempt delete this replaced used to lose to.
+    /// *delete* not — because that is how `vmwp` holds a disk, and a single
+    /// delete attempt loses to it.
     #[test]
     fn a_held_session_disk_is_released_once_the_handle_closes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1032,9 +1032,8 @@ mod tests {
     }
 
     /// A guest that will not dial is quoted, not pointed at: the failure
-    /// carries the console's last lines, oldest first, each in its own quotes.
-    /// This is the invariant that makes the error useful where it used to say
-    /// the output was "above" — under a service there is no above.
+    /// carries the console's last lines, oldest first, each in its own quotes,
+    /// because under a service there is no "above" to point to.
     #[test]
     fn a_failing_boot_quotes_the_guest() {
         let said = quoted(&[

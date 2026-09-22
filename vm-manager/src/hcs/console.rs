@@ -15,27 +15,27 @@
 //! server end must exist first.  Hence the order in [`Hypervisor::boot`](crate::Hypervisor::boot):
 //! create the pipe, create the machine, start it, then read.
 //!
-//! # Why `stdout` alone was a diagnostic that reached nobody
+//! # Why `stdout` alone is a diagnostic that reaches nobody
 //!
 //! On an installed synod the process that owns the machine is
 //! `SynodMachineBroker`, a `LocalSystem` service, and a service has no console:
 //! its standard output is a handle that writes nowhere at all.  So the one line
-//! that explained why a guest refused to come up was written, and discarded,
-//! every time — and the boot failure went on to say the reason was "above",
-//! where there was no above.  This module therefore *tees*: `stdout` for a
+//! that explains why a guest refused to come up must not depend on stdout
+//! reaching anyone, and the failure must not point at an "above" that a
+//! service does not have.  This module therefore *tees*: `stdout` for a
 //! developer running `synod-machine-broker.exe --console`, a per-machine log
 //! file for everyone else, and a short ring of the last lines in memory
 //! ([`Tail`]) so the boot failure can quote the guest instead of pointing at a
 //! place the reader has to go and look.
 //!
-//! A failing write to `stdout` is therefore no longer a reason to stop pumping:
-//! under a service it fails on the very first chunk, and stopping there is
-//! exactly how the durable copy would be lost again.
+//! A failing write to `stdout` must not be a reason to stop pumping: under a
+//! service it fails on the very first chunk, and stopping there is exactly how
+//! the durable copy would be lost.
 //!
 //! # Three bounds, so a diagnostic does not become litter
 //!
-//! Nothing here may accumulate the way session disks once did, so each of the
-//! three sinks is bounded by construction:
+//! Nothing here may accumulate without bound, so each of the three sinks is
+//! bounded by construction:
 //!
 //! - the **ring** keeps [`RETAINED_LINES`] lines, and no line longer than
 //!   [`LINE_LIMIT`] characters;
@@ -425,8 +425,8 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
             let mut buffer = [0u8; PIPE_BUFFER as usize];
             // `None` once the output has refused a write, which under a service
             // is on the first chunk: there is no console attached, and giving
-            // up on the *pump* for that reason is the whole bug this teeing
-            // exists to fix.
+            // up on the *pump* for that reason would silence the log and the
+            // ring too.
             let mut out = Some(std::io::stdout());
             // The log, and how much of its allowance it has spent.
             let mut sink = log.map(|file| (file, 0u64));

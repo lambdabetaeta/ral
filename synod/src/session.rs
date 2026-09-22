@@ -486,10 +486,11 @@ pub fn seat_machine(
 /// [`exarch::agent::EngineLost`] — the engine attached to nothing, or died
 /// between being spawned and answering — and it already carries the whole
 /// message: a plain sentence, a stable code, and the run directory to read.
-/// Adding a prefix to it is precisely the layering this replaced, so nothing
-/// is added; what happens instead is that the guest's console is captured into
-/// that same run directory *before* the machine is torn down and its console
-/// log swept, so the invitation the sentence extends leads somewhere.
+/// Adding a prefix to it would only relayer an already-complete message, so
+/// nothing is added; what happens instead is that the guest's console is
+/// captured into that same run directory *before* the machine is torn down
+/// and its console log swept, so the invitation the sentence extends leads
+/// somewhere.
 ///
 /// The other is an ordinary filesystem failure — the run directory could not
 /// be made, the record could not be opened — which says nothing about where it

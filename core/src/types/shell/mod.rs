@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Default cap on the machine's stack (§2.1, §6.3 of the CEK plan): frames,
-/// not host stack frames, so it can sit far above the old host-frame count.
+/// not host stack frames, so it can sit far above what a host stack allows.
 pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 
 /// The Send+Clone dynamic context every child computation carries — a thunk

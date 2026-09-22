@@ -251,8 +251,7 @@ mod tests {
     }
 
     /// A trailing `?` is a continuation exactly as a trailing `|` is, and
-    /// the joined buffer must then parse — the REPL used to offer the
-    /// continuation and the parser refuse it.
+    /// the joined buffer must then parse.
     #[test]
     fn folds_a_line_after_a_trailing_chain_question() {
         let mut rest = vec!["echo b"].into_iter();

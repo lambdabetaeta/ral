@@ -655,8 +655,7 @@ mod tests {
     }
 
     /// A must-reply completion at budget with a pin due returns `None` and
-    /// leaves that edge armed — the regression for the old three-owner latch
-    /// bug.
+    /// leaves that edge armed.
     #[test]
     fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
         let mut nudges = Nudges::new();

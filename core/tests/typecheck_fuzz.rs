@@ -514,8 +514,9 @@ fn common_paths_carry_a_hint() {
 /// messages should say `Command` if they need that noun at all.
 #[test]
 fn cmd_abbreviation_does_not_leak() {
-    // An `if` whose branches return different types historically
-    // surfaced as `command type mismatch: Cmd Int vs Cmd String`.
+    // An `if` whose branches return different types must not surface the
+    // internal `Cmd` abbreviation, as in `command type mismatch: Cmd Int
+    // vs Cmd String`.
     let errs = raw_errors("if true { return 1 } else { return hello }");
     let body: String = errs
         .iter()

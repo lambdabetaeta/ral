@@ -467,7 +467,7 @@ mod tests {
         );
     }
 
-    /// SIGPIPE is no longer special: with no interior edge left to deliver
+    /// SIGPIPE carries no special case: with no interior edge left to deliver
     /// it, a pipe of the stage's own making that breaks is its own failure,
     /// whoever ended the stage.
     #[cfg(unix)]

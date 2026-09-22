@@ -44,11 +44,9 @@ pub(crate) enum Seat {
 /// When in a session's life its engine was lost, which is the whole of what
 /// decides what a person should do next.
 ///
-/// The distinction used to be missing, and the cost of missing it was a
-/// failure that told a user to "start a new session" about a session that had
-/// never started — advice for a conversation that had already produced
-/// something, offered to someone staring at an empty window.  A start failure
-/// is a thing to retry; a mid-session death is a thing to abandon.  Nothing
+/// A start failure is a thing to retry; a mid-session death is a thing to
+/// abandon — telling someone who has already produced something to "start a
+/// new session" is advice for a conversation that never began.  Nothing
 /// else about the two cases differs, which is why this is a two-variant enum
 /// and not a description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,14 +61,10 @@ pub enum EnginePhase {
 
 /// The one thing every edge says about a severed engine, said once.
 ///
-/// Before this existed the same fact was dressed four times on its way to a
-/// user: the transport named the stream that closed, [`Severed`]'s `Display`
-/// wrapped that in "the connection to the engine closed", the seat wrapped
-/// *that* in "the engine behind this session is gone", and the front-end
-/// wrapped the lot in "could not start the assistant".  Four layers, one
-/// fact, and the reader learnt nothing from any of them — least of all where
-/// to go and look.  So the sentence is now short and fixed, and the one thing
-/// beside it is the one thing a reader can act on: the run's log directory.
+/// The transport, [`Severed`]'s `Display`, the seat, and the front-end all
+/// report through this single, short, fixed sentence rather than each
+/// wrapping the fact in its own words.  The one thing beside it is the one
+/// thing a reader can act on: the run's log directory.
 ///
 /// Neither the engine's own words nor [`Severed::code`] belong in a window —
 /// a paragraph of machinery and a token for a bug report.  Both go to the

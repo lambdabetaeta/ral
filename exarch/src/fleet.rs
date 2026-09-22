@@ -315,9 +315,8 @@ mod tests {
         );
     }
 
-    /// The fence itself now lives on the inbox ([`bus::inbox`]'s epoch
-    /// tests); an `Agent` no longer bumps anything of its own on `/clear`.
-    /// What is left here is the cascade: an abandoned child's in-flight eval
+    /// The fence lives on the inbox ([`bus::inbox`]'s epoch tests); this
+    /// test covers only the cascade: an abandoned child's in-flight eval
     /// unwinds instead of grinding on as an orphan whose result nobody will
     /// collect.
     #[test]

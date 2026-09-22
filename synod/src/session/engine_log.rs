@@ -1,17 +1,12 @@
 //! Keeping what the engine said, so a failed start has an explanation
 //! somewhere.
 //!
-//! # The hole this fills
+//! # Why this matters
 //!
-//! exarch's TUI has always captured the engine's output: `TerminalGuard::enter`
-//! redirects file descriptor 2 into `stderr.log` in the run directory, and a
-//! session that dies leaves its reason there.  synod never did.  A synod run
-//! directory held `run.lock` and `sessions/<id>/record.jsonl` and nothing
-//! else, so a conversation whose engine died a second after it started left
-//! behind a record with one line in it — the session's own opening bookend —
-//! and no account at all of what happened next.  The failure the user saw was
-//! assembled entirely out of the *host's* observation that a socket had
-//! closed, which is the one fact that explains nothing.
+//! exarch's TUI captures the engine's output: `TerminalGuard::enter` redirects
+//! file descriptor 2 into `stderr.log` in the run directory, so a session that
+//! dies leaves its reason there.  Under synod the host's only fact is that the
+//! protocol socket closed, which on its own explains nothing.
 //!
 //! # What is actually reachable, and what is not
 //!
@@ -19,18 +14,17 @@
 //! `ral-daemon`, inside a virtual machine, and the only descriptor this
 //! process holds onto it is the protocol socket itself.  There is no stderr
 //! to redirect here, and nothing can be added to the wire — a dying engine is
-//! not in a position to describe itself over a protocol, which is why it died
-//! silently in the first place.
+//! not in a position to describe itself over a protocol, which is why it dies
+//! silently.
 //!
 //! What *is* reachable is the guest's console.  `ral-daemon` gives the engine
 //! its own standard descriptors, which the kernel has connected to
 //! `/dev/console`, so a panic or a refusal from the engine goes to the console
-//! beside the daemon's own lines.  The machine layer has pumped that console
-//! since before the guest started, keeping it in a capped file and a short
-//! ring ([`vm_manager::GuestConsole`]) — until now used only to explain a boot
-//! that never dialled.  This module asks the same question at the other end of
-//! a machine's life and writes the answer into the run directory, where a
-//! person looking for it will actually be.
+//! beside the daemon's own lines.  The machine layer pumps that console from
+//! before the guest starts, keeping it in a capped file and a short ring
+//! ([`vm_manager::GuestConsole`]).  This module asks the same question at the
+//! other end of a machine's life and writes the answer into the run
+//! directory, where a person looking for it will actually be.
 //!
 //! On the macOS backend the console is attached to this process's standard
 //! output and no copy is kept, so there is genuinely nothing to fetch; the

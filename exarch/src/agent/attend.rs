@@ -511,8 +511,8 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
 
 /// [`Avatar::attend_with`]'s park policy for
 /// [`crate::headless::converse_settled`]: a conversing trunk's `park_mode`
-/// always answers [`ParkMode::Held`], blind to its fleet, since a chat trunk
-/// never used to have one worth waiting on. This reshapes exactly that
+/// always answers [`ParkMode::Held`], blind to its fleet, because the general
+/// policy assumes a chat trunk has no fleet worth waiting on. This reshapes exactly that
 /// answer — live children hold as [`ParkMode::HeldByChildren`] instead, and a
 /// childless trunk quiesces at once rather than parking on a human who is not
 /// there to type. Every other verdict passes through unchanged: `Engaged`

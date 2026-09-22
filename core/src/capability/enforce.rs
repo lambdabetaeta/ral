@@ -317,8 +317,8 @@ fn emit_capability_denial(
 }
 
 /// Pins for [`GrantStack::admits_fs`]: containment is judged on resolved
-/// forms on both sides, so a symlink-spelled grant covers its target — the
-/// divergence the retired hand-rolled skill matcher had, in both directions.
+/// forms on both sides, so a symlink-spelled grant covers its target, in
+/// both directions.
 #[cfg(unix)]
 #[cfg(test)]
 #[allow(

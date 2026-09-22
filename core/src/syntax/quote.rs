@@ -161,7 +161,7 @@ mod tests {
         }
     }
 
-    /// `unit` is not one of them any more: `()` is the unit literal, so these
+    /// `unit` is not a word literal: `()` is the unit literal, so these
     /// bytes are text like any other word's.
     #[test]
     fn bare_word_keeps_unit() {

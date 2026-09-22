@@ -300,8 +300,7 @@ fn a_cd_handler_is_shadowed_at_the_bare_head() {
 
 /// A `let` inside `grant [...] { ... }` must not be visible afterwards: it
 /// is a machine-local `Bind`, never a `Phrase::Define`, so it never reaches
-/// `shell.env` (S10: `grant`'s body itself no longer discards anything —
-/// this is lexical scoping, not a block boundary).  Capabilities
+/// `shell.env` — this is lexical scoping, not a block boundary.  Capabilities
 /// inside the grant are an empty exec policy + permissive fs/net — the
 /// minimum that still parses and lets `let` run.  Mirrors the policy
 /// shape exarch's tool grants use without inducing OS sandbox setup
@@ -324,8 +323,7 @@ fn block_grant_does_not_leak_let_binding() {
 
 /// `within [...] { let ... }` does not leak: its `let` is a machine-local
 /// `Bind`, never a `Phrase::Define`, so it can never reach `shell.env`
-/// regardless of how the block is entered (S10: `within`'s body no longer
-/// discards `cd`, but a `let`'s lexical scoping was never that mechanism).
+/// regardless of how the block is entered.
 #[test]
 fn block_within_does_not_leak_let_binding() {
     let mut shell = fresh_shell();
@@ -616,18 +614,14 @@ fn par_prelude_returns_values_in_order() {
 }
 
 /// A `spawn` inside a grant body is usable *within that body*: under an
-/// active fs projection the grant body now evaluates **locally** (there is
-/// no grant-body IPC boundary anymore — milestone 4 of
+/// active fs projection the grant body evaluates **locally** (there is
+/// no grant-body IPC boundary — milestone 4 of
 /// `decisions/260617_sandbox-external-children`), so the handle is an
 /// ordinary process-local reference to a worker thread and `await` on it
-/// returns the worker's value.
-///
-/// This replaces the old `handle_cannot_cross_confined_eval`, which
-/// asserted a handle could not cross the confined-eval IPC boundary. That
-/// boundary is gone: a `grant` body is a dynamic effect scope, not a
-/// process boundary, so a handle created and consumed inside it just works.
-/// (Confinement now lives at external dispatch, exercised by
-/// `sandbox_fail_closed.rs`, not at grant-body entry.)
+/// returns the worker's value.  A `grant` body is a dynamic effect scope,
+/// not a process boundary, so a handle created and consumed inside it just
+/// works; confinement lives at external dispatch, exercised by
+/// `sandbox_fail_closed.rs`, not at grant-body entry.
 #[cfg(unix)]
 #[test]
 fn handle_is_usable_inside_local_grant_body() {

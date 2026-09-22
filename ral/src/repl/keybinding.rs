@@ -48,9 +48,9 @@ pub(super) fn dispatch_keybinding(
     runtime: &Arc<Mutex<PluginRuntime>>,
     keymap: Keymap,
 ) -> KeybindingOutcome {
-    // Resolve the owning plugin by name, not by position: the index a
-    // stale binding once carried would now address whatever plugin slid
-    // into that slot.  A miss (the plugin was unloaded between keypress
+    // Resolve the owning plugin by name, not by position: a stale
+    // binding's index could address whatever plugin now occupies that
+    // slot.  A miss (the plugin was unloaded between keypress
     // and dispatch) is benign — the line re-edits unchanged, and the
     // sequence is unbound on the next `sync_plugins`.
     let resolved = {
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(rt.resolve_keybinding("a", 0), Some("ctrl-t".into()));
 
         // `unload_plugin` removes "a"; "b" shifts down to slot 0 — the
-        // exact compaction that the old index-keyed dispatch mishandled.
+        // exact compaction that index-based dispatch would mishandle.
         rt.plugins.remove(0);
 
         // The stale "a" binding now misses; it must NOT pick up "b"'s

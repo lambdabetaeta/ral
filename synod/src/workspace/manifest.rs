@@ -70,7 +70,7 @@ impl EntryKind {
     /// A timestamp moving is not by itself evidence that anything differs:
     /// a backup agent, a sync client, or a tool that rewrote a file with
     /// the bytes it already had moves it and changes nothing.  Since no
-    /// manifest reads bytes any more, that case cannot be settled — so the
+    /// manifest reads bytes, that case cannot be settled — so the
     /// diff tells it apart as
     /// [`Change::Touched`](crate::workspace::changes::Change::Touched)
     /// rather than folding it into an edit it cannot prove.
