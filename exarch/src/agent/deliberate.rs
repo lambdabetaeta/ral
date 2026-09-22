@@ -1172,7 +1172,7 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
-        let _ = child.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        let _ = child.ral("spawn { test-clear-block-forever }", 30, &emit);
 
         let entries = child.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 1, "the child's own spawn must register");

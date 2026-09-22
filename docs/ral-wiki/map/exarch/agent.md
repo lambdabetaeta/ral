@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 451d1ab5
+generated_at_commit: 2339a364
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -213,7 +213,7 @@ Three nested loops, the same for trunk and child alike:
   durability being engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
   The per-call host — `RunHost`, wrapping the desk and applier
   ([[map/exarch/shell-eval|shell-eval]]) — is never installed as shared
-  state: it is a plain `Arc` `Avatar::run_shell` builds and holds on its own
+  state: it is a plain `Arc` `Avatar::ral` builds and holds on its own
   stack, so a panic unwinding through `deliberate` drops it with everything
   else there, with nothing separate to retire.
 - `deliberate` — one prompt driven to quiescence over the agent's *own* provider
@@ -280,7 +280,7 @@ once per source dispatch and sweeps it at each settled run's ready
 boundary ([[map/core/shell-state|shell-state]]), armed with
 [[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
 agent keeps its own mirror of the same drum — `Avatar::ral_epoch`,
-incremented once at the top of every `run_shell` call, a failed eval still
+incremented once at the top of every `Avatar::ral` call, a failed eval still
 a call — which `/resources` reads to render nearest time-to-reap and
 `check_disk_warn` reads for its amortisation; the two clocks coincide
 one-to-one (`decisions/260629_agent-binding-reaping`). The counter starts
@@ -862,7 +862,7 @@ session's, known where the result is assembled and not inside a byte-capped
 section, and `system.md` tells the model to expect it
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
-`run_shell` here threads to [[map/exarch/shell-eval|shell-eval]].
+`Avatar::ral` here threads to [[map/exarch/shell-eval|shell-eval]]'s `run_shell`.
 
 ## See also
 

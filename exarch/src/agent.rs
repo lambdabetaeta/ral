@@ -242,7 +242,7 @@ pub struct Avatar {
     /// an agent toward a tool it does not hold, so such a turn is only ever
     /// reported.
     nudges: Option<nudge::Nudges>,
-    /// The staged return value, harvested by [`Self::run_shell`] from that
+    /// The staged return value, harvested by [`Self::ral`] from that
     /// call's [`ReplyCell`] as the desk retires, then lifted into a
     /// [`deliberate::Outcome::Replied`] only once the tool-call batch drains,
     /// so the session settles with every `call_id` answered.
@@ -256,7 +256,7 @@ pub struct Avatar {
     /// Input tokens and the event-log position at which that measurement
     /// landed — the numerator for the eviction trigger and pressure nudge.
     last_input: (u64, usize),
-    /// The ral-call clock, bumped at the top of every [`Self::run_shell`] — a
+    /// The ral-call clock, bumped at the top of every [`Self::ral`] — a
     /// failed eval is still a call.  The settled-worker sweep, the
     /// binding-lease ledger, and [`Self::check_disk_warn`] all read it.  Never
     /// rewound, not even by `/clear`.

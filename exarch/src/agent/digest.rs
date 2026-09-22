@@ -15,7 +15,7 @@ const VALUE_CAP: usize = 20_000;
 const STDOUT_CAP: usize = 10_000;
 const STDERR_CAP: usize = 10_000;
 
-/// Cap for a `shell_eval::Outcome::Static` blob (parse / type errors), which
+/// Cap for a `Report::Static` blob (parse / type errors), which
 /// the model reads whole and cannot query — so it sits well under the
 /// section caps: a diagnostic past a few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;

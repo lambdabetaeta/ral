@@ -89,32 +89,28 @@ pub(crate) fn compile(source: &str) -> Result<Toplevel, ParseError> {
     parse(source).and_then(|ast| elaborate(&ast, std::collections::HashSet::default(), ""))
 }
 
-/// Outcome of [`compile_and_typecheck`], carrying the errors structured so
+/// Why [`compile_and_typecheck`] produced no toplevel, kept structured so
 /// the rendering choice stays at the call site.
-pub enum CompileOutcome {
-    /// The toplevel carries the checker's annotations.
-    Compiled(Toplevel),
+#[derive(Debug)]
+pub enum CompileError {
     Parse(ParseError),
     Types(Vec<TypeError>),
 }
 
-impl CompileOutcome {
-    /// Collapse to the toplevel or one rendered message — the shape
-    /// `evaluate_source`'s callers (the plugin and capability loaders) want,
-    /// reporting a failed load as a single fatal error rather than
-    /// per-error ariadne output.
-    ///
-    /// # Errors
-    /// The rendered parse error, or the newline-joined type errors.
-    pub(crate) fn into_comp_or_message(self) -> Result<Toplevel, String> {
+/// One plain message: the parse error, or the type errors a line each.
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Compiled(top) => Ok(top),
-            Self::Parse(e) => Err(e.to_string()),
-            Self::Types(errors) => Err(errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")),
+            Self::Parse(e) => write!(f, "{e}"),
+            Self::Types(errors) => {
+                for (i, e) in errors.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -137,29 +133,24 @@ impl CompileOutcome {
 /// an rc file's top-level keys, a plugin manifest's fields.  The *inferred*
 /// row is what is checked, so a key misspelled inside a spread is caught with
 /// one written out; `None` for a program no form speaks about.
+///
+/// # Errors
+/// The parse error, or every type error, as a [`CompileError`].
 pub fn compile_and_typecheck(
     source: &str,
     schemes: SessionSchemes,
     file: source::FileId,
     name: &str,
     contract: Option<typecheck::ReturnContract>,
-) -> CompileOutcome {
-    let ast = match parse_with(source, file) {
-        Ok(a) => a,
-        Err(e) => return CompileOutcome::Parse(e),
-    };
-    let comp = match elaborate(
+) -> Result<Toplevel, CompileError> {
+    let ast = parse_with(source, file).map_err(CompileError::Parse)?;
+    let comp = elaborate(
         &ast,
         schemes.bindings.iter().map(|(n, _)| n.clone()).collect(),
         name,
-    ) {
-        Ok(comp) => comp,
-        Err(e) => return CompileOutcome::Parse(e),
-    };
-    match typecheck(&comp, schemes, contract) {
-        Ok(annotated) => CompileOutcome::Compiled(annotated),
-        Err(errs) => CompileOutcome::Types(errs),
-    }
+    )
+    .map_err(CompileError::Parse)?;
+    typecheck(&comp, schemes, contract).map_err(CompileError::Types)
 }
 
 /// Pre-`main` dispatch for the lib's own unit-test binary: serve the shared

@@ -229,7 +229,7 @@ impl Log {
 
     /// Point this log's publisher at a live fleet channel, delivering whatever
     /// was appended before any sink existed.  Called wherever a session's seam
-    /// meets a run's bus (attend, deliberate, a direct `run_shell`);
+    /// meets a run's bus (attend, deliberate, a direct `Avatar::ral`);
     /// re-attaching over a dead per-exchange channel is the ordinary way a
     /// headless session's next exchange comes back on air.
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]

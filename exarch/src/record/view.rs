@@ -36,7 +36,7 @@ pub enum BlockKind {
         tool: String,
         cmd: String,
         summary: Option<String>,
-        result_lines: Option<u32>,
+        verdict: Option<Verdict>,
     },
     HarnessCall {
         verb: String,
@@ -93,6 +93,14 @@ pub enum BlockKind {
         cut: Cut,
         by: EditAuthority,
     },
+}
+
+/// What a result told the call it answers: how much it moved, and whether
+/// the run failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub lines: u32,
+    pub failed: bool,
 }
 
 /// One committed block of scrollback, named by the [`Seq`] of the record that
@@ -244,13 +252,13 @@ impl Blocks {
     /// Attach a result's line count to the call it names — a patch record
     /// addressed by `BlockId`.  A target this fold cannot find — evicted, or
     /// simply never resident — is [`Delta::Quiet`] rather than a panic.
-    fn attach_result(&mut self, call: BlockId, text: &str) -> Delta {
-        let n = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+    fn attach_result(&mut self, call: BlockId, text: &str, failed: bool) -> Delta {
+        let lines = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
         let target = call.seq();
         if let Some(block) = self.blocks.iter_mut().find(|b| b.seq == target)
-            && let BlockKind::ToolCall { result_lines, .. } = &mut block.kind
+            && let BlockKind::ToolCall { verdict, .. } = &mut block.kind
         {
-            *result_lines = Some(n);
+            *verdict = Some(Verdict { lines, failed });
             return Delta::Patched(call);
         }
         Delta::Quiet
@@ -267,7 +275,7 @@ impl Blocks {
                     tool,
                     cmd,
                     summary,
-                    result_lines: None,
+                    verdict: None,
                 },
             ),
             Display::HarnessCall {
@@ -284,7 +292,7 @@ impl Blocks {
                     failed,
                 },
             ),
-            Display::Result { text, call } => self.attach_result(call, &text),
+            Display::Result { text, failed, call } => self.attach_result(call, &text, failed),
             Display::SubagentDone {
                 name,
                 error,
@@ -450,6 +458,7 @@ mod tests {
                 Seq::new(3),
                 Display::Result {
                     text: "a\nb\n".into(),
+                    failed: false,
                     call,
                 },
             ),
@@ -460,6 +469,7 @@ mod tests {
                 Seq::new(4),
                 Display::Result {
                     text: "a\n".into(),
+                    failed: false,
                     call: BlockId::new(Seq::new(99)),
                 },
             ),

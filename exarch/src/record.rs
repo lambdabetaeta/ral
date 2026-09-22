@@ -24,7 +24,7 @@ mod view;
 pub use model::{Held, Linked, Pointer, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
-pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, View};
+pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View};
 
 pub(crate) use log::FleetSink;
 
@@ -204,6 +204,7 @@ pub enum Display {
     /// backward to the nearest resident tail.
     Result {
         text: String,
+        failed: bool,
         call: BlockId,
     },
     /// A child's landed line.  No body: the reply is a value on the child's own

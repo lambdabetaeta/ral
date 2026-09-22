@@ -662,24 +662,19 @@ mod tests {
         let mut root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, root.agent.id);
-        let root_result = root.run_shell("c1".into(), "exarch-agents `reply 1", 5, &emit);
+        let (root_result, _) = root.ral("exarch-agents `reply 1", 5, &emit);
         let refusal = "you converse with the user; you do not return";
-        assert!(
-            root_result.content.contains(refusal),
-            "got: {}",
-            root_result.content
-        );
+        assert!(root_result.contains(refusal), "got: {root_result}");
 
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // fleet, and names are unique among the live.
         let mut branch = root
             .branch("branch".into())
             .expect("branch a conversing child");
-        let branch_result = branch.run_shell("c2".into(), "exarch-agents `reply 1", 5, &emit);
+        let (branch_result, _) = branch.ral("exarch-agents `reply 1", 5, &emit);
         assert!(
-            branch_result.content.contains(refusal),
-            "a /branch child must be refused with the same text, got: {}",
-            branch_result.content
+            branch_result.contains(refusal),
+            "a /branch child must be refused with the same text, got: {branch_result}"
         );
         assert_eq!(
             branch.park_mode(branch.agent.engaged()),
@@ -866,7 +861,7 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        session.run_shell("c0".into(), "return 1", 5, &emit);
+        session.ral("return 1", 5, &emit);
 
         let reaps: Vec<(String, String)> = crate::bus::drain_records(&rx)
             .into_iter()
@@ -888,7 +883,7 @@ mod tests {
             "an unpolled worker past its idle bound reaps as Idle"
         );
 
-        session.run_shell("c1".into(), "return 1", 5, &emit);
+        session.ral("return 1", 5, &emit);
         assert!(
             crate::bus::drain_records(&rx)
                 .into_iter()
@@ -907,8 +902,7 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.run_shell(
-            "c0".into(),
+        session.ral(
             r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
             5,
             &emit,
@@ -960,8 +954,7 @@ mod tests {
         let mut session = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.run_shell(
-            "c0".into(),
+        session.ral(
             r#"exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
             5,
             &emit,
@@ -1048,9 +1041,9 @@ mod tests {
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.run_shell("c0".into(), "let reap_me = 1", 5, &emit);
-        session.run_shell("c1".into(), "$[0]", 5, &emit);
-        session.run_shell("c2".into(), "$[0]", 5, &emit);
+        session.ral("let reap_me = 1", 5, &emit);
+        session.ral("$[0]", 5, &emit);
+        session.ral("$[0]", 5, &emit);
 
         let prunes: Vec<(Vec<String>, Vec<u64>)> = crate::bus::drain_records(&rx)
             .into_iter()
@@ -1071,7 +1064,7 @@ mod tests {
         assert_eq!(idle_calls.len(), 1);
         assert!(idle_calls[0] >= 2, "idle at least the armed bound");
 
-        session.run_shell("c3".into(), "$[0]", 5, &emit);
+        session.ral("$[0]", 5, &emit);
         assert!(
             crate::bus::drain_records(&rx).into_iter().all(|record| {
                 !matches!(
@@ -1228,11 +1221,11 @@ mod tests {
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
+        session.ral("let events_json_x = 1", 5, &emit);
         let after_bind = session.log.lock().event_count();
 
         // The prune fires at this call's own ready boundary (idle bound 1).
-        session.run_shell("c1".into(), "$[0]", 5, &emit);
+        session.ral("$[0]", 5, &emit);
         let after_prune_call = session.log.lock().event_count();
         let pruned = crate::bus::drain_records(&rx).into_iter().any(|record| {
             matches!(
@@ -1244,7 +1237,7 @@ mod tests {
         });
         assert!(pruned, "the prune notice must have fired on the bus");
 
-        session.run_shell("c2".into(), "$[0]", 5, &emit);
+        session.ral("$[0]", 5, &emit);
         let after_plain_call = session.log.lock().event_count();
         assert_eq!(
             after_prune_call - after_bind,

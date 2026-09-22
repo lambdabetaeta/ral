@@ -26,7 +26,7 @@ use ral_core::ir::{Comp, CompKind, Phrase, Toplevel};
 use ral_core::sync::LockExt as _;
 use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
 use ral_core::types::HandleState;
-use ral_core::{CompileOutcome, Value};
+use ral_core::{CompileError, Value};
 
 use ansi_to_tui::IntoText;
 use prompt_editor::completion::{Candidate as MenuCandidate, MENU_MAX_ROWS, Menu};
@@ -619,14 +619,14 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
         "",
         None,
     ) {
-        CompileOutcome::Compiled(top) => match pipeline_stage_rows(&top, src) {
+        Ok(top) => match pipeline_stage_rows(&top, src) {
             Some(rows) => Spine::Stages(rows),
             None => Spine::Empty,
         },
         // A parse error mid-typing is an incomplete line, not a real error:
         // show nothing rather than flare on every keystroke.
-        CompileOutcome::Parse(_) => Spine::Empty,
-        CompileOutcome::Types(errs) => match errs.first() {
+        Err(CompileError::Parse(_)) => Spine::Empty,
+        Err(CompileError::Types(errs)) => match errs.first() {
             // Reuse core's diagnostic phrasing verbatim — the headline, the
             // under-caret label, and the code are exactly what the post-Enter
             // ariadne report uses, so the two agree word for word.
@@ -1491,7 +1491,7 @@ mod tests {
             "",
             None,
         );
-        let CompileOutcome::Compiled(comp) = outcome else {
+        let Ok(comp) = outcome else {
             panic!("pipeline should compile");
         };
         let rows = pipeline_stage_rows(&comp, "/bin/echo hi | /bin/cat")
@@ -1515,7 +1515,7 @@ mod tests {
             "",
             None,
         );
-        let CompileOutcome::Compiled(comp) = outcome else {
+        let Ok(comp) = outcome else {
             panic!("should compile");
         };
         assert!(pipeline_stage_rows(&comp, "/bin/echo hi").is_none());

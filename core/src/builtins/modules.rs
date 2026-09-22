@@ -210,9 +210,8 @@ fn check_source(
         virtual_path,
         contract,
     )
-    .into_comp_or_message()
     .map(std::sync::Arc::new)
-    .map_err(sig)?;
+    .map_err(|e| sig(e.to_string()))?;
     if shell.local.bindings.armed() {
         shell.local.bindings.renew(top.referenced_names());
     }

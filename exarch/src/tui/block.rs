@@ -20,7 +20,7 @@ use super::rail::{self, RailKind};
 use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{Card, Landing, Mark, Span as CardSpan};
-use crate::record::Seq;
+use crate::record::{Seq, Verdict};
 use ral_core::types::Observed;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -629,16 +629,16 @@ impl Block {
         }
     }
 
-    /// Stamp the result magnitude on the call `at` names, if this block holds
-    /// it.  Reports whether it did, so the mirror's walk stops there.
-    pub(super) fn measure(&mut self, at: Seq, n: u32) -> bool {
+    /// Settle the call `at` names with its result's verdict, if this block
+    /// holds it.  Reports whether it did, so the mirror's walk stops there.
+    pub(super) fn settle(&mut self, at: Seq, verdict: Verdict) -> bool {
         let Some(call) = self
             .group_mut()
             .and_then(|g| g.calls.iter_mut().find(|c| c.at() == at))
         else {
             return false;
         };
-        call.measure(n);
+        call.settle(verdict);
         self.memo = None;
         true
     }

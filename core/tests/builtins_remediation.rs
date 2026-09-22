@@ -19,7 +19,8 @@ use common::fresh_shell;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, Escape, GrantStack, Settled, Shell, Status, Value};
 use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics,
+    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
+    StaticDiagnostics,
 };
 
 /// Run one top-level run of `source` through the public `run` door
@@ -107,8 +108,14 @@ fn expect_static(source: &str) -> StaticDiagnostics {
 /// Run `source` expecting one type error, whose code must be `code`.
 fn expect_type_code(source: &str, code: &str) {
     let codes: Vec<_> = match expect_static(source) {
-        StaticDiagnostics::Types { errors, .. } => errors.iter().map(|e| e.kind.code()).collect(),
-        StaticDiagnostics::Parse { error, .. } => {
+        StaticDiagnostics::Compile {
+            error: CompileError::Types(errors),
+            ..
+        } => errors.iter().map(|e| e.kind.code()).collect(),
+        StaticDiagnostics::Compile {
+            error: CompileError::Parse(error),
+            ..
+        } => {
             panic!("{source:?}: expected a type error, got parse {error:?}")
         }
         StaticDiagnostics::Host(e) => panic!("{source:?}: expected a type error, got host {e:?}"),

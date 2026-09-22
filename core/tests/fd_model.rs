@@ -19,7 +19,8 @@ use common::fresh_shell;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Shell};
 use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics,
+    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
+    StaticDiagnostics,
 };
 
 fn report(shell: &mut Shell, source: &str) -> RunReport {
@@ -49,7 +50,11 @@ fn report(shell: &mut Shell, source: &str) -> RunReport {
 fn parse_error(shell: &mut Shell, source: &str) -> String {
     match report(shell, source) {
         RunReport::Static {
-            diagnostics: StaticDiagnostics::Parse { error, .. },
+            diagnostics:
+                StaticDiagnostics::Compile {
+                    error: CompileError::Parse(error),
+                    ..
+                },
         } => error.message,
         _ => panic!("expected a parse error from {source:?}"),
     }

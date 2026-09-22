@@ -100,7 +100,7 @@ pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 fn invalid_input(id: String, reason: &str, session: &Avatar) -> SessionToolResult {
     let call = record_call(session, INVALID_INPUT.to_string(), None);
     let msg = input_error(reason);
-    record_result(session, &msg, call);
+    record_result(session, &msg, true, call);
     SessionToolResult { id, content: msg }
 }
 
@@ -124,10 +124,11 @@ fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option
 
 /// The paired half: the byte-identical result string, addressed at the call
 /// commit it answers.
-fn record_result(session: &Avatar, content: &str, call: Option<BlockId>) {
+fn record_result(session: &Avatar, content: &str, failed: bool, call: Option<BlockId>) {
     let Some(call) = call else { return };
     if let Err(error) = session.recorder().emit(Display::Result {
         text: content.to_string(),
+        failed,
         call,
     }) {
         session.recorder().report_fault(&error);
@@ -147,9 +148,9 @@ pub(crate) fn dispatch(
         Err(reason) => return invalid_input(id, &reason, session),
     };
     let call = record_call(session, args.cmd.clone(), Some(args.description.clone()));
-    let result = session.run_shell(id, &args.cmd, args.timeout_secs, emit);
-    record_result(session, &result.content, call);
-    result
+    let (content, failed) = session.ral(&args.cmd, args.timeout_secs, emit);
+    record_result(session, &content, failed, call);
+    SessionToolResult { id, content }
 }
 
 #[cfg(test)]

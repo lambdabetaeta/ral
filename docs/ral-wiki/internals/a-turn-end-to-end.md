@@ -176,9 +176,9 @@ module's framed scaffold:
   `Program::Source` `Run` and drains it through
   `protocol::dispatch_to_report` against its call's `RunHost` — one `Host`
   pairing the enquiry desk with the applier that renders each live surface
-  value onto the presentation bus — and renders the capped `ToolResult`, or
-  folds an `Err(Severed)` into `Outcome::Severed` and the one sentence
-  `agent::seat::EngineLost` renders for it
+  value onto the presentation bus — and hands back the `Result<Report,
+  Severed>` itself; `Avatar::ral` renders the capped `ToolResult`, or the one
+  sentence `agent::seat::EngineLost` renders for a severance
   ([[map/exarch/agent|agent]]). **The pushed grant frame *is* the sandbox** — ral's
   [[design/grant|grant]], not a source-level `grant { … }` the model could
   escape — which is why exarch needs no runtime of its own

@@ -22,9 +22,9 @@ use super::block::Detail;
 use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::md;
-use super::palette::{CODE_BG, EFFECT_BG, SLATE};
+use super::palette::{CODE_BG, EFFECT_BG, RED, SLATE};
 use crate::bus::card::{execs_card, greps_card, reads_card};
-use crate::record::Seq;
+use crate::record::{Seq, Verdict};
 use ral_core::types::Observed;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -50,9 +50,10 @@ struct Buckets<'a> {
     greps: Vec<&'a Observed>,
 }
 
-/// One observation call as rendered: the magnitude drives its sparkline bar,
-/// the context is the turn's floor, and its effects are the facts themselves,
-/// grouped into rows only at render.
+/// One observation call as rendered: its verdict's magnitude drives its
+/// sparkline bar and a failure reddens its script, the context is the turn's
+/// floor, and its effects are the facts themselves, grouped into rows only at
+/// render.
 ///
 /// Named by the [`Seq`] of the commit that opened it, which is how the result
 /// patch addressed to that commit finds the bar it earned.
@@ -60,20 +61,20 @@ pub(super) struct Call {
     at: Seq,
     intent: String,
     cmd: String,
-    magnitude: Option<u32>,
+    verdict: Option<Verdict>,
     context: u8,
     effects: Vec<Observed>,
 }
 
 impl Call {
     /// Open a call on its stated intent and the script behind it; its effects
-    /// and its result magnitude arrive after.
+    /// and its result's verdict arrive after.
     pub(super) fn open(at: Seq, intent: String, cmd: String, context: u8) -> Self {
         Self {
             at,
             intent,
             cmd,
-            magnitude: None,
+            verdict: None,
             context,
             effects: Vec::new(),
         }
@@ -88,9 +89,17 @@ impl Call {
         }
     }
 
-    /// Stamp the result magnitude the fold patched onto this call.
-    pub(super) fn measure(&mut self, n: u32) {
-        self.magnitude = Some(n);
+    /// Settle this call with the verdict the fold patched onto it.
+    pub(super) fn settle(&mut self, verdict: Verdict) {
+        self.verdict = Some(verdict);
+    }
+
+    fn magnitude(&self) -> Option<u32> {
+        self.verdict.map(|v| v.lines)
+    }
+
+    fn failed(&self) -> bool {
+        self.verdict.is_some_and(|v| v.failed)
     }
 
     fn buckets(&self) -> Buckets<'_> {
@@ -171,7 +180,7 @@ fn bar_col(width: usize) -> usize {
 pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
     calls
         .iter()
-        .filter_map(|c| c.magnitude)
+        .filter_map(Call::magnitude)
         .reduce(|a, b| a + b)
 }
 
@@ -196,7 +205,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let tip = calls
         .iter()
         .rev()
-        .find(|c| c.magnitude.is_some())
+        .find(|c| c.verdict.is_some())
         .unwrap_or_else(|| calls.last().expect("a run has at least one call"));
     let mut ls = vec![Line::default()];
     ls.extend(pinned_intent(
@@ -276,7 +285,13 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 /// intent opens flush in content space — the margin is the only indent, and the
 /// rail glyph the first call wears is seated in it.
 fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
-    pinned_intent(&[], &call.intent, call.context, &bar(call.magnitude), width)
+    pinned_intent(
+        &[],
+        &call.intent,
+        call.context,
+        &bar(call.magnitude()),
+        width,
+    )
 }
 
 /// Lay one intent out as a left text block with its `bars` pinned right, in
@@ -322,13 +337,21 @@ fn pinned_intent(
     out
 }
 
-/// A call's ral `cmd` at the `Full` rung, syntax-highlighted, folded to the
-/// panel's own columns and washed into the recessed [`CODE_BG`] panel inset
-/// under [`BODY_INDENT`].
+/// A call's ral `cmd` at the `Full` rung, syntax-highlighted — or solid red
+/// when the run failed — folded to the panel's own columns and washed into
+/// the recessed [`CODE_BG`] panel inset under [`BODY_INDENT`].
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let body_w = inset_w(BODY_INDENT, width);
     let mut ls = Vec::new();
-    for line in highlight_ral(&call.cmd) {
+    let lines = if call.failed() {
+        call.cmd
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(RED))))
+            .collect()
+    } else {
+        highlight_ral(&call.cmd)
+    };
+    for line in lines {
         for vrow in wrap_line(&line, body_w) {
             wash_inset(&mut ls, vrow, BODY_INDENT, body_w, CODE_BG);
         }
@@ -343,7 +366,7 @@ fn sparkline(calls: &[Call]) -> Span<'static> {
     let glyphs: String = calls
         .iter()
         .skip(skip)
-        .map(|c| line::spark_glyph(c.magnitude))
+        .map(|c| line::spark_glyph(c.magnitude()))
         .collect();
     Span::styled(glyphs, Style::default().fg(SLATE))
 }
@@ -401,8 +424,11 @@ mod tests {
 
     fn call(intent: &str, magnitude: Option<u32>) -> Call {
         let mut call = Call::open(Seq::new(1), intent.into(), String::new(), 0);
-        if let Some(n) = magnitude {
-            call.measure(n);
+        if let Some(lines) = magnitude {
+            call.settle(Verdict {
+                lines,
+                failed: false,
+            });
         }
         call
     }

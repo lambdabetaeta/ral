@@ -33,7 +33,7 @@ pub(crate) enum Seat {
         interrupt_target: InterruptTarget,
     },
     /// Out-of-process, one engine per session, holding nothing per call: a
-    /// wire run's desk and applier ride `Avatar::run_shell`'s arguments into
+    /// wire run's desk and applier ride `Avatar::ral`'s arguments into
     /// the drain loop's enquiry arm, the real scratch lives in the guest,
     /// and forks are refused at the desk for fuel 0, so no fork door either.
     Wire {
@@ -644,7 +644,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// The binding is production's exactly: `Avatar::run_shell` hands its
+    /// The binding is production's exactly: `Avatar::ral` hands its
     /// desk straight to `shell_eval::run_shell`'s closure, not to the seat.
     #[test]
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {

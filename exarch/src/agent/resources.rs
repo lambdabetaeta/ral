@@ -730,8 +730,8 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
-        session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
+        session.ral("spawn { test-clear-block-forever }", 30, &emit);
+        session.ral("spawn { return 7 }", 30, &emit);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !session
             .probe_workers()
@@ -753,7 +753,7 @@ mod tests {
             "bindings.count",
         )
         .current;
-        session.run_shell("c3".into(), "let probe_marker = 1", 30, &emit);
+        session.ral("let probe_marker = 1", 30, &emit);
         let rows = session
             .resource_rows()
             .expect("an identity seat never severs");
@@ -852,7 +852,7 @@ mod tests {
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        session.ral("spawn { test-clear-block-forever }", 30, &emit);
 
         let entry = session
             .seat

@@ -1308,9 +1308,9 @@ mod tests {
             "",
             None,
         ) {
-            ral_core::CompileOutcome::Compiled(_) => {}
-            ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
-            ral_core::CompileOutcome::Types(errs) => panic!(
+            Ok(_) => {}
+            Err(ral_core::CompileError::Parse(e)) => panic!("expected a clean parse, got: {e}"),
+            Err(ral_core::CompileError::Types(errs)) => panic!(
                 "expected `service`'s Handle to satisfy `cancel` on an exarch-dressed shell, got: {:?}",
                 errs.iter()
                     .map(|e| e.kind.render_message())
@@ -1337,9 +1337,9 @@ mod tests {
             "",
             None,
         ) {
-            ral_core::CompileOutcome::Compiled(_) => {}
-            ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
-            ral_core::CompileOutcome::Types(errs) => panic!(
+            Ok(_) => {}
+            Err(ral_core::CompileError::Parse(e)) => panic!("expected a clean parse, got: {e}"),
+            Err(ral_core::CompileError::Types(errs)) => panic!(
                 "`service-handle`'s ∀α Handle must instantiate per call site, got: {:?}",
                 errs.iter()
                     .map(|e| e.kind.render_message())

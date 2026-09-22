@@ -6,6 +6,7 @@
 //! it reads is handed in, so it never touches a transport or a registry
 //! itself.
 
+use super::{ToolResult, ral_value_to_text};
 use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::Value as RalValue;
@@ -17,6 +18,34 @@ use std::collections::HashSet;
 /// Enough of one call's fan-out to name without crowding the stderr it rides
 /// on; the rest is counted aloud, never dropped in silence.
 const NAMED: usize = 5;
+
+/// The model's sections of a run that reached evaluation: its captured
+/// streams, its settled value, and [`render`]'s suffix and exit.
+pub(crate) fn tool_result(
+    ending: &Ending,
+    captured: Option<ral_core::Captured>,
+    trail: &[FOValue],
+    fragment: &ActFragment,
+    workers: &[ProbedWorker],
+    timeout_secs: u64,
+) -> ToolResult {
+    let ral_core::Captured { stdout, mut stderr } = captured.unwrap_or(ral_core::Captured {
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    });
+    let value = match ending {
+        Ending::Settled { value, .. } => ral_value_to_text(value),
+        _ => None,
+    };
+    let (suffix, exit) = render(ending, trail, fragment, workers, timeout_secs);
+    stderr.extend_from_slice(suffix.as_bytes());
+    ToolResult {
+        stdout,
+        stderr,
+        value,
+        exit,
+    }
+}
 
 /// Compose a dispatch's ending into the stderr suffix the model reads, and
 /// the exit code its `EXIT:` section carries.

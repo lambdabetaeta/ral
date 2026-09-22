@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6049f131
+generated_at_commit: 2339a364
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -168,7 +168,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
  and the whole frame is redrawn each tick from each block's own memoised visual
  rows. A burst of `ral` work is the collapsible object — its tip call's intent
- shows shut, every call with its ral source when a click opens it; the wheel scrolls, click-drag selects and copies the
+ shows shut, every call with its ral source when a click opens it — highlighted, or solid red when the run failed; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
  own selection. `tui/md.rs` is the streaming markdown renderer — a ral code
  block in the model's prose (tagged `ral`, or untagged, which is what the

@@ -24,7 +24,8 @@ use common::fresh_shell;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, GrantStack, Value};
 use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Settled, StaticDiagnostics,
+    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Settled,
+    StaticDiagnostics,
 };
 
 /// A session as every front end builds one: prelude registered, env seeded,
@@ -84,11 +85,19 @@ fn printed(src: &str) -> String {
 fn static_codes(src: &str) -> Vec<String> {
     match report(src) {
         RunReport::Static {
-            diagnostics: StaticDiagnostics::Types { errors, .. },
+            diagnostics:
+                StaticDiagnostics::Compile {
+                    error: CompileError::Types(errors),
+                    ..
+                },
             ..
         } => errors.iter().map(|e| e.kind.code().to_string()).collect(),
         RunReport::Static {
-            diagnostics: StaticDiagnostics::Parse { error, .. },
+            diagnostics:
+                StaticDiagnostics::Compile {
+                    error: CompileError::Parse(error),
+                    ..
+                },
             ..
         } => panic!("{src:?}: expected type diagnostics, got parse {error:?}"),
         RunReport::Static {

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6049f131
+generated_at_commit: 2339a364
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
@@ -29,7 +29,7 @@ for every tool.
 
 - **`ral`** (`shell_eval/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
-  through [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
+  through `Avatar::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
   (the ral source) and a required one-line `description` (shown on the
   [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block; oversize descriptions are truncated, never rejected). An
@@ -42,7 +42,10 @@ for every tool.
   ([[map/exarch/shell-eval|shell-eval]]).
   Every accepted or malformed call emits a `Display::ToolCall` followed by a
   `Display::Result` addressed by the call's `BlockId`, so a result never has to
-  search backward for its tool row. Malformed JSON uses `<invalid input>` as the
+  search backward for its tool row. The result carries `failed` — rejected,
+  raised, nonzero, or severed — which the view fold settles onto the call as a
+  `Verdict` beside its line count, and the TUI draws a failed call's script in
+  solid red. Malformed JSON uses `<invalid input>` as the
   call label but still gets a paired diagnostic result; if the call row itself
   cannot be appended, the seam reports a transient fault and cannot invent a
   result target.

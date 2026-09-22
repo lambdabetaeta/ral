@@ -101,9 +101,7 @@ impl<'a> Headless<'a> {
         let Some(reply) = &self.reply else {
             return Ok(false);
         };
-        let Some(text) =
-            crate::shell_eval::ral_value_to_text(&ral_core::Value::from(reply.clone()))
-        else {
+        let Some(text) = crate::shell_eval::ral_value_to_text(reply) else {
             return Ok(false);
         };
         self.out.write_all(text.as_bytes())?;

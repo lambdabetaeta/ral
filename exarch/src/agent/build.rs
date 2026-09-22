@@ -1102,19 +1102,13 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        // The deferred sink `run_shell` wires captures `emit`'s mailbox, which
+        // The deferred sink `Avatar::ral` wires captures `emit`'s mailbox, which
         // must be this session's own inbox for the late-surface assertion
         // below to mean anything.
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        let _ = session.run_shell(
-            "c1".into(),
-            "spawn { test-clear-block-until-released }",
-            30,
-            &emit,
-        );
-        let _ = session.run_shell(
-            "c2".into(),
+        let _ = session.ral("spawn { test-clear-block-until-released }", 30, &emit);
+        let _ = session.ral(
             r#"service "clear-test" { test-clear-block-until-released }"#,
             30,
             &emit,
@@ -1233,7 +1227,7 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());
-        let _ = avatar.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        let _ = avatar.ral("spawn { test-clear-block-forever }", 30, &emit);
 
         let entries = avatar.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 1, "the agent's own spawn must register");
@@ -1283,7 +1277,7 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
+        session.ral("let pre_clear_x = 1", 5, &emit);
 
         session.clear().expect("clear must succeed");
 
@@ -1368,7 +1362,7 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
+        session.ral("let parent_scratch = 1", 5, &emit);
 
         let mut child = session
             .fork(ral_core::types::GrantStack::root())
@@ -1391,8 +1385,8 @@ mod tests {
             });
         let (child_tx, _child_rx) = crate::bus::channel();
         let child_emit = Emitter::new(child_tx, child.agent.id);
-        for i in 0..3 {
-            child.run_shell(format!("child{i}"), "let _child_spin = 0", 5, &child_emit);
+        for _ in 0..3 {
+            child.ral("let _child_spin = 0", 5, &child_emit);
         }
         assert!(
             scope_has(&mut child, "parent_scratch"),

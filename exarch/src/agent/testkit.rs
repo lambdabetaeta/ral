@@ -193,14 +193,7 @@ pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
     // Discarded, so a block- or handle-valued binding still settles on data.
-    let content = session
-        .run_shell(
-            format!("probe-{name}"),
-            &format!("let _ = ${name}"),
-            5,
-            &emit,
-        )
-        .content;
+    let (content, _) = session.ral(&format!("let _ = ${name}"), 5, &emit);
     if content.lines().any(|line| line == "EXIT: 0") {
         return true;
     }

@@ -1302,18 +1302,12 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         for label in bare_grant_tags() {
-            assert!(
-                result.content.contains(label),
-                "must name `{label}`, got: {}",
-                result.content
-            );
+            assert!(result.contains(label), "must name `{label}`, got: {result}");
         }
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1329,18 +1323,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result
-                .content
-                .contains("inherit is how you decline to narrow"),
-            "the refusal must point at `inherit, got: {}",
-            result.content
+            result.contains("inherit is how you decline to narrow"),
+            "the refusal must point at `inherit, got: {result}"
         );
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1355,16 +1344,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("capability record"),
-            "the refusal must name the record `restrict carries, got: {}",
-            result.content
+            result.contains("capability record"),
+            "the refusal must name the record `restrict carries, got: {result}"
         );
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1380,19 +1366,16 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        for (call, grant) in [("call-1", "`inherit"), ("call-2", "`restrict [net: false]")] {
-            let result = session.run_shell(
-                call.to_string(),
-                &format!(
+        for grant in ["`inherit", "`restrict [net: false]"] {
+            let (result, _) = session.ral(&format!(
                     r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, search: true, provider: `guess, model: `inherit]"
                 ),
                 5,
                 &emit,
             );
             assert!(
-                result.content.contains("`provider`") && !result.content.contains("`grant`"),
-                "{grant} must pass the grant door and be refused at `provider`, got: {}",
-                result.content
+                result.contains("`provider`") && !result.contains("`grant`"),
+                "{grant} must pass the grant door and be refused at `provider`, got: {result}"
             );
             assert!(
                 crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1406,18 +1389,12 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
-        assert!(
-            result.content.contains("amnemon"),
-            "got: {}",
-            result.content
-        );
-        assert!(result.content.contains("mnemon"), "got: {}", result.content);
+        assert!(result.contains("amnemon"), "got: {result}");
+        assert!(result.contains("mnemon"), "got: {result}");
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
             "an unknown type tag must never register a child"
@@ -1431,18 +1408,12 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `guess, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `guess, model: `inherit]",
             5,
             &emit,
         );
         for arm in ["inherit", "named"] {
-            assert!(
-                result.content.contains(arm),
-                "must name `{arm}, got: {}",
-                result.content
-            );
+            assert!(result.contains(arm), "must name `{arm}, got: {result}");
         }
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1456,16 +1427,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `named '']",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `named '']",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("non-empty"),
-            "the refusal must say the name may not be empty, got: {}",
-            result.content
+            result.contains("non-empty"),
+            "the refusal must say the name may not be empty, got: {result}"
         );
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1478,13 +1446,11 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
+        let (result, _) = session.ral(r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
             5,
             &emit,
         );
-        assert!(result.content.contains("name"), "got: {}", result.content);
+        assert!(result.contains("name"), "got: {result}");
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
             "an invalid name must never register a child"
@@ -1498,13 +1464,9 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell("call-1".to_string(), "exarch-agents `stop 'x'", 5, &emit);
+        let (result, _) = session.ral("exarch-agents `stop 'x'", 5, &emit);
         for tag in ["list", "start", "message", "cancel"] {
-            assert!(
-                result.content.contains(tag),
-                "must name `{tag}, got: {}",
-                result.content
-            );
+            assert!(result.contains(tag), "must name `{tag}, got: {result}");
         }
     }
 
@@ -1515,16 +1477,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("field named 'grant'"),
-            "the diagnostic must name the missing field, got: {}",
-            result.content
+            result.contains("field named 'grant'"),
+            "the diagnostic must name the missing field, got: {result}"
         );
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1540,16 +1499,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, search: true, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, search: true, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("no field named 'grnat'"),
-            "the diagnostic must name the offending field, got: {}",
-            result.content
+            result.contains("no field named 'grnat'"),
+            "the diagnostic must name the offending field, got: {result}"
         );
         assert!(
             crate::fleet::roster::summary(&session.agent).live == 0,
@@ -1557,7 +1513,7 @@ mod tests {
         );
     }
 
-    /// Drives `run_shell` rather than `Avatar::deliberate`'s provider loop:
+    /// Drives `Avatar::ral` rather than `Avatar::deliberate`'s provider loop:
     /// the spawn seeds the child's handle from the parent's *own*
     /// `Arc<Provider>`, so one script consumed by both a driven parent
     /// exchange and its child races over which gets which stage.
@@ -1577,16 +1533,13 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'say hi'#, name: 'helper', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("live: 1"),
-            "the summary answered afterwards must count the child, got: {}",
-            result.content
+            result.contains("live: 1"),
+            "the summary answered afterwards must count the child, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1611,22 +1564,15 @@ mod tests {
             }
         }
 
-        let read = session.run_shell(
-            "call-2".to_string(),
-            r"exarch-agents `read 'helper'",
-            5,
-            &emit,
-        );
+        let (read, _) = session.ral(r"exarch-agents `read 'helper'", 5, &emit);
         assert!(
-            read.content.contains("say hi"),
-            "exarch-agents `read` must answer the child's deposited reply, got: {}",
-            read.content
+            read.contains("say hi"),
+            "exarch-agents `read` must answer the child's deposited reply, got: {read}"
         );
-        let roster = session.run_shell("call-3".to_string(), r"exarch-agents `list", 5, &emit);
+        let (roster, _) = session.ral(r"exarch-agents `list", 5, &emit);
         assert!(
-            roster.content.contains("replied"),
-            "the replied child must stay on the roster as `replied, got: {}",
-            roster.content
+            roster.contains("replied"),
+            "the replied child must stay on the roster as `replied, got: {roster}"
         );
     }
 
@@ -1636,7 +1582,7 @@ mod tests {
     ///
     /// Pinned with a bare agent rather than a real spawned child: a scripted
     /// child runs to completion and settles on the same synchronous thread
-    /// that starts it, so a second `run_shell` racing a real
+    /// that starts it, so a second `Avatar::ral` racing a real
     /// `` `start ``/`` `cancel `` pair would be racing CPU-bound work with no
     /// reliable window in between.
     #[test]
@@ -1649,22 +1595,15 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "exarch-agents `cancel 'doomed'",
-            5,
-            &emit,
+        let (result, _) = session.ral("exarch-agents `cancel 'doomed'", 5, &emit);
+        assert!(
+            result.contains("EXIT: 0"),
+            "a valid exarch-agents `cancel call must succeed, got: {result}"
         );
         assert!(
-            result.content.contains("EXIT: 0"),
-            "a valid exarch-agents `cancel call must succeed, got: {}",
-            result.content
-        );
-        assert!(
-            result.content.contains("live: 1"),
+            result.contains("live: 1"),
             "a cancel is a request, not a transaction — the target is still \
-             counted by the summary answered afterwards, got: {}",
-            result.content
+             counted by the summary answered afterwards, got: {result}"
         );
     }
 
@@ -1681,16 +1620,14 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("five fields"),
-            "must carry the parser's own message, got: {}",
-            result.content
+            result.contains("five fields"),
+            "must carry the parser's own message, got: {result}"
         );
         assert!(
             session.agent.schedules.list().is_empty(),
@@ -1703,16 +1640,14 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("duration"),
-            "must carry the parser's own message, got: {}",
-            result.content
+            result.contains("duration"),
+            "must carry the parser's own message, got: {result}"
         );
         assert!(
             session.agent.schedules.list().is_empty(),
@@ -1725,14 +1660,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
-        assert!(result.content.contains("cron"), "got: {}", result.content);
-        assert!(result.content.contains("after"), "got: {}", result.content);
+        assert!(result.contains("cron"), "got: {result}");
+        assert!(result.contains("after"), "got: {result}");
         assert!(
             session.agent.schedules.list().is_empty(),
             "an unrecognised trigger tag must never register a schedule"
@@ -1746,16 +1680,14 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("missing a field named 'prompt'"),
-            "the diagnostic must name the missing field, got: {}",
-            result.content
+            result.contains("missing a field named 'prompt'"),
+            "the diagnostic must name the missing field, got: {result}"
         );
         assert!(
             session.agent.schedules.list().is_empty(),
@@ -1770,16 +1702,13 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
+        let (result, _) = session.ral("exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("no field named 'extra'"),
-            "the diagnostic must name the surplus field, got: {}",
-            result.content
+            result.contains("no field named 'extra'"),
+            "the diagnostic must name the surplus field, got: {result}"
         );
         assert!(
             session.agent.schedules.list().is_empty(),
@@ -1803,16 +1732,14 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("nightly"),
-            "the table answered afterwards must carry the row just armed, got: {}",
-            result.content
+            result.contains("nightly"),
+            "the table answered afterwards must carry the row just armed, got: {result}"
         );
     }
 
@@ -1825,29 +1752,25 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("EXIT: 0"),
-            "a valid exarch-schedules `add call must succeed, got: {}",
-            result.content
+            result.contains("EXIT: 0"),
+            "a valid exarch-schedules `add call must succeed, got: {result}"
         );
         assert!(
-            result.content.contains("next-s"),
-            "the table answered afterwards must carry the new row, got: {}",
-            result.content
+            result.contains("next-s"),
+            "the table answered afterwards must carry the new row, got: {result}"
         );
         let live = session.agent.schedules.list();
         assert_eq!(live.len(), 1, "the schedule must be registered");
         assert_eq!(live[0].label, "nightly", "must take the given label");
         assert!(
-            result.content.contains("nightly"),
-            "the table must carry the given label, got: {}",
-            result.content
+            result.contains("nightly"),
+            "the table must carry the given label, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1883,16 +1806,14 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("EXIT: 0"),
-            "a valid exarch-schedules `add call must succeed, got: {}",
-            result.content
+            result.contains("EXIT: 0"),
+            "a valid exarch-schedules `add call must succeed, got: {result}"
         );
         assert_eq!(
             session.agent.schedules.list().len(),
@@ -1900,37 +1821,24 @@ mod tests {
             "the schedule must be registered"
         );
 
-        let result = session.run_shell(
-            "call-2".to_string(),
-            "exarch-schedules `remove 'nightly'",
-            5,
-            &emit,
+        let (result, _) = session.ral("exarch-schedules `remove 'nightly'", 5, &emit);
+        assert!(
+            result.contains("EXIT: 0"),
+            "a valid exarch-schedules `remove call must succeed, got: {result}"
         );
         assert!(
-            result.content.contains("EXIT: 0"),
-            "a valid exarch-schedules `remove call must succeed, got: {}",
-            result.content
-        );
-        assert!(
-            !result.content.contains("nightly"),
-            "the removed row must be gone from the table answered afterwards, got: {}",
-            result.content
+            !result.contains("nightly"),
+            "the removed row must be gone from the table answered afterwards, got: {result}"
         );
         assert!(
             session.agent.schedules.list().is_empty(),
             "exarch-schedules `remove by label must remove the schedule"
         );
 
-        let miss = session.run_shell(
-            "call-3".to_string(),
-            "exarch-schedules `remove 'nightly'",
-            5,
-            &emit,
-        );
+        let (miss, _) = session.ral("exarch-schedules `remove 'nightly'", 5, &emit);
         assert!(
-            miss.content.contains("EXIT: 0"),
-            "removing an already-absent label answers the same empty table, not an error, got: {}",
-            miss.content
+            miss.contains("EXIT: 0"),
+            "removing an already-absent label answers the same empty table, not an error, got: {miss}"
         );
     }
 
@@ -1943,34 +1851,25 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
+        session.ral(
             "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
-        session.run_shell(
-            "call-2".to_string(),
+        session.ral(
             "exarch-schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
             5,
             &emit,
         );
 
-        let result = session.run_shell(
-            "call-3".to_string(),
-            "exarch-schedules `remove 'nightly'",
-            5,
-            &emit,
+        let (result, _) = session.ral("exarch-schedules `remove 'nightly'", 5, &emit);
+        assert!(
+            !result.contains("nightly"),
+            "the removed row must be gone from the table answered afterwards, got: {result}"
         );
         assert!(
-            !result.content.contains("nightly"),
-            "the removed row must be gone from the table answered afterwards, got: {}",
-            result.content
-        );
-        assert!(
-            result.content.contains("daily"),
-            "the untouched row must still be in the table answered afterwards, got: {}",
-            result.content
+            result.contains("daily"),
+            "the untouched row must still be in the table answered afterwards, got: {result}"
         );
     }
 
@@ -1997,16 +1896,13 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'find files'#, name: 'finder', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("live: 1"),
-            "the summary must be the run's value and must count the child, got: {}",
-            result.content
+            result.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2024,18 +1920,10 @@ mod tests {
             }
         }
 
-        let read = session.run_shell(
-            "call-2".to_string(),
-            r"exarch-agents `read 'finder'",
-            5,
-            &emit,
-        );
+        let (read, _) = session.ral(r"exarch-agents `read 'finder'", 5, &emit);
         assert!(
-            read.content.contains("files:")
-                && read.content.contains("a.rs")
-                && read.content.contains("b.rs"),
-            "the structured record must reach the parent through `exarch-agents `read`, got: {}",
-            read.content
+            read.contains("files:") && read.contains("a.rs") && read.contains("b.rs"),
+            "the structured record must reach the parent through `exarch-agents `read`, got: {read}"
         );
     }
 
@@ -2047,23 +1935,16 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `reply { echo hi }",
-            5,
-            &emit,
-        );
+        let (result, _) = session.ral(r"exarch-agents `reply { echo hi }", 5, &emit);
         assert!(
-            result.content.contains("first-order"),
-            "must name the first-order rule, got: {}",
-            result.content
+            result.contains("first-order"),
+            "must name the first-order rule, got: {result}"
         );
 
-        let ok = session.run_shell("call-2".to_string(), r"exarch-agents `reply 42", 5, &emit);
+        let (ok, _) = session.ral(r"exarch-agents `reply 42", 5, &emit);
         assert!(
-            ok.content.contains("EXIT: 0"),
-            "the session must still be usable after a refused reply, got: {}",
-            ok.content
+            ok.contains("EXIT: 0"),
+            "the session must still be usable after a refused reply, got: {ok}"
         );
     }
 
@@ -2127,16 +2008,13 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("live: 1"),
-            "the summary must be the run's value and must count the child, got: {}",
-            result.content
+            result.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2165,16 +2043,10 @@ mod tests {
         // itself does not survive to this rendering; what proves the round
         // trip *canonical* — a lifted `` `text `` mark, not the bare-string
         // sugar it was authored with — does.
-        let read = session.run_shell(
-            "call-2".to_string(),
-            r"exarch-agents `read 'pinner'",
-            5,
-            &emit,
-        );
+        let (read, _) = session.ral(r"exarch-agents `read 'pinner'", 5, &emit);
         assert!(
-            read.content.contains("`card") && read.content.contains("`text [spans:"),
-            "the canonical card must reach the parent, got: {}",
-            read.content
+            read.contains("`card") && read.contains("`text [spans:"),
+            "the canonical card must reach the parent, got: {read}"
         );
     }
 
@@ -2196,16 +2068,13 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("live: 1"),
-            "the summary must be the run's value and must count the child, got: {}",
-            result.content
+            result.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2230,16 +2099,10 @@ mod tests {
             }
         }
 
-        let read = session.run_shell(
-            "call-2".to_string(),
-            r"exarch-agents `read 'reader'",
-            5,
-            &emit,
-        );
+        let (read, _) = session.ral(r"exarch-agents `read 'reader'", 5, &emit);
         assert!(
-            read.content.contains("reply: ()"),
-            "an absent key must reply unit, got: {}",
-            read.content
+            read.contains("reply: ()"),
+            "an absent key must reply unit, got: {read}"
         );
     }
 
@@ -2261,53 +2124,33 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-tasks `add "fix the parser""#,
-            BUDGET,
-            &emit,
-        );
-        session.run_shell(
-            "call-2".to_string(),
-            r#"exarch-tasks `add "write docs""#,
-            BUDGET,
-            &emit,
-        );
-        session.run_shell(
-            "call-3".to_string(),
+        session.ral(r#"exarch-tasks `add "fix the parser""#, BUDGET, &emit);
+        session.ral(r#"exarch-tasks `add "write docs""#, BUDGET, &emit);
+        session.ral(
             "exarch-tasks `status [id: 1, status: `doing]",
             BUDGET,
             &emit,
         );
-        session.run_shell(
-            "call-4".to_string(),
-            r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#,
-            BUDGET,
-            &emit,
-        );
-        session.run_shell(
-            "call-5".to_string(),
+        session.ral(r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#, BUDGET, &emit);
+        session.ral(
             r#"exarch-tasks `note [id: 1, note: "blocked on review"]"#,
             BUDGET,
             &emit,
         );
 
-        let listed = session.run_shell("call-6".to_string(), "exarch-tasks `list", BUDGET, &emit);
+        let (listed, _) = session.ral("exarch-tasks `list", BUDGET, &emit);
         for field in ["fix the parser", "`doing", "urgent", "blocked on review"] {
             assert!(
-                listed.content.contains(field),
-                "exarch-tasks `list must show the tagged, noted task's {field}, got: {}",
-                listed.content
+                listed.contains(field),
+                "exarch-tasks `list must show the tagged, noted task's {field}, got: {listed}"
             );
         }
         assert!(
-            listed.content.contains("write docs"),
-            "exarch-tasks `list must show the untouched second task, got: {}",
-            listed.content
+            listed.contains("write docs"),
+            "exarch-tasks `list must show the untouched second task, got: {listed}"
         );
 
-        let read = session.run_shell(
-            "call-7".to_string(),
+        let (read, _) = session.ral(
             r#"let [decoded-task, _] = !{tasks-decode !{exarch-pins `read "tasks"}}
                echo $decoded-task[desc]
                echo $decoded-task[status]
@@ -2317,24 +2160,20 @@ mod tests {
             &emit,
         );
         assert!(
-            read.content.contains("fix the parser"),
-            "the decoded desc must survive, got: {}",
-            read.content
+            read.contains("fix the parser"),
+            "the decoded desc must survive, got: {read}"
         );
         assert!(
-            read.content.contains("doing"),
-            "the decoded status must survive, got: {}",
-            read.content
+            read.contains("doing"),
+            "the decoded status must survive, got: {read}"
         );
         assert!(
-            read.content.contains("urgent"),
-            "the decoded tags must survive, got: {}",
-            read.content
+            read.contains("urgent"),
+            "the decoded tags must survive, got: {read}"
         );
         assert!(
-            read.content.contains("blocked on review"),
-            "the decoded notes must survive, got: {}",
-            read.content
+            read.contains("blocked on review"),
+            "the decoded notes must survive, got: {read}"
         );
     }
 
@@ -2347,18 +2186,16 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
+        session.ral(
             r#"let f = { exarch-tasks `add "inside a block" }; !{f}"#,
             5,
             &emit,
         );
 
-        let listed = session.run_shell("call-2".to_string(), "exarch-tasks `list", 5, &emit);
+        let (listed, _) = session.ral("exarch-tasks `list", 5, &emit);
         assert!(
-            listed.content.contains("inside a block"),
-            "a task added inside a function body must survive to the next top-level run, got: {}",
-            listed.content
+            listed.contains("inside a block"),
+            "a task added inside a function body must survive to the next top-level run, got: {listed}"
         );
     }
 
@@ -2370,12 +2207,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-tasks `add "parent task""#,
-            5,
-            &emit,
-        );
+        session.ral(r#"exarch-tasks `add "parent task""#, 5, &emit);
 
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
@@ -2388,16 +2220,13 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
 
-        let result = session.run_shell(
-            "call-2".to_string(),
-            r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+        let (result, _) = session.ral(r"exarch-agents `start [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("live: 1"),
-            "the summary must be the run's value and must count the child, got: {}",
-            result.content
+            result.contains("live: 1"),
+            "the summary must be the run's value and must count the child, got: {result}"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2415,16 +2244,14 @@ mod tests {
             }
         }
 
-        let listed = session.run_shell("call-3".to_string(), "exarch-tasks `list", 5, &emit);
+        let (listed, _) = session.ral("exarch-tasks `list", 5, &emit);
         assert!(
-            listed.content.contains("parent task"),
-            "the parent's own task must survive, got: {}",
-            listed.content
+            listed.contains("parent task"),
+            "the parent's own task must survive, got: {listed}"
         );
         assert!(
-            !listed.content.contains("child task"),
-            "the child's pin must never reach the parent's register, got: {}",
-            listed.content
+            !listed.contains("child task"),
+            "the child's pin must never reach the parent's register, got: {listed}"
         );
     }
 
@@ -2437,43 +2264,21 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-tasks `add "only task""#,
-            5,
-            &emit,
-        );
-        session.run_shell(
-            "call-2".to_string(),
-            "exarch-tasks `status [id: 1, status: `done]",
-            5,
-            &emit,
-        );
+        session.ral(r#"exarch-tasks `add "only task""#, 5, &emit);
+        session.ral("exarch-tasks `status [id: 1, status: `done]", 5, &emit);
 
-        let read = session.run_shell(
-            "call-3".to_string(),
-            r#"exarch-pins `read "tasks""#,
-            5,
-            &emit,
-        );
+        let (read, _) = session.ral(r#"exarch-pins `read "tasks""#, 5, &emit);
         assert!(
-            !read.content.contains("VALUE:"),
-            "an all-done list must clear the pin to unit, got: {}",
-            read.content
+            !read.contains("VALUE:"),
+            "an all-done list must clear the pin to unit, got: {read}"
         );
 
-        session.run_shell(
-            "call-4".to_string(),
-            r#"exarch-tasks `add "fresh""#,
-            5,
-            &emit,
-        );
-        let listed = session.run_shell("call-5".to_string(), "exarch-tasks `list", 5, &emit);
+        session.ral(r#"exarch-tasks `add "fresh""#, 5, &emit);
+        let (listed, _) = session.ral("exarch-tasks `list", 5, &emit);
         for field in ["id: 1", "fresh", "`open"] {
             assert!(
-                listed.content.contains(field),
-                "id allocation must restart at 1 once the register is empty, missing {field} in: {}",
-                listed.content
+                listed.contains(field),
+                "id allocation must restart at 1 once the register is empty, missing {field} in: {listed}"
             );
         }
     }
@@ -2488,20 +2293,15 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
+        session.ral(r#"exarch-pins `set [key: "tasks", body: `card [`text [spans: [[text: "not task shaped"]]]]]"#,
             5,
             &emit,
         );
 
-        let result = session.run_shell("call-2".to_string(), r#"exarch-tasks `add "x""#, 5, &emit);
+        let (result, _) = session.ral(r#"exarch-tasks `add "x""#, 5, &emit);
         assert!(
-            result
-                .content
-                .contains("tasks: the card under the 'tasks' pin is not task-shaped"),
-            "the didactic fail must name the expected shape, got: {}",
-            result.content
+            result.contains("tasks: the card under the 'tasks' pin is not task-shaped"),
+            "the didactic fail must name the expected shape, got: {result}"
         );
     }
 
@@ -2523,14 +2323,9 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result =
-            session.run_shell("call-1".to_string(), "exarch-context `rewind [3]", 5, &emit);
+        let (result, _) = session.ral("exarch-context `rewind [3]", 5, &emit);
         for tag in ["survey", "evict"] {
-            assert!(
-                result.content.contains(tag),
-                "must name `{tag}, got: {}",
-                result.content
-            );
+            assert!(result.contains(tag), "must name `{tag}, got: {result}");
         }
     }
 
@@ -2541,16 +2336,10 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "exarch-context `evict [turn: [1]]",
-            5,
-            &emit,
-        );
+        let (result, _) = session.ral("exarch-context `evict [turn: [1]]", 5, &emit);
         assert!(
-            !result.content.contains("EXIT: 0") && result.content.contains("turns"),
-            "the diagnostic must name the field the row demands, got: {}",
-            result.content
+            !result.contains("EXIT: 0") && result.contains("turns"),
+            "the diagnostic must name the field the row demands, got: {result}"
         );
     }
 
@@ -2587,26 +2376,22 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             "exarch-context `evict [turns: [1, 2], note: 'the old work is done']",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("EXIT: 0"),
-            "a valid eviction must succeed, got: {}",
-            result.content
+            result.contains("EXIT: 0"),
+            "a valid eviction must succeed, got: {result}"
         );
         assert!(
-            result.content.contains("total-bytes"),
-            "the answer must be the survey afterwards, got: {}",
-            result.content
+            result.contains("total-bytes"),
+            "the answer must be the survey afterwards, got: {result}"
         );
         assert!(
-            !result.content.contains("bytes-delta"),
-            "the edit answers the state, never a receipt for the transition, got: {}",
-            result.content
+            !result.contains("bytes-delta"),
+            "the edit answers the state, never a receipt for the transition, got: {result}"
         );
     }
 
@@ -2619,16 +2404,10 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "exarch-context `evict [turns: !{range 1 3}]",
-            5,
-            &emit,
-        );
+        let (result, _) = session.ral("exarch-context `evict [turns: !{range 1 3}]", 5, &emit);
         assert!(
-            result.content.contains("EXIT: 0"),
-            "an eviction with no note must succeed, got: {}",
-            result.content
+            result.contains("EXIT: 0"),
+            "an eviction with no note must succeed, got: {result}"
         );
     }
 
@@ -2641,8 +2420,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             r#"let material = exarch-transcript `read [turns: [1, 2]]
                echo !{length $material}
                echo $material[0][turn] $material[0][role]
@@ -2670,25 +2448,20 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("\n2\n"),
-            "two named turns, one record each, got: {}",
-            result.content
+            result.contains("\n2\n"),
+            "two named turns, one record each, got: {result}"
         );
         assert!(
-            result.content.contains("1 user"),
-            "the first record names its own turn and its role, got: {}",
-            result.content
+            result.contains("1 user"),
+            "the first record names its own turn and its role, got: {result}"
         );
         assert!(
-            result.content.contains("role=user") && result.content.contains("text=first prompt"),
-            "the user turn must be a `text part of a `user message, got: {}",
-            result.content
+            result.contains("role=user") && result.contains("text=first prompt"),
+            "the user turn must be a `text part of a `user message, got: {result}"
         );
         assert!(
-            result.content.contains("role=assistant")
-                && result.content.contains("text=first answer"),
-            "the assistant turn must be a `text part of an `assistant message, got: {}",
-            result.content
+            result.contains("role=assistant") && result.contains("text=first answer"),
+            "the assistant turn must be a `text part of an `assistant message, got: {result}"
         );
     }
 
@@ -2702,8 +2475,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             r"let spanning = exarch-transcript `read [turns: [2, 3]]
                echo !{length $spanning}
                echo $spanning[0][turn] $spanning[0][role] !{length $spanning[0][messages]}
@@ -2714,24 +2486,20 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("\n2\n"),
-            "two named turns answer one record each, got: {}",
-            result.content
+            result.contains("\n2\n"),
+            "two named turns answer one record each, got: {result}"
         );
         assert!(
-            result.content.contains("2 assistant 1"),
-            "turn 2 is an assistant turn holding one message, got: {}",
-            result.content
+            result.contains("2 assistant 1"),
+            "turn 2 is an assistant turn holding one message, got: {result}"
         );
         assert!(
-            result.content.contains("3 user"),
-            "turn 3 is the prompt after it, got: {}",
-            result.content
+            result.contains("3 user"),
+            "turn 3 is the prompt after it, got: {result}"
         );
         assert!(
-            result.content.contains("2 4"),
-            "`range 3 5` is turns 3 and 4, the second of them turn 4, got: {}",
-            result.content
+            result.contains("2 4"),
+            "`range 3 5` is turns 3 and 4, the second of them turn 4, got: {result}"
         );
     }
 
@@ -2743,18 +2511,9 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "exarch-transcript `search 'x'",
-            5,
-            &emit,
-        );
+        let (result, _) = session.ral("exarch-transcript `search 'x'", 5, &emit);
         for tag in ["index", "read", "grep"] {
-            assert!(
-                result.content.contains(tag),
-                "must name `{tag}, got: {}",
-                result.content
-            );
+            assert!(result.contains(tag), "must name `{tag}, got: {result}");
         }
     }
 
@@ -2769,8 +2528,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "call-1".to_string(),
+        let (result, _) = session.ral(
             // Bindings are named, not lettered: ral keeps value and command
             // names disjoint, so a one-letter binding fails on any host with
             // that letter on PATH (plan9port ships a `g`).
@@ -2787,29 +2545,24 @@ mod tests {
             &emit,
         );
         assert!(
-            result.content.contains("1 user resident"),
-            "the first turn is listed and still in the context, got: {}",
-            result.content
+            result.contains("1 user resident"),
+            "the first turn is listed and still in the context, got: {result}"
         );
         assert!(
-            result.content.contains("2 2"),
-            "both of its turns match, and `total` counts them all, got: {}",
-            result.content
+            result.contains("2 2"),
+            "both of its turns match, and `total` counts them all, got: {result}"
         );
         assert!(
-            result.content.contains("1 2"),
-            "the hits name the turns they lie in, got: {}",
-            result.content
+            result.contains("1 2"),
+            "the hits name the turns they lie in, got: {result}"
         );
         assert!(
-            result.content.contains("\n1\n"),
-            "an address narrows the search to the assistant turn alone, got: {}",
-            result.content
+            result.contains("\n1\n"),
+            "an address narrows the search to the assistant turn alone, got: {result}"
         );
         assert!(
-            result.content.contains("\n0\n"),
-            "a pattern that matches nothing answers no hits, got: {}",
-            result.content
+            result.contains("\n0\n"),
+            "a pattern that matches nothing answers no hits, got: {result}"
         );
     }
 }

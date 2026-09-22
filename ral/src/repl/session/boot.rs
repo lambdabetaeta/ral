@@ -493,9 +493,9 @@ fn evaluate_startup_file(
         path,
         contract,
     ) {
-        ral_core::CompileOutcome::Compiled(annotated) => annotated,
-        ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
-        ral_core::CompileOutcome::Types(errs) => {
+        Ok(annotated) => annotated,
+        Err(ral_core::CompileError::Parse(e)) => return Err(format!("{path}: {e}")),
+        Err(ral_core::CompileError::Types(errs)) => {
             eprint!(
                 "{}",
                 diagnostic::format_type_errors_ariadne(path, &src, &errs)

@@ -202,7 +202,7 @@ impl ActFragment {
 }
 
 /// Everything a desk handler may read off `&Avatar`, snapshotted fresh at every
-/// [`crate::agent::Avatar::run_shell`] install so no capture goes stale mid-call.
+/// [`crate::agent::Avatar::ral`] install so no capture goes stale mid-call.
 pub(crate) struct HostServices {
     /// This run's own agent: parent of what it spawns, root of the descendant
     /// check `` `message ``/`` `cancel `` enforce, and the source every
@@ -1628,8 +1628,7 @@ impl ExarchDesk {
             ));
         }
         let [value] = payload_list(payload, "exarch-agents `reply", "[value]")?;
-        let display =
-            shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
+        let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();
         let payload = if display.is_empty() {
             "(empty reply)".into()
         } else {
@@ -4296,9 +4295,7 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let _ = session.run_shell(
-            "call-1".to_string(),
-            r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
+        let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
             5,
             &emit,
         );

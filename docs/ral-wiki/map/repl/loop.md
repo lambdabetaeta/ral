@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b1a0f280
-generated_at_date: 2026-09-21
+generated_at_commit: 2339a364
+generated_at_date: 2026-09-22
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -79,7 +79,7 @@ the inferred row and not the syntax that produced it, so a key misspelled
 inside a spread is caught with one written out; a return carrying no row (a
 `Map`) meets the same keyset at `apply_rc_key` instead. The contract is part of
 the one inference, not a pass after it. Both failing
-`CompileOutcome` arms — `Parse` and `Types`, a broken contract among the
+`CompileError` arms — `Parse` and `Types`, a broken contract among the
 latter — are *reported and skipped*: the file has no runnable annotation,
 while the boot always survives
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), the

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: 2339a364
+generated_at_date: 2026-09-22
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -14,7 +14,8 @@ binaries, `ral` and [[map/exarch|exarch]], embed it.
 
 `core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
 flat AST → CBPV IR → typed IR*, bundled as `compile_and_typecheck` (parse →
-elaborate → typecheck → `CompileOutcome`) and, crate-privately, `compile`
+elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`)
+and, crate-privately, `compile`
 (the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
 (`Define`/`Run`) run by `evaluator::run_phrases`, which replaced the
 flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,

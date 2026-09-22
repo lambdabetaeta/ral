@@ -437,7 +437,7 @@ pub(super) fn call_plugin_hook(
                     // A host error (hook not found, non-ground arg).
                     let msg = match diagnostics {
                         StaticDiagnostics::Host(e) => e.message,
-                        _ => "unknown static diagnostic".into(),
+                        StaticDiagnostics::Compile { error, .. } => error.to_string(),
                     };
                     (
                         Err(Break::Error(ral_core::types::Error::new(msg, 1))),

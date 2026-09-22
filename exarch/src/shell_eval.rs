@@ -45,7 +45,7 @@ pub(crate) const LIVE_WORKER_CAP: usize = 64;
 pub const DETACH_BIRTH_BUDGET: u64 = 16;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
-/// counted from the per-call epoch sweep in `Avatar::run_shell` that first
+/// counted from the per-call epoch sweep in `Avatar::ral` that first
 /// observes it settled.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
@@ -71,27 +71,6 @@ pub struct ToolResult {
     pub stderr: Vec<u8>,
     pub value: Option<String>,
     pub exit: i32,
-}
-
-/// What `run_shell` produces.  `Static` is a parse or type failure: ariadne
-/// text the protocol already formatted, with no sections, so it is clipped whole.
-///
-/// `Ran` is deliberately not yet a finished [`ToolResult`]: `ending` and
-/// `trail` are the raw materials `report::render` composes into the model's
-/// stderr and exit code, at the one call site that also holds this call's
-/// [`crate::fleet::desk::ActFragment`] and the boundary's own `` `workers ``
-/// probe read.
-pub(crate) enum Outcome {
-    Ran {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        value: Option<String>,
-        ending: ral_core::protocol::Ending,
-        trail: Vec<FOValue>,
-    },
-    Static(String),
-    /// The engine is gone: no `Report` will ever arrive for this dispatch.
-    Severed(ral_core::protocol::Severed),
 }
 
 /// One mirrored pin.  The bus and scrollback carry `Forensic::Pin` and
@@ -250,12 +229,12 @@ pub(crate) fn run_shell(
     cmd: &str,
     timeout_secs: u64,
     host: Arc<dyn ral_core::protocol::Host>,
-) -> Outcome {
+) -> Result<ral_core::protocol::Report, ral_core::protocol::Severed> {
     // Trace-only timing.
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::protocol::{Ending, Program, Report, Run};
+    use ral_core::protocol::{Program, Run};
     use ral_core::types::CapturePolicy;
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
@@ -275,38 +254,9 @@ pub(crate) fn run_shell(
         trail: Some(CapturePolicy::Off),
     };
 
-    let report = match ral_core::protocol::dispatch_to_report(transport, run, host) {
-        Ok(report) => report,
-        Err(severed) => return Outcome::Severed(severed),
-    };
-
+    let report = ral_core::protocol::dispatch_to_report(transport, run, host);
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
-
-    match report {
-        Report::Static { rendered, .. } => Outcome::Static(rendered),
-        Report::Ran {
-            ending,
-            captured,
-            trail,
-        } => {
-            let captured = captured.unwrap_or(ral_core::Captured {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            });
-            let value = match &ending {
-                Ending::Settled { value, .. } => Some(RalValue::from(value.clone())),
-                _ => None,
-            };
-
-            Outcome::Ran {
-                stdout: captured.stdout,
-                stderr: captured.stderr,
-                value: value.as_ref().and_then(ral_value_to_text),
-                ending,
-                trail,
-            }
-        }
-    }
+    report
 }
 
 /// Print settings for the `VALUE` section: structured values print in ral
@@ -331,16 +281,16 @@ const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::
     max_bytes: 16 * 1024,
 };
 
-/// Render a ral value as the text the `VALUE` section carries.  A top-level
+/// Render a first-order value as the text the `VALUE` section carries.  A top-level
 /// string or byte string is a payload and passes through raw, so file windows,
 /// markdown reports, and captured byte text keep their exact lines.
-pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
+pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
     match value {
-        RalValue::Unit => None,
-        RalValue::String(s) => Some(s.clone()),
-        RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        FOValue::Unit => None,
+        FOValue::String { value } => Some(value.clone()),
+        FOValue::Bytes { value } => Some(String::from_utf8_lossy(value).into_owned()),
         other => Some(ral_core::builtins::pretty_print(
-            other,
+            &RalValue::from(other.clone()),
             0,
             &VALUE_PRINT_PARAMS,
         )),
@@ -450,7 +400,7 @@ mod tests {
     }
 
     /// One tool run through the **real** production `run_shell`, composed via
-    /// `report::render` exactly as the boundary does — with no fragment or
+    /// `report::tool_result` exactly as the boundary does — with no fragment or
     /// worker rows to join, since this bare harness installs no desk and
     /// probes no registry.  Panics on a static failure: every call site below
     /// expects a completed run.
@@ -484,30 +434,22 @@ mod tests {
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
         match outcome {
-            Outcome::Ran {
-                stdout,
-                mut stderr,
-                value,
+            Ok(ral_core::protocol::Report::Ran {
                 ending,
+                captured,
                 trail,
-            } => {
-                let (suffix, exit) = report::render(
-                    &ending,
-                    &trail,
-                    &crate::fleet::desk::ActFragment::default(),
-                    &[],
-                    timeout_secs,
-                );
-                stderr.extend_from_slice(suffix.as_bytes());
-                ToolResult {
-                    stdout,
-                    stderr,
-                    value,
-                    exit,
-                }
+            }) => report::tool_result(
+                &ending,
+                captured,
+                &trail,
+                &crate::fleet::desk::ActFragment::default(),
+                &[],
+                timeout_secs,
+            ),
+            Ok(ral_core::protocol::Report::Static { rendered, .. }) => {
+                panic!("static failure: {rendered}")
             }
-            Outcome::Static(s) => panic!("static failure: {s}"),
-            Outcome::Severed(s) => panic!("an identity seat never severs: {s}"),
+            Err(s) => panic!("an identity seat never severs: {s}"),
         }
     }
 

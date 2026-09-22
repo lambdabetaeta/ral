@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7e38e2e9
+generated_at_commit: 2339a364
 generated_at_date: 2026-09-22
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
@@ -63,8 +63,8 @@ Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is
 surfaced by the loader as a plain message, never reaching the runtime renderer.
 A run that never reached evaluation carries its `StaticDiagnostics` (`run.rs`)
-instead of registering into the session's `SourceDb`: the spanned arms
-(`Parse`/`Types`) hold their own `Source`, since a failed compile leaves no
+instead of registering into the session's `SourceDb`: the spanned arm
+(`Compile`, wrapping a `CompileError` of `Parse` or `Types`) holds its own `Source`, since a failed compile leaves no
 live span to justify a permanent, unreclaimable registry slot; `Host` is a
 spanless pre-run failure (an unknown hook, a non-ground argument). This is what
 every host on the wire renders through `Report::Static`

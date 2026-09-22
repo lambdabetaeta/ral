@@ -1,15 +1,15 @@
 ---
 verified_at_commit: b1a0f280
 verified_at_date: 2026-09-21
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
 
 Source text descends a fixed ladder, and each rung hands the next a different
 artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile`
-(parse → elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck →
-`CompileOutcome`).
+(parse → elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck,
+a `Result` whose `CompileError` is `Parse` or `Types`).
 
 - **Text → tokens.** The lexer reads characters into tokens with no
   context-dependent rules — there is one lexer, not the several a POSIX shell
@@ -90,7 +90,7 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   every route here and leaves its verdict as syntax, never re-derived at
   runtime. A node inference never visited keeps the elaborator's placeholder —
   `Unit` for a stage type. The verdict rides inside the comp;
-  `CompileOutcome` is unchanged in shape. ([[map/core/typecheck|typecheck]])
+  `CompileError` is unchanged in shape. ([[map/core/typecheck|typecheck]])
 
 A loading form may also hand this rung a `ReturnContract` — one of the
 declared `typecheck::contract::Table`s — and the checker holds the toplevel's

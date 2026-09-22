@@ -16,13 +16,11 @@ use crate::io::{Io, Sink, Source};
 use crate::process::{CancelCause, ForegroundScope};
 use crate::protocol::{Program, Run};
 use crate::source::{FileId, Span};
-use crate::syntax::parser::ParseError;
-use crate::typecheck::TypeError;
 use crate::types::{
     Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard, Observation,
     Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
-use crate::{CompileOutcome, compile_and_typecheck};
+use crate::{CompileError, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -46,12 +44,8 @@ impl RunLifecycle for () {}
 /// no live span behind, so its text has no business in a registry that is
 /// append-only precisely because live spans index it.
 pub enum StaticDiagnostics {
-    Parse {
-        error: ParseError,
-        source: crate::source::Source,
-    },
-    Types {
-        errors: Vec<TypeError>,
+    Compile {
+        error: CompileError,
         source: crate::source::Source,
     },
     /// A host-level error that stopped the run before it started: hook not
@@ -626,23 +620,14 @@ pub(crate) fn compile_run(
         src.len(),
         t_tc.elapsed()
     );
-    let top = match outcome {
-        CompileOutcome::Compiled(t) => Arc::new(t),
-        // The text is copied only here, on the failure path, and dies with the
-        // report: `file` was peeked, never minted, so the registry is untouched.
-        CompileOutcome::Parse(error) => {
-            return Err(Box::new(StaticDiagnostics::Parse {
-                error,
-                source: crate::source::Source::from_text(name, src),
-            }));
-        }
-        CompileOutcome::Types(errors) => {
-            return Err(Box::new(StaticDiagnostics::Types {
-                errors,
-                source: crate::source::Source::from_text(name, src),
-            }));
-        }
-    };
+    // The text is copied only here, on the failure path, and dies with the
+    // report: `file` was peeked, never minted, so the registry is untouched.
+    let top = Arc::new(outcome.map_err(|error| {
+        Box::new(StaticDiagnostics::Compile {
+            error,
+            source: crate::source::Source::from_text(name, src),
+        })
+    })?);
 
     let single_command = crate::ir::is_single_command(&top);
     Ok((top, single_command, file))
@@ -754,7 +739,13 @@ pub(crate) mod tests {
         match shell.run(capture_req("let = ")) {
             RunReport::Static { diagnostics } => {
                 assert!(
-                    matches!(diagnostics, StaticDiagnostics::Parse { .. }),
+                    matches!(
+                        diagnostics,
+                        StaticDiagnostics::Compile {
+                            error: CompileError::Parse(_),
+                            ..
+                        }
+                    ),
                     "expected a parse diagnostic"
                 );
             }
@@ -816,7 +807,13 @@ pub(crate) mod tests {
         match shell.run(capture_req("$[1 + true]")) {
             RunReport::Static { diagnostics } => {
                 assert!(
-                    matches!(diagnostics, StaticDiagnostics::Types { .. }),
+                    matches!(
+                        diagnostics,
+                        StaticDiagnostics::Compile {
+                            error: CompileError::Types(_),
+                            ..
+                        }
+                    ),
                     "expected type diagnostics"
                 );
             }

@@ -13,7 +13,7 @@ use ral_core::protocol::{Program, Run};
 use ral_core::source::FileId;
 use ral_core::types::{GrantStack, Settled};
 use ral_core::{
-    CompileOutcome, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
+    CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     TypeError, Value, builtins, compile_and_typecheck, typecheck::fmt_scheme,
 };
 
@@ -65,9 +65,9 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
 /// errors a run would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
     match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, "", None) {
-        CompileOutcome::Compiled(_) => Vec::new(),
-        CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
-        CompileOutcome::Types(errs) => errs,
+        Ok(_) => Vec::new(),
+        Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
+        Err(CompileError::Types(errs)) => errs,
     }
 }
 

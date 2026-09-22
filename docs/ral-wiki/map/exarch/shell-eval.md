@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6049f131
+generated_at_commit: 2339a364
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
@@ -11,8 +11,8 @@ persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
 supplier*: it builds a transport-level `Source` `Run`, dispatches it through
 `ral_core::protocol::dispatch_to_report` against the agent's seat transport —
 the in-process `IdentityTransport`, or a wire engine's `WireTransport`
-([[map/exarch/agent|agent]]) — and renders the terminal `Report` that comes
-back, or `Outcome::Severed` when the engine is gone before one arrives** — the
+([[map/exarch/agent|agent]]) — and returns the terminal `Report` that comes
+back, or the `Severed` when the engine is gone before one arrives** — the
 transport is the canonical run vocabulary
 ([[map/core/engine-protocol|engine-protocol]];
 [[internals/a-turn-end-to-end|a run, end to end]];
@@ -20,7 +20,8 @@ transport is the canonical run vocabulary
 be entered *only* through a framed run door — the reduction primitive behind it
 is crate-private ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]) —
 so core owns all the run machinery (compile, frame install, capture, the wall),
-and `run_shell` owns only the run it builds and the outcome it formats:
+and `run_shell` owns only the run it builds. Formatting is `Avatar::ral`'s,
+through `report::tool_result`, which also reports whether the run failed:
 
 - **source + `script_name: "<tool>"`.** Core's `compile_run` runs
   `compile_and_typecheck` seeded from the live session (`shell.session_schemes()`,
@@ -31,8 +32,8 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   one inference pass every evaluated path shares
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   Parse/type errors come back as `Report::Static { rendered, status }`, already
-  the caret report the protocol drew, which `run_shell` passes through to
-  `Outcome::Static`; on success the *annotated* comp
+  the caret report the protocol drew, which the model reads clipped whole; on
+  success the *annotated* comp
   runs ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]);
 - **`caps`** — the agent's `GrantStack` (`Agent::caps`), pushed for the eval's dynamic extent.
   **This is the sandbox**: the boundary is the pushed [[design/grant|grant]]
@@ -96,7 +97,7 @@ residency threshold, not a lifetime one, so the install chokepoint checks it
 independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
-becomes `Outcome::Severed` instead, folded by every attend-loop caller into
+is folded by every attend-loop caller into
 `agent::seat::EngineLost` ([[map/exarch/agent|agent]]). A detached `spawn`ed
 worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
@@ -107,7 +108,7 @@ on loan from the shell, self-healing on a caught worker panic as well as on the
 normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
 the run's invariant half — surface, deferred sink, desk, nursery, cancel, the
 leases — threads as an immutable `&Mooring` the stack itself restores. Exarch
-needs no bracket of its own: its `RunHost` is a plain `Arc` `Avatar::run_shell`
+needs no bracket of its own: its `RunHost` is a plain `Arc` `Avatar::ral`
 builds and passes to the dispatch, never installed as shared state, so an
 unwind drops it with the rest of that call's stack. The
 dynamic-context half of the contract lives in [[map/exarch/agent|agent]].

@@ -1,4 +1,4 @@
-//! One `ral` call — [`Avatar::run_shell`] — and the two `Arc`-shared cells a
+//! One `ral` call — [`Avatar::ral`] — and the two `Arc`-shared cells a
 //! desk handler writes the agent through: a handler answers mid-dispatch, on
 //! the attend thread's own stack inside [`shell_eval::run_shell`], so it can
 //! never take `&mut Avatar` and reaches [`ReplyCell`] and [`LogCell`] through
@@ -8,12 +8,12 @@
 
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
-use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
+use crate::agent::event::AgentLog;
 use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
-use ral_core::protocol::Severed;
+use ral_core::protocol::{Report, Severed};
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
 use std::fmt::Write;
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and
 /// then abandoned cannot resurface in a later one.  The desk's `reply` handler
-/// is its only writer; [`Avatar::run_shell`] harvests it into [`Avatar::reply`].
+/// is its only writer; [`Avatar::ral`] harvests it into [`Avatar::reply`].
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
@@ -78,7 +78,7 @@ impl Avatar {
     /// Point this session's record seam at the bus `emit` rides, so every
     /// fact the log authors is published live as it lands on disk.  Called
     /// at each entry where a session meets a bus — `attend`, `deliberate`,
-    /// `run_shell`, `rewind` — because the seam outlives any one bus:
+    /// `Avatar::ral`, `rewind` — because the seam outlives any one bus:
     /// idempotent, and re-coupling over a dead per-exchange channel is how a
     /// headless session's next exchange comes back on air.
     pub(crate) fn couple(&self, emit: &Emitter) {
@@ -117,7 +117,7 @@ impl Avatar {
 
     /// Everything a desk handler may read off `&Avatar`, since the reentrancy
     /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.  Built
-    /// fresh at each [`Self::run_shell`] install, so no capture goes stale.
+    /// fresh at each [`Self::ral`] install, so no capture goes stale.
     ///
     /// # Errors
     /// The engine's severance, from the live `cwd` probe.
@@ -144,13 +144,9 @@ impl Avatar {
         })
     }
 
-    pub(crate) fn run_shell(
-        &mut self,
-        id: String,
-        cmd: &str,
-        timeout_secs: u64,
-        emit: &Emitter,
-    ) -> SessionToolResult {
+    /// Evaluate one `ral` call: the text the model reads, and whether the run
+    /// failed — rejected, raised, nonzero, or lost with its engine.
+    pub(crate) fn ral(&mut self, cmd: &str, timeout_secs: u64, emit: &Emitter) -> (String, bool) {
         self.couple(emit);
         // At entry, so a call that fails to evaluate still ages the clock.
         self.ral_epoch += 1;
@@ -165,10 +161,10 @@ impl Avatar {
         let services = match self.host_services(emit, nursery, reply_cell.clone()) {
             Ok(services) => services,
             Err(s) => {
-                return SessionToolResult {
-                    id,
-                    content: EngineLost::running(&s, self.agent.run_dir()).to_string(),
-                };
+                return (
+                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
+                    true,
+                );
             }
         };
         let host = Arc::new(desk::RunHost {
@@ -183,7 +179,7 @@ impl Avatar {
         self.seat.install_deferred(shell_eval::deferred_sink(emit));
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
-        let outcome = shell_eval::run_shell(
+        let report = shell_eval::run_shell(
             self.seat.transport(),
             &self.agent.caps,
             &source,
@@ -193,36 +189,33 @@ impl Avatar {
         );
         // Only now, with the dispatch returned: the worker probe below is
         // legal at a run boundary and nowhere else.
-        let mut content = match outcome {
-            shell_eval::Outcome::Ran {
-                stdout,
-                mut stderr,
-                value,
+        let (mut content, failed) = match report {
+            Ok(Report::Ran {
                 ending,
+                captured,
                 trail,
-            } => match self.probe_workers() {
+            }) => match self.probe_workers() {
                 Ok(workers) => {
-                    let (suffix, exit) = shell_eval::report::render(
+                    let result = shell_eval::report::tool_result(
                         &ending,
+                        captured,
                         &trail,
                         &host.desk.services.acts,
                         &workers,
                         timeout_secs,
                     );
-                    stderr.extend_from_slice(suffix.as_bytes());
-                    render(&shell_eval::ToolResult {
-                        stdout,
-                        stderr,
-                        value,
-                        exit,
-                    })
+                    (render(&result), result.exit != 0)
                 }
-                Err(s) => EngineLost::running(&s, self.agent.run_dir()).to_string(),
+                Err(s) => (
+                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
+                    true,
+                ),
             },
-            shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
-            shell_eval::Outcome::Severed(s) => {
-                EngineLost::running(&s, self.agent.run_dir()).to_string()
-            }
+            Ok(Report::Static { rendered, .. }) => (clip(&rendered, OPAQUE_CAP), true),
+            Err(s) => (
+                EngineLost::running(&s, self.agent.run_dir()).to_string(),
+                true,
+            ),
         };
         // `if let`, not an unconditional overwrite: last-wins is a property of
         // the batch, so a later call that stages nothing must leave an earlier
@@ -233,7 +226,7 @@ impl Avatar {
         if let Some(turn) = turn {
             let _ = write!(content, "\nTURN: {turn}");
         }
-        SessionToolResult { id, content }
+        (content, failed)
     }
 
     /// Every pinned slot's summary joined onto one line, for the periodic
@@ -257,7 +250,7 @@ impl Avatar {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    //! `run_shell`'s call-boundary bookkeeping — binding-lease pruning, the
+    //! `Avatar::ral`'s call-boundary bookkeeping — binding-lease pruning, the
     //! large-binding warning, worker retention, the audit and the surviving
     //! workers a raise owes the model — and the panic recovery those boundaries
     //! rest on.
@@ -313,22 +306,19 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
 
-        let result = session.run_shell(
-            "transcript-no-echo".into(),
+        let (result, _) = session.ral(
             "let ctx = exarch-transcript `read [turns: [1, 2]]",
             5,
             &emit,
         );
         assert!(
-            !result.content.contains("material that must stay bound")
-                && !result.content.contains("the answer stays in the binding"),
-            "a let-bound read must not echo its value: {}",
-            result.content
+            !result.contains("material that must stay bound")
+                && !result.contains("the answer stays in the binding"),
+            "a let-bound read must not echo its value: {result}"
         );
         assert!(
-            result.content.ends_with("\nTURN: 2"),
-            "every tool result closes with the id of the turn it closes: {}",
-            result.content
+            result.ends_with("\nTURN: 2"),
+            "every tool result closes with the id of the turn it closes: {result}"
         );
     }
 
@@ -408,29 +398,25 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        let result = session.run_shell(
-            "c0".into(),
+        let (result, _) = session.ral(
             "let large_binding_x = 'well over eight bytes long'",
             5,
             &emit,
         );
 
-        let warnings = result
-            .content
-            .matches("large binding `large_binding_x`")
-            .count();
+        let warnings = result.matches("large binding `large_binding_x`").count();
         assert_eq!(warnings, 1, "exactly one warning per offending install");
         assert!(
-            result.content.contains("held in session memory"),
+            result.contains("held in session memory"),
             "the warning carries the file-path recommendation"
         );
 
         // `return` binds nothing, so no install meets the threshold again.
         let (tx2, _rx2) = crate::bus::channel();
         let emit2 = Emitter::with_mailbox(tx2, session.agent.id, session.inbox.mailbox());
-        let result2 = session.run_shell("c1".into(), "return 1", 5, &emit2);
+        let (result2, _) = session.ral("return 1", 5, &emit2);
         assert!(
-            !result2.content.contains("large binding"),
+            !result2.contains("large binding"),
             "nothing newly installed must warn again"
         );
     }
@@ -446,33 +432,27 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let result = session.run_shell(
-            "c0".into(),
+        let (result, _) = session.ral(
             "exarch-agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         );
 
         assert!(
-            result.content.contains("EXIT: 3"),
-            "the command's own exit is the tool exit; content was: {}",
-            result.content
+            result.contains("EXIT: 3"),
+            "the command's own exit is the tool exit; content was: {result}"
         );
         let (remedy, audit) = (
-            result.content.find("recovery: this non-zero exit raised"),
-            result
-                .content
-                .find("audit: this call had already staged your reply"),
+            result.find("recovery: this non-zero exit raised"),
+            result.find("audit: this call had already staged your reply"),
         );
         assert!(
             audit.is_some(),
-            "a committed act must be audited on a non-zero exit too; content was: {}",
-            result.content
+            "a committed act must be audited on a non-zero exit too; content was: {result}"
         );
         assert!(
             remedy < audit,
-            "the audit comes last, after the branch's own remedy; content was: {}",
-            result.content
+            "the audit comes last, after the branch's own remedy; content was: {result}"
         );
     }
 
@@ -489,22 +469,15 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let result = session.run_shell(
-            "c0".into(),
-            "let deferred = defer { sleep 20 }\nsleep 20",
-            2,
-            &emit,
-        );
+        let (result, _) = session.ral("let deferred = defer { sleep 20 }\nsleep 20", 2, &emit);
 
         assert!(
-            result.content.contains("EXIT: 124"),
-            "the wall exits 124; content was: {}",
-            result.content
+            result.contains("EXIT: 124"),
+            "the wall exits 124; content was: {result}"
         );
         assert!(
-            result.content.contains("`block at tool call, line 1`"),
-            "the surviving worker is named by the line that deferred it; content was: {}",
-            result.content
+            result.contains("`block at tool call, line 1`"),
+            "the surviving worker is named by the line that deferred it; content was: {result}"
         );
     }
 
@@ -516,12 +489,11 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
+        let (result, _) = session.ral("let ok = defer { return 1 }", 10, &emit);
 
         assert!(
-            !result.content.contains("`block at tool call, line 1`"),
-            "a call that returned holds its own handle; content was: {}",
-            result.content
+            !result.contains("`block at tool call, line 1`"),
+            "a call that returned holds its own handle; content was: {result}"
         );
     }
 
@@ -535,22 +507,19 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let result = session.run_shell(
-            "c0".into(),
+        let (result, _) = session.ral(
             "let deferred = defer { sleep 20 }\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         );
 
         assert!(
-            result.content.contains("EXIT: 3"),
-            "the command's own exit is the tool exit; content was: {}",
-            result.content
+            result.contains("EXIT: 3"),
+            "the command's own exit is the tool exit; content was: {result}"
         );
         assert!(
-            result.content.contains("`block at tool call, line 1`"),
-            "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {}",
-            result.content
+            result.contains("`block at tool call, line 1`"),
+            "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {result}"
         );
     }
 
@@ -576,9 +545,9 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        session.run_shell("c0".into(), "let panic_prune_x = 1", 5, &emit);
-        session.run_shell("c1".into(), "let _spin1 = 0", 5, &emit);
-        session.run_shell("c2".into(), "let _spin2 = 0", 5, &emit);
+        session.ral("let panic_prune_x = 1", 5, &emit);
+        session.ral("let _spin1 = 0", 5, &emit);
+        session.ral("let _spin2 = 0", 5, &emit);
 
         // The probe is itself a call, so it may prune the idle `_spin` names
         // too — nothing below asserts on those.
@@ -630,8 +599,8 @@ mod tests {
             .next()
             .expect("the boot sequence seeds at least one binding");
 
-        for i in 0..(shell_eval::BINDING_IDLE_CALLS + 5) {
-            session.run_shell(format!("spin{i}"), "let _boot_spin = 0", 5, &emit);
+        for _ in 0..(shell_eval::BINDING_IDLE_CALLS + 5) {
+            session.ral("let _boot_spin = 0", 5, &emit);
         }
         assert!(
             scope_has(&mut session, &boot_name),
@@ -651,10 +620,10 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        session.run_shell("t1".into(), "spawn { return 1 }", 5, &emit);
+        session.ral("spawn { return 1 }", 5, &emit);
         assert_eq!(session.ral_epoch, 1, "one call, one tick");
 
-        // Through the probe rail, not a `run_shell`: a boundary read ticks
+        // Through the probe rail, not a `ral` call: a boundary read ticks
         // nothing, so the retention arithmetic below stays exact.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !session
@@ -673,8 +642,8 @@ mod tests {
         // Which call stamps and which expires depends on when the worker
         // settled, so drive calls until the notice lands, bounded.
         let mut reaps = 0;
-        for i in 0..6 {
-            session.run_shell(format!("spin{i}"), "$[0]", 5, &emit);
+        for _ in 0..6 {
+            session.ral("$[0]", 5, &emit);
             for record in crate::bus::drain_records(&rx) {
                 let crate::record::Record::Display(crate::record::Display::Notice {
                     notice: crate::record::NoticeFact::Reap { cmd, cause },

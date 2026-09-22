@@ -526,16 +526,16 @@ impl Scrollback {
         }
     }
 
-    /// Stamp the result magnitude the fold patched onto the call it names.
+    /// Settle the call the fold patched with the verdict its result earned.
     fn patched(&mut self, call: BlockId) {
-        let Some(n) = self
+        let Some(verdict) = self
             .fold
             .blocks()
             .iter()
             .rev()
             .find(|b| b.id() == call)
             .and_then(|b| match b.kind() {
-                record::BlockKind::ToolCall { result_lines, .. } => *result_lines,
+                record::BlockKind::ToolCall { verdict, .. } => *verdict,
                 _ => None,
             })
         else {
@@ -543,7 +543,7 @@ impl Scrollback {
         };
         let at = call.seq();
         for block in self.blocks.iter_mut().rev() {
-            if block.measure(at, n) {
+            if block.settle(at, verdict) {
                 break;
             }
         }
@@ -990,14 +990,14 @@ impl Scrollback {
             K::ToolCall {
                 cmd,
                 summary,
-                result_lines,
+                verdict,
                 ..
             } => match summary {
                 Some(summary) => {
                     let mut call =
                         group::Call::open(seq, summary.clone(), cmd.clone(), self.context_floor());
-                    if let Some(n) = result_lines {
-                        call.measure(*n);
+                    if let Some(verdict) = verdict {
+                        call.settle(*verdict);
                     }
                     vec![Item::Member(Member::Call(call))]
                 }
@@ -1481,6 +1481,7 @@ mod tests {
             &mut sb,
             Record::Display(Display::Result {
                 text: "a line\n".repeat(40),
+                failed: false,
                 call: BlockId::new(call),
             }),
         );

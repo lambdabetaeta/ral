@@ -93,8 +93,8 @@ impl Worksheet {
             "",
             None,
         ) {
-            ral_core::CompileOutcome::Compiled(top) => bind_effects(&top),
-            _ => return,
+            Ok(top) => bind_effects(&top),
+            Err(_) => return,
         };
 
         for stmt in &stmts {

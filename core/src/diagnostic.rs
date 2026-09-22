@@ -1,6 +1,7 @@
 //! Every user-visible parse, type, and runtime error is rendered here: through
 //! `ariadne` when a span points somewhere, as a one-liner when it does not.
 
+use crate::CompileError;
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use crate::run::StaticDiagnostics;
 use crate::source::{SourceDb, Span, byte_to_line_col};
@@ -312,11 +313,17 @@ pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) 
 /// every host prints the same report.
 pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i32) {
     match diagnostics {
-        StaticDiagnostics::Parse { error, source } => (
+        StaticDiagnostics::Compile {
+            error: CompileError::Parse(error),
+            source,
+        } => (
             format_parse_error_ariadne(source.name(), source.as_str(), error),
             2,
         ),
-        StaticDiagnostics::Types { errors, source } => (
+        StaticDiagnostics::Compile {
+            error: CompileError::Types(errors),
+            source,
+        } => (
             format_type_errors_ariadne(source.name(), source.as_str(), errors),
             1,
         ),
