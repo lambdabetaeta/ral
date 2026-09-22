@@ -52,10 +52,7 @@ return [
   #
   #   * `xdg:bin` is on the human's `$PATH`. A program dropped there
   #     outlives the session and is run tomorrow by the user, with the
-  #     user's authority — not this projection's. (That the `exec`
-  #     `xdg:bin/` entry would also admit it next call is beside the
-  #     point: in-projection overlap escalates nothing, which is why
-  #     `cwd:`, `/tmp`, and `tempdir:` are freely both.)
+  #     user's authority — not this projection's.
   #
   #   * `xdg:config` holds credentials for many tools (gh, op,
   #     gcloud OAuth tokens, …).  Read is accepted as a
@@ -157,8 +154,7 @@ return [
   # Directory-based exec admittance.  A key ending in `/` is a subpath
   # prefix: any binary whose resolved absolute path lies inside the
   # directory is admitted with `'allow'`.  Per-name entries below win on
-  # more-specific match; a literal key always wins over a directory prefix.
-  # even though `/bin/bash` is under `/bin/`.
+  # more-specific match: a literal key always beats a directory prefix.
   exec: [
     # Admit every binary on PATH.  Expands at freeze time: each `:`
     # separator in `$PATH` becomes a `dirs` entry with this verdict.
@@ -172,14 +168,12 @@ return [
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',
-    # These three are writable as well as admitted, which is the whole
-    # point — a general agent builds and runs what it built — and is
-    # also why the `deny` keys further down are a narrowing of the
-    # allow set rather than a boundary: a denied tool copied into the
-    # project tree under another name would run.  The fs and net
-    # grants are what confine this profile; use `edit-only` or
-    # `read-only`, where no admitted directory is writable, when a
-    # deny has to hold against the agent rather than steer it.
+    # These three are writable as well as admitted — a general agent
+    # builds and runs what it built.  The fs and net grants are what
+    # confine this profile; use `edit-only` or `read-only`, where no
+    # admitted directory is writable, when the boundary has to hold
+    # against the agent rather than steer it (wiki: design/grant
+    # §Concessions).
     'cwd:/':               'allow',   # scripts the agent drops into the project tree
     '/tmp/':               'allow',   # scratch builds (autotools `./configure`, ad-hoc scripts)
     'tempdir:/':           'allow',   # `$TMPDIR` on macOS — distinct from /tmp
@@ -218,6 +212,16 @@ return [
     '~/.asdf/installs/':     'allow',
     '~/.sdkman/candidates/': 'allow',  # Java, Kotlin, Scala, Groovy, Maven, …
 
+    # The per-name entries below are not a second opinion on what the
+    # directories above already admit.  The coreutils linked into the ral
+    # binary (`core/src/uutils.rs`) are spawned by bare name and never
+    # resolved on disk, so no prefix above can reach one: a bundled tool
+    # left unnamed here is unrunnable.  `cmp`, `diff` and `rg` bundle only
+    # under non-default features, and are named too so this profile holds
+    # whichever way the binary was built.  The rest are host binaries,
+    # named so the everyday set does not depend on what `$PATH` happened
+    # to hold when the profile froze.
+    #
     # Coreutils
     base64:    'allow',
     basename:  'allow',
@@ -275,14 +279,9 @@ return [
     # Shells
     sh:   'allow',
 
-    # Version control.  `git` is admitted; the fs grant above adds
-    # ~/.gitconfig and xdg:config/git for read so commits and the
-    # rest of the local-only subcommands work.  Credential and
-    # signing helpers fail by separate lack of admit: ~/.ssh and
-    # ~/.gnupg are not in fs reads, so SSH push and `commit -S` die
-    # naturally, and osxkeychain with them — its securityd door is
-    # one the base profile withholds.  This binary is also how cargo
-    # fetches git dependencies here; see PROFILES.md.
+    # Version control.  What git can and cannot do here follows from the
+    # fs reads above (~/.gitconfig yes, ~/.ssh and ~/.gnupg no); cargo
+    # fetches git dependencies through this binary — see PROFILES.md.
     git: 'allow',
     gh:  'allow',
 
@@ -317,6 +316,7 @@ return [
     unzip:   'allow',
 
     # Diff / patch / docs
+    cmp:   'allow',
     diff:  'allow',
     patch: 'allow',
     less:  'allow',

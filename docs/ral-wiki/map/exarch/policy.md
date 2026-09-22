@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: c225319f
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -30,14 +30,16 @@ pushed layer**:
 - pushes a deny layer carving out each restrict file's own path (below);
 - pushes a deny layer for
   [[decisions/260905_a-grant-does-not-hand-out-its-own-key|exarch's and synod's own credential files]]
-  the same way, for every base but `dangerous`;
-- lints the assembled stack for confused-deputy prefixes
-  (`lint_deputy_prefixes` over `ral_core::capability::deputy_prefixes`) — a
-  warning, never a denial, run once every layer is pushed. It fires
-  on every bake-in: `reasonable` alone flags `cwd:`, `/tmp`, and `tempdir:`,
-  all three deliberate, since in-projection overlap escalates nothing
-  ([[design/grant|grant]] §Concessions). The predicate is thus not the one that
-  matters, and the lint's standing is open.
+  the same way, for every base but `dangerous`.
+
+Composition emits no confused-deputy warning. It used to: a stderr line naming
+every prefix both exec-admitted and writable. The predicate is not the one that
+matters — in-projection overlap escalates nothing and every bake-in requires it,
+so the line fired on every session naming `cwd:`, `/tmp`, and `tempdir:`, all
+three deliberate ([[design/grant|grant]] §Concessions). The report survives
+where it is asked for rather than announced: `ral`'s audit trail still records
+one `deputy` check per flagged prefix when a grant frame is entered
+([[map/core/capabilities|capabilities]]).
 
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
 `tempdir:` / `gitdir:` / `system:` sigil against the session's home, working
@@ -48,7 +50,7 @@ An `xdg:` path escaping `$HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::capability::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
-format, the `absolute_in` cwd-join helper, and the deputy lint).
+format and the `absolute_in` cwd-join helper).
 
 `base_layer(base_name, cwd)` resolves a bake-in base, frozen against the
 child's working directory, as the one layer a [[design/agents|sub-agent]]

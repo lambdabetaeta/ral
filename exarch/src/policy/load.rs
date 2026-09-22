@@ -1,12 +1,11 @@
 //! The loading half of exarch's capability composition: `ral_core`'s profile
-//! loader dressed in exarch's error format, the confused-deputy lint, and the
-//! cwd-relative path helper `super::for_invocation` calls around them.
+//! loader dressed in exarch's error format, and the cwd-relative path helper
+//! `super::for_invocation` calls around it.
 
-use ral_core::types::{Break, Capabilities, Escape, GrantStack, Mooring, Shell};
+use ral_core::types::{Break, Capabilities, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
-use ral_core::path::NormalizedPrefix;
 
 /// Read a capabilities profile from `path` as a frozen [`Capabilities`].
 ///
@@ -31,27 +30,6 @@ pub(super) fn load_capabilities_ral(
         };
         format!("{flag} {}: {detail}", path.display())
     })
-}
-
-/// Warn — never deny — when the composed stack admits exec and write on one
-/// prefix, as `ral_core::capability::deputy_prefixes` judges it.
-///
-/// Runs once every layer is pushed in [`for_invocation`](super::for_invocation):
-/// two profiles can each be innocent and still fold into a deputy.
-pub(super) fn lint_deputy_prefixes(stack: &GrantStack) {
-    let found = ral_core::capability::deputy_prefixes(stack);
-    if found.is_empty() {
-        return;
-    }
-    let list = found
-        .iter()
-        .map(NormalizedPrefix::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    eprintln!(
-        "exarch: capability profile admits exec and write on the same prefix ({list}) — \
-         a binary written there is admitted on the next call"
-    );
 }
 
 /// Resolve `p` against `cwd` unless it is already absolute.

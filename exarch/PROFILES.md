@@ -51,8 +51,10 @@ and use installed development toolchains.
   of everyday tools.
 - **Network:** on.
 
-`bash`, `zsh`, and their Windows counterparts are denied; `sh` remains
-available for tools such as `configure` and `make`.
+Interactive shells are not singled out: `bash` and `zsh` are admitted through
+the same `PATH` and system-root entries as any other binary. What a shell can
+do here is what this profile allows, so denying it by name would steer rather
+than confine. Use `minimal`, which denies both, when the ban must hold.
 
 Git works locally, including unsigned commits. SSH and GPG keys are not
 readable, so SSH pushes and signed commits fail unless you deliberately extend

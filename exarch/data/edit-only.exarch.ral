@@ -198,6 +198,7 @@ return [
     unzip:   'allow',
 
     # Diff / patch / docs
+    cmp:   'allow',
     diff:  'allow',
     patch: 'allow',
     less:  'allow',

@@ -15,7 +15,7 @@ mod base;
 mod load;
 
 use base::{resolve_base, root_fs_policy};
-use load::{absolute_in, lint_deputy_prefixes, load_capabilities_ral};
+use load::{absolute_in, load_capabilities_ral};
 use ral_core::host;
 use ral_core::io::TerminalState;
 use ral_core::path::{sigil::FreezeCtx, sigil::freeze_path_list};
@@ -99,8 +99,6 @@ pub fn for_invocation(
     if stack.iter().any(|c| c.fs.is_some()) {
         stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
-
-    lint_deputy_prefixes(&stack);
 
     Ok((stack, restricts))
 }
