@@ -299,7 +299,9 @@ mod tests {
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_)])
                 && hunks[0].rows.iter().map(Row::text).eq(["x", "y"].map(String::from))));
         assert!(matches!(&marks[2], Mark::Fields { rows } if rows[0].label == "tests"));
-        assert!(matches!(&marks[3], Mark::Measure(m) if m.readout.value == 7 && m.readout.max == Some(12)));
+        assert!(
+            matches!(&marks[3], Mark::Measure(m) if m.readout.value == 7 && m.readout.max == Some(12))
+        );
         assert!(matches!(&marks[4], Mark::Raw { bytes } if bytes == b"hi"));
     }
 

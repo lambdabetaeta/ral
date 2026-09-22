@@ -107,9 +107,11 @@ impl Span {
     }
 }
 
-/// A magnitude with no name of its own: bounded (`max` present) it renders as
-/// a proportional fill bar, unbounded as a `log2` size bar.  What labels it is
-/// the position it sits in — a [`Measure`]'s label, or a [`Field`]'s.
+/// A magnitude with no name of its own.
+///
+/// Bounded (`max` present) it renders as a proportional fill bar, unbounded as
+/// a `log2` size bar.  What labels it is the position it sits in — a
+/// [`Measure`]'s label, or a [`Field`]'s.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Readout {
     pub value: u32,
