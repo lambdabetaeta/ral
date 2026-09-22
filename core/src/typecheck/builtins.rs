@@ -169,9 +169,9 @@ macro_rules! curry_bytes {
     ($p:expr, $($rest:expr),+) => { fun($p, curry_bytes!($($rest),+)) };
 }
 
-/// A record type over a closed row: the tail is `Empty`, so no extension.
-pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
-    let mut row = Row::Empty;
+/// A record type over a row of fields ending in `tail`.
+pub fn record_row(fields: &[(&str, Ty)], tail: Row) -> Ty {
+    let mut row = tail;
     for (l, t) in fields.iter().rev() {
         row = Row::Extend(
             Label::Field((*l).to_string()),
@@ -182,12 +182,21 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     Ty::Record(row)
 }
 
-/// A variant type over a closed row of tags: the tail is `Empty`, so a `case`
-/// on it must cover exactly these arms.  A payload-less tag takes `Unit`, as
-/// `Inferencer::infer_val` gives one at its construction site.
-fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
-    let mut row = Row::Empty;
-    for (l, t) in arms.iter().rev() {
+/// A record type over a closed row: the tail is `Empty`, so no extension.
+pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
+    record_row(fields, Row::Empty)
+}
+
+/// A record type left open on `tail`: the one shape a row can give an
+/// *optional* field, whose type is then the reader's to check.
+pub fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
+    record_row(fields, Row::Var(tail))
+}
+
+/// A variant type over a row of tags with stated payloads, ending in `tail`.
+pub fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
+    let mut row = tail;
+    for (l, t) in tags.iter().rev() {
         row = Row::Extend(
             Label::Case((*l).to_string()),
             Field::present(t.clone()),
@@ -195,6 +204,22 @@ fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
         );
     }
     Ty::Variant(row)
+}
+
+/// A variant type over a closed row of tags.
+///
+/// The tail is `Empty`, so a `case` on it must cover exactly these arms.  A
+/// payload-less tag takes `Unit`, as `Inferencer::infer_val` gives one at its
+/// construction site.
+pub fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
+    variant_row(arms, Row::Empty)
+}
+
+/// A variant left open on `tail`, so an unknown tag reaches the runtime door
+/// that enumerates the legal ones rather than dying as a row-unification
+/// mismatch.
+pub fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
+    variant_row(tags, Row::Var(tail))
 }
 
 /// The error record a raising form demands of its argument: `status` and

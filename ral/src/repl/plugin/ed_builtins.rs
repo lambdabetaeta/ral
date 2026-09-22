@@ -16,8 +16,10 @@
 use ral_core::builtins::util::arg0_str;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
-use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
-use ral_core::typecheck::{CompTy, Field, Label, PayloadRoute, Row, Scheme, Ty, Unifier};
+use ral_core::typecheck::builtins::{
+    closed_record, fun, mk_scheme as scheme, open_record, pure, thunk,
+};
+use ral_core::typecheck::{CompTy, PayloadRoute, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map, sig};
 use ral_core::{Shell, Value};
@@ -606,15 +608,7 @@ fn scheme_unit_thunk(_u: &mut Unifier) -> Scheme {
 
 fn scheme_ed_set(u: &mut Unifier) -> Scheme {
     let rho = u.fresh_row_var();
-    let record = Ty::Record(Row::Extend(
-        Label::Field("text".into()),
-        Field::present(Ty::String),
-        Box::new(Row::Extend(
-            Label::Field("cursor".into()),
-            Field::present(Ty::Int),
-            Box::new(Row::Var(rho)),
-        )),
-    ));
+    let record = open_record(&[("text", Ty::String), ("cursor", Ty::Int)], rho);
     scheme(&[], &[], &[rho], thunk(fun(record, pure(Ty::Unit))))
 }
 

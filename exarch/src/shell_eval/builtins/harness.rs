@@ -23,8 +23,10 @@
 use crate::fleet::desk::Selection;
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
-use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
-use ral_core::typecheck::{Field, Label, Row, RowVar, Scheme, Ty, Unifier};
+use ral_core::typecheck::builtins::{
+    closed_record, fun, mk_scheme as scheme, open_record, open_variant, pure, thunk,
+};
+use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
@@ -900,39 +902,6 @@ pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
         let _ = turn_list_payload(turns, VERB)?;
     }
     verbatim(value, VERB)
-}
-
-/// A variant over a row of tags with stated payloads, ending in `tail`.
-fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
-    let mut row = tail;
-    for (label, ty) in tags.iter().rev() {
-        row = Row::Extend(
-            Label::Case((*label).to_string()),
-            Field::present(ty.clone()),
-            Box::new(row),
-        );
-    }
-    Ty::Variant(row)
-}
-
-/// Left open on `tail` so an unknown tag reaches the runtime door that
-/// enumerates the legal ones rather than dying as a row-unification mismatch.
-fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
-    variant_row(tags, Row::Var(tail))
-}
-
-/// A record type left open on `tail`: the one shape a row can give an
-/// *optional* field, whose type is then the door's to check.
-fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
-    let mut row = Row::Var(tail);
-    for (label, ty) in fields.iter().rev() {
-        row = Row::Extend(
-            Label::Field((*label).to_string()),
-            Field::present(ty.clone()),
-            Box::new(row),
-        );
-    }
-    Ty::Record(row)
 }
 
 /// `exarch-agents :: ∀α β ρ1 ρ2 ρ3 ρ4 ρ5. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
