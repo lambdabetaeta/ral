@@ -96,9 +96,7 @@ outcome rather than a turn error.
 no ink to spend — the headless tee and the model's wake-up notice
 (`surface_notice`, [[map/exarch/agent|agent]]) — so none of the three can drift;
 only `record::view`'s ledger keeps its own `[done: …]`, the bracketed register
-every fact wears there. It names no worker, because there is nothing to name:
-core spells a `spawn`'s `cmd` `<block>` and `prelude.ral`'s `defer` is a
-`spawn`.
+every fact wears there. It names no worker.
 
 A settlement is *announced*, not bounded, so it is no card at all. Exarch's
 transcript seats those spans as a chrome line on the rail — `Chrome::Settled`

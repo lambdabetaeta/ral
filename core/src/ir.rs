@@ -31,13 +31,6 @@ pub(crate) enum CommandName {
 }
 
 impl CommandName {
-    pub(crate) fn bare(&self) -> Option<&str> {
-        match self {
-            Self::Bare(name) => Some(name),
-            Self::Path(_) | Self::TildePath(_) => None,
-        }
-    }
-
     /// The head as the source wrote it — what a diagnostic raised before the
     /// run can name it.  A `~` stays a `~`: expanding it wants a live `HOME`,
     /// which is command resolution's business rather than the checker's.

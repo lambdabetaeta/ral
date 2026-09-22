@@ -539,15 +539,27 @@ impl FOValue<SerialClosure> {
     }
 }
 
-/// The first leaf [`FOValue::try_from`] met that is not data.
+/// A leaf that is not data: what a seam scrubs to an `` `opaque `` placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotData {
+pub enum Opaque {
     Block,
     Function,
     Handle,
 }
 
-impl std::fmt::Display for NotData {
+impl Opaque {
+    #[must_use]
+    pub fn of(v: &Value) -> Option<Self> {
+        match v {
+            Value::Thunk(c) if c.comp.arrow().is_none() => Some(Self::Block),
+            Value::Thunk(_) | Value::Native { .. } => Some(Self::Function),
+            Value::Handle(_) => Some(Self::Handle),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Opaque {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Block => "a block",
@@ -557,13 +569,12 @@ impl std::fmt::Display for NotData {
     }
 }
 
-impl From<NotData> for Error {
-    fn from(found: NotData) -> Self {
-        Self::new(
-            format!("{found} is not data: the protocol carries only data"),
-            1,
-        )
-    }
+/// Why a value has no [`FOValue`]: the first opaque leaf met, and whether it
+/// sat inside a list, map, or variant rather than being the value itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotData {
+    pub leaf: Opaque,
+    pub nested: bool,
 }
 
 impl TryFrom<&Value> for FOValue {
@@ -572,6 +583,13 @@ impl TryFrom<&Value> for FOValue {
     /// Recursion over the data variants *is* the protocol's first-orderness
     /// check, rather than a separate test followed by a hopeful re-encode.
     fn try_from(v: &Value) -> Result<Self, NotData> {
+        if let Some(leaf) = Opaque::of(v) {
+            return Err(NotData {
+                leaf,
+                nested: false,
+            });
+        }
+        let inner = |v: &Value| Self::try_from(v).map_err(|e| NotData { nested: true, ..e });
         Ok(match v {
             Value::Unit => Self::Unit,
             Value::Bool(v) => Self::Bool { value: *v },
@@ -580,24 +598,21 @@ impl TryFrom<&Value> for FOValue {
             Value::String(v) => Self::String { value: v.clone() },
             Value::Bytes(v) => Self::Bytes { value: v.clone() },
             Value::List(items) => Self::List {
-                items: items.iter().map(Self::try_from).collect::<Result<_, _>>()?,
+                items: items.iter().map(inner).collect::<Result<_, _>>()?,
             },
             Value::Map(items) => Self::Map {
                 entries: items
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), Self::try_from(v)?)))
+                    .map(|(k, v)| Ok((k.clone(), inner(v)?)))
                     .collect::<Result<_, NotData>>()?,
             },
             Value::Variant { label, payload } => Self::Variant {
                 label: label.clone(),
-                payload: match payload {
-                    Some(p) => Some(Box::new(Self::try_from(p.as_ref())?)),
-                    None => None,
-                },
+                payload: payload.as_deref().map(inner).transpose()?.map(Box::new),
             },
-            Value::Thunk(c) if c.comp.arrow().is_none() => return Err(NotData::Block),
-            Value::Thunk(_) | Value::Native { .. } => return Err(NotData::Function),
-            Value::Handle(_) => return Err(NotData::Handle),
+            Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
+                unreachable!("Opaque::of answers for every leaf that is not data")
+            }
         })
     }
 }
@@ -608,7 +623,7 @@ pub(crate) const OPAQUE_TAG: &str = "opaque";
 
 /// The leaves [`FOValue::try_from`] rejects.
 pub(crate) fn no_wire_form(v: &Value) -> bool {
-    matches!(v, Value::Handle(_) | Value::Thunk(_) | Value::Native { .. })
+    Opaque::of(v).is_some()
 }
 
 /// Just the leaf a `Handle` has no wire form at all: unlike [`no_wire_form`],

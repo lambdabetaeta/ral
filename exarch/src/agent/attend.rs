@@ -879,7 +879,10 @@ mod tests {
             .collect();
         assert_eq!(reaps.len(), 1, "the queued reap surfaces exactly once");
         let (cmd, cause) = &reaps[0];
-        assert_eq!(cmd, "<block>", "the reap must name the spawned body");
+        assert_eq!(
+            cmd, "block at line 1",
+            "the reap must name the spawned body by its line"
+        );
         assert_eq!(
             cause, "idle",
             "an unpolled worker past its idle bound reaps as Idle"

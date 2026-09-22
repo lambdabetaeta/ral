@@ -43,20 +43,22 @@ pub(crate) fn error_record(
     ])
 }
 
-/// A failed body's position comes from the error's own span; an unspanned
-/// error falls back to the run's call site.  The failing command is the one
-/// the innermost dispatch stamped onto the error (`evaluator::audit`'s
-/// `frame_call`); `<runtime>` names a failure no dispatch owns.
+/// A failed body's position comes from the error's own span; one outside the
+/// session's sources falls back to the run's call site, and no position at all
+/// is line 0.  The failing command is the one the innermost dispatch stamped
+/// onto the error (`evaluator::audit`'s `frame_call`); `<runtime>` names a
+/// failure no dispatch owns.
 pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
-    let site = e
-        .span
-        .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
+    let (line, col) = shell
+        .site_of(e.span)
+        .or_else(|| shell.call_site())
+        .map_or((0, 0), |s| (s.line, s.col));
     Outcome {
         status: e.exit_code(),
         message: e.message.clone(),
         cmd: e.command.clone().unwrap_or_else(|| "<runtime>".into()),
-        line: site.line,
-        col: site.col,
+        line,
+        col,
     }
 }
 

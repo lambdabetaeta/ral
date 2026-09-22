@@ -44,7 +44,7 @@ impl Shell {
     /// Every audit-emitting check funnels through here: `context` and
     /// `local.audit` are disjoint fields, and the site is taken by value so it
     /// keeps no borrow on the session's source registry.
-    fn audit_call<R>(&mut self, f: impl FnOnce(&Context, &mut Audit, CallSite) -> R) -> R {
+    fn audit_call<R>(&mut self, f: impl FnOnce(&Context, &mut Audit, Option<CallSite>) -> R) -> R {
         let site = self.call_site();
         f(&self.context, &mut self.local.audit, site)
     }

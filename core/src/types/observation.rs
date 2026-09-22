@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 /// redirect read opened, a capability check decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
-    pub site: CallSite,
+    /// `None` where the observing dispatch has no position in a session source.
+    pub site: Option<CallSite>,
     /// Microseconds since the Unix epoch; equal to `end` at an instantaneous
     /// door.
     pub start: i64,
@@ -237,7 +238,7 @@ fn optional(v: Option<Value>) -> Value {
 impl Observation {
     /// An instantaneous door: the observation is stamped now, and its window
     /// has no width.
-    pub fn instant(site: CallSite, principal: Option<String>, what: Observed) -> Self {
+    pub fn instant(site: Option<CallSite>, principal: Option<String>, what: Observed) -> Self {
         let now = epoch_us();
         Self {
             site,
@@ -251,7 +252,7 @@ impl Observation {
     /// A door with a body behind it: the caller stamped `start` before the
     /// body ran and `end` after it settled.
     pub(crate) fn spanning(
-        site: CallSite,
+        site: Option<CallSite>,
         start: i64,
         end: i64,
         principal: Option<String>,
@@ -271,16 +272,21 @@ impl Observation {
     /// strings, empty when the command did not fail and when nothing named a
     /// principal — a record field is always present, and neither a runtime
     /// error message nor a user name is ever legitimately empty.  An absent
-    /// byte field or subject is `` `none ``, never a missing key.
+    /// site is likewise an empty script at line 0, lines being 1-indexed.  An
+    /// absent byte field or subject is `` `none ``, never a missing key.
     pub fn to_value(&self) -> Value {
+        let (script, line, col) = self
+            .site
+            .as_ref()
+            .map_or(("", 0, 0), |s| (s.script.as_str(), s.line, s.col));
         #[allow(
             clippy::cast_possible_wrap,
             reason = "line/col are source positions bounded by source size, far below i64::MAX"
         )]
         Value::map(vec![
-            ("script".into(), Value::String(self.site.script.clone())),
-            ("line".into(), Value::Int(self.site.line as i64)),
-            ("col".into(), Value::Int(self.site.col as i64)),
+            ("script".into(), Value::String(script.to_string())),
+            ("line".into(), Value::Int(line as i64)),
+            ("col".into(), Value::Int(col as i64)),
             ("start".into(), Value::Int(self.start)),
             ("end".into(), Value::Int(self.end)),
             (
@@ -320,11 +326,12 @@ impl Observation {
             clippy::cast_possible_truncation,
             reason = "line/col were projected from usize source positions"
         )]
-        let site = CallSite {
+        let site = Some(CallSite {
             script: str_at(m, "script")?,
             line: int_at(m, "line")? as usize,
             col: int_at(m, "col")? as usize,
-        };
+        })
+        .filter(|s| s.line > 0);
         Some(Self {
             site,
             start: int_at(m, "start")?,
@@ -587,9 +594,22 @@ mod tests {
     }
 
     fn round_trips(what: Observed) {
-        let obs = Observation::spanning(site(), 100, 250, Some("alex".into()), what);
+        let obs = Observation::spanning(Some(site()), 100, 250, Some("alex".into()), what);
         let back = Observation::from_value(&obs.to_value());
         assert_eq!(back.as_ref(), Some(&obs));
+    }
+
+    #[test]
+    fn an_absent_site_round_trips() {
+        let obs = Observation::instant(
+            None,
+            None,
+            Observed::Grep {
+                scope: String::new(),
+                pattern: "x".into(),
+            },
+        );
+        assert_eq!(Observation::from_value(&obs.to_value()), Some(obs));
     }
 
     /// The tag and the record behind it, out of a projection's `what`.
@@ -713,7 +733,7 @@ mod tests {
     #[test]
     fn the_tag_is_the_kind_and_stands_alone() {
         let obs = Observation::instant(
-            site(),
+            Some(site()),
             None,
             Observed::Read {
                 path: "in.txt".into(),
@@ -740,7 +760,7 @@ mod tests {
             new_bytes: Some(Vec::new()),
             old_bytes: None,
         };
-        let obs = Observation::instant(site(), None, what.clone());
+        let obs = Observation::instant(Some(site()), None, what.clone());
         let (_, fact) = fact_of(&obs.to_value());
         assert_eq!(
             fact.get("new_bytes"),
@@ -788,7 +808,7 @@ mod tests {
                 old_bytes: None,
             },
         ] {
-            let obs = Observation::spanning(site(), 10, 20, Some("alex".into()), what);
+            let obs = Observation::spanning(Some(site()), 10, 20, Some("alex".into()), what);
             let fo = FOValue::try_from(&obs.to_wire())
                 .expect("to_wire scrubs every leaf try_from rejects");
             let json = serde_json::to_vec(&fo).expect("serialise FOValue");
@@ -805,7 +825,7 @@ mod tests {
     #[test]
     fn a_capability_decision_projects_as_itself() {
         let obs = Observation::instant(
-            site(),
+            Some(site()),
             Some("alex".into()),
             Observed::Capability {
                 resource: "exec".into(),

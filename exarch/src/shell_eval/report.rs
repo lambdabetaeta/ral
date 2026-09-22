@@ -6,14 +6,13 @@
 //! it reads is handed in, so it never touches a transport or a registry
 //! itself.
 
-use super::TOOL_SCRIPT;
 use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::Value as RalValue;
 use ral_core::protocol::Ending;
 use ral_core::serial::FOValue;
-use ral_core::types::{CallSite, Observation, Observed};
-use std::collections::HashMap;
+use ral_core::types::{Observation, Observed};
+use std::collections::HashSet;
 
 /// Enough of one call's fan-out to name without crowding the stderr it rides
 /// on; the rest is counted aloud, never dropped in silence.
@@ -108,27 +107,17 @@ fn exit_tip(single_command: bool) -> String {
     tip
 }
 
-/// Where each worker this dispatch's own trail gave birth to was spawned, by
-/// [`WorkerId`](ral_core::types::WorkerId).
-fn trail_births(trail: &[FOValue]) -> HashMap<u64, CallSite> {
+/// The [`WorkerId`](ral_core::types::WorkerId)s this dispatch's own trail gave
+/// birth to.
+fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
     trail
         .iter()
         .filter_map(|fov| Observation::from_value(&RalValue::from(fov.clone())))
         .filter_map(|obs| match obs.what {
-            Observed::Worker { id, .. } => Some((id.0, obs.site)),
+            Observed::Worker { id, .. } => Some(id.0),
             _ => None,
         })
         .collect()
-}
-
-/// A worker as the model can find it: its command, and the line that spawned
-/// it when the birth carries one.
-fn worker_name(cmd: &str, site: &CallSite) -> String {
-    match (site.line, site.script.as_str()) {
-        (0, _) => format!("`{cmd}`"),
-        (line, TOOL_SCRIPT) => format!("`{cmd}` (spawned at line {line})"),
-        (line, script) => format!("`{cmd}` (spawned at {script}:{line})"),
-    }
 }
 
 /// The sentence a failed ending owes the model about work that outlived it: a
@@ -137,10 +126,11 @@ fn worker_name(cmd: &str, site: &CallSite) -> String {
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
 fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
-    let births = trail_births(trail);
+    let births = trail_worker_ids(trail);
     let mut cmds: Vec<String> = workers
         .iter()
-        .filter_map(|w| births.get(&w.id).map(|site| worker_name(&w.cmd, site)))
+        .filter(|w| births.contains(&w.id))
+        .map(|w| format!("`{}`", w.cmd))
         .collect();
     if cmds.is_empty() {
         return None;
@@ -171,15 +161,11 @@ fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[ProbedWorker]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::{CallSite, LeaseClass, WorkerId};
+    use ral_core::types::{LeaseClass, WorkerId};
 
     fn worker_birth(id: u64, cmd: &str) -> FOValue {
-        worker_birth_at(id, cmd, CallSite::default())
-    }
-
-    fn worker_birth_at(id: u64, cmd: &str, site: CallSite) -> FOValue {
         let obs = Observation::instant(
-            site,
+            None,
             Some("test".into()),
             Observed::Worker {
                 id: WorkerId(id),
@@ -204,7 +190,7 @@ mod tests {
 
     fn committed_act(verb: &str, subject: Option<&str>) -> Observation {
         Observation::instant(
-            CallSite::default(),
+            None,
             Some("test".into()),
             Observed::Act {
                 verb: verb.into(),
@@ -292,32 +278,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_orphan_is_named_by_the_line_that_spawned_it() {
-        let at = |script: &str, line| CallSite {
-            script: script.into(),
-            line,
-            col: 9,
-        };
-        let trail = vec![
-            worker_birth_at(1, "<block>", at(TOOL_SCRIPT, 3)),
-            worker_birth_at(2, "<block>", at("lib.ral", 7)),
-        ];
-        let workers = vec![
-            worker_row(1, "<block>", true),
-            worker_row(2, "<block>", true),
-        ];
-        let (out, _) = render(
-            &Ending::Exited(1),
-            &trail,
-            &ActFragment::default(),
-            &workers,
-            5,
-        );
-        assert!(out.contains("`<block>` (spawned at line 3)"), "{out:?}");
-        assert!(out.contains("`<block>` (spawned at lib.ral:7)"), "{out:?}");
-    }
-
     /// A handle that was only the result was not stranded by a failing step:
     /// the note says it went with the result.
     #[test]
@@ -325,8 +285,8 @@ mod tests {
         let ending = Ending::Unreturnable {
             rendered: "error: the result is a handle, and a run can return only data\n".into(),
         };
-        let trail = vec![worker_birth(4, "<block>")];
-        let workers = vec![worker_row(4, "<block>", true)];
+        let trail = vec![worker_birth(4, "block at line 1")];
+        let workers = vec![worker_row(4, "block at line 1", true)];
         let (out, exit) = render(&ending, &trail, &ActFragment::default(), &workers, 5);
         assert_eq!(exit, 1);
         assert!(out.starts_with("error: the result is a handle"), "{out:?}");

@@ -578,7 +578,7 @@ mod tests {
     use crate::fleet::Fleet;
     use crate::tui::palette::READ_W;
     use crate::tui::row::Row;
-    use ral_core::types::{CallSite, Observation, Observed};
+    use ral_core::types::{Observation, Observed};
 
     /// The trunk is returned alongside its `App` because the frontend holds it
     /// only weakly: dropping it here would settle the agent mid-test.
@@ -714,7 +714,7 @@ mod tests {
         };
         let read_at = |path: &str| {
             observation_wire(&Observation::instant(
-                CallSite::default(),
+                None,
                 None,
                 Observed::Read { path: path.into() },
             ))

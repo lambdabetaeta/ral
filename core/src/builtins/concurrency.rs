@@ -411,12 +411,15 @@ fn spawn_buffered(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
+    let name = shell
+        .call_site_label()
+        .map_or_else(|| "block".into(), |at| format!("block at {at}"));
     Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
         shell,
         Birth::Spawn,
-        "<block>",
+        &name,
         worker_body(body),
     )?)))
 }
@@ -458,12 +461,13 @@ fn spawn_labelled(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
+    let name = label.clone();
     Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
         shell,
         Birth::Watch { label },
-        "<watch>",
+        &name,
         worker_body(body),
     )?)))
 }
@@ -1602,11 +1606,35 @@ mod tests {
         let report = run_source(&mut shell, "audit { !{spawn { return 1 }} }")
             .expect("audit over a plain spawn must succeed");
         let birth = only_birth(trail_of(&report));
-        assert_eq!(birth.get("cmd"), Some(&Value::String("<block>".into())));
+        assert_eq!(
+            birth.get("cmd"),
+            Some(&Value::String("block at line 1".into()))
+        );
         assert_eq!(birth.get("class"), Some(&Value::String("worker".into())));
         assert!(
             matches!(birth.get("id"), Some(Value::Int(_))),
             "the birth carries the minted worker id: {birth:?}"
+        );
+    }
+
+    /// `defer` is a prelude function around `spawn`: its worker is named at
+    /// the line that applied `defer`, not at the command before it.
+    #[test]
+    fn a_deferred_worker_is_named_by_the_line_that_wrote_defer() {
+        let mut shell = crate::boot::boot_shell(
+            crate::io::TerminalState::default(),
+            &crate::boot::BakedPrelude::bake_runtime(),
+            &crate::boot::HostSurface::default(),
+        );
+        let report = run_source(
+            &mut shell,
+            "audit {\n  echo x\n  let h = defer { return 1 }\n}",
+        )
+        .expect("audit over a defer must succeed");
+        let birth = only_birth(trail_of(&report));
+        assert_eq!(
+            birth.get("cmd"),
+            Some(&Value::String("block at line 3".into()))
         );
     }
 

@@ -27,7 +27,7 @@ use ral_core::Value as RalValue;
 use ral_core::protocol::{EnquiryError, Host};
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
-use ral_core::types::{CallSite, Error, GrantStack, Nursery, NurseryId, Observation, Observed};
+use ral_core::types::{Error, GrantStack, Nursery, NurseryId, Observation, Observed};
 use regex::Regex;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -246,7 +246,7 @@ impl HostServices {
     /// one construction either draws from.
     fn commit_act(&self, act: DeskAct, subject: Option<&str>, payload: String, refused: bool) {
         let obs = Observation::instant(
-            CallSite::default(),
+            None,
             self.principal.clone(),
             Observed::Act {
                 verb: act.verb().to_string(),
@@ -1773,13 +1773,11 @@ impl ExarchDesk {
             "key",
         )?;
         let m = self.services.agent.pins.lock_ignore_poison();
-        match m.get(&key) {
-            // A card value is always first-order, so this conversion never fails.
-            Some(digest) => Ok(FOValue::try_from(&crate::bus::card::encode_card(
-                &digest.card,
-            ))?),
-            None => Ok(FOValue::Unit),
-        }
+        Ok(match m.get(&key) {
+            Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card))
+                .expect("an encoded card is always data"),
+            None => FOValue::Unit,
+        })
     }
 
     /// `` `list `` — the keys currently occupied on this agent's own
@@ -3480,7 +3478,7 @@ mod tests {
         };
 
         let read = ral_core::types::Observation::instant(
-            ral_core::types::CallSite::default(),
+            None,
             None,
             ral_core::types::Observed::Read {
                 path: "a.rs".into(),

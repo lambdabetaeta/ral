@@ -214,6 +214,17 @@ fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
     }))
 }
 
+/// A call's span becomes the dispatch site, unless it lies outside the
+/// session's sources — the baked prelude's — so that `defer`'s inner `spawn`
+/// is stamped where the user wrote `defer`.
+fn stamp_call_site(span: Option<Span>, shell: &mut Shell) {
+    if let Some(span) = span
+        && shell.session.sources.get(span.file).is_some()
+    {
+        shell.local.audit.call_site = Some(span);
+    }
+}
+
 pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
@@ -580,6 +591,7 @@ impl Machine {
 
             CompKind::App { head, args } => {
                 crate::process::check(mooring)?;
+                stamp_call_site(comp.span, shell);
                 let argv = close_args(args, &env)?;
                 self.reserve(shell)?;
                 self.push(Frame::Apply {
@@ -784,15 +796,7 @@ impl Machine {
         crate::process::check(mooring)?;
         let argv = close_args(&exec.args, env)?;
         let redirs = close_redirects(&exec.redirects, env)?;
-        // A span outside the session's sources — the baked prelude's — keeps
-        // the user's site, so `defer`'s inner `spawn` is stamped where
-        // `defer` was written.
-        if !matches!(exec.head.name().bare(), Some(name) if name.starts_with('_'))
-            && let Some(span) = span
-            && shell.session.sources.get(span.file).is_some()
-        {
-            shell.local.audit.call_site = Some(span);
-        }
+        stamp_call_site(span, shell);
         Ok(
             match command_call::classify_command(&exec.head, env, mooring, shell)? {
                 Resolution::Env(v) => {

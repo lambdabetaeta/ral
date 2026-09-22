@@ -209,11 +209,10 @@ pub fn report_value(outcome: Result<Value, Value>, trail: &[Observation]) -> Val
 mod tests {
     use super::super::observation::Observed;
     use super::*;
-    use crate::diagnostic::CallSite;
 
     fn dummy(pattern: &str) -> Observation {
         Observation::instant(
-            CallSite::default(),
+            None,
             None,
             Observed::Grep {
                 scope: String::new(),

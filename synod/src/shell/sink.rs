@@ -654,7 +654,7 @@ mod tests {
     use exarch::bus::AgentState;
     use exarch::bus::card::{Row, Seg};
     use exarch::record::{DoneOutcome, NoticeFact};
-    use ral_core::types::{CallSite, Observation, Observed};
+    use ral_core::types::{Observation, Observed};
     use std::path::PathBuf;
 
     /// The wire form a `Display::Observation` carries —
@@ -662,7 +662,7 @@ mod tests {
     /// the seam itself, rebuilt here without pulling the private conversion
     /// into this crate.
     fn observation_wire(what: Observed) -> ral_core::serial::FOValue {
-        let observation = Observation::instant(CallSite::default(), None, what);
+        let observation = Observation::instant(None, None, what);
         ral_core::serial::FOValue::try_from(&observation.to_wire())
             .expect("a test observation always scrubs to a valid FOValue")
     }

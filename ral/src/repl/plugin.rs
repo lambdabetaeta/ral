@@ -420,7 +420,10 @@ pub(super) fn call_plugin_hook(
                 }
                 Err(e) => RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(ral_core::types::Error::new(
-                        format!("hook '{hook}' was handed {e}, but its arguments must be data"),
+                        format!(
+                            "hook '{hook}' was handed {}, but its arguments must be data",
+                            e.leaf
+                        ),
                         1,
                     )),
                 },

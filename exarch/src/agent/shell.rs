@@ -512,8 +512,8 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("`<block>`"),
-            "the surviving worker is named by the `cmd` core filed it under; content was: {}",
+            result.content.contains("`block at line 1`"),
+            "the surviving worker is named by the line that deferred it; content was: {}",
             result.content
         );
     }
@@ -529,7 +529,7 @@ mod tests {
         let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
 
         assert!(
-            !result.content.contains("`<block>`"),
+            !result.content.contains("`block at line 1`"),
             "a call that returned holds its own handle; content was: {}",
             result.content
         );
@@ -558,7 +558,7 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("`<block>`"),
+            result.content.contains("`block at line 1`"),
             "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {}",
             result.content
         );
@@ -692,7 +692,10 @@ mod tests {
                 else {
                     continue;
                 };
-                assert_eq!(cmd, "<block>", "the reap names the spawned body");
+                assert_eq!(
+                    cmd, "block at line 1",
+                    "the reap names the spawned body by its line"
+                );
                 assert_eq!(
                     cause, "retention",
                     "an unclaimed settled entry expires as Retention"

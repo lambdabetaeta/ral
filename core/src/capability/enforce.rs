@@ -28,7 +28,7 @@ pub(crate) fn check_exec_args(
     policy_names: &[&str],
     args: &[String],
     audit: &mut Audit,
-    site: CallSite,
+    site: Option<CallSite>,
 ) -> Settled<()> {
     let names = ExecNames {
         deny: deny_names,
@@ -169,7 +169,7 @@ pub(crate) fn check_fs_op(
     path: &crate::path::ResolvedPath,
     op: &FsOp,
     audit: &mut Audit,
-    site: CallSite,
+    site: Option<CallSite>,
 ) -> Settled<()> {
     if path.is_discard() {
         return Ok(());
@@ -184,7 +184,7 @@ pub(crate) fn check_fs_exact(
     resolved: &std::path::Path,
     op: &FsOp,
     audit: &mut Audit,
-    site: CallSite,
+    site: Option<CallSite>,
 ) -> Settled<()> {
     let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), resolved, op);
 
@@ -296,7 +296,7 @@ fn emit_capability_denial(
     context: &Context,
     resource: &str,
     audit: &mut Audit,
-    site: CallSite,
+    site: Option<CallSite>,
     fill: impl FnOnce(&mut BTreeMap<String, String>),
 ) {
     if !audit.active() {

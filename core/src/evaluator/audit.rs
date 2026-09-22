@@ -35,7 +35,7 @@ pub(crate) struct Frame(());
 /// observation's stamp, paired so the dispatch site carries one local.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuditStart {
-    pub site: CallSite,
+    pub site: Option<CallSite>,
     pub(crate) time: i64,
 }
 

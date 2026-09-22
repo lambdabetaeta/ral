@@ -227,19 +227,17 @@ pub struct Shell {
 
 impl Shell {
     /// Resolve `span` to the value-typed [`CallSite`] observations and
-    /// capability checks carry.  [`CallSite::default`] when there is no span,
-    /// or its source is not registered in this session.
-    pub(crate) fn site_of(&self, span: Option<Span>) -> CallSite {
-        let resolved = span.and_then(|s| self.session.sources.get(s.file).map(|src| (s, src)));
-        let Some((span, source)) = resolved else {
-            return CallSite::default();
-        };
+    /// capability checks carry; `None` when there is no span, or its source is
+    /// not registered in this session.
+    pub(crate) fn site_of(&self, span: Option<Span>) -> Option<CallSite> {
+        let span = span?;
+        let source = self.session.sources.get(span.file)?;
         let (line, col) = source.byte_to_line_col(span.start as usize);
-        CallSite {
+        Some(CallSite {
             script: source.name().to_string(),
             line,
             col,
-        }
+        })
     }
 
     /// [`Self::site_of`] applied to the dispatch register [`Audit`] carries.
@@ -247,8 +245,20 @@ impl Shell {
     /// `pub`, not `pub(crate)`: a host door that builds its own
     /// [`crate::types::Observation`] (a grep walk, a read outside any
     /// redirect) needs the same call site core's own doors stamp.
-    pub fn call_site(&self) -> CallSite {
+    pub fn call_site(&self) -> Option<CallSite> {
         self.site_of(self.local.audit.call_site)
+    }
+
+    /// The call site as this run's reader names it: `line 3` in the run's own
+    /// source, `lib.ral:7` in another.
+    pub(crate) fn call_site_label(&self) -> Option<String> {
+        let span = self.local.audit.call_site?;
+        let site = self.site_of(Some(span))?;
+        Some(if span.file == self.session.root_file {
+            format!("line {}", site.line)
+        } else {
+            format!("{}:{}", site.script, site.line)
+        })
     }
 
     /// Put one enquiry to `mooring`'s host desk and block for the answer.  The

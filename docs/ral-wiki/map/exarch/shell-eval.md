@@ -187,9 +187,10 @@ order, and exits 124:
    still present in the registry, running or settled-unclaimed, is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
    registry and is nobody's orphan. The sentence names each survivor by its
-   `cmd` and the line its birth's `CallSite` records — an anonymous `defer`'s
-   `cmd` is only `<block>` — up to five, and counts aloud whatever it does not
-   name — a silent truncation would read as "that was all of them".
+   `cmd` — a `watch`'s label, a `service`'s description, and for an anonymous
+   `spawn` or `defer` the line that wrote it, `block at line 3` — up to five,
+   and counts aloud whatever it does not name — a silent truncation would read
+   as "that was all of them".
 
 The per-stage journal exists but goes unrendered: `run_shell` asks with
 `trail: Some(CapturePolicy::Off)`, so every dispatch's `Report::Ran.trail`

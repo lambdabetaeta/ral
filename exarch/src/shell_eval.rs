@@ -36,9 +36,6 @@ pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 /// lingering under retention does not.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
-/// The script name every tool call runs under.
-pub(crate) const TOOL_SCRIPT: &str = "<tool>";
-
 /// Birth budget on `detach` per session shell.
 ///
 /// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap
@@ -258,7 +255,7 @@ pub(crate) fn run_shell(
 
     let run = Run {
         program: Program::Source(cmd.to_string()),
-        script_name: TOOL_SCRIPT.to_string(),
+        script_name: "<tool>".to_string(),
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         deferred_lease: Some(ral_core::types::WorkerLease {
@@ -648,8 +645,8 @@ mod tests {
 
     /// The prompt's index lists the agent helpers and tells the model to
     /// `explain` any name for its docs, so every helper must answer with one.
-    /// They are plain locals, and a local used to shadow the library table its
-    /// own doc lives in.
+    /// They are plain locals, which could shadow the library table their own
+    /// docs live in.
     #[test]
     fn explain_answers_every_agent_helper_with_its_doc() {
         let mut shell = fresh_shell();
@@ -1088,11 +1085,11 @@ keep-bottom
         assert!(matches!(
             decode_surface(
                 &Observation::instant(
-                    CallSite {
+                    Some(CallSite {
                         script: "run.ral".into(),
                         line: 1,
                         col: 1,
-                    },
+                    }),
                     Some("alex".into()),
                     Observed::Read {
                         path: "a.rs".into()

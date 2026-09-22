@@ -23,7 +23,7 @@ use std::time::Duration;
 // socketpair end inherited on fd 3. The frame protocol itself is not.
 #[cfg(unix)]
 use crate::process::ChildHandle;
-use crate::serial::{FOValue, NotData};
+use crate::serial::{FOValue, NotData, Opaque};
 use crate::sync::{CondvarExt as _, LockExt};
 use crate::types::CapturePolicy;
 use crate::types::DeferredSink;
@@ -333,10 +333,8 @@ impl Report {
 /// The status of an ending that *failed*: never zero, so an error can never
 /// be reported with the code that means success.
 ///
-/// `render_ending` once built a `Raised` out of a settled run's own status —
-/// normally `0` — and a host dutifully reported the failure as a success. The
-/// clamp lives in the type rather than at that one site: `From<i32>` is the
-/// only way in, the wire form is the plain integer, and `serde` routes a
+/// The clamp lives in the type rather than at any one site: `From<i32>` is
+/// the only way in, the wire form is the plain integer, and `serde` routes a
 /// decoded status back through the same door, so no peer can smuggle a
 /// success code into a failure either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,33 +415,26 @@ impl Ending {
     }
 }
 
-/// Why a settled `value` has no wire form, and what the author likely meant.
-fn render_unreturnable(value: &crate::types::Value, found: NotData) -> String {
-    let (message, hint) = if crate::serial::no_wire_form(value) {
-        let hint = match found {
-            NotData::Handle => {
-                "did you mean to keep it? bind it — `let h = defer { … }` — and `await $h` \
-                 when you need its value"
-            }
-            NotData::Block => "did you mean to run it? force it with `!{ … }`",
-            NotData::Function => "did you mean to apply it? pass it its arguments",
-        };
-        (
-            format!("the result is {found}, and a run can return only data"),
-            hint,
-        )
-    } else {
-        let hint = match found {
-            NotData::Handle => "bind the handle with `let h = …`, and return only data",
-            NotData::Block | NotData::Function => {
-                "return only data: force a block with `!{ … }`, or bind it with `let`"
-            }
-        };
-        (
-            format!("the result holds {found}, and a run can return only data"),
-            hint,
-        )
+/// Why a settled result has no wire form, and what the author likely meant.
+fn render_unreturnable(NotData { leaf, nested }: NotData) -> String {
+    let (verb, hint) = match (leaf, nested) {
+        (Opaque::Handle, false) => (
+            "is",
+            "did you mean to keep it? bind it — `let h = defer { … }` — and `await $h` \
+             when you need its value",
+        ),
+        (Opaque::Block, false) => ("is", "did you mean to run it? force it with `!{ … }`"),
+        (Opaque::Function, false) => ("is", "did you mean to apply it? pass it its arguments"),
+        (Opaque::Handle, true) => (
+            "holds",
+            "bind the handle with `let h = …`, and return only data",
+        ),
+        (Opaque::Block | Opaque::Function, true) => (
+            "holds",
+            "return only data: force a block with `!{ … }`, or bind it with `let`",
+        ),
     };
+    let message = format!("the result {verb} {leaf}, and a run can return only data");
     let mut error = crate::types::Error::new(message, 1);
     error.hint = Some(hint.into());
     crate::diagnostic::format_runtime_error_compact(&error)
@@ -465,7 +456,7 @@ fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) 
                 status: status.clamp(0, 255),
             },
             Err(found) => Ending::Unreturnable {
-                rendered: render_unreturnable(&value, found),
+                rendered: render_unreturnable(found),
             },
         },
         Raw::Raised {

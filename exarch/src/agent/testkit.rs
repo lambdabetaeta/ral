@@ -192,16 +192,21 @@ pub(crate) fn probe_int(session: &Avatar, class: &str) -> i64 {
 pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
+    // Discarded, so a block- or handle-valued binding still settles on data.
     let content = session
-        .run_shell(format!("probe-{name}"), &format!("${name}"), 5, &emit)
+        .run_shell(
+            format!("probe-{name}"),
+            &format!("let _ = ${name}"),
+            5,
+            &emit,
+        )
         .content;
-    // A closure-valued binding never crosses the seam, but it did resolve.
-    if content.contains("VALUE:") || content.contains("a run can return only data") {
+    if content.lines().any(|line| line == "EXIT: 0") {
         return true;
     }
     assert!(
         content.contains(&format!("undefined variable: ${name}")),
-        "scope probe for `{name}` answered neither a VALUE nor an undefined-variable error: {content}"
+        "scope probe for `{name}` neither succeeded nor reported an undefined variable: {content}"
     );
     false
 }
