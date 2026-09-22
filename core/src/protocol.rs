@@ -27,6 +27,7 @@ use crate::serial::{FOValue, NotData, Opaque};
 use crate::sync::{CondvarExt as _, LockExt};
 use crate::types::CapturePolicy;
 use crate::types::DeferredSink;
+use crate::types::Observation;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
@@ -511,10 +512,6 @@ impl crate::run::RunReport {
     /// the last point at which the engine's
     /// [`SourceDb`](crate::source::SourceDb) is in hand; the host receives the
     /// full string — prefix, status, hint, caret — and only has to print it.
-    ///
-    /// # Panics
-    /// Never: [`Observation::to_wire`] is total over exactly the vocabulary
-    /// [`FOValue`] admits.
     pub(crate) fn into_report(self, sources: &crate::source::SourceDb) -> Report {
         match self {
             // Not `sources`: a static failure carries the text its carets point
@@ -530,13 +527,7 @@ impl crate::run::RunReport {
             } => Report::Ran {
                 ending: render_ending(ending, sources),
                 captured,
-                trail: trail
-                    .iter()
-                    .map(|obs| {
-                        FOValue::try_from(&obs.to_wire())
-                            .expect("Observation::to_wire is total over the wire vocabulary")
-                    })
-                    .collect(),
+                trail: trail.iter().map(Observation::to_wire).collect(),
             },
         }
     }
@@ -701,7 +692,7 @@ pub enum ProbeError {
 /// enquiries, how a session it forks reaches that desk. One object, so the
 /// rails a run speaks on can never be bound to two hosts.
 pub trait Host: Send + Sync {
-    fn surface(&self, val: FOValue);
+    fn surface(&self, val: &FOValue);
 
     /// Answer one enquiry.
     ///
@@ -714,7 +705,7 @@ pub trait Host: Send + Sync {
 
 /// The mute host: renders nothing, answers nothing, adopts nothing.
 impl Host for () {
-    fn surface(&self, _val: FOValue) {}
+    fn surface(&self, _val: &FOValue) {}
 
     fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
         Err(EnquiryError::no_desk())
@@ -835,7 +826,7 @@ pub fn dispatch_to_report(
             continue;
         }
         match event {
-            Event::Surface(val) => host.surface(val),
+            Event::Surface(val) => host.surface(&val),
             Event::Enquiry(eid, req) => {
                 let answer = host.enquire(req);
                 transport.answer(eid, answer);
@@ -1401,7 +1392,7 @@ impl crate::types::EnquiryDesk for IdentityDesk {
         let mut carried = std::collections::VecDeque::new();
         while let Some((did, event)) = self.events.try_recv() {
             match event {
-                Event::Surface(val) => self.host.surface(val),
+                Event::Surface(val) => self.host.surface(&val),
                 other => carried.push_back((did, other)),
             }
         }
@@ -2330,7 +2321,7 @@ mod enquiry_tests {
     /// A stub host that maps `Int{n}` to `Int{n+1}`, otherwise echoes.
     struct IncrementSeam;
     impl Host for IncrementSeam {
-        fn surface(&self, _val: FOValue) {}
+        fn surface(&self, _val: &FOValue) {}
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             match req {
                 FOValue::Int { value } => Ok(FOValue::Int { value: value + 1 }),
@@ -2394,7 +2385,7 @@ mod enquiry_tests {
     /// sets `dispatch`'s thread stamp by hand and exercises the same guard.
     struct ReentrantShellMutSeam(std::sync::Arc<IdentityTransport>);
     impl Host for ReentrantShellMutSeam {
-        fn surface(&self, _val: FOValue) {}
+        fn surface(&self, _val: &FOValue) {}
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             let _guard = self.0.shell_mut();
             Ok(req)
@@ -2423,7 +2414,7 @@ mod enquiry_tests {
     /// The same guard on the other door.
     struct ReentrantDispatchSeam(std::sync::Arc<IdentityTransport>);
     impl Host for ReentrantDispatchSeam {
-        fn surface(&self, _val: FOValue) {}
+        fn surface(&self, _val: &FOValue) {}
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             self.0.dispatch(
                 DispatchId(0),

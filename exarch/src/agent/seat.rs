@@ -593,8 +593,8 @@ mod tests {
     struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::serial::FOValue>>);
 
     impl Host for SurfaceCollector {
-        fn surface(&self, val: ral_core::serial::FOValue) {
-            self.0.lock().unwrap().push(val);
+        fn surface(&self, val: &ral_core::serial::FOValue) {
+            self.0.lock().unwrap().push(val.clone());
         }
         fn enquire(
             &self,
@@ -747,7 +747,7 @@ mod tests {
                 // this asserts on content rather than length.
                 assert!(
                     values.iter().any(
-                        |v| matches!(v, ral_core::Value::Variant { label, .. } if label == "done")
+                        |v| matches!(v, ral_core::serial::FOValue::Variant { label, .. } if label == "done")
                     ),
                     "the batch must carry the worker's completion marker, got {values:?}"
                 );

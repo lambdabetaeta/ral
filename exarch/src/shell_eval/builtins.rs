@@ -200,7 +200,7 @@ fn rows_of(body: &str) -> Vec<String> {
 /// Raise the one read observation for a whole-file read: the readers read in
 /// Rust below the ral line, so no redirect frame speaks for them.
 fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
-    mooring.surface(
+    mooring.surface_data(
         &Observation::instant(
             shell.call_site(),
             shell.principal(),
@@ -208,7 +208,7 @@ fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
                 path: path.to_string(),
             },
         )
-        .to_value(),
+        .to_wire(),
     );
 }
 
@@ -388,7 +388,7 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let pattern = args[0].to_string();
 
-    mooring.surface(
+    mooring.surface_data(
         &Observation::instant(
             shell.call_site(),
             shell.principal(),
@@ -397,7 +397,7 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
                 pattern: pattern.clone(),
             },
         )
-        .to_value(),
+        .to_wire(),
     );
 
     let results = search_tree(mooring, shell, &pattern)?
@@ -585,7 +585,7 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
     if hunks.is_empty() {
         return;
     }
-    mooring.surface(&encode_card(&Card(vec![Mark::Diff {
+    mooring.surface_data(&encode_card(&Card(vec![Mark::Diff {
         path: path.to_string(),
         hunks,
     }])));

@@ -409,6 +409,55 @@ impl<X> FOValue<X> {
             Self::Ext(_) => "a value that is not first-order".to_string(),
         }
     }
+
+    /// A record's field; `None` on an absent key or a value that is no record.
+    #[must_use]
+    pub fn field(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Map { entries } => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int { value } => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool { value } => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_list(&self) -> Option<&[Self]> {
+        match self {
+            Self::List { items } => Some(items),
+            _ => None,
+        }
+    }
 }
 
 /// `n` of `noun`, agreeing in number: the one spelling of a count in prose,
@@ -621,44 +670,66 @@ impl TryFrom<&Value> for FOValue {
 /// genuine string can impersonate one.
 pub(crate) const OPAQUE_TAG: &str = "opaque";
 
-/// The leaves [`FOValue::try_from`] rejects.
-pub(crate) fn no_wire_form(v: &Value) -> bool {
-    Opaque::of(v).is_some()
-}
-
-/// Just the leaf a `Handle` has no wire form at all: unlike [`no_wire_form`],
-/// a closure is not one of them, since a fork or a wire seed keeps closures
-/// rich rather than scrubbing them.
-pub(crate) fn is_handle(v: &Value) -> bool {
-    matches!(v, Value::Handle(_))
-}
-
-/// Recursively replace every leaf `p` accepts with `` `opaque {type: …} ``.
-///
-/// Every other leaf crosses untouched.  The seams differ only in `p`: a flat
-/// wire scrubs closures as well as handles, the fragment wire keeps them,
-/// since they intern against its scope table and decode back live.
-pub(crate) fn scrub(v: &Value, p: &impl Fn(&Value) -> bool) -> Value {
-    if p(v) {
-        return Value::Variant {
-            label: OPAQUE_TAG.to_string(),
-            payload: Some(Box::new(Value::map(vec![(
+/// `` `opaque {type: …} ``: what a scrubbed leaf crosses as.
+fn opaque(v: &Value) -> FOValue {
+    FOValue::Variant {
+        label: OPAQUE_TAG.to_string(),
+        payload: Some(Box::new(FOValue::Map {
+            entries: vec![(
                 "type".to_string(),
-                Value::String(v.type_name().to_lowercase()),
-            )]))),
-        };
+                FOValue::String {
+                    value: v.type_name().to_lowercase(),
+                },
+            )],
+        })),
     }
+}
+
+impl FOValue {
+    /// [`FOValue::try_from`] made total: every leaf that is not data crosses
+    /// as its `` `opaque `` placeholder, as the flat wire needs.
+    pub(crate) fn scrubbed(v: &Value) -> Self {
+        match v {
+            Value::Unit => Self::Unit,
+            Value::Bool(v) => Self::Bool { value: *v },
+            Value::Int(v) => Self::Int { value: *v },
+            Value::Float(v) => Self::Float { value: *v },
+            Value::String(v) => Self::String { value: v.clone() },
+            Value::Bytes(v) => Self::Bytes { value: v.clone() },
+            Value::List(items) => Self::List {
+                items: items.iter().map(Self::scrubbed).collect(),
+            },
+            Value::Map(items) => Self::Map {
+                entries: items
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::scrubbed(v)))
+                    .collect(),
+            },
+            Value::Variant { label, payload } => Self::Variant {
+                label: label.clone(),
+                payload: payload.as_deref().map(|p| Box::new(Self::scrubbed(p))),
+            },
+            Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => opaque(v),
+        }
+    }
+}
+
+/// Every `Handle` leaf as its `` `opaque `` placeholder.  Unlike
+/// [`FOValue::scrubbed`], closures stay live: a fork or a wire seed interns
+/// them against its scope table rather than erasing them.
+pub(crate) fn scrub_handles(v: &Value) -> Value {
     match v {
-        Value::List(items) => Value::list(items.iter().map(|i| scrub(i, p)).collect()),
+        Value::Handle(_) => Value::from(opaque(v)),
+        Value::List(items) => Value::list(items.iter().map(scrub_handles).collect()),
         Value::Map(entries) => Value::map(
             entries
                 .iter()
-                .map(|(k, v)| (k.clone(), scrub(v, p)))
+                .map(|(k, v)| (k.clone(), scrub_handles(v)))
                 .collect(),
         ),
         Value::Variant { label, payload } => Value::Variant {
             label: label.clone(),
-            payload: payload.as_ref().map(|q| Box::new(scrub(q, p))),
+            payload: payload.as_deref().map(|q| Box::new(scrub_handles(q))),
         },
         other => other.clone(),
     }

@@ -1030,20 +1030,14 @@ mod tests {
     /// appends, stamped with `epoch` — a live one for the ordinary path, a
     /// stale one to exercise the pop-time fence.
     fn surface(epoch: u64) -> Post {
-        use ral_core::Value;
-        let done = Value::Variant {
-            label: "done".into(),
-            payload: Some(Box::new(Value::map(vec![
-                ("cmd".into(), Value::String("<block>".into())),
-                (
-                    "outcome".into(),
-                    Value::Variant {
-                        label: "ok".into(),
-                        payload: Some(Box::new(Value::Unit)),
-                    },
-                ),
-            ]))),
-        };
+        use crate::bus::card::testkit::{map_value, s, variant};
+        let done = variant(
+            "done",
+            map_value(vec![
+                ("cmd", s("<block>")),
+                ("outcome", variant("ok", ral_core::serial::FOValue::Unit)),
+            ]),
+        );
         Post::Stamped {
             epoch: Minted(epoch),
             kind: Stamped::Surface {

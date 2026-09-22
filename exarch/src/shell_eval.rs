@@ -143,8 +143,8 @@ pub enum Decoded {
 ///
 /// The register is not among them: a pin is *state*, keyed to a slot and
 /// overwritten in place, and `exarch-pins` is its only door.
-pub fn decode_surface(ev: &RalValue) -> Decoded {
-    if let Some(event) = Observation::from_value(ev) {
+pub fn decode_surface(ev: &FOValue) -> Decoded {
+    if let Some(event) = Observation::from_wire(ev) {
         // Core reports every observation it makes and judges none of them;
         // `landing` is where this host says which it wants.  One core
         // dispatch is one observation, so a rejected one is dropped outright
@@ -192,10 +192,7 @@ struct InboxDeferred {
 }
 
 impl DeferredSink for InboxDeferred {
-    fn deliver(&self, batch: Vec<ral_core::serial::FOValue>) {
-        // Decode once, totally, at this door: the batch crosses as first-order
-        // values, the inbox renders `Value`s.
-        let values = batch.into_iter().map(RalValue::from).collect();
+    fn deliver(&self, values: Vec<FOValue>) {
         self.stamp.post(Stamped::Surface {
             id: self.root,
             values,
@@ -367,7 +364,7 @@ mod tests {
     //! pin that `run_shell`'s wrapping does not perturb it.
 
     use super::*;
-    use crate::bus::card::{Row, observation_from_wire};
+    use crate::bus::card::Row;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::Shell;
@@ -1031,6 +1028,7 @@ keep-bottom
     /// `deliver` mints later.
     #[test]
     fn decode_surface_round_trips_each_class() {
+        use crate::bus::card::testkit::{card_value, map_value, s, variant};
         assert!(matches!(
             decode_surface(
                 &Observation::instant(
@@ -1044,57 +1042,45 @@ keep-bottom
                         path: "a.rs".into()
                     },
                 )
-                .to_value()
+                .to_wire()
             ),
             Decoded::Surface(Surface::Observation(_))
         ));
         assert!(matches!(
-            decode_surface(&RalValue::Variant {
-                label: "notice".into(),
-                payload: Some(Box::new(RalValue::map(vec![
+            decode_surface(&variant(
+                "notice",
+                map_value(vec![
                     (
-                        "kind".into(),
-                        RalValue::Variant {
+                        "kind",
+                        FOValue::Variant {
                             label: "reap".into(),
                             payload: None,
                         },
                     ),
-                    ("cmd".into(), RalValue::String("sleep 10".into())),
-                    ("cause".into(), RalValue::String("idle".into())),
-                ]))),
-            }),
+                    ("cmd", s("sleep 10")),
+                    ("cause", s("idle")),
+                ]),
+            )),
             Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
         ));
         assert!(matches!(
-            decode_surface(&RalValue::Variant {
-                label: "card".into(),
-                payload: Some(Box::new(RalValue::list(vec![]))),
-            }),
+            decode_surface(&card_value(vec![])),
             Decoded::Surface(Surface::Card(_))
         ));
         assert!(matches!(
-            decode_surface(&RalValue::Variant {
-                label: "done".into(),
-                payload: Some(Box::new(RalValue::map(vec![
-                    ("cmd".into(), RalValue::String("block at turn 1, line 1".into())),
-                    (
-                        "outcome".into(),
-                        RalValue::Variant {
-                            label: "ok".into(),
-                            payload: Some(Box::new(RalValue::Unit)),
-                        },
-                    ),
-                ]))),
-            }),
+            decode_surface(&variant(
+                "done",
+                map_value(vec![
+                    ("cmd", s("block at turn 1, line 1")),
+                    ("outcome", variant("ok", FOValue::Unit)),
+                ]),
+            )),
             Decoded::Surface(Surface::Done {
                 cmd,
                 outcome: crate::record::DoneOutcome::Ok,
             }) if cmd == "block at turn 1, line 1"
         ));
-        assert!(matches!(
-            decode_surface(&RalValue::String("nope".into())),
-            Decoded::Unknown
-        ));
+        assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
     }
 
     /// The sink always posts, stamped with the root id and its birth
@@ -1758,7 +1744,7 @@ return !{{length $hits}}"
             .iter()
             .filter_map(|r| match r {
                 crate::record::Record::Display(crate::record::Display::Observation { value }) => {
-                    observation_from_wire(value.clone()).map(|o| o.what)
+                    Observation::from_wire(value).map(|o| o.what)
                 }
                 _ => None,
             })

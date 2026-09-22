@@ -1,18 +1,19 @@
 //! One fact observed at a door, and the one record shape it reifies as.
 //!
 //! The surface rail, the audit trail, `--audit`, and the wire all speak this
-//! vocabulary: [`Observation::to_value`] is the single projection, and
-//! [`Observation::from_value`] its inverse, so a host decodes exactly what
+//! vocabulary: [`Observation::to_wire`] is the single projection,
+//! [`Observation::to_value`] its runtime form, and
+//! [`Observation::from_wire`] the inverse, so a host decodes exactly what
 //! core built.  The envelope is a record of `site`, `start`, `end` and
 //! `principal`; the fact itself is `what`, a variant whose tag is
 //! the kind, so no separate `kind` field can disagree with the payload beside
 //! it.
 
 use super::audit::{AuditIo, epoch_us};
-use super::map::Map;
 use super::shell::workers::{LeaseClass, WorkerId};
 use super::value::Value;
 use crate::diagnostic::CallSite;
+use crate::serial::FOValue;
 use crate::syntax::ast::RedirectMode;
 use std::collections::BTreeMap;
 
@@ -220,15 +221,42 @@ fn lease_class_parse(s: &str) -> Option<LeaseClass> {
     })
 }
 
+fn string(value: impl Into<String>) -> FOValue {
+    FOValue::String {
+        value: value.into(),
+    }
+}
+
+fn int(value: i64) -> FOValue {
+    FOValue::Int { value }
+}
+
+fn bytes(value: Vec<u8>) -> FOValue {
+    FOValue::Bytes { value }
+}
+
+/// Keys sorted, as a runtime map would iterate them, so the wire form is the
+/// one `Value`'s own encoding would give.
+fn record(fields: Vec<(&str, FOValue)>) -> FOValue {
+    let mut entries: Vec<(String, FOValue)> =
+        fields.into_iter().map(|(k, v)| (k.into(), v)).collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    FOValue::Map { entries }
+}
+
+fn tagged(label: &str, payload: FOValue) -> FOValue {
+    FOValue::Variant {
+        label: label.into(),
+        payload: Some(Box::new(payload)),
+    }
+}
+
 /// `` `just x `` for a field that has a value, `` `none `` for one that does
 /// not: an absent before-image is a fact of its own, not a missing key.
-fn optional(v: Option<Value>) -> Value {
+fn optional(v: Option<FOValue>) -> FOValue {
     match v {
-        Some(v) => Value::Variant {
-            label: "just".into(),
-            payload: Some(Box::new(v)),
-        },
-        None => Value::Variant {
+        Some(v) => tagged("just", v),
+        None => FOValue::Variant {
             label: "none".into(),
             payload: None,
         },
@@ -241,12 +269,12 @@ fn optional(v: Option<Value>) -> Value {
     clippy::cast_possible_wrap,
     reason = "line/col are source positions bounded by source size, far below i64::MAX"
 )]
-pub(crate) fn site_value(site: Option<&CallSite>) -> Value {
+pub(crate) fn site_value(site: Option<&CallSite>) -> FOValue {
     optional(site.map(|s| {
-        Value::map(vec![
-            ("script".into(), Value::String(s.script.clone())),
-            ("line".into(), Value::Int(s.line as i64)),
-            ("col".into(), Value::Int(s.col as i64)),
+        record(vec![
+            ("script", string(s.script.clone())),
+            ("line", int(s.line as i64)),
+            ("col", int(s.col as i64)),
         ])
     }))
 }
@@ -256,12 +284,11 @@ pub(crate) fn site_value(site: Option<&CallSite>) -> Value {
     clippy::cast_possible_truncation,
     reason = "line/col were projected from usize source positions"
 )]
-fn site_of(v: &Value) -> Option<CallSite> {
-    let Value::Map(m) = v else { return None };
+fn site_of(v: &FOValue) -> Option<CallSite> {
     Some(CallSite {
-        script: str_at(m, "script")?,
-        line: int_at(m, "line")? as usize,
-        col: int_at(m, "col")? as usize,
+        script: str_at(v, "script")?,
+        line: int_at(v, "line")? as usize,
+        col: int_at(v, "col")? as usize,
     })
 }
 
@@ -303,49 +330,36 @@ impl Observation {
     /// principal — a record field is always present, and neither a runtime
     /// error message nor a user name is ever legitimately empty.  An absent
     /// site, byte field or subject is `` `none ``, never a missing key.
-    pub fn to_value(&self) -> Value {
-        Value::map(vec![
-            ("site".into(), site_value(self.site.as_ref())),
-            ("start".into(), Value::Int(self.start)),
-            ("end".into(), Value::Int(self.end)),
+    pub fn to_wire(&self) -> FOValue {
+        record(vec![
+            ("site", site_value(self.site.as_ref())),
+            ("start", int(self.start)),
+            ("end", int(self.end)),
             (
-                "principal".into(),
-                Value::String(self.principal.clone().unwrap_or_default()),
+                "principal",
+                string(self.principal.clone().unwrap_or_default()),
             ),
-            (
-                "what".into(),
-                Value::Variant {
-                    label: self.what.kind().into(),
-                    payload: Some(Box::new(self.what.to_payload())),
-                },
-            ),
+            ("what", tagged(self.what.kind(), self.what.to_payload())),
         ])
     }
 
-    /// The protocol-facing projection: total where [`Self::to_value`] is not.
-    /// Nothing about the envelope or any first-order field changes, so a host
-    /// decoder built against [`Self::from_value`] reads it unmodified.
-    pub fn to_wire(&self) -> Value {
-        crate::serial::scrub(&self.to_value(), &crate::serial::no_wire_form)
+    /// [`Self::to_wire`] as a runtime value.
+    pub fn to_value(&self) -> Value {
+        Value::from(self.to_wire())
     }
 
-    /// Inverse of [`Self::to_value`]; `None` for anything that is not a record
+    /// Inverse of [`Self::to_wire`]; `None` for anything that is not a record
     /// this module built, so a host decoder can try the next shape.
-    pub fn from_value(v: &Value) -> Option<Self> {
-        let Value::Map(m) = v else { return None };
-        let Value::Variant { label, payload } = m.get("what")? else {
+    pub fn from_wire(v: &FOValue) -> Option<Self> {
+        let FOValue::Variant { label, payload } = v.field("what")? else {
             return None;
         };
-        let Value::Map(fact) = payload.as_deref()? else {
-            return None;
-        };
-        let what = Observed::from_payload(label, fact)?;
         Some(Self {
-            site: optional_at(m, "site", site_of)?,
-            start: int_at(m, "start")?,
-            end: int_at(m, "end")?,
-            principal: Some(str_at(m, "principal")?).filter(|p| !p.is_empty()),
-            what,
+            site: optional_at(v, "site", site_of)?,
+            start: int_at(v, "start")?,
+            end: int_at(v, "end")?,
+            principal: Some(str_at(v, "principal")?).filter(|p| !p.is_empty()),
+            what: Observed::from_payload(label, payload.as_deref()?)?,
         })
     }
 }
@@ -366,7 +380,7 @@ impl Observed {
     }
 
     /// The tagged variant's payload: one closed record per kind.
-    fn to_payload(&self) -> Value {
+    fn to_payload(&self) -> FOValue {
         match self {
             Self::Command {
                 argv,
@@ -374,98 +388,85 @@ impl Observed {
                 origin,
                 io,
                 error,
-            } => {
-                let argv_list = argv.iter().map(|a| Value::String(a.clone())).collect();
-                Value::map(vec![
-                    ("argv".into(), Value::list(argv_list)),
-                    ("status".into(), Value::Int(i64::from(*status))),
-                    ("origin".into(), Value::String(origin.as_str().into())),
-                    ("stdout".into(), Value::Bytes(io.stdout.clone())),
-                    ("stderr".into(), Value::Bytes(io.stderr.clone())),
-                    (
-                        "error".into(),
-                        Value::String(error.clone().unwrap_or_default()),
-                    ),
-                ])
-            }
+            } => record(vec![
+                (
+                    "argv",
+                    FOValue::List {
+                        items: argv.iter().map(|a| string(a.clone())).collect(),
+                    },
+                ),
+                ("status", int(i64::from(*status))),
+                ("origin", string(origin.as_str())),
+                ("stdout", bytes(io.stdout.clone())),
+                ("stderr", bytes(io.stderr.clone())),
+                ("error", string(error.clone().unwrap_or_default())),
+            ]),
             Self::Write {
                 path,
                 mode,
                 outcome,
                 new_bytes,
                 old_bytes,
-            } => Value::map(vec![
-                ("path".into(), Value::String(path.clone())),
-                ("mode".into(), Value::String(mode_str(*mode).into())),
-                ("outcome".into(), Value::String(outcome.as_str().into())),
-                (
-                    "new_bytes".into(),
-                    optional(new_bytes.clone().map(Value::Bytes)),
-                ),
-                (
-                    "old_bytes".into(),
-                    optional(old_bytes.clone().map(Value::Bytes)),
-                ),
+            } => record(vec![
+                ("path", string(path.clone())),
+                ("mode", string(mode_str(*mode))),
+                ("outcome", string(outcome.as_str())),
+                ("new_bytes", optional(new_bytes.clone().map(bytes))),
+                ("old_bytes", optional(old_bytes.clone().map(bytes))),
             ]),
-            Self::Read { path } => Value::map(vec![("path".into(), Value::String(path.clone()))]),
-            Self::Grep { scope, pattern } => Value::map(vec![
-                ("scope".into(), Value::String(scope.clone())),
-                ("pattern".into(), Value::String(pattern.clone())),
+            Self::Read { path } => record(vec![("path", string(path.clone()))]),
+            Self::Grep { scope, pattern } => record(vec![
+                ("scope", string(scope.clone())),
+                ("pattern", string(pattern.clone())),
             ]),
             Self::Capability {
                 resource,
                 decision,
                 fields,
-            } => Value::map(vec![
-                ("resource".into(), Value::String(resource.clone())),
-                ("decision".into(), Value::String(decision.as_str().into())),
+            } => record(vec![
+                ("resource", string(resource.clone())),
+                ("decision", string(decision.as_str())),
                 (
-                    "fields".into(),
-                    Value::map(
-                        fields
+                    "fields",
+                    FOValue::Map {
+                        entries: fields
                             .iter()
-                            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                            .map(|(k, v)| (k.clone(), string(v.clone())))
                             .collect(),
-                    ),
+                    },
                 ),
             ]),
             #[allow(
                 clippy::cast_possible_wrap,
                 reason = "a worker id is minted from a process-global counter, far below i64::MAX"
             )]
-            Self::Worker { id, cmd, class } => Value::map(vec![
-                ("id".into(), Value::Int(id.0 as i64)),
-                ("cmd".into(), Value::String(cmd.clone())),
-                (
-                    "class".into(),
-                    Value::String(lease_class_str(*class).into()),
-                ),
+            Self::Worker { id, cmd, class } => record(vec![
+                ("id", int(id.0 as i64)),
+                ("cmd", string(cmd.clone())),
+                ("class", string(lease_class_str(*class))),
             ]),
             Self::Act {
                 verb,
                 subject,
                 payload,
                 refused,
-            } => Value::map(vec![
-                ("verb".into(), Value::String(verb.clone())),
-                (
-                    "subject".into(),
-                    optional(subject.clone().map(Value::String)),
-                ),
-                ("payload".into(), Value::String(payload.clone())),
-                ("refused".into(), Value::Bool(*refused)),
+            } => record(vec![
+                ("verb", string(verb.clone())),
+                ("subject", optional(subject.clone().map(string))),
+                ("payload", string(payload.clone())),
+                ("refused", FOValue::Bool { value: *refused }),
             ]),
         }
     }
 
-    fn from_payload(tag: &str, m: &Map) -> Option<Self> {
+    fn from_payload(tag: &str, m: &FOValue) -> Option<Self> {
         #[allow(
             clippy::cast_possible_truncation,
             reason = "an exit status was projected from i32 and round-trips exactly"
         )]
         Some(match tag {
             "command" => Self::Command {
-                argv: strings_at(m, "argv"),
+                argv: strings_at(m, "argv")?,
                 status: int_at(m, "status")? as i32,
                 origin: CommandOrigin::parse(&str_at(m, "origin")?)?,
                 io: AuditIo {
@@ -513,52 +514,40 @@ impl Observed {
     }
 }
 
-fn string_of(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    }
+fn string_of(v: &FOValue) -> Option<String> {
+    v.as_str().map(str::to_owned)
 }
 
-fn bytes_of(v: &Value) -> Option<Vec<u8>> {
-    match v {
-        Value::Bytes(b) => Some(b.clone()),
-        _ => None,
-    }
+fn bytes_of(v: &FOValue) -> Option<Vec<u8>> {
+    v.as_bytes().map(<[u8]>::to_vec)
 }
 
-fn str_at(m: &Map, key: &str) -> Option<String> {
-    string_of(m.get(key)?)
+fn str_at(m: &FOValue, key: &str) -> Option<String> {
+    string_of(m.field(key)?)
 }
 
-fn int_at(m: &Map, key: &str) -> Option<i64> {
-    match m.get(key)? {
-        Value::Int(n) => Some(*n),
-        _ => None,
-    }
+fn int_at(m: &FOValue, key: &str) -> Option<i64> {
+    m.field(key)?.as_int()
 }
 
-fn bool_at(m: &Map, key: &str) -> Option<bool> {
-    match m.get(key)? {
-        Value::Bool(b) => Some(*b),
-        _ => None,
-    }
+fn bool_at(m: &FOValue, key: &str) -> Option<bool> {
+    m.field(key)?.as_bool()
 }
 
-fn bytes_at(m: &Map, key: &str) -> Option<Vec<u8>> {
-    bytes_of(m.get(key)?)
+fn bytes_at(m: &FOValue, key: &str) -> Option<Vec<u8>> {
+    bytes_of(m.field(key)?)
 }
 
 /// Inverse of [`optional`]: the outer `None` means the field was not the
-/// option [`Observation::to_value`] projects, the inner one the honest absence.
+/// option [`Observation::to_wire`] projects, the inner one the honest absence.
 #[allow(
     clippy::option_option,
     reason = "the two layers are different facts: a malformed field and an absent one"
 )]
-fn optional_at<T>(m: &Map, key: &str, of: fn(&Value) -> Option<T>) -> Option<Option<T>> {
-    match m.get(key)? {
-        Value::Variant { label, payload } if label == "just" => of(payload.as_deref()?).map(Some),
-        Value::Variant {
+fn optional_at<T>(m: &FOValue, key: &str, of: fn(&FOValue) -> Option<T>) -> Option<Option<T>> {
+    match m.field(key)? {
+        FOValue::Variant { label, payload } if label == "just" => of(payload.as_deref()?).map(Some),
+        FOValue::Variant {
             label,
             payload: None,
         } if label == "none" => Some(None),
@@ -566,31 +555,23 @@ fn optional_at<T>(m: &Map, key: &str, of: fn(&Value) -> Option<T>) -> Option<Opt
     }
 }
 
-fn string_map_at(m: &Map, key: &str) -> Option<BTreeMap<String, String>> {
-    let Value::Map(fields) = m.get(key)? else {
+fn string_map_at(m: &FOValue, key: &str) -> Option<BTreeMap<String, String>> {
+    let FOValue::Map { entries } = m.field(key)? else {
         return None;
     };
-    fields
+    entries
         .iter()
         .map(|(k, v)| Some((k.clone(), string_of(v)?)))
         .collect()
 }
 
-fn strings_at(m: &Map, key: &str) -> Vec<String> {
-    match m.get(key) {
-        Some(Value::List(l)) => l
-            .iter()
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+fn strings_at(m: &FOValue, key: &str) -> Option<Vec<String>> {
+    m.field(key)?.as_list()?.iter().map(string_of).collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::map::Map;
     use super::*;
 
     fn site() -> CallSite {
@@ -603,7 +584,7 @@ mod tests {
 
     fn round_trips(what: Observed) {
         let obs = Observation::spanning(Some(site()), 100, 250, Some("alex".into()), what);
-        let back = Observation::from_value(&obs.to_value());
+        let back = Observation::from_wire(&obs.to_wire());
         assert_eq!(back.as_ref(), Some(&obs));
     }
 
@@ -621,8 +602,8 @@ mod tests {
         let Value::Map(m) = &value else {
             panic!("an observation projects as a record")
         };
-        assert_eq!(m.get("site"), Some(&optional(None)));
-        assert_eq!(Observation::from_value(&value), Some(obs));
+        assert_eq!(m.get("site"), Some(&Value::from(optional(None))));
+        assert_eq!(Observation::from_wire(&obs.to_wire()), Some(obs));
     }
 
     /// The tag and the record behind it, out of a projection's `what`.
@@ -718,24 +699,28 @@ mod tests {
     }
 
     #[test]
-    fn from_value_declines_what_it_did_not_build() {
-        assert!(Observation::from_value(&Value::String("plain".into())).is_none());
-        assert!(Observation::from_value(&Value::map(vec![])).is_none());
+    fn from_wire_declines_what_it_did_not_build() {
+        let what = |v| FOValue::Map {
+            entries: vec![("what".into(), v)],
+        };
         assert!(
-            Observation::from_value(&Value::map(vec![(
-                "what".into(),
-                Value::Variant {
-                    label: "teleport".into(),
-                    payload: Some(Box::new(Value::map(vec![]))),
-                }
-            )]))
+            Observation::from_wire(&FOValue::String {
+                value: "plain".into()
+            })
+            .is_none()
+        );
+        assert!(Observation::from_wire(&FOValue::Map { entries: vec![] }).is_none());
+        assert!(
+            Observation::from_wire(&what(FOValue::Variant {
+                label: "teleport".into(),
+                payload: Some(Box::new(FOValue::Map { entries: vec![] })),
+            }))
             .is_none()
         );
         assert!(
-            Observation::from_value(&Value::map(vec![(
-                "what".into(),
-                Value::String("command".into())
-            )]))
+            Observation::from_wire(&what(FOValue::String {
+                value: "command".into()
+            }))
             .is_none(),
             "an untagged `what` is not a fact"
         );
@@ -794,14 +779,11 @@ mod tests {
     }
 
     /// The record leg's full round trip, as `Display::Observation` retraces
-    /// it on resume: `to_wire` scrubs, `FOValue::try_from` encodes,
-    /// `serde_json` crosses the log, `FOValue`'s own `Deserialize` decodes,
-    /// and `from_value` rebuilds.  Bytes, the `what` tag, and both legs of an
+    /// it on resume: `to_wire` encodes, `serde_json` crosses the log,
+    /// `FOValue`'s own `Deserialize` decodes, and `from_wire` rebuilds.  Bytes, the `what` tag, and both legs of an
     /// optional byte field survive intact.
     #[test]
     fn survives_to_wire_fovalue_json_and_back() {
-        use crate::serial::FOValue;
-
         for what in [
             Observed::Command {
                 argv: vec!["git".into(), "status".into()],
@@ -822,12 +804,9 @@ mod tests {
             },
         ] {
             let obs = Observation::spanning(Some(site()), 10, 20, Some("alex".into()), what);
-            let fo = FOValue::try_from(&obs.to_wire())
-                .expect("to_wire scrubs every leaf try_from rejects");
-            let json = serde_json::to_vec(&fo).expect("serialise FOValue");
+            let json = serde_json::to_vec(&obs.to_wire()).expect("serialise FOValue");
             let back_fo: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
-            let back =
-                Observation::from_value(&Value::from(back_fo)).expect("the wire form decodes");
+            let back = Observation::from_wire(&back_fo).expect("the wire form decodes");
             assert_eq!(back, obs);
         }
     }
@@ -848,7 +827,7 @@ mod tests {
         );
         let (tag, fact) = fact_of(&obs.to_value());
         assert_eq!(tag, "check");
-        assert_eq!(str_at(&fact, "decision").as_deref(), Some("denied"));
+        assert_eq!(fact.get("decision"), Some(&Value::String("denied".into())));
         assert!(!fact.contains_key("status"));
         assert_eq!(
             fact.get("fields"),

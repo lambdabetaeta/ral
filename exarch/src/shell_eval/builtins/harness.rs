@@ -710,15 +710,12 @@ fn builtin_pins(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled
 /// name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
     const FIELDS: [&str; 2] = ["rows", "total-bytes"];
-    let FOValue::Map { entries } = &answer else {
+    if !matches!(answer, FOValue::Map { .. }) {
         return Err(sig(
             "exarch-context: host answered an unexpected shape for the survey",
         ));
-    };
-    if let Some(missing) = FIELDS
-        .iter()
-        .find(|field| !entries.iter().any(|(key, _)| key == *field))
-    {
+    }
+    if let Some(missing) = FIELDS.iter().find(|field| answer.field(field).is_none()) {
         return Err(sig(format!(
             "exarch-context: host answered a survey missing the `{missing}` field"
         )));

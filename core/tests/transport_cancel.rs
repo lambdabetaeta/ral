@@ -75,7 +75,7 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
     // run door — `Audit::close` reads that prefix regardless of how the run
     // ended.
     let struck = trail.into_iter().find_map(|fo| {
-        let obs = ral_core::types::Observation::from_value(&ral_core::Value::from(fo))?;
+        let obs = ral_core::types::Observation::from_wire(&fo)?;
         match obs.what {
             Observed::Command { argv, .. } if argv.first().is_some_and(|a| a.contains("sleep")) => {
                 Some(argv)

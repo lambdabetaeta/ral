@@ -118,7 +118,7 @@ pub struct RunRequest<'a> {
 
 /// The byte streams captured under [`RunIo::Capture`], carried verbatim onto
 /// the protocol [`Report`](crate::protocol::Report).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -969,13 +969,10 @@ pub(crate) mod tests {
                 return false;
             }
             let Some(payload) = payload else { return false };
-            let crate::serial::FOValue::Map { entries } = payload.as_ref() else {
-                return false;
-            };
-            entries.iter().any(|(k, v)| {
-                k == "kind"
-                    && matches!(v, crate::serial::FOValue::Variant { label, .. } if label == "reap")
-            })
+            matches!(
+                payload.field("kind"),
+                Some(crate::serial::FOValue::Variant { label, .. }) if label == "reap"
+            )
         });
         assert!(
             saw_reap_notice,
@@ -1714,8 +1711,7 @@ pub(crate) mod tests {
             "the dispatch's own trail must carry its one command"
         );
         let round_tripped = trail.iter().any(|fo| {
-            let value = Value::from(fo.clone());
-            let Some(obs) = crate::types::Observation::from_value(&value) else {
+            let Some(obs) = crate::types::Observation::from_wire(fo) else {
                 return false;
             };
             matches!(obs.what, crate::types::Observed::Command { .. })

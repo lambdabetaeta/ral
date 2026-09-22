@@ -700,7 +700,6 @@ mod tests {
     /// of it.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
-        use crate::bus::card::observation_wire;
         use crate::record::{Display, Locus, Record, Recorded, Seq};
 
         let (mut app, rx, root) = app();
@@ -713,11 +712,7 @@ mod tests {
             );
         };
         let read_at = |path: &str| {
-            observation_wire(&Observation::instant(
-                None,
-                None,
-                Observed::Read { path: path.into() },
-            ))
+            Observation::instant(None, None, Observed::Read { path: path.into() }).to_wire()
         };
 
         fact(

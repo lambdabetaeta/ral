@@ -23,10 +23,10 @@ use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
 use crate::agent::event::EditAuthority;
-use crate::bus::card::{self, Card, Landing, landing, observation_card, observation_from_wire};
+use crate::bus::card::{self, Card, Landing, landing, observation_card};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
-use ral_core::types::Observed;
+use ral_core::types::{Observation, Observed};
 use std::fs;
 use std::io;
 use std::io::{Seek, Write};
@@ -1027,7 +1027,7 @@ impl Scrollback {
                 error: error.clone(),
                 elapsed: Duration::from_millis(*elapsed_ms),
             })],
-            K::Observation { value } => observation_items(value.clone()),
+            K::Observation { value } => observation_items(value),
             K::Card { card } => vec![surfaced(card.clone())],
             // Not a card: a settled block is announced, not bounded — a line
             // on the rail, exactly as a subagent's answer arrives.  The shape
@@ -1068,8 +1068,8 @@ fn surfaced(card: Card) -> Item {
 /// Decode one [`Display::Observation`](crate::record::Display::Observation),
 /// through the same [`landing`] the live rail draws from — a rendering, never
 /// recorded, built as the fact arrives.
-fn observation_items(value: ral_core::serial::FOValue) -> Vec<Item> {
-    let Some(obs) = observation_from_wire(value) else {
+fn observation_items(value: &ral_core::serial::FOValue) -> Vec<Item> {
+    let Some(obs) = Observation::from_wire(value) else {
         return Vec::new();
     };
     observed_items(&obs.what)

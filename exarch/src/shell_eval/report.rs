@@ -9,7 +9,6 @@
 use super::{ToolResult, ral_value_to_text};
 use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
-use ral_core::Value as RalValue;
 use ral_core::protocol::Ending;
 use ral_core::serial::FOValue;
 use ral_core::types::{Observation, Observed};
@@ -29,10 +28,7 @@ pub(crate) fn tool_result(
     workers: &[ProbedWorker],
     timeout_secs: u64,
 ) -> ToolResult {
-    let ral_core::Captured { stdout, mut stderr } = captured.unwrap_or(ral_core::Captured {
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-    });
+    let ral_core::Captured { stdout, mut stderr } = captured.unwrap_or_default();
     let value = match ending {
         Ending::Settled { value, .. } => ral_value_to_text(value),
         _ => None,
@@ -55,7 +51,7 @@ pub(crate) fn tool_result(
 /// taken at the run boundary.  The audit and the orphan sentence never draw
 /// on a [`Ending::Settled`] ending — it leaves the model well able to see
 /// from the transcript what landed.
-pub(crate) fn render(
+fn render(
     ending: &Ending,
     trail: &[FOValue],
     fragment: &ActFragment,
@@ -141,7 +137,7 @@ fn exit_tip(single_command: bool) -> String {
 fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
     trail
         .iter()
-        .filter_map(|fov| Observation::from_value(&RalValue::from(fov.clone())))
+        .filter_map(Observation::from_wire)
         .filter_map(|obs| match obs.what {
             Observed::Worker { id, .. } => Some(id.0),
             _ => None,
@@ -202,7 +198,7 @@ mod tests {
                 class: LeaseClass::Worker,
             },
         );
-        FOValue::try_from(&obs.to_wire()).expect("Observation::to_wire is total")
+        obs.to_wire()
     }
 
     fn worker_row(id: u64, cmd: &str, running: bool) -> ProbedWorker {

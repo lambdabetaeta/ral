@@ -32,7 +32,7 @@ pub(crate) fn error_record(
         ("cmd".into(), Value::String(cmd.to_string())),
         ("status".into(), Value::Int(i64::from(status))),
         ("message".into(), Value::String(message.to_string())),
-        ("site".into(), site_value(site)),
+        ("site".into(), Value::from(site_value(site))),
     ])
 }
 

@@ -2,9 +2,9 @@
 //! chain reaped, or idle top-level bindings the ledger pruned, decoded from
 //! `` `notice `` and composed into a one-liner.
 
-use super::value::{map_of, str_field};
+use super::value::{record, str_field};
 use super::{Card, Mark, Role, Span};
-use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 
 /// The decoded body of a `` `notice `` event, minted by core's
 /// `Shell::emit_ready_boundary_notices` once per settled run.
@@ -27,15 +27,15 @@ pub enum Notice {
 /// Anything unrecognised — a foreign `kind`, a missing field, another variant
 /// entirely — answers `None`, and `shell_eval::decode_surface` tries the next
 /// shape rather than dropping the value.
-pub(crate) fn value_to_notice(v: &RalValue) -> Option<Notice> {
-    let RalValue::Variant { label, payload } = v else {
+pub(crate) fn value_to_notice(v: &FOValue) -> Option<Notice> {
+    let FOValue::Variant { label, payload } = v else {
         return None;
     };
     if label != "notice" {
         return None;
     }
-    let m = map_of(payload.as_deref()?)?;
-    let RalValue::Variant { label: kind, .. } = m.get("kind")? else {
+    let m = record(payload.as_deref()?)?;
+    let FOValue::Variant { label: kind, .. } = m.field("kind")? else {
         return None;
     };
     Some(match kind.as_str() {
@@ -49,31 +49,23 @@ pub(crate) fn value_to_notice(v: &RalValue) -> Option<Notice> {
             },
         },
         "prune" => {
-            let RalValue::List(names) = m.get("names")? else {
-                return None;
-            };
-            let names: Vec<String> = names
+            let names: Vec<String> = m
+                .field("names")?
+                .as_list()?
                 .iter()
-                .map(|v| match v {
-                    RalValue::String(s) => Some(s.clone()),
-                    _ => None,
-                })
+                .map(|v| v.as_str().map(str::to_owned))
                 .collect::<Option<_>>()?;
-            let RalValue::List(idle) = m.get("idle-calls")? else {
-                return None;
-            };
-            let idle_calls: Vec<u64> = idle
+            let idle_calls: Vec<u64> = m
+                .field("idle-calls")?
+                .as_list()?
                 .iter()
-                .map(|v| match v {
-                    RalValue::Int(i) => {
-                        #[allow(
-                            clippy::cast_sign_loss,
-                            reason = "max(0) floors to a non-negative call count"
-                        )]
-                        let n = (*i).max(0) as u64;
-                        Some(n)
-                    }
-                    _ => None,
+                .map(|v| {
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "max(0) floors to a non-negative call count"
+                    )]
+                    let n = v.as_int()?.max(0) as u64;
+                    Some(n)
                 })
                 .collect::<Option<_>>()?;
             if names.len() != idle_calls.len() {

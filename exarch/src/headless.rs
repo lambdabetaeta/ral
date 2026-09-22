@@ -11,14 +11,14 @@
 
 use crate::agent::Avatar;
 use crate::agent::event::EditAuthority;
-use crate::bus::card::{self, Card, Mark, Row, landing, observation_card, observation_from_wire};
+use crate::bus::card::{self, Card, Mark, Row, landing, observation_card};
 use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
 use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
-use ral_core::types::Observed;
+use ral_core::types::{Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -329,7 +329,7 @@ impl Headless<'_> {
             }
             K::ProviderError { error } => self.print_readout(&record::fault::Readout::fatal(error)),
             K::Stalled { error } => self.print_readout(&record::fault::Readout::stall(error)),
-            K::Observation { value } => self.print_observation(value.clone()),
+            K::Observation { value } => self.print_observation(value),
             K::Card { card } => self.print_card(card),
             K::Done { cmd, outcome } => {
                 let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
@@ -395,8 +395,8 @@ impl Headless<'_> {
         }
     }
 
-    fn print_observation(&mut self, value: FOValue) {
-        let Some(obs) = observation_from_wire(value) else {
+    fn print_observation(&mut self, value: &FOValue) {
+        let Some(obs) = Observation::from_wire(value) else {
             return;
         };
         self.print_observed(&obs.what);

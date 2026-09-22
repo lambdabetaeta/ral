@@ -657,14 +657,9 @@ mod tests {
     use ral_core::types::{Observation, Observed};
     use std::path::PathBuf;
 
-    /// The wire form a `Display::Observation` carries —
-    /// the round trip `observation_wire` and `observation_from_wire` take in
-    /// the seam itself, rebuilt here without pulling the private conversion
-    /// into this crate.
+    /// The wire form a `Display::Observation` carries.
     fn observation_wire(what: Observed) -> ral_core::serial::FOValue {
-        let observation = Observation::instant(None, None, what);
-        ral_core::serial::FOValue::try_from(&observation.to_wire())
-            .expect("a test observation always scrubs to a valid FOValue")
+        Observation::instant(None, None, what).to_wire()
     }
 
     #[test]

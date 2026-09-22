@@ -23,7 +23,6 @@ use crate::fleet::{
 use crate::provider::Provider;
 use crate::shell_eval::{self, PinDigests, Surface};
 use ral_core::SpawnGrant;
-use ral_core::Value as RalValue;
 use ral_core::protocol::{EnquiryError, Host};
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
@@ -227,7 +226,7 @@ pub(crate) struct HostServices {
     /// than *its* `/clear` refuses to spawn.
     pub stamp: Stamp,
     /// What this call has committed so far: minted per `ral` call, and read
-    /// back by [`crate::shell_eval::report::render`] when a raise discards
+    /// back by [`crate::shell_eval::report::tool_result`] when a raise discards
     /// the bindings but not the acts.
     pub acts: ActFragment,
     /// Who the acts are committed on behalf of, read once at install: the
@@ -1717,8 +1716,7 @@ impl ExarchDesk {
             "key",
         )?;
         let body = spec.take("body", "the card to pin")?;
-        let card = crate::bus::card::value_to_card(&RalValue::from(body))
-            .filter(|c| !c.marks().is_empty());
+        let card = crate::bus::card::value_to_card(&body).filter(|c| !c.marks().is_empty());
         self.apply_pin(key, card);
         Ok(FOValue::Unit)
     }
@@ -1773,8 +1771,7 @@ impl ExarchDesk {
         )?;
         let m = self.services.agent.pins.lock_ignore_poison();
         Ok(match m.get(&key) {
-            Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card))
-                .expect("an encoded card is always data"),
+            Some(digest) => crate::bus::card::encode_card(&digest.card),
             None => FOValue::Unit,
         })
     }
@@ -2214,9 +2211,9 @@ impl SurfaceApplier {
     /// loud case — recorded, not dropped silently; `landing`'s own rejection
     /// of a known observation stays silent, since that is a class this host
     /// chose not to render, not an unknown one.
-    pub(crate) fn live(&self, val: FOValue) {
+    pub(crate) fn live(&self, val: &FOValue) {
         let shape = val.shape();
-        let surface = match shell_eval::decode_surface(&RalValue::from(val)) {
+        let surface = match shell_eval::decode_surface(val) {
             shell_eval::Decoded::Surface(surface) => surface,
             shell_eval::Decoded::Landed => return,
             shell_eval::Decoded::Unknown => {
@@ -2249,7 +2246,7 @@ impl SurfaceApplier {
 /// An applier alone is the mute host the bare harness runs under:
 /// nothing answers, nothing forks.
 impl Host for SurfaceApplier {
-    fn surface(&self, val: FOValue) {
+    fn surface(&self, val: &FOValue) {
         self.live(val);
     }
 
@@ -2283,7 +2280,7 @@ pub(crate) fn absorb_surface(
 ) -> std::io::Result<()> {
     match surface {
         Surface::Observation(event) => {
-            let value = crate::bus::card::observation_wire(event);
+            let value = event.to_wire();
             let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
             Ok(())
         }
@@ -2352,7 +2349,7 @@ pub(crate) struct RunHost {
 }
 
 impl Host for RunHost {
-    fn surface(&self, val: FOValue) {
+    fn surface(&self, val: &FOValue) {
         self.apply.live(val);
     }
 
@@ -2386,6 +2383,7 @@ mod tests {
     };
     use crate::record::{Display, FleetSink, Record, Transient};
     use crate::shell_eval::builtins::harness;
+    use ral_core::Value as RalValue;
 
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
@@ -2499,28 +2497,15 @@ mod tests {
         family_req("transcript", "grep", Some(payload))
     }
 
-    fn int_field(value: FOValue, key: &str) -> i64 {
-        let FOValue::Map { entries } = value else {
-            panic!("expected a record")
-        };
-        entries
-            .into_iter()
-            .find_map(|(name, value)| (name == key).then_some(value))
-            .and_then(|value| match value {
-                FOValue::Int { value } => Some(value),
-                _ => None,
-            })
+    fn int_field(value: &FOValue, key: &str) -> i64 {
+        value
+            .field(key)
+            .and_then(FOValue::as_int)
             .unwrap_or_else(|| panic!("record has no Int field `{key}`"))
     }
 
-    fn str_field(row: &FOValue, key: &str) -> Option<String> {
-        let FOValue::Map { entries } = row else {
-            panic!("expected a record")
-        };
-        entries.iter().find_map(|(name, value)| match value {
-            FOValue::String { value } if name == key => Some(value.clone()),
-            _ => None,
-        })
+    fn str_field<'a>(row: &'a FOValue, key: &str) -> Option<&'a str> {
+        row.field(key).and_then(FOValue::as_str)
     }
 
     pub(super) fn bare(label: &str) -> FOValue {
@@ -2684,14 +2669,7 @@ mod tests {
             panic!("every `exarch-agents tag answers a tagged variant")
         };
         assert_eq!(label, "summary", "a transition answers the summary");
-        let FOValue::Map { entries } = *payload else {
-            panic!("a summary carries a record")
-        };
-        let int = |key: &str| match entries.iter().find(|(k, _)| k == key) {
-            Some((_, FOValue::Int { value })) => *value,
-            _ => panic!("a summary carries an Int `{key}`"),
-        };
-        (int("live"), int("replied"))
+        (int_field(&payload, "live"), int_field(&payload, "replied"))
     }
 
     /// The rows `` `list `` answers, for a test whose transition no longer
@@ -2825,47 +2803,18 @@ mod tests {
         }
         let expected_bytes = desk.services.log.lock().history_bytes();
 
-        let FOValue::Map { entries } = desk
+        let answer = desk
             .handle(context_survey_request())
-            .expect("context survey")
-        else {
-            panic!("context must answer a record")
-        };
-        let rows = entries
+            .expect("context survey");
+        let kinds = survey_rows(&answer)
             .iter()
-            .find_map(|(key, value)| (key == "rows").then_some(value))
-            .expect("survey rows");
-        let FOValue::List { items } = rows else {
-            panic!("survey rows must be a list")
-        };
-        let kinds = items
-            .iter()
-            .map(|item| {
-                let FOValue::Map { entries } = item else {
-                    panic!("survey row must be a record")
-                };
-                entries
-                    .iter()
-                    .find_map(|(key, value)| {
-                        (key == "kind").then(|| match value {
-                            FOValue::String { value } => value.as_str(),
-                            _ => panic!("survey kind must be a string"),
-                        })
-                    })
-                    .expect("survey kind")
-            })
+            .map(|row| str_field(row, "kind").expect("survey kind"))
             .collect::<Vec<_>>();
         assert_eq!(kinds, vec!["own", "own", "import", "own"]);
-        let total_bytes = entries
-            .iter()
-            .find_map(|(key, value)| {
-                (key == "total-bytes").then(|| match value {
-                    FOValue::Int { value } => *value,
-                    _ => panic!("survey total bytes must be an Int"),
-                })
-            })
-            .expect("survey total bytes");
-        assert_eq!(total_bytes, i64::try_from(expected_bytes).unwrap());
+        assert_eq!(
+            int_field(&answer, "total-bytes"),
+            i64::try_from(expected_bytes).unwrap()
+        );
     }
 
     /// One record per turn the read named, not one concatenated blob: the
@@ -2895,27 +2844,19 @@ mod tests {
         let [first, second] = items.as_slice() else {
             panic!("two named turns must answer exactly two records, got {items:?}")
         };
-        let FOValue::Map { entries } = first else {
-            panic!("a read answers records, got {first:?}")
-        };
-        let field = |name: &str| {
-            let Some((_, value)) = entries.iter().find(|(key, _)| key == name) else {
-                panic!("a read carries `{name}`, got {entries:?}")
-            };
-            value
-        };
-        assert!(matches!(field("turn"), FOValue::Int { value: 1 }));
-        assert!(matches!(field("role"), FOValue::String { value } if value == "user"));
-        let FOValue::List { items: messages } = field("messages") else {
-            panic!("a read's messages are a list, got {entries:?}")
-        };
+        assert_eq!(int_field(first, "turn"), 1);
+        assert_eq!(str_field(first, "role"), Some("user"));
+        let messages = first
+            .field("messages")
+            .and_then(FOValue::as_list)
+            .unwrap_or_else(|| panic!("a read's messages are a list, got {first:?}"));
         assert_eq!(
             messages.len(),
             1,
             "the prompt turn holds one message, got {messages:?}"
         );
         assert_eq!(
-            int_field(second.clone(), "turn"),
+            int_field(second, "turn"),
             2,
             "the second record is the turn asked for after it"
         );
@@ -2954,14 +2895,14 @@ mod tests {
             .iter()
             .map(|item| {
                 (
-                    int_field(item.clone(), "turn"),
+                    int_field(item, "turn"),
                     str_field(item, "role").expect("a read names the turn's role"),
                 )
             })
             .collect::<Vec<_>>();
         assert_eq!(
             reached,
-            vec![(2, "assistant".to_string()), (3, "user".to_string())],
+            vec![(2, "assistant"), (3, "user")],
             "an answer and the prompt after it, each naming its own role"
         );
 
@@ -3102,7 +3043,7 @@ mod tests {
             .handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
             .expect("context evict");
         assert_eq!(
-            int_field(answer.clone(), "total-bytes"),
+            int_field(&answer, "total-bytes"),
             i64::try_from(desk.services.log.lock().history_bytes()).unwrap(),
             "the survey's total is the context's own weight"
         );
@@ -3110,14 +3051,14 @@ mod tests {
         assert_eq!(
             rows.iter()
                 .map(|row| (
-                    int_field(row.clone(), "id"),
+                    int_field(row, "id"),
                     str_field(row, "role").expect("a survey row names its role")
                 ))
                 .collect::<Vec<_>>(),
-            vec![(3, "user".to_string()), (4, "assistant".to_string())],
+            vec![(3, "user"), (4, "assistant")],
             "the evicted turns are gone from the answer"
         );
-        assert_eq!(str_field(&rows[0], "kind").as_deref(), Some("own"));
+        assert_eq!(str_field(&rows[0], "kind"), Some("own"));
         let audit = desk
             .services
             .acts
@@ -3130,18 +3071,11 @@ mod tests {
     }
 
     /// The survey rows an answer carries, in id order.
-    fn survey_rows(answer: &FOValue) -> Vec<FOValue> {
-        let FOValue::Map { entries } = answer else {
-            panic!("a context tag answers the survey record")
-        };
-        let rows = entries
-            .iter()
-            .find_map(|(key, value)| (key == "rows").then_some(value))
-            .expect("survey rows");
-        let FOValue::List { items } = rows else {
-            panic!("survey rows must be a list")
-        };
-        items.clone()
+    fn survey_rows(answer: &FOValue) -> &[FOValue] {
+        answer
+            .field("rows")
+            .and_then(FOValue::as_list)
+            .expect("a context answer carries its survey rows")
     }
 
     /// An empty note would render `Your note at eviction: ""` in the marker,
@@ -3294,8 +3228,8 @@ mod tests {
         let answer = d
             .handle(pin_read_req("tasks"))
             .expect("a hit must answer Ok");
-        let card = crate::bus::card::value_to_card(&RalValue::from(answer))
-            .expect("the readback must decode as a card");
+        let card =
+            crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
         assert!(
             matches!(
                 card.marks(),
@@ -3322,8 +3256,8 @@ mod tests {
         let answer = d
             .handle(pin_read_req("tasks"))
             .expect("a set key must read back");
-        let card = crate::bus::card::value_to_card(&RalValue::from(answer))
-            .expect("the readback must decode as a card");
+        let card =
+            crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
         assert!(
             matches!(
                 card.marks(),
@@ -3431,12 +3365,12 @@ mod tests {
                 path: "a.rs".into(),
             },
         );
-        applier.live(crate::bus::card::observation_wire(&read));
-        applier.live(FOValue::Variant {
+        applier.live(&read.to_wire());
+        applier.live(&FOValue::Variant {
             label: "card".into(),
             payload: Some(Box::new(FOValue::List { items: vec![] })),
         });
-        applier.live(FOValue::Variant {
+        applier.live(&FOValue::Variant {
             label: "done".into(),
             payload: Some(Box::new(FOValue::Map {
                 entries: vec![
@@ -3456,7 +3390,7 @@ mod tests {
                 ],
             })),
         });
-        applier.live(FOValue::Variant {
+        applier.live(&FOValue::Variant {
             label: "notice".into(),
             payload: Some(Box::new(FOValue::Map {
                 entries: vec![
@@ -3551,7 +3485,7 @@ mod tests {
         let rows = listed(&desk);
         let child = rows
             .iter()
-            .find(|row| str_field(row, "name").as_deref() == Some("helper"))
+            .find(|row| str_field(row, "name") == Some("helper"))
             .expect("the child stands on the listing");
         assert!(
             str_field(child, "log-dir").is_some(),
@@ -3606,18 +3540,10 @@ mod tests {
         let answer = desk
             .handle(family_req("agents", "read", Some(text("helper"))))
             .expect("a descendant that has replied must answer its reply");
-        assert_eq!(str_field(&answer, "name").as_deref(), Some("helper"));
-        let FOValue::Map { entries } = &answer else {
-            panic!("expected a record")
-        };
-        let reply = entries
-            .iter()
-            .find_map(|(k, v)| (k == "reply").then(|| v.clone()));
+        assert_eq!(str_field(&answer, "name"), Some("helper"));
         assert_eq!(
-            reply,
-            Some(FOValue::String {
-                value: "read me".into()
-            }),
+            str_field(&answer, "reply"),
+            Some("read me"),
             "`` `read `` must answer the very value the child handed to `reply"
         );
     }
@@ -3655,18 +3581,15 @@ mod tests {
             live, 2,
             "the spawn counts the fleet's state, the sibling it did not start included"
         );
-        let mut names: Vec<String> = listed(&desk)
+        let rows = listed(&desk);
+        let mut names: Vec<&str> = rows
             .iter()
             .filter_map(|row| str_field(row, "name"))
             .collect();
-        names.sort();
+        names.sort_unstable();
         assert_eq!(
             names,
-            vec![
-                "already-there".to_string(),
-                "helper".to_string(),
-                "parent".to_string()
-            ],
+            vec!["already-there", "helper", "parent"],
             "and `list names them, the reader among them"
         );
 
@@ -4013,7 +3936,7 @@ mod tests {
         let rows = listed(&desk);
         let child = rows
             .iter()
-            .find(|row| str_field(row, "name").as_deref() == Some("helper"))
+            .find(|row| str_field(row, "name") == Some("helper"))
             .expect("the child stands on the listing");
         let log_dir = str_field(child, "log-dir").expect("a roster row carries its log dir");
 
@@ -4403,12 +4326,9 @@ mod tests {
                 .expect("a valid `add must succeed"),
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(str_field(&rows[0], "label").as_deref(), Some("nightly"));
-        assert_eq!(str_field(&rows[0], "trigger").as_deref(), Some("after 2h"));
-        assert!(
-            !matches!(&rows[0], FOValue::Map { entries } if entries.iter().any(|(k, _)| k == "id")),
-            "the table carries no id"
-        );
+        assert_eq!(str_field(&rows[0], "label"), Some("nightly"));
+        assert_eq!(str_field(&rows[0], "trigger"), Some("after 2h"));
+        assert!(rows[0].field("id").is_none(), "the table carries no id");
 
         let listed = table(
             desk.handle(family_req("schedules", "list", None))

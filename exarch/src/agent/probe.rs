@@ -40,19 +40,14 @@ impl Avatar {
             }
         };
         items
-            .into_iter()
+            .iter()
             .map(|item| {
-                let FOValue::Map { entries } = item else {
+                if !matches!(item, FOValue::Map { .. }) {
                     return Err(self
                         .seat
                         .fault(Severed::Faulted("`workers probe row must be a Map".into())));
-                };
-                let field = |key: &str| {
-                    entries
-                        .iter()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, v)| v.clone())
-                };
+                }
+                let field = |key: &str| item.field(key);
                 let int_field = |key: &str| -> Result<u64, Severed> {
                     match field(key) {
                         Some(FOValue::Int { value }) => {
@@ -60,7 +55,7 @@ impl Avatar {
                                 clippy::cast_sign_loss,
                                 reason = "probe integers (id, up-secs, idle-secs) are non-negative counters"
                             )]
-                            let v = value as u64;
+                            let v = *value as u64;
                             Ok(v)
                         }
                         other => Err(self.seat.fault(Severed::Faulted(format!(
@@ -70,7 +65,7 @@ impl Avatar {
                 };
                 let id = int_field("id")?;
                 let cmd = match field("cmd") {
-                    Some(FOValue::String { value }) => value,
+                    Some(FOValue::String { value }) => value.clone(),
                     other => {
                         return Err(self.seat.fault(Severed::Faulted(format!(
                             "`workers row `cmd must be a String, got {other:?}"
@@ -95,7 +90,7 @@ impl Avatar {
                 };
                 let bool_field = |key: &str| -> Result<bool, Severed> {
                     match field(key) {
-                        Some(FOValue::Bool { value }) => Ok(value),
+                        Some(FOValue::Bool { value }) => Ok(*value),
                         other => Err(self.seat.fault(Severed::Faulted(format!(
                             "`workers row `{key} must be a Bool, got {other:?}"
                         )))),

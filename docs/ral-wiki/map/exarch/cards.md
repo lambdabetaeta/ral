@@ -51,8 +51,8 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 
 ## Decode — `value_to_card`
 
-`value_to_card` (`bus/card/decode.rs`) is the card decoder, reading marks off the runtime
-`Value`; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the pin,
+`value_to_card` (`bus/card/decode.rs`) is the card decoder, reading marks off the
+first-order `FOValue` the surface sink carries, as `encode_card` writes them; `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) tries the pin,
 io, and notice shapes first ([[map/exarch/io-surface|io-surface]]). The wire
 shape is `Variant{label:"card", payload: List<mark>}`; each mark is
 `Variant{label, payload: Map}`. A bare known mark surfaced unwrapped

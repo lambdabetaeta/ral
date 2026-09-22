@@ -100,8 +100,8 @@ recursion is irreducible; the evaluator reaches it at
     interest — the host filters the rail. It judges only whether anything
     happened: a write onto the discard device is dropped there
     ([[design/audit|audit]]). Core emits plain `Value::Map`s through
-    `Observation::to_value`; a host (exarch) decodes them back with
-    `Observation::from_value`. The observation *shapes* and their card
+    `Observation::to_value`; a host (exarch) decodes their first-order wire
+    form (`Observation::to_wire`) back with `Observation::from_wire`. The observation *shapes* and their card
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`

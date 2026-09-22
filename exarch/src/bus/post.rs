@@ -4,7 +4,7 @@
 
 use crate::fleet::schedule::ScheduleId;
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
-use ral_core::Value;
+use ral_core::serial::FOValue;
 use std::time::Duration;
 
 use super::AgentId;
@@ -193,7 +193,7 @@ pub(crate) enum Stamped {
     /// the un-awaited path.  Carries the *root* session id, since a spawn
     /// worker registers no tab of its own.  Already once-only when posted:
     /// core's completion path wins the worker's deliver-once latch first.
-    Surface { id: AgentId, values: Vec<Value> },
+    Surface { id: AgentId, values: Vec<FOValue> },
 }
 
 impl Stamped {
@@ -280,7 +280,7 @@ impl Post {
 
 /// The notice [`Item::Surface`] wakes the model with.  The cards already reached
 /// the rail through `agent::attend::announce`, so this only names the outcome.
-fn surface_notice(values: &[Value]) -> String {
+fn surface_notice(values: &[FOValue]) -> String {
     let settled = values
         .iter()
         .rev()
@@ -321,7 +321,7 @@ pub(crate) enum Item {
         /// it matches the draining session's, so a misrouted batch trips
         /// there rather than rendering silently into the wrong scrollback.
         id: AgentId,
-        values: Vec<Value>,
+        values: Vec<FOValue>,
     },
 }
 

@@ -163,7 +163,7 @@ impl Env {
             .bindings
             .iter()
             .map(|(name, binding)| {
-                let value = crate::serial::scrub(&binding.value, &crate::serial::is_handle);
+                let value = crate::serial::scrub_handles(&binding.value);
                 (
                     name.clone(),
                     Binding {

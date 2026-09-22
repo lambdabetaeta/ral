@@ -263,27 +263,25 @@ impl Mooring {
         self.surface.is_some()
     }
 
-    /// The one sink door.  Every door core owns reaches it through
-    /// `evaluator::audit::observe_stamped`, which builds the [`Value`] from
-    /// [`crate::types::Observation::to_value`] — the single map shape shared
-    /// by the rail, the audit trail, and `--audit`; a host builtin with no
-    /// vocabulary of its own may still hand in a fully-formed [`Value`]
-    /// directly.  Encoded here into the first-order
+    /// The sink door for a runtime [`Value`], such as a host builtin with no
+    /// vocabulary of its own hands in.  Encoded here into the first-order
     /// [`FOValue`](crate::serial::FOValue) the sink carries; inert with no
     /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
     /// crosses as its `opaque` placeholder rather than being dropped.
-    ///
-    /// # Panics
-    /// Never: the scrub erases exactly the leaves
-    /// [`FOValue::try_from`](crate::serial::FOValue) rejects.
     pub fn surface(&self, ev: &Value) {
-        let Some(sink) = self.surface.as_ref() else {
-            return;
-        };
-        let scrubbed = crate::serial::scrub(ev, &crate::serial::no_wire_form);
-        let fo = crate::serial::FOValue::try_from(&scrubbed)
-            .expect("the scrub erases every leaf a first-order value rejects");
-        sink.emit(&fo);
+        if let Some(sink) = self.surface.as_ref() {
+            sink.emit(&crate::serial::FOValue::scrubbed(ev));
+        }
+    }
+
+    /// [`Self::surface`] for a host that already holds data.  Every door core
+    /// owns reaches it through `evaluator::audit::observe_stamped` with
+    /// [`crate::types::Observation::to_wire`] — the single record shape
+    /// shared by the rail, the audit trail, and `--audit`.
+    pub fn surface_data(&self, ev: &crate::serial::FOValue) {
+        if let Some(sink) = self.surface.as_ref() {
+            sink.emit(ev);
+        }
     }
 
     /// Derive a mooring identical to this one with its terminal authority

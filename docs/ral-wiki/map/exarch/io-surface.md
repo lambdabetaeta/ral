@@ -160,13 +160,13 @@ same [[map/core/shell-state|sink]] as a kit `` `card ``.
 
 `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) is the shared surface
 decoder: a map matching the projection above decodes through
-`Observation::from_value` into `Surface::Observation`, the raw observation
+`Observation::from_wire` into `Surface::Observation`, the raw observation
 alone — no card built yet, since the decoder's own codomain carries the
 structured value and nothing a printer merely wants a copy of. The card is
 bound by `observation_card` only at draw time — from whichever printer's fold
 reads the recorded `Display::Observation` — never by the seam
 (`fleet/desk.rs`'s `absorb_surface`) that records it: the
-observation crosses the seam as its raw wire form alone (`observation_wire`),
+observation crosses the seam as its raw wire form alone (`Observation::to_wire`),
 and the card is rebuilt fresh wherever it is drawn. The other surface shapes
 (pin, notice, card, done) have their own arms; a value matching none drops,
 the same graceful degradation as before.

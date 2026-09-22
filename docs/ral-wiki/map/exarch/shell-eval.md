@@ -224,7 +224,7 @@ never by the decoder or by the seam that records it (`absorb_surface`):
   pinned state without parsing rendered text — the read side reuses the same
   store rather than adding a second one ([[design/pins|pins]]);
 - a `Map` core emits at a redirect, exec, or capability-check door decodes
-  through `Observation::from_value` into `Surface::Observation`, the raw
+  through `Observation::from_wire` into `Surface::Observation`, the raw
   observation alone ([[map/exarch/io-surface|io-surface]]);
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
   idle-binding prune, a large-binding warning) decodes to `Surface::Notice`

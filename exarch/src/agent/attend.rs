@@ -489,7 +489,7 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
                     shell_eval::Decoded::Landed => {}
                     shell_eval::Decoded::Unknown => {
                         if let Err(error) =
-                            recorder.emit(shell_eval::unknown_surface_note(v.type_name()))
+                            recorder.emit(shell_eval::unknown_surface_note(v.shape()))
                         {
                             recorder.report_fault(&error);
                         }

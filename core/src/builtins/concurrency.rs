@@ -908,13 +908,6 @@ mod tests {
         }
     }
 
-    fn fo_map_get<'a>(v: &'a FOValue, key: &str) -> Option<&'a FOValue> {
-        match v {
-            FOValue::Map { entries } => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            other => panic!("expected Map, got {other:?}"),
-        }
-    }
-
     /// A panicked worker's `Disconnected` receiver must settle as a failure,
     /// not `None` — else `poll` reads `pending` forever and `race` spins.
     #[test]
@@ -1911,7 +1904,7 @@ mod tests {
     /// the exarch decoder matches: a `{cmd, outcome}` map over a closed variant.
     fn done_outcome_label(done: &FOValue) -> String {
         let done = fo_expect_variant(done, "done");
-        match fo_map_get(done, "outcome").expect("outcome field") {
+        match done.field("outcome").expect("outcome field") {
             FOValue::Variant { label, .. } => label.clone(),
             other => panic!("outcome must be a variant, got {other:?}"),
         }
@@ -1944,10 +1937,8 @@ mod tests {
         assert_eq!(done_outcome_label(done), "ok");
         let fields = fo_expect_variant(done, "done");
         assert_eq!(
-            fo_map_get(fields, "cmd"),
-            Some(&FOValue::String {
-                value: "<block>".into()
-            })
+            fields.field("cmd").and_then(FOValue::as_str),
+            Some("<block>")
         );
 
         let err = run(|_, _child| Err(sig("boom")));

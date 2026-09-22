@@ -4,23 +4,23 @@
 //! text rather than dropping the card around it, since a card is a deliberate
 //! user-facing act.  `decode_surface` in `shell_eval.rs` calls in here.
 
-use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 
 use super::diff::{Hunk, Row, Seg};
-use super::value::{count_field, map_of, str_field};
+use super::value::{count_field, items, record, shown, str_field};
 use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 
 /// Decode the value a kit handed to `surface` into a [`Card`].
 ///
 /// The shape is `` `card [mark, mark, …] ``; a known mark surfaced bare
 /// (`` `diff […] ``) lifts into a one-mark card.  Anything else is `None`.
-pub(crate) fn value_to_card(v: &RalValue) -> Option<Card> {
-    let RalValue::Variant { label, payload } = v else {
+pub(crate) fn value_to_card(v: &FOValue) -> Option<Card> {
+    let FOValue::Variant { label, payload } = v else {
         return None;
     };
     if label == "card" {
         let marks = match payload.as_deref() {
-            Some(RalValue::List(items)) => items.iter().map(decode_mark).collect(),
+            Some(FOValue::List { items }) => items.iter().map(decode_mark).collect(),
             // A non-list payload is still a deliberate surface: its one mark.
             Some(other) => vec![decode_mark(other)],
             None => Vec::new(),
@@ -41,14 +41,11 @@ fn is_mark_label(label: &str) -> bool {
 
 /// Decode one mark; anything unrecognised or malformed becomes a plain-text
 /// span of the value's display, never a drop or a panic.
-fn decode_mark(v: &RalValue) -> Mark {
-    let RalValue::Variant { label, payload } = v else {
-        return plain_text(&v.to_string());
+fn decode_mark(v: &FOValue) -> Mark {
+    let FOValue::Variant { label, payload } = v else {
+        return plain_text(&shown(v));
     };
-    let rec = match payload.as_deref() {
-        Some(RalValue::Map(m)) => Some(m),
-        _ => None,
-    };
+    let rec = payload.as_deref().and_then(record);
     match label.as_str() {
         "text" => Mark::Text {
             spans: rec.map(decode_spans).unwrap_or_default(),
@@ -65,7 +62,7 @@ fn decode_mark(v: &RalValue) -> Mark {
         "raw" => Mark::Raw {
             bytes: rec.map(decode_raw_bytes).unwrap_or_default(),
         },
-        _ => plain_text(&v.to_string()),
+        _ => plain_text(&shown(v)),
     }
 }
 
@@ -78,32 +75,29 @@ fn plain_text(text: &str) -> Mark {
     }
 }
 
-fn decode_spans(m: &ral_core::types::Map) -> Vec<Span> {
-    match m.get("spans") {
-        Some(RalValue::List(items)) => items.iter().map(decode_span).collect(),
-        _ => Vec::new(),
-    }
+fn decode_spans(m: &FOValue) -> Vec<Span> {
+    items(m, "spans").iter().map(decode_span).collect()
 }
 
-fn decode_span(v: &RalValue) -> Span {
+fn decode_span(v: &FOValue) -> Span {
     match v {
-        RalValue::Map(m) => Span {
-            role: str_field(m, "role").as_deref().and_then(Role::parse),
-            text: str_field(m, "text").unwrap_or_default(),
+        FOValue::Map { .. } => Span {
+            role: str_field(v, "role").as_deref().and_then(Role::parse),
+            text: str_field(v, "text").unwrap_or_default(),
         },
-        RalValue::String(s) => Span {
+        FOValue::String { value } => Span {
             role: None,
-            text: s.clone(),
+            text: value.clone(),
         },
         other => Span {
             role: None,
-            text: other.to_string(),
+            text: shown(other),
         },
     }
 }
 
 /// The magnitude `value` is the one field a readout cannot default.
-fn decode_readout(m: &ral_core::types::Map) -> Option<Readout> {
+fn decode_readout(m: &FOValue) -> Option<Readout> {
     Some(Readout {
         value: count_field(m, "value")?,
         max: count_field(m, "max"),
@@ -111,44 +105,41 @@ fn decode_readout(m: &ral_core::types::Map) -> Option<Readout> {
     })
 }
 
-fn decode_measure(m: &ral_core::types::Map) -> Option<Measure> {
+fn decode_measure(m: &FOValue) -> Option<Measure> {
     Some(Measure {
         label: str_field(m, "label").unwrap_or_default(),
         readout: decode_readout(m)?,
     })
 }
 
-fn decode_rows(m: &ral_core::types::Map) -> Vec<Field> {
-    match m.get("rows") {
-        Some(RalValue::List(items)) => items.iter().map(decode_field).collect(),
-        _ => Vec::new(),
-    }
+fn decode_rows(m: &FOValue) -> Vec<Field> {
+    items(m, "rows").iter().map(decode_field).collect()
 }
 
 /// A row is a record, not a positional pair, because ral types a list
 /// homogeneously: a `String` label and a variant value could not share one.
-fn decode_field(v: &RalValue) -> Field {
-    let Some(m) = map_of(v) else {
+fn decode_field(v: &FOValue) -> Field {
+    let Some(m) = record(v) else {
         return Field {
-            label: v.to_string(),
+            label: shown(v),
             value: FieldVal::Inline(Vec::new()),
         };
     };
     let label = str_field(m, "label").unwrap_or_default();
-    let value = match m.get("value") {
+    let value = match m.field("value") {
         None => FieldVal::Inline(Vec::new()),
-        Some(RalValue::Variant { label, payload }) if label == "text" => {
-            let spans = match payload.as_deref() {
-                Some(RalValue::Map(m)) => decode_spans(m),
-                _ => Vec::new(),
-            };
-            FieldVal::Inline(spans)
-        }
+        Some(FOValue::Variant { label, payload }) if label == "text" => FieldVal::Inline(
+            payload
+                .as_deref()
+                .and_then(record)
+                .map(decode_spans)
+                .unwrap_or_default(),
+        ),
         // A nested `measure` is read for its readout alone: the row's own label
         // names it, so a `label` written here is dropped like any other field
         // the decoder does not read.
-        Some(RalValue::Variant { label, payload }) if label == "measure" => {
-            match payload.as_deref().and_then(map_of).and_then(decode_readout) {
+        Some(FOValue::Variant { label, payload }) if label == "measure" => {
+            match payload.as_deref().and_then(record).and_then(decode_readout) {
                 Some(readout) => FieldVal::Readout(readout),
                 None => FieldVal::Inline(Vec::new()),
             }
@@ -160,34 +151,36 @@ fn decode_field(v: &RalValue) -> Field {
 
 /// Decode a kit-composed `diff` — by hand, the shape `whole_file_hunks` builds
 /// for the host's own write cards.  Only `path` is required.
-fn decode_diff(m: &ral_core::types::Map) -> Option<Mark> {
+fn decode_diff(m: &FOValue) -> Option<Mark> {
     let path = str_field(m, "path")?;
-    let hunks = match m.get("hunks") {
-        Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_hunk).collect(),
-        _ => Vec::new(),
-    };
+    let hunks = items(m, "hunks")
+        .iter()
+        .filter_map(record)
+        .map(decode_hunk)
+        .collect();
     Some(Mark::Diff { path, hunks })
 }
 
 /// A missing `start` defaults to 1: hunk rows count from the original line 1.
-fn decode_hunk(m: &ral_core::types::Map) -> Hunk {
-    let rows = match m.get("rows") {
-        Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_row).collect(),
-        _ => Vec::new(),
-    };
+fn decode_hunk(m: &FOValue) -> Hunk {
     Hunk {
         start: count_field(m, "start").unwrap_or(1),
-        rows,
+        rows: items(m, "rows")
+            .iter()
+            .filter_map(record)
+            .map(decode_row)
+            .collect(),
     }
 }
 
 /// An unrecognised or missing `tag` degrades to context, the one row kind that
 /// claims nothing changed.
-fn decode_row(m: &ral_core::types::Map) -> Row {
-    let segs = match m.get("segs") {
-        Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_seg).collect(),
-        _ => Vec::new(),
-    };
+fn decode_row(m: &FOValue) -> Row {
+    let segs = items(m, "segs")
+        .iter()
+        .filter_map(record)
+        .map(decode_seg)
+        .collect();
     match str_field(m, "tag").as_deref() {
         Some("del") => Row::Del(segs),
         Some("add") => Row::Add(segs),
@@ -195,24 +188,21 @@ fn decode_row(m: &ral_core::types::Map) -> Row {
     }
 }
 
-fn decode_seg(m: &ral_core::types::Map) -> Seg {
+fn decode_seg(m: &FOValue) -> Seg {
     Seg {
-        emph: matches!(m.get("emph"), Some(RalValue::Bool(true))),
+        emph: m.field("emph").and_then(FOValue::as_bool) == Some(true),
         text: str_field(m, "text").unwrap_or_default(),
     }
 }
 
 /// A kit has no byte literal, so a string or a list of integers reads as bytes.
-fn decode_raw_bytes(m: &ral_core::types::Map) -> Vec<u8> {
-    match m.get("bytes") {
-        Some(RalValue::Bytes(b)) => b.clone(),
-        Some(RalValue::String(s)) => s.clone().into_bytes(),
-        Some(RalValue::List(items)) => items
+fn decode_raw_bytes(m: &FOValue) -> Vec<u8> {
+    match m.field("bytes") {
+        Some(FOValue::Bytes { value }) => value.clone(),
+        Some(FOValue::String { value }) => value.clone().into_bytes(),
+        Some(FOValue::List { items }) => items
             .iter()
-            .filter_map(|v| match v {
-                RalValue::Int(n) => u8::try_from(*n).ok(),
-                _ => None,
-            })
+            .filter_map(|v| u8::try_from(v.as_int()?).ok())
             .collect(),
         _ => Vec::new(),
     }
@@ -220,25 +210,17 @@ fn decode_raw_bytes(m: &ral_core::types::Map) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{card_value, list, s};
+    use super::super::testkit::{card_value, int, list, map_value, s, variant};
     use super::*;
 
-    fn mark(label: &str, fields: Vec<(&str, RalValue)>) -> RalValue {
-        RalValue::Variant {
-            label: label.into(),
-            payload: Some(Box::new(RalValue::map(
-                fields.into_iter().map(|(k, v)| (k.into(), v)).collect(),
-            ))),
-        }
+    fn mark(label: &str, fields: Vec<(&str, FOValue)>) -> FOValue {
+        variant(label, map_value(fields))
     }
     /// The record shape [`decode_row`] lifts back into a [`Row`].
-    fn seg_row(tag: &str, text: &str) -> RalValue {
-        RalValue::map(vec![
-            ("tag".into(), s(tag)),
-            (
-                "segs".into(),
-                list(vec![RalValue::map(vec![("text".into(), s(text))])]),
-            ),
+    fn seg_row(tag: &str, text: &str) -> FOValue {
+        map_value(vec![
+            ("tag", s(tag)),
+            ("segs", list(vec![map_value(vec![("text", s(text))])])),
         ])
     }
 
@@ -249,9 +231,9 @@ mod tests {
                 "text",
                 vec![(
                     "spans",
-                    list(vec![RalValue::map(vec![
-                        ("role".into(), s("strong")),
-                        ("text".into(), s("edited ")),
+                    list(vec![map_value(vec![
+                        ("role", s("strong")),
+                        ("text", s("edited ")),
                     ])]),
                 )],
             ),
@@ -261,12 +243,9 @@ mod tests {
                     ("path", s("a.rs")),
                     (
                         "hunks",
-                        list(vec![RalValue::map(vec![
-                            ("start".into(), RalValue::Int(7)),
-                            (
-                                "rows".into(),
-                                list(vec![seg_row("del", "x"), seg_row("add", "y")]),
-                            ),
+                        list(vec![map_value(vec![
+                            ("start", int(7)),
+                            ("rows", list(vec![seg_row("del", "x"), seg_row("add", "y")])),
                         ])]),
                     ),
                 ],
@@ -275,19 +254,15 @@ mod tests {
                 "fields",
                 vec![(
                     "rows",
-                    list(vec![RalValue::map(vec![
-                        ("label".into(), s("tests")),
-                        ("value".into(), s("42 passed")),
+                    list(vec![map_value(vec![
+                        ("label", s("tests")),
+                        ("value", s("42 passed")),
                     ])]),
                 )],
             ),
             mark(
                 "measure",
-                vec![
-                    ("label", s("crates")),
-                    ("value", RalValue::Int(7)),
-                    ("max", RalValue::Int(12)),
-                ],
+                vec![("label", s("crates")), ("value", int(7)), ("max", int(12))],
             ),
             mark("raw", vec![("bytes", s("hi"))]),
         ]);
@@ -307,19 +282,12 @@ mod tests {
 
     #[test]
     fn drops_non_card_but_lifts_bare_mark() {
-        assert!(value_to_card(&RalValue::String("nope".into())).is_none());
+        assert!(value_to_card(&s("nope")).is_none());
         assert!(
-            value_to_card(&RalValue::Variant {
-                label: "bogus".into(),
-                payload: Some(Box::new(RalValue::map(vec![]))),
-            })
-            .is_none(),
+            value_to_card(&variant("bogus", map_value(vec![]))).is_none(),
             "an unknown top-level variant is not a card"
         );
-        let bare = mark(
-            "diff",
-            vec![("path", s("a.rs")), ("start", RalValue::Int(1))],
-        );
+        let bare = mark("diff", vec![("path", s("a.rs")), ("start", int(1))]);
         let Card(marks) = value_to_card(&bare).expect("a bare diff lifts");
         assert_eq!(marks.len(), 1);
         assert!(matches!(&marks[0], Mark::Diff { .. }));
@@ -330,7 +298,7 @@ mod tests {
     fn unknown_mark_degrades_to_plain_text() {
         let v = card_value(vec![
             mark("text", vec![("spans", list(vec![]))]),
-            mark("wormhole", vec![("x", RalValue::Int(1))]),
+            mark("wormhole", vec![("x", int(1))]),
         ]);
         let Card(marks) = value_to_card(&v).expect("card decodes");
         assert_eq!(marks.len(), 2);

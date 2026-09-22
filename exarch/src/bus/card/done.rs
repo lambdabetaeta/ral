@@ -3,40 +3,41 @@
 //! Core flushes a single `` `done `` value at the end of a background block's
 //! deferred buffer; [`value_to_done`] decodes it, [`settled_spans`] words it.
 
-use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 
-use super::value::{int_field, map_of, str_field};
+use super::value::{int_field, record, str_field};
 use super::{Role, Span};
 use crate::record::DoneOutcome;
 
 /// Decode a `` `done `` value into the worker's `cmd` and how it settled,
 /// `None` for anything else — and since `decode_surface` in `shell_eval.rs`
 /// tries this branch last, `None` drops the value rather than passing it on.
-pub(crate) fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
-    let RalValue::Variant { label, payload } = v else {
+pub(crate) fn value_to_done(v: &FOValue) -> Option<(String, DoneOutcome)> {
+    let FOValue::Variant { label, payload } = v else {
         return None;
     };
     if label != "done" {
         return None;
     }
-    let m = map_of(payload.as_deref()?)?;
-    let RalValue::Variant { label, payload } = m.get("outcome")? else {
+    let m = record(payload.as_deref()?)?;
+    let FOValue::Variant { label, payload } = m.field("outcome")? else {
         return None;
     };
     let outcome = match label.as_str() {
         "ok" => DoneOutcome::Ok,
         "err" => {
-            let rec = map_of(payload.as_deref()?)?;
+            let rec = record(payload.as_deref()?)?;
             DoneOutcome::Err {
                 message: str_field(rec, "message").unwrap_or_default(),
                 status: int_field(rec, "status").unwrap_or(0),
             }
         }
         "panic" => DoneOutcome::Panic {
-            message: match payload.as_deref() {
-                Some(RalValue::String(s)) => s.clone(),
-                _ => String::new(),
-            },
+            message: payload
+                .as_deref()
+                .and_then(FOValue::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         },
         _ => return None,
     };
@@ -81,24 +82,15 @@ pub fn settled_text(cmd: &str, outcome: &DoneOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{card_value, map_value, s};
+    use super::super::testkit::{card_value, int, map_value, s, variant};
     use super::*;
 
     /// Mirrors core's `done_event`: `cmd` plus a closed outcome variant.
-    fn done_value(cmd: &str, outcome: RalValue) -> RalValue {
-        RalValue::Variant {
-            label: "done".into(),
-            payload: Some(Box::new(RalValue::map(vec![
-                ("cmd".into(), s(cmd)),
-                ("outcome".into(), outcome),
-            ]))),
-        }
-    }
-    fn variant(label: &str, payload: RalValue) -> RalValue {
-        RalValue::Variant {
-            label: label.into(),
-            payload: Some(Box::new(payload)),
-        }
+    fn done_value(cmd: &str, outcome: FOValue) -> FOValue {
+        variant(
+            "done",
+            map_value(vec![("cmd", s(cmd)), ("outcome", outcome)]),
+        )
     }
 
     #[test]
@@ -107,19 +99,19 @@ mod tests {
         assert_eq!(
             value_to_done(&done_value(
                 "block at turn 1, line 1",
-                variant("ok", RalValue::Unit)
+                variant("ok", FOValue::Unit)
             )),
             named(DoneOutcome::Ok)
         );
         let err = variant(
             "err",
-            RalValue::map(vec![
-                ("cmd".into(), s("<runtime>")),
-                ("status".into(), RalValue::Int(2)),
-                ("message".into(), s("boom")),
+            map_value(vec![
+                ("cmd", s("<runtime>")),
+                ("status", int(2)),
+                ("message", s("boom")),
                 (
-                    "site".into(),
-                    RalValue::Variant {
+                    "site",
+                    FOValue::Variant {
                         label: "none".into(),
                         payload: None,
                     },

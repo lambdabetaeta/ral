@@ -54,17 +54,9 @@ fn recording() -> (Arc<Mutex<Vec<FOValue>>>, SurfaceSink) {
 fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
     events
         .iter()
-        .filter(
-            |ev| !matches!(ev, FOValue::Map { entries } if fo_map_get(entries, "what").is_some()),
-        )
+        .filter(|ev| ev.field("what").is_none())
         .cloned()
         .collect()
-}
-
-/// Look up a key in an [`FOValue::Map`]'s entries — the [`FOValue`] dual of
-/// `Map::get`, since the wire map is a plain assoc-vec, not `imbl::OrdMap`.
-fn fo_map_get<'a>(entries: &'a [(String, FOValue)], key: &str) -> Option<&'a FOValue> {
-    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 /// Run one run of `source` with an optional surface sink, returning the
@@ -128,22 +120,11 @@ fn surface_forwards_the_event_to_the_sink() {
     let Some(payload) = payload.as_deref() else {
         panic!("expected a payload record");
     };
-    let FOValue::Map { entries } = payload else {
-        panic!("expected a record payload, got {payload:?}");
-    };
+    assert_eq!(payload.field("done").and_then(FOValue::as_int), Some(1));
+    assert_eq!(payload.field("total").and_then(FOValue::as_int), Some(3));
     assert_eq!(
-        fo_map_get(entries, "done"),
-        Some(&FOValue::Int { value: 1 })
-    );
-    assert_eq!(
-        fo_map_get(entries, "total"),
-        Some(&FOValue::Int { value: 3 })
-    );
-    assert_eq!(
-        fo_map_get(entries, "label"),
-        Some(&FOValue::String {
-            value: "tasks".into()
-        })
+        payload.field("label").and_then(FOValue::as_str),
+        Some("tasks")
     );
 }
 

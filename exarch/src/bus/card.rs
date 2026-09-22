@@ -17,6 +17,7 @@
 //! (`ral_core::types::Observed`), which core itself decodes.
 
 use ral_core::serial::FOValue;
+use ral_core::types::Observation;
 use serde::{Deserialize, Serialize};
 
 mod decode;
@@ -26,7 +27,7 @@ mod encode;
 mod notice;
 mod observation;
 #[cfg(test)]
-mod testkit;
+pub(crate) mod testkit;
 mod value;
 
 pub use diff::{Hunk, Row, Seg};
@@ -37,7 +38,6 @@ pub(crate) use diff::{hunk_magnitude, whole_file_hunks};
 pub(crate) use done::value_to_done;
 pub(crate) use encode::encode_card;
 pub(crate) use notice::value_to_notice;
-pub(crate) use observation::observation_wire;
 pub(crate) use observation::{Landing, landing};
 /// The comma-joined bucket cards a run's effects render as; `pub(crate)`
 /// because only the mirror groups, and it groups at render time.
@@ -49,7 +49,7 @@ pub(crate) use observation::{execs_card, greps_card, reads_card};
 /// spans and their flattening rather than a [`Card`] nothing would draw.
 pub use done::{settled_spans, settled_text};
 pub use notice::notice_card;
-pub use observation::{observation_card, observation_from_wire, observation_spans};
+pub use observation::{observation_card, observation_spans};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
@@ -336,7 +336,7 @@ fn context_groups(rows: &[crate::record::TurnRow]) -> Vec<ContextGroup> {
 /// built here, at render time, exactly as `record/view.rs` will for a
 /// resumed scrollback.
 pub fn observation_display_card(value: &FOValue) -> Option<Card> {
-    let observation = observation_from_wire(value.clone())?;
+    let observation = Observation::from_wire(value)?;
     Some(observation_card(&observation.what))
 }
 
