@@ -1,32 +1,31 @@
-The session keeps three tiers of memory: **turns** are the working set the provider is charged for; **bindings, the register, and the goal** outlive every turn; **the transcript** is the complete record — every closed turn, evicted or not. Promote what must survive (`let` it, `exarch-tasks `note` it, `exarch-goal `set` it) and let the record keep whatever you let go.
+Your context is the turns the provider is sent on each request; it is the only memory that costs you, and the only memory that can be taken away. Bindings, files, the task list and the goal survive every eviction. The transcript keeps every turn, evicted or not. So before letting a turn go, promote what it established: `let` it, `` exarch-tasks `note `` it, or `` exarch-goal `set `` it.
 
-## Spending turns
+    exarch-context `survey / `evict [turns: [Int], note: Str]
+    exarch-transcript `index / `grep [pattern: Str, turns: [Int]] / `read [turns: [Int]]
 
-`exarch-context `survey` — `rows`, one per resident turn (id, role, kind `own`|`import`|`inherited`, label, bytes), and `total-bytes`, the figure to weigh against the window. `exarch-context `evict [turns: [Int], note: '…']` — the named turns leave at once, wherever they lie, never the one being written; the answer is the survey after it has acted. A run of departed turns leaves one marker behind: which turns went, your `note` verbatim, how to read them back. `!{range a b}` builds the ids.
+`explain exarch-context` and `explain exarch-transcript` give the full shapes and rules.
 
-Evict the moment a detour proves useless, with a note saying what went and why. Near the window the harness cuts the oldest turns itself, noteless, and warns you first: that warning is your chance to bind the conclusions and make the cut yourself. Cost: the cache holds only the prefix before the earliest cut, so the next request re-reads from there on.
+## Evicting
 
-## Searching the record
+Evict a detour the moment it proves useless, with a note saying what it found. The note is kept verbatim in the marker left behind, so it is the only part of those turns you keep without reading them back. `!{range a b}` builds a run of ids; weigh `total-bytes` from `survey` against the window.
 
-`exarch-transcript `index` — every recorded turn (id, role, kind, label, bytes, held: `resident`|`evicted`), oldest first. `exarch-transcript `grep [pattern: '…', turns: [Int]]` — Rust regex over every message line of the searched turns; `turns` is optional. `exarch-transcript `read [turns: [Int]]` — the messages exactly as the provider was sent them, nothing clipped.
+Near the window the harness evicts the oldest turns itself, without a note, and warns you once beforehand. Take that warning as your cue: bind the conclusions and make the cut yourself. Every eviction costs a cache miss from the earliest evicted turn onward, so cut once, not piecemeal.
 
-Work outward from `grep`, in on `read`. A hit is [turn, role, line, text] — the ids are the point, read nothing whole until you have them:
+## Searching
+
+Find ids with `grep`, then `read` only those turns. A hit is `[turn, role, line, text]`; `hits` holds the 100 oldest matches, each clipped to 200 bytes, and `total` counts them all.
 
     let found = exarch-transcript `grep [pattern: 'test result: FAILED']
-    $found[total]                          # 7 — `hits` holds the 100 oldest, each `text` 200 bytes
-    let mine = filter { |h| equal $h[role] #'assistant'# } $found[hits]
-    map { |h| [$h[turn], $h[line]] } $mine # [[40, 79], [40, 85], ...]
+    let mine = filter { |h| equal $h[role] 'assistant' } $found[hits]
+    map { |h| [$h[turn], $h[line]] } $mine     # [[40, 79], [40, 85], ...]
 
-    let turn = exarch-transcript `read [turns: [40]]
-    let parts = $turn[0][messages][0][parts]
-    let peek = str $parts[0]
-    # `text [content: ...] — probe the tags before projecting: `keys` fails on a variant, `str` never fails
-    case $parts[0] [ `text: { |c| $c[content] }, `reasoning: { |c| #'(kept)'# } ]
+    let turns = exarch-transcript `read [turns: [40]]
+    str $turns[0][messages][1][parts]          # parts are variants: `str` shows the tags, `keys` fails
 
-Narrow `grep` to `turns:` once ids are known; `read` is uncapped, so bind and slice it like any large output. A `mnemon` child shares this record and greps it in its own context.
+Once ids are known, narrow `grep` with `turns:`. `read` is not clipped, so bind and slice it like any large output. A `mnemon` child shares this record and can search it in its own context.
 
-## Rewinding when it fails
+## Recovering from failure
 
-There is no undo and no `rewind` — `exarch-context` takes `survey` and `evict`, and the transcript is read-only ("tag must be one of `survey, `evict — got rewind"). Rewinding is a protocol. When a stretch of work fails: bind the conclusion — what failed and what it means — then `evict` the failed turns in one call with that conclusion as the note, `grep` and then `read` whatever you must recover, and resume from the last good state. Bindings, files, and the register are untouched: the cut is to the working set only, and the marker carries your note forward.
+When a script fails — a type error, a parse error, or it simply did not do what you meant — evict its turn in your next script, alongside the corrected attempt. Every tool result ends with `TURN: <id>`, the turn to name; the note says what you learned, if anything, and what the script wrote before it failed. A failed attempt is noise to every later request, and cutting the newest turn costs almost nothing in cache.
 
-Never replay a failed script from the top (Failure); the writes already happened. Refused for you, naming the turn: one being written ("turn N is being written now — an eviction keeps the work in hand"), an id never recorded, and a set that would leave a user turn unanswered. To try work that may fail without dirtying the working set at all, hand it to a child — `mnemon` shares the record, `amnemon` starts clean — and cancel it on failure.
+There is no undo. When a stretch of work fails, bind the conclusion — what failed and what it means — then evict the failed turns in one call with that conclusion as the note, and resume from the last good state. Never replay a failed script from the top: its writes already happened. To try work that may fail without touching your context at all, hand it to a child — `mnemon` shares the record, `amnemon` starts clean — and cancel it if it fails.

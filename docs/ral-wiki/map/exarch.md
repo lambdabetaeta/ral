@@ -191,10 +191,11 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   blocks as policy, long-running work behind `defer`/`await`, and work that must
   outlive the session behind `detach`
   ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
-- **`Context management`** (`data/context.md`) is the three-tier memory model: turns
-  are the working set, bindings and the register the durable memory, the transcript
-  the complete record — promote to survive, evict with a note, search `grep`-first
-  and read by probed shape, and rewind a failed run by cutting it and resuming.
+- **`Context management`** (`data/context.md`) is strategy, not reference — the
+  builtins' `explain` text owns the shapes and rules: the context is the only
+  memory that can be taken away, so promote before evicting, evict with a note,
+  search `grep`-first then `read`, and recover from failure by cutting the failed
+  turns and resuming rather than replaying.
 - **`Host`** opens by naming the reader — the one host fact that is not the
   host's, since a name is what every other agent addresses it by and the only
   way it picks its own row out of a roster — then gives the environment snapshot
