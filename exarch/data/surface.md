@@ -6,7 +6,7 @@ A card `` `card LIST-OF-MARKS` `` is an ordered stack of marks drawn top-to-bott
 
 - `` `text [spans: [[role: "…", text: "…"], …]] `` — a run of spans. Every span carries `role` — one of `path`, `code`, `ok`, `warn`, `bad`, `muted`, `strong` (identity, mapped to a hue), or `""` for plain ink. A heading is a `strong` span.
 - `` `measure [label: "…", value: N, max: M, unit: "…"] `` — a magnitude. With `max`, it reads as a proportional bar (`value/max`); without, as a `log2` size bar. `max`/`unit` may be omitted.
-- `` `fields [rows: [[label: "…", value: VALUE], …]] `` — an aligned `(label, value)` table; rows are records (a positional `[label, value]` list would force label and value to one type). A `VALUE` is a `` `text `` or `` `measure `` mark; use the same kind across the rows.
+- `` `fields [rows: [[label: "…", value: VALUE], …]] `` — an aligned `(label, value)` table; rows are records (a positional `[label, value]` list would force label and value to one type). A `VALUE` is a `` `text `` mark, or a `` `measure `` **without its `label`** — the row already names it, so a `label` written here is ignored. Use the same kind across the rows.
 - `` `raw [bytes: "…"] `` — pre-formed bytes appended verbatim, for output outside the grammar. Honest about being un-encoded ink.
 
 A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table's values one kind. **The backtick and tag name must be on the same line** (`` `card ``, not `` `\ncard ``); the payload may span lines freely. Compose marks directly for anything else:

@@ -7,7 +7,7 @@
 mod meters;
 
 use crate::agent::resources::hms;
-use crate::bus::card::{Card, Field, FieldVal, Mark, Measure, Span};
+use crate::bus::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::credential::Roster;
 use crate::provider::identity::{AccountId, Meter};
 use crate::provider::listing::Fetches;
@@ -97,8 +97,7 @@ impl Allowance {
             None => window_part,
         };
         let value = if let Some(f) = self.fraction() {
-            FieldVal::Measure(Measure {
-                label: String::new(),
+            FieldVal::Readout(Readout {
                 value: percent_from_fraction(f),
                 max: Some(100),
                 unit: Some("%".into()),
@@ -375,20 +374,20 @@ mod tests {
             used: Consumption::Fraction(0.004),
             resets_at: None,
         };
-        let FieldVal::Measure(m) = barely_started.field_at(0).value else {
-            panic!("a disclosed fraction renders as a measure");
+        let FieldVal::Readout(r) = barely_started.field_at(0).value else {
+            panic!("a disclosed fraction renders as a readout");
         };
-        assert_eq!(m.value, 1);
+        assert_eq!(r.value, 1);
 
         let untouched = Allowance {
             window: None,
             used: Consumption::Fraction(0.0),
             resets_at: None,
         };
-        let FieldVal::Measure(m) = untouched.field_at(0).value else {
-            panic!("a disclosed fraction renders as a measure");
+        let FieldVal::Readout(r) = untouched.field_at(0).value else {
+            panic!("a disclosed fraction renders as a readout");
         };
-        assert_eq!(m.value, 0);
+        assert_eq!(r.value, 0);
     }
 
     #[test]
@@ -432,8 +431,8 @@ mod tests {
         assert_eq!(spans[0].text, "$12.40 used · no cap");
 
         let capped = counted(30, Some(100), Unit::Tokens);
-        let FieldVal::Measure(_) = capped.field_at(0).value else {
-            panic!("a disclosed cap yields a fraction, hence a measure");
+        let FieldVal::Readout(_) = capped.field_at(0).value else {
+            panic!("a disclosed cap yields a fraction, hence a readout");
         };
     }
 

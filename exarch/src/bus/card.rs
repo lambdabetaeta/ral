@@ -107,12 +107,11 @@ impl Span {
     }
 }
 
-/// The quantitative mark `[label, value, max?, unit?]`: a bounded magnitude
-/// (`max` present) renders as a proportional fill bar, an unbounded one as a
-/// `log2` size bar.
+/// A magnitude with no name of its own: bounded (`max` present) it renders as
+/// a proportional fill bar, unbounded as a `log2` size bar.  What labels it is
+/// the position it sits in — a [`Measure`]'s label, or a [`Field`]'s.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Measure {
-    pub label: String,
+pub struct Readout {
     pub value: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
@@ -120,10 +119,11 @@ pub struct Measure {
     pub unit: Option<String>,
 }
 
-impl Measure {
-    /// The unlabelled `value[/max][unit]` readout, shared by
-    /// [`FieldVal::plain`] and [`summary_line`]'s measure arm.
-    fn readout(&self) -> String {
+impl Readout {
+    /// `value[/max][unit]` as text, for every surface with no bar to draw:
+    /// [`FieldVal::plain`], [`summary_line`]'s measure arm, and the headless
+    /// stderr condenser.
+    pub(crate) fn plain(&self) -> String {
         let bound = self.max.map(|mx| format!("/{mx}")).unwrap_or_default();
         format!(
             "{}{bound}{}",
@@ -133,13 +133,22 @@ impl Measure {
     }
 }
 
-/// A [`Mark::Fields`] row's value: inline spans or a nested [`Measure`] — the
-/// one place a mark nests inside another.
+/// The quantitative mark: a [`Readout`] standing on its own, so it carries the
+/// label nothing else supplies.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Measure {
+    pub label: String,
+    #[serde(flatten)]
+    pub readout: Readout,
+}
+
+/// A [`Mark::Fields`] row's value: inline spans or a bare [`Readout`].  The row
+/// already carries the label, so the nested position cannot hold a second one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldVal {
     Inline(Vec<Span>),
-    Measure(Measure),
+    Readout(Readout),
 }
 
 impl FieldVal {
@@ -148,7 +157,7 @@ impl FieldVal {
     pub(crate) fn plain(&self) -> String {
         match self {
             Self::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
-            Self::Measure(m) => m.readout(),
+            Self::Readout(r) => r.plain(),
         }
     }
 }
@@ -368,7 +377,7 @@ pub(crate) fn summary_line(card: &Card) -> String {
                     })
                     .collect::<String>(),
             ),
-            Mark::Measure(m) => format!("{} {}", m.label, m.readout()),
+            Mark::Measure(m) => format!("{} {}", m.label, m.readout.plain()),
             Mark::Fields { rows } => rows
                 .iter()
                 .map(|f| format!("{} {}", f.label, f.value.plain()))
@@ -399,9 +408,11 @@ mod tests {
             },
             Mark::Measure(Measure {
                 label: "tasks".into(),
-                value: 3,
-                max: Some(12),
-                unit: None,
+                readout: Readout {
+                    value: 3,
+                    max: Some(12),
+                    unit: None,
+                },
             }),
             Mark::Raw {
                 bytes: vec![0xff, b'h'],

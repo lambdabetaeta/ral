@@ -29,10 +29,14 @@ A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
   a hue, never a magnitude. A heading is a `strong` span.
 - **`measure`** `[label, value, max?, unit?]` — the quantitative mark, two
   ordered variables (size + value/lightness). Bounded (`max` present) → a
-  proportional fill bar; unbounded → a `log2` size bar.
+  proportional fill bar; unbounded → a `log2` size bar. In Rust it is a
+  **`Readout`** — `value`/`max?`/`unit?`, the magnitude with no name of its own
+  — plus the label this position has to supply.
 - **`fields`** — the matrix mark: an aligned `(label, value)` table in one shared
-  label column (Bertin's selective alignment). A value nests a `text` or
-  `measure` mark. The columns are the *card's*, not the mark's: a card of
+  label column (Bertin's selective alignment). A value nests a `text` mark or a
+  bare `Readout`: the row carries the label, so the nested position *cannot*
+  hold a second one, and a `label` written into a nested `` `measure `` is
+  dropped on decode like any other unread field. The columns are the *card's*, not the mark's: a card of
   several `fields` marks — `/limits`, one section per account — aligns as one
   table, since a selective alignment that restarts per section selects nothing.
 - **`diff`** `[path, hunks]` — the dense composite, binding four variables exarch
@@ -142,7 +146,7 @@ standing alone, measures its own. A card is never laid out at a fixed budget and
 (over the palette constants in `tui/palette.rs`) is the **single place hue
 lives** for kit content, so the kit can name a role but never a colour, and
 magnitude can never land on hue — the encoding is correct by construction. The quantitative encoders are reused, not duplicated: `measure`
-calls the generalised `size_bar`/`progress_bar` through `measure_value_spans`,
+calls the generalised `size_bar`/`progress_bar` through `readout_spans`,
 `diff` calls the patch body (`diff_body`, the one subject with a module of its own, `tui/diff.rs`), and `fields` plus `provider_error`
 both feed the shared `render_field_rows` matrix primitive — so
 `provider_error` is one internal caller of the `fields` path, not a duplicate

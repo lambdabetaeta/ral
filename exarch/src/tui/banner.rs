@@ -351,7 +351,7 @@ mod tests {
     fn lead_role(v: &FieldVal) -> Option<Role> {
         match v {
             FieldVal::Inline(spans) => spans.first().and_then(|sp| sp.role),
-            FieldVal::Measure(_) => None,
+            FieldVal::Readout(_) => None,
         }
     }
 

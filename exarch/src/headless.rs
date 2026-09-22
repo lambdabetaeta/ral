@@ -123,11 +123,7 @@ fn card_stderr(card: &Card) -> Vec<String> {
                 let text: String = spans.iter().map(|s| s.text.as_str()).collect();
                 out.extend(text.lines().map(|l| format!("  {l}")));
             }
-            Mark::Measure(m) => {
-                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
-                let unit = m.unit.as_deref().unwrap_or("");
-                out.push(format!("[{}: {}{bound}{unit}]", m.label, m.value));
-            }
+            Mark::Measure(m) => out.push(format!("[{}: {}]", m.label, m.readout.plain())),
             Mark::Fields { rows } => {
                 for f in rows {
                     out.push(format!("  {}: {}", f.label, f.value.plain()));

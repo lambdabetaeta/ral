@@ -7,7 +7,7 @@
 use ral_core::Value as RalValue;
 
 use super::diff::{Row, Seg};
-use super::{Card, Field, FieldVal, Mark, Measure, Role, Span};
+use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 
 /// Encode a decoded [`Card`] as the canonical `` `card [mark, …] `` value —
 /// always the list form, even for a single mark, so a reader need not branch
@@ -49,18 +49,21 @@ fn encode_spans(spans: &[Span]) -> RalValue {
     )])
 }
 
-fn encode_measure_fields(measure: &Measure) -> Vec<(String, RalValue)> {
-    let mut fields = vec![
-        ("label".to_string(), RalValue::String(measure.label.clone())),
-        ("value".to_string(), RalValue::Int(i64::from(measure.value))),
-    ];
-    if let Some(max) = measure.max {
+fn encode_readout_fields(readout: &Readout) -> Vec<(String, RalValue)> {
+    let mut fields = vec![("value".to_string(), RalValue::Int(i64::from(readout.value)))];
+    if let Some(max) = readout.max {
         fields.push(("max".to_string(), RalValue::Int(i64::from(max))));
     }
-    if let Some(unit) = &measure.unit {
+    if let Some(unit) = &readout.unit {
         fields.push(("unit".to_string(), RalValue::String(unit.clone())));
     }
     fields
+}
+
+fn encode_measure(measure: &Measure) -> RalValue {
+    let mut fields = vec![("label".to_string(), RalValue::String(measure.label.clone()))];
+    fields.extend(encode_readout_fields(&measure.readout));
+    RalValue::map(fields)
 }
 
 fn encode_field_val(val: &FieldVal) -> RalValue {
@@ -69,9 +72,9 @@ fn encode_field_val(val: &FieldVal) -> RalValue {
             label: "text".into(),
             payload: Some(Box::new(encode_spans(spans))),
         },
-        FieldVal::Measure(m) => RalValue::Variant {
+        FieldVal::Readout(r) => RalValue::Variant {
             label: "measure".into(),
-            payload: Some(Box::new(RalValue::map(encode_measure_fields(m)))),
+            payload: Some(Box::new(RalValue::map(encode_readout_fields(r)))),
         },
     }
 }
@@ -114,7 +117,7 @@ fn encode_mark(mark: &Mark) -> RalValue {
         },
         Mark::Measure(m) => RalValue::Variant {
             label: "measure".into(),
-            payload: Some(Box::new(RalValue::map(encode_measure_fields(m)))),
+            payload: Some(Box::new(encode_measure(m))),
         },
         Mark::Fields { rows } => RalValue::Variant {
             label: "fields".into(),
@@ -177,9 +180,11 @@ mod tests {
             },
             Mark::Measure(Measure {
                 label: "crates".into(),
-                value: 7,
-                max: Some(12),
-                unit: Some("kb".into()),
+                readout: Readout {
+                    value: 7,
+                    max: Some(12),
+                    unit: Some("kb".into()),
+                },
             }),
             Mark::Fields {
                 rows: vec![
@@ -189,8 +194,7 @@ mod tests {
                     },
                     Field {
                         label: "cov".into(),
-                        value: FieldVal::Measure(Measure {
-                            label: "cov".into(),
+                        value: FieldVal::Readout(Readout {
                             value: 3,
                             max: None,
                             unit: None,
@@ -221,11 +225,12 @@ mod tests {
         assert!(matches!(&got.marks()[0],
             Mark::Text { spans } if spans[0].role == Some(Role::Strong) && spans[1].role.is_none()));
         assert!(matches!(&got.marks()[1],
-            Mark::Measure(m) if m.value == 7 && m.max == Some(12) && m.unit.as_deref() == Some("kb")));
+            Mark::Measure(m) if m.readout.value == 7 && m.readout.max == Some(12)
+                && m.readout.unit.as_deref() == Some("kb")));
         assert!(matches!(&got.marks()[2], Mark::Fields { rows }
             if rows.len() == 2
                 && matches!(&rows[0].value, FieldVal::Inline(spans) if spans[0].text == "42 passed")
-                && matches!(&rows[1].value, FieldVal::Measure(m) if m.value == 3 && m.max.is_none())));
+                && matches!(&rows[1].value, FieldVal::Readout(r) if r.value == 3 && r.max.is_none())));
         assert!(matches!(&got.marks()[3], Mark::Diff { path, hunks }
             if path == "a.rs" && hunks[0].start == 7
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_), Row::Context(_)])
@@ -238,9 +243,11 @@ mod tests {
             },
             Mark::Measure(Measure {
                 label: "n".into(),
-                value: 1,
-                max: None,
-                unit: None,
+                readout: Readout {
+                    value: 1,
+                    max: None,
+                    unit: None,
+                },
             }),
             Mark::Fields { rows: vec![] },
             Mark::Diff {
@@ -253,7 +260,7 @@ mod tests {
         assert!(matches!(&got_bare.marks()[0],
             Mark::Text { spans } if spans[0].role.is_none()));
         assert!(matches!(&got_bare.marks()[1],
-            Mark::Measure(m) if m.max.is_none() && m.unit.is_none()));
+            Mark::Measure(m) if m.readout.max.is_none() && m.readout.unit.is_none()));
         assert!(matches!(&got_bare.marks()[3], Mark::Diff { hunks, .. } if hunks.is_empty()));
         assert!(matches!(&got_bare.marks()[4], Mark::Raw { bytes } if bytes.is_empty()));
     }

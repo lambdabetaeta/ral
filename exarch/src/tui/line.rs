@@ -10,7 +10,10 @@ use super::highlight::highlight_ral_spans;
 use super::palette::{CYAN, Col, LIME, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w};
 use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
-use crate::bus::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
+use crate::bus::card::{
+    Card, Field as CardField, FieldVal, Mark, Measure, Readout as CardReadout, Role,
+    Span as CardSpan,
+};
 use crate::provider;
 use crate::record::fault::{Datum, Field as FaultField, Readout};
 use ratatui::{
@@ -421,12 +424,12 @@ impl Cols {
         let mut cols = Self::default();
         for mark in marks {
             match mark {
-                Mark::Measure(m) => cols.readout = cols.readout.seeing(&measure_readout(m)),
+                Mark::Measure(m) => cols.readout = cols.readout.seeing(&figures(&m.readout)),
                 Mark::Fields { rows } => {
                     for row in rows {
                         cols.label = cols.label.seeing(&row.label);
-                        if let FieldVal::Measure(m) = &row.value {
-                            cols.readout = cols.readout.seeing(&measure_readout(m));
+                        if let FieldVal::Readout(r) = &row.value {
+                            cols.readout = cols.readout.seeing(&figures(r));
                         }
                     }
                 }
@@ -698,40 +701,38 @@ pub(super) fn fold_styled_lines(
 }
 
 /// A `measure` mark as one line: slate label, then the readout and its bar.
-fn render_measure(m: &Measure, readout: Col) -> Line<'static> {
+fn render_measure(m: &Measure, col: Col) -> Line<'static> {
     let mut spans = vec![
         Span::styled(m.label.clone(), Style::default().fg(SLATE)),
         Span::raw("  "),
     ];
-    spans.extend(measure_value_spans(m, readout));
+    spans.extend(readout_spans(&m.readout, col));
     Line::from(spans)
 }
 
-/// A [`Measure`]'s value without its label, since a fields row supplies its
-/// own: bounded (`max` present) reads `value/max` with a proportional
-/// [`progress_bar`], unbounded reads `value[unit]` with a `log2` [`size_bar`].
-fn measure_value_spans(m: &Measure, readout: Col) -> Vec<Span<'static>> {
+/// A [`CardReadout`] in the shared figures column, then its bar: bounded
+/// (`max` present) a proportional [`progress_bar`], unbounded a `log2`
+/// [`size_bar`].
+fn readout_spans(r: &CardReadout, col: Col) -> Vec<Span<'static>> {
     let mut spans = vec![
-        Span::styled(
-            readout.right(&measure_readout(m)),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(col.right(&figures(r)), Style::default().fg(Color::White)),
         Span::raw("  "),
     ];
-    match m.max {
-        Some(max) => spans.extend(progress_bar(m.value, max)),
-        None => spans.push(size_bar(m.value)),
+    match r.max {
+        Some(max) => spans.extend(progress_bar(r.value, max)),
+        None => spans.push(size_bar(r.value)),
     }
     spans
 }
 
-/// The figures a [`Measure`] reads as, ahead of any column: `value/max` when
-/// bounded, else `value[unit]`.
-fn measure_readout(m: &Measure) -> String {
-    match (m.max, &m.unit) {
-        (Some(max), _) => format!("{}/{max}", m.value),
-        (None, Some(u)) => format!("{}{u}", m.value),
-        (None, None) => m.value.to_string(),
+/// The figures a readout reads as, ahead of any column: `value/max` when
+/// bounded — the bar carries the proportion, so the unit would only crowd it —
+/// else `value[unit]`.
+fn figures(r: &CardReadout) -> String {
+    match (r.max, &r.unit) {
+        (Some(max), _) => format!("{}/{max}", r.value),
+        (None, Some(u)) => format!("{}{u}", r.value),
+        (None, None) => r.value.to_string(),
     }
 }
 
@@ -769,7 +770,7 @@ fn render_fields(rows: &[CardField], cols: Cols, width: usize) -> Vec<Line<'stat
                     .iter()
                     .map(|s| Span::styled(s.text.clone(), span_style(s.role)))
                     .collect(),
-                FieldVal::Measure(m) => measure_value_spans(m, cols.readout),
+                FieldVal::Readout(r) => readout_spans(r, cols.readout),
             },
         })
         .collect();

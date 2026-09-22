@@ -8,7 +8,7 @@ use ral_core::Value as RalValue;
 
 use super::diff::{Hunk, Row, Seg};
 use super::value::{count_field, map_of, str_field};
-use super::{Card, Field, FieldVal, Mark, Measure, Role, Span};
+use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 
 /// Decode the value a kit handed to `surface` into a [`Card`].
 ///
@@ -102,13 +102,19 @@ fn decode_span(v: &RalValue) -> Span {
     }
 }
 
-/// The magnitude `value` is the one field a measure cannot default.
-fn decode_measure(m: &ral_core::types::Map) -> Option<Measure> {
-    Some(Measure {
-        label: str_field(m, "label").unwrap_or_default(),
+/// The magnitude `value` is the one field a readout cannot default.
+fn decode_readout(m: &ral_core::types::Map) -> Option<Readout> {
+    Some(Readout {
         value: count_field(m, "value")?,
         max: count_field(m, "max"),
         unit: str_field(m, "unit"),
+    })
+}
+
+fn decode_measure(m: &ral_core::types::Map) -> Option<Measure> {
+    Some(Measure {
+        label: str_field(m, "label").unwrap_or_default(),
+        readout: decode_readout(m)?,
     })
 }
 
@@ -138,9 +144,12 @@ fn decode_field(v: &RalValue) -> Field {
             };
             FieldVal::Inline(spans)
         }
+        // A nested `measure` is read for its readout alone: the row's own label
+        // names it, so a `label` written here is dropped like any other field
+        // the decoder does not read.
         Some(RalValue::Variant { label, payload }) if label == "measure" => {
-            match payload.as_deref().and_then(map_of).and_then(decode_measure) {
-                Some(measure) => FieldVal::Measure(measure),
+            match payload.as_deref().and_then(map_of).and_then(decode_readout) {
+                Some(readout) => FieldVal::Readout(readout),
                 None => FieldVal::Inline(Vec::new()),
             }
         }
@@ -290,7 +299,7 @@ mod tests {
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_)])
                 && hunks[0].rows.iter().map(Row::text).eq(["x", "y"].map(String::from))));
         assert!(matches!(&marks[2], Mark::Fields { rows } if rows[0].label == "tests"));
-        assert!(matches!(&marks[3], Mark::Measure(m) if m.value == 7 && m.max == Some(12)));
+        assert!(matches!(&marks[3], Mark::Measure(m) if m.readout.value == 7 && m.readout.max == Some(12)));
         assert!(matches!(&marks[4], Mark::Raw { bytes } if bytes == b"hi"));
     }
 
