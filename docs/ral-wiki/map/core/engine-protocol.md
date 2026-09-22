@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4d859c3
-generated_at_date: 2026-09-16
+generated_at_commit: 451d1ab5
+generated_at_date: 2026-09-22
 covers_paths: [core/src/protocol.rs, core/src/engine.rs, core/src/wire.rs, core/src/hatch.rs]
 ---
 
@@ -173,12 +173,19 @@ hatch section for the why.
 - `seed_from_env` — the child's own take: reads `RAL_ENGINE_SEED_FD`,
   striking the var as it takes the fd, before the engine waits for `Attach`.
 - `apply_seed` — hydrates the taken seed's scope and context into the booted
-  shell, then narrows its capabilities through the installer's
-  `GrantNarrower`.
-- `GrantNarrower` — `fn(&Capabilities, &str, &str) -> Result<Capabilities,
-  String>`, a field of `EngineInstaller` rather than a registered hook: core
-  has no base-tag lexicon of its own, so a seeded child's ceiling is always
-  stated by the host that boots the engine.
+  shell, then pushes the child's own layer, resolved by `SpawnGrant::layer`
+  against the *child's* cwd — the same resolution the host-side desk runs, so
+  neither seat holds a narrowing decision of its own
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). A
+  `` `restrict `` record crosses undecoded and is decoded here, which is what
+  keeps `Capabilities`' resolved-by-construction invariant true of every
+  value that ever exists.
+- `GrantNarrower` (`core/src/spawn_grant.rs`) — `fn(&str, &str) ->
+  Result<Capabilities, String>`, a field of `EngineInstaller` rather than a
+  registered hook: core has no base-tag lexicon of its own, so a
+  `` `base `` arm is always resolved by the host that boots the engine
+  (`exarch::policy::base_layer`), and the policy is demanded of every host that
+  dresses an engine instead of left in a slot one could forget to fill.
 - `HATCHED` / `teardown_hatched` / `sweep_hatched` — the process-global table
   of spawned-but-unreaped hatch children, swept by `waitpid` at the next
   hatch and again at engine teardown (a hatched child closes its seed channel

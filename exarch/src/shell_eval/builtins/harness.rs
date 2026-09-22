@@ -26,24 +26,8 @@ use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Field, Label, Row, RowVar, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
-use ral_core::{Shell, Value};
+use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
-
-/// The bases a spawn's `grant` may name — a subset of what
-/// `crate::policy::base::resolve_base` offers a launching human, and kept in
-/// step by hand.
-///
-/// Each admits the bundled coreutils (`ral_core::uutils`). Those spawn by bare
-/// name, so a base that states its exec admissions as directory prefixes alone
-/// denies every one of them, and a child that cannot run `ls` cannot widen its
-/// own grant to get it back.
-const PERMISSION_LABELS: [&str; 5] = [
-    "confined",
-    "read-only",
-    "edit-only",
-    "reasonable",
-    "dangerous",
-];
 
 /// The label of a nullary tag — the shape both `type` and `grant` must have.
 fn bare_tag(v: &Value) -> Option<&str> {
@@ -67,15 +51,42 @@ fn agent_type_label(v: &Value) -> Settled<()> {
     )))
 }
 
-/// Check a `grant`, closing the row [`scheme_agents`] leaves open so the
-/// error can enumerate every legal label.
-fn permission_label(v: &Value) -> Settled<()> {
-    if bare_tag(v).is_some_and(|label| PERMISSION_LABELS.contains(&label)) {
-        return Ok(());
+/// Read a `grant`, closing the row [`scheme_agents`] leaves open so the error
+/// can enumerate every legal shape. `` `restrict ``'s record is carried across
+/// as plain data rather than decoded here: the capability vocabulary is the
+/// far side's, and every form is one more layer pushed onto the parent's
+/// stack, so no form of this can widen the child.
+fn spawn_grant(v: &Value) -> Settled<SpawnGrant> {
+    match v {
+        Value::Variant {
+            label,
+            payload: None,
+        } if label == "inherit" => Ok(SpawnGrant::Inherit),
+        Value::Variant {
+            label,
+            payload: None,
+        } if crate::policy::SPAWN_BASES.contains(&label.as_str()) => {
+            Ok(SpawnGrant::Base(label.clone()))
+        }
+        Value::Variant {
+            label,
+            payload: Some(record),
+        } if label == "restrict" => FOValue::try_from(record.as_ref())
+            .map(SpawnGrant::Restrict)
+            .map_err(|_| {
+                sig(
+                    "exarch-agents: `grant`'s `restrict record must be first-order data — no \
+                     closures, handles, or environments — since the ceiling crosses to the host \
+                     as plain data",
+                )
+            }),
+        other => Err(sig(format!(
+            "exarch-agents: `grant` must be `inherit, `confined, `read-only, `edit-only, \
+             `reasonable, or `restrict [exec: …, fs: …, net: …, detach: …, editor: …, shell: …] — \
+             `inherit is how you decline to narrow at all, and `restrict must carry a capability \
+             record of the same shape `grant [...] takes, every key optional — got {other}"
+        ))),
     }
-    Err(sig(format!(
-        "grant must be one of `confined, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
-    )))
 }
 
 /// Check a spawn's `provider` or `model`, closing the row [`scheme_agents`]
@@ -275,7 +286,7 @@ fn mint_token() -> u64 {
 #[cfg(target_os = "linux")]
 fn hatch_over_the_wire(
     spec: FOValue,
-    grant: String,
+    grant: SpawnGrant,
     mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<FOValue> {
@@ -304,7 +315,7 @@ fn hatch_over_the_wire(
 #[cfg(not(target_os = "linux"))]
 fn hatch_over_the_wire(
     _spec: FOValue,
-    _grant: String,
+    _grant: SpawnGrant,
     _mooring: &Mooring,
     _shell: &Shell,
 ) -> Settled<FOValue> {
@@ -345,7 +356,8 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     };
     let Some(grant) = fields.get("grant") else {
         return Err(sig(
-            "exarch-agents: the spec record needs a `grant` field — one of the five permission bases",
+            "exarch-agents: the spec record needs a `grant` field — the child's ceiling: `inherit, \
+             `confined, `read-only, `edit-only, `reasonable, or `restrict [...]",
         ));
     };
     let Some(search) = fields.get("search") else {
@@ -372,10 +384,7 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     // unskippable.
     crate::fleet::check_name(&name).map_err(|why| sig(format!("exarch-agents: {why}")))?;
     agent_type_label(kind)?;
-    permission_label(grant)?;
-    // The door admitted it, so the grant is a bare tag; the hatch needs its
-    // label to narrow the child guest-side.
-    let grant = bare_tag(grant).unwrap_or_default().to_string();
+    let grant = spawn_grant(grant)?;
     if !matches!(search, Value::Bool(_)) {
         return Err(sig(format!(
             "exarch-agents: `search` must be a Bool — got {}",
@@ -946,7 +955,7 @@ fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
 /// it. The `type`, `grant`, `provider` and `model` rows *inside* `start` stay
 /// open, because a literal tag infers its own open row: closing them would
 /// make `` `bogus `` a bare row-mismatch diagnostic that never reaches
-/// [`agent_type_label`]/[`permission_label`]/[`selection_label`], which
+/// [`agent_type_label`]/[`spawn_grant`]/[`selection_label`], which
 /// enumerate the legal labels. `search` is two-state rather than an
 /// enumeration, so `Ty::Bool` closes it outright. `reply`'s `β` is likewise
 /// trusted first-order data,
@@ -1180,7 +1189,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "exarch-agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `list and `read answers `summary [live: Int, replied: Int] afterwards — how many other agents are alive around you, and how many of the agents you started park holding a value you have not fetched. It is the world after the transition rather than a receipt for what you just did, but two integers rather than a roster: after a `start you already know the name you chose, and what you could not have derived is whether someone is waiting on you. A non-zero `replied` is the one number asking you to act — call `read. Call `list when you want the rows.\n\nexarch-agents `list  — the rows: every live agent in your own tree, oldest first, you among them — not only the ones you started, because you may message any of them. `spawner` says who started each one: `root for an agent a human started, `agent <name> otherwise, so the flat listing is still the spawn tree, and the rows reachable from your own name are the ones you may also `cancel and `read. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction, your own among them.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live agent named `to`; it lands at that agent's next exchange boundary, not as human input, and wakes a `replied or `waiting one into a fresh exchange. Any live agent may receive it — a descendant, a sibling, an ancestor — but not yourself; the fleet is one mailbox space, and `list names all of it, so anyone you can see you can write to. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nexarch-agents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. The roster names the whole fleet, so it lists agents this tag will refuse: `spawner` is how you tell them apart before you ask. A cancel is a request, not a transaction: the child is still running when this answers, and still counted by the `summary you get back. A name still on a later `list is NOT a failed cancel — do not fire it again; read `list later still and find it gone.\n\nexarch-agents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nexarch-agents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and what it answers — the rows for `list, the two counts for every tag but `list and `read — is the fleet as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `list and `read answers `summary [live: Int, replied: Int] afterwards — how many other agents are alive around you, and how many of the agents you started park holding a value you have not fetched. It is the world after the transition rather than a receipt for what you just did, but two integers rather than a roster: after a `start you already know the name you chose, and what you could not have derived is whether someone is waiting on you. A non-zero `replied` is the one number asking you to act — call `read. Call `list when you want the rows.\n\nexarch-agents `list  — the rows: every live agent in your own tree, oldest first, you among them — not only the ones you started, because you may message any of them. `spawner` says who started each one: `root for an agent a human started, `agent <name> otherwise, so the flat listing is still the spawn tree, and the rows reachable from your own name are the ones you may also `cancel and `read. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction, your own among them.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` is the child's ceiling: `inherit (decline to narrow — the child runs under your own authority), `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape `grant [...] takes — [exec, fs, net, detach, editor, shell], every key optional — and is how you hand a child a ceiling you computed in your own shell, e.g. `grant: `restrict $ceiling`. Any other shape is refused, naming all six. Every form bounds the child to at most your own authority: a grant is one more narrowing layer on the stack you already hold, never a widening, so asking for more than you have silently yields less rather than failing. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live agent named `to`; it lands at that agent's next exchange boundary, not as human input, and wakes a `replied or `waiting one into a fresh exchange. Any live agent may receive it — a descendant, a sibling, an ancestor — but not yourself; the fleet is one mailbox space, and `list names all of it, so anyone you can see you can write to. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nexarch-agents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. The roster names the whole fleet, so it lists agents this tag will refuse: `spawner` is how you tell them apart before you ask. A cancel is a request, not a transaction: the child is still running when this answers, and still counted by the `summary you get back. A name still on a later `list is NOT a failed cancel — do not fire it again; read `list later still and find it gone.\n\nexarch-agents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nexarch-agents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and what it answers — the rows for `list, the two counts for every tag but `list and `read — is the fleet as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
@@ -1220,27 +1229,51 @@ mod tests {
     use crate::agent::testkit::ral_call;
 
     #[test]
-    fn permission_label_accepts_every_bake_in() {
-        for label in PERMISSION_LABELS {
+    fn spawn_grant_admits_every_bare_tag() {
+        for label in bare_grant_tags() {
             let v = Value::Variant {
                 label: label.to_string(),
                 payload: None,
             };
-            permission_label(&v).unwrap_or_else(|e| panic!("the door must admit `{label}: {e:?}"));
+            let grant = spawn_grant(&v).unwrap_or_else(|e| panic!("must admit `{label}: {e:?}"));
+            let read_back = match (&grant, label) {
+                (SpawnGrant::Inherit, "inherit") => true,
+                (SpawnGrant::Base(base), _) => base == label,
+                _ => false,
+            };
+            assert!(read_back, "`{label} must read back as its own grant");
         }
     }
 
+    /// The record is carried, not decoded: the door's whole judgement is that
+    /// it is first-order data.
     #[test]
-    fn permission_label_rejects_an_unknown_tag_naming_every_offered_base() {
+    fn spawn_grant_carries_a_restrict_record_verbatim() {
+        let v = Value::Variant {
+            label: "restrict".to_string(),
+            payload: Some(Box::new(Value::map(vec![(
+                "net".to_string(),
+                Value::Bool(false),
+            )]))),
+        };
+        let grant = spawn_grant(&v).unwrap_or_else(|e| panic!("must admit `restrict: {e:?}"));
+        let SpawnGrant::Restrict(FOValue::Map { entries }) = grant else {
+            panic!("`restrict must carry its record through as first-order data");
+        };
+        assert_eq!(entries.len(), 1, "the record must cross unchanged");
+    }
+
+    #[test]
+    fn spawn_grant_rejects_an_unknown_tag_naming_every_legal_shape() {
         let v = Value::Variant {
             label: "bogus".to_string(),
             payload: None,
         };
-        let err = match permission_label(&v) {
+        let err = match spawn_grant(&v) {
             Err(ral_core::types::Break::Error(e)) => e,
             other => panic!("expected a door error, got {other:?}"),
         };
-        for label in PERMISSION_LABELS {
+        for label in bare_grant_tags().chain(["restrict"]) {
             assert!(
                 err.message.contains(label),
                 "must name `{label}`, got: {}",
@@ -1249,14 +1282,20 @@ mod tests {
         }
     }
 
-    /// Every label the door admits must resolve to a bake-in profile — which
+    /// Every bare tag the door admits: the bases, plus `` `inherit ``, which
+    /// names none and so is the one admitted tag policy has nothing to resolve.
+    fn bare_grant_tags() -> impl Iterator<Item = &'static str> {
+        std::iter::once("inherit").chain(crate::policy::SPAWN_BASES)
+    }
+
+    /// Every base the door admits must resolve to a bake-in profile — which
     /// also parses and evaluates that profile's `data/*.exarch.ral` — so a label
     /// added here alone shows up. The door's table is the narrower of the two:
     /// the policy layer offers a launching human bases a child is not handed.
     #[test]
     fn every_permission_label_resolves_to_a_bake_in_base() {
         let cwd = std::env::current_dir().unwrap().display().to_string();
-        for label in PERMISSION_LABELS {
+        for label in crate::policy::SPAWN_BASES {
             crate::policy::base_layer(label, &cwd)
                 .unwrap_or_else(|e| panic!("door label `{label} must name a bake-in base: {e}"));
         }
@@ -1269,19 +1308,22 @@ mod tests {
             .split(", ")
             .collect();
         assert!(
-            PERMISSION_LABELS.iter().all(|l| offered.contains(l)),
+            crate::policy::SPAWN_BASES
+                .iter()
+                .all(|l| offered.contains(l)),
             "every door label must be a base the policy layer offers, got: {offered:?}"
         );
     }
 
-    /// A payload-carrying tag is refused, never truncated to its label.
+    /// A base carrying a payload is refused, never truncated to its label:
+    /// `` `restrict `` is the only tag that takes one.
     #[test]
-    fn permission_label_rejects_a_variant_carrying_a_payload() {
+    fn spawn_grant_rejects_a_base_carrying_a_payload() {
         let v = Value::Variant {
             label: "confined".to_string(),
             payload: Some(Box::new(Value::Int(1))),
         };
-        assert!(permission_label(&v).is_err());
+        assert!(spawn_grant(&v).is_err());
     }
 
     /// The door validates `name`, `type`, and `grant` before
@@ -1297,7 +1339,7 @@ mod tests {
             5,
             &emit,
         );
-        for label in PERMISSION_LABELS {
+        for label in bare_grant_tags() {
             assert!(
                 result.content.contains(label),
                 "must name `{label}`, got: {}",
@@ -1308,6 +1350,86 @@ mod tests {
             crate::fleet::roster::summary(&session.agent).live == 0,
             "an unknown grant label must never register a child"
         );
+    }
+
+    /// `` `dangerous `` has left the spawn surface: there it resolved to ⊤, a
+    /// layer saying nothing, which is what `` `inherit `` now says outright —
+    /// so the refusal must send a model there rather than leave it guessing.
+    #[test]
+    fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, search: true, provider: `inherit, model: `inherit]",
+            5,
+            &emit,
+        );
+        assert!(
+            result
+                .content
+                .contains("inherit is how you decline to narrow"),
+            "the refusal must point at `inherit, got: {}",
+            result.content
+        );
+        assert!(
+            crate::fleet::roster::summary(&session.agent).live == 0,
+            "`dangerous must never register a child"
+        );
+    }
+
+    /// `` `restrict `` is the one grant tag that takes a payload, so bare it is
+    /// a shape error, and the refusal must say what it was missing.
+    #[test]
+    fn a_bare_restrict_errors_before_any_enquiry_crosses() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, search: true, provider: `inherit, model: `inherit]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("capability record"),
+            "the refusal must name the record `restrict carries, got: {}",
+            result.content
+        );
+        assert!(
+            crate::fleet::roster::summary(&session.agent).live == 0,
+            "a bare `restrict must never register a child"
+        );
+    }
+
+    /// Both new spellings pass the grant door — the open `grant` row carries a
+    /// payload-bearing tag too — so what comes back is the *next* door's
+    /// refusal, naming `provider`, and still no child.
+    #[test]
+    fn inherit_and_restrict_pass_the_grant_door() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        for (call, grant) in [("call-1", "`inherit"), ("call-2", "`restrict [net: false]")] {
+            let result = session.run_shell(
+                call.to_string(),
+                &format!(
+                    r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: {grant}, search: true, provider: `guess, model: `inherit]"
+                ),
+                5,
+                &emit,
+            );
+            assert!(
+                result.content.contains("`provider`") && !result.content.contains("`grant`"),
+                "{grant} must pass the grant door and be refused at `provider`, got: {}",
+                result.content
+            );
+            assert!(
+                crate::fleet::roster::summary(&session.agent).live == 0,
+                "a later door's refusal must never leave a child registered"
+            );
+        }
     }
 
     #[test]

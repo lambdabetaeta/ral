@@ -2,6 +2,7 @@
 //! [`EngineSeed`] for a freshly spawned engine process.
 
 use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot};
+use crate::spawn_grant::SpawnGrant;
 use crate::subprocess::WireShell;
 use crate::types::{Settled, Shell};
 use serde::{Deserialize, Serialize};
@@ -18,9 +19,9 @@ pub(crate) struct EngineSeed {
     pub(crate) scope_table: ScopeTable,
     pub shell: WireShell,
     pub captured: SerialEnvSnapshot,
-    /// The spawn's validated base tag, meet-narrowed against the receiving
-    /// engine's own ceiling once hydrated.
-    pub(crate) grant: String,
+    /// The spawn's grant, still unresolved: frozen against the receiving
+    /// engine's own cwd, and meet-narrowed against its ceiling, once hydrated.
+    pub(crate) grant: SpawnGrant,
 }
 
 /// Reify a forked shell into a wire-ready [`EngineSeed`] — `hatch`'s only
@@ -31,7 +32,7 @@ pub(crate) struct EngineSeed {
 /// caller, so a plain non-Linux, non-test build sees this as unreachable —
 /// accurate, not a bug.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
+pub(crate) fn pack_seed(shell: &Shell, grant: SpawnGrant) -> Settled<EngineSeed> {
     let mut ctx = InternCtx::new();
     let captured = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
     let wire_shell = WireShell::from_runtime(
@@ -107,7 +108,8 @@ mod tests {
             .fork_into_nursery(&mooring)
             .expect("a nursery is installed");
         let nursery_shell = nursery.adopt(id_b).expect("adopt the parked fork");
-        let seed = pack_seed(&nursery_shell, "confined".to_string()).expect("pack seed");
+        let seed =
+            pack_seed(&nursery_shell, SpawnGrant::Base("confined".to_string())).expect("pack seed");
         let mut wire_child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&wire_child, &seed.scope_table).expect("decoder");
         install_wire_shell(seed.shell, &mut wire_child, &dec).expect("install shell");

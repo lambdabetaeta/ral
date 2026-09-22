@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c225319f
+generated_at_commit: 451d1ab5
 generated_at_date: 2026-09-22
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -53,17 +53,34 @@ composition could discard it. Loading reuses
 format and the `absolute_in` cwd-join helper).
 
 `base_layer(base_name, cwd)` resolves a bake-in base, frozen against the
-child's working directory, as the one layer a [[design/agents|sub-agent]]
-spawn pushes. It no longer takes the parent: the desk behind the
-[[map/exarch/builtins|`` exarch-agents `start `` tag]] (`fleet/desk.rs`'s
-`fork_child`) clones the parent's own `GrantStack` and pushes this layer onto
-the clone, so the same stack that carries the root's authority also carries a
-spawned child's attenuation. The stack's per-check fold ANDs every layer's
-verdict, so an added layer can only remove authority: a spawn can reduce a
-child's reach but never escalate it past the parent's — naming a base looser
-than the parent changes nothing (a network-off parent stays offline even
-under `minimal`) — and `dangerous` — the lattice top — leaves the parent's
-authority verbatim.
+child's working directory, as one way of naming the single layer a
+[[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
+desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
+(`fleet/desk.rs`'s `fork_child`) clones the parent's own `GrantStack` and
+pushes this layer onto the clone, so the same stack that carries the root's
+authority also carries a spawned child's attenuation. The stack's per-check
+fold ANDs every layer's verdict, so an added layer can only remove authority:
+a spawn can reduce a child's reach but never escalate it past the parent's —
+naming a base looser than the parent changes nothing (a network-off parent
+stays offline even under `minimal`).
+
+**A spawn's `grant` is one field with six spellings**, because at a spawn
+`--base` and `--restrict` are the same act — the parent's stack is already
+underneath, so a base pushed here can only narrow, exactly as a restrict does
+([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). The layer is
+resolved by `SpawnGrant::layer` (`core/src/spawn_grant.rs`), which both seats
+call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
+`` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
+`base_layer` through the `GrantNarrower` the resolution is handed; and
+`` `restrict R `` hands the record to
+`ral_core`'s `decode_capability_map` — the same walker, off the same
+`Form::Grant` declared table, that `grant [...] { body }` and each bake-in
+profile below already pass through, so one keyset earns one wording.
+`` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
+that says nothing, which *means* inherit-the-parent, and `` `inherit `` says
+that without borrowing the root's reading of ⊤. A spawn's `R` gets no
+self-denial layer either — it is a value computed in the parent's shell, with
+no file on disk for the child to rewrite.
 
 `deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
 fresh `Capabilities` layer holding only those paths as `fs.deny_paths`, for the
@@ -115,8 +132,8 @@ and it fails, naming the tool.
 The consequence for spawning: a base whose `exec` is prefixes alone is
 unusable as a child's `grant`, since the child cannot widen its own ceiling to
 recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`harness.rs::PERMISSION_LABELS` withholds it from `` exarch-agents `start ``
-([[design/agents|agents]]).
+`harness.rs::PERMISSION_LABELS` withholds it from `` exarch-agents `start ``,
+as it does `dangerous` ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument
 of `grant [...] { body }`, loaded through

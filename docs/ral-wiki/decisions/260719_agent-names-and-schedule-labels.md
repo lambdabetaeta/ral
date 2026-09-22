@@ -35,6 +35,19 @@ tabula-rasa/inherits split is untouched — it moves from the verb to a field).
   labels" lives at the door for exactly the two arguments whose vocabulary the
   model must be *told*. This is the same shape [[map/exarch/builtins|`schedule`]]
   already carries for its own spec record.
+
+  > **Amended 2026-09-22.** "`<one of six>`" above never named a stable set,
+  > and does not name today's. The spawnable bases settled at five
+  > (`confined`, `read-only`, `edit-only`, `reasonable`, `dangerous`), and the
+  > field is six spellings again — but a different six: `` `inherit ``,
+  > four bases (`` `dangerous `` left the spawn surface; at a spawn ⊤ is a
+  > layer that says nothing, which *means* inherit), and `` `restrict R ``
+  > carrying a capability record
+  > ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). What this
+  > bullet decided is exactly what survived the widening: the row stays open,
+  > the door still enumerates, and `R`'s own keyset is enumerated by the same
+  > `Form::Grant` declared table `grant [...] { body }` answers to — so the
+  > widening cost no second lexicon.
 - **The record is extensible where positional arguments were not.** A future
   per-child budget, a memory-window cap, a model override — each rides as a new
   optional field on the spec, decoded at the same door, without a new verb or a

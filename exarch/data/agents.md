@@ -1,6 +1,6 @@
 An agent is a function from a prompt and your bindings to a value. It runs in a copy of your shell, reads what you point it at, and replies with first-order ral data that you compute with. 
 
-`` exarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is one of `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous ``, at most your own authority. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain exarch-agents` has the full documentation.
+`` exarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: `inherit|`confined|`read-only|`edit-only|`reasonable|`restrict <caps>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is `` `inherit `` to run the child on your own authority verbatim, one of the profiles `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, or `` `restrict R `` for a capability record `R` — `[exec, fs, net, detach, editor, shell]`, every key optional, the same shape the `grant [...] { … }` form takes. Every form is one more layer on what you already hold, and a layer only narrows: a child can never be granted more than you have, and asking for more silently yields less rather than failing. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain exarch-agents` has the full documentation.
 
 `provider` and `model` say what the child runs on; write `` `inherit `` for both to run it on your own selection. Spend a cheaper, faster model on a child whose task is mechanical and whose answer you will check — a scan, a summary, a fan-out over chunks — with `` model: `named '<model>' `` and `` provider: `inherit ``, which keeps your own account. Keep your own model for work that needs judgement.
 
@@ -30,6 +30,14 @@ Example:
 When all the agents are done:
 
     let parts = map { |i| let r = exarch-agents `read "chunk-$i"; $r[reply] } !{range 0 !{length $chunks}}
+
+`` `restrict `` takes a record you compute, so a fan-out can hand each child its own ceiling — here, one agent per corpus directory, each able to read only the directory it was given and none of the others, and none of them online:
+
+    let dirs = glob #'corpus/*'#
+    for !{range 0 !{length $dirs}} { |i|
+      let only-mine = [net: false, fs: [read: ["cwd:$dirs[$i]"]]]
+      exarch-agents `start [prompt: "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].", name: "corpus-$i", type: `amnemon, grant: `restrict $only-mine, search: false, provider: `inherit, model: `inherit]
+    }
 
 DO NOT POLL AGENTS. Wait to be notified of their completion.
 

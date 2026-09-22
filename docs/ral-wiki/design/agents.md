@@ -254,7 +254,11 @@ spawn is one exchange:
   spawn**, packs the scrubbed fork into an `EngineSeed` before the listener
   thread starts — a `Shell` never crosses to it, and the seed is all it ever
   holds of the parent's session — mints eight token bytes, and names port and
-  token in the enquiry;
+  token in the enquiry. The seed carries the spawn's `grant` as a
+  `SpawnGrant`, and a `` `restrict `` record crosses it **undecoded**: the
+  sigils in it must freeze against the child's own working directory, and the
+  guest is the side standing in it
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]);
 - the desk, *while answering*, dials that port, writes the token, and waits;
 - the listener thread checks the token, spawns `current_exe --engine` with the
   dialled connection on its protocol fd and the seed on an inherited one — the
@@ -441,16 +445,64 @@ family is dropped from an ungranted agent's builtin index
 ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). A live self-schedule
 is one of the three reasons an agent parks (`ParkMode::UntilCancelled`).
 
-## Permissions: the child's ceiling is `parent ⊓ base`
+## Permissions: a spawn pushes one layer
 
-**Every spawn states the child's ceiling explicitly**, through a *mandatory*
-`grant` field naming one of five capability bake-ins (`confined`, `read-only`,
-`edit-only`, `reasonable`, `dangerous`; ordered loosest-to-tightest in
-[[map/exarch/policy|policy]]). An unknown tag is refused at the runtime door,
-naming all five.
+**Every spawn states the child's authority explicitly**, through a *mandatory*
+`grant` field with six spellings:
 
-The five are a *subset* of the `--base` CLI vocabulary, and the door's
-`PERMISSION_LABELS` is where the two part company. A grantable base must admit
+```text
+  grant: `inherit | `confined | `read-only | `edit-only | `reasonable | `restrict R
+```
+
+Four name a capability bake-in (the bake-ins are ordered loosest-to-tightest in
+[[map/exarch/policy|policy]]); `` `restrict R `` states a capability record
+outright, written in the parent's shell in exactly the vocabulary of
+`grant [...] { body }`; `` `inherit `` names ⊤, a layer that says nothing. An unknown tag,
+or an `R` with an unknown key, is refused at the runtime door in the declared
+table's own words ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
+
+**One field, because a spawn has one question.** At the CLI, `--base` and
+`--restrict` are different acts: a base *establishes* a ceiling with nothing
+beneath it, a restrict *narrows* what is already established. At a spawn there
+is nothing to establish — the parent's `GrantStack` is already underneath — so
+a named base is pushed *as if it were a restrict*, and both acts collapse into
+"what single layer does this child get?". The CLI keeps its two flags, because
+there the two acts genuinely differ; the mirror worth having between the two
+surfaces is in the vocabulary of values, not of flag names.
+
+The child is born with its parent's whole stack, plus at most one layer:
+
+```text
+  child_stack = parent_stack ++ [layer(grant)]
+```
+
+`policy::base_layer` resolves a named base, `decode_capability_map` an `R`, both
+frozen against the **child's** working directory so the layer lands already
+resolved ([[design/capability-freeze|capabilities]]); the desk
+(`fleet/desk.rs`'s `fork_child`) clones the parent's stack and pushes onto the
+clone ([[map/exarch/policy|policy]]). There is no meet and no `Capabilities`
+folded against another: the stack's own per-check fold ANDs every layer's
+verdict, so a pushed layer can **narrow** the child below the parent and can
+**never escalate** it past the parent's reach
+([[design/grant|the grant lattice]], [[decisions/260906_object-not-name|object-not-name]]):
+
+- naming a base *looser* than the parent simply changes nothing — a network-off
+  `confined` parent stays offline even under `reasonable`, since the fold ANDs
+  both layers' verdicts;
+- an `R` claiming authority the parent does not hold is ANDed away for the same
+  reason, so it needs no comparison against the parent to be safe;
+- `` `inherit `` resolves to ⊤, which the fold leaves no trace of, so the child
+  runs at the parent's own ceiling.
+
+`` `inherit `` is the one spelling the CLI has no name for, and the spawn
+surface has no `` `dangerous ``: at a spawn the lattice top is a layer that says
+nothing, which is *inherit the parent verbatim* under a name that claims
+otherwise. `` `inherit `` says it plainly, in the spelling `provider` and
+`model` already use for *no opinion*, while `` `dangerous `` stays a `--base`
+name, where ⊤ genuinely is no ceiling.
+
+The four bake-in names are a *subset* of the `--base` vocabulary, and the
+door's own label list is where the two part company. A grantable base must admit
 the bundled coreutils (`ral_core::uutils`), which spawn by bare name and so
 match no directory prefix: `read-only` and `edit-only` name each tool literally
 for exactly this reason. A base whose `exec` block is prefixes alone leaves the
@@ -458,29 +510,14 @@ child unable to run `ls`, and — the ceiling being non-escalating — with no w
 to ask for it back. A human at the CLI can see that and reach for
 `--extend-base`; a child can only spend turns discovering it.
 
-The child is born with
+A spawn's `R` mints no self-denial. `--restrict` denies the restriction
+*files'* own paths, so the agent cannot rewrite the bytes that shape its
+permissions; an `R` is a value computed in the parent's shell at the instant of
+the spawn, with no file for the child to reach.
 
-```text
-  child = parent ⊓ resolve_base(grant)
-```
-
-computed by `policy::narrow`, the **meet-sibling** of the root's
-`policy::for_invocation` ([[map/exarch/policy|policy]]). Because meet only ever
-removes authority and the result is ≤ both operands, the base can **narrow** the
-child below the parent but can **never escalate** it past the parent's reach
-([[design/grant|the grant lattice]]):
-
-- naming a base *looser* than the parent simply changes nothing — a network-off
-  `confined` parent stays offline even under `reasonable`, since `false ⊓ true =
-  false`;
-- `dangerous` resolves to the lattice top (`Capabilities::root`), so it means
-  *no narrowing — inherit the parent's authority verbatim*.
-
-The base is frozen against the child's working directory as it resolves, so the
-meet runs on already-resolved [[design/capability-freeze|capabilities]]. The
-ceiling is non-escalating by construction: the spawn site, not the child, owns
-the authority decision, because [[map/exarch/agent|`Avatar::fork_with`]] takes the
-child's `Capabilities` as an argument rather than cloning the parent's.
+The ceiling is non-escalating by construction: the spawn site, not the child,
+owns the authority decision, because [[map/exarch/agent|`Avatar::fork_with`]]
+takes the child's authority as an argument rather than cloning the parent's.
 
 ## See also
 
@@ -489,7 +526,9 @@ over one `ral` tool),
 [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
 (the record-spec `` exarch-agents `start `` tag, names as fleet-unique identity,
 schedule labels, commitments retired),
-[[design/grant|grant]] (the capability lattice the meet runs in),
+[[design/grant|grant]] (the capability lattice the fold runs in),
+[[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]] (why `grant` is
+one field with six spellings, and why the CLI's two flags are not),
 [[map/exarch/tools|tools]], [[map/exarch/agent|agent]],
 [[map/exarch/policy|policy]],
 [[decisions/260617_async-agent-tool|async-agent-tool]],

@@ -8,9 +8,10 @@
 //! `RAL_ENGINE_SEED_FD`, writes the one framed [`EngineSeed`] while the child
 //! drains it, and answers [`crate::protocol::HATCH_ACK`]: a peer that hears
 //! the ack has a live child holding its whole seed. [`seed_from_env`] and
-//! [`apply_seed`] are the other end, pushing the child's own grant layer
-//! through the [`GrantNarrower`] its [`crate::engine::EngineInstaller`]
-//! carries — core has no grant vocabulary of its own.
+//! [`apply_seed`] are the other end, pushing the child's own grant layer:
+//! [`crate::SpawnGrant`] decodes a restriction record here, against the
+//! child's own cwd, and hands a base tag to the [`GrantNarrower`] its
+//! [`crate::engine::EngineInstaller`] carries — core knows no base names.
 //!
 //! Nothing here names a transport: the listening socket is the caller's, and
 //! the tests stand a `UnixListener` and `UnixStream` pairs in for it. Only a
@@ -29,9 +30,10 @@ use std::thread::JoinHandle;
 use crate::engine_seed::{EngineSeed, pack_seed};
 use crate::process::ChildHandle;
 use crate::serial::WireDecoder;
+use crate::spawn_grant::{GrantNarrower, SpawnGrant};
 use crate::subprocess::install_wire_shell;
 use crate::sync::LockExt as _;
-use crate::types::{Capabilities, Shell};
+use crate::types::Shell;
 
 /// The engine's protocol socket lands on this descriptor, exactly as
 /// `run_engine` expects (`core/src/engine.rs`) and `ral-daemon` already
@@ -50,18 +52,6 @@ type Recipe = &'static [&'static str];
 
 #[cfg(target_os = "linux")]
 const ENGINE: Recipe = &["--engine"];
-
-/// The grant tag and the cwd — in, one [`Capabilities`] layer out.
-///
-/// Pushed onto the hydrated shell's stack rather than folded against what it
-/// already carries: the stack itself is the meet, so the child's own ceiling
-/// only needs to be resolved, not composed here. Evaluated where the host's
-/// own capability vocabulary lives, since core carries no base-tag lexicon. A
-/// field of [`crate::engine::EngineInstaller`] rather than a registered hook:
-/// an installer is chosen at `Attach`, before [`apply_seed`] runs, so the
-/// policy can be demanded of every host that dresses an engine instead of
-/// left in a slot one of them might forget to fill.
-pub(crate) type GrantNarrower = fn(&str, &str) -> Result<Capabilities, String>;
 
 /// The process-global hatch table. No thread, no signal handler: a hatch
 /// sweeps it on entry, and `teardown` sweeps it once more as the engine
@@ -143,7 +133,7 @@ pub fn listen_for_hatch(
     listener: OwnedFd,
     token: u64,
     shell: &Shell,
-    grant: String,
+    grant: SpawnGrant,
 ) -> Result<HatchListener, String> {
     hatch_listener(listener, token, packed_seed(shell, grant)?, ENGINE)
 }
@@ -299,7 +289,7 @@ fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
 
 /// The forked session as the wire carries it: everything a child engine is
 /// given, and all the listener thread ever holds.
-fn packed_seed(shell: &Shell, grant: String) -> Result<EngineSeed, String> {
+fn packed_seed(shell: &Shell, grant: SpawnGrant) -> Result<EngineSeed, String> {
     use crate::types::Break;
 
     pack_seed(shell, grant).map_err(|b| match b {
@@ -472,14 +462,16 @@ fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
 
 /// Application of a seed already taken: called from `engine_session` once the
 /// installer has booted `shell`. Hydrates scope and context, then pushes the
-/// child's own grant layer, resolved by `narrow`, the [`GrantNarrower`] that
-/// installer carries — the hydrated stack already carries the parent's
-/// layers, so this only adds the child's, never folds against them.
+/// child's own grant layer, resolved by [`SpawnGrant::layer`] against this
+/// shell's own cwd — `narrow`, the [`GrantNarrower`] that installer carries,
+/// answers for the base names core has no lexicon for. The hydrated stack
+/// already carries the parent's layers, so this only adds the child's, never
+/// folds against them.
 ///
 /// # Errors
-/// Returns a sentence naming a decode failure, or whatever `narrow` refuses
-/// with — a wire-seeded child is refused rather than admitted above its
-/// ceiling.
+/// Returns a sentence naming a decode failure, a restriction record the
+/// capability decoder will not read, or whatever `narrow` refuses a base with
+/// — a wire-seeded child is refused rather than admitted above its ceiling.
 pub(crate) fn apply_seed(
     seed: EngineSeed,
     shell: &mut Shell,
@@ -501,7 +493,8 @@ pub(crate) fn apply_seed(
     })?;
 
     let cwd = shell.cwd();
-    let layer = narrow(&seed.grant, &cwd.to_string_lossy())?;
+    let home = shell.context.home();
+    let layer = seed.grant.layer(narrow, &cwd, home.as_deref())?;
     shell.push_session_capabilities(layer);
     Ok(())
 }
@@ -515,7 +508,7 @@ mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
     use crate::subprocess::bare_child_shell;
-    use crate::types::Value;
+    use crate::types::{Capabilities, Value};
     use std::sync::OnceLock;
 
     fn prelude() -> &'static BakedPrelude {
@@ -523,13 +516,13 @@ mod tests {
         P.get_or_init(BakedPrelude::bake_runtime)
     }
 
-    /// A grant narrower that returns a fixed net-off layer, so tests need no
+    /// A narrower that returns a fixed net-off layer, so tests need no
     /// exarch-shaped base vocabulary.
     #[allow(
         clippy::unnecessary_wraps,
         reason = "must match GrantNarrower's fn-pointer signature, which can genuinely refuse"
     )]
-    fn deny_net(_grant: &str, _cwd: &str) -> Result<Capabilities, String> {
+    fn deny_net(_base: &str, _cwd: &str) -> Result<Capabilities, String> {
         Ok(Capabilities {
             net: Some(false),
             ..Capabilities::default()
@@ -593,7 +586,8 @@ mod tests {
             "larger-than-a-socket-buffer".to_string(),
             Value::String("x".repeat(2 * 1024 * 1024)),
         );
-        let seed = packed_seed(&parent, "read-only".to_string()).expect("pack a seed");
+        let seed =
+            packed_seed(&parent, SpawnGrant::Base("read-only".to_string())).expect("pack a seed");
 
         let (dial, host) = UnixStream::pair().expect("a socketpair for the host's dial");
         let dial = well_clear_of_fd_3(dial);
@@ -644,7 +638,7 @@ mod tests {
 
     fn a_seed() -> EngineSeed {
         let shell = Shell::new(crate::io::TerminalState::default());
-        packed_seed(&shell, "read-only".to_string()).expect("pack a seed")
+        packed_seed(&shell, SpawnGrant::Base("read-only".to_string())).expect("pack a seed")
     }
 
     /// A `UnixListener` stands in for the socket the caller binds.
@@ -712,7 +706,7 @@ mod tests {
     fn apply_seed_hydrates_scope_and_narrows_capabilities() {
         let mut parent = Shell::new(crate::io::TerminalState::default());
         parent.set_var("kept".to_string(), Value::Int(7));
-        let seed = pack_seed(&parent, "confined".to_string()).expect("pack seed");
+        let seed = pack_seed(&parent, SpawnGrant::Base("confined".to_string())).expect("pack seed");
 
         let (mut writer, reader) = UnixStream::pair().expect("socketpair");
         std::thread::spawn(move || send_seed(&mut writer, &seed).expect("send the seed"));

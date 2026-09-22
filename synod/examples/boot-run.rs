@@ -98,8 +98,9 @@ fn main() {
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
 
     let spawn_cmd = format!(
-        "agent [prompt: #'write the text {HELPER_TEXT:?} into {HELPER_FILE}, then reply \
-         confirming the write'#, name: 'helper', type: `amnemon, grant: `edit-only, search: false]"
+        "exarch-agents `start [prompt: #'write the text {HELPER_TEXT:?} into {HELPER_FILE}, \
+         then reply confirming the write'#, name: 'helper', type: `amnemon, grant: `edit-only, \
+         search: false, provider: `inherit, model: `inherit]"
     );
     let write_and_reply = vec![
         // `/bin/echo`, never the `echo` builtin: this example is the only

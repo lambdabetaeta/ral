@@ -40,7 +40,7 @@ pub struct EngineInstaller {
     /// registered hook: core has no base-tag lexicon to resolve a grant
     /// against, and a host that boots an engine has to state the policy its
     /// seeded children are held to rather than be trusted to install one.
-    pub narrow: crate::hatch::GrantNarrower,
+    pub narrow: crate::spawn_grant::GrantNarrower,
 }
 
 /// The engine's half of the severance law: [`crate::wire::write_or_sever`]

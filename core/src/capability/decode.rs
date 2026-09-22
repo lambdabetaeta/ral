@@ -164,13 +164,18 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyEr
 /// sigil against `ctx`.
 ///
 /// The single `Value::Map → Capabilities` constructor, shared by the
-/// `grant [...] { body }` builtin in `evaluator::scope` and the
-/// capability-file loader in `capability::load`; both callers are
-/// in-crate, so "a `Capabilities` has every path already resolved" holds
-/// by construction.  Unknown keys error here and in each dimension's
+/// `grant [...] { body }` builtin in `evaluator::scope`, the
+/// capability-file loader in `capability::load`, and [`crate::SpawnGrant`]'s
+/// resolver; every path is frozen against `ctx` right here, so "a
+/// `Capabilities` has every path already resolved" holds by construction
+/// whoever comes through.  Unknown keys error here and in each dimension's
 /// decoder rather than being silently dropped; the keyset is `grant`'s own
 /// declared table, so this door and the checker cannot drift apart.
-pub(crate) fn decode_capability_map(
+///
+/// # Errors
+/// A [`PolicyError`] naming the key whose shape or value it will not read, or
+/// the path sigil that would not resolve absolute.
+pub fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,

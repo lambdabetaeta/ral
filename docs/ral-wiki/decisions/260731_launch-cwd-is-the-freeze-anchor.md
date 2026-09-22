@@ -11,7 +11,7 @@ fans out to the capability ceiling, `AGENTS.md`/skills discovery, project
 identity and logs, and `/export`'s anchor; the live shell seeded at that same
 place drifts with every `cd` the model issues, but the grants that watch over
 it do not follow. Realised in `exarch/src/lib.rs` (`run`), `exarch/src/policy.rs`
-(`for_invocation`, `narrow`), `exarch/src/agent/seat.rs` (`boot_root_shell`,
+(`for_invocation`, `base_layer`), `exarch/src/agent/seat.rs` (`boot_root_shell`,
 `Seat::identity`), `exarch/src/fleet/desk.rs` (`agent-start`), `exarch/src/prompt.rs`
 (`assemble`), `exarch/src/bootstrap.rs` (`project_dir`, `log_run_dir`), and
 `exarch/src/tui/commands.rs` (`resolve_export_path`).
@@ -35,9 +35,10 @@ every relative path it types next, and nothing in this list re-reads it.
 A desk-spawned child is the same shape from the child's side. `HostServices`
 is rebuilt fresh at every `ral` call from the *parent's* live directory —
 `Agent::cwd()` probes the running shell rather than reading the parent seat's
-stored `cwd`, "so a desk-spawned child starts where the model is." `agent-start`
-narrows `policy::narrow(&s.caps, spec.grant, &s.cwd)` against exactly that
-probed value, then `Seat::identity(shell, scratch, s.cwd.clone(), …)` seeds the
+stored `cwd`, "so a desk-spawned child starts where the model is." The desk's
+`fork_child` resolves the child's one grant layer against exactly that probed
+value — `policy::base_layer(spec.grant, &cwd)`, pushed onto a clone of the
+parent's own `GrantStack` — then `Seat::identity(shell, scratch, s.cwd.clone(), …)` seeds the
 new child's shell there and stores the same value as the new seat's own `cwd`
 field — the one `/clear` rebuilds from verbatim, never by probing again.
 
@@ -56,14 +57,23 @@ field — the one `/clear` rebuilds from verbatim, never by probing again.
   and the prompt's host-facts `cwd` line — are display-only, and exarch never
   chdirs its own process, so they can only restate the same value.
 - **A desk child's anchor is its session's live cwd, taken at the moment it is
-  started** — the parent's cwd as `agent-start` sees it when the spawn runs,
+  started** — the parent's cwd as the spawn sees it when it runs,
   which is where the child's own existence begins. `Seat::identity` fixes that
   reading into the child's own seat once, and `Seat::clear` (`/clear`'s engine
   half) rebuilds from the same stored field rather than probing the live
   shell again, so the child's own anchor does not drift either.
 - **One rule, read from both ends: grants freeze where the agent was
   started.** A trunk's "started" is the process's launch; a child's is the
-  `agent-start` call that gave it its own identity.
+  spawn call that gave it its own identity.
+
+> **Amended 2026-09-22.** A spawn's `grant` widened to six spellings, one of
+> them `` `restrict R `` — a capability record written in the parent's shell
+> ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). It freezes
+> under the same rule and at the same instant as a base tag: against the
+> child's cwd as the spawn sees it. For a wire spawn that puts the decode on
+> the far side, since the guest is the side standing in the child's directory
+> — the record crosses the seed **unfrozen** and `apply_seed` resolves it
+> there. The anchor did not move; a second kind of thing is now anchored to it.
 
 ## Consequences
 
@@ -90,8 +100,8 @@ field — the one `/clear` rebuilds from verbatim, never by probing again.
 [[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]].
 
 Cite: `exarch/src/lib.rs` (`run`), `exarch/src/policy.rs` (`for_invocation`,
-`narrow`), `exarch/src/agent/seat.rs` (`boot_root_shell`, `Seat::identity`,
-`Seat::clear`), `exarch/src/fleet/desk.rs` (`HostServices::cwd`, `agent-start`,
+`base_layer`), `exarch/src/agent/seat.rs` (`boot_root_shell`, `Seat::identity`,
+`Seat::clear`), `exarch/src/fleet/desk.rs` (`HostServices::cwd`, `fork_child`,
 `ExarchDesk::launch`), `exarch/src/agent.rs` (`Agent::cwd`), `exarch/src/prompt.rs`
 (`assemble`), `exarch/src/bootstrap.rs` (`App::project_dir`, `App::log_run_dir`),
 `exarch/src/tui/commands.rs` (`resolve_export_path`, `cmd_export`).

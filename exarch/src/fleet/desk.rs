@@ -22,6 +22,7 @@ use crate::fleet::{
 };
 use crate::provider::Provider;
 use crate::shell_eval::{self, PinDigests, Surface};
+use ral_core::SpawnGrant;
 use ral_core::Value as RalValue;
 use ral_core::protocol::{EnquiryError, Host};
 use ral_core::serial::FOValue;
@@ -670,6 +671,44 @@ fn payload_fork(v: FOValue, class: &str) -> Result<ForkClaim, Error> {
     }
 }
 
+/// Decode `` `start ``'s `grant`: the one layer the child's stack gains.
+/// `` `dangerous `` is not among the tags — at a spawn it only ever meant
+/// "narrow nothing", which `` `inherit `` now says outright.
+fn payload_grant(v: FOValue, class: &str) -> Result<SpawnGrant, Error> {
+    match v {
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if label == "inherit" => Ok(SpawnGrant::Inherit),
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if crate::policy::SPAWN_BASES.contains(&label.as_str()) => Ok(SpawnGrant::Base(label)),
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "restrict" => match *payload {
+            record @ FOValue::Map { .. } => Ok(SpawnGrant::Restrict(record)),
+            other => Err(Error::new(
+                format!(
+                    "`{class}`: `grant `restrict` must carry a capability record \
+                     [exec, fs, net, detach, editor, shell], got {}",
+                    other.shape()
+                ),
+                1,
+            )),
+        },
+        other => Err(Error::new(
+            format!(
+                "`{class}`: `grant` must be `inherit`, `confined`, `read-only`, `edit-only`, \
+                 `reasonable` or `restrict <record>`, got {}",
+                other.shape()
+            ),
+            1,
+        )),
+    }
+}
+
 /// Decode an `` `add `` trigger into a live [`Trigger`], re-running the parsers
 /// the builtin's door already ran: that check is never the only line of defence.
 fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
@@ -755,10 +794,10 @@ fn payload_selection(v: FOValue, class: &str, field: &str) -> Result<Selection, 
 /// All that varies across `` `start ``'s two spawn kinds (`amnemon`/`mnemon`,
 /// the `agent` builtin's `type`); every other step of the spawn spine is
 /// identical for both and lives once in [`ExarchDesk::launch`].
-struct Launch<'a> {
+struct Launch {
     /// How the builtin body left its fork for this desk to reach.
     fork: ForkClaim,
-    grant: &'a str,
+    grant: SpawnGrant,
     /// Import the parent's model-visible conversation — a `mnemon` spawn only.
     inherit_context: bool,
     /// Which account the child authenticates as.
@@ -1001,17 +1040,23 @@ impl ExarchDesk {
     /// The child-log/capability half of the spawn spine, shared by both arms:
     /// an identity spawn runs it once it has adopted its shell, a wire spawn
     /// before it dials, since the host has no shell of its own to gate on.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: a host-side spawn's grant freezes against the launching user's real home, like base_layer's own"
+    )]
     fn fork_child(
         &self,
         spec: &Launch,
         provider: &Provider,
     ) -> Result<(GrantStack, crate::agent::event::AgentLog, String), Error> {
         let s = &self.services;
-        // `base_layer` names all six legal bases in its own diagnostic, so an
-        // unknown `grant` needs no refusal text here.
-        let cwd = s.cwd.to_string_lossy();
-        let layer =
-            crate::policy::base_layer(spec.grant, &cwd).map_err(|reason| Error::new(reason, 1))?;
+        // Both seats resolve a spawn's grant through this one function, so the
+        // host's vocabulary and a hatched guest's cannot drift apart.
+        let home = ral_core::host::home();
+        let layer = spec
+            .grant
+            .layer(crate::policy::base_layer, &s.cwd, home.as_deref())
+            .map_err(|reason| Error::new(reason, 1))?;
         let mut child_caps = s.agent.caps().clone();
         child_caps.push(layer);
 
@@ -1223,10 +1268,9 @@ impl ExarchDesk {
                 ));
             }
         };
-        let grant = payload_tag(
-            spec.take("grant", "one of the five permission bases")?,
+        let grant = payload_grant(
+            spec.take("grant", "the one layer the child's authority gains")?,
             CLASS,
-            "grant",
         )?;
         let search = payload_bool(
             spec.take(
@@ -1249,7 +1293,7 @@ impl ExarchDesk {
 
         self.launch(Launch {
             fork,
-            grant: &grant,
+            grant,
             inherit_context: mnemon,
             provider,
             model,
@@ -2512,7 +2556,7 @@ mod tests {
         })
     }
 
-    fn bare(label: &str) -> FOValue {
+    pub(super) fn bare(label: &str) -> FOValue {
         FOValue::Variant {
             label: label.to_string(),
             payload: None,
@@ -2552,7 +2596,7 @@ mod tests {
         fork: FOValue,
         prompt: &str,
         name: &str,
-        grant: &str,
+        grant: FOValue,
         search: bool,
         selection: (FOValue, FOValue),
     ) -> FOValue {
@@ -2562,7 +2606,7 @@ mod tests {
                 ("prompt".to_string(), text(prompt)),
                 ("name".to_string(), text(name)),
                 ("type".to_string(), bare("amnemon")),
-                ("grant".to_string(), bare(grant)),
+                ("grant".to_string(), grant),
                 ("search".to_string(), FOValue::Bool { value: search }),
                 ("provider".to_string(), provider),
                 ("model".to_string(), model),
@@ -2586,7 +2630,7 @@ mod tests {
         fork: FOValue,
         prompt: &str,
         name: &str,
-        grant: &str,
+        grant: FOValue,
         search: bool,
     ) -> FOValue {
         start_req_selecting(fork, prompt, name, grant, search, inherits())
@@ -2600,7 +2644,21 @@ mod tests {
         grant: &str,
         search: bool,
     ) -> FOValue {
-        start_req_forked(parked(session), prompt, name, grant, search)
+        start_req_forked(parked(session), prompt, name, bare(grant), search)
+    }
+
+    /// A `` `start `` whose `grant` is not a bare tag: the `` `restrict ``
+    /// forms, which the `&str` shorthand above cannot spell.
+    pub(super) fn start_req_granting(session: NurseryId, name: &str, grant: FOValue) -> FOValue {
+        start_req_forked(parked(session), "go", name, grant, false)
+    }
+
+    /// `` `restrict `` carrying `payload`.
+    fn restrict_req(payload: FOValue) -> FOValue {
+        FOValue::Variant {
+            label: "restrict".to_string(),
+            payload: Some(Box::new(payload)),
+        }
     }
 
     /// A `fork` tag naming a session parked in this host's own nursery.
@@ -3667,18 +3725,28 @@ mod tests {
         let _ = wait_for_settle(&parent_inbox);
     }
 
-    /// A `Launch` naming `selection`, and otherwise the plainest spawn there
-    /// is — the two provider tests differ in nothing else.
-    fn launch_selecting(provider: Selection, model: Selection) -> Launch<'static> {
+    /// A `Launch` asking for `grant`, and otherwise the plainest spawn there
+    /// is — every test below differs in nothing else.
+    fn launch_granting(grant: SpawnGrant) -> Launch {
         Launch {
             fork: ForkClaim::Parked(NurseryId(0)),
-            grant: "confined",
+            grant,
             inherit_context: false,
-            provider,
-            model,
+            provider: Selection::Inherit,
+            model: Selection::Inherit,
             name: "helper".to_string(),
             prompt: "go".to_string(),
             search: false,
+        }
+    }
+
+    /// The same, naming `selection` — the two provider tests differ in
+    /// nothing else.
+    fn launch_selecting(provider: Selection, model: Selection) -> Launch {
+        Launch {
+            provider,
+            model,
+            ..launch_granting(SpawnGrant::Base("confined".to_string()))
         }
     }
 
@@ -3728,7 +3796,7 @@ mod tests {
                 parked(session),
                 "go",
                 "helper",
-                "confined",
+                bare("confined"),
                 false,
                 (bare("inherit"), named("other-model")),
             ))
@@ -3856,6 +3924,91 @@ mod tests {
             "a spawn asking for more search reach than its parent holds is narrowed, not refused"
         );
         let _ = wait_for_settle(&parent_inbox);
+    }
+
+    /// A `restriction` record naming `net` alone — the one axis a folded
+    /// stack answers with a single question.
+    fn restrict_net(on: bool) -> SpawnGrant {
+        SpawnGrant::Restrict(FOValue::Map {
+            entries: vec![("net".to_string(), FOValue::Bool { value: on })],
+        })
+    }
+
+    /// The pushed layer of a spawn granting `grant`, folded onto the parent's
+    /// own stack, as [`ExarchDesk::fork_child`] resolves it.
+    fn child_stack(desk: &ExarchDesk, grant: SpawnGrant) -> GrantStack {
+        let provider = desk.services.agent.current_provider();
+        desk.fork_child(&launch_granting(grant), &provider)
+            .expect("a grant this desk can resolve")
+            .0
+    }
+
+    /// `` `inherit `` is the lattice top: the spawn still pushes its one
+    /// layer, and that layer withholds nothing the parent holds.
+    #[test]
+    fn an_inheriting_spawn_pushes_a_layer_that_withholds_nothing() {
+        let desk = desk();
+        let parent = desk.services.agent.caps().len();
+        let child = child_stack(&desk, SpawnGrant::Inherit);
+        assert_eq!(child.len(), parent + 1, "a spawn pushes exactly one layer");
+        assert!(
+            !child
+                .iter()
+                .next_back()
+                .expect("the layer the spawn pushed")
+                .is_restrictive(),
+            "`inherit must attenuate nothing beyond what the parent already holds"
+        );
+    }
+
+    /// And a `` `restrict `` record is a real layer: what it withholds, the
+    /// child does not hold.
+    #[test]
+    fn a_restricting_spawn_pushes_the_record_it_names() {
+        let child = child_stack(&desk(), restrict_net(false));
+        assert!(
+            !child.net().all(|n| n),
+            "a record naming `net: false` must take the network away"
+        );
+    }
+
+    /// The spawn-side reading of `crate::policy`'s
+    /// `narrow_cannot_escalate_a_restricted_parent`: the stack is the meet, so
+    /// a record asking for an axis the parent withheld gets nothing back.
+    #[test]
+    fn a_restricting_spawn_cannot_escalate_a_restricted_parent() {
+        let (services, _fleet, _parent_inbox) = services_with(3, |spec| {
+            spec.caps.push(ral_core::types::Capabilities {
+                net: Some(false),
+                ..ral_core::types::Capabilities::default()
+            });
+        });
+        let child = child_stack(&ExarchDesk { services }, restrict_net(true));
+        assert!(
+            !child.net().all(|n| n),
+            "asking for the network back must not turn it on"
+        );
+    }
+
+    /// A `` `restrict `` carrying anything but a record is refused by the
+    /// desk's own decoder, before a base is named or a path is frozen.
+    #[test]
+    fn start_refuses_a_restriction_that_is_not_a_record() {
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
+        let root = root_shell();
+        let session = desk.services.nursery.park(forkable_child_shell(&root));
+        let err = desk
+            .handle(start_req_granting(
+                session,
+                "helper",
+                restrict_req(text("everything")),
+            ))
+            .expect_err("a `restrict that carries no record at all");
+        assert_eq!(
+            err.message,
+            "`exarch-agents `start`: `grant `restrict` must carry a capability record \
+             [exec, fs, net, detach, editor, shell], got a Str"
+        );
     }
 
     /// Read `system_prompt_bytes` off a session's opening bookend — the first
@@ -4106,8 +4259,10 @@ mod tests {
         );
     }
 
-    /// A refusal after [`Nursery::adopt`] — here, a bad grant label — drops the
-    /// adopted `Shell` rather than leaving it to be adopted twice.
+    /// A refusal after [`Nursery::adopt`] — here, a restriction record the
+    /// capability decoder will not read, which only the freeze in
+    /// [`ExarchDesk::fork_child`] discovers — drops the adopted `Shell`
+    /// rather than leaving it to be adopted twice.
     #[test]
     fn refused_enquiry_leaves_the_nursery_empty() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
@@ -4115,11 +4270,17 @@ mod tests {
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
         let err = desk
-            .handle(start_req(session, "hi", "helper", "bogus", true))
-            .expect_err("an unknown permissions label must refuse");
+            .handle(start_req_granting(
+                session,
+                "helper",
+                restrict_req(FOValue::Map {
+                    entries: vec![("net".to_string(), text("yes"))],
+                }),
+            ))
+            .expect_err("a `net axis that is not a Bool must refuse");
         assert!(
-            err.message.contains("confined"),
-            "must name the legal bases, got: {}",
+            err.message.contains("net"),
+            "must name the axis it could not read, got: {}",
             err.message
         );
         assert!(
@@ -4749,7 +4910,7 @@ mod tests {
     reason = "[test] test fs/process scaffolding"
 )]
 mod wire_tests {
-    use super::tests::{message_req, start_req_forked};
+    use super::tests::{bare, message_req, start_req_forked};
     use super::*;
     use crate::agent::cancel::EvalReach;
     use crate::agent::event::AgentLog;
@@ -4944,7 +5105,7 @@ mod wire_tests {
                 ],
             })),
         };
-        start_req_forked(fork, "go", name, "confined", false)
+        start_req_forked(fork, "go", name, bare("confined"), false)
     }
 
     /// A guest whose own hatch failed closes without acking. The host has a

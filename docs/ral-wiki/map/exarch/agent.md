@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ced3518c
-generated_at_date: 2026-09-17
+generated_at_commit: 451d1ab5
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -707,8 +707,11 @@ A fork builds the child `Avatar` (and, inside it, the child `Agent`) for
 [[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
 hand-copying fields after a bare `Shell::new`. It takes the child's
-`Capabilities` **as an argument**, so the spawn site owns the authority decision
-(the parent's verbatim, or `parent ⊓ base` via [[map/exarch/policy|`policy::narrow`]]).
+`GrantStack` **as an argument**, so the spawn site owns the authority decision:
+the parent's stack cloned, plus at most the one layer the spawn's `grant` names
+([[map/exarch/policy|`policy::base_layer`]] for a base tag, `decode_capability_map`
+for a `` `restrict `` record, nothing for `` `inherit `` —
+[[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 The child sets `parent: Some(self.agent.clone())` — the strong tree edge that
 routes its result and drives the subtree cascade — and enrols itself in the
 fleet (`Fleet::enrol`), joining the shared `Arc<Fleet>` every node holds.

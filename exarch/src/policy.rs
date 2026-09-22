@@ -103,7 +103,19 @@ pub fn for_invocation(
     Ok((stack, restricts))
 }
 
-/// Resolve a bake-in base for a spawned child — the layer a caller pushes onto the parent's stack.
+/// The bake-in bases a spawn's `grant` may name — a subset of what
+/// [`base::resolve_base`] offers a launching human, kept in step by hand.
+/// `` `inherit `` and `` `restrict `` name no base, so neither appears here.
+///
+/// Each admits the bundled coreutils (`ral_core::uutils`). Those spawn by bare
+/// name, so a base that states its exec admissions as directory prefixes alone
+/// denies every one of them, and a child that cannot run `ls` cannot widen its
+/// own grant to get it back.
+pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only", "reasonable"];
+
+/// Resolve a bake-in base for a spawned child — the layer a caller pushes onto
+/// the parent's stack, and the narrower every spawn grant naming a base
+/// resolves through.
 ///
 /// Frozen against the child's working directory. The stack is the meet, so a
 /// spawn narrowing a child only ever adds a layer; naming a base looser than

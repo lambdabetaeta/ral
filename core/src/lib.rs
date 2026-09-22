@@ -36,6 +36,7 @@ pub(crate) mod runtime;
 pub mod sandbox;
 pub mod serial;
 pub mod source;
+pub mod spawn_grant;
 pub(crate) mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
@@ -63,6 +64,7 @@ pub use run::{
     RunStdin, StaticDiagnostics,
 };
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_anchor};
+pub use spawn_grant::SpawnGrant;
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
     Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,

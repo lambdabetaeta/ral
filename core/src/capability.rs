@@ -15,7 +15,7 @@ mod fs;
 mod load;
 mod sandbox;
 
-pub(crate) use decode::decode_capability_map;
+pub use decode::decode_capability_map;
 pub use deputy::deputy_prefixes;
 pub(crate) use enforce::{
     admits_head, check_editor_read, check_editor_tui, check_editor_write, check_exec_args,

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e4d859c3
-generated_at_date: 2026-09-16
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs]
+generated_at_commit: 451d1ab5
+generated_at_date: 2026-09-22
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
 
 # Map: core / transport
@@ -105,15 +105,18 @@ so a wire-hatched engine child cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
 
 `core/src/engine_seed.rs` carries `EngineSeed` — a forked shell reified
-for a wire-seat hatch (`scope_table`, `mobile: WireShell`,
-`captured: SerialEnvSnapshot`, the spawn's validated `grant` tag), the one
+for a wire-seat hatch (`scope_table`, `shell: WireShell`,
+`captured: SerialEnvSnapshot`, and the spawn's `grant: SpawnGrant` —
+`` `inherit ``, a base name, or a restriction record carried **unfrozen**, so
+its sigils resolve against the child's own cwd on the far side
+([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]])), the one
 type left in that module now that a pipeline stage no longer crosses a wire
 ([[decisions/260902_stages-are-threads|stages-are-threads]]). `pack_seed` builds one from a `Shell`, and
 `seed_from_env` takes it before the engine waits for `Attach` — striking the env
 var as it takes the fd, so no descendant inherits a number that has stopped being
 one — and after `Attach` selects an installer and boots the shell, `apply_seed`
 hydrates it through `WireDecoder::for_shell` plus `install_wire_shell`,
-before narrowing the shell's capabilities to the seed's grant. Taking and applying
+before pushing the seed's grant as the child's one layer. Taking and applying
 are split for one reason each: the take must not wait on the host, and the
 application needs the booted installer's shell. The scope it carries is never the
 parent's whole lexical scope: `Shell::fork_scrubbed` strips every
@@ -123,6 +126,15 @@ in-process identity fork and a wire hatch's `EngineSeed` snapshot the same
 serialisable fragment and
 `` exarch-agents `start `` means one thing regardless of seat
 ([[design/agents|agents]]'s one-snapshot law).
+
+`core/src/spawn_grant.rs` carries `SpawnGrant` and `SpawnGrant::layer` — the
+one resolution both seats call, so the host-side desk and `apply_seed` hold no
+narrowing decision of their own: `Inherit` is ⊤, `Base` reaches the host's
+`GrantNarrower` (core has no base-tag lexicon), and `Restrict` walks the record
+through `capability::decode_capability_map` against the child's cwd. A record
+rather than a `Capabilities` is exactly what lets the freeze happen there,
+keeping "every path already resolved" a construction invariant of the type the
+wire never carries ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 ## Framing codec — `core/src/subprocess_codec.rs`
 

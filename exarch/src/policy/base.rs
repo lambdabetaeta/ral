@@ -80,7 +80,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
     }
 }
 
-/// The implicit ceiling made concrete: `super::deny_paths` installs this so a
+/// The implicit ceiling made concrete: `super::deny_layer` installs this so a
 /// restriction file's carve-outs land on a policy rather than on nothing.  `/`
 /// is minted in the normal form every other grant-side prefix carries.
 pub(super) fn root_fs_policy() -> FsPolicy {
@@ -666,8 +666,9 @@ mod tests {
     /// that omits one leaves an agent unable to run it. Every base a *spawn*
     /// may name must therefore settle each bundled tool by literal — `allow`
     /// or `deny`, but never silence, which denies it with no decision recorded.
-    /// The list is the door's `PERMISSION_LABELS`; `dangerous` is absent
-    /// because it declares no exec map to restrict.
+    /// The list is [`super::SPAWN_BASES`], the bases a spawn may name, which
+    /// no base; `dangerous` is absent because it declares no exec map to
+    /// restrict.
     #[test]
     fn every_grantable_base_settles_the_bundled_tools() {
         let home = host_home();

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ced3518c
-generated_at_date: 2026-09-18
+generated_at_commit: 451d1ab5
+generated_at_date: 2026-09-22
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -358,9 +358,17 @@ so the model has the address before it asks for one.
   again for peers that never came through a door
   ([[map/exarch/agent|agent]]);
   `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
-  parent's model-visible context before the fresh final prompt); `grant` is one
-  of the five spawnable [[map/exarch/policy|base]] names (`confined`,
-  `read-only`, `edit-only`, `reasonable`, `dangerous`); `search` is a `Bool`
+  parent's model-visible context before the fresh final prompt); `grant` is the
+  one layer the child gets — `` `inherit ``, one of the four spawnable
+  [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
+  `reasonable`), or `` `restrict R `` with `R` a capability record in
+  `grant [...] { body }`'s own vocabulary. `spawn_grant` closes the row here,
+  naming all six shapes and `R`'s own keys in its refusal and holding `R` to
+  first-order data, since the ceiling crosses to the far side as data; the
+  record itself is decoded by `decode_capability_map` off the `Form::Grant`
+  table when `SpawnGrant::layer` resolves it against the child's cwd, so an
+  unknown key is refused in that table's words
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]); `search` is a `Bool`
   admitting the provider's own hosted web search, clamped at the desk to at
   most the caller's own bit, which the trunk takes from the network policy's
   `search` verdict ([[map/exarch/agent|agent]]). `provider` and `model` are
