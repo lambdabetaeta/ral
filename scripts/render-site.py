@@ -17,7 +17,8 @@ pages open straight from the filesystem with no server.
   rationale.html  docs/RATIONALE.md rendered to HTML
 
   exarch/index.html     the exarch landing — shared menubar injected into
-                        exarch-index.template.html
+                        exarch-index.template.html, its ral listings
+                        highlighted like every other
   exarch/profiles.html  exarch/PROFILES.md rendered to HTML (single source of
                         truth, so the page can't drift from the docs)
 
@@ -561,12 +562,18 @@ def render_examples(examples: list[dict]) -> None:
     (SITE / "examples.html").write_text(page, encoding="utf-8")
 
 
+def release_base(downloads: dict) -> str:
+    """Where the newest stable release's assets resolve.  Not the `latest`
+    tag, which names a stale prerelease."""
+    return f'https://github.com/{downloads["release_repo"]}/releases/latest/download'
+
+
 # ── landing ────────────────────────────────────────────────────────────────
 
 def render_index(examples: list[dict]) -> None:
     template = (ROOT / "scripts" / "index.template.html").read_text(encoding="utf-8")
     downloads = json.loads((SITE / "downloads.json").read_text(encoding="utf-8"))
-    base = f'https://github.com/{downloads["release_repo"]}/releases/download/latest'
+    base = release_base(downloads)
     # The installer column is Windows-only for now, and `installer` is absent
     # from the other targets rather than empty: an em dash is the cell for a
     # platform that has no such thing, not for one whose file we forgot.
@@ -704,10 +711,9 @@ def product_menubar(nav: list[tuple[str, str, str, bool]], current: str,
 def render_exarch_downloads(downloads: dict) -> str:
     """Per-OS binary buttons for the exarch landing's get section.
 
-    Mirrors the landing's download table but for exarch's matrix: macOS +
-    Linux only, one binary per target (no `allutils` split — those utils
-    belong to ral)."""
-    base = f'https://github.com/{downloads["release_repo"]}/releases/download/latest'
+    Mirrors the landing's download table but for exarch's matrix: one binary
+    per target (no `allutils` split — those utils belong to ral)."""
+    base = release_base(downloads)
     lines: list[str] = []
     for target in downloads["targets"]:
         os_name = html.escape(target["os"])
@@ -791,7 +797,7 @@ def render_exarch() -> None:
     """Build the exarch sub-site under site/exarch/.
 
     The landing is a bespoke page; the build injects the shared menubar so its
-    nav stays in step with the profiles page.  The profiles reference is
+    nav stays in step with the profiles page, and highlights its listings.  The profiles reference is
     generated from exarch/PROFILES.md — the single source of truth — so the
     page can never drift from the documentation.
     """
@@ -809,7 +815,8 @@ def render_exarch() -> None:
             raise SystemExit(
                 f"missing placeholder {placeholder} in exarch-index.template.html")
         rendered = rendered.replace(placeholder, value)
-    (EXARCH_SITE / "index.html").write_text(rendered, encoding="utf-8")
+    (EXARCH_SITE / "index.html").write_text(highlight_doc_blocks(rendered),
+                                            encoding="utf-8")
 
     profiles_md = (EXARCH_DIR / "PROFILES.md").read_text(encoding="utf-8")
     body = markdown.markdown(profiles_md, extensions=["extra", "sane_lists", "toc"])
@@ -828,7 +835,7 @@ def render_synod_downloads(downloads: dict) -> str:
     `installer` rather than exarch's bare `artifact`.  The names are the ones
     build-binaries.yml renames its bundles to, which carry no version, so a
     release bumps nothing here."""
-    base = f'https://github.com/{downloads["release_repo"]}/releases/download/latest'
+    base = release_base(downloads)
     lines: list[str] = []
     for target in downloads["targets"]:
         os_name = html.escape(target["os"])

@@ -12,6 +12,10 @@
     {
       "os": "Linux arm64",
       "artifact": "exarch-linux-arm64"
+    },
+    {
+      "os": "Windows x86_64",
+      "artifact": "exarch-windows.exe"
     }
   ]
 }

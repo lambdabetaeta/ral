@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>exarch — a coding agent with bounded authority</title>
-  <meta name="description" content="exarch is a coding agent built on ral. Choose what it may read, write, run, and reach; those limits are enforced outside the model, where it cannot rewrite them.">
+  <title>exarch — a coding agent inside a shell</title>
+  <meta name="description" content="exarch is a coding agent whose only tool is a ral shell. Every program it writes runs inside a grant it cannot edit, and every sub-agent it starts runs inside a smaller one.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,187 +24,340 @@
 
   <main>
 
-    <!-- 1. crest -->
     <div class="crest-wrap">
-      <div class="crest">
+      <header class="crest">
         <div class="ascii eagle scroll-x"><pre>     ▗▄▆███▆▄▖
   ▗▟▀    ╋    ▀▙▖
        ◢███◣
  ◢█◣   █◠◠◠█   ◢█◣
  ▐█▌█████╳█████▐█▌
  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</pre></div>
-        <div class="scroll-x"><div class="ascii banner"><pre> ███████╗██╗  ██╗ █████╗ ██████╗  ██████╗██╗  ██╗
+        <h1 class="scroll-x"><span class="ascii banner" aria-label="exarch"><pre aria-hidden="true"> ███████╗██╗  ██╗ █████╗ ██████╗  ██████╗██╗  ██╗
  ██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔════╝██║  ██║
  █████╗   ╚███╔╝ ███████║██████╔╝██║     ███████║
  ██╔══╝   ██╔██╗ ██╔══██║██╔══██╗██║     ██╔══██║
  ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
- ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></div></div>
-        <p class="thesis">A coding agent that does not need<br>the keys to your whole machine.</p>
-        <div class="rule"></div>
-        <p class="sub">Every action runs through <a href="../index.html"><code>ral</code></a>, under limits chosen by you and enforced outside the model.</p>
-      </div>
+ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></span></h1>
+        <p class="thesis">A coding agent that works in a shell, inside limits it cannot touch.</p>
+        <p class="sub">Its one tool is a persistent <a href="../index.html">ral</a>
+        session. Every program it writes runs under a grant you chose, and
+        every agent it starts runs under a smaller one.</p>
+        <div class="run">
+          <span class="prompt" aria-hidden="true">$</span>
+          <code class="cmd" id="hero-cmd" role="button" tabindex="0"
+                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh</code>
+          <button class="copy" id="hero-copy" type="button" aria-live="polite">copy</button>
+        </div>
+      </header>
     </div>
 
-    <!-- 2. one language -->
-    <section class="section decree">
+    <section class="section" id="province">
       <div class="column">
-        <p class="eyebrow">The agent gets one tool</p>
-        <p>exarch reads code, edits files, and runs tests through one persistent
-        <a href="../index.html"><code>ral</code></a> session. There is no
-        privileged back door: every action is a program in the same small
-        language, under the same boundary.</p>
-        <p><code>ral</code> keeps data as data. Results can be decoded into
-        strings, lists, and records, not split and spliced into another
-        command. Failures can be caught, inspected, and handled.</p>
-        <p>The session remembers bindings, environment changes, and the working
-        directory between turns. exarch also logs the full conversation, every
-        program it ran, and the complete output.</p>
+        <h2>Authority only narrows</h2>
+        <p class="lede">An exarch was a Byzantine viceroy: full power, within a
+        bounded province. Here the province is a <code>grant</code>, and
+        provinces nest.</p>
+
+        <figure class="province" aria-label="Nested grants: the exarch process holds the keys; the agent runs inside its grant; each sub-agent runs inside a smaller grant folded onto its parent's.">
+          <div class="ring host">
+            <div class="ring-head">
+              <span class="who">exarch itself</span>
+              <span class="what">outside every grant; holds the API keys, writes the record</span>
+            </div>
+            <div class="ring agent">
+              <div class="ring-head">
+                <span class="who">the agent</span>
+                <code class="cap">--base reasonable</code>
+              </div>
+              <p class="ring-note">every program it writes, every turn</p>
+              <div class="ring child">
+                <div class="ring-head">
+                  <span class="who">plan-review</span>
+                  <code class="cap">grant: `read-only</code>
+                </div>
+                <p class="ring-note">a sub-agent, started from ral</p>
+                <div class="ring grandchild">
+                  <div class="ring-head">
+                    <span class="who">notes-a</span>
+                    <code class="cap">grant: `restrict [net: false, fs: [read: ['cwd:notes/a']]]</code>
+                  </div>
+                  <p class="ring-note">its own sub-agent; the checks fold every ring above it</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </figure>
+
+        <p>Each ring is checked by folding it together with every ring
+        outside it, so a sub-agent that asks for more than its parent
+        holds simply gets less. The model never sees a switch that widens
+        the boundary, because there is none.</p>
       </div>
     </section>
 
-    <!-- 3. the boundary -->
-    <section class="section boundary">
+    <section class="section" id="shell">
       <div class="column">
-        <p class="eyebrow">Permissions, not promises</p>
-        <p class="provider-note">Telling an agent what not to touch is advice.
-        exarch instead wraps every program in a grant supplied by the host. The
-        model can use that authority, but it cannot edit or remove the boundary
-        around it.</p>
-        <div class="compare">
-          <div class="panel">
-            <div class="panel-label">an unrestricted shell tool</div>
-            <div class="body"><pre><span class="c"># the model supplies the command;</span>
-<span class="c"># the command gets your authority</span>
-shell(<span class="s">"rm -rf build"</span>)
-shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
+        <h2>One tool, and the tool is a language</h2>
+        <p>Most agents choose from a menu: read, grep, edit, bash. exarch
+        writes a <code>ral</code> program. Reading, searching, editing,
+        testing and starting sub-agents are all functions in the same
+        language, so one call can do what a menu needs five round trips
+        for.</p>
+        <p>The session persists. Bindings, the working directory and the
+        environment carry from one call to the next, and each call is
+        type-checked against everything already bound. Results come back
+        as data: lists and records the next call can filter, not text to
+        be split again.</p>
+
+        <div class="listing">
+          <div class="listing-bar">one call</div>
+<pre><code>let suite = defer { cargo test -q 2&gt;&amp;1 }
+let impl  = within [dir: #'src/widget'#] { grep-files #'fn render'# }
+let tests = await $suite
+let log   = lines !{bytes-to-string !{commands $tests[value]}[0][stdout]}
+[impl: !{take 4 $impl}, ok: !{succeeded $tests[value]}, log: !{take 20 $log}]</code></pre>
+          <p class="listing-note">The test suite runs in the background
+          while the search does; the call answers with one record.</p>
+        </div>
+
+        <p>A program is checked whole before any of it runs. A type error
+        on the last line means the first line never happened.</p>
+
+        <div class="exchange">
+          <div class="listing">
+            <div class="listing-bar">the agent writes</div>
+<pre><code>let hits = grep-files #'fn render'#
+cargo test -q
+echo $[!{length $hits} + #' matches'#]</code></pre>
           </div>
-          <div class="panel bound">
-            <div class="panel-label">exarch — ral inside a grant</div>
-            <div class="body"><pre><span class="c"># the model supplies the program;</span>
-<span class="c"># you supply its authority</span>
-<span class="a">grant</span> [exec: [git:[], cargo:[]],
-       fs:   [read:  [<span class="s">'&lt;cwd&gt;'</span>],
-              write: [<span class="s">'&lt;cwd&gt;'</span>]],
-       net:  <span class="k">false</span>] {
-  cargo test -q
-}</pre></div>
+          <div class="output">
+            <div class="listing-bar">and reads back; <code>cargo</code> never started</div>
+            <pre>[T0010] Error: couldn't match type Integer with type String
+   ╭─[ turn.ral:3:6 ]
+   │
+ 3 │ echo $[!{length $hits} + #' matches'#]
+   │      ────────────────┬────────────────
+   │                      ╰────────────────── Integer doesn't match String
+   │
+   │ Help: the two sides of a `+` / `-` / `*` / `/` must have the same numeric type
+───╯</pre>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 4. capability profiles -->
-    <section class="section writs">
+    <section class="section" id="grant">
       <div class="column">
-        <p class="eyebrow">Start with the smallest useful boundary</p>
-        <p class="provider-note">Pick a built-in profile for the job, then
-        narrow or extend it with your own <code>ral</code> file if needed.
-        Profiles govern executable programs, readable and writable paths, and
-        network access. ral checks every action; the platform sandbox also
-        confines child processes.</p>
+        <h2>Limits the model cannot edit</h2>
+        <p>The grant is not a line in the agent's program, where the agent
+        could delete it. exarch pushes it onto the shell before each call
+        runs. The agent may write its own <code>grant</code> to narrow what
+        a block can do; it has no way to widen one. Nested grants meet:</p>
+
+        <div class="exchange">
+          <div class="listing">
+            <div class="listing-bar">grants intersect</div>
+<pre><code>grant [exec: [git: ['status', 'diff']]] {
+    grant [exec: [git: ['status']]] {
+        git status   # allowed
+        git diff     # denied
+    }
+}</code></pre>
+          </div>
+          <div class="output">
+            <div class="listing-bar">what the agent is told</div>
+            <pre>[R0001] Error: command 'git' subcommand 'diff' denied by active grant
+   ╭─[ turn.ral:4:9 ]
+   │
+ 4 │         git diff     # denied
+   │         ────┬───
+   │             ╰───── here
+   │
+   │ Help: allowed subcommands (matched against the command's first argument): status
+───╯</pre>
+          </div>
+        </div>
+
+        <p>A denial is an error with a reason, not a bare
+        <code>EPERM</code>, so the agent can change course. Two enforcers
+        share the work, each covering what the other cannot see:</p>
+
+        <table class="enforcers">
+          <thead>
+            <tr><th scope="col">what</th><th scope="col">checked by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>which commands run, down to subcommands</td>
+                <td>ral, before anything is spawned</td></tr>
+            <tr><td>files the shell reads and writes itself</td>
+                <td>ral, on the object a path resolves to</td></tr>
+            <tr><td>files and network of every external program</td>
+                <td>the operating system, per command: Seatbelt on macOS,
+                bubblewrap with Landlock and seccomp on Linux,
+                AppContainer on Windows</td></tr>
+            <tr><td>API keys</td>
+                <td>removed from the environment at startup; no program
+                the agent runs inherits them</td></tr>
+            <tr><td>exarch's own credential files and restriction files</td>
+                <td>denied in every profile that restricts the filesystem</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Profiles</h3>
+        <p>A profile is a ral program that returns a grant. Pick one with
+        <code>--base</code>, then widen it with <code>--extend-base</code>
+        or narrow it with any number of <code>--restrict</code> files.</p>
         <div class="lattice">
-          <div class="writ">
-            <span class="seal">✚</span>
-            <span class="name">dangerous</span>
-            <span class="desc">Full ambient authority. For a VM, container, or hand-written restriction.</span>
-            <span class="caps"><span><span class="key">net</span> inherit</span><span><span class="key">exec</span> inherit</span></span>
-          </div>
           <div class="writ default">
-            <span class="seal">✚</span>
             <span class="name">reasonable</span>
-            <span class="desc">Daily coding. Common tools and network; writes stay in the project, caches, and scratch.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> curated toolchain</span></span>
+            <span class="desc">Everyday coding. Reads and writes the project; writes scratch and caches; runs your toolchain; network on.</span>
           </div>
           <div class="writ">
-            <span class="seal">✚</span>
             <span class="name">edit-only</span>
-            <span class="desc">Patch and refactor with a smaller tool surface; writes stay in the project and scratch.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> git denied</span></span>
+            <span class="desc">Patching. Writes the project and scratch; git and interactive shells denied; nothing in the project may run.</span>
           </div>
           <div class="writ">
-            <span class="seal">✚</span>
             <span class="name">read-only</span>
-            <span class="desc">Review and investigation. Project writes are denied; scratch remains available.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> scratch</span></span>
+            <span class="desc">Review. The project is read-only; writes go to scratch alone.</span>
           </div>
           <div class="writ">
-            <span class="seal">✚</span>
             <span class="name">minimal</span>
-            <span class="desc">A small base: project, scratch, system tools, and network, without home-directory reads.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> system tools</span></span>
+            <span class="desc">A small base to extend: project, scratch, system tools, no home directory.</span>
           </div>
           <div class="writ">
-            <span class="seal">✚</span>
             <span class="name">confined</span>
-            <span class="desc">A compact build jail: one project, scratch space, system tools, and no network.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="off">off</span></span><span><span class="key">fs</span> cwd + scratch</span></span>
+            <span class="desc">An offline build jail: one project, scratch space, no network.</span>
           </div>
-
+          <div class="writ">
+            <span class="name">dangerous</span>
+            <span class="desc">No restriction at all. For a VM or container, or as the base for <code>--restrict</code>.</span>
+          </div>
         </div>
-        <div class="cta-links">
-          <a href="profiles.html">Read the profiles &rarr;</a>
-        </div>
+        <p class="aside">This is defence in depth for a development tool, not
+        a hardened jail; <a href="profiles.html">the profiles page</a> lists
+        what each one admits and where the gaps are. For a wall, run the
+        shell under <a href="../synod/index.html">synod</a>, which puts it
+        in a virtual machine whose only route out is an allow-listed
+        proxy.</p>
       </div>
     </section>
 
-    <!-- 5. providers -->
-    <section class="section providers-sec">
+    <section class="section" id="agents">
       <div class="column">
-        <p class="eyebrow">Bring the model you want</p>
-        <p class="provider-note">Set an API key or sign in with ChatGPT. exarch
-        discovers available providers at startup, keeps their credentials in
-        its own process, and removes them from the environment before the agent
-        can run a program. Sign in to several ChatGPT accounts and each is
-        separately selectable, even when they share a login email.</p>
-        <div class="providers">
-          <span class="chip">anthropic</span>
-          <span class="chip">openai</span>
-          <span class="chip">chatgpt</span>
-          <span class="chip">openrouter</span>
-          <span class="chip">deepseek</span>
-          <span class="chip">opencode</span>
-          <span class="chip">xai</span>
-          <span class="chip">qwen</span>
-          <span class="chip more">+ custom / self-hosted</span>
+        <h2>Sub-agents are started from the shell</h2>
+        <p>There is no separate delegation tool. The agent starts
+        sub-agents with <code>exarch-agents</code>, from inside the same
+        ral program, so it can compute their prompts, names and grants,
+        and start a dozen in one loop.</p>
+        <p>A child begins with a snapshot of its parent's bindings, so the
+        prompt names data instead of pasting it. It runs under one more
+        grant folded onto its parent's. It answers with ral data, which
+        the parent binds and computes with. Children can start children
+        of their own, three generations deep, and every one is the same
+        agent.</p>
+
+        <div class="listing">
+          <div class="listing-bar">a grant computed per child</div>
+<pre><code>let dirs = glob #'notes/*'#
+for !{range 0 !{length $dirs}} { |i|
+  let only-mine = [net: false, fs: [read: ["cwd:$dirs[$i]"]]]
+  exarch-agents `start [
+    prompt:   "Summarise the notes under $dirs[$i]. Reply [topic: Str, claims: [Str]].",
+    name:     "notes-$i",
+    type:     `amnemon,
+    grant:    `restrict $only-mine,
+    search:   false,
+    provider: `inherit,
+    model:    `inherit,
+  ]
+}</code></pre>
+          <p class="listing-note">Each child may read one directory and
+          nothing else, and has no network.</p>
         </div>
+
+        <p>Sub-agents run in the background. When one replies, its parent
+        is woken with a one-line notice, and reads the value only when it
+        wants it, so a large answer never floods the parent's context
+        uninvited:</p>
+
+        <div class="listing">
+          <div class="listing-bar">a later call</div>
+<pre><code>let parts = map { |i| let r = exarch-agents `read "notes-$i"; $r[reply] } !{range 0 !{length $dirs}}</code></pre>
+        </div>
+
+        <p>Each child can run on its own provider and model. It stays
+        addressable after it replies: send it a message, and it resumes
+        with its context intact.</p>
       </div>
     </section>
 
-    <!-- 6. get exarch -->
-    <section class="section get-sec">
+    <section class="section" id="rest">
       <div class="column">
-        <p class="eyebrow">Get exarch</p>
-        <p class="get-note">One self-contained binary. The
-        <a href="../index.html"><code>ral</code></a> shell is built in.</p>
+        <h2>Around the shell</h2>
+        <dl class="facts">
+          <dt>A transcript drawn as a graphic</dt>
+          <dd>A two-column rail marks each block: its kind by shape, the
+          agent by hue, size by lightness. Nothing streams or spins;
+          waiting is a bar that grows from a fixed point. Bursts of calls
+          fold into one group you can open.</dd>
+
+          <dt>Any provider</dt>
+          <dd>Set a key and it is found at startup, then scrubbed from the
+          environment. Sign in to ChatGPT, with several accounts if you
+          like; add any compatible endpoint in <code>config.ral</code>.
+            <span class="providers">
+              <span class="chip">anthropic</span><span class="chip">openai</span><span class="chip">chatgpt</span><span class="chip">openrouter</span><span class="chip">gemini</span><span class="chip">deepseek</span><span class="chip">xai</span><span class="chip">qwen</span><span class="chip">opencode-zen</span><span class="chip">opencode-go</span>
+            </span>
+          </dd>
+
+          <dt>Headless</dt>
+          <dd><code>exarch --prompt "…"</code> runs one task and prints the
+          reply; <code>--output-format json</code> adds turns, tokens and
+          cost.</dd>
+
+          <dt>One record</dt>
+          <dd>Every session is written to a single log, one event at a
+          time; the screen and the model's context are both replays of it.
+          <code>--resume</code> picks a session up again.</dd>
+
+          <dt>Your instructions</dt>
+          <dd><code>AGENTS.md</code> files from the repository root down to
+          the working directory, and skills loaded on demand. They add to
+          the prompt, never to the grant.</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section" id="get">
+      <div class="column">
+        <h2>Get exarch</h2>
+        <p>One binary, with the ral shell built in. On macOS or Linux:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="install-cmd" role="button" tabindex="0"
                 aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh</code>
           <button class="copy" id="install-copy" type="button" aria-live="polite">copy</button>
         </div>
+        <p>On Windows, in PowerShell:</p>
+        <div class="run">
+          <span class="prompt" aria-hidden="true">&gt;</span>
+          <code class="cmd" id="win-cmd" role="button" tabindex="0"
+                aria-label="Copy Windows install command to clipboard">irm https://lambdabetaeta.github.io/ral/scripts/exarch-install.ps1 | iex</code>
+          <button class="copy" id="win-copy" type="button" aria-live="polite">copy</button>
+        </div>
         <div class="downloads">
           <div class="dl-grid">
 {{EXARCH_DOWNLOADS}}
           </div>
           <div class="dl-src">
-            <span class="seal" aria-hidden="true">&#10010;</span>
             <span class="label">source</span>
             <a class="dl-btn dl-repo" href="https://github.com/lambdabetaeta/ral/tree/main/exarch">
               <svg class="gh-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
               lambdabetaeta/ral
             </a>
-            <a class="dl-btn dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>
-              <svg class="archive-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
-              .tar.gz
-            </a>
-            <a class="dl-btn dl-archive" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>
-              <svg class="archive-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 1h6l4 4v10H3V1zm1 1v12h8V6H8V2H4zm5 0v3h3L9 2zM7 4h2v1H7V4zm0 2h2v1H7V6zm0 2h2v1H7V8zm0 2h2v2H7v-2z"/></svg>
-              .zip
-            </a>
           </div>
         </div>
-        <p class="get-note">Set a provider key, enter the project you want it to
-        work on, and run:</p>
+        <p>Then set a provider key, go to the project, and run it:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="run-cmd" role="button" tabindex="0"
@@ -230,10 +383,10 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
 
   <script>
     (function () {
-      /* ── copy-to-clipboard widgets (install + run) ── */
-      function wireCopy(cmdId, copyId, text) {
+      function wireCopy(cmdId, copyId) {
         var cmd  = document.getElementById(cmdId);
         var copy = document.getElementById(copyId);
+        var text = cmd.textContent;
         var timer;
         function flash() {
           copy.textContent = 'copied';
@@ -245,9 +398,8 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
           }, 1600);
         }
         function doCopy() {
-          if (navigator.clipboard) {
-            navigator.clipboard.writeText(text).then(flash, flash);
-          } else { flash(); }
+          if (navigator.clipboard) navigator.clipboard.writeText(text).then(flash, flash);
+          else flash();
         }
         copy.addEventListener('click', doCopy);
         cmd.addEventListener('click', doCopy);
@@ -255,11 +407,11 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
         });
       }
-      wireCopy('install-cmd', 'install-copy',
-               'curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh');
-      wireCopy('run-cmd', 'run-copy', 'ANTHROPIC_API_KEY=… exarch');
+      wireCopy('hero-cmd', 'hero-copy');
+      wireCopy('install-cmd', 'install-copy');
+      wireCopy('win-cmd', 'win-copy');
+      wireCopy('run-cmd', 'run-copy');
 
-      /* ── theme toggle ── */
       var root  = document.documentElement;
       var btn   = document.getElementById('theme-toggle');
       var glyph = document.getElementById('theme-glyph');

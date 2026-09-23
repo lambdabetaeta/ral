@@ -174,7 +174,10 @@ a:hover { color: var(--porphyry-2); text-decoration: underline; }
 
 /* ── responsive ── */
 @media (max-width: 36rem) {
-  .menu-item { padding: 0.28rem 0.5rem; font-size: 0.78rem; }
+  .menubar { padding: 0.35rem 0.4rem; }
+  .menu-item { padding: 0.28rem 0.4rem; font-size: 0.78rem; }
+  .theme-toggle { padding: 0.28rem 0.5rem; }
+  #theme-label { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
