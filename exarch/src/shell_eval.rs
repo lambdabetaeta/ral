@@ -134,15 +134,14 @@ pub enum Decoded {
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.
 ///
-/// The shapes riding the one `exarch-surface` channel are disjoint — an
-/// observation is a `Map` tagged by its `kind` field, the rest are distinct
-/// variant labels — so the arm order below carries no meaning.  Anything else
+/// Every class riding the one `exarch-surface` channel is a variant with a
+/// distinct label, so the arm order below carries no meaning.  Anything else
 /// is [`Decoded::Unknown`].
 ///
 /// The register is not among them: a pin is *state*, keyed to a slot and
 /// overwritten in place, and `exarch-pins` is its only door.
 pub fn decode_surface(ev: &FOValue) -> Decoded {
-    if let Some(event) = Observation::from_wire(ev) {
+    if let Some(event) = Observation::from_surface(ev) {
         // Core reports every observation it makes and judges none of them;
         // `landing` is where this host says which it wants.  One core
         // dispatch is one observation, so a rejected one is dropped outright
@@ -1024,7 +1023,7 @@ keep-bottom
                         path: "a.rs".into()
                     },
                 )
-                .to_wire()
+                .to_surface()
             ),
             Decoded::Surface(Surface::Observation(_))
         ));

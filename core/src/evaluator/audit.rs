@@ -59,7 +59,7 @@ pub(crate) fn observe_stamped(shell: &mut Shell, mooring: &Mooring, obs: Observa
         return;
     }
     if mooring.has_surface() {
-        mooring.surface_data(&obs.to_wire());
+        mooring.surface_data(&obs.to_surface());
     }
     shell.local.audit.push(obs);
 }
@@ -247,7 +247,7 @@ pub(crate) fn record_capability(
         },
     );
     if mooring.has_surface() {
-        mooring.surface_data(&obs.to_wire());
+        mooring.surface_data(&obs.to_surface());
     }
     if shell.local.audit.active() {
         shell.local.audit.push(obs);

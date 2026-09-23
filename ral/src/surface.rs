@@ -30,10 +30,11 @@ pub(crate) fn watch_line(v: &FOValue) -> Option<String> {
 /// The note `v` is dropped with; none for an observation, which neither
 /// front-end renders by choice.
 pub(crate) fn dropped(v: &FOValue) -> Option<String> {
-    if Observation::from_wire(v).is_some() {
-        return None;
-    }
-    let class = untag(v).map_or_else(|| v.shape(), |(label, _)| format!("`{label}"));
+    let class = match untag(v) {
+        Some((Observation::SURFACE_TAG, _)) => return None,
+        Some((label, _)) => format!("`{label}"),
+        None => v.shape(),
+    };
     Some(format!(
         "note: dropped a surfaced value ({class}): this front-end renders no such value"
     ))

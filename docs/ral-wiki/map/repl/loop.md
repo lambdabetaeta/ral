@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e2b7067b
+generated_at_commit: 3e43ce37
 generated_at_date: 2026-09-23
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
@@ -168,9 +168,9 @@ captured, fault, walled, ctx}`).
   [[map/repl/plugins|plugin runtime]], which may refuse).
 - `surface` and the `DeferredSink` impl render what the engine surfaces: a
   `` `watch `` line (`ral/src/surface.rs`, shared with batch) through the
-  frontend's printer above the prompt, a `` `notice `` dim, an observation
-  skipped by choice (the ral front-ends render no audit), and anything else
-  dropped with a note naming its class.
+  frontend's printer above the prompt, a `` `notice `` dim, an
+  `` `observed `` observation skipped by choice (the ral front-ends render no
+  audit), and anything else dropped with a note naming its class.
 - `prompt_fault` prints a broken prompt's diagnostic once while it repeats.
 
 ## The selectable frontend

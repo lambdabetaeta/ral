@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e2b7067b
+generated_at_commit: 3e43ce37
 generated_at_date: 2026-09-23
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/engine.rs, core/src/engine/, core/src/wire.rs, core/src/hatch.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
@@ -62,7 +62,8 @@ wire-seat child's spawn machinery.** The why is
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`.
 - `Event` — engine→front-end, inside a dispatch's window: `Surface`,
-  `Enquiry`, `Report`.
+  `Enquiry`, `Report`. Every surfaced value is a tagged variant; an audit
+  observation rides as `` `observed <record> `` (`Observation::to_surface`).
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(String)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a detached worker's batch, and a watched worker's lines).

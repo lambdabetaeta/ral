@@ -109,7 +109,9 @@ level too: a class that nests tags beneath it (`` exarch-agents `list ``,
 for an unrecognised class — nesting must not open a silent hole beneath the
 rule it was introduced under. An unrecognised enquiry class or tag answers
 `Err` naming it; an unrecognised surface class is dropped with a note, never
-silently.
+silently. Every surface class is a label, an audit observation included
+(`` `observed ``), so a host dispatches on the tag alone and never on a
+value's shape.
 
 **A payload is typed once, for both ends.** It is an `FOValue` on the wire
 and a Rust type on either side of it: `Datum` (`ral_core::serial::datum`) is

@@ -19,18 +19,21 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{GrantStack, Map, Settled, Value};
+use ral_core::types::{GrantStack, Map, Observation, Settled, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
 };
 use std::sync::{Arc, Mutex};
 
-/// A sink that records every surfaced value, decoded back to `Value`.
+/// A sink that records every surfaced observation as the record a trail
+/// carries.
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
 impl EventSink for Recorder {
     fn emit(&self, ev: &ral_core::serial::FOValue) {
-        self.0.lock().unwrap().push(Value::from(ev.clone()));
+        if let Some(obs) = Observation::from_surface(ev) {
+            self.0.lock().unwrap().push(obs.to_value());
+        }
     }
 }
 

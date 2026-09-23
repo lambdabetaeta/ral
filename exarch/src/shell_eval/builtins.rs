@@ -208,7 +208,7 @@ fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
                 path: path.to_string(),
             },
         )
-        .to_wire(),
+        .to_surface(),
     );
 }
 
@@ -397,7 +397,7 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
                 pattern: pattern.clone(),
             },
         )
-        .to_wire(),
+        .to_surface(),
     );
 
     let results = search_tree(mooring, shell, &pattern)?

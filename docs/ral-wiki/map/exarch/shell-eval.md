@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
+generated_at_commit: 3e43ce37
+generated_at_date: 2026-09-23
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -225,10 +225,11 @@ never by the decoder or by the seam that records it (`absorb_surface`):
   mirrored as `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name
   pinned state without parsing rendered text — the read side reuses the same
   store rather than adding a second one ([[design/pins|pins]]);
-- a `Map` core emits at a redirect, exec, or capability-check door decodes
-  through `Observation::from_wire` into `Surface::Observation`, the raw
-  observation alone ([[map/exarch/io-surface|io-surface]]); one `landing`
-  declines is `Decoded::Landed`, kept off the rail without a word;
+- an `` `observed `` value core emits at a redirect, exec, or
+  capability-check door decodes through `Observation::from_surface` into
+  `Surface::Observation`, the raw observation alone
+  ([[map/exarch/io-surface|io-surface]]); one `landing` declines is
+  `Decoded::Landed`, kept off the rail without a word;
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
   idle-binding prune, a large-binding warning) decodes to `Surface::Notice`
   ([[map/core/engine-protocol|engine-protocol]]);

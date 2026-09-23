@@ -2074,7 +2074,7 @@ mod tests {
                 path: "a.rs".into(),
             },
         );
-        applier.live(&read.to_wire());
+        applier.live(&read.to_surface());
         applier.live(&FOValue::Variant {
             label: "card".into(),
             payload: Some(Box::new(FOValue::List { items: vec![] })),

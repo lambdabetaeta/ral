@@ -7,13 +7,15 @@
 //! core built.  The envelope is a record of `site`, `start`, `end` and
 //! `principal`; the fact itself is `what`, a variant whose tag is
 //! the kind, so no separate `kind` field can disagree with the payload beside
-//! it.
+//! it.  On the surface channel, which carries other classes too, the record
+//! rides as `` `observed <record> `` ([`Observation::to_surface`]).
 
 use super::audit::{AuditIo, epoch_us};
 use super::shell::workers::{LeaseClass, WorkerId};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::serial::FOValue;
+use crate::serial::datum::untag;
 use crate::syntax::ast::RedirectMode;
 use std::collections::BTreeMap;
 
@@ -362,6 +364,23 @@ impl Observation {
             what: Observed::from_payload(label, payload.as_deref()?)?,
         })
     }
+
+    /// The tag an observation carries on the surface channel.
+    pub const SURFACE_TAG: &str = "observed";
+
+    /// [`Self::to_wire`] tagged for the surface channel, so a host dispatches
+    /// on the tag alone.
+    pub fn to_surface(&self) -> FOValue {
+        tagged(Self::SURFACE_TAG, self.to_wire())
+    }
+
+    /// Inverse of [`Self::to_surface`].
+    pub fn from_surface(v: &FOValue) -> Option<Self> {
+        match untag(v)? {
+            (Self::SURFACE_TAG, Some(record)) => Self::from_wire(record),
+            _ => None,
+        }
+    }
 }
 
 impl Observed {
@@ -696,6 +715,18 @@ mod tests {
             payload: "done".into(),
             refused: true,
         });
+    }
+
+    #[test]
+    fn the_surface_form_is_the_record_under_its_tag() {
+        let obs = Observation::instant(None, None, Observed::Read { path: "a".into() });
+        let surfaced = obs.to_surface();
+        assert_eq!(
+            untag(&surfaced),
+            Some((Observation::SURFACE_TAG, Some(&obs.to_wire())))
+        );
+        assert_eq!(Observation::from_surface(&surfaced), Some(obs.clone()));
+        assert!(Observation::from_surface(&obs.to_wire()).is_none());
     }
 
     #[test]

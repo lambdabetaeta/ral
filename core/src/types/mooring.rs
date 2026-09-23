@@ -276,8 +276,7 @@ impl Mooring {
 
     /// [`Self::surface`] for a host that already holds data.  Every door core
     /// owns reaches it through `evaluator::audit::observe_stamped` with
-    /// [`crate::types::Observation::to_wire`] — the single record shape
-    /// shared by the rail, the audit trail, and `--audit`.
+    /// [`crate::types::Observation::to_surface`].
     pub fn surface_data(&self, ev: &crate::serial::FOValue) {
         if let Some(sink) = self.surface.as_ref() {
             sink.emit(ev);

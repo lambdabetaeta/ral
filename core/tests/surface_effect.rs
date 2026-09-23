@@ -14,7 +14,8 @@ use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::io::TerminalState;
 use ral_core::protocol::{Program, Run};
 use ral_core::serial::FOValue;
-use ral_core::types::{GrantStack, Settled, Shell, Value};
+use ral_core::serial::datum::untag;
+use ral_core::types::{GrantStack, Observation, Settled, Shell, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
 };
@@ -54,7 +55,7 @@ fn recording() -> (Arc<Mutex<Vec<FOValue>>>, SurfaceSink) {
 fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
     events
         .iter()
-        .filter(|ev| ev.field("what").is_none())
+        .filter(|ev| !matches!(untag(ev), Some((Observation::SURFACE_TAG, _))))
         .cloned()
         .collect()
 }
