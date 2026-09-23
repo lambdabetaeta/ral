@@ -305,7 +305,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 }
 
 /// The inverse of [`parse_duration`], in the coarsest unit that divides.
-fn fmt_duration(d: Duration) -> String {
+pub(crate) fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
     if s.is_multiple_of(86_400) {
         format!("{}d", s / 86_400)

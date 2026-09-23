@@ -197,10 +197,13 @@ The escape is detachment — the *handle* is its evidence
   ([[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   The snapshot is cumulative — each poll of a live worker reports monotonically more
   — and it is capped by `SINK_BUFFER_CAP` like every capture buffer.
-- `watch` — the one primitive that *streams* a running worker's output live — is
-  still REPL-only: exarch's per-call capture sinks cannot host a root-surviving
-  writer ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). Partial `poll`
-  is the headless substitute: not a live stream, but a poll-driven read exarch can
+- `watch` — the one primitive that *streams* a running worker's output live —
+  rides the session surface: each line leaves as one `` `watch [label, line] ``
+  value through the session-lived deferred sink (`Sink::Watch`), a batch of one,
+  which the REPL host prints through rustyline's external printer above the
+  prompt and batch prints to stdout. Only the ral hosts install it
+  ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); partial `poll`
+  is exarch's substitute: not a live stream, but a poll-driven read exarch can
   drive from its own runs.
 - So under exarch a server is *fire-and-`poll`-and-`cancel`*: `spawn` it, read its
   accumulated output with `poll $h` on later runs, `cancel $h` when done. `poll`

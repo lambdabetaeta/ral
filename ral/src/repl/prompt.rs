@@ -1,29 +1,46 @@
 //! Prompt construction.
 //!
-//! The prompt body is a registered hook at `Session/"prompt"`,
-//! dispatched via [`Shell::run`].  CWD and USER are ambient
-//! pseudo-variables read by the prompt body directly.
-//! Plugins may transform the result via the `prompt` lifecycle hook.
+//! The prompt body is a registered hook at `Session/"prompt"`, dispatched
+//! like any other hook.  CWD and USER are ambient pseudo-variables read by
+//! the prompt body directly.  Plugins may transform the result via the
+//! `prompt` lifecycle hook.
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, GrantStack, HookName};
-use ral_core::{
-    Captured, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell, Value,
-    diagnostic,
-};
-#[cfg(test)]
-use ral_core::{DefaultPolicy, HookSig};
-use std::sync::{Arc, Mutex};
+use ral_core::protocol::Transport;
+use ral_core::serial::FOValue;
+use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
+use ral_core::{Captured, Shell, Value};
+use std::sync::Arc;
 
-use super::plugin::{FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook};
+use super::host::ReplHost;
+use super::plugin::lock;
 
-/// The default prompt.  Session boot registers it as the
-/// `Session/"prompt"` hook (`install_default_prompt`); the failure
-/// arms in [`render`] fall back to it directly, so a broken user thunk
-/// degrades to the out-of-box prompt beside its per-render diagnostic.
-/// The session survives a broken prompt: it is the place where the user
-/// rebinds the prompt to fix it.
+/// The default prompt.  The boot door registers it as the `Session/"prompt"`
+/// hook; a failing prompt falls back to it directly.  The session survives a
+/// broken prompt: it is the place where the user rebinds the prompt to fix it.
 pub(super) const DEFAULT_PROMPT: &str = "❯ ";
+
+/// Register the `Session/"prompt"` hook returning [`DEFAULT_PROMPT`], unless
+/// the rc registered one already.  Built as a thunk, not compiled from source,
+/// so no boot-time `.expect` can panic on the constant's bytes.
+pub(crate) fn install_default_prompt(shell: &mut Shell) {
+    let name = HookName::session("prompt");
+    if shell.has_hook(&name) {
+        return;
+    }
+    let block = Value::Thunk(Closure {
+        comp: Arc::new(ral_core::source::Spanned::synthetic(
+            ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
+        )),
+        env: ral_core::types::Env::default(),
+    });
+    let _ = shell.register_hook(
+        name,
+        block,
+        HookSig::Prompt,
+        DefaultPolicy::denied_capture(),
+        ral_core::source::Span::synthetic(),
+    );
+}
 
 /// Prompt text in both raw and styled forms.
 ///
@@ -51,174 +68,75 @@ impl PromptText {
     }
 }
 
-/// Build the capture-into-string run for the `Session/<name>` prompt hook.
-/// The prompt body runs with denied terminal access and its stdout captured,
-/// so a block that prints its prompt is read back from the capture.
-fn prompt_run(name: &str) -> RunRequest<'static> {
-    RunRequest {
-        run: Run {
-            program: Program::Hook {
-                name: HookName::session(name),
-                args: vec![],
-            },
-            script_name: "<prompt>".to_string(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-        lifecycle: Box::new(()),
-    }
-}
-
-/// Extract the prompt display text from a prompt run's outcome.  A returned
-/// value is the prompt; a returned unit falls back to captured stdout (with a
-/// trailing newline trimmed); an error prints a diagnostic and degrades to
-/// [`DEFAULT_PROMPT`].
-fn prompt_text_from(result: Result<Value, Break>, captured: Option<Captured>) -> String {
-    match result {
-        Ok(Value::Unit) => {
-            if let Some(cap) = captured {
-                let text = String::from_utf8_lossy(&cap.stdout).into_owned();
-                if let Some(stripped) = text.strip_suffix('\n') {
-                    stripped.to_string()
-                } else {
-                    text
-                }
-            } else {
-                DEFAULT_PROMPT.to_string()
+/// A prompt run's text: a returned value is the prompt; a returned unit falls
+/// back to its captured stdout, a trailing newline trimmed.
+fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
+    match (value, captured) {
+        (FOValue::Unit, Some(cap)) => {
+            let mut text = String::from_utf8_lossy(&cap.stdout).into_owned();
+            if text.ends_with('\n') {
+                text.pop();
             }
+            text
         }
-        Ok(other) => other.to_string(),
-        Err(Break::Error(e)) => {
-            diagnostic::cmd_error("ral", &format!("prompt error: {}", e.message));
-            DEFAULT_PROMPT.to_string()
-        }
-        Err(Break::Escape(_)) => DEFAULT_PROMPT.to_string(),
+        (FOValue::Unit, None) => DEFAULT_PROMPT.to_string(),
+        (value, _) => Value::from(value).to_string(),
     }
-}
-
-/// Evaluate a prompt block, extracting its display text.  A block's return
-/// value produces the prompt; when it returns unit, its captured stdout is
-/// used.  Any other value is its display form, so a plain string prompt is
-/// the string itself.  Registers the value as a temporary hook and runs it
-/// through the same [`prompt_run`] / [`prompt_text_from`] path as [`render`].
-#[cfg(test)]
-pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
-    let Value::Thunk(closure) = prompt else {
-        return prompt.to_string();
-    };
-    if closure.comp.arrow().is_some() {
-        return prompt.to_string();
-    }
-
-    let _ = shell.register_hook(
-        HookName::session("__eval_prompt_test__"),
-        prompt.clone(),
-        HookSig::Prompt,
-        DefaultPolicy::denied_capture(),
-        ral_core::source::Span::synthetic(),
-    );
-
-    let (result, captured) = match shell.run(prompt_run("__eval_prompt_test__")) {
-        RunReport::Ran {
-            ending, captured, ..
-        } => (ending.into_result(), captured),
-        RunReport::Static { .. } => unreachable!("a thunk prompt body never compiles source"),
-    };
-
-    prompt_text_from(result, captured)
 }
 
 /// Write the terminal title escape (`ral: <cwd>`) to stdout.
 ///
 /// Presentation-layer side effect, separate from the semantic prompt
-/// computation in [`render`].  Called by the session loop before
-/// rendering so the title updates whether or not the user changes the
-/// prompt.  No-op on terminals that can't render OSC titles.
-pub(super) fn write_terminal_title(shell: &Shell) {
-    if !shell.terminal().ui_title_ok() {
+/// computation in [`render`], so the title updates whether or not the user
+/// changes the prompt.  No-op on terminals that can't render OSC titles.
+pub(super) fn write_terminal_title(terminal: &ral_core::io::TerminalState, cwd: &str) {
+    if !terminal.ui_title_ok() {
         return;
     }
     use std::io::Write;
-    let p = shell.cwd();
-    let cwd = if p.as_os_str().is_empty() {
-        "?".into()
-    } else {
-        p.to_string_lossy().into_owned()
-    };
+    let cwd = if cwd.is_empty() { "?" } else { cwd };
     let _ = std::io::stdout()
         .write_all(ral_core::ansi::osc_set_title(&format!("ral: {cwd}")).as_bytes());
     let _ = std::io::stdout().flush();
 }
 
-/// Run the registered `Session/"prompt"` hook, fold plugin `prompt`
-/// hooks, and produce the renderable [`PromptText`].
-///
-/// The prompt hook is registered at session boot and may be
-/// overwritten by the rc `prompt:` key.
-///
-/// This runs on the session itself, as a run like any other: its frame is
-/// born after the settled command's Ctrl-C, so the prompt is drawn free of it
-/// without anything having to be handed back.
-pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
-    let base = match shell.run(prompt_run("prompt")) {
-        RunReport::Ran {
-            ending, captured, ..
-        } => prompt_text_from(ending.into_result(), captured),
-        RunReport::Static { .. } => DEFAULT_PROMPT.to_string(),
-    };
-
-    let final_prompt = fold_hook(
-        runtime,
-        shell,
-        "prompt",
-        base,
-        |shell, plugin, hook, prompt| {
-            // The prompt hook runs during `read`, outside any frame, and only
-            // transforms the prompt string — it never foregrounds a child, so
-            // it frames with `Denied`.
-            let hr = call_plugin_hook(
-                shell,
-                plugin,
-                hook,
-                &[Value::String(prompt.clone())],
-                None,
-                HookFraming::Framed(FramedHook {
-                    terminal: RequestedTerminalAccess::Denied,
-                    kind: "prompt",
-                    budget: None,
-                }),
-            );
-            if let Ok(Value::String(s)) = hr.result {
-                s
-            } else {
-                // No readline escape is pending at render time, so the
-                // source-mapped fault (rendered while its registry was live)
-                // prints immediately above the prompt.
-                if let Some(rendered) = hr.rendered_error {
-                    eprintln!("{rendered}");
-                }
-                prompt
-            }
-        },
+/// Run the registered `Session/"prompt"` hook, fold plugin `prompt` hooks
+/// over it, and produce the renderable [`PromptText`].  A failing prompt —
+/// one whose value cannot cross included — falls back to [`DEFAULT_PROMPT`],
+/// printing its diagnostic when it differs from the last one printed.
+pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
+    let base = host.run_hook(t, HookName::session("prompt"), vec![], None, None);
+    if let Some(fault) = host.prompt_fault(base.fault) {
+        eprintln!("{fault}");
+    }
+    let mut prompt = base.value.map_or_else(
+        || DEFAULT_PROMPT.to_string(),
+        |value| prompt_text(value, base.captured),
     );
-
-    PromptText::from_styled(final_prompt)
+    let plugins = lock(&host.runtime).with_hook("prompt", |_| true);
+    for name in plugins {
+        let hr = host.run_hook(
+            t,
+            HookName::plugin(name, "prompt"),
+            vec![FOValue::String {
+                value: prompt.clone(),
+            }],
+            None,
+            None,
+        );
+        match (hr.value, hr.fault) {
+            (Some(FOValue::String { value }), _) => prompt = value,
+            (_, Some(fault)) => eprintln!("{fault}"),
+            _ => {}
+        }
+    }
+    PromptText::from_styled(prompt)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PromptText, eval_prompt};
-    use ral_core::{Shell, Value};
+    use super::*;
+    use ral_core::source::Span;
 
     #[test]
     fn strips_sgr_sequences_from_prompt_width() {
@@ -227,78 +145,64 @@ mod tests {
         assert_eq!(prompt.styled(), "\x1b[31mred\x1b[0m $ ");
     }
 
-    /// Parse and evaluate `src` to a thunk against a prelude-loaded shell.
-    /// Returns `(shell, prompt_thunk)`.
-    fn evaluate_prompt_src(src: &str) -> (Shell, Value) {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let prompt = match shell.run(ral_core::RunRequest {
-            run: ral_core::protocol::Run {
-                program: ral_core::protocol::Program::Source(src.to_string()),
-                script_name: "<test>".to_string(),
-                caps: ral_core::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: ral_core::RunIo::Inherit,
-                terminal: ral_core::RequestedTerminalAccess::Leased,
-                stdin: ral_core::RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        }) {
-            ral_core::RunReport::Ran { ending, .. } => ending.into_result().unwrap(),
-            ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-        };
-        assert!(matches!(prompt, Value::Thunk(_)), "expected thunk");
-        (shell, prompt)
+    /// Render the prompt a block evaluated from `src` gives, registered as
+    /// the session prompt, through the transport.
+    fn render_src(src: &str) -> String {
+        let src = src.to_owned();
+        let t = crate::repl::engine(move |shell| {
+            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            let prompt = crate::repl::eval(shell, &src);
+            shell
+                .register_hook(
+                    HookName::session("prompt"),
+                    prompt,
+                    HookSig::Prompt,
+                    DefaultPolicy::denied_capture(),
+                    Span::synthetic(),
+                )
+                .expect("a block registers as the prompt");
+        });
+        render(&t, &ReplHost::new(Arc::default()))
+            .styled()
+            .to_string()
     }
 
     #[test]
     fn prompt_block_prefers_return_value_over_stdout() {
-        let (mut shell, prompt) = evaluate_prompt_src("{ echo Darwin; return 'ral $ ' }");
-        assert_eq!(eval_prompt(&prompt, &mut shell), "ral $ ");
+        assert_eq!(render_src("{ echo Darwin; return 'ral $ ' }"), "ral $ ");
     }
 
     #[test]
     fn prompt_block_keeps_closure_captures_from_rc_scope() {
-        let (mut shell, prompt) = evaluate_prompt_src(
-            "let left = '['\n let right = ']'\n return { return \"$left ok $right\" }",
-        );
-        assert_eq!(eval_prompt(&prompt, &mut shell), "[ ok ]");
+        let src = "let left = '['\n let right = ']'\n return { return \"$left ok $right\" }";
+        assert_eq!(render_src(src), "[ ok ]");
     }
 
     // ambient pseudo-variables ($CWD, $USER) are live.
 
     #[test]
     fn prompt_block_sees_pseudo_vars() {
-        let source = "return { return \"$USER:$CWD\" }";
-        let (mut shell, prompt) = evaluate_prompt_src(source);
-        let result = eval_prompt(&prompt, &mut shell);
+        let result = render_src("return { return \"$USER:$CWD\" }");
         // Split at the first colon: a Windows `$CWD` carries a drive
         // colon of its own, and it lies to the right of this one.
         let (user, cwd) = result
             .split_once(':')
             .unwrap_or_else(|| panic!("expected user:cwd, got {result:?}"));
-
         assert!(!user.is_empty(), "USER must be non-empty, got {result:?}");
         assert!(!cwd.is_empty(), "CWD must be non-empty, got {result:?}");
     }
 
     #[test]
-    fn string_prompt_renders_as_itself() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let prompt = Value::String("abc $ ".into());
-        assert_eq!(eval_prompt(&prompt, &mut shell), "abc $ ");
+    fn failing_prompt_thunk_falls_back_to_default() {
+        assert_eq!(
+            render_src("{ fail [status: 1, message: 'boom'] }"),
+            DEFAULT_PROMPT
+        );
     }
 
+    /// A prompt whose value cannot cross falls back rather than rendering it.
     #[test]
-    fn failing_prompt_thunk_falls_back_to_default() {
-        let (mut shell, prompt) = evaluate_prompt_src("{ fail [status: 1, message: 'boom'] }");
-        assert_eq!(eval_prompt(&prompt, &mut shell), super::DEFAULT_PROMPT);
+    fn a_prompt_returning_a_block_falls_back_to_default() {
+        assert_eq!(render_src("{ return { echo x } }"), DEFAULT_PROMPT);
     }
 }

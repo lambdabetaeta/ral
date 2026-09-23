@@ -368,12 +368,13 @@ echo ">> [container] boot contract $BOOT_CONTRACT"
 # package this media rather than ship an engine that will refuse its Attach
 # and leave the front-end holding a closed socket.
 echo ">> [container] reading the protocol version out of the engine it just built"
-( cd /ral && cargo build --release --locked --target "$RUST_TARGET"     -p ral-core --example proto-version )
+( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
+    -p ral-core --example proto-version )
 PROTO_VERSION=$("$BIN/examples/proto-version")
 case "$PROTO_VERSION" in
   '' | *[!0-9]*)
-    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.
-'       "$PROTO_VERSION" >&2
+    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.\n' \
+      "$PROTO_VERSION" >&2
     echo "core/examples/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
     exit 1 ;;
 esac

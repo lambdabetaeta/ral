@@ -6,7 +6,7 @@
     reason = "[test] test fs/process scaffolding"
 )]
 
-use crate::agent::cancel::EvalReach;
+use crate::agent::cancel::InterruptTarget;
 use crate::agent::{
     Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
     cancel,
@@ -18,6 +18,7 @@ use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
 use ral_core::Shell;
 use ral_core::Value;
+use ral_core::engine::EngineInstaller;
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
@@ -26,6 +27,84 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+type Dress = Box<dyn FnOnce(&mut Shell)>;
+
+thread_local! {
+    static DRESS: std::cell::Cell<Option<Dress>> = const { std::cell::Cell::new(None) };
+}
+
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+)]
+fn dressed_boot(attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
+    let mut booted = crate::bootstrap::engine_boot_shell(attach)?;
+    if let Some(dress) = DRESS.take() {
+        dress(&mut booted.shell);
+    }
+    Ok(booted)
+}
+
+static DRESSED: [EngineInstaller; 1] = [EngineInstaller {
+    tag: crate::shell_eval::builtins::INSTALLER_TAG,
+    boot: dressed_boot,
+    narrow: crate::policy::base_layer,
+}];
+
+/// Exarch's recipe, then `dress`, for the next boot on this thread: a recipe
+/// is a `fn`, and `boot` runs it on the calling thread. Spent on that boot,
+/// so a `/clear` reboots undressed.
+pub(crate) fn dressed(dress: impl FnOnce(&mut Shell) + 'static) -> &'static [EngineInstaller] {
+    DRESS.set(Some(Box::new(dress)));
+    &DRESSED
+}
+
+/// A [`Avatar::for_test`] trunk whose engine `dress` fits out at boot.
+pub(crate) fn dressed_trunk(dress: impl FnOnce(&mut Shell) + 'static) -> Avatar {
+    Avatar::for_test_with(crate::agent::TestTrunk {
+        installers: dressed(dress),
+        ..crate::agent::TestTrunk::new("system")
+    })
+    .expect("dressed test trunk")
+}
+
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+)]
+fn bare_boot(_attach: &ral_core::protocol::Attach) -> Result<ral_core::engine::Booted, String> {
+    Ok(ral_core::engine::Booted {
+        shell: Shell::new(ral_core::io::TerminalState::default()),
+        keep: Box::new(()),
+    })
+}
+
+static BARE: [EngineInstaller; 1] = [EngineInstaller {
+    tag: "bare",
+    boot: bare_boot,
+    narrow: |_, _| Err("a bare test engine hatches no children".into()),
+}];
+
+/// An engine over a bare shell: no prelude, no surface, nothing to reach
+/// but its control and its probes.
+pub(crate) fn bare_transport() -> ral_core::protocol::IdentityTransport {
+    let temp = std::env::temp_dir();
+    ral_core::protocol::IdentityTransport::boot(
+        &BARE,
+        &ral_core::protocol::Attach::new("bare", temp.clone(), temp),
+    )
+    .expect("a bare engine boots")
+}
+
+/// Every worker `session`'s engine holds, handles included, so a test can
+/// watch one outlive the engine.
+pub(crate) fn workers(session: &Avatar) -> Vec<ral_core::types::WorkerEntry> {
+    let crate::agent::seat::SeatKind::Identity(transport) = session.seat.kind() else {
+        panic!("a test trunk sits on an identity seat");
+    };
+    ral_core::test_access::workers(&transport)
+}
 
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
@@ -37,7 +116,7 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
     pub(crate) cancel: cancel::Token,
-    pub(crate) reach: EvalReach,
+    pub(crate) reach: InterruptTarget,
     pub(crate) mailbox: Mailbox,
     /// `None` builds a root, `Some` a reporting child of that agent.
     pub(crate) parent: Option<Arc<Agent>>,
@@ -66,10 +145,9 @@ impl TestAgentSpec {
         Self {
             name: name.to_string(),
             cancel: cancel::Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: crate::agent::cancel::InterruptTarget::default(),
-            },
+            reach: InterruptTarget::new(
+                ral_core::protocol::Transport::control(&bare_transport()).clone(),
+            ),
             mailbox: crate::bus::Inbox::new().mailbox(),
             parent: None,
             idle: Duration::ZERO,
@@ -83,9 +161,12 @@ impl TestAgentSpec {
             dial: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             system_base: String::new(),
-            index: crate::prompt::BuiltinIndex::resolve(&Shell::new(
-                ral_core::io::TerminalState::default(),
-            )),
+            index: crate::prompt::BuiltinIndex::resolve(
+                Shell::new(ral_core::io::TerminalState::default())
+                    .builtin_names()
+                    .map(str::to_string)
+                    .collect(),
+            ),
         }
     }
 }
@@ -176,15 +257,32 @@ pub(crate) fn test_agent(
     Ok(agent)
 }
 
-/// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.
-pub(crate) fn probe_int(session: &Avatar, class: &str) -> i64 {
-    match session.seat.transport().probe(FOValue::Variant {
-        label: class.into(),
-        payload: None,
-    }) {
-        Ok(FOValue::Int { value }) => value,
-        other => panic!("`{class} probe must answer an Int, got {other:?}"),
+/// A capturing run of `src`, under the lattice top.
+pub(crate) fn source_run(src: &str) -> ral_core::protocol::Run {
+    ral_core::protocol::Run {
+        program: ral_core::protocol::Program::Source(src.into()),
+        script_name: "<test>".into(),
+        caps: ral_core::types::GrantStack::root(),
+        wall: None,
+        deferred_lease: None,
+        worker_cap: None,
+        io: ral_core::RunIo::Capture,
+        terminal: ral_core::RequestedTerminalAccess::Denied,
+        stdin: ral_core::RunStdin::Empty,
+        trail: None,
     }
+}
+
+/// A boundary read through one of `test_access`'s count doors — unlike
+/// `scope_has` it ticks no epoch and no ledger.
+pub(crate) fn probe_count(
+    session: &Avatar,
+    door: impl FnOnce(&dyn ral_core::protocol::Transport) -> Result<u64, ral_core::protocol::ProbeError>,
+) -> u64 {
+    session
+        .seat
+        .read(door)
+        .expect("an identity seat never severs")
 }
 
 /// Whether `name` resolves, asked through a real eval — which ticks the ral
@@ -297,7 +395,7 @@ fn root(interactive: bool, chat: bool) -> Avatar {
         RootSeat::Identity {
             scratch: Arc::new(scratch),
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            detach: false,
+            terminal: ral_core::io::TerminalState::default(),
         },
         scripted("test-model", Script::new()),
     )

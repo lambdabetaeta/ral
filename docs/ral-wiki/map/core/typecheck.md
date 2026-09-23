@@ -122,8 +122,7 @@ Internals:
   keysets — `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` —
   dispatch off it rather than each keeping a copy; and it is where the one
   condition a variable flag owes is checked, that no two tables name a label at
-  two types that will not unify — the door carrying order-independence now that
-  the assignment is gone
+  two types that will not unify — the door carrying order-independence
   ([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]).
 
 `infer.rs`'s `infer_case` is left whole by decision
@@ -306,8 +305,8 @@ the two computations disagree about where their payload lives.
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`: its own route
 grounds `Value`, its value type is `Bytes` — and `body`'s extracted value
-unifies with `Unit`, WF-2 as a rule rather than the `eval_capture` assert it
-used to be. `body`'s route is left free: a join arm subsumed at `Value Unit`
+unifies with `Unit`, WF-2 as a typing rule rather than a runtime assert in
+`eval_capture`. `body`'s route is left free: a join arm subsumed at `Value Unit`
 reaches `Capture` too (`Wrap`, below), and constraining the route would refuse
 it. `CompKind::Decode(val)` is the reading step, and its value type is
 `String`; the kernel's `decode` takes a value, so `val` is the variable the

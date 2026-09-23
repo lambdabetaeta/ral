@@ -1,16 +1,16 @@
-//! Shared session bring-up helpers: terminal probing, user directories,
-//! exit-code hints, and `--capabilities` application.
+//! Shared session bring-up helpers: terminal probing, the in-process attach,
+//! and exit-code hints.
 //!
 //! Centralised here so the batch runner and the `repl/` submodules can reach
 //! them through `crate::platform::*` without one path reaching into the
 //! other's module.  Both Unix and Windows env-var fallbacks are encoded
 //! explicitly.
 
+use ral_core::diagnostic;
 use ral_core::exit_hints::ExitHints;
 use ral_core::io::{InteractiveMode, TerminalState};
-use ral_core::types::{Break, Escape, Mooring};
-use ral_core::{Shell, diagnostic};
-use std::process::ExitCode;
+use ral_core::protocol::Attach;
+use ral_core::serial::FOValue;
 
 /// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb
 /// it into the diagnostic subsystem, and return both halves.  When
@@ -23,6 +23,20 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
     }
     diagnostic::set_terminal(&terminal);
     (mode, terminal)
+}
+
+/// An in-process engine's attach: its cwd and home are this process's own.
+pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOValue) -> Attach {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: an identity engine's home is this process's own"
+    )]
+    let home = ral_core::host::home().unwrap_or_default();
+    let cwd = ral_core::path::process_cwd().unwrap_or_else(|| ".".into());
+    Attach {
+        terminal,
+        ..Attach::new(installer, cwd, home.into()).with_config(config)
+    }
 }
 
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
@@ -57,28 +71,4 @@ pub(crate) fn exit_byte(code: i32) -> u8 {
     )]
     let byte = code.clamp(0, 255) as u8;
     byte
-}
-
-/// Apply the `--capabilities` profiles as a session-wide ceiling, mapping the
-/// outcome to a process exit.
-///
-/// The composition mechanism (load, `meet`-fold, freeze, push) lives in
-/// [`ral_core::capability::apply_session_profiles`]. A load failure is
-/// attributed to the flag that supplied the profiles and yields exit 2; an
-/// escape raised while a profile evaluates (`exit`) propagates to the same
-/// process exit it would from any other script.
-pub(crate) fn apply_session_capabilities(
-    shell: &mut Shell,
-    paths: &[std::path::PathBuf],
-) -> Result<(), ExitCode> {
-    // Session bring-up: no run is in hand yet, so the profiles evaluate
-    // moored adrift — no surface, no desk, no fork door.
-    match ral_core::capability::apply_session_profiles(&Mooring::adrift(), shell, paths) {
-        Ok(()) => Ok(()),
-        Err(Break::Error(e)) => {
-            diagnostic::cmd_error("ral", &format!("--capabilities: {}", e.message));
-            Err(ExitCode::from(2))
-        }
-        Err(Break::Escape(Escape::Exit(code))) => Err(ExitCode::from(exit_byte(code))),
-    }
 }

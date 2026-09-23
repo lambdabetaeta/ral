@@ -5,10 +5,10 @@
 //! connection *is* the session — while Dispatch carries one whole run, Event
 //! flows engine→front-end, and Control flows front-end→engine.
 //!
-//! Two transports realise the algebra. `IdentityTransport` is a direct call in
-//! one address space: frames move, never encode. `WireTransport` encodes the
-//! same frames as length-prefixed JSON over a socket, answered by the engine
-//! process in `engine.rs`.
+//! Two transports realise the algebra over one [`Engine`]. `IdentityTransport`
+//! calls it in one address space: frames move, never encode. `WireTransport`
+//! encodes the same frames as length-prefixed JSON over a socket, answered by
+//! the engine process in `engine/wire.rs`.
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
@@ -19,22 +19,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-// Only the same-host child handle is platform-gated: its handoff is a
-// socketpair end inherited on fd 3. The frame protocol itself is not.
-#[cfg(unix)]
-use crate::process::ChildHandle;
+use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::serial::{FOValue, NotData, Opaque};
+use crate::spawn_grant::SpawnGrant;
 use crate::sync::{CondvarExt as _, LockExt};
-use crate::types::CapturePolicy;
-use crate::types::DeferredSink;
-use crate::types::Observation;
-use crate::types::SurfaceSink;
+use crate::types::{CapturePolicy, DeferredSink, Fork, Nursery, NurseryId, Observation, Shell};
 use std::sync::OnceLock;
+
+pub mod reading;
 
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -113,20 +110,7 @@ pub struct EnquiryId(pub u64);
 pub enum Frame {
     /// The only legal first frame: an engine speaks no shell until told a
     /// version and an installer.
-    Attach {
-        endpoint: TerminalEndpoint,
-        cwd: PathBuf,
-        home: PathBuf,
-        rc_path: Option<PathBuf>,
-        /// Checked against `PROTOCOL_VERSION`; a mismatch refuses the attach.
-        proto_version: u32,
-        /// Tag naming the boot recipe the engine applies once attached —
-        /// `"repl"`, `"exarch-agent"`. Each front-end binary re-execs *itself*
-        /// with `--engine` and resolves the tag against its own compiled-in
-        /// `EngineInstaller` table, so only the tag crosses, never the
-        /// functions it names.
-        installer: String,
-    },
+    Attach(Attach),
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
     Detach,
@@ -137,7 +121,7 @@ pub enum Frame {
     /// engine's worker rendezvous alongside dispatches, so a probe sent mid-run
     /// gets the same "engine busy" answer a second dispatch would, and is
     /// answered on the `Event::Report` rail under the same `DispatchId`. The
-    /// `FOValue` is a `Variant` naming the class [`answer_probe`] decodes.
+    /// `FOValue` is a `Variant` naming a [`reading`] class.
     Probe(DispatchId, FOValue),
     /// Engine → front-end, inside a dispatch's claim-to-Report window. May
     /// arrive while that Dispatch is outstanding.
@@ -151,7 +135,7 @@ pub enum Frame {
     /// outstanding.
     Control(Control),
     /// Front-end → engine: the dual of `Event::Enquiry`, correlated by the
-    /// enquiry alone — `WireDesk::fill` keys its slots by `EnquiryId`, and the
+    /// enquiry alone — `Parks::fill` keys its slots by `EnquiryId`, and the
     /// dispatch it belongs to is implicit in which enquiry is outstanding.
     Answer(EnquiryId, Result<FOValue, EnquiryError>),
     /// Front-end → engine heartbeat, never sent before `Attach`. Where the
@@ -164,6 +148,68 @@ pub enum Frame {
     /// Engine → front-end: the echo of one `Ping`, keeping an *idle* engine
     /// visibly alive.  A busy one already proves itself with `Event` traffic.
     Pong(u64),
+}
+
+impl Frame {
+    /// The variant's name, for a diagnostic about a frame out of place.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Attach(_) => "Attach",
+            Self::Detach => "Detach",
+            Self::Dispatch(..) => "Dispatch",
+            Self::Probe(..) => "Probe",
+            Self::Event(..) => "Event",
+            Self::Session(..) => "Session",
+            Self::Control(..) => "Control",
+            Self::Answer(..) => "Answer",
+            Self::Ping(_) => "Ping",
+            Self::Pong(_) => "Pong",
+        }
+    }
+}
+
+/// What every engine is born from, under either carrier: `Frame::Attach`'s
+/// payload, and `IdentityTransport::boot`'s argument.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attach {
+    pub terminal: crate::io::TerminalState,
+    /// The session's logical cwd.
+    pub cwd: PathBuf,
+    pub home: PathBuf,
+    /// Checked against `PROTOCOL_VERSION`; a mismatch refuses the attach.
+    pub proto_version: u32,
+    /// Tag naming the boot recipe the engine applies once attached —
+    /// `"repl"`, `"exarch-agent"`. Each front-end binary re-execs *itself*
+    /// with `--engine` and resolves the tag against its own compiled-in
+    /// `EngineInstaller` table, so only the tag crosses, never the functions
+    /// it names.
+    pub installer: String,
+    /// Per-session variables the host seeds into the engine's environment.
+    pub env: Vec<(String, String)>,
+    /// The installer's own settings: its recipe decodes them, and refuses
+    /// ill-shaped ones in its own words. Core never reads them.
+    pub config: FOValue,
+}
+
+impl Attach {
+    /// An attach at this build's protocol version, seeding no variables and
+    /// configuring nothing.
+    pub fn new(installer: impl Into<String>, cwd: PathBuf, home: PathBuf) -> Self {
+        Self {
+            terminal: crate::io::TerminalState::default(),
+            cwd,
+            home,
+            proto_version: PROTOCOL_VERSION,
+            installer: installer.into(),
+            env: Vec::new(),
+            config: FOValue::Unit,
+        }
+    }
+
+    #[must_use]
+    pub fn with_config(self, config: FOValue) -> Self {
+        Self { config, ..self }
+    }
 }
 
 /// One whole run: the program to evaluate and the conditions it runs under.
@@ -263,35 +309,31 @@ impl EnquiryError {
     }
 }
 
-/// Front-end → engine out-of-band control frame.
-///
-/// One verb today. It stays an enum because the tag is the wire encoding: a
-/// second verb must be able to arrive without changing how `Cancel` encodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Front-end → engine out-of-band control frame: one meaning under either
+/// carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
+    /// Unwind whatever dispatch is in flight, as a Ctrl-C would; none in
+    /// flight, nothing happens.
+    Interrupt,
+    /// Unwind this dispatch, even one not yet arrived; a stale id strikes
+    /// nothing.
     Cancel(DispatchId),
+    /// Cancel the session's durable root: every run and every detached
+    /// worker, for good.
+    Terminate,
+    /// [`Terminate`](Self::Terminate), as Ctrl-`\` asks it: cause `RootAbort`.
+    Abort,
 }
 
-// ── Terminal endpoint ─────────────────────────────────────────────────
-
-/// The terminal endpoint the front-end conveys at attach.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalEndpoint {
-    /// The session lease, when the front-end owns a terminal. `#[serde(skip)]`:
-    /// no terminal descriptor crosses a wire, so an engine child attaches
-    /// without one and never foregrounds against the host's terminal.
-    #[serde(skip)]
-    pub lease: Option<crate::process::TerminalLease>,
-    pub state: crate::io::TerminalState,
-}
-
-/// `TerminalLease` is deliberately not `Clone` — its security argument rests on
-/// being unforgeable — so a cloned endpoint carries no lease.
-impl Clone for TerminalEndpoint {
-    fn clone(&self) -> Self {
-        Self {
-            lease: None,
-            state: self.state,
+impl Control {
+    /// The verb an ambient cause asks of the session it reaches.
+    pub(crate) fn hearing(ambient: crate::process::Ambient) -> Self {
+        use crate::process::{Ambient, CancelCause};
+        match ambient {
+            Ambient::Interrupt => Self::Interrupt,
+            Ambient::Root(CancelCause::RootAbort) => Self::Abort,
+            Ambient::Root(_) => Self::Terminate,
         }
     }
 }
@@ -367,7 +409,8 @@ impl FailureStatus {
 /// The protocol projection of the engine's [`Ending`](crate::run::Ending),
 /// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
 /// cannot cross the protocol, so [`Self::Raised`]/[`Self::Walled`] carry the
-/// string it rendered to instead. `status` is carried explicitly wherever it
+/// string it rendered to, and the record `try` would hand its handler.
+/// `status` is carried explicitly wherever it
 /// is not the whole of the arm's payload, since a renderer that has already
 /// discarded the engine `Error` for its `rendered` string has no other way
 /// back to it; on the two failing arms it is a [`FailureStatus`], which has
@@ -384,6 +427,7 @@ pub enum Ending {
     /// `single_command` picks between the exit-code remedy's two wordings.
     Raised {
         rendered: String,
+        record: FOValue,
         command_exit: bool,
         single_command: bool,
         status: FailureStatus,
@@ -392,13 +436,16 @@ pub enum Ending {
     /// the timeout remedy is unconditional, so no renderer reads them here.
     Walled {
         rendered: String,
+        record: FOValue,
         status: FailureStatus,
     },
     /// The run settled, but on a value that is not data — a handle, a block,
     /// a function — which the protocol cannot carry. Nothing failed, yet the
-    /// value is lost, so it ends as a failure of its own kind.
+    /// value is lost, so it ends as a failure of its own kind, with its own
+    /// record.
     Unreturnable {
         rendered: String,
+        record: FOValue,
     },
     Exited(i32),
 }
@@ -416,8 +463,24 @@ impl Ending {
     }
 }
 
-/// Why a settled result has no wire form, and what the author likely meant.
-fn render_unreturnable(NotData { leaf, nested }: NotData) -> String {
+/// A settled result that cannot cross, said with what the author likely
+/// meant.
+fn unreturnable(message: String, hint: &str, shell: &Shell) -> Ending {
+    let mut error = crate::types::Error::new(message, 1);
+    error.hint = Some(hint.into());
+    Ending::Unreturnable {
+        rendered: crate::diagnostic::format_runtime_error_compact(&error),
+        record: record_of(&error, shell),
+    }
+}
+
+/// The record `try` hands its handler for `error`.
+fn record_of(error: &crate::types::Error, shell: &Shell) -> FOValue {
+    FOValue::try_from(&crate::types::error_record_of(error, shell))
+        .expect("an error record is data")
+}
+
+fn not_data(NotData { leaf, nested }: NotData, shell: &Shell) -> Ending {
     let (verb, hint) = match (leaf, nested) {
         (Opaque::Handle, false) => (
             "is",
@@ -435,17 +498,18 @@ fn render_unreturnable(NotData { leaf, nested }: NotData) -> String {
             "return only data: force a block with `!{ … }`, or bind it with `let`",
         ),
     };
-    let message = format!("the result {verb} {leaf}, and a run can return only data");
-    let mut error = crate::types::Error::new(message, 1);
-    error.hint = Some(hint.into());
-    crate::diagnostic::format_runtime_error_compact(&error)
+    unreturnable(
+        format!("the result {verb} {leaf}, and a run can return only data"),
+        hint,
+        shell,
+    )
 }
 
 /// Project an engine [`Ending`](crate::run::Ending) onto the wire, rendering
-/// a caught runtime error against `sources` — the one lossy step between the
+/// a caught runtime error against `shell` — the one lossy step between the
 /// engine and the protocol: the live `Error` renders to the string the host
-/// prints verbatim.
-fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) -> Ending {
+/// prints verbatim, and to its record.
+fn render_ending(ending: crate::run::Ending, shell: &Shell) -> Ending {
     use crate::run::Ending as Raw;
     match ending {
         // A top-level result is not an `Observation` — it has no placeholder
@@ -456,20 +520,18 @@ fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) 
                 value: fo,
                 status: status.clamp(0, 255),
             },
-            Err(found) => Ending::Unreturnable {
-                rendered: render_unreturnable(found),
-            },
+            Err(found) => not_data(found, shell),
         },
         Raw::Raised {
             error,
             single_command,
             root,
-        } => render_raise(&error, single_command, root, sources, false),
+        } => render_raise(&error, single_command, root, shell, false),
         Raw::Walled {
             error,
             single_command,
             root,
-        } => render_raise(&error, single_command, root, sources, true),
+        } => render_raise(&error, single_command, root, shell, true),
         Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
     }
 }
@@ -480,7 +542,7 @@ fn render_raise(
     error: &crate::types::Error,
     single_command: bool,
     root: crate::source::FileId,
-    sources: &crate::source::SourceDb,
+    shell: &Shell,
     walled: bool,
 ) -> Ending {
     let status = FailureStatus::from(error.exit_code());
@@ -489,15 +551,21 @@ fn render_raise(
         crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
     );
     let rendered = crate::diagnostic::format_runtime_error_auto(
-        sources,
+        shell.sources(),
         error,
         single_command.then_some(root),
     );
+    let record = record_of(error, shell);
     if walled {
-        Ending::Walled { rendered, status }
+        Ending::Walled {
+            rendered,
+            record,
+            status,
+        }
     } else {
         Ending::Raised {
             rendered,
+            record,
             command_exit,
             single_command,
             status,
@@ -509,13 +577,13 @@ impl crate::run::RunReport {
     /// Project into the protocol [`Report`] — the one lossy step between the
     /// engine and the protocol: the live `Value` becomes an [`FOValue`], and rich
     /// diagnostics render to strings. Rendering belongs here because this is
-    /// the last point at which the engine's
-    /// [`SourceDb`](crate::source::SourceDb) is in hand; the host receives the
-    /// full string — prefix, status, hint, caret — and only has to print it.
-    pub(crate) fn into_report(self, sources: &crate::source::SourceDb) -> Report {
+    /// the last point at which the engine's shell is in hand; the host
+    /// receives the full string — prefix, status, hint, caret — and only has
+    /// to print it.
+    pub(crate) fn into_report(self, shell: &Shell) -> Report {
         match self {
-            // Not `sources`: a static failure carries the text its carets point
-            // into, so nothing about it was ever registered.
+            // Not the shell's sources: a static failure carries the text its
+            // carets point into, so nothing about it was ever registered.
             Self::Static { diagnostics } => {
                 let (rendered, status) = crate::diagnostic::format_static_diagnostics(&diagnostics);
                 Report::Static { rendered, status }
@@ -525,7 +593,7 @@ impl crate::run::RunReport {
                 captured,
                 trail,
             } => Report::Ran {
-                ending: render_ending(ending, sources),
+                ending: render_ending(ending, shell),
                 captured,
                 trail: trail.iter().map(Observation::to_wire).collect(),
             },
@@ -566,6 +634,7 @@ mod ending_wire_round_trip_tests {
     fn raised_round_trips() {
         round_trips(&ran(Ending::Raised {
             rendered: "error: boom\n".into(),
+            record: FOValue::Unit,
             command_exit: true,
             single_command: false,
             status: 7.into(),
@@ -576,6 +645,7 @@ mod ending_wire_round_trip_tests {
     fn walled_round_trips() {
         round_trips(&ran(Ending::Walled {
             rendered: "error: timed out\n".into(),
+            record: FOValue::Unit,
             status: 143.into(),
         }));
     }
@@ -591,6 +661,7 @@ mod ending_wire_round_trip_tests {
     fn a_failing_ending_never_carries_a_success_status() {
         let raised = Ending::Raised {
             rendered: "error: boom\n".into(),
+            record: FOValue::Unit,
             command_exit: false,
             single_command: false,
             status: 0.into(),
@@ -598,9 +669,10 @@ mod ending_wire_round_trip_tests {
         assert_eq!(raised.status(), 1, "a raise reported success");
         round_trips(&ran(raised));
 
-        let smuggled: Ending =
-            serde_json::from_str(r#"{"Walled":{"rendered":"error: timed out\n","status":0}}"#)
-                .expect("a Walled ending must decode");
+        let smuggled: Ending = serde_json::from_str(
+            r#"{"Walled":{"rendered":"error: timed out\n","record":"unit","status":0}}"#,
+        )
+        .expect("a Walled ending must decode");
         assert_eq!(smuggled.status(), 1, "a decoded raise reported success");
     }
 
@@ -680,7 +752,7 @@ pub enum ProbeError {
     /// The engine answered but would not read: an unknown class, a malformed
     /// payload, or the rendezvous held by an in-flight run. A program error
     /// on the caller's side — probes are legal only at a run boundary and
-    /// only for the classes `answer_probe` knows.
+    /// only for the classes [`reading`] knows.
     Rejected(String),
     /// No answer will ever come.
     Severed(Severed),
@@ -688,9 +760,9 @@ pub enum ProbeError {
 
 // ── The host ───────────────────────────────────────────────────────────
 
-/// The host's side of one run: where its surfaced values go, who answers its
-/// enquiries, how a session it forks reaches that desk. One object, so the
-/// rails a run speaks on can never be bound to two hosts.
+/// The host's side of one run: where its surfaced values go, and who answers
+/// its enquiries. One object, so the rails a run speaks on can never be bound
+/// to two hosts.
 pub trait Host: Send + Sync {
     fn surface(&self, val: &FOValue);
 
@@ -699,26 +771,21 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// Returns `Err` when this host cannot answer `req`.
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError>;
-
-    fn fork(&self) -> Option<crate::types::Fork>;
 }
 
-/// The mute host: renders nothing, answers nothing, adopts nothing.
+/// The mute host: renders nothing, answers nothing.
 impl Host for () {
     fn surface(&self, _val: &FOValue) {}
 
     fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
         Err(EnquiryError::no_desk())
     }
-
-    fn fork(&self) -> Option<crate::types::Fork> {
-        None
-    }
 }
 
 // ── Transport trait ───────────────────────────────────────────────────
 
-/// The front-end side of the engine protocol.
+/// The front-end side of the engine protocol. Construction is attach: a
+/// transport in hand is one its engine accepted.
 pub trait Transport: Send + Sync {
     /// Run a dispatch synchronously. The `Report` arrives as the final `Event`,
     /// after any `Surface` events, which may be drained concurrently. `host`
@@ -726,43 +793,32 @@ pub trait Transport: Send + Sync {
     /// transport uses it.
     fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>);
 
-    /// Read session state at a run boundary, synchronously.
+    /// Read session state at a run boundary, synchronously. [`reading`]'s
+    /// typed doors are the way to ask.
     ///
     /// # Errors
     /// [`ProbeError::Rejected`] is a program error on the caller's side:
     /// `probe` is legal only at a run boundary, so a caller that could see it
-    /// has already broken that rule — identity's own caller is this process,
-    /// so it treats it `unreachable!`. A wire caller cannot extend that trust
+    /// has already broken that rule. A wire caller cannot extend that trust
     /// to the far side, and treats a `Rejected` there as the protocol fault
-    /// it would then be (`exarch/src/agent/probe.rs`). [`ProbeError::Severed`]
-    /// is the engine's death, never a program error.
+    /// it would then be. [`ProbeError::Severed`] is the engine's death, never
+    /// a program error.
     fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError>;
 
     /// The out-of-band control sender — writable while a dispatch is in
-    /// flight.  Under the identity transport this raises the ambient
-    /// foreground interrupt directly.
+    /// flight.
     fn control(&self) -> &ControlSender;
 
     /// The event stream the front-end drains.
     fn events(&self) -> &EventReceiver;
 
     /// Why no further frame will cross the protocol, if that has happened.
-    /// Identity answers `None`: an in-process transport never severs.
     fn severed(&self) -> Option<Severed>;
 
-    /// Convey the session terminal endpoint and bootstrap state.
-    ///
-    /// `installer` is the boot-recipe tag of `Frame::Attach`. The identity
-    /// transport ignores it: its shell was booted and dressed with the host's
-    /// builtins by the caller before `attach`.
-    fn attach(
-        &self,
-        endpoint: TerminalEndpoint,
-        cwd: PathBuf,
-        home: PathBuf,
-        rc_path: Option<PathBuf>,
-        installer: String,
-    );
+    /// Declare the engine dead for a cause the front-end observed itself — an
+    /// answer outside the protocol, say — and answer the cause that stands,
+    /// which is the first one recorded.
+    fn sever(&self, cause: Severed) -> Severed;
 
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
     /// restore terminal state.
@@ -777,21 +833,58 @@ pub trait Transport: Send + Sync {
     /// With no sink installed, a batch is dropped — a front-end explicitly
     /// declining session events, not a loss the transport owes anyone.
     fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>);
-
-    /// Returns `self` as an `&dyn Any` for downcast support.
-    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // ── Dispatch loop ─────────────────────────────────────────────────────
+
+thread_local! {
+    /// The transports this thread is dispatching on, innermost last.
+    static DISPATCHING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn key<T: ?Sized>(transport: &T) -> usize {
+    std::ptr::from_ref(transport).cast::<()>().addr()
+}
+
+/// Panic, didactically, if this thread is inside a dispatch on `transport`: a
+/// `Host` handler runs on the dispatching thread, inside that very dispatch.
+pub(crate) fn forbid_reentry<T: ?Sized>(transport: &T) {
+    let key = key(transport);
+    assert!(
+        !DISPATCHING.with_borrow(|within| within.contains(&key)),
+        "reentrant session access: a Host handler runs inside the dispatch that called it, on \
+         the dispatching thread, so it must not dispatch, probe, or take the session of that \
+         same transport — the identity transport would deadlock on its own session lock, and \
+         the wire's drain loop would swallow the outer run's events. Did the handler mean to \
+         answer from state it captured instead?"
+    );
+}
+
+/// This thread's claim on a transport for one [`dispatch_to_report`].
+struct Dispatching;
+
+impl Dispatching {
+    fn enter(transport: &dyn Transport) -> Self {
+        forbid_reentry(transport);
+        DISPATCHING.with_borrow_mut(|within| within.push(key(transport)));
+        Self
+    }
+}
+
+impl Drop for Dispatching {
+    fn drop(&mut self) {
+        DISPATCHING.with_borrow_mut(Vec::pop);
+    }
+}
 
 /// Mint a dispatch id, send `run` down `transport`, and drain events to the
 /// run's terminal [`Report`](Event::Report).
 ///
 /// `host` is the host's side of this run. Under the identity transport it
-/// rides straight onto the dispatch as the run's desk and fork door
-/// (`IdentityDesk`), so an enquiry never appears on this loop at all; under
-/// the wire, where an enquiry crosses as a frame on `events()`, this loop is
-/// what answers it, through [`Transport::answer`].
+/// rides straight onto the dispatch as the run's desk (`IdentityDesk`), so an
+/// enquiry never appears on this loop at all; under the wire, where an
+/// enquiry crosses as a frame on `events()`, this loop is what answers it,
+/// through [`Transport::answer`].
 ///
 /// The `did != id` filter rejects a cancelled predecessor's late run frames,
 /// and nothing else: every `Event` belongs to some dispatch, and this is the
@@ -800,14 +893,12 @@ pub trait Transport: Send + Sync {
 /// `Transport::set_deferred_sink` installed.
 ///
 /// # Errors
-/// The event stream closed without a Report — impossible under the identity
-/// transport, which sends it before `dispatch` returns; under the wire, the
-/// transport's own severance.
+/// The transport's severance: recorded already, or met while draining.
 ///
 /// # Panics
-/// Never: the `expect` on a closed event stream is guarded by the invariant
-/// [`spawn_wire_reader`] states — a severed cause is always recorded before
-/// `event_tx` drops.
+/// If a `Host` handler reaches back into `transport` from inside this
+/// dispatch. The `expect` on a closed event stream never fires: a severed
+/// cause is always recorded before `event_tx` drops.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "an owned Arc mirrors Transport::dispatch's own host handoff; the body only ever borrows it"
@@ -817,6 +908,10 @@ pub fn dispatch_to_report(
     run: Run,
     host: Arc<dyn Host>,
 ) -> Result<Report, Severed> {
+    let _dispatching = Dispatching::enter(transport);
+    if let Some(cause) = transport.severed() {
+        return Err(cause);
+    }
     let id = mint_dispatch_id();
 
     transport.dispatch(id, run, &host);
@@ -849,249 +944,57 @@ fn mint_dispatch_id() -> DispatchId {
     DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-// ── Probe decoder ─────────────────────────────────────────────────────
-
-/// The one decoder for every probe reading, shared by `IdentityTransport` and
-/// the wire engine in `engine.rs`, so a new class costs one arm here rather
-/// than a copy per transport.
-///
-/// # Errors
-/// Returns `Err` if `req` is not a variant, if the `` `env-var `` class lacks
-/// a string payload, or if the reading class is unrecognised (naming it).
-pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FOValue, String> {
-    let FOValue::Variant { label, payload } = req else {
-        return Err(format!("probe request must be a variant, got {req:?}"));
-    };
-    match label.as_str() {
-        "worker-count" =>
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "usize cardinality below i64::MAX"
-            )]
-            Ok(FOValue::Int {
-                value: shell.worker_count() as i64,
-            })
-        }
-        "binding-count" =>
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "usize cardinality below i64::MAX"
-            )]
-            Ok(FOValue::Int {
-                value: shell.binding_count() as i64,
-            })
-        }
-        "leased-binding-count" =>
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "usize cardinality below i64::MAX"
-            )]
-            Ok(FOValue::Int {
-                value: shell.leased_binding_count() as i64,
-            })
-        }
-        "env-var" => {
-            let name = match payload.as_deref() {
-                Some(FOValue::String { value }) => value.as_str(),
-                _ => return Err("`env-var probe requires a string payload".into()),
-            };
-            Ok(match shell.env_var(name) {
-                Some(value) => FOValue::Variant {
-                    label: "some".into(),
-                    payload: Some(Box::new(FOValue::String { value })),
-                },
-                None => FOValue::Variant {
-                    label: "none".into(),
-                    payload: None,
-                },
-            })
-        }
-        "cwd" => Ok(FOValue::String {
-            value: shell.cwd().display().to_string(),
-        }),
-        "grant-depth" =>
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "usize cardinality below i64::MAX"
-            )]
-            Ok(FOValue::Int {
-                value: shell.grant_depth() as i64,
-            })
-        }
-        "largest-binding-bytes" =>
-        {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "an in-memory shallow byte estimate is far below i64::MAX"
-            )]
-            Ok(FOValue::Int {
-                value: shell.largest_binding_shallow_size() as i64,
-            })
-        }
-        "workers" => {
-            use crate::types::{HandleState, LeaseClass};
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "worker counts, sequential WorkerId(u64) ids, and u64 uptime/idle/settled-epoch quantities are all far below i64::MAX in any live process"
-            )]
-            let items = shell
-                .workers()
-                .into_iter()
-                .map(|entry| {
-                    let running = *entry.handle.state.lock_ignore_poison() == HandleState::Running;
-                    let up_secs = entry.started.elapsed().unwrap_or_default().as_secs();
-                    let idle_secs = entry
-                        .handle
-                        .last_observed
-                        .lock_ignore_poison()
-                        .elapsed()
-                        .as_secs();
-                    FOValue::Map {
-                        entries: vec![
-                            (
-                                "id".into(),
-                                FOValue::Int {
-                                    value: entry.id.0 as i64,
-                                },
-                            ),
-                            ("cmd".into(), FOValue::String { value: entry.cmd }),
-                            (
-                                "class".into(),
-                                FOValue::String {
-                                    value: match entry.class {
-                                        LeaseClass::Worker => "worker".into(),
-                                        LeaseClass::Durable => "durable".into(),
-                                    },
-                                },
-                            ),
-                            ("running".into(), FOValue::Bool { value: running }),
-                            (
-                                "up-secs".into(),
-                                FOValue::Int {
-                                    value: up_secs as i64,
-                                },
-                            ),
-                            (
-                                "idle-secs".into(),
-                                FOValue::Int {
-                                    value: idle_secs as i64,
-                                },
-                            ),
-                            (
-                                "settled-epoch".into(),
-                                match entry.settled_epoch {
-                                    Some(epoch) => FOValue::Variant {
-                                        label: "some".into(),
-                                        payload: Some(Box::new(FOValue::Int {
-                                            value: epoch as i64,
-                                        })),
-                                    },
-                                    None => FOValue::Variant {
-                                        label: "none".into(),
-                                        payload: None,
-                                    },
-                                },
-                            ),
-                        ],
-                    }
-                })
-                .collect();
-            Ok(FOValue::List { items })
-        }
-        other => Err(format!("unknown probe class `{other}")),
-    }
-}
-
 // ── Senders and receivers ─────────────────────────────────────────────
-
-/// What an identity transport's `Control::Cancel` arm aims at: the id and
-/// scope of the dispatch it last minted, written by
-/// [`IdentityTransport::dispatch`] ahead of the engine lock, so a cancel
-/// naming that dispatch has a scope to land on before the run's own frame is
-/// born. Replaced each dispatch, never cleared — so between runs it still
-/// names a settled one, and the id is what lets a cancel that outlived its
-/// run miss rather than strike the successor.
-type CancelTarget = Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
 
 /// A wire sender's write door and the severance cell a failed write records
 /// into.
 type WireControl = (Arc<Mutex<crate::wire::WireChannel>>, Arc<OnceLock<Severed>>);
 
-/// Out-of-band control sender.
+/// The out-of-band control door: [`Control`]'s verbs, meaning the same under
+/// either carrier.
 #[derive(Clone)]
-pub struct ControlSender {
-    /// `Some` writes `Control` frames to a `WireChannel`, carrying that
-    /// transport's severance cell so a failed control write severs the
-    /// connection the same way a failed data write does; `None` acts on the
-    /// in-process foreground scope instead.
-    wire: Option<WireControl>,
-    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-    /// `Some` for an identity sender, `None` for a wire one, whose cancel
-    /// already reaches the run across the wire without a local scope to trip.
-    cancel_target: Option<CancelTarget>,
+pub struct ControlSender(Door);
+
+#[derive(Clone)]
+enum Door {
+    /// In-process: straight onto the engine's own scopes.
+    Identity(Arc<Scopes>),
+    /// A `Control` frame, recording into the transport's severance cell, so a
+    /// failed control write severs the connection as a failed data write does.
+    Wire(WireControl),
 }
 
 impl ControlSender {
-    pub(crate) fn new(
-        current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-        cancel_target: CancelTarget,
-    ) -> Self {
-        Self {
-            wire: None,
-            current_dispatch,
-            cancel_target: Some(cancel_target),
-        }
+    /// Unwind whatever dispatch is in flight; none in flight, nothing happens.
+    pub fn interrupt(&self) {
+        self.send(Control::Interrupt);
     }
 
-    pub(crate) fn new_wire(
-        ch: Arc<Mutex<crate::wire::WireChannel>>,
-        severance: Arc<OnceLock<Severed>>,
-        current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Self {
-        Self {
-            wire: Some((ch, severance)),
-            current_dispatch,
-            cancel_target: None,
-        }
+    /// Unwind dispatch `id`, even one the engine has not yet seen.
+    pub fn cancel(&self, id: DispatchId) {
+        self.send(Control::Cancel(id));
     }
 
-    /// Cancel this sender's own in-flight dispatch, down whichever channel it
-    /// writes.
-    pub fn cancel_in_flight(&self) {
-        let id = self
-            .current_dispatch
-            .load(std::sync::atomic::Ordering::Relaxed);
-        self.send(Control::Cancel(DispatchId(id)));
+    /// End every run and every detached worker of the session, for good.
+    pub fn terminate(&self) {
+        self.send(Control::Terminate);
     }
 
-    /// # Panics
-    /// Panics if the wire-channel mutex is poisoned.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
-    )]
-    pub fn send(&self, ctrl: Control) {
-        if let Some((ch, severance)) = &self.wire {
+    /// Hear this process's signals as this session's `Control` until the
+    /// guard drops: no engine folds them itself.
+    pub fn forward_signals(&self) -> crate::process::AmbientForward {
+        let door = self.clone();
+        crate::process::forward_ambient(move |ambient| door.send(Control::hearing(ambient)))
+    }
+
+    fn send(&self, control: Control) {
+        match &self.0 {
+            Door::Identity(scopes) => scopes.apply(control),
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
-            let _ = write_through(ch, severance, &Frame::Control(ctrl));
-            return;
-        }
-        // Cancellation is sticky and a fold walks the chain live, so a scope
-        // cancelled here before the run's frame exists is still observed once
-        // that frame is minted a descendant of it.
-        let Control::Cancel(id) = ctrl;
-        if let Some(target) = &self.cancel_target {
-            let recorded = target.lock_ignore_poison();
-            if let Some((current, scope)) = recorded.as_ref()
-                && *current == id
-            {
-                scope.cancel(crate::process::CancelCause::Explicit);
+            Door::Wire((ch, severance)) => {
+                let _ = write_through(ch, severance, &Frame::Control(control));
             }
         }
     }
@@ -1181,192 +1084,93 @@ mod event_receiver_tests {
     }
 }
 
-// ── Transport sink ────────────────────────────────────────────────────
-
-/// The identity transport's sink for a live surface value
-/// ([`EventSink`](crate::types::EventSink)), forwarded onto the event
-/// channel.
-struct TransportSink {
-    event_tx: mpsc::Sender<(DispatchId, Event)>,
-    /// `0` = no dispatch in flight, so a value emitted then has nothing to
-    /// correlate to and is dropped.
-    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl crate::types::EventSink for TransportSink {
-    fn emit(&self, ev: &FOValue) {
-        let id = self
-            .current_dispatch
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if id != 0 {
-            let _ = self
-                .event_tx
-                .send((DispatchId(id), Event::Surface(ev.clone())));
-        }
-    }
-}
-
 // ── Identity transport ────────────────────────────────────────────────
 
 /// A session lock that cannot poison-panic, named for the one state it
 /// guards: a run that unwinds drops its guard mid-mutation, and recovering
 /// the poison (via [`LockExt`]) rather than unwrapping it means such a run
 /// can never wedge the session for whatever runs next.
-struct SessionLock(std::sync::Mutex<EngineInner>);
+struct SessionLock(std::sync::Mutex<Engine>);
 
 impl SessionLock {
-    fn new(inner: EngineInner) -> Self {
-        Self(std::sync::Mutex::new(inner))
-    }
-    fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Engine> {
         self.0.lock_ignore_poison()
-    }
-    fn into_inner(self) -> EngineInner {
-        self.0.into_inner_ignore_poison()
     }
 }
 
-/// The in-process transport: one kernel, one address space.
-///
-/// `dispatch` runs the engine door synchronously on the calling thread; a
-/// `Control::Cancel` trips the scope `dispatch` mints for its own id ahead of
-/// the engine lock, rather than crossing anything.
+/// The in-process carrier: an [`Engine`] behind the session lock, run on the
+/// calling thread, its rails calling the `Host` directly.
 pub struct IdentityTransport {
-    /// Behind a poison-free [`SessionLock`] so `dispatch` can take `&self`.
     engine: SessionLock,
+    /// The engine's scopes, outside the lock, so a `Control` lands on a
+    /// dispatch still waiting to take it.
+    scopes: Arc<Scopes>,
+    installer: &'static EngineInstaller,
+    /// Where this transport's runs park their forks — outside the lock, so a
+    /// handler can adopt one mid-dispatch.
+    nursery: Nursery,
     control: ControlSender,
     /// `Arc`-wrapped so a drain-then-handle adapter can hold its own clone
     /// alongside the transport rather than a borrow tied to `&self`.
     events_recv: Arc<EventReceiver>,
-    /// Stamped for the duration of `dispatch`, so a desk handler reentering
-    /// `dispatch`/`shell_mut`/`with_shell` panics instead of deadlocking. A
-    /// separate short lock: checking it must not touch `self.engine`.
-    dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
-    /// The destination a host injects through [`Self::set_interrupt_target`],
-    /// republished with each dispatch's scope. Outside `engine`'s lock, so a
-    /// holder of a clone can cancel the *current* dispatch from another thread
-    /// without waiting on it — how an observing host interrupts one run
-    /// without touching the session's durable root. An interrupt names no id,
-    /// so it needs none: it strikes whatever runs now.
-    interrupt_target: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
-    /// Minted once at construction; each dispatch hangs a child off it, ahead
-    /// of the engine lock, so a `Control::Cancel` naming that dispatch always
-    /// has a scope to land on.
-    dispatches: crate::process::ForegroundScope,
-    /// The id and scope of the last dispatch to claim `dispatches` — shared
-    /// with `control`'s `Control::Cancel` arm, which uses the id to tell a
-    /// live cancel from one that outlived its run.
-    cancel_target: CancelTarget,
-}
-
-pub struct EngineInner {
-    pub shell: crate::types::Shell,
-    pub(crate) event_tx: mpsc::Sender<(DispatchId, Event)>,
-    surface_sink: Arc<TransportSink>,
-    /// Session-lived: `None` until a host installs one through
-    /// `set_deferred_sink`, and while it is `None` a settling worker's batch is
-    /// dropped.
-    deferred_sink: Option<Arc<dyn DeferredSink>>,
-    /// Set by Attach.
-    terminal_lease: Option<crate::process::TerminalLease>,
-    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-}
-
-/// Clears the dispatch-thread stamp on drop, unwind included: a stamp left set
-/// by a panicking run would false-trip the next legitimate `shell_mut`.
-struct DispatchStampGuard<'a> {
-    slot: &'a std::sync::Mutex<Option<std::thread::ThreadId>>,
-}
-
-impl Drop for DispatchStampGuard<'_> {
-    fn drop(&mut self) {
-        *self.slot.lock_ignore_poison() = None;
-    }
+    event_tx: mpsc::Sender<(DispatchId, Event)>,
+    /// `None` until a host installs one, and while it is `None` a settling
+    /// worker's batch is dropped.
+    deferred_sink: Mutex<Option<Arc<dyn DeferredSink>>>,
+    severance: OnceLock<Severed>,
 }
 
 impl IdentityTransport {
-    /// Create a new identity transport that owns `shell`.
-    pub fn new(shell: crate::types::Shell) -> Self {
+    /// Boot an engine from `attach`, in this process.
+    ///
+    /// # Errors
+    /// [`Severed::Refused`], in the refusing step's own words — the verdict
+    /// [`WireTransport::await_attached`] gives.
+    pub fn boot(installers: &'static [EngineInstaller], attach: &Attach) -> Result<Self, Severed> {
+        Engine::boot(installers, attach, None)
+            .map(Self::over)
+            .map_err(Severed::Refused)
+    }
+
+    fn over(engine: Engine) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
-        let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let sink = Arc::new(TransportSink {
-            event_tx: event_tx.clone(),
-            current_dispatch: current_dispatch.clone(),
-        });
-        let dispatches = shell.run_cancel_handle();
-        let cancel_target: CancelTarget = Arc::new(std::sync::Mutex::new(None));
-        let control = ControlSender::new(current_dispatch.clone(), cancel_target.clone());
-
-        let engine = EngineInner {
-            shell,
-            event_tx,
-            surface_sink: sink,
-            deferred_sink: None,
-            terminal_lease: None,
-            current_dispatch,
-        };
-
+        let scopes = engine.scopes().clone();
         Self {
-            engine: SessionLock::new(engine),
-            control,
+            installer: engine.installer(),
+            control: ControlSender(Door::Identity(scopes.clone())),
+            scopes,
+            engine: SessionLock(std::sync::Mutex::new(engine)),
+            nursery: Nursery::default(),
             events_recv: Arc::new(EventReceiver::new(event_rx)),
-            dispatch_thread: std::sync::Mutex::new(None),
-            interrupt_target: None,
-            dispatches,
-            cancel_target,
+            event_tx,
+            deferred_sink: Mutex::new(None),
+            severance: OnceLock::new(),
         }
     }
 
-    /// Install `target` as where an interrupt lands. This call writes no scope;
-    /// each later dispatch republishes its own into it as the dispatch is
-    /// minted — ahead of the engine lock, so the target never names a run that
-    /// has already ended while its successor waits to begin. Call once, right
-    /// after construction: exarch's agent fleet keeps its own clone, so an
-    /// interrupt cancels the dispatch in flight without touching the durable
-    /// root a later run would inherit.
+    /// Adopt the fork a run parked under `id` as an engine of its own, its
+    /// grant layer narrowed against the fork's own cwd under this transport's
+    /// installer.
     ///
-    /// The target outlives any one transport — a `/clear` rebuild republishes
-    /// into the same one — so the host injects it rather than borrowing ours.
-    pub fn set_interrupt_target(
-        &mut self,
-        target: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
-    ) {
-        self.interrupt_target = Some(target);
+    /// # Errors
+    /// No fork parked under `id`, or whatever narrowing `grant` refuses.
+    pub fn adopt_parked(&self, id: NurseryId, grant: &SpawnGrant) -> Result<Self, String> {
+        let mut shell = self.nursery.adopt(id).ok_or_else(|| {
+            format!(
+                "no forked session is parked under nursery id {}: was it adopted already, or \
+                 has the run that forked it ended?",
+                id.0
+            )
+        })?;
+        grant.narrow_onto(&mut shell, self.installer.narrow)?;
+        Ok(Self::over(Engine::new(shell, self.installer, Box::new(()))))
     }
 
-    /// The inverse of [`IdentityTransport::new`], for a caller that lent a
-    /// shell in to route one run through production.
-    pub fn into_shell(self) -> crate::types::Shell {
-        self.engine.into_inner().shell
-    }
-
-    /// A desk handler reaching back through `dispatch`/`shell_mut`/`with_shell`
-    /// would deadlock on the session lock its own stack holds. Checked *before*
-    /// touching `self.engine`, so it panics rather than hangs.
-    fn check_not_reentrant(&self) {
-        let current = std::thread::current().id();
-        assert!(
-            *self.dispatch_thread.lock_ignore_poison() != Some(current),
-            "reentrant session access: a desk handler must not take the session lock \
-             (dispatch/shell_mut/with_shell) — it runs inside the dispatch on the \
-             dispatching thread and would deadlock under the identity transport"
-        );
-    }
-
-    /// The guard itself, for a caller that must hold shell access across other
-    /// borrows (the REPL's frontend and jobs table). Prefer `with_shell`.
-    pub fn shell_mut(&self) -> std::sync::MutexGuard<'_, EngineInner> {
-        self.check_not_reentrant();
-        self.engine.lock()
-    }
-
-    /// Access the underlying `Shell` mutably for session bootstrap.
-    pub fn with_shell<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut crate::types::Shell) -> R,
-    {
-        self.check_not_reentrant();
-        f(&mut self.engine.lock().shell)
+    /// Read the engine's shell under the session lock.
+    #[cfg(feature = "test-util")]
+    pub(crate) fn inspect<R>(&self, read: impl FnOnce(&Shell) -> R) -> R {
+        forbid_reentry(self);
+        read(&self.engine.lock().shell)
     }
 }
 
@@ -1407,51 +1211,22 @@ impl crate::types::EnquiryDesk for IdentityDesk {
 
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>) {
-        self.check_not_reentrant();
-
-        // Minted ahead of the engine lock, so a cancel raised in that window —
-        // a `Control::Cancel` naming `id`, or an observing host's interrupt —
-        // has a scope to land on even while this call is still waiting to
-        // acquire it. Both targets name the same scope; only the control arm
-        // needs the id, because only a cancel names which dispatch it meant.
-        let scope = self.dispatches.child();
-        *self.cancel_target.lock_ignore_poison() = Some((id, scope.clone()));
-        if let Some(target) = &self.interrupt_target {
-            *target.lock_ignore_poison() = Some(scope.clone());
+        if self.severed().is_some() {
+            return;
         }
-
-        let mut engine = self.engine.lock();
-        *self.dispatch_thread.lock_ignore_poison() = Some(std::thread::current().id());
-        let _stamp_guard = DispatchStampGuard {
-            slot: &self.dispatch_thread,
+        let scope = self.scopes.open(id);
+        let events = self.event_tx.clone();
+        let rails = Rails {
+            outlet: Arc::new(move |id, event| events.send((id, event)).is_ok()),
+            deferred: self.deferred_sink.lock_ignore_poison().clone(),
+            desk: Arc::new(IdentityDesk {
+                host: host.clone(),
+                events: self.events_recv.clone(),
+            }),
+            fork: Fork::Park(self.nursery.clone()),
         };
-
-        // The one atomic both sinks read to stamp and gate their frames.
-        engine
-            .current_dispatch
-            .store(id.0, std::sync::atomic::Ordering::Relaxed);
-
-        let desk: crate::types::Desk = Arc::new(IdentityDesk {
-            host: host.clone(),
-            events: self.events_recv.clone(),
-        });
-        // The live, non-transportable handles this dispatch lends the run,
-        // joined with the protocol `Run` the engine door takes.
-        let req = crate::run::RunRequest {
-            run,
-            surface: Some(engine.surface_sink.clone() as SurfaceSink),
-            deferred: engine.deferred_sink.clone(),
-            desk: Some(desk),
-            fork: host.fork(),
-            lifecycle: Box::new(()),
-        };
-        let run_report = engine.shell.run_under(&scope, req);
-        let report = run_report.into_report(engine.shell.sources());
-
-        engine
-            .current_dispatch
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        let _ = engine.event_tx.send((id, Event::Report(report)));
+        let report = self.engine.lock().run(id, run, rails, &scope);
+        let _ = self.event_tx.send((id, Event::Report(report)));
     }
 
     #[allow(
@@ -1459,9 +1234,14 @@ impl Transport for IdentityTransport {
         reason = "Transport::probe signature is fixed by the trait; the sibling impl consumes `reading` into a Frame"
     )]
     fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError> {
-        self.check_not_reentrant();
-        let mut engine = self.engine.lock();
-        answer_probe(&mut engine.shell, &reading).map_err(ProbeError::Rejected)
+        forbid_reentry(self);
+        if let Some(cause) = self.severed() {
+            return Err(ProbeError::Severed(cause));
+        }
+        self.engine
+            .lock()
+            .probe(&reading)
+            .map_err(ProbeError::Rejected)
     }
 
     fn control(&self) -> &ControlSender {
@@ -1473,105 +1253,58 @@ impl Transport for IdentityTransport {
     }
 
     fn severed(&self) -> Option<Severed> {
-        None
+        self.severance.get().cloned()
     }
 
-    fn attach(
-        &self,
-        endpoint: TerminalEndpoint,
-        _cwd: PathBuf,
-        _home: PathBuf,
-        _rc_path: Option<PathBuf>,
-        _installer: String,
-    ) {
-        self.check_not_reentrant();
-        let mut engine = self.engine.lock();
-        engine.terminal_lease = endpoint.lease;
+    fn sever(&self, cause: Severed) -> Severed {
+        self.severance.get_or_init(|| cause).clone()
     }
 
     fn detach(&self) {
-        self.check_not_reentrant();
-        crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
-        self.engine.lock().terminal_lease = None;
+        self.scopes.strike(crate::process::CancelCause::Explicit);
     }
 
     fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
-        self.check_not_reentrant();
-        self.engine.lock().deferred_sink = Some(sink);
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+        *self.deferred_sink.lock_ignore_poison() = Some(sink);
     }
 }
 
 #[cfg(test)]
 mod identity_cancel_tests {
     use super::*;
-    use crate::run::{RequestedTerminalAccess, RunIo, RunStdin};
-    use crate::types::Shell;
     use std::time::{Duration, Instant};
 
-    fn sleep_run(src: &str) -> Run {
-        Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: crate::types::GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        }
-    }
-
-    /// A `Control::Cancel` sent while `dispatch` is still waiting on the
-    /// engine lock — before the run's own frame exists — must still settle
-    /// the run promptly rather than let it run to completion. The engine
-    /// lock is held here so `dispatch`, called on another thread, is forced
-    /// to park right after it records its scope and before it ever reaches
-    /// `shell.run_under`; `face_signals` makes the run's frame signal-facing,
-    /// so a failure here is the race and not a plain absence of wiring.
-    #[test]
-    fn a_cancel_racing_a_fresh_dispatch_is_not_dropped() {
-        let _g = crate::process::cancel::REQUEST_SERIAL.lock();
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        let transport = Arc::new(IdentityTransport::new(shell));
-
-        let guard = transport.shell_mut();
+    /// Dispatch `sleep 30` from another thread while this one holds the
+    /// session lock, so `dispatch` parks right after it opens its scope and
+    /// before it ever reaches the run; strike the scope with `strike`, then let
+    /// the run go. A failure here is the race, not an absence of wiring.
+    fn race(strike: impl FnOnce(&ControlSender)) {
+        let transport = Arc::new(crate::engine::testkit::boot(&crate::engine::testkit::BARE));
+        let guard = transport.engine.lock();
 
         let worker = {
             let transport = transport.clone();
             std::thread::spawn(move || {
                 transport.dispatch(
                     DispatchId(1),
-                    sleep_run("sleep 30"),
+                    crate::engine::testkit::run("sleep 30"),
                     &(Arc::new(()) as Arc<dyn Host>),
                 );
             })
         };
 
-        // `dispatch` records its scope ahead of the engine lock; wait for
-        // that record rather than guessing at a delay.
+        // `dispatch` opens its scope ahead of the session lock; wait for that
+        // rather than guessing at a delay.
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if matches!(
-                *transport.cancel_target.lock_ignore_poison(),
-                Some((current, _)) if current == DispatchId(1)
-            ) {
-                break;
-            }
+        while transport.scopes.current() != Some(DispatchId(1)) {
             assert!(
                 Instant::now() < deadline,
-                "dispatch must record its scope before acquiring the engine lock"
+                "dispatch must open its scope before acquiring the session lock"
             );
             std::thread::yield_now();
         }
 
-        transport.control().send(Control::Cancel(DispatchId(1)));
+        strike(transport.control());
         drop(guard);
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -1581,63 +1314,82 @@ mod identity_cancel_tests {
         });
         assert!(
             done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
-            "a cancel recorded before the run's frame exists must still settle it promptly, \
+            "a strike recorded before the run's frame exists must still settle it promptly, \
              not run `sleep 30` to completion"
         );
     }
 
-    /// The same race down the other cancel channel: an observing host — exarch's
-    /// fleet, holding a clone of the interrupt target — interrupts by cancelling
-    /// whatever scope it finds there. Published as the dispatch is minted rather
-    /// than once its run frame exists, the target can never name a run that has
-    /// already ended while its successor waits on the engine lock. The shell is left
-    /// deaf to signals here, so nothing but this cancel can settle the run.
+    /// The run's frame hangs off the scope a strike lands on, even one struck
+    /// before the frame exists.
     #[test]
-    fn an_observed_interrupt_racing_a_fresh_dispatch_is_not_dropped() {
-        let target: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let mut transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        transport.set_interrupt_target(target.clone());
-        let transport = Arc::new(transport);
+    fn a_cancel_racing_a_fresh_dispatch_is_not_dropped() {
+        race(|control| control.cancel(DispatchId(1)));
+    }
 
-        let guard = transport.shell_mut();
+    #[test]
+    fn an_interrupt_racing_a_fresh_dispatch_is_not_dropped() {
+        race(ControlSender::interrupt);
+    }
 
+    /// Dispatch `sleep 30` under a forwarder, `raise` once the run is
+    /// in flight, and return its status and whether the session then ended.
+    fn forwarded(raise: fn()) -> (i32, Option<i32>) {
+        let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
+        let transport = Arc::new(crate::engine::testkit::boot(&crate::engine::testkit::BARE));
+        let _signals = transport.control().forward_signals();
         let worker = {
             let transport = transport.clone();
-            std::thread::spawn(move || {
-                transport.dispatch(
-                    DispatchId(1),
-                    sleep_run("sleep 30"),
-                    &(Arc::new(()) as Arc<dyn Host>),
-                );
-            })
+            std::thread::spawn(move || crate::engine::testkit::eval(&transport, "sleep 30"))
         };
-
         let deadline = Instant::now() + Duration::from_secs(5);
-        let scope = loop {
-            let published = target.lock_ignore_poison().clone();
-            if let Some(scope) = published {
-                break scope;
-            }
+        while transport.scopes.current().is_none() {
             assert!(
                 Instant::now() < deadline,
-                "the observed cell must hold this dispatch's scope before the engine lock"
+                "the dispatch never opened its scope"
             );
             std::thread::yield_now();
+        }
+        raise();
+        let report = worker.join().expect("dispatch must not panic");
+        crate::process::cancel::clear_root_request();
+        let Report::Ran { ending, .. } = report else {
+            panic!("`sleep 30` must reach evaluation, got {report:?}");
         };
+        let ended = reading::session_ended(&*transport).expect("the probe answers");
+        (ending.status(), ended)
+    }
 
-        scope.cancel(crate::process::CancelCause::Interrupt);
-        drop(guard);
+    /// A SIGINT reaches an identity engine only as its host's
+    /// `Control::Interrupt`: the run unwinds, the session lives on.
+    #[test]
+    fn a_forwarded_interrupt_unwinds_the_run_in_flight() {
+        assert_eq!(
+            forwarded(crate::process::request_interrupt),
+            (130, None),
+            "an interrupt ends the run, never the session"
+        );
+    }
 
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            worker.join().expect("dispatch must not panic");
-            let _ = done_tx.send(());
-        });
-        assert!(
-            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
-            "an interrupt on the observed scope must settle the run it names even when raised \
-             before that run's frame is born"
+    /// Ctrl-`\` arrives as `Control::Abort`, ending the session with its own
+    /// cause: `RootAbort`, reported 130 rather than a SIGTERM's 143.
+    #[test]
+    fn a_forwarded_root_abort_ends_the_session() {
+        assert_eq!(
+            forwarded(|| crate::process::request_root_cancel(
+                crate::process::CancelCause::RootAbort
+            )),
+            (130, Some(130)),
+        );
+    }
+
+    /// SIGTERM arrives as `Control::Terminate`.
+    #[test]
+    fn a_forwarded_terminate_ends_the_session() {
+        assert_eq!(
+            forwarded(|| crate::process::request_root_cancel(
+                crate::process::CancelCause::Terminate
+            )),
+            (143, Some(143)),
         );
     }
 }
@@ -1646,7 +1398,7 @@ mod identity_cancel_tests {
 
 /// The front-end's half of the severance law: [`crate::wire::write_or_sever`]
 /// recording into `severance`. Shared by [`WireTransport::write`] and the wire
-/// arm of [`ControlSender::send`]; `Err` is handed back so a caller that must
+/// arm of `ControlSender`; `Err` is handed back so a caller that must
 /// react further — the heartbeat's `Ping` arm breaking its loop — can, without
 /// repeating the severing itself.
 fn write_through(
@@ -1695,17 +1447,11 @@ impl Liveness {
     }
 }
 
-/// The peer-patience deadline used wherever one socket needs a single
-/// deadline but no full [`Liveness`]: [`WireTransport::new`]'s same-host child
-/// (no ticker, so only a write deadline applies) and `Liveness::default`'s own
-/// deadline, so the two never drift apart into two literals.
-const DEFAULT_PEER_PATIENCE: Duration = Duration::from_secs(25);
-
 impl Default for Liveness {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(5),
-            deadline: DEFAULT_PEER_PATIENCE,
+            deadline: Duration::from_secs(25),
         }
     }
 }
@@ -1713,12 +1459,9 @@ impl Default for Liveness {
 /// The out-of-process transport: the engine runs across a duplex stream, frames
 /// crossing on a `WireChannel` as length-prefixed JSON.
 ///
-/// Two constructors give it two lives. `WireTransport::new` — Unix only, since
-/// all it does is hand a socketpair end to a child on fd 3 — spawns a same-host
-/// engine child, whose death is a kernel-guaranteed EOF, so heartbeats would be
-/// noise. [`WireTransport::adopt`] drives an *existing* stream, in production
-/// the virtual socket into a guest VM, whose failure mode is silence rather
-/// than EOF, and so runs a ticker.
+/// [`WireTransport::adopt`] drives an *existing* stream, in production the
+/// virtual socket into a guest VM, whose failure mode is silence rather than
+/// EOF, and so runs a ticker.
 ///
 /// A reader thread forwards `Event` frames into the `EventReceiver`, swallows
 /// `Pong`s, and timestamps every frame it reads. All writes share one
@@ -1727,11 +1470,6 @@ pub struct WireTransport {
     events_recv: EventReceiver,
     control: ControlSender,
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
-    /// `Some` under [`WireTransport::new`], whose child is killed and reaped on
-    /// drop; `None` under [`WireTransport::adopt`], which does not own the far
-    /// end. The one field belonging to a platform rather than the protocol.
-    #[cfg(unix)]
-    child: Option<ChildHandle>,
     /// Never joined: the thread exits when the channel closes. `Mutex` only
     /// for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1740,21 +1478,19 @@ pub struct WireTransport {
     /// check it to break early, and it is what [`WireTransport::severed`]
     /// reports.
     severance: Arc<OnceLock<Severed>>,
-    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     /// `Ping`s sent with no frame back since — what the ticker counts silence
     /// in. Any frame read resets it; see [`Liveness::probes`].
     unanswered: Arc<AtomicU32>,
-    /// The heartbeat an adopted stream still owes, parked by
-    /// [`WireTransport::adopt`] and taken by the first [`Transport::attach`].
-    /// `None` under [`WireTransport::new`], which never pings at all.
+    /// The heartbeat still owed, parked by [`WireTransport::adopt`] and taken
+    /// by the first [`WireTransport::attach`].
     pending_heartbeat: Mutex<Option<Liveness>>,
     /// Where the reader thread hands a `Frame::Session` batch. Shared with the
     /// reader so `set_deferred_sink` takes effect on the next batch without
     /// restarting anything; `None` drops a batch that arrives before a host
     /// installs one.
     deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
-    /// A shutdown-only duplicate of the socket, minted alongside `write_tx` by
-    /// both constructors. `Drop` shuts this down directly rather than taking
+    /// A shutdown-only duplicate of the socket, minted alongside `write_tx`.
+    /// `Drop` shuts this down directly rather than taking
     /// `write_tx`'s lock, so tearing the transport down never parks behind a
     /// write some other thread holds the lock over.
     shutdown: crate::wire::WireChannel,
@@ -1766,9 +1502,10 @@ pub struct WireTransport {
     patience: Duration,
 }
 
-/// The reader loop shared by both constructors. *Every* frame read clears
+/// The transport's reader loop. *Every* frame read clears
 /// `unanswered`, not just a `Pong` — any frame is proof of life. On EOF, a read
-/// error, or a refused `Attach` it severs before exiting, so `severed()` is
+/// error, a refused `Attach`, or a frame only a front-end sends it severs
+/// before exiting, so `severed()` is
 /// honest under every teardown path and the dropped `event_tx` closes the
 /// channel whose `recv` is what fails the in-flight dispatch — the reader
 /// severs *before* it drops `event_tx`, on every exit path.
@@ -1835,7 +1572,17 @@ fn spawn_wire_reader(
                             sever(&severance, Severed::Refused(msg));
                             break;
                         }
-                        _ => {}
+                        Frame::Pong(_) => {}
+                        other => {
+                            sever(
+                                &severance,
+                                Severed::Faulted(format!(
+                                    "it sent a {} frame, which only a front-end sends",
+                                    other.kind()
+                                )),
+                            );
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
@@ -1855,7 +1602,7 @@ fn spawn_wire_reader(
 }
 
 /// The heartbeat ticker of an adopted stream, spawned by the first
-/// [`Transport::attach`] once the `Attach` frame is through the write lock —
+/// [`WireTransport::attach`] once the `Attach` frame is through the write lock —
 /// never at [`WireTransport::adopt`] — so no `Ping` precedes the handshake by
 /// construction. On declaring death, from silence or a failed write, it shuts
 /// the wire down too, waking the parked reader so the event channel closes.
@@ -1898,105 +1645,14 @@ fn spawn_heartbeat(
 }
 
 impl WireTransport {
-    /// Spawn the engine child on one end of a fresh socketpair, inherited as
-    /// fd 3, and start the reader on the other.
+    /// Drive the protocol over an existing duplex `stream`.
     ///
-    /// No ticker: a same-host child's death is a kernel-guaranteed EOF, so
-    /// heartbeats belong to [`WireTransport::adopt`].
-    ///
-    /// # Errors
-    /// Returns `Err` if creating the socketpair fails, if duplicating the
-    /// front-end fd fails, if resolving the current executable path fails, or
-    /// if spawning the engine child process fails.
-    #[cfg(unix)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
-    )]
-    pub fn new() -> io::Result<Self> {
-        let (frontend, engine) = crate::wire::WireChannel::pair()?;
-
-        // A duplicate fd, so the reader can park in `read_frame` while the
-        // front-end writes on the same socket.
-        let writer = frontend.try_clone()?;
-        writer.set_write_deadline(DEFAULT_PEER_PATIENCE)?;
-        // A second duplicate, held back from ever taking the write lock, so
-        // `Drop` can sever the connection without parking behind a write in
-        // progress.
-        let shutdown = writer.try_clone()?;
-
-        let engine_fd = engine.as_raw_fd();
-        let mut cmd =
-            std::process::Command::new(std::env::current_exe().map_err(io::Error::other)?);
-        cmd.arg("--engine");
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(move || {
-                if libc::dup2(engine_fd, 3) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Only fd 3 may remain.
-                libc::close(engine_fd);
-                Ok(())
-            });
-        }
-        let child = crate::process::spawn(&mut cmd)?;
-        // The parent must not hold the engine end open, or the child's exit
-        // would never read as EOF.
-        drop(engine);
-
-        let severance = Arc::new(OnceLock::new());
-        let (event_tx, event_rx) = mpsc::channel();
-        // No ticker here, but the shared reader keeps the count anyway.
-        let unanswered = Arc::new(AtomicU32::new(0));
-        let deferred_sink = Arc::new(Mutex::new(None));
-        let attached = Arc::new((Mutex::new(false), Condvar::new()));
-        let reader = spawn_wire_reader(
-            frontend,
-            event_tx,
-            deferred_sink.clone(),
-            severance.clone(),
-            unanswered.clone(),
-            attached.clone(),
-        );
-
-        let write_tx = Arc::new(Mutex::new(writer));
-        let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control = ControlSender::new_wire(
-            write_tx.clone(),
-            severance.clone(),
-            current_dispatch.clone(),
-        );
-
-        Ok(Self {
-            events_recv: EventReceiver::new(event_rx),
-            control,
-            write_tx,
-            child: Some(ChildHandle::from_std(child)),
-            _reader: Mutex::new(Some(reader)),
-            severance,
-            current_dispatch,
-            unanswered,
-            pending_heartbeat: Mutex::new(None),
-            deferred_sink,
-            shutdown,
-            attached,
-            patience: DEFAULT_PEER_PATIENCE,
-        })
-    }
-
-    /// Drive the protocol over an existing duplex `stream` — no child spawn.
-    ///
-    /// The guest-VM path, and the one constructor both platforms have:
     /// `stream` is the virtual-socket connection to the engine in the guest —
     /// an `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
     /// socket under Hyper-V — adopted through [`crate::wire::WireStream`],
     /// whose docs say why std's stream types can carry either. Such a stream
-    /// can fall silent without ever tearing, so the first [`Transport::attach`]
-    /// spawns a heartbeat ticker under `liveness`.
+    /// can fall silent without ever tearing, so the first
+    /// [`WireTransport::attach`] spawns a heartbeat ticker under `liveness`.
     ///
     /// # Errors
     /// Returns `Err` if the stream cannot be duplicated into separate read
@@ -2030,22 +1686,14 @@ impl WireTransport {
         );
 
         let write_tx = Arc::new(Mutex::new(writer));
-        let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control = ControlSender::new_wire(
-            write_tx.clone(),
-            severance.clone(),
-            current_dispatch.clone(),
-        );
+        let control = ControlSender(Door::Wire((write_tx.clone(), severance.clone())));
 
         Ok(Self {
             events_recv: EventReceiver::new(event_rx),
             control,
             write_tx,
-            #[cfg(unix)]
-            child: None,
             _reader: Mutex::new(Some(reader)),
             severance,
-            current_dispatch,
             unanswered,
             pending_heartbeat: Mutex::new(Some(liveness)),
             deferred_sink,
@@ -2055,16 +1703,34 @@ impl WireTransport {
         })
     }
 
-    /// Declare the peer dead for a reason the front-end observed itself, and
-    /// shut the connection so the engine sees EOF.
-    pub fn sever(&self, cause: Severed) {
-        sever(&self.severance, cause);
-        self.shutdown.shutdown();
+    /// Write `attach`, the only legal first frame, and only then start the
+    /// heartbeat: no `Ping` may precede the handshake. The verdict is
+    /// [`Self::await_attached`]'s.
+    ///
+    /// # Panics
+    /// If the already-open socket cannot be duplicated for the heartbeat.
+    pub fn attach(&self, attach: Attach) {
+        self.write(&Frame::Attach(attach));
+        let pending = self.pending_heartbeat.lock_ignore_poison().take();
+        if let Some(liveness) = pending {
+            // Silence is counted from here, not from `adopt`: a front-end that
+            // adopted long before attaching must not find its booting engine
+            // already declared `Silent` on the heartbeat's first tick.
+            self.unanswered.store(0, Ordering::Relaxed);
+            spawn_heartbeat(
+                self.write_tx.clone(),
+                self.severance.clone(),
+                self.unanswered.clone(),
+                liveness,
+                self.shutdown
+                    .try_clone()
+                    .expect("dup an already-open socket"),
+            );
+        }
     }
 
-    /// Block until the engine answers the `Attach` this transport wrote.
-    /// `Transport::attach` only writes the frame; the verdict is awaited here,
-    /// so a refusal is learnt at construction, not at the first dispatch.
+    /// Block until the engine answers the `Attach` this transport wrote, so a
+    /// refusal is learnt at construction, not at the first dispatch.
     ///
     /// Patience is spent in waits this thread observed, never in elapsed
     /// clock: a suspended host resumes mid-wait having watched one tick, not
@@ -2120,20 +1786,13 @@ impl WireTransport {
 impl Drop for WireTransport {
     fn drop(&mut self) {
         // `self.shutdown` never takes `write_tx`'s lock, so this wakes the
-        // reader and (under `adopt`) the ticker — which share the one socket —
+        // reader and the ticker — which share the one socket —
         // without ever parking behind a write in progress.
         sever(
             &self.severance,
             Severed::Closed("the front-end dropped the transport".into()),
         );
         self.shutdown.shutdown();
-        // An adopted stream owns no child — its far end is a guest VM the
-        // session manager reaps — so only `new`'s child is reaped here.
-        #[cfg(unix)]
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.reap();
-        }
     }
 }
 
@@ -2142,12 +1801,11 @@ impl Transport for WireTransport {
         // The host is consulted by the drain loop, not here: an enquiry
         // crossing a wire is a frame on `events()`, answered by whoever drains
         // it — `dispatch_to_report`.
-        self.current_dispatch
-            .store(id.0, std::sync::atomic::Ordering::Relaxed);
         self.write(&Frame::Dispatch(id, Box::new(run)));
     }
 
     fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError> {
+        forbid_reentry(self);
         let id = mint_dispatch_id();
         self.write(&Frame::Probe(id, reading));
         // Foreign events read past on the way to this probe's own Report are
@@ -2158,21 +1816,7 @@ impl Transport for WireTransport {
         let outcome = loop {
             match self.events_recv.recv() {
                 Some((did, Event::Report(report))) if did == id => {
-                    break match report {
-                        Report::Ran {
-                            ending: Ending::Settled { value, .. },
-                            ..
-                        } => Ok(value),
-                        Report::Ran {
-                            ending:
-                                Ending::Raised { rendered, .. } | Ending::Walled { rendered, .. },
-                            ..
-                        }
-                        | Report::Static { rendered, .. } => Err(ProbeError::Rejected(rendered)),
-                        Report::Ran { ending, .. } => Err(ProbeError::Rejected(format!(
-                            "probe answered abnormally: {ending:?}"
-                        ))),
-                    };
+                    break reading::unreport(report);
                 }
                 Some(item) => carried.push_back(item),
                 None => {
@@ -2207,42 +1851,11 @@ impl Transport for WireTransport {
         self.severance.get().cloned()
     }
 
-    /// The endpoint's lease does not survive encoding, so the engine attaches
-    /// with no terminal of its own.
-    fn attach(
-        &self,
-        endpoint: TerminalEndpoint,
-        cwd: PathBuf,
-        home: PathBuf,
-        rc_path: Option<PathBuf>,
-        installer: String,
-    ) {
-        self.write(&Frame::Attach {
-            endpoint,
-            cwd,
-            home,
-            rc_path,
-            proto_version: PROTOCOL_VERSION,
-            installer,
-        });
-        // Only now, with the Attach through the write lock, may the heartbeat
-        // start: no Ping may precede the handshake.
-        let pending = self.pending_heartbeat.lock_ignore_poison().take();
-        if let Some(liveness) = pending {
-            // Silence is counted from here, not from `adopt`: a front-end that
-            // adopted long before attaching must not find its booting engine
-            // already declared `Silent` on the heartbeat's first tick.
-            self.unanswered.store(0, Ordering::Relaxed);
-            spawn_heartbeat(
-                self.write_tx.clone(),
-                self.severance.clone(),
-                self.unanswered.clone(),
-                liveness,
-                self.shutdown
-                    .try_clone()
-                    .expect("dup an already-open socket"),
-            );
-        }
+    /// Also shuts the connection, so the engine sees EOF.
+    fn sever(&self, cause: Severed) -> Severed {
+        let standing = self.severance.get_or_init(|| cause).clone();
+        self.shutdown.shutdown();
+        standing
     }
 
     fn detach(&self) {
@@ -2256,51 +1869,20 @@ impl Transport for WireTransport {
     fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
         *self.deferred_sink.lock_ignore_poison() = Some(sink);
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 // ── Enquiry desk tests ────────────────────────────────────────────────
 //
-// Core installs no builtin that enquires, so a run's body cannot reach
-// `Shell::enquire` from ral source here. These drive it through a
-// `RunLifecycle` handed `&mut Shell` mid-run instead — the same shape a real
-// enquiring builtin runs under.
+// Core installs no builtin that enquires, so these install a test builtin
+// that does — the shape a real enquiring door runs under.
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod enquiry_tests {
     use super::*;
-    use crate::run::{
-        RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
-    };
-    use crate::types::{Desk, Fork, Mooring, Shell};
+    use crate::run::tests::{capture_req, install_act};
+    use crate::run::{RunReport, RunRequest};
+    use crate::types::{Desk, Mooring};
     use std::sync::Mutex;
-
-    /// The minimal capturing request under the ⊤ ceiling, mirroring `run.rs`'s
-    /// own `capture_req`.
-    fn capture_req<'a>(src: &str) -> RunRequest<'a> {
-        RunRequest {
-            run: Run {
-                program: Program::Source(src.into()),
-                script_name: "<test>".into(),
-                caps: crate::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        }
-    }
 
     /// No desk installed answers the honest absence error, verbatim.
     #[test]
@@ -2328,22 +1910,6 @@ mod enquiry_tests {
                 other => Ok(other),
             }
         }
-        fn fork(&self) -> Option<Fork> {
-            None
-        }
-    }
-
-    /// Enquires from `pre_exec`, which runs with the run frame — and so its
-    /// desk — already installed.
-    #[derive(Clone)]
-    struct AskDuringRun {
-        req: FOValue,
-        answer: std::sync::Arc<Mutex<Option<Result<FOValue, crate::types::Error>>>>,
-    }
-    impl RunLifecycle for AskDuringRun {
-        fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
-            *self.answer.lock().unwrap() = Some(shell.enquire(mooring, self.req.clone()));
-        }
     }
 
     /// The host's transform reaches `enquire`'s caller, not just `IdentityDesk`.
@@ -2351,10 +1917,10 @@ mod enquiry_tests {
     fn enquire_round_trips_through_a_stub_desk() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let answer = std::sync::Arc::new(Mutex::new(None));
-        let lifecycle = AskDuringRun {
-            req: FOValue::Int { value: 41 },
-            answer: answer.clone(),
-        };
+        let asked = answer.clone();
+        install_act(&mut shell, "ask-desk", move |mooring, shell| {
+            *asked.lock().unwrap() = Some(shell.enquire(mooring, FOValue::Int { value: 41 }));
+        });
         let desk: Desk = Arc::new(IdentityDesk {
             host: Arc::new(IncrementSeam),
             events: no_events(),
@@ -2362,14 +1928,17 @@ mod enquiry_tests {
 
         match shell.run(RunRequest {
             desk: Some(desk),
-            lifecycle: Box::new(lifecycle),
-            ..capture_req("$[1 + 1]")
+            ..capture_req("ask-desk")
         }) {
             RunReport::Ran { .. } => {}
-            RunReport::Static { .. } => panic!("`$[1 + 1]` must reach evaluation"),
+            RunReport::Static { .. } => panic!("`ask-desk` must reach evaluation"),
         }
 
-        let answer = answer.lock().unwrap().take().expect("pre_exec must fire");
+        let answer = answer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("`ask-desk` must enquire");
         match answer {
             Ok(v) => assert_eq!(
                 v,
@@ -2380,32 +1949,32 @@ mod enquiry_tests {
         }
     }
 
-    /// A handler reaching back into `shell_mut` would take the session lock its
+    /// A handler reaching back into `probe` would take the session lock its
     /// own stack already holds. Lacking a core builtin that enquires, the test
-    /// sets `dispatch`'s thread stamp by hand and exercises the same guard.
-    struct ReentrantShellMutSeam(std::sync::Arc<IdentityTransport>);
-    impl Host for ReentrantShellMutSeam {
+    /// enters `dispatch_to_report`'s claim by hand and exercises the same guard.
+    struct ReentrantProbeSeam(std::sync::Arc<IdentityTransport>);
+    impl Host for ReentrantProbeSeam {
         fn surface(&self, _val: &FOValue) {}
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-            let _guard = self.0.shell_mut();
+            let _ = reading::cwd(&*self.0);
             Ok(req)
-        }
-        fn fork(&self) -> Option<Fork> {
-            None
         }
     }
 
     #[test]
     #[should_panic(expected = "reentrant session access")]
-    fn desk_reentering_shell_mut_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(
-            crate::io::TerminalState::default(),
-        )));
-        *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
+    fn desk_reentering_probe_panics_never_hangs() {
+        reenter(|transport| Arc::new(ReentrantProbeSeam(transport)));
+    }
+
+    /// Enquire, from inside a dispatch's claim, of the host `seam` builds.
+    fn reenter(seam: impl FnOnce(Arc<IdentityTransport>) -> Arc<dyn Host>) {
+        let transport = Arc::new(crate::engine::testkit::boot(&crate::engine::testkit::BARE));
+        let _dispatching = Dispatching::enter(&*transport);
         let shell = Shell::new(crate::io::TerminalState::default());
         let mut mooring = Mooring::adrift();
         mooring.desk = Some(Arc::new(IdentityDesk {
-            host: Arc::new(ReentrantShellMutSeam(transport)),
+            host: seam(transport),
             events: no_events(),
         }) as Desk);
         let _ = shell.enquire(&mooring, FOValue::Unit);
@@ -2416,43 +1985,15 @@ mod enquiry_tests {
     impl Host for ReentrantDispatchSeam {
         fn surface(&self, _val: &FOValue) {}
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-            self.0.dispatch(
-                DispatchId(0),
-                Run {
-                    program: Program::Source(String::new()),
-                    script_name: "<test>".into(),
-                    caps: crate::types::GrantStack::root(),
-                    wall: None,
-                    deferred_lease: None,
-                    worker_cap: None,
-                    io: RunIo::Capture,
-                    terminal: RequestedTerminalAccess::Denied,
-                    stdin: RunStdin::Empty,
-                    trail: None,
-                },
-                &(Arc::new(()) as Arc<dyn Host>),
-            );
+            let _ = dispatch_to_report(&*self.0, crate::engine::testkit::run(""), Arc::new(()));
             Ok(req)
-        }
-        fn fork(&self) -> Option<Fork> {
-            None
         }
     }
 
     #[test]
     #[should_panic(expected = "reentrant session access")]
     fn desk_reentering_dispatch_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(
-            crate::io::TerminalState::default(),
-        )));
-        *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
-        let shell = Shell::new(crate::io::TerminalState::default());
-        let mut mooring = Mooring::adrift();
-        mooring.desk = Some(Arc::new(IdentityDesk {
-            host: Arc::new(ReentrantDispatchSeam(transport)),
-            events: no_events(),
-        }) as Desk);
-        let _ = shell.enquire(&mooring, FOValue::Unit);
+        reenter(|transport| Arc::new(ReentrantDispatchSeam(transport)));
     }
 }
 
@@ -2481,35 +2022,30 @@ mod durability_tests {
         "test-only: panic the evaluator mid-run.",
         crate::types::BuiltinBody::Static(builtin_panic_now),
     )];
-    static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
-    fn run(src: &str) -> Run {
-        Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: crate::types::GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: crate::run::RunIo::Capture,
-            terminal: crate::run::RequestedTerminalAccess::Denied,
-            stdin: crate::run::RunStdin::Empty,
-            trail: None,
-        }
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+    )]
+    fn panicky(_attach: &Attach) -> Result<crate::engine::Booted, String> {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.install_builtins(&PANIC_BUILTINS_ARR);
+        Ok(crate::engine::Booted {
+            shell,
+            keep: Box::new(()),
+        })
     }
+
+    static PANICKY: [EngineInstaller; 1] = [crate::engine::testkit::installer("panicky", panicky)];
 
     /// A panicking run arrives as an ordinary `Report::Static{Host}` — the run
     /// door caught it and rolled the shell back — and the same transport
     /// dispatches the next run cleanly.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.install_builtins(PANIC_BUILTINS);
-        let transport = IdentityTransport::new(shell);
+        let transport = crate::engine::testkit::boot(&PANICKY);
 
-        let report = dispatch_to_report(&transport, run("protocol-panic-now"), Arc::new(()))
-            .expect("the identity transport sends the Report synchronously");
+        let report = crate::engine::testkit::eval(&transport, "protocol-panic-now");
         match report {
             Report::Static { rendered, .. } => {
                 assert!(rendered.contains("run panicked"), "got {rendered:?}");
@@ -2519,8 +2055,7 @@ mod durability_tests {
             }
         }
 
-        let report = dispatch_to_report(&transport, run("$[1 + 1]"), Arc::new(()))
-            .expect("the next dispatch must still answer");
+        let report = crate::engine::testkit::eval(&transport, "$[1 + 1]");
         match report {
             Report::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
             Report::Static { .. } => panic!("the healed session must evaluate"),
@@ -2533,181 +2068,268 @@ mod durability_tests {
 // Identity-only. Engine-busy serialisation needs a second process racing the
 // wire engine's rendezvous, which no unit test can stage.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod probe_tests {
     use super::*;
-    use crate::types::Shell;
+    use crate::engine::testkit::{BARE, attach, boot, boot_at, eval};
 
-    /// Nothing spawned yet.
-    #[test]
-    fn worker_count_answers_zero_on_a_fresh_shell() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        let answer = transport
-            .probe(FOValue::Variant {
-                label: "worker-count".into(),
-                payload: None,
-            })
-            .expect("worker-count must answer");
-        assert_eq!(answer, FOValue::Int { value: 0 });
+    fn fresh() -> IdentityTransport {
+        boot(&BARE)
     }
 
-    /// A fresh shell's ledger is unarmed, so nothing is leased.
-    #[test]
-    fn binding_probes_answer_integers() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        match transport.probe(FOValue::Variant {
-            label: "binding-count".into(),
-            payload: None,
-        }) {
-            Ok(FOValue::Int { .. }) => {}
-            other => panic!("binding-count must answer an Int, got {other:?}"),
+    /// A bare engine seated at `dir`.
+    fn at(dir: &std::path::Path) -> IdentityTransport {
+        boot_at(
+            &BARE,
+            &Attach {
+                cwd: dir.to_path_buf(),
+                ..attach(&BARE)
+            },
+        )
+    }
+
+    fn raw(label: &str, payload: Option<FOValue>) -> FOValue {
+        FOValue::Variant {
+            label: label.into(),
+            payload: payload.map(Box::new),
         }
-        let leased = transport
-            .probe(FOValue::Variant {
-                label: "leased-binding-count".into(),
-                payload: None,
-            })
-            .expect("leased-binding-count must answer");
-        assert_eq!(leased, FOValue::Int { value: 0 });
     }
 
-    /// `` `none `` for a name never set, `` `some [value] `` once
-    /// `Shell::set_env_var` installs one.
-    #[test]
-    fn env_var_probe_round_trips_the_overlay() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.set_env_var("PROBE_TEST_VAR", "42");
-        let transport = IdentityTransport::new(shell);
+    fn rejection(transport: &IdentityTransport, req: FOValue) -> String {
+        match transport.probe(req) {
+            Err(ProbeError::Rejected(msg)) => msg,
+            other => panic!("a malformed probe is a rejection, got {other:?}"),
+        }
+    }
 
-        let absent = transport
-            .probe(FOValue::Variant {
-                label: "env-var".into(),
-                payload: Some(Box::new(FOValue::String {
-                    value: "PROBE_TEST_VAR_ABSENT".into(),
-                })),
-            })
-            .expect("env-var must answer");
+    /// A fresh shell's ledger is unarmed and nothing is spawned or bound.
+    #[test]
+    fn a_fresh_shell_reads_empty() {
+        let transport = fresh();
+        assert!(reading::binding_count(&transport).is_ok());
+        assert_eq!(reading::leased_binding_count(&transport), Ok(0));
+        assert_eq!(reading::largest_binding_bytes(&transport), Ok(0));
+        assert_eq!(reading::workers(&transport), Ok(Vec::new()));
+        assert!(reading::cwd(&transport).is_ok());
+        assert!(reading::home(&transport).is_ok());
+        assert!(reading::builtin_names(&transport).is_ok());
+    }
+
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn the_test_only_classes_answer() {
+        let transport = fresh();
         assert_eq!(
-            absent,
-            FOValue::Variant {
-                label: "none".into(),
-                payload: None
-            }
+            reading::read::<u64>(&transport, reading::Class::WorkerCount, None),
+            Ok(0)
         );
-
-        let present = transport
-            .probe(FOValue::Variant {
-                label: "env-var".into(),
-                payload: Some(Box::new(FOValue::String {
-                    value: "PROBE_TEST_VAR".into(),
-                })),
-            })
-            .expect("env-var must answer");
-        assert_eq!(
-            present,
-            FOValue::Variant {
-                label: "some".into(),
-                payload: Some(Box::new(FOValue::String { value: "42".into() }))
-            }
-        );
-    }
-
-    /// The shell's *logical* cwd, not the process's.
-    #[test]
-    fn cwd_probe_answers_a_string() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        match transport.probe(FOValue::Variant {
-            label: "cwd".into(),
-            payload: None,
-        }) {
-            Ok(FOValue::String { .. }) => {}
-            other => panic!("cwd must answer a String, got {other:?}"),
-        }
-    }
-
-    /// A fresh shell still carries the ambient root frame.
-    #[test]
-    fn grant_depth_probe_answers_at_least_one() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        match transport.probe(FOValue::Variant {
-            label: "grant-depth".into(),
-            payload: None,
-        }) {
-            Ok(FOValue::Int { value }) => assert!(value >= 1),
-            other => panic!("grant-depth must answer an Int, got {other:?}"),
-        }
-    }
-
-    /// `0` on a bare shell, a positive shallow estimate once anything is bound.
-    #[test]
-    fn largest_binding_bytes_probe_measures_without_bindings_and_with() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let transport = IdentityTransport::new(shell);
-        let empty = transport
-            .probe(FOValue::Variant {
-                label: "largest-binding-bytes".into(),
-                payload: None,
-            })
-            .expect("largest-binding-bytes must answer");
-        assert_eq!(empty, FOValue::Int { value: 0 });
-
-        shell = transport.into_shell();
-        shell.set_var(
-            "probe_sized".into(),
-            crate::types::Value::String("a dozen bytes or so".into()),
-        );
-        let transport = IdentityTransport::new(shell);
-        match transport.probe(FOValue::Variant {
-            label: "largest-binding-bytes".into(),
-            payload: None,
-        }) {
-            Ok(FOValue::Int { value }) => assert!(value > 0),
-            other => panic!("must answer a positive Int, got {other:?}"),
-        }
-    }
-
-    /// An empty list, not an error, when there is nothing to report.
-    #[test]
-    fn workers_probe_answers_an_empty_list_on_a_fresh_shell() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        let answer = transport
-            .probe(FOValue::Variant {
-                label: "workers".into(),
-                payload: None,
-            })
-            .expect("workers must answer");
-        assert_eq!(answer, FOValue::List { items: vec![] });
-    }
-
-    /// An unrecognised class names itself in the error, never a silent default.
-    #[test]
-    fn unknown_probe_class_names_itself_in_the_error() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        let err = transport
-            .probe(FOValue::Variant {
-                label: "not-a-real-class".into(),
-                payload: None,
-            })
-            .expect_err("an unrecognised class must not answer Ok");
-        let ProbeError::Rejected(msg) = err else {
-            panic!("an unrecognised class is a rejection, not a severance: {err:?}");
-        };
         assert!(
-            msg.contains("not-a-real-class"),
-            "error must name the unrecognised class, got: {msg}"
+            reading::read::<u64>(&transport, reading::Class::GrantDepth, None)
+                .is_ok_and(|depth| depth >= 1),
+            "a fresh shell still carries the ambient root frame"
         );
     }
 
-    /// No class to read at all is an error, not a panic.
     #[test]
-    fn non_variant_probe_request_is_an_honest_error() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        let err = transport
-            .probe(FOValue::Unit)
-            .expect_err("a non-variant probe request must not answer Ok");
-        let ProbeError::Rejected(msg) = err else {
-            panic!("a malformed request is a rejection, not a severance: {err:?}");
+    fn largest_binding_bytes_measures_what_is_bound() {
+        let transport = fresh();
+        eval(&transport, "let probe_sized = 'a dozen bytes or so'");
+        assert!(reading::largest_binding_bytes(&transport).is_ok_and(|n| n > 0));
+    }
+
+    #[test]
+    fn env_var_reads_the_overlay() {
+        let mut attach = attach(&BARE);
+        attach.env.push(("PROBE_TEST_VAR".into(), "42".into()));
+        let transport = boot_at(&BARE, &attach);
+        assert_eq!(
+            reading::env_var(&transport, "PROBE_TEST_VAR_ABSENT"),
+            Ok(None)
+        );
+        assert_eq!(
+            reading::env_var(&transport, "PROBE_TEST_VAR"),
+            Ok(Some("42".to_string()))
+        );
+    }
+
+    /// Relative to the engine's own cwd, and recursive.
+    #[test]
+    fn path_bytes_sums_a_tree_under_the_engine_cwd() {
+        let dir = tempfile::tempdir().expect("a tempdir");
+        std::fs::create_dir(dir.path().join("sub")).expect("a subdirectory");
+        std::fs::write(dir.path().join("sub/five"), b"12345").expect("a file");
+        let transport = at(dir.path());
+        assert_eq!(
+            reading::path_bytes(&transport, std::path::Path::new(".")),
+            Ok(5)
+        );
+    }
+
+    /// Ended only once its durable root is cancelled, with that cause's status.
+    #[test]
+    fn session_ended_reads_the_root_cause() {
+        let transport = fresh();
+        assert_eq!(reading::session_ended(&transport), Ok(None));
+        transport.control().terminate();
+        assert_eq!(reading::session_ended(&transport), Ok(Some(143)));
+    }
+
+    /// `cd` leaves a record the probe reads without taking.
+    #[test]
+    fn last_chpwd_counts_directory_changes() {
+        let dir = tempfile::tempdir().expect("a tempdir");
+        let transport = at(dir.path());
+        assert_eq!(reading::last_chpwd(&transport), Ok(None));
+        assert!(matches!(
+            eval(&transport, "cd ..\ncd .."),
+            Report::Ran { .. }
+        ));
+        let first = reading::last_chpwd(&transport).expect("a reading");
+        assert_eq!(first.as_ref().map(|c| c.seq), Some(2));
+        assert_eq!(reading::last_chpwd(&transport).expect("a reading"), first);
+    }
+
+    #[test]
+    fn spine_stages_a_pipeline_and_locates_a_type_error() {
+        let transport = fresh();
+        assert_eq!(reading::spine(&transport, " "), Ok(reading::Spine::Empty));
+        let Ok(reading::Spine::Stages(stages)) =
+            reading::spine(&transport, "/bin/echo hi | /bin/cat")
+        else {
+            panic!("a pipeline stages");
         };
-        assert!(msg.contains("variant"));
+        assert_eq!(stages[0].src, "/bin/echo hi");
+        let Ok(reading::Spine::TypeError(error)) =
+            reading::spine(&transport, "if \"x\" { 1 } else { 2 }")
+        else {
+            panic!("an ill-typed buffer locates its error");
+        };
+        assert_eq!(error.span, Some((3, 6)));
+    }
+
+    #[test]
+    fn bind_effects_tells_an_exec_from_arithmetic() {
+        let effects = reading::bind_effects(&fresh(), "let n = $[1 + 2]\nlet p = /bin/echo hi");
+        let effectful = |name: &str, effectful: bool| reading::BindEffect {
+            name: name.into(),
+            effectful,
+        };
+        assert_eq!(
+            effects,
+            Ok(vec![effectful("n", false), effectful("p", true)])
+        );
+    }
+
+    #[test]
+    fn bindings_and_completion_names_read_the_scope() {
+        let transport = fresh();
+        eval(&transport, "let probe_row = 7");
+        let rows = reading::bindings(&transport).expect("a reading");
+        let row = rows
+            .iter()
+            .find(|r| r.name == "probe_row")
+            .expect("the row");
+        assert_eq!((row.preview.as_str(), &row.handle), ("7", &None));
+        let names = reading::completion_names(&transport).expect("a reading");
+        assert!(names.bindings.iter().any(|n| n == "probe_row"));
+    }
+
+    #[test]
+    fn path_entries_lists_under_the_engine_cwd() {
+        let dir = tempfile::tempdir().expect("a tempdir");
+        std::fs::create_dir(dir.path().join("sub")).expect("a subdirectory");
+        let transport = at(dir.path());
+        assert_eq!(
+            reading::path_entries(&transport, std::path::Path::new(".")),
+            Ok(vec![reading::PathEntry {
+                name: "sub".into(),
+                dir: true,
+                exec: false,
+            }])
+        );
+    }
+
+    #[test]
+    fn an_unknown_class_names_itself() {
+        let msg = rejection(&fresh(), raw("not-a-real-class", None));
+        assert!(msg.contains("not-a-real-class"), "{msg}");
+    }
+
+    #[test]
+    fn a_request_that_is_not_a_variant_is_refused() {
+        let msg = rejection(&fresh(), FOValue::Unit);
+        assert!(msg.contains("variant"), "{msg}");
+    }
+
+    /// Each class states its payload, and a request breaking that is refused
+    /// naming the class.
+    #[test]
+    fn a_payload_its_class_does_not_take_is_refused() {
+        let transport = fresh();
+        let msg = rejection(&transport, raw("cwd", Some(FOValue::Unit)));
+        assert!(msg.contains("`cwd probe takes no payload"), "{msg}");
+        let msg = rejection(&transport, raw("env-var", None));
+        assert!(
+            msg.contains("`env-var probe reads a string payload"),
+            "{msg}"
+        );
+    }
+
+    /// First cause wins, and a severed identity is as over as a wire.
+    #[test]
+    fn a_severed_identity_refuses_what_follows() {
+        let transport = fresh();
+        let first = Severed::Faulted("the first".into());
+        assert_eq!(transport.sever(first.clone()), first);
+        assert_eq!(
+            transport.sever(Severed::Faulted("the second".into())),
+            first
+        );
+        assert_eq!(
+            reading::cwd(&transport),
+            Err(ProbeError::Severed(first.clone()))
+        );
+        let refused = dispatch_to_report(
+            &transport,
+            Run {
+                program: Program::Source("$[1 + 1]".into()),
+                script_name: "<test>".into(),
+                caps: crate::types::GrantStack::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: crate::run::RunIo::Capture,
+                terminal: crate::run::RequestedTerminalAccess::Denied,
+                stdin: crate::run::RunStdin::Empty,
+                trail: None,
+            },
+            Arc::new(()),
+        );
+        assert_eq!(refused, Err(first));
+    }
+
+    /// A parked fork is adopted once, and narrowed under the parent's own
+    /// installer — which, for a test engine, has no base lexicon to narrow by.
+    #[test]
+    fn a_parked_fork_is_adopted_once_under_the_parent_installer() {
+        let transport = fresh();
+        let park = || {
+            transport
+                .nursery
+                .park(Shell::new(crate::io::TerminalState::default()))
+        };
+        let id = park();
+        assert!(transport.adopt_parked(id, &SpawnGrant::Inherit).is_ok());
+        let again = transport
+            .adopt_parked(id, &SpawnGrant::Inherit)
+            .err()
+            .expect("a fork adopts once");
+        assert!(again.contains("no forked session is parked"), "{again}");
+        let based = transport
+            .adopt_parked(park(), &SpawnGrant::Base("confined".into()))
+            .err()
+            .expect("a bare engine has no base lexicon");
+        assert!(based.contains("`confined`"), "{based}");
     }
 }
 
@@ -2718,19 +2340,26 @@ mod probe_tests {
 #[cfg(test)]
 mod runtime_error_seam_tests {
     use super::*;
-    use crate::source::SourceDb;
     use crate::types::Error;
 
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
-        let db = SourceDb::default();
+        let shell = Shell::new(crate::io::TerminalState::default());
         let err = Error::new("boom", 3).with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
-        let Ending::Raised { rendered, .. } =
-            render_raise(&err, true, crate::source::FileId(0), &db, false)
+        let Ending::Raised {
+            rendered, record, ..
+        } = render_raise(&err, true, crate::source::FileId(0), &shell, false)
         else {
             panic!("an engine runtime error must project to a wire Ending::Raised");
         };
+        assert_eq!(
+            record.field("message"),
+            Some(&FOValue::String {
+                value: "boom".into()
+            }),
+            "the record carries the bare message: {record:?}"
+        );
         assert!(
             rendered.contains("error"),
             "error prefix missing: {rendered:?}"
@@ -2764,7 +2393,6 @@ mod static_diagnostic_seam_tests {
 
     /// The wire report for `src`, and how many registry ids the run minted.
     fn project(src: &str) -> (String, i32, u32) {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let before = shell.sources().next_id().0;
         let report = shell.run(capture_req(src));
@@ -2773,7 +2401,7 @@ mod static_diagnostic_seam_tests {
             "{src:?} must fail before evaluation"
         );
         let minted = shell.sources().next_id().0 - before;
-        let Report::Static { rendered, status } = report.into_report(shell.sources()) else {
+        let Report::Static { rendered, status } = report.into_report(&shell) else {
             panic!("a static run must project to Report::Static");
         };
         (rendered, status, minted)
@@ -2872,16 +2500,7 @@ mod wire_liveness_tests {
     /// The ticker does not start until the attach is written, so any test
     /// expecting heartbeat traffic or deadline death must call this first.
     fn attach(transport: &WireTransport) {
-        transport.attach(
-            TerminalEndpoint {
-                lease: None,
-                state: crate::io::TerminalState::default(),
-            },
-            PathBuf::from("/"),
-            PathBuf::from("/"),
-            None,
-            "repl".into(),
-        );
+        transport.attach(Attach::new("repl", PathBuf::from("/"), PathBuf::from("/")));
     }
 
     /// The version handshake the guest engine checks before it will speak.
@@ -2898,7 +2517,7 @@ mod wire_liveness_tests {
             .unwrap()
             .expect("an Attach frame must arrive")
         {
-            Frame::Attach { proto_version, .. } => assert_eq!(proto_version, PROTOCOL_VERSION),
+            Frame::Attach(attach) => assert_eq!(attach.proto_version, PROTOCOL_VERSION),
             other => panic!("expected an Attach frame, got {other:?}"),
         }
     }
@@ -2915,7 +2534,7 @@ mod wire_liveness_tests {
         attach(&transport);
 
         match peer.read_frame().unwrap().expect("a frame must arrive") {
-            Frame::Attach { .. } => {}
+            Frame::Attach(_) => {}
             other => panic!("the first frame on the wire must be Attach, got {other:?}"),
         }
     }
@@ -3032,7 +2651,7 @@ mod wire_liveness_tests {
         front.shutdown(std::net::Shutdown::Write).unwrap();
         let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
 
-        transport.control().send(Control::Cancel(DispatchId(1)));
+        transport.control().cancel(DispatchId(1));
 
         assert!(
             transport.severed().is_some(),
@@ -3069,7 +2688,7 @@ mod wire_liveness_tests {
             .unwrap()
             .expect("the Attach handshake must cross first")
         {
-            Frame::Attach { .. } => {}
+            Frame::Attach(_) => {}
             other => panic!("expected the Attach frame, got {other:?}"),
         }
 

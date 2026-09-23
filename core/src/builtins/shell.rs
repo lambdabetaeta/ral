@@ -1,6 +1,6 @@
 //! The shell-state builtins: `alias`, `unalias`, and `cd`.
 
-use crate::types::{Settled, Shell, Value, sig};
+use crate::types::{Chpwd, Settled, Shell, Value, sig};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
 /// which the rc `aliases:` map and the plugin loader also come in through.
@@ -55,8 +55,8 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
 
 /// `cd <path>` — move the shell's logical cwd, never the OS process cwd.
 ///
-/// Only the REPL owns the plugin runtime that fires `chpwd`, so the
-/// `(old, new)` pair waits on `local.repl.pending_chpwd` for it to drain.
+/// Only the REPL owns the plugin runtime that fires `chpwd`, so each move is
+/// recorded on `local.repl.last_chpwd`, for the `last-chpwd` probe to read.
 pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // The checker guarantees one String, but not a non-empty one, and
     // `resolve_path` would read "" as the cwd — making `cd $d` a silent
@@ -79,7 +79,8 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
 
     shell.check_shell_chdir()?;
     let (old, new) = shell.apply_chdir(&path)?;
-    shell.local.repl.pending_chpwd =
-        Some((std::path::PathBuf::from(old), std::path::PathBuf::from(new)));
+    let last = &mut shell.local.repl.last_chpwd;
+    let seq = last.as_ref().map_or(1, |c| c.seq + 1);
+    *last = Some(Chpwd { seq, old, new });
     Ok(Value::Unit)
 }

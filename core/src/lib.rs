@@ -13,6 +13,7 @@ pub mod builtins;
 pub mod capability;
 pub mod diagnostic;
 pub mod elaborator;
+pub mod engine;
 pub(crate) mod engine_seed;
 pub mod evaluator;
 pub mod exit_hints;
@@ -25,8 +26,6 @@ pub mod path;
 pub(crate) mod prelude_manifest {
     include!(concat!(env!("OUT_DIR"), "/prelude_manifest.rs"));
 }
-#[cfg(unix)]
-pub mod engine;
 #[cfg(unix)]
 pub mod hatch;
 pub mod process;
@@ -60,8 +59,8 @@ pub mod wire;
 // evaluator or syntax layers through the crate root.
 pub use boot::HostSurface;
 pub use run::{
-    Captured, Ending, RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest,
-    RunStdin, StaticDiagnostics,
+    Captured, Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
+    StaticDiagnostics,
 };
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_anchor};
 pub use spawn_grant::SpawnGrant;

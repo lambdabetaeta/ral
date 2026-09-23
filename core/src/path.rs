@@ -52,8 +52,9 @@ pub(crate) use render::{Rendered, render_paths};
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;
+pub(crate) use which::is_executable_file;
 pub(crate) use which::{PathSearch, search};
-pub use which::{SearchCwd, commands_on_path, forget_located_commands, locate, resolve_in_path};
+pub use which::{SearchCwd, forget_located_commands, locate, resolve_in_path};
 
 /// Process working directory, for callers with no shell to ask; shells go
 /// through `Shell::cwd`, which honours a `within` override or a prior `cd`.

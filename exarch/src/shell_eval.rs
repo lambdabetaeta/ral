@@ -86,16 +86,14 @@ impl PinDigest {
     }
 }
 
-/// A shared, session-owned register of pinned-state digests, written as
-/// `` `pin ``/`` `unpin `` flow past the live surface sink.
-///
-/// Pins otherwise flow straight through the session to the frontend, so
-/// this mirror is the only way the boundary nudge can name them; `None`
-/// (tests, any path with no nudge layer) disables it.
+/// A shared, session-owned register of pinned-state digests, written by the
+/// desk's `exarch-pins` family and read back by its `` `read ``/`` `list ``
+/// and by the boundary nudge.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// The shell's own decode target: the five shapes the `surface` channel
-/// carries, closed and named rather than borrowed from the bus's vocabulary.
+/// What the record absorbs: the four shapes the `surface` channel carries,
+/// plus the register writes `exarch-pins` makes — closed and named rather
+/// than borrowed from the bus's vocabulary.
 ///
 /// `Surface` carries the fact a card *is* (`Card`, `Pin`) rather than one a
 /// printer merely wants a copy of — an observation, a notice, and a done
@@ -296,8 +294,8 @@ pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
 
 /// Project a `reply`'s first-order payload to the JSON a user-facing edge (the
 /// headless `result`) reads — deliberately **not** [`FOValue`]'s own `serde`
-/// impl, which is the transport encoding (internally tagged by `kind`, floats
-/// as IEEE-754 bits) and would hand the user a `{"kind":"string",…}` wrapper
+/// impl, which is the transport encoding (externally tagged, floats as
+/// IEEE-754 bits) and would hand the user a `{"string":{"value":…}}` wrapper
 /// where a bare JSON string was promised.  JSON has neither non-finite floats
 /// nor a byte type, so those cross as named strings and as base64.
 pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
@@ -356,7 +354,7 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
     //!
-    //! They hold one `Shell` across two `run_shell` calls — the harness shape
+    //! They hold one engine across two `run_shell` calls — the harness shape
     //! exarch uses between consecutive tool calls — to pin what routing through
     //! `run_phrases` buys: `let` bindings persist, effects before a failing
     //! line persist while those after it never ran, and `cd` persists.  The
@@ -367,7 +365,7 @@ mod tests {
     use crate::bus::card::Row;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
-    use ral_core::Shell;
+    use ral_core::protocol::IdentityTransport;
     use ral_core::types::{CallSite, Capabilities, Observed};
 
     /// Render a path without a trailing separator.  Some hosts return
@@ -382,18 +380,8 @@ mod tests {
         }
     }
 
-    /// A `Shell` mirroring `bootstrap::boot_shell` without signal-handler
-    /// installation — global, and racey under `cargo test`.
-    fn fresh_shell() -> Shell {
-        let mut shell = ral_core::boot::boot_shell(
-            ral_core::io::TerminalState::default(),
-            &PRELUDE,
-            &builtins::host_surface(),
-        );
-        builtins::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
-            .expect("embedded agent library");
-        crate::bootstrap::seed_no_color(&mut shell);
-        shell
+    fn fresh() -> IdentityTransport {
+        crate::bootstrap::test_transport()
     }
 
     /// One tool run through the **real** production `run_shell`, composed via
@@ -402,34 +390,23 @@ mod tests {
     /// probes no registry.  Panics on a static failure: every call site below
     /// expects a completed run.
     fn run_shell_direct(
-        shell: &mut ral_core::Shell,
+        transport: &IdentityTransport,
         caps: &Capabilities,
         cmd: &str,
         timeout_secs: u64,
         recorder: &crate::record::Emitter,
     ) -> ToolResult {
-        // The transport owns its `Shell`, so move the live one out behind a
-        // placeholder that the swap below discards.
-        let taken = std::mem::replace(
-            shell,
-            ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
-        );
-        let transport = ral_core::protocol::IdentityTransport::new(taken);
         let applier = Arc::new(crate::fleet::desk::SurfaceApplier {
-            pins: None,
             recorder: recorder.clone(),
         });
         let outcome = run_shell(
-            &transport,
+            transport,
             &ral_core::types::GrantStack::of(caps.clone()),
             "turn 1",
             cmd,
             timeout_secs,
             applier,
         );
-        // Recover the mutated shell so `let`/`cd`/binding state reaches the
-        // caller's next run — the across-calls contract these tests pin.
-        *shell = transport.into_shell();
         match outcome {
             Ok(ral_core::protocol::Report::Ran {
                 ending,
@@ -453,9 +430,9 @@ mod tests {
     /// One tool run under `Capabilities::root()` — exarch's least-restricted
     /// default, so every source here runs without exercising the OS sandbox,
     /// which `core/tests/top_level_vs_block.rs` covers separately.
-    fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
+    fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
         run_shell_direct(
-            shell,
+            engine,
             &Capabilities::root(),
             cmd,
             30,
@@ -511,14 +488,14 @@ mod tests {
                 }),
                 ..Capabilities::root()
             };
-            let mut shell = fresh_shell();
+            let engine = fresh();
             let cmd = format!(
                 "cd '{root}'\n\
                  let hits = grep-files 'NEEDLE'\n\
                  let listing = explore-dir 3\n\
                  return [hits: $hits, listing: $listing]"
             );
-            let r = run_shell_direct(&mut shell, &caps, &cmd, 30, &crate::record::Emitter::none());
+            let r = run_shell_direct(&engine, &caps, &cmd, 30, &crate::record::Emitter::none());
             assert_eq!(
                 r.exit,
                 0,
@@ -553,10 +530,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn view_tags_lines_with_hash() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
         let r = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let rows = view-hash '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
             ),
@@ -595,9 +572,9 @@ mod tests {
     /// docs live in.
     #[test]
     fn explain_answers_every_agent_helper_with_its_doc() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         for (name, doc) in builtins::agent_library_docs() {
-            let run = run_once(&mut shell, &format!("explain {name}"));
+            let run = run_once(&engine, &format!("explain {name}"));
             // `explain` indents every line it prints; a family's doc spans lines.
             let out = String::from_utf8_lossy(&run.stdout).replace("\n  ", "\n");
             assert!(
@@ -611,9 +588,9 @@ mod tests {
     /// `run_phrases` install survives the tool-call boundary.
     #[test]
     fn tool_call_let_persists_across_calls() {
-        let mut shell = fresh_shell();
-        let _ = run_once(&mut shell, "let persist_n = 41");
-        let second = run_once(&mut shell, "return $[$persist_n + 1]");
+        let engine = fresh();
+        let _ = run_once(&engine, "let persist_n = 41");
+        let second = run_once(&engine, "return $[$persist_n + 1]");
         assert_eq!(
             second.exit,
             0,
@@ -631,25 +608,28 @@ mod tests {
     /// command fails, so `pre_x` is defined and `post_y` never ran.
     #[test]
     fn tool_call_partial_effects_persist_on_error() {
-        let mut shell = fresh_shell();
-        let failing = run_once(
-            &mut shell,
-            "let pre_x = 1\ncat /nonexistent\nlet post_y = 2",
-        );
+        let engine = fresh();
+        let failing = run_once(&engine, "let pre_x = 1\ncat /nonexistent\nlet post_y = 2");
         assert_ne!(
             failing.exit, 0,
             "the failing tool call must surface a non-zero exit"
         );
 
-        // Against the live shell's scope, not a follow-up tool call: looking
-        // up an undefined name from ral elaborates to a type error and
-        // surfaces as `Static`, the wrong shape for "simply absent".
+        // Through the probe, not a follow-up tool call: looking up an
+        // undefined name from ral elaborates to a type error and surfaces as
+        // `Static`, the wrong shape for "simply absent".
+        let bound = |name: &str| {
+            ral_core::protocol::reading::bindings(&engine)
+                .expect("an identity transport answers")
+                .iter()
+                .any(|row| row.name == name)
+        };
         assert!(
-            shell.scope_lookup("pre_x").is_some(),
+            bound("pre_x"),
             "pre-failure `let` must persist into the next tool call"
         );
         assert!(
-            shell.scope_lookup("post_y").is_none(),
+            !bound("post_y"),
             "post-failure `let` never ran, must not be present"
         );
     }
@@ -658,17 +638,19 @@ mod tests {
     /// one call is observable to `cwd` in the next.
     #[test]
     fn tool_call_cd_persists_across_calls() {
-        let mut shell = fresh_shell();
-        let tmp = std::env::temp_dir();
+        let engine = fresh();
+        // Beneath the temp dir the engine boots in, so the `cd` moves it.
+        let dir = scratch_dir("cd-persists");
+        let tmp = dir.path().to_path_buf();
         let tmp_disp = display_no_trailing_sep(&tmp);
-        let cd = run_once(&mut shell, &format!("cd '{tmp_disp}'"));
+        let cd = run_once(&engine, &format!("cd '{tmp_disp}'"));
         assert_eq!(
             cd.exit,
             0,
             "cd should succeed; stderr was: {}",
             String::from_utf8_lossy(&cd.stderr)
         );
-        let pwd = run_once(&mut shell, "cwd");
+        let pwd = run_once(&engine, "cwd");
         assert_eq!(pwd.exit, 0, "cwd in the second call should succeed");
         let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
         let got = pwd
@@ -687,7 +669,7 @@ mod tests {
     /// grows its window to the run's edge rather than going unaddressable.
     #[test]
     fn edit_window_hash_addresses_repeated_lines() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tmp = scratch_dir("window-edit");
 
         let repeated = tmp.path().join("repeated.txt");
@@ -704,7 +686,7 @@ target
         let repeated_str = display_no_trailing_sep(&repeated);
         // `target` is line 2 = index 1; its witness differs from line 6's.
         let edited = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let nlines = line-count '{repeated_str}'\n\
                  let rows = view-hash '{repeated_str}' 1 $[$nlines + 1]\n\
@@ -736,7 +718,7 @@ target
         std::fs::write(&run, run_original).expect("write run fixture");
         let run_str = display_no_trailing_sep(&run);
         let buried = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let nlines = line-count '{run_str}'\n\
                  let rows = view-hash '{run_str}' 1 $[$nlines + 1]\n\
@@ -762,7 +744,7 @@ target
     /// halves: one stale hash writes nothing, a clean batch applies in a pass.
     #[test]
     fn edit_batch_is_atomic_and_non_interfering() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tmp = scratch_dir("batch-edit");
         let path = tmp.path().join("batch.txt");
         let original = "\
@@ -777,7 +759,7 @@ keep-bottom
 
         // `hzzzzzz` is not `h` + six hex, so it can match no witness.
         let poisoned = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let nlines = line-count '{path_str}'\n\
                  let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
@@ -792,7 +774,7 @@ keep-bottom
         );
 
         let ok = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let nlines = line-count '{path_str}'\n\
                  let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
@@ -825,11 +807,11 @@ keep-bottom
     /// getting one of them.
     #[test]
     fn edit_batch_rejects_two_edits_naming_one_line() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (dir, path) = scratch_file("dup-edit", "f.txt", "a\nb\nc\n");
 
         let clash = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[1][hash], line: 'SECOND']]"
@@ -850,7 +832,7 @@ keep-bottom
         // The control: distinct lines in one batch still apply, so the test
         // cannot pass by refusing every batch.
         let ok = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
@@ -872,11 +854,11 @@ keep-bottom
     /// `\n`/`\t`-style escape rather than the real character.
     #[test]
     fn edit_notes_changed_lines_on_stderr() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("edit-note", "f.txt", "a\nb\nc\n");
 
         let one = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[0][hash], line: 'A']]"
@@ -890,7 +872,7 @@ keep-bottom
         );
 
         let batch = run_once(
-            &mut shell,
+            &engine,
             &format!(
                 "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
@@ -912,10 +894,10 @@ keep-bottom
     /// match spans a real newline in `from`.
     #[test]
     fn edit_replace_notes_changed_line_range_on_stderr() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
         let r = run_once(
-            &mut shell,
+            &engine,
             &format!("edit-replace '{path}' 'hello world' 'hi\\tthere'"),
         );
         assert_eq!(r.exit, 0, "edit-replace must succeed");
@@ -930,7 +912,7 @@ keep-bottom
 
         let (_dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
         let spanning = run_once(
-            &mut shell,
+            &engine,
             &format!("edit-replace '{path2}' 'two\nthree' 'TWO\nTHREE'"),
         );
         assert_eq!(
@@ -977,7 +959,7 @@ keep-bottom
         }
 
         fn assert_round_trips(label: &str, content: &str) {
-            let mut shell = fresh_shell();
+            let engine = fresh();
             let (tmp, path_str) = scratch_file(
                 &format!("numeric-witness-{label}"),
                 "fixture.txt",
@@ -986,7 +968,7 @@ keep-bottom
 
             // Read the witness as the agent would: from `view-hash`.
             let vr = run_once(
-                &mut shell,
+                &engine,
                 &format!("let rows = view-hash '{path_str}' 1 2; $rows[0][hash]"),
             );
             assert_eq!(
@@ -1004,7 +986,7 @@ keep-bottom
 
             // Feed it back as a *bare* token, the way the agent copies it.
             let er = run_once(
-                &mut shell,
+                &engine,
                 &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
             let after = std::fs::read_to_string(tmp.path().join("fixture.txt")).unwrap_or_default();
@@ -1129,9 +1111,9 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn spawned_commands_inherit_color_suppression() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let r = run_once(
-            &mut shell,
+            &engine,
             "/bin/sh -c 'printf %s \"$NO_COLOR/$CLICOLOR_FORCE\"'",
         );
         assert_eq!(r.exit, 0);
@@ -1149,14 +1131,14 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn timeout_kills_external_subprocess_tree() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         // The leader blocks in `wait`, holding the call open unless the
         // timeout tears the group down; the grandchild prints its pid so the
         // test can prove it was reaped.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = run_shell_direct(
-            &mut shell,
+            &engine,
             &Capabilities::root(),
             cmd,
             2,
@@ -1203,10 +1185,10 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn timeout_message_names_budget_and_knob() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let r = run_shell_direct(
-            &mut shell,
+            &engine,
             &Capabilities::root(),
             cmd,
             2,
@@ -1233,9 +1215,9 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn command_exit_is_the_tool_exit() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let r = run_shell_direct(
-            &mut shell,
+            &engine,
             &Capabilities::root(),
             "/bin/sh -c 'exit 3'",
             10,
@@ -1247,9 +1229,9 @@ keep-bottom
     /// A raised error's status travels the same way a command's does.
     #[test]
     fn raised_error_status_is_the_tool_exit() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let r = run_shell_direct(
-            &mut shell,
+            &engine,
             &Capabilities::root(),
             "fail [status: 7, message: 'raised error']",
             10,
@@ -1272,11 +1254,11 @@ keep-bottom
             );
             return;
         }
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = run_shell_direct(
-            &mut shell,
+            &engine,
             &projecting_caps(),
             cmd,
             2,
@@ -1323,23 +1305,21 @@ keep-bottom
         );
     }
 
-    /// The eval-layer half of the fleet's cascade: cancelling the durable root
-    /// each agent's `EvalReach` holds (`Shell::cancel_handle`) unwinds an
-    /// in-flight `run_shell` and tears down its tree.  A 30 s budget, so only
-    /// the cancel can explain a fast return, over a `fork_session` child — the
-    /// sub-agent shape, which publishes no process signal slots, leaving this
-    /// handle the only way to stop it.
+    /// The eval-layer half of the fleet's cascade: an agent's terminate
+    /// cancels the durable root, which unwinds an in-flight `run_shell` and
+    /// tears down its tree.  A 30 s budget, so only the terminate can explain
+    /// a fast return.
     #[cfg(unix)]
     #[test]
     fn root_cancel_unwinds_inflight_run_shell() {
-        let mut shell = fresh_shell().fork_session();
-        let handle = shell.cancel_handle();
+        let engine = fresh();
+        let control = ral_core::protocol::Transport::control(&engine).clone();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = std::thread::scope(|s| {
             let worker = s.spawn(|| {
                 run_shell_direct(
-                    &mut shell,
+                    &engine,
                     &Capabilities::root(),
                     cmd,
                     30,
@@ -1349,7 +1329,7 @@ keep-bottom
             // Let the eval reach the blocking external wait, then cancel from
             // outside — the registry cascade's move.
             std::thread::sleep(std::time::Duration::from_millis(300));
-            handle.cancel(ral_core::process::CancelCause::Explicit);
+            control.terminate();
             worker.join().expect("run_shell worker")
         });
         let elapsed = t0.elapsed();
@@ -1361,11 +1341,11 @@ keep-bottom
         );
         // Two shapes, both the unwind under test: blocked in the child wait,
         // teardown SIGTERMs the group and the signal death is the statement
-        // error; between statements, `check` raises Explicit as "cancelled".
+        // error; between statements, `check` raises Terminate as "terminated".
         assert_ne!(r.exit, 0, "a cancelled run must not report success");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
-            stderr.contains("cancelled") || stderr.contains("SIGTERM"),
+            stderr.contains("terminated") || stderr.contains("SIGTERM"),
             "the unwind surfaces the cancel or the torn-down child; stderr was: {stderr}"
         );
 
@@ -1396,9 +1376,9 @@ keep-bottom
     /// and the model must read the message, not a wall of codes.
     #[test]
     fn byte_fields_render_as_lossy_text_not_decimal() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let r = run_once(
-            &mut shell,
+            &engine,
             "return [stderr: !{ints-to-bytes [107, 105, 108, 108, 101, 100, 255] | from-bytes}]",
         );
         assert_eq!(
@@ -1425,7 +1405,7 @@ keep-bottom
     /// ever read by eye.
     #[test]
     fn programmatic_todo_sweep_rewrites_every_match() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tmp = scratch_dir("todo-sweep");
         std::fs::write(
             tmp.path().join("a.txt"),
@@ -1449,7 +1429,7 @@ each {{ |f|
 }} $files
 return !{{length $hits}}"
         );
-        let r = run_once(&mut shell, &src);
+        let r = run_once(&engine, &src);
         assert_eq!(
             r.exit,
             0,
@@ -1477,7 +1457,7 @@ return !{{length $hits}}"
     /// than guess.
     #[test]
     fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (tmp, file_str) = scratch_file(
             "edit-replace",
             "config.txt",
@@ -1485,7 +1465,7 @@ return !{{length $hits}}"
         );
 
         let r = run_once(
-            &mut shell,
+            &engine,
             &format!("edit-replace '{file_str}' 'USE_OPENCV := 0' 'USE_OPENCV := 1'"),
         );
         assert_eq!(
@@ -1500,7 +1480,7 @@ return !{{length $hits}}"
         );
 
         let r = run_once(
-            &mut shell,
+            &engine,
             &format!("edit-replace '{file_str}' 'USE_MISSING := 0' 'x'"),
         );
         assert_ne!(r.exit, 0, "0 matches must error, not write");
@@ -1510,7 +1490,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let r = run_once(&mut shell, &format!("edit-replace '{file_str}' ':=' '='"));
+        let r = run_once(&engine, &format!("edit-replace '{file_str}' ':=' '='"));
         assert_ne!(
             r.exit, 0,
             "a repeated match must error, not guess which one"
@@ -1527,13 +1507,11 @@ return !{{length $hits}}"
     /// its own: the whole-file diff, and no `write` observation beside it.
     #[test]
     fn edit_replace_surfaces_one_whole_file_diff_card() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
-        let (r, records) = run_capturing(
-            &mut shell,
-            &format!("edit-replace '{path}' 'world' 'friend'"),
-        );
+        let (r, records) =
+            run_capturing(&engine, &format!("edit-replace '{path}' 'world' 'friend'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         assert_eq!(
             r.exit,
@@ -1575,12 +1553,11 @@ return !{{length $hits}}"
     /// under (`old_snapshot_for_diff`) governs a read this path never makes.
     #[test]
     fn edit_over_an_oversized_file_still_diffs() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tail = "x".repeat(70_000);
         let (dir, path) = scratch_file("edit-oversized", "big.txt", &format!("HEAD\n{tail}"));
 
-        let (r, records) =
-            run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
+        let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
         let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
         assert_eq!(
             r.exit,
@@ -1616,10 +1593,10 @@ return !{{length $hits}}"
     /// no hunks would draw an empty block under a path that did not change.
     #[test]
     fn edit_changing_nothing_surfaces_nothing() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("edit-noop", "same.txt", "one\ntwo\n");
 
-        let (r, records) = run_capturing(&mut shell, &format!("edit-replace '{path}' 'two' 'two'"));
+        let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'two' 'two'"));
         assert_eq!(r.exit, 0, "a no-op edit still succeeds");
         assert!(
             cards(&records).is_empty() && observations(&records).is_empty(),
@@ -1634,7 +1611,7 @@ return !{{length $hits}}"
     #[test]
     fn edit_replace_preserves_the_target_file_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (dir, path) = scratch_file("edit-replace-mode", "run.sh", "#!/bin/sh\necho old\n");
         std::fs::set_permissions(
             dir.path().join("run.sh"),
@@ -1642,7 +1619,7 @@ return !{{length $hits}}"
         )
         .expect("chmod the fixture executable");
 
-        let r = run_once(&mut shell, &format!("edit-replace '{path}' 'old' 'new'"));
+        let r = run_once(&engine, &format!("edit-replace '{path}' 'old' 'new'"));
         let mode =
             std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
 
@@ -1664,7 +1641,7 @@ return !{{length $hits}}"
     /// one must be refused at the door, unread.
     #[test]
     fn skill_name_validation_confines_the_join_to_the_skills_root() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tmp = scratch_dir("skill-root");
         let skills = tmp.path().join(".exarch").join("skills");
         std::fs::create_dir_all(skills.join("demo")).expect("create skill dir");
@@ -1683,7 +1660,7 @@ return !{{length $hits}}"
         .expect("write secret fixture");
         let root = display_no_trailing_sep(tmp.path());
 
-        let loaded = run_once(&mut shell, &format!("cd '{root}'; skill 'demo'"));
+        let loaded = run_once(&engine, &format!("cd '{root}'; skill 'demo'"));
         let body = loaded.value.as_deref().expect("skill returns its body");
         assert!(
             body.contains("// skill root:") && body.contains("body line"),
@@ -1691,7 +1668,7 @@ return !{{length $hits}}"
         );
 
         for name in ["../secret", "demo/../../secret", ".", "../../etc/passwd"] {
-            let r = run_once(&mut shell, &format!("skill '{name}'"));
+            let r = run_once(&engine, &format!("skill '{name}'"));
             assert_eq!(
                 r.value.as_deref(),
                 Some(format!("skill not found: {name}").as_str()),
@@ -1707,12 +1684,12 @@ return !{{length $hits}}"
     /// shadowed by the empty local root.
     #[test]
     fn absent_skill_is_not_found_not_unreadable() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let tmp = scratch_dir("skill-absent");
         let root = display_no_trailing_sep(tmp.path());
         // `root` has no `.exarch/skills`, so the local root lacks `nowhere`;
         // the config root must still be consulted before declaring it missing.
-        let r = run_once(&mut shell, &format!("cd '{root}'; skill 'nowhere'"));
+        let r = run_once(&engine, &format!("cd '{root}'; skill 'nowhere'"));
         assert_eq!(
             r.value.as_deref(),
             Some("skill not found: nowhere"),
@@ -1724,7 +1701,10 @@ return !{{length $hits}}"
     /// returning the result and every [`crate::record::Record`] the run
     /// witnessed — the whole `core surface → decode_surface → Surface →
     /// Display` path the surface tests assert on.
-    fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::record::Record>) {
+    fn run_capturing(
+        engine: &IdentityTransport,
+        cmd: &str,
+    ) -> (ToolResult, Vec<crate::record::Record>) {
         let (tx, rx) = channel();
         let recorder = crate::record::Emitter::none();
         recorder.attach(crate::record::FleetSink {
@@ -1732,7 +1712,7 @@ return !{{length $hits}}"
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
-        let result = run_shell_direct(shell, &Capabilities::root(), cmd, 30, &recorder);
+        let result = run_shell_direct(engine, &Capabilities::root(), cmd, 30, &recorder);
         (result, crate::bus::drain_records(&rx))
     }
 
@@ -1789,10 +1769,10 @@ return !{{length $hits}}"
     /// event, and no exec card — `from-string` is a builtin, not an image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("cov-read", "a", "hello\n");
 
-        let (r, records) = run_capturing(&mut shell, &format!("from-string < '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("from-string < '{path}'"));
         assert_eq!(
             r.exit,
             0,
@@ -1819,12 +1799,12 @@ return !{{length $hits}}"
     fn bare_write_redirect_surfaces_one_committed_write_card() {
         use ral_core::syntax::ast::RedirectMode;
         use ral_core::types::WriteOutcome;
-        let mut shell = fresh_shell();
+        let engine = fresh();
         // No fixture file: the write creates the target.
         let dir = scratch_dir("cov-write");
         let path = display_no_trailing_sep(&dir.path().join("b"));
 
-        let (r, records) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("to-string 'x' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         assert_eq!(
             r.exit,
@@ -1860,11 +1840,11 @@ return !{{length $hits}}"
     /// preview shape for every write the door can show.
     #[test]
     fn creating_a_file_by_redirect_reads_as_an_all_adds_diff() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let dir = scratch_dir("cov-write-create");
         let path = display_no_trailing_sep(&dir.path().join("fresh.txt"));
 
-        let (r, records) = run_capturing(&mut shell, &format!("to-string 'one\ntwo' > '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("to-string 'one\ntwo' > '{path}'"));
         assert_eq!(r.exit, 0, "the write redirect must succeed");
 
         let obs = observations(&records);
@@ -1891,11 +1871,11 @@ return !{{length $hits}}"
     fn bare_write_redirect_over_existing_file_surfaces_old_and_new_bytes() {
         use ral_core::syntax::ast::RedirectMode;
         use ral_core::types::WriteOutcome;
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
 
         let (r, records) = run_capturing(
-            &mut shell,
+            &engine,
             &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
         );
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
@@ -1937,12 +1917,12 @@ return !{{length $hits}}"
     #[test]
     fn bare_write_redirect_over_oversized_existing_file_still_opens_what_landed() {
         use ral_core::types::WriteOutcome;
-        let mut shell = fresh_shell();
+        let engine = fresh();
         // Comfortably past the 64KiB read cap.
         let big = "x".repeat(70_000);
         let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
 
-        let (r, records) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("to-string 'short' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         assert_eq!(
             r.exit,
@@ -1990,7 +1970,7 @@ return !{{length $hits}}"
     /// mutation of the card that also reaches the record and resumed sessions.
     #[test]
     fn a_long_write_retains_its_complete_diff() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let dir = scratch_dir("cov-write-long");
         let path = display_no_trailing_sep(&dir.path().join("long.txt"));
         let body = (1..=25)
@@ -1998,7 +1978,7 @@ return !{{length $hits}}"
             .collect::<Vec<_>>()
             .join("\n");
 
-        let (r, records) = run_capturing(&mut shell, &format!("to-string '{body}' > '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("to-string '{body}' > '{path}'"));
         assert_eq!(r.exit, 0, "the write redirect must succeed");
 
         let obs = observations(&records);
@@ -2026,9 +2006,9 @@ return !{{length $hits}}"
     #[test]
     fn bare_external_surfaces_one_exec_card() {
         use ral_core::types::{AuditIo, CommandOrigin};
-        let mut shell = fresh_shell();
+        let engine = fresh();
 
-        let (r, records) = run_capturing(&mut shell, "/usr/bin/true");
+        let (r, records) = run_capturing(&engine, "/usr/bin/true");
         assert_eq!(
             r.exit,
             0,
@@ -2061,10 +2041,10 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
-        let (r, records) = run_capturing(&mut shell, &format!("view-text '{path}' 1 2"));
+        let (r, records) = run_capturing(&engine, &format!("view-text '{path}' 1 2"));
         assert_eq!(
             r.exit,
             0,
@@ -2095,10 +2075,10 @@ return !{{length $hits}}"
     #[test]
     fn cat_redirect_surfaces_read_then_exec_in_order() {
         use ral_core::types::{AuditIo, CommandOrigin};
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
-        let (r, records) = run_capturing(&mut shell, &format!("/bin/cat < '{path}'"));
+        let (r, records) = run_capturing(&engine, &format!("/bin/cat < '{path}'"));
         assert_eq!(
             r.exit,
             0,
@@ -2140,10 +2120,10 @@ return !{{length $hits}}"
     /// file's own effects would surface, and this one is pure bindings.
     #[test]
     fn using_a_ral_file_raises_no_io_card() {
-        let mut shell = fresh_shell();
+        let engine = fresh();
         let (_dir, path) = scratch_file("cov-use", "lib.ral", "let answer = 42\n");
 
-        let (ur, use_records) = run_capturing(&mut shell, &format!("use '{path}'"));
+        let (ur, use_records) = run_capturing(&engine, &format!("use '{path}'"));
         assert_eq!(
             ur.exit,
             0,

@@ -298,9 +298,10 @@ pub fn command_line(boot: &Boot, console: &str) -> String {
 /// The comparison belongs to the build and to nothing else.  By run time it
 /// is already too late — the host writes a line the guest is right to refuse,
 /// and the only thing a person on the host's side can see is a control plane
-/// that was never dialled.  So this is called from synod's `build.rs`, whose
-/// failure is a failure to *produce an installer*, which is the last moment
-/// at which a stale `vm-image/out/` is still cheap.
+/// that was never dialled.  So this is called from synod's
+/// `examples/check-media.rs`, which tauri runs as its `beforeBuildCommand`:
+/// its failure is a failure to *produce an installer*, which is the last
+/// moment at which a stale `vm-image/out/` is still cheap.
 ///
 /// `manifest` is the whole text of `boot-manifest.txt` — `key=value` a line,
 /// and, as on the kernel command line, a key written twice takes its last

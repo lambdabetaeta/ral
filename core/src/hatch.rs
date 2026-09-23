@@ -7,11 +7,9 @@
 //! binary with the dial on fd 3 and a seed socketpair named by
 //! `RAL_ENGINE_SEED_FD`, writes the one framed [`EngineSeed`] while the child
 //! drains it, and answers [`crate::protocol::HATCH_ACK`]: a peer that hears
-//! the ack has a live child holding its whole seed. [`seed_from_env`] and
-//! [`apply_seed`] are the other end, pushing the child's own grant layer:
-//! [`crate::SpawnGrant`] decodes a restriction record here, against the
-//! child's own cwd, and hands a base tag to the [`GrantNarrower`] its
-//! [`crate::engine::EngineInstaller`] carries — core knows no base names.
+//! the ack has a live child holding its whole seed. [`seed_from_env`] is the
+//! other end; the engine applies what it takes once its installer has booted
+//! (`EngineSeed::apply`).
 //!
 //! Nothing here names a transport: the listening socket is the caller's, and
 //! the tests stand a `UnixListener` and `UnixStream` pairs in for it. Only a
@@ -29,14 +27,12 @@ use std::thread::JoinHandle;
 
 use crate::engine_seed::{EngineSeed, pack_seed};
 use crate::process::ChildHandle;
-use crate::serial::WireDecoder;
-use crate::spawn_grant::{GrantNarrower, SpawnGrant};
-use crate::subprocess::install_wire_shell;
+use crate::spawn_grant::SpawnGrant;
 use crate::sync::LockExt as _;
 use crate::types::Shell;
 
 /// The engine's protocol socket lands on this descriptor, exactly as
-/// `run_engine` expects (`core/src/engine.rs`) and `ral-daemon` already
+/// `run_engine` expects (`core/src/engine/wire.rs`) and `ral-daemon` already
 /// spawns onto (`PROTOCOL_FD`).
 const PROTOCOL_FD: RawFd = 3;
 
@@ -327,8 +323,7 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
         format!("hatch: the child engine started, but the host could not be told so: {e}")
     });
     // The peer's end must read the child's death as EOF, so this process keeps
-    // no copy of the dial — it drops here as `WireTransport::new`'s own
-    // `engine` end does.
+    // no copy of the dial.
     drop(dial);
 
     // Recorded before the ack is reported on, so a child that started is
@@ -347,7 +342,7 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
 /// of failing it.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:hatch-spawn] re-execs the current engine binary as a hatched child over the connection a peer just dialled — infrastructure handoff exactly like WireTransport::new's engine-spawn site, not model turn-time I/O"
+    reason = "[silent:hatch-spawn] re-execs the current engine binary as a hatched child over the connection a peer just dialled — infrastructure handoff, not model turn-time I/O"
 )]
 fn spawn_engine(
     recipe: Recipe,
@@ -460,45 +455,6 @@ fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
         .ok_or_else(|| "hatch: the seed channel closed before a seed arrived".to_string())
 }
 
-/// Application of a seed already taken: called from `engine_session` once the
-/// installer has booted `shell`. Hydrates scope and context, then pushes the
-/// child's own grant layer, resolved by [`SpawnGrant::layer`] against this
-/// shell's own cwd — `narrow`, the [`GrantNarrower`] that installer carries,
-/// answers for the base names core has no lexicon for. The hydrated stack
-/// already carries the parent's layers, so this only adds the child's, never
-/// folds against them.
-///
-/// # Errors
-/// Returns a sentence naming a decode failure, a restriction record the
-/// capability decoder will not read, or whatever `narrow` refuses a base with
-/// — a wire-seeded child is refused rather than admitted above its ceiling.
-pub(crate) fn apply_seed(
-    seed: EngineSeed,
-    shell: &mut Shell,
-    narrow: GrantNarrower,
-) -> Result<(), String> {
-    let dec = WireDecoder::for_shell(shell, &seed.scope_table).map_err(|e| {
-        format!(
-            "hatch: the seed's scope table failed to decode: {}",
-            e.message
-        )
-    })?;
-    install_wire_shell(seed.shell, shell, &dec)
-        .map_err(|e| format!("hatch: the seed's context failed to decode: {}", e.message))?;
-    shell.env = seed.captured.into_runtime(&dec).map_err(|e| {
-        format!(
-            "hatch: the seed's captured environment failed to decode: {}",
-            e.message
-        )
-    })?;
-
-    let cwd = shell.cwd();
-    let home = shell.context.home();
-    let layer = seed.grant.layer(narrow, &cwd, home.as_deref())?;
-    shell.push_session_capabilities(layer);
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -522,7 +478,7 @@ mod tests {
         clippy::unnecessary_wraps,
         reason = "must match GrantNarrower's fn-pointer signature, which can genuinely refuse"
     )]
-    fn deny_net(_base: &str, _cwd: &str) -> Result<Capabilities, String> {
+    fn deny_net(_base: &str, _cwd: &std::path::Path) -> Result<Capabilities, String> {
         Ok(Capabilities {
             net: Some(false),
             ..Capabilities::default()
@@ -703,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_seed_hydrates_scope_and_narrows_capabilities() {
+    fn a_seed_hydrates_scope_and_narrows_capabilities() {
         let mut parent = Shell::new(crate::io::TerminalState::default());
         parent.set_var("kept".to_string(), Value::Int(7));
         let seed = pack_seed(&parent, SpawnGrant::Base("confined".to_string())).expect("pack seed");
@@ -712,7 +668,9 @@ mod tests {
         std::thread::spawn(move || send_seed(&mut writer, &seed).expect("send the seed"));
 
         let mut shell = bare_child_shell(prelude());
-        apply_seed(read_seed(reader).expect("read seed"), &mut shell, deny_net)
+        read_seed(reader)
+            .expect("read seed")
+            .apply(&mut shell, deny_net)
             .expect("apply seed");
 
         assert_eq!(shell.env.get("kept"), Some(&Value::Int(7)));

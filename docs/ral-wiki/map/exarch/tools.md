@@ -6,9 +6,9 @@ covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 
 # Map: exarch / tools
 
-**`ral` is exarch's tool.** Every other harness affordance the model once
-reached as a provider-advertised `Tool` — spawning, messaging, cancelling,
-scheduling, replying, and reading a reply — is now a ral builtin reached by writing ral inside
+**`ral` is exarch's tool.** Every other harness affordance — spawning,
+messaging, cancelling, scheduling, replying, and reading a reply — is a ral
+builtin, not a provider-advertised `Tool`, reached by writing ral inside
 `ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 migration; see [[map/exarch/builtins|builtins]] for the verbs and
@@ -58,7 +58,7 @@ for every tool.
   bare `relayed`. Nothing else happens — no call row, no model-view twin — so a
   model may narrate between calls without ending its turn. A record failure is
   a seam fault, not a tool error: the model still gets its acknowledgement.
-- **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
+- **`shell_eval/tools/agent.rs`** — not a tool module but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
   `` exarch-agents `start `` handler build on it — either arm of it, in-process or

@@ -18,9 +18,7 @@
 
 #![cfg(unix)]
 
-use ral_core::protocol::{
-    Control, DispatchId, Host, Liveness, Program, Run, Transport, WireTransport,
-};
+use ral_core::protocol::{DispatchId, Host, Liveness, Program, Run, Transport, WireTransport};
 use ral_core::types::GrantStack;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::os::unix::net::UnixStream;
@@ -102,7 +100,7 @@ fn a_stuck_write_still_declares_death() {
 }
 
 /// A write-stalled cancel returns and declares death: while the dispatch's
-/// write parks holding the lock, `ControlSender::send` queues behind it
+/// write parks holding the lock, `ControlSender::cancel` queues behind it
 /// rather than deadlocking, and returns once the stalled write times out and
 /// severs the connection — a cancel is never silently lost to a peer that
 /// stopped reading.
@@ -120,7 +118,7 @@ fn a_write_stalled_cancel_returns_and_declares_death() {
     std::thread::sleep(Duration::from_millis(50));
 
     let started = Instant::now();
-    transport.control().send(Control::Cancel(DispatchId(1)));
+    transport.control().cancel(DispatchId(1));
     let elapsed = started.elapsed();
 
     assert!(

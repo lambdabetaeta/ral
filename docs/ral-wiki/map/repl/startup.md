@@ -1,15 +1,16 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
-covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
+generated_at_commit: e2b7067b
+generated_at_date: 2026-09-23
+covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
 # Map: repl / startup
 
 The `ral` binary startup is a four-part front door: **`startup.rs` decides what
-kind of process this is, `cli.rs` distils argv into a `Mode`, `main.rs`
-dispatches the answer, and `batch.rs` runs non-interactive programs through
-core's framed run door**. Interactive sessions then hand to the REPL, above a
+kind of process this is and holds the binary's engine installers, `cli.rs`
+distils argv into a `Mode`, `main.rs` dispatches the answer, and `batch.rs`
+runs non-interactive programs through an engine it boots, speaking only the
+protocol**. Interactive sessions then hand to the REPL, above a
 pre-clap dispatch that lets the binary re-enter itself in confined or helper
 roles.
 
@@ -30,17 +31,18 @@ exit code, which `identify` lifts to `Invocation::Exit`. The chain is
 two-staged around the sandbox:
 
 - **Engine entry** (Unix) — `--engine` hands the process to
-  `ral_core::engine::run_engine` before anything else: the wire-engine child
-  boots the real shell itself through the installer's boot recipe. That recipe
-  is one `EngineInstaller` const in `startup::engine` — tag (`"repl"`), boot
-  shell, grant policy. The tag carries the baked prelude over the empty
-  `HostSurface`, since the captured host builtins are boot-time closures a
-  child cannot construct; the grant policy is a refusal, because the shell
-  spawns no child engines and has no base-tag lexicon to resolve a grant
-  against.
+  `ral_core::engine::run_engine(&engine::INSTALLERS)` before anything else,
+  so a wire-engine child boots through the very recipes the in-process
+  front-ends boot through. `startup::engine::INSTALLERS` holds two
+  `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface, decoding
+  `Attach.config` as `ReplConfig {login}`) and `batch` (`boot_batch` over the
+  batch surface, decoding `BatchConfig {args}`), each registering the boot
+  door. Both share one grant policy, a refusal (`no_seeded_children`),
+  because the shell spawns no child engines and has no base-tag lexicon to
+  resolve a grant against.
 - **Helper trampolines** — `try_run_pipeline_anchor` (`--ral-pipeline-anchor`,
-  the one multicall re-exec a pipeline still uses: a stage itself now runs on
-  a thread of the parent process, but a multi-stage pipeline still needs one
+  the one multicall re-exec a pipeline uses: a stage itself runs on
+  a thread of the parent process, but a multi-stage pipeline needs one
   process to hold its pgid open for its whole life) and
   `test_helper::try_run_test_helper`.
 - **Sandbox entry** — `ral_core::sandbox::early_init(&argv)` returns the
@@ -102,46 +104,41 @@ rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` /
 `ral/src/batch.rs` owns the whole non-interactive pipeline, from the source
 text inwards: `run_file` reads a script path, `run_stdin` reads a piped script,
 and both meet `-c` at `run_source`, which is therefore where line endings are
-normalised — one door, one rule. `run_source` parses,
-elaborates, typechecks, then **runs the program through core's framed run door
-rather than evaluating it directly**
-([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): the same
-`Shell::run` entry every host shares, handed a `Program::Source` run
-([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
+normalised — one door, one rule. Batch holds no `Shell`: it boots an
+`IdentityTransport` from the `batch` installer and speaks only the protocol,
+through `dispatch_to_report` under the mute host `()`, so it shares the REPL's
+one ending law and one typecheck
+([[design/engine-protocol|engine-protocol]]).
 
-- **The check.** The inference pass is not optional — it writes the ground
-  annotations the evaluator reads
-  ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — so a
-  batch run always typechecks, taking `typecheck`'s
-  `Result<Comp, Vec<TypeError>>`. A script has no prior session, so the check
-  seeds from the baked scheme list plus the surface's builtin table
-  (`SessionSchemes::from_schemes(PRELUDE.schemes(), host_surface.builtin_table())`)
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); a
-  clean check returns the fully annotated comp, any type error is fatal, and
-  `--check` runs the same check and exits without evaluating.
-- **The run.** `shell.run(RunRequest { … })` with
-  `Program::Source(source)` runs the annotated comp under
-  `GrantStack::root()` with no wall or detached limit, inheriting IO and
-  stdin. Its `RunReport` has two arms: `Ran` yields the `result` to score;
-  `Static` cannot occur on this path (batch already typechecked) and is
-  treated defensively as a fatal exit.
-- **The foreground gate.** The request's `RequestedTerminalAccess` is `Leased`
-  only when the probed terminal carries `startup_foreground`, else `Denied` —
-  the authority to hand the controlling terminal to a child is a held value,
-  not an inferred predicate ([[decisions/260619_terminal-lease|terminal-lease]]).
-- **The verdict.** The `Settled` result is scored into an exit code: `Ok`
-  reports 0; `Escape::Exit(code)` clamps and returns it
-  (`platform::exit_byte`); `Error` prints a runtime diagnostic (unless
-  `--audit` will carry it) and returns the error's exit code
-  ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]: there is no
-  `Stopped` escape to score).
-- **Capabilities and audit.** `--capabilities` composition goes through
-  `platform.rs::apply_session_capabilities` (shared with the REPL boot), a
-  thin map from `ral_core::capability::apply_session_profiles`'s outcome to a
-  process exit; the composition itself (load and freeze each `.ral` profile
-  against home/cwd, pushing it as its own layer onto the session
-  `GrantStack`) lives in core ([[design/grant|grant]]). `--audit` wraps the
-  run in a traced [[map/core/evaluator|audit trail]] emitted as JSON.
+- **Static work.** `--check` and `--dump-ast` parse, elaborate and (for
+  `--check`) typecheck the source against `PRELUDE`'s schemes plus the batch
+  surface's builtin table, and boot nothing.
+- **Boot, stage one.** `IdentityTransport::boot` with the `batch` installer
+  (the table is not `cfg(unix)`-gated, only `run_engine` is), whose recipe
+  decodes `Attach.config` — `{args}` — strictly, boots the batch surface, sets
+  exit hints and args, and registers the boot door. `platform::local_attach`
+  builds the attach at this process's cwd and home, the probed terminal in
+  `Attach.terminal`. A refusal exits 2 with its sentence on stderr.
+- **Boot, stage two.** The first dispatch is `Program::Hook` on
+  `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_door.rs`),
+  applied to the REPL's own record, `{login: false, no_rc: true,
+  recursion_limit, capabilities}`. The door is one-shot — it unregisters its
+  own hook — sources no startup file here, sets the recursion limit, and
+  applies `--capabilities` under its own mooring. `boot_door::settle` reads
+  its `Ending`: a load failure is `Raised` status 2, an `exit N` is
+  `Exited(N)`, and either stops batch there, exactly as it stops the REPL.
+- **The run.** The script is a `Program::Source` dispatch under
+  `GrantStack::root()` and the mute host, inheriting IO and stdin; the engine
+  typechecks it once against the live session. The terminal is `Leased` only
+  when the probed terminal carries `startup_foreground`
+  ([[decisions/260619_terminal-lease|terminal-lease]]). A watched worker's
+  lines reach batch's deferred sink, which prints them to stdout.
+- **The verdict.** batch prints the `Report`'s `rendered` as the REPL does and
+  exits with the ending's status through `platform::exit_byte`.
+- **Audit.** `--audit` asks the script's dispatch for its trail
+  (`Run.trail`) and builds the envelope from the `Report`: the trail, and an
+  `` `err `` outcome from the failing ending's `record` — the one `try` hands
+  its handler.
 
 ## Embedding and the baked prelude
 
@@ -173,19 +170,20 @@ scope[0], so the per-run seed and the baked list agree by construction
 ## Platform glue
 
 `ral/src/platform.rs` centralises the host queries and shared exits the
-binary needs: `probe_terminal` (under `RAL_INTERACTIVE_MODE`), `home_dir`,
-`load_exit_hints` (user override in the data dir, else the embedded
-`data/exit-hints.txt`), `exit_byte` (the one clamp-and-narrow every mode's
-final code funnels through), and `apply_session_capabilities` (above).
+binary needs: `probe_terminal` (under `RAL_INTERACTIVE_MODE`),
+`local_attach` (an in-process engine's `Attach`, at this process's own cwd and
+home), `load_exit_hints` (user override in the data dir, else the embedded
+`data/exit-hints.txt`), and `exit_byte` (the one clamp-and-narrow every mode's
+final code funnels through).
 Default-env seeding is core's: `boot_shell` calls
 `Shell::seed_default_env_vars`.
 
 Builtins are shell-scoped: each mode declares its surface as one
 `HostSurface` value and hands it to `boot_shell`, so the checker surface and
 the runtime surface cannot drift. Batch's surface is core plus
-`WATCH_BUILTIN`, and the same value seeds `--check`'s builtin table
+`WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot door, and the same value seeds `--check`'s builtin table
 (`HostSurface::builtin_table`, the checker with no live shell); the REPL's
-adds the [[map/repl/plugins|`_ed-*` builtins]] and the captured session
-commands. The ral binary has a durable stdout sink in every mode, where an
-agent host does not, so `watch` is the ral host's to install
+adds the [[map/repl/plugins|`_ed-*` doors and the plugin load doors]], all
+static. Both ral front-ends print a watched worker's lines, so `watch` is the
+ral hosts' to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

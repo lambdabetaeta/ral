@@ -85,7 +85,8 @@ enum Frame {
         outcome: Settled<Value>,
     },
     Within(WithinUndo),
-    Grant,
+    /// Where its layer sits: a session frame pushed above survives the pop.
+    Grant(usize),
     Audit {
         scope: TrailScope,
         saved: CapturePolicy,
@@ -702,9 +703,10 @@ impl Machine {
                 let caps = crate::capability::decode_capability_map(&c, "grant", &ctx)?;
                 let body = close(body, &env)?;
                 self.reserve(shell)?;
+                let at = shell.context.grants.len();
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
-                self.push(Frame::Grant);
+                self.push(Frame::Grant(at));
                 Self::force(body, &env, mooring, shell)
             }
 
@@ -921,8 +923,8 @@ impl Machine {
                 Focus::Return(t)
             }
 
-            Frame::Grant => {
-                shell.context.grants.pop();
+            Frame::Grant(at) => {
+                shell.context.grants.remove(at, 1);
                 Focus::Return(t)
             }
 
@@ -996,8 +998,8 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Grant => {
-                shell.context.grants.pop();
+            Frame::Grant(at) => {
+                shell.context.grants.remove(at, 1);
                 Focus::Halt(s)
             }
 
@@ -1023,7 +1025,7 @@ impl Frame {
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Audit`
     /// `audit.close(scope)` then `set_capture(saved)`, discarding the trail
-    /// no one is left to read; `Within` applies its undo; `Grant` pops.
+    /// no one is left to read; `Within` applies its undo; `Grant` removes its layer.
     /// `Apply`, `Try`, `Guard`, `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
@@ -1040,9 +1042,7 @@ impl Frame {
                 shell.local.audit.set_capture(saved);
             }
             Self::Within(undo) => undo.apply(shell),
-            Self::Grant => {
-                shell.context.grants.pop();
-            }
+            Self::Grant(at) => shell.context.grants.remove(at, 1),
             Self::Apply { .. } | Self::Try { .. } | Self::Guard { .. } | Self::Cleanup { .. } => {}
         }
     }

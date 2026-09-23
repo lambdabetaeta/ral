@@ -1,5 +1,5 @@
 ---
-status: active
+status: superseded
 ---
 
 # Spend was a birth date implemented destructively: the interrupt is a watermark

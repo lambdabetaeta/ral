@@ -395,9 +395,7 @@ mod tests {
                     guard: None,
                 })
                 .collect(),
-            bindings: Vec::new(),
             state_cell: None,
-            source: std::sync::Arc::from(""),
             buffer_change_health: HookHealth::default(),
         };
         let router =

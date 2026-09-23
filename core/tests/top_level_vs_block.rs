@@ -71,7 +71,6 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
@@ -196,7 +195,6 @@ fn recovered_try_reports_a_clean_transport_status() {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.status(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
@@ -439,7 +437,6 @@ fn top_level_capturing(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran {
             ending, captured, ..

@@ -44,7 +44,6 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
@@ -96,7 +95,6 @@ fn expect_static(source: &str) -> StaticDiagnostics {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Static { diagnostics } => diagnostics,
         RunReport::Ran { ending, .. } => {

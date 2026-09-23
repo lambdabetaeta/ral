@@ -8,39 +8,57 @@
 //! so `apply_rc_config` meets the same keyset and the same field types
 //! itself, before applying anything: either mistake refuses the whole rc
 //! there too, agreeing with what the static check already does.
+//!
+//! All of it runs engine-side, inside the boot door; the host is told only
+//! the [`RcSettings`] its frontend needs.
 
+pub(crate) mod source;
+
+use ral_core::record;
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum;
 use ral_core::typecheck::Form;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
 
 use super::frontend::Surface;
-use super::theme::{OutputTheme, set_output_theme};
-use rustyline::config::{BellStyle, EditMode};
-use std::sync::{Arc, Mutex};
-
-use super::plugin::PluginRuntime;
+use super::plugin::Keymap;
+use super::theme::OutputTheme;
 
 // ── Frontend knobs resolved by the rc file ───────────────────────────────
 
-/// The frontend knobs an rc file can set: line-editing mode, bell style,
-/// and surface.  Everything else the rc configures lands directly on the
-/// shell (env, aliases, bindings, hooks, recursion limit) or the plugin
-/// runtime, so rc application takes those two and returns this value —
-/// there is no mutable context to thread.
-#[derive(Clone, Copy)]
+/// What the rc settles for the host: its frontend knobs, its output theme,
+/// and whether it registered a `startup` block for the host to dispatch.
+/// Everything else the rc configures lands on the engine's shell.
+#[derive(Clone, Default)]
 pub(crate) struct RcSettings {
-    pub edit_mode: EditMode,
-    pub bell: BellStyle,
-    pub surface: Surface,
+    pub(super) edit_mode: Keymap,
+    pub(super) bell: bool,
+    pub(super) surface: Surface,
+    pub(super) theme: OutputTheme,
+    pub(super) startup: bool,
 }
 
-impl Default for RcSettings {
-    fn default() -> Self {
-        Self {
-            edit_mode: EditMode::Emacs,
-            bell: BellStyle::None,
-            surface: Surface::default(),
-        }
+record!(RcSettings {
+    edit_mode: "edit_mode",
+    bell: "bell",
+    surface: "surface",
+    theme: "theme",
+    startup: "startup",
+});
+
+impl Datum for Surface {
+    fn encode(self) -> FOValue {
+        clap::ValueEnum::to_possible_value(&self)
+            .map(|v| v.get_name().to_string())
+            .unwrap_or_default()
+            .encode()
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        let name = String::decode(v)?;
+        <Self as clap::ValueEnum>::from_str(&name, true)
+            .map_err(|_| format!("expected minimal, readline, or structural, got '{name}'"))
     }
 }
 
@@ -130,11 +148,11 @@ fn refuse(reason: impl std::fmt::Display) -> String {
     format!("rc: {reason}. The rc was not applied; the shell started with defaults.")
 }
 
-/// Apply the RC config map to the shell and plugin runtime.  Returns the
-/// resolved frontend settings and the `startup` block, if any, so the
-/// caller can execute it in the right context.  The rc's map contract
+/// Apply the RC config map to the shell, loading its plugins under
+/// `mooring`.  Returns the resolved settings and the `startup` block, if
+/// any, for the caller to register.  The rc's map contract
 /// (and the diagnostic for breaking it) lives with the sourcing in
-/// `session::boot`; this function only ever sees a map.
+/// [`source`]; this function only ever sees a map.
 ///
 /// A map has no row for the checker to hold to the rc's keyset or its
 /// fields' types, so both are met here instead, agreeing with what a
@@ -151,8 +169,8 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 /// unconditional, cannot fail behind them.
 pub(crate) fn apply_rc_config(
     pairs: Map,
+    mooring: &Mooring,
     shell: &mut Shell,
-    runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Result<(RcSettings, Option<Value>), String> {
     let table = ral_core::typecheck::contract::declared(Form::Rc);
     if let Some(key) = pairs.keys().find(|k| table.holds(k).is_none()) {
@@ -169,8 +187,8 @@ pub(crate) fn apply_rc_config(
             apply_rc_key(
                 key,
                 val.clone(),
+                mooring,
                 shell,
-                runtime,
                 &mut settings,
                 &mut startup,
             )
@@ -182,7 +200,7 @@ pub(crate) fn apply_rc_config(
             continue;
         }
         // Every other key was shape-checked above, so this cannot fail.
-        apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup)
+        apply_rc_key(&key, val, mooring, shell, &mut settings, &mut startup)
             .map_err(|err| refuse(err.message))?;
     }
     Ok((settings, startup))
@@ -257,8 +275,8 @@ fn rc_value_shape_error(key: &str, val: &Value) -> Option<Error> {
 fn apply_rc_key(
     key: &str,
     val: Value,
+    mooring: &Mooring,
     shell: &mut Shell,
-    runtime: &Arc<Mutex<PluginRuntime>>,
     settings: &mut RcSettings,
     startup: &mut Option<Value>,
 ) -> Result<(), Error> {
@@ -344,8 +362,8 @@ fn apply_rc_key(
                 ));
             };
             match s.to_ascii_lowercase().as_str() {
-                "vi" => settings.edit_mode = EditMode::Vi,
-                "emacs" => settings.edit_mode = EditMode::Emacs,
+                "vi" => settings.edit_mode = Keymap::Vi,
+                "emacs" => settings.edit_mode = Keymap::Emacs,
                 _ => {
                     return Err(Error::new(
                         format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'"),
@@ -362,11 +380,7 @@ fn apply_rc_key(
                     1,
                 ));
             };
-            settings.bell = if b {
-                BellStyle::Audible
-            } else {
-                BellStyle::None
-            };
+            settings.bell = b;
             Ok(())
         }
         "surface" => {
@@ -424,7 +438,7 @@ fn apply_rc_key(
                 ));
             };
             for (name, options) in entries {
-                if let Err(err) = load_rc_plugin(&name, options, shell, runtime) {
+                if let Err(err) = load_rc_plugin(&name, options, mooring, shell) {
                     eprint!(
                         "{}",
                         ral_core::diagnostic::format_runtime_error_auto(
@@ -443,8 +457,7 @@ fn apply_rc_key(
         }
         "theme" => match val {
             Value::Map(pairs) => {
-                let theme = OutputTheme::from_map(&pairs).map_err(|msg| Error::new(msg, 1))?;
-                set_output_theme(theme);
+                settings.theme = OutputTheme::from_map(&pairs).map_err(|msg| Error::new(msg, 1))?;
                 Ok(())
             }
             other => Err(Error::new(
@@ -465,8 +478,8 @@ fn apply_rc_key(
 fn load_rc_plugin(
     name: &str,
     options: Value,
+    mooring: &Mooring,
     shell: &mut Shell,
-    runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Result<(), Error> {
     let Value::Map(options) = options else {
         return Err(Error::new(
@@ -478,9 +491,7 @@ fn load_rc_plugin(
             1,
         ));
     };
-    // rc loading runs at session bring-up, with no run in hand, so the
-    // plugin file evaluates moored adrift.
-    match super::plugin::load::load_plugin(name, &options, &Mooring::adrift(), shell, runtime) {
+    match super::plugin::load::load_plugin(name, &options, mooring, shell) {
         Err(Break::Error(e)) => Err(e.context(format!("plugin '{name}'"))),
         _ => Ok(()),
     }
@@ -524,54 +535,74 @@ pub(super) fn dirs_history() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Evaluate `rc_src`, apply it through `apply_rc_config`, and return
-    /// the resulting environment.  Registers the baked prelude so plugin
-    /// files can use `get`, `has`, etc. — the same environment they see at
-    /// real startup.
-    fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings, Arc<Mutex<PluginRuntime>>) {
+    use crate::repl::host::ReplHost;
+    use ral_core::types::{BuiltinBody, BuiltinEntry};
+    use std::borrow::Cow;
+    use std::sync::{Arc, Mutex};
+
+    fn prelude_shell() -> Shell {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let config = match shell.run(ral_core::RunRequest {
-            run: ral_core::protocol::Run {
-                program: ral_core::protocol::Program::Source(rc_src.to_string()),
-                script_name: "<rc>".to_string(),
-                caps: ral_core::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: ral_core::RunIo::Inherit,
-                terminal: ral_core::RequestedTerminalAccess::Leased,
-                stdin: ral_core::RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        }) {
-            ral_core::RunReport::Ran { ending, .. } => ending.into_result().expect("rc must run"),
-            ral_core::RunReport::Static { .. } => panic!("rc source must run: {rc_src:?}"),
-        };
-        let Value::Map(pairs) = config else {
-            panic!(
+        shell
+    }
+
+    fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
+        match crate::repl::eval(shell, rc_src) {
+            Value::Map(pairs) => pairs,
+            other => panic!(
                 "test rc source must return a record or a map; got {}",
-                config.type_name()
-            );
-        };
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        let (settings, _) =
-            apply_rc_config(pairs, &mut shell, &runtime).expect("test rc must satisfy the keyset");
-        (shell, settings, runtime)
+                other.type_name()
+            ),
+        }
+    }
+
+    /// Evaluate `rc_src`, apply it through `apply_rc_config`, and return the
+    /// resulting shell and settings.  Registers the baked prelude so the rc
+    /// sees the environment it sees at real startup.
+    fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings) {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(&mut shell, rc_src);
+        let (settings, _) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell)
+            .expect("test rc must satisfy the keyset");
+        (shell, settings)
     }
 
     fn apply_rc(rc_src: &str) -> Shell {
         apply_rc_inner(rc_src).0
     }
 
-    fn apply_rc_with_runtime(rc_src: &str) -> (Shell, Arc<Mutex<PluginRuntime>>) {
-        let (shell, _, runtime) = apply_rc_inner(rc_src);
-        (shell, runtime)
+    fn unit_thunk(_u: &mut ral_core::typecheck::Unifier) -> ral_core::Scheme {
+        use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
+        mk_scheme(&[], &[], &[], thunk(pure(ral_core::typecheck::Ty::Unit)))
+    }
+
+    /// Apply `rc_src` inside a dispatch with the REPL host, as the boot door
+    /// does, so a plugin load has a desk to tell; the host's plugins after.
+    fn loaded_plugins(rc_src: &str) -> Vec<String> {
+        let rc_src = rc_src.to_owned();
+        let t = crate::repl::engine(move |shell| {
+            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            let pairs = Mutex::new(Some(rc_map(shell, &rc_src)));
+            let door = BuiltinEntry::new(
+                Cow::Borrowed("_apply-rc"),
+                unit_thunk,
+                "_apply-rc  — test door applying one rc map.",
+                BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
+                    let pairs = pairs.lock().unwrap().take().expect("applied once");
+                    apply_rc_config(pairs, mooring, shell)
+                        .expect("test rc must satisfy the keyset");
+                    Ok(Value::Unit)
+                })),
+            );
+            shell.install_captured_builtins(&vec![door].into());
+        });
+        let host = ReplHost::new(Arc::default());
+        let _ = host.dispatch(&t, crate::repl::exec::line_run("_apply-rc"), None);
+        crate::repl::plugin::lock(&host.runtime)
+            .plugins
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
     }
 
     /// Write `plugin` to a temp file, load it from an rc whose sole
@@ -585,9 +616,7 @@ mod tests {
             "return [plugins: ['{}': {options}]]\n",
             path.to_string_lossy()
         );
-        let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
-        let rt = runtime.lock().unwrap();
-        rt.plugins.first().map(|p| p.name.clone())
+        loaded_plugins(&rc_src).into_iter().next()
     }
 
     /// The value under a plugin name is its options map, forwarded verbatim
@@ -596,7 +625,7 @@ mod tests {
     #[test]
     fn rc_plugin_options_are_forwarded() {
         // Echoes an option back as its manifest name, so the name the
-        // runtime records reports what the block received.
+        // host records reports what the block received.
         let plugin = r"return { |options|
     let k = get $options key 'fallback'
     return [name: $k]
@@ -624,15 +653,14 @@ mod tests {
     /// anything but a map is reported and that one plugin skipped.
     #[test]
     fn rc_plugin_non_map_options_is_rejected() {
-        let (_, runtime) = apply_rc_with_runtime("return [plugins: [zoxide: 'alt-z']]\n");
-        assert!(runtime.lock().unwrap().plugins.is_empty());
+        assert!(loaded_plugins("return [plugins: [zoxide: 'alt-z']]\n").is_empty());
     }
 
     /// Aliases declared in rc install as alias-origin handler frames.
     #[test]
     fn aliases_install_as_handler_frames() {
         let src = "return [\n    aliases: [\n        greet: { |args| echo hello ...$args },\n        ll: { |args| ls -lh ...$args },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src);
+        let (shell, _) = apply_rc_inner(src);
         assert!(shell.has_alias("greet"));
         assert!(shell.has_alias("ll"));
         // Aliases live in the handler stack, not in scope.
@@ -705,17 +733,15 @@ mod tests {
     }
 
     /// Apply `config` to a fresh shell via `apply_rc_config` and return the
-    /// full post-application state: shell, resolved settings, and plugin
-    /// runtime.
-    fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings, Arc<Mutex<PluginRuntime>>) {
+    /// full post-application state: shell and resolved settings.
+    fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let (settings, _) =
-            apply_rc_config(pairs, &mut shell, &runtime).expect("test rc must satisfy the keyset");
-        (shell, settings, runtime)
+        let (settings, _) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell)
+            .expect("test rc must satisfy the keyset");
+        (shell, settings)
     }
 
     /// Apply `config` to a fresh shell, expecting `apply_rc_config` to
@@ -724,11 +750,10 @@ mod tests {
     /// (untouched by the refused keys) and the refusal text.
     fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let Err(err) = apply_rc_config(pairs, &mut shell, &runtime) else {
+        let Err(err) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell) else {
             panic!("test rc must fail its contract");
         };
         (shell, err)
@@ -863,7 +888,7 @@ mod tests {
     #[test]
     fn rc_bindings_function_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src);
+        let (shell, _) = apply_rc_inner(src);
         // Lexical binding, not an alias handler frame.
         assert!(shell.scope_lookup("ws").is_some());
         assert!(!shell.has_alias("ws"));
@@ -883,7 +908,7 @@ mod tests {
     #[test]
     fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
-        let (shell, _, _) = apply_rc_inner(src);
+        let (shell, _) = apply_rc_inner(src);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
         assert!(shell.scope_lookup("ws").is_none());
@@ -907,15 +932,14 @@ mod tests {
     fn every_declared_rc_key_is_handled_by_apply_rc_key() {
         let table = ral_core::typecheck::contract::declared(Form::Rc);
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         for key in table.keys {
             let mut settings = RcSettings::default();
             let mut startup = None;
             let result = apply_rc_key(
                 key.label,
                 Value::Unit,
+                &Mooring::adrift(),
                 &mut shell,
-                &runtime,
                 &mut settings,
                 &mut startup,
             );

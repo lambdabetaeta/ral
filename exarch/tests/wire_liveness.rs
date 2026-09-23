@@ -24,10 +24,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::io::TerminalState;
 use ral_core::protocol::{
-    Control, DispatchId, Event, Host, Liveness, Program, Report, Run, TerminalEndpoint, Transport,
-    WireTransport, dispatch_to_report,
+    Attach, DispatchId, Event, Host, Liveness, Program, Report, Run, Transport, WireTransport,
+    dispatch_to_report,
 };
 use ral_core::types::GrantStack;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -53,8 +52,7 @@ impl Drop for EngineChild {
 /// host end into a `WireTransport` driving the §3 frame protocol under
 /// `liveness`.
 ///
-/// The `pre_exec` is the canonical one from `WireTransport::new` and
-/// ral-daemon's `spawn`: `dup2` the guest end onto fd 3, close the original
+/// The `pre_exec` is ral-daemon's `spawn`'s: `dup2` the guest end onto fd 3, close the original
 /// if it landed elsewhere. The guest end lives only in the child afterwards;
 /// the host end is the parent's sole handle to the protocol.
 fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
@@ -68,7 +66,7 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
     cmd.stderr(std::process::Stdio::null());
     // SAFETY: the closure runs between fork and exec and calls only
     // async-signal-safe syscalls (`dup2`, `close`) with no allocation and no
-    // locking — the canonical pre_exec of `WireTransport::new`.
+    // locking.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -96,16 +94,11 @@ fn engine_over_socketpair(liveness: Liveness) -> (WireTransport, EngineChild) {
 /// [`INSTALLER_TAG`]: exarch::shell_eval::builtins::INSTALLER_TAG
 fn attach(transport: &WireTransport) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    transport.attach(
-        TerminalEndpoint {
-            lease: None,
-            state: TerminalState::default(),
-        },
+    transport.attach(Attach::new(
+        exarch::shell_eval::builtins::INSTALLER_TAG,
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
-        None,
-        exarch::shell_eval::builtins::INSTALLER_TAG.to_string(),
-    );
+    ));
     transport
         .await_attached()
         .expect("the engine must accept the attach");
@@ -180,7 +173,7 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let _dir = attach(&transport);
 
     let id = DispatchId(7);
-    transport.control().send(Control::Cancel(id));
+    transport.control().cancel(id);
     let started = Instant::now();
     transport.dispatch(id, source_run("sleep 30"), &(Arc::new(()) as Arc<dyn Host>));
 

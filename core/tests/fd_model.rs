@@ -41,7 +41,6 @@ fn report(shell: &mut Shell, source: &str) -> RunReport {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     })
 }
 

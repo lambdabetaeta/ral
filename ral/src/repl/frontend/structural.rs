@@ -6,10 +6,11 @@
 //! per-stage types of the pipeline being composed (the **typed spine**), the
 //! session's `let` bindings with their types and value previews (the
 //! **worksheet**), and every live spawn handle (the **handles matrix**).
-//! The runtime already computes all three — the checker infers per-stage
+//! The engine already computes all three — the checker infers per-stage
 //! types, the environment holds typed bindings, the concurrency runtime
-//! holds handles — and the ordinary REPL throws them away unless they
-//! constitute an error.  This frontend stops throwing them away.
+//! holds handles — and its probes answer them rendered; the ordinary REPL
+//! throws them away unless they constitute an error.  This frontend stops
+//! throwing them away.
 //!
 //! It draws into a ratatui *inline viewport* at the bottom of the normal
 //! screen, so scrollback above is preserved and the prompt stays where
@@ -18,15 +19,12 @@
 //! prints command output to the ordinary screen between reads.
 //!
 //! The worksheet and the handles matrix are both read-only projections of
-//! env-held spawn handles; every projection here reads runtime state and
-//! never mutates it.
+//! the engine's bindings; every projection here reads engine state and never
+//! mutates it.
 
-use ral_core::Shell;
-use ral_core::ir::{Comp, CompKind, Phrase, Toplevel};
-use ral_core::sync::LockExt as _;
-use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
+use ral_core::protocol::Transport;
+use ral_core::protocol::reading::{self, BindingRow, Spine, SpineError};
 use ral_core::types::HandleState;
-use ral_core::{CompileError, Value};
 
 use ansi_to_tui::IntoText;
 use prompt_editor::completion::{Candidate as MenuCandidate, MENU_MAX_ROWS, Menu};
@@ -43,19 +41,19 @@ use ratatui::{TerminalOptions, Viewport};
 
 use std::collections::HashSet;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 use crate::repl::completion::{self, SourceCache};
 use crate::repl::highlight_style::style_ratatui;
+use crate::repl::host::ReplHost;
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::editor::HighlightSpan;
 use crate::repl::plugin::{
-    HookEnvGuard, KeyChord, KeyName, KeyRouter, Keymap, PendingKeybinding, PluginRuntime,
-    Resolution, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
-    run_buffer_change_hooks,
+    KeyChord, KeyName, KeyRouter, Keymap, PendingKeybinding, Resolution, flush_pending_messages,
+    lock, pop_buffer_stack, reset_editor_hooks, run_buffer_change_hooks,
 };
 use crate::repl::worksheet::Worksheet;
 use ral_core::text::char_to_byte;
@@ -92,35 +90,27 @@ pub(in crate::repl) struct StructuralFrontend {
     history: History,
     /// The set of binding names present at the first `read` — the prelude
     /// and prompt bindings — so the worksheet shows only what the user has
-    /// since defined.  Captured lazily because `new` has no shell.
+    /// since defined.  Captured lazily, at the first probe.
     baseline: Option<HashSet<String>>,
     /// The completion candidate sources, the same type the line editor's helper
     /// holds, so the two surfaces cannot drift on when a `PATH` enumeration is
     /// taken or dropped.  A field rather than a per-compose local because the
     /// enumeration is meant to outlive one prompt.
     sources: SourceCache,
-    /// Whether the user asked for vi keys (`edit_mode: vi` in their ralrc).
-    /// Reduced from `rustyline::config::EditMode` at construction so the rest
-    /// of this frontend never sees rustyline's type.
-    vi: bool,
-    /// The plugin runtime, shared with the session and the other frontends.
-    /// The compose loop drives buffer-change hooks and dispatches plugin
+    keymap: Keymap,
+    /// The REPL host, shared with the session and the other frontends.  The
+    /// compose loop drives buffer-change hooks and dispatches plugin
     /// keybindings through it, reusing the same neutral primitives the
     /// rustyline frontend does — so the in-editor plugin surface (ghost text,
     /// highlights, fzf/zoxide keys) works under `structural` too.
-    runtime: Arc<Mutex<PluginRuntime>>,
+    host: Arc<ReplHost>,
 }
 
 impl StructuralFrontend {
     /// Construct the frontend, verifying the terminal supports raw mode (so
     /// the boot selector can fall back when it does not).  Loads persisted
-    /// history like the other frontends.  `edit_mode` selects emacs vs. vi
-    /// keybindings, reduced here to a plain flag.  `runtime` is the shared
-    /// plugin runtime the in-editor surface drives.
-    pub(in crate::repl) fn new(
-        edit_mode: rustyline::config::EditMode,
-        runtime: Arc<Mutex<PluginRuntime>>,
-    ) -> io::Result<Self> {
+    /// history like the other frontends.
+    pub(in crate::repl) fn new(keymap: Keymap, host: Arc<ReplHost>) -> io::Result<Self> {
         // Probe raw mode once: if the terminal cannot do it, the structural
         // surface cannot run and the caller degrades to a line editor.
         enable_raw_mode()?;
@@ -129,17 +119,17 @@ impl StructuralFrontend {
             history: History::load(),
             baseline: None,
             sources: SourceCache::new(),
-            vi: matches!(edit_mode, rustyline::config::EditMode::Vi),
-            runtime,
+            keymap,
+            host,
         })
     }
 
     /// The composition loop: enter raw mode + an inline viewport, edit the
-    /// buffer while projecting the live shell, and leave the viewport before
+    /// buffer while projecting the engine, and leave the viewport before
     /// returning so the session's output prints to the ordinary screen.
     fn compose(
         &mut self,
-        shell: &mut Shell,
+        engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         worksheet: &Worksheet,
@@ -147,15 +137,20 @@ impl StructuralFrontend {
         // Completion state, refreshed once here and read per Tab below.  Only
         // the cheap half: the `PATH` enumeration behind it waits for a Tab, so
         // entering the editor reads no directories.
-        self.sources.refresh(shell);
+        self.sources.refresh(engine);
 
-        // The worksheet and matrix read the env, which does not change while
-        // the user composes (no evaluation happens here), so build them once.
-        // Both project the same user bindings, so fold the scope once and
-        // derive both from that single snapshot.
-        let baseline = self.baseline.get_or_insert_with(|| binding_names(shell));
-        let user = user_bindings(shell, baseline);
-        let ws_rows = worksheet_rows(&user, shell, worksheet);
+        // The worksheet and matrix read the bindings, which do not change
+        // while the user composes (no evaluation happens here), so probe them
+        // once and derive both from that single snapshot.
+        let rows = reading::bindings(engine).unwrap_or_default();
+        let baseline = self
+            .baseline
+            .get_or_insert_with(|| rows.iter().map(|r| r.name.clone()).collect());
+        let user: Vec<BindingRow> = rows
+            .into_iter()
+            .filter(|r| !baseline.contains(&r.name))
+            .collect();
+        let ws_rows = worksheet_rows(&user, worksheet);
         let matrix = matrix_rows(&user);
 
         // The styled prompt, parsed into spans once and split on its newlines:
@@ -169,19 +164,18 @@ impl StructuralFrontend {
         // primitives, not a parallel implementation.  The session-supplied
         // `pending` wins; otherwise a buffer pushed by `_ed-push` (fzf-cd /
         // zoxide save the current line, run, then accept a `cd`, and the
-        // saved line is restored here on the next read) is popped.  The hook
-        // shell + its guard, and the newest-first history snapshot that
-        // autosuggestion's `_ed-history` reads, are prepared up front.
-        let keymap = if self.vi { Keymap::Vi } else { Keymap::Emacs };
-        let initial = pending.or_else(|| pop_buffer_stack(&self.runtime));
-        prepare_hook_env(shell, &self.runtime, keymap);
-        let _guard = HookEnvGuard(self.runtime.clone());
-        lock(&self.runtime).hooks.history = self.history.entries().iter().rev().cloned().collect();
+        // saved line is restored here on the next read) is popped.  The
+        // editor-hook state, and the newest-first history snapshot that
+        // autosuggestion's `_ed-history` reads, are reset up front.
+        let keymap = self.keymap;
+        let runtime = &self.host.runtime;
+        let initial = pending.or_else(|| pop_buffer_stack(runtime));
+        reset_editor_hooks(runtime, keymap);
+        lock(runtime).hooks.history = self.history.entries().iter().rev().cloned().collect();
 
-        let mut prompt = PromptEditor::new(if self.vi {
-            EditMode::Vi
-        } else {
-            EditMode::Emacs
+        let mut prompt = PromptEditor::new(match keymap {
+            Keymap::Vi => EditMode::Vi,
+            Keymap::Emacs => EditMode::Emacs,
         });
         if let Some(p) = &initial {
             prompt.set_text(&p.text);
@@ -225,7 +219,7 @@ impl StructuralFrontend {
         let result = loop {
             let s = prompt.text();
             if last_buf.as_deref() != Some(s.as_str()) {
-                spine = build_spine(&s, shell);
+                spine = reading::spine(engine, &s).unwrap_or(Spine::Empty);
                 last_buf = Some(s.clone());
             }
             // Drive plugin buffer-change hooks (fish-style ghost text,
@@ -233,9 +227,9 @@ impl StructuralFrontend {
             // dedups on (text, cursor) internally, so an idle redraw between
             // keystrokes re-runs no plugin code.  The ghost is hidden while the
             // completion menu owns the lower band.
-            run_buffer_change_hooks(&self.runtime, &s, prompt.cursor_byte_offset());
+            run_buffer_change_hooks(engine, &self.host, &s, prompt.cursor_byte_offset());
             let (ghost, highlights) = {
-                let rt = lock(&self.runtime);
+                let rt = lock(&self.host.runtime);
                 (rt.hooks.ghost.clone(), rt.hooks.highlights.clone())
             };
             terminal.draw(|frame| {
@@ -322,7 +316,7 @@ impl StructuralFrontend {
                     // realizes by running its own action.
                     if let Some(chord) = chord_of(&k) {
                         let router =
-                            router.get_or_insert_with(|| lock(&self.runtime).router.clone());
+                            router.get_or_insert_with(|| lock(&self.host.runtime).router.clone());
                         let pos = prompt.cursor_byte_offset();
                         if let Resolution::Claimed {
                             plugin,
@@ -366,7 +360,7 @@ impl StructuralFrontend {
                                 prompt.handle_key(k);
                                 continue;
                             };
-                            let src = self.sources.sources();
+                            let src = self.sources.sources(engine);
                             let cursor_byte = char_to_byte(&line, col);
                             let (start, candidates) =
                                 completion::complete(&line, cursor_byte, &src);
@@ -466,7 +460,7 @@ impl StructuralFrontend {
             // here, the edited buffer reappearing on the next read).
             Composed::Keybinding(pk) => {
                 let buf = prompt.text();
-                match dispatch_keybinding(&pk, &buf, shell, &self.runtime, keymap) {
+                match dispatch_keybinding(&pk, &buf, engine, &self.host, keymap) {
                     KeybindingOutcome::Accept(line) => Read::Line(line),
                     KeybindingOutcome::Edit(text, cursor) => {
                         Read::Edit(EditBuffer { text, cursor })
@@ -476,7 +470,7 @@ impl StructuralFrontend {
         };
         // Flush plugin diagnostics deferred during composition or dispatch on
         // every exit path, so they land on a durable line above the next prompt.
-        flush_pending_messages(&self.runtime);
+        flush_pending_messages(&self.host.runtime);
         Ok(read)
     }
 
@@ -524,12 +518,12 @@ impl StructuralFrontend {
 impl Frontend for StructuralFrontend {
     fn read(
         &mut self,
-        shell: &mut Shell,
+        engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read {
-        if let Ok(r) = self.compose(shell, prompt, pending, worksheet) {
+        if let Ok(r) = self.compose(engine, prompt, pending, worksheet) {
             r
         } else {
             // A terminal IO failure mid-session: leave raw mode and end
@@ -577,128 +571,12 @@ fn chord_of(k: &KeyEvent) -> Option<KeyChord> {
     })
 }
 
-// ── Projection 1: the typed spine ───────────────────────────────────────────
-
-/// One pipeline stage's row in the spine: its source slice and value type.
-#[derive(Clone, PartialEq)]
-struct SpineRow {
-    src: String,
-    ty: String,
-}
-
-/// What the spine shows for the current buffer.
-#[derive(Clone, PartialEq)]
-enum Spine {
-    /// A pipeline: one typed row per stage.
-    Stages(Vec<SpineRow>),
-    /// A type error — underlined in place on the prompt, ariadne-style.
-    /// `span` is a half-open CHAR range into the prompt buffer (the same
-    /// coordinate system the editor's char cursor uses); `None` when the
-    /// error carries no location, in which case only the dim headline shows.
-    TypeError {
-        span: Option<(usize, usize)>,
-        code: String,
-        headline: String,
-        label: String,
-        hint: Option<String>,
-    },
-    /// Nothing to show: an empty or still-incomplete buffer, or a buffer
-    /// that compiles but is not a pipeline.
-    Empty,
-}
-
-/// Re-infer the spine for the buffer against the live session.
-fn build_spine(src: &str, shell: &Shell) -> Spine {
-    if src.trim().is_empty() {
-        return Spine::Empty;
-    }
-    match ral_core::compile_and_typecheck(
-        src,
-        shell.session_schemes(),
-        ral_core::source::FileId::DUMMY,
-        "",
-        None,
-    ) {
-        Ok(top) => match pipeline_stage_rows(&top, src) {
-            Some(rows) => Spine::Stages(rows),
-            None => Spine::Empty,
-        },
-        // A parse error mid-typing is an incomplete line, not a real error:
-        // show nothing rather than flare on every keystroke.
-        Err(CompileError::Parse(_)) => Spine::Empty,
-        Err(CompileError::Types(errs)) => match errs.first() {
-            // Reuse core's diagnostic phrasing verbatim — the headline, the
-            // under-caret label, and the code are exactly what the post-Enter
-            // ariadne report uses, so the two agree word for word.
-            Some(err) => Spine::TypeError {
-                span: err.pos.map(|sp| {
-                    (
-                        ral_core::text::byte_to_char(src, sp.start as usize),
-                        ral_core::text::byte_to_char(src, sp.end as usize),
-                    )
-                }),
-                code: err.kind.code().to_string(),
-                headline: err.kind.render_message(),
-                label: err.kind.render_label(),
-                hint: err.hint(),
-            },
-            None => Spine::Empty,
-        },
-    }
-}
-
-/// The first pipeline in `top`, if any — the phrase being composed
-/// elaborates to a bare `Pipeline`, or one under a `let` bind.
-fn find_pipeline(top: &Toplevel) -> Option<&Comp> {
-    top.phrases.iter().find_map(|phrase| match &phrase.item {
-        Phrase::Define { comp, .. } | Phrase::Run(comp) => find_pipeline_in(comp),
-    })
-}
-
-fn find_pipeline_in(comp: &Comp) -> Option<&Comp> {
-    match &comp.item {
-        CompKind::Pipeline { .. } => Some(comp),
-        CompKind::Bind {
-            comp: bound, rest, ..
-        } => find_pipeline_in(bound).or_else(|| find_pipeline_in(rest)),
-        _ => None,
-    }
-}
-
-/// Per-stage rows for the first pipeline in `top`, each pairing the stage's
-/// source slice with its retained value type.
-fn pipeline_stage_rows(top: &Toplevel, src: &str) -> Option<Vec<SpineRow>> {
-    let pipe = find_pipeline(top)?;
-    let CompKind::Pipeline {
-        stages,
-        stage_types,
-        ..
-    } = &pipe.item
-    else {
-        return None;
-    };
-    let rows = stages
-        .iter()
-        .zip(stage_types)
-        .map(|(stage, ty)| SpineRow {
-            src: stage
-                .span
-                .and_then(|sp| src.get(sp.start as usize..sp.end as usize))
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            ty: fmt_ty(ty),
-        })
-        .collect();
-    Some(rows)
-}
-
 // ── Projections 2 & 3: worksheet and handles matrix ─────────────────────────
 
 /// One worksheet node: a user binding with its type and value preview, its
 /// nesting `depth` in the dependency tree, and its pure/effectful verdict.
 ///
-/// `name`/`ty`/`preview` come from the live env each `read`; `depth` and
+/// `name`/`ty`/`preview` come from the engine each `read`; `depth` and
 /// `effectful` come from the session's [`Worksheet`] model (the retained
 /// dependency edges and the checker's effect verdict).  A node with no model
 /// entry — a binding that predates the model, or whose record was dropped —
@@ -712,56 +590,22 @@ struct WsRow {
     effectful: bool,
 }
 
-/// One matrix row's lifecycle state: an env-held [`Value::Handle`] spawn's
-/// own [`HandleState`].
-#[derive(Clone, Copy)]
-enum MxState {
-    Running,
-    Completed,
-    Cancelled,
-}
-
-impl From<HandleState> for MxState {
-    fn from(s: HandleState) -> Self {
-        match s {
-            HandleState::Running => Self::Running,
-            HandleState::Completed => Self::Completed,
-            HandleState::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
 /// One matrix row: an env-held spawn handle, with its lifecycle state and a
 /// label.
 struct MxRow {
     name: String,
-    state: MxState,
+    state: HandleState,
     cmd: String,
-}
-
-/// Every binding name currently in scope — the baseline snapshot.
-fn binding_names(shell: &Shell) -> HashSet<String> {
-    shell.bindings().into_iter().map(|(n, _)| n).collect()
-}
-
-/// The user's bindings — those added since the baseline — as a single
-/// snapshot the worksheet and matrix projections share.
-fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Value)> {
-    shell
-        .bindings()
-        .into_iter()
-        .filter(|(n, _)| !baseline.contains(n))
-        .collect()
 }
 
 /// The user's bindings rendered as worksheet rows, laid out as an indented
 /// dependency tree: a binding nests under the binding it depends on, so
 /// dependents read downstream of what feeds them.
 ///
-/// Name, type, and value preview come from the live env (`user` +
-/// `binding_schemes`); the dependency edges and the pure/effectful verdict
-/// come from the session's [`Worksheet`] model.  The two are joined by name:
-/// only bindings present in the *live env* are nodes (a model entry whose
+/// Name, type, and value preview come from the engine's rows; the dependency
+/// edges and the pure/effectful verdict come from the session's [`Worksheet`]
+/// model.  The two are joined by name: only bindings present in the
+/// *engine* are nodes (a model entry whose
 /// binding is gone is skipped); the model supplies each present node's depth
 /// and effect glyph.
 ///
@@ -769,10 +613,8 @@ fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Valu
 /// hangs under one chosen parent — the *latest-recorded* of its dependencies
 /// that is itself a live node — which keeps the indentation reading as the
 /// data-flow chain.  A node with no live-binding dependency is a root.
-fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) -> Vec<WsRow> {
-    let schemes: std::collections::HashMap<String, Option<Scheme>> =
-        shell.binding_schemes().into_iter().collect();
-    let live: HashSet<&str> = user.iter().map(|(n, _)| n.as_str()).collect();
+fn worksheet_rows(user: &[BindingRow], model: &Worksheet) -> Vec<WsRow> {
+    let live: HashSet<&str> = user.iter().map(|r| r.name.as_str()).collect();
 
     // Record order indexes the model entries; a node's "latest dependency"
     // is the one with the greatest record index, so the tree nests along the
@@ -792,8 +634,8 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
         std::collections::HashMap::new();
     let mut rooted: Vec<&str> = Vec::new();
 
-    for (name, _) in user {
-        let name = name.as_str();
+    for row in user {
+        let name = row.name.as_str();
         let entry = model.entries().iter().find(|e| e.name == name);
         effectful.insert(name, entry.is_some_and(|e| e.effectful));
         // The parent is the live dependency recorded latest; a node may
@@ -830,7 +672,7 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
     let seeds = rooted
         .iter()
         .copied()
-        .chain(user.iter().map(|(n, _)| n.as_str()));
+        .chain(user.iter().map(|r| r.name.as_str()));
     for seed in seeds {
         if visited.contains(seed) {
             continue;
@@ -840,19 +682,14 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
             if !visited.insert(name) {
                 continue;
             }
-            let value = user
+            let row = user
                 .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v)
+                .find(|r| r.name == name)
                 .expect("a tree node is a live user binding");
-            let ty = schemes
-                .get(name)
-                .and_then(|s| s.as_ref())
-                .map_or_else(|| "?".into(), fmt_scheme);
             rows.push(WsRow {
                 name: name.to_string(),
-                ty,
-                preview: preview(value),
+                ty: row.scheme.clone().unwrap_or_else(|| "?".into()),
+                preview: row.preview.clone(),
                 depth,
                 effectful: effectful.get(name).copied().unwrap_or(false),
             });
@@ -868,33 +705,19 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
 
 /// The matrix rows: the user's live env-held spawn handles, sorted by
 /// binding name.
-fn matrix_rows(user: &[(String, Value)]) -> Vec<MxRow> {
+fn matrix_rows(user: &[BindingRow]) -> Vec<MxRow> {
     let mut rows: Vec<MxRow> = user
         .iter()
-        .filter_map(|(name, value)| match value {
-            Value::Handle(h) => Some(MxRow {
-                name: name.clone(),
-                state: (*h.state.lock_ignore_poison()).into(),
+        .filter_map(|r| {
+            r.handle.as_ref().map(|h| MxRow {
+                name: r.name.clone(),
+                state: h.state,
                 cmd: h.cmd.clone(),
-            }),
-            _ => None,
+            })
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows
-}
-
-/// A one-line value preview, truncated.
-fn preview(v: &Value) -> String {
-    const CAP: usize = 40;
-    let s = v.to_string().replace('\n', " ");
-    if s.chars().count() > CAP {
-        let mut t: String = s.chars().take(CAP - 1).collect();
-        t.push('…');
-        t
-    } else {
-        s
-    }
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -1019,7 +842,7 @@ fn render(
             let n = rows.len() as u16;
             (n, 0)
         }
-        Spine::TypeError { .. } => (0, 1),
+        Spine::TypeError(_) => (0, 1),
         Spine::Empty => (0, 0),
     };
 
@@ -1075,7 +898,7 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
             })
             .collect(),
         // The type error draws below the prompt, not here.
-        Spine::TypeError { .. } | Spine::Empty => return,
+        Spine::TypeError(_) | Spine::Empty => return,
     };
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -1098,13 +921,13 @@ fn overlay_type_error(
     editor: &PromptEditor,
     spine: &Spine,
 ) {
-    let Spine::TypeError {
+    let Spine::TypeError(SpineError {
         span,
         code,
         headline,
         label,
         ..
-    } = spine
+    }) = spine
     else {
         return;
     };
@@ -1408,9 +1231,9 @@ fn render_projections(
             .take(mx_area.height.saturating_sub(1) as usize)
         {
             let (glyph, hue) = match r.state {
-                MxState::Running => ("●", HANDLE_RUN),
-                MxState::Completed => ("✓", NAME_HUE),
-                MxState::Cancelled => ("○", SLATE),
+                HandleState::Running => ("●", HANDLE_RUN),
+                HandleState::Completed => ("✓", NAME_HUE),
+                HandleState::Cancelled => ("○", SLATE),
             };
             mx_lines.push(Line::from(vec![
                 Span::styled(format!("{glyph} {}", r.name), Style::default().fg(hue)),
@@ -1458,95 +1281,35 @@ fn commit_line(
 mod tests {
     use super::*;
 
-    /// A buffer the checker rejects with a located error builds the
-    /// `TypeError` spine: a char span to underline and the exact under-caret
-    /// label core's diagnostic uses — so the inline flare and the post-Enter
-    /// report agree word for word.  `if "x" { … }` mismatches the condition's
-    /// `String` against the expected `Bool`, pointing at the `"x"` literal.
-    #[test]
-    fn build_spine_locates_type_error() {
-        let shell = Shell::new(ral_core::io::TerminalState::default());
-        let spine = build_spine("if \"x\" { 1 } else { 2 }", &shell);
-        let Spine::TypeError {
-            span, label, code, ..
-        } = spine
-        else {
-            panic!("a located type error yields the TypeError spine");
-        };
-        // The span points at the `"x"` condition (chars 3..6), to underline.
-        assert_eq!(span, Some((3, 6)));
-        assert!(!label.is_empty(), "carries an under-caret label");
-        assert_eq!(label, "String doesn't match Bool");
-        assert_eq!(code, "T0010");
+    /// A live binding row, as the `bindings` probe answers one.
+    fn row(name: &str) -> BindingRow {
+        BindingRow {
+            name: name.into(),
+            scheme: Some("Int".into()),
+            preview: "1".into(),
+            handle: None,
+        }
     }
 
-    /// The spine extracts a typed row per pipeline stage from the retained
-    /// per-stage value types — the keystone projection, end to end.
-    #[test]
-    fn spine_rows_carry_per_stage_types() {
-        let outcome = ral_core::compile_and_typecheck(
-            "/bin/echo hi | /bin/cat",
-            ral_core::typecheck::SessionSchemes::default(),
-            ral_core::source::FileId::DUMMY,
-            "",
-            None,
-        );
-        let Ok(comp) = outcome else {
-            panic!("pipeline should compile");
-        };
-        let rows = pipeline_stage_rows(&comp, "/bin/echo hi | /bin/cat")
-            .expect("a pipeline yields per-stage rows");
-        assert_eq!(rows.len(), 2, "two stages");
-        assert_eq!(rows[0].src, "/bin/echo hi");
-        assert_eq!(rows[1].src, "/bin/cat");
-        // Both external stages resolve to `Unit` (the retained value type;
-        // their payload rides the byte channel).
-        assert_eq!(rows[0].ty, "Unit");
-        assert_eq!(rows[1].ty, "Unit");
-    }
-
-    /// A non-pipeline buffer yields no spine rows.
-    #[test]
-    fn non_pipeline_has_no_stage_rows() {
-        let outcome = ral_core::compile_and_typecheck(
-            "/bin/echo hi",
-            ral_core::typecheck::SessionSchemes::default(),
-            ral_core::source::FileId::DUMMY,
-            "",
-            None,
-        );
-        let Ok(comp) = outcome else {
-            panic!("should compile");
-        };
-        assert!(pipeline_stage_rows(&comp, "/bin/echo hi").is_none());
-    }
-
-    /// A long value preview is truncated with an ellipsis.
-    #[test]
-    fn preview_truncates() {
-        let v = Value::String("x".repeat(100));
-        let p = preview(&v);
-        assert!(p.chars().count() <= 40);
-        assert!(p.ends_with('…'));
+    fn pure(name: &str) -> reading::BindEffect {
+        reading::BindEffect {
+            name: name.into(),
+            effectful: false,
+        }
     }
 
     /// The worksheet rows nest dependents under what they depend on: with
     /// `b = $a` and `c = $b`, the tree reads `a` (depth 0) ▸ `b` (1) ▸ `c`
     /// (2), so the indentation traces the data-flow chain.  Names/values come
-    /// from the `user` list (the live env stand-in); edges from the model.
+    /// from the `user` rows (the engine stand-in); edges from the model.
     #[test]
     fn worksheet_rows_nest_dependents_under_dependencies() {
-        let shell = Shell::new(ral_core::io::TerminalState::default());
         let mut model = Worksheet::default();
-        model.record("let a = 1", &shell);
-        model.record("let b = $a", &shell);
-        model.record("let c = $b", &shell);
-        let user = vec![
-            ("a".to_string(), Value::Int(1)),
-            ("b".to_string(), Value::Int(1)),
-            ("c".to_string(), Value::Int(1)),
-        ];
-        let rows = worksheet_rows(&user, &shell, &model);
+        model.record("let a = 1", &[pure("a")]);
+        model.record("let b = $a", &[pure("b")]);
+        model.record("let c = $b", &[pure("c")]);
+        let user = vec![row("a"), row("b"), row("c")];
+        let rows = worksheet_rows(&user, &model);
         let shape: Vec<(&str, usize)> = rows.iter().map(|r| (r.name.as_str(), r.depth)).collect();
         assert_eq!(shape, vec![("a", 0), ("b", 1), ("c", 2)]);
     }
@@ -1555,15 +1318,17 @@ mod tests {
     /// its row; a pure one does not — the marker the render distinguishes.
     #[test]
     fn worksheet_rows_carry_the_effect_verdict() {
-        let shell = Shell::new(ral_core::io::TerminalState::default());
         let mut model = Worksheet::default();
-        model.record("let n = $[1 + 2]", &shell);
-        model.record("let p = /bin/echo hi", &shell);
-        let user = vec![
-            ("n".to_string(), Value::Int(3)),
-            ("p".to_string(), Value::Unit),
-        ];
-        let rows = worksheet_rows(&user, &shell, &model);
+        model.record("let n = $[1 + 2]", &[pure("n")]);
+        model.record(
+            "let p = /bin/echo hi",
+            &[reading::BindEffect {
+                name: "p".into(),
+                effectful: true,
+            }],
+        );
+        let user = vec![row("n"), row("p")];
+        let rows = worksheet_rows(&user, &model);
         let n = rows.iter().find(|r| r.name == "n").unwrap();
         let p = rows.iter().find(|r| r.name == "p").unwrap();
         assert!(!n.effectful, "arithmetic is pure");
@@ -1578,10 +1343,9 @@ mod tests {
     /// the projection.
     #[test]
     fn worksheet_row_without_a_model_entry_renders_as_a_pure_root() {
-        let shell = Shell::new(ral_core::io::TerminalState::default());
         let model = Worksheet::default();
-        let user = vec![("legacy".to_string(), Value::Int(7))];
-        let rows = worksheet_rows(&user, &shell, &model);
+        let user = vec![row("legacy")];
+        let rows = worksheet_rows(&user, &model);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "legacy");
         assert_eq!(rows[0].depth, 0);

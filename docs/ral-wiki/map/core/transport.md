@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 451d1ab5
 generated_at_date: 2026-09-22
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
+covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
 
 # Map: core / transport
@@ -10,8 +10,8 @@ The wire layer that carries a shell across a process boundary. The one
 consumer left is the wire-seat agent hatch: when a run seats an engine on a
 remote transport, a forked shell's mobile state — `env`, `context`, the
 relevant parent state — is serialised to JSON, framed, and reconstituted on
-the other side ([[map/core/shell-state|shell-state]]). A pipeline stage no
-longer rides this wire at all — it runs on a thread of the parent process,
+the other side ([[map/core/shell-state|shell-state]]). A pipeline stage
+never rides this wire — it runs on a thread of the parent process,
 sharing the parent's memory directly
 ([[decisions/260902_stages-are-threads|stages-are-threads]]). (A
 [[design/grant|grant]] does
@@ -47,9 +47,14 @@ realisations:
 
 `FOValue` is the serde-round-trippable *first-order* value — data all the way
 down, first-order by construction via an uninhabited-by-default extension slot
-— and the engine protocol's shared value vocabulary. `SerialValue = FOValue<Closure>`
+— and the engine protocol's shared value vocabulary, externally tagged on the
+wire. `SerialValue = FOValue<Closure>`
 fills that slot with closures, the mirror of the runtime `Value` this wire
-carries. Around it:
+carries. `serial/datum.rs` types it: `Datum` (`encode`, a strict `decode`
+naming what arrived ill-shaped) is the one first-order codec every typed
+protocol payload goes through, with `tag`/`untag`/`field`/`exact_keys` and
+the `record!` macro, which derives a strict record — exact keys, each once,
+an unknown one answered with the key it most likely meant. Around it:
 
 - `SerialLambda` / `SerialThunk` for closures, `SerialEnvSnapshot` for an `Env`;
   `SerialBinding` mirrors a scope entry — value *and* scheme — so a wire-hatched
@@ -98,11 +103,10 @@ past them):
 
 `install_wire_shell` reinstates a received `WireShell` into a child `Shell`,
 splicing the wire's handler frames atop the receiver's own so the receiver's
-own builtin table survives, never having ridden the wire. `bare_child_shell`
-is the one constructor `hatch::apply_seed` — the sole production caller,
-Unix-only — builds a fresh shell through before installing the wire state,
-so a wire-hatched engine child cannot drop the host builtins. All
-conversions share the `InternCtx` from `serial.rs`.
+own builtin table survives, never having ridden the wire: a wire-hatched
+engine child installs the state onto the shell its own installer booted, so it
+cannot drop the host builtins (`bare_child_shell` is the tests' stand-in for
+that boot). All conversions share the `InternCtx` from `serial.rs`.
 
 `core/src/engine_seed.rs` carries `EngineSeed` — a forked shell reified
 for a wire-seat hatch (`scope_table`, `shell: WireShell`,
@@ -110,13 +114,14 @@ for a wire-seat hatch (`scope_table`, `shell: WireShell`,
 `` `inherit ``, a base name, or a restriction record carried **unfrozen**, so
 its sigils resolve against the child's own cwd on the far side
 ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]])), the one
-type left in that module now that a pipeline stage no longer crosses a wire
+type in that module, since a pipeline stage never crosses a wire
 ([[decisions/260902_stages-are-threads|stages-are-threads]]). `pack_seed` builds one from a `Shell`, and
 `seed_from_env` takes it before the engine waits for `Attach` — striking the env
 var as it takes the fd, so no descendant inherits a number that has stopped being
-one — and after `Attach` selects an installer and boots the shell, `apply_seed`
-hydrates it through `WireDecoder::for_shell` plus `install_wire_shell`,
-before pushing the seed's grant as the child's one layer. Taking and applying
+one — and after `Attach` selects an installer and boots the shell,
+`Engine::boot` hands it to `EngineSeed::apply`, which hydrates it through
+`WireDecoder::for_shell` plus `install_wire_shell`, then pushes the seed's
+grant as the child's one layer through `SpawnGrant::narrow_onto`. Taking and applying
 are split for one reason each: the take must not wait on the host, and the
 application needs the booted installer's shell. The scope it carries is never the
 parent's whole lexical scope: `Shell::fork_scrubbed` strips every
@@ -127,9 +132,12 @@ serialisable fragment and
 `` exarch-agents `start `` means one thing regardless of seat
 ([[design/agents|agents]]'s one-snapshot law).
 
-`core/src/spawn_grant.rs` carries `SpawnGrant` and `SpawnGrant::layer` — the
-one resolution both seats call, so the host-side desk and `apply_seed` hold no
-narrowing decision of their own: `Inherit` is ⊤, `Base` reaches the host's
+`core/src/spawn_grant.rs` carries `SpawnGrant`, `SpawnGrant::layer`, and
+`SpawnGrant::narrow_onto` — the layer resolved against the shell's own cwd and
+home and pushed as a session frame, the one step an adopted identity fork
+(`IdentityTransport::adopt_parked`) and a hatched seed (`EngineSeed::apply`)
+share, so neither holds a narrowing decision of its own, both under the
+installer's `narrow`: `Inherit` is ⊤, `Base` reaches the host's
 `GrantNarrower` (core has no base-tag lexicon), and `Restrict` walks the record
 through `capability::decode_capability_map` against the child's cwd. A record
 rather than a `Capabilities` is exactly what lets the freeze happen there,
@@ -148,6 +156,10 @@ MiB, checked on the read side before the body is allocated and on the write
 side before anything reaches the wire. One enforcement point, so an oversized
 frame fails locally with a sentence instead of being written happily and then
 killing the peer mid-stream.
+
+Neither side caps depth: every frame encodes and decodes under
+`serde_stacker`, which grows the stack onto the heap, so a legal nest of any
+depth crosses and only the fuse bounds it.
 
 This layer is the mechanism behind the mobile/local split — `env` /
 `context` cross a re-exec boundary, `io` / `session` / `local`

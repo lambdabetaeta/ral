@@ -2,8 +2,8 @@
 //! (rc file, plugin loader) registers and the engine dispatches at lifecycle
 //! moments — prompt render, startup, plugin events, keybindings.
 //!
-//! A hook is a block- or lambda-shaped [`Value::Thunk`] the host already
-//! holds compiled; running one is a `Program::Hook` dispatch through
+//! A hook is a function the host already holds — a compiled block or lambda,
+//! or a builtin; running one is a `Program::Hook` dispatch through
 //! [`Shell::run`],
 //! which looks it up here and applies it. The table is a namespace apart from
 //! the lexical scope and the handler stack: a hook is never resolved by
@@ -49,6 +49,14 @@ impl HookName {
             name: name.into(),
         }
     }
+
+    /// How a fault in this hook's run is attributed.
+    pub(crate) fn fault_label(&self) -> String {
+        match &self.namespace {
+            Namespace::Session => self.name.clone(),
+            Namespace::Plugin(id) => format!("plugin '{id}' hook '{}'", self.name),
+        }
+    }
 }
 
 impl fmt::Display for HookName {
@@ -71,8 +79,6 @@ pub enum HookSig {
     Hook {
         kind: String,
     },
-    /// A `Lambda` over the plugin's options map.
-    PluginFactory,
     /// Applied in place inside the caller's run frame rather than as a fresh
     /// run root — `pre-exec`, `post-exec`, `chpwd`.
     Lifecycle {
@@ -85,7 +91,7 @@ impl HookSig {
     pub(crate) fn expected_arity(&self) -> usize {
         match self {
             Self::Prompt => 0,
-            Self::Hook { .. } | Self::PluginFactory | Self::Lifecycle { .. } => 1,
+            Self::Hook { .. } | Self::Lifecycle { .. } => 1,
         }
     }
 
@@ -94,7 +100,6 @@ impl HookSig {
         match self {
             Self::Prompt => "prompt body",
             Self::Hook { kind } | Self::Lifecycle { kind } => kind.as_str(),
-            Self::PluginFactory => "plugin factory",
         }
     }
 }
@@ -108,13 +113,16 @@ pub enum TerminalPolicy {
     Leased,
 }
 
-/// The host-stated policy for a hook's runs, which [`Shell::run`] applies over
-/// the dispatching request: `terminal` replaces the requested authority and
-/// `capture` can only tighten it.
+/// The host-stated policy for a hook's runs.
+///
+/// [`Shell::run`] applies it over the dispatching request: `terminal` replaces
+/// the requested authority, `capture` can only tighten it, and `aside` runs it
+/// on [`Shell::join_session`], so nothing it does flows back.
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
     pub terminal: TerminalPolicy,
     pub(crate) capture: bool,
+    pub(crate) aside: bool,
 }
 
 impl DefaultPolicy {
@@ -122,20 +130,30 @@ impl DefaultPolicy {
         Self {
             terminal: TerminalPolicy::Denied,
             capture: false,
+            aside: false,
         }
     }
 
     pub const fn leased() -> Self {
         Self {
             terminal: TerminalPolicy::Leased,
-            capture: false,
+            ..Self::denied()
         }
     }
 
     pub const fn denied_capture() -> Self {
         Self {
-            terminal: TerminalPolicy::Denied,
             capture: true,
+            ..Self::denied()
+        }
+    }
+
+    /// This policy, its runs taken aside.
+    #[must_use]
+    pub const fn aside(self) -> Self {
+        Self {
+            aside: true,
+            ..self
         }
     }
 }
@@ -153,8 +171,8 @@ pub struct Hook {
     pub(crate) origin: Span,
 }
 impl Hook {
-    /// The single registration gate: the bound value must be a `Block` or a
-    /// `Lambda` of the arity `sig` expects.
+    /// The single registration gate: the bound value must be a function — a
+    /// `Block`, a `Lambda`, or a builtin — of the arity `sig` expects.
     ///
     /// # Errors
     /// [`RegisterError::NotFunction`] if it is neither,
@@ -164,6 +182,7 @@ impl Hook {
         let actual = match &self.binding.value {
             Value::Thunk(c) if c.comp.arrow().is_none() => 0,
             Value::Thunk(_) => self.binding.value.lambda_arity().unwrap_or(0),
+            Value::Native { entry, applied } => entry.fixed_arity().saturating_sub(applied.len()),
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),
@@ -213,7 +232,7 @@ impl fmt::Display for RegisterError {
                 write!(
                     f,
                     "cannot register '{name}' as a hook: \
-                     expected a Block or Lambda, got {actual}"
+                     expected a Block, Lambda, or builtin, got {actual}"
                 )
             }
             Self::ArityMismatch {
@@ -244,8 +263,8 @@ impl fmt::Display for RegisterError {
 // ── The session's registration surface ──────────────────────────────────
 
 impl Shell {
-    /// Register a compiled [`Value`] — a `Block` or `Lambda` — as a named run
-    /// root in the session hook table.
+    /// Register a function [`Value`] — a `Block`, `Lambda`, or builtin — as a
+    /// named run root in the session hook table.
     ///
     /// It fires only on a host-dispatched `Program::Hook` run, never as `$name`
     /// and never as a command.  On failure the caller renders the

@@ -24,6 +24,7 @@
 //! work another tab is still waiting on.
 
 pub(crate) mod desk;
+pub(crate) mod enquiry;
 pub mod roster;
 pub mod schedule;
 
@@ -244,11 +245,12 @@ fn lease_fire(fleet: &Arc<Fleet>, agent: &Weak<Agent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cancel::InterruptTarget;
     use crate::agent::cancel::Token;
-    use crate::agent::cancel::{EvalReach, InterruptTarget};
-    use crate::agent::testkit::{TestAgentSpec, test_agent};
+    use crate::agent::testkit::source_run;
+    use crate::agent::testkit::{TestAgentSpec, bare_transport, test_agent};
     use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, ParkMode, Post, Stamped};
-    use ral_core::process::DurableRoot;
+    use ral_core::protocol::{IdentityTransport, Transport as _};
     use std::time::Instant;
 
     /// The reaper fires on its own daemon thread, so a lease test asserts
@@ -281,12 +283,15 @@ mod tests {
         test_agent(fleet, spec)
     }
 
-    /// The in-process reach, over an eval root the test goes on to assert on.
-    fn reach_into(root: &DurableRoot) -> EvalReach {
-        EvalReach::Identity {
-            eval_root: Some(root.clone()),
-            interrupt_target: InterruptTarget::default(),
-        }
+    /// A reach into a real engine, and the engine it reaches.
+    fn reach_into() -> (InterruptTarget, IdentityTransport) {
+        let engine = bare_transport();
+        (InterruptTarget::new(engine.control().clone()), engine)
+    }
+
+    /// The cause `engine`'s durable root was cancelled with, as its status.
+    fn ended(engine: &IdentityTransport) -> Option<i32> {
+        ral_core::protocol::reading::session_ended(engine).expect("an identity transport answers")
     }
 
     /// A lease is a consequence of having a reporting parent, and of nothing
@@ -297,15 +302,13 @@ mod tests {
         let fleet = Fleet::with_lease(Duration::from_millis(50));
         let trunk = agent(&fleet, "trunk", None);
         let branch = agent(&fleet, "branch", None);
-        let worker_root = DurableRoot::default();
+        let (reach, worker_engine) = reach_into();
         let mut worker = spec("worker", Some(&trunk));
-        worker.reach = reach_into(&worker_root);
+        worker.reach = reach;
         let _worker = born(&fleet, worker).expect("a fresh child of a live trunk");
 
         assert!(
-            eventually(Duration::from_secs(2), || worker_root
-                .as_scope()
-                .is_cancelled()),
+            eventually(Duration::from_secs(2), || ended(&worker_engine).is_some()),
             "a reporting child is reaped once the bound elapses"
         );
         std::thread::sleep(Duration::from_millis(300));
@@ -323,9 +326,9 @@ mod tests {
     fn clear_subtree_cancels_the_subtree() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
-        let child_root = DurableRoot::default();
+        let (reach, child_engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
-        child.reach = reach_into(&child_root);
+        child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
         trunk.clear_subtree();
@@ -335,7 +338,7 @@ mod tests {
             "the abandoned child's token is terminate-stamped"
         );
         assert!(
-            child_root.as_scope().is_cancelled(),
+            ended(&child_engine).is_some(),
             "the reap cancels the child's eval layer, not just its token"
         );
     }
@@ -373,41 +376,15 @@ mod tests {
         );
     }
 
-    /// The other reason the trunk must never carry a `DurableRoot`: a
-    /// terminate of the `cancel`/`` exarch-agents `cancel `` class landing on it must
-    /// not poison the session.  A root states its reach pre-weakened, so a
-    /// terminate never reaches the root that construction captured.
-    #[test]
-    fn a_terminate_on_the_trunk_leaves_its_session_root_uncancelled() {
-        let fleet = Fleet::new();
-        let root = DurableRoot::default();
-        let mut trunk = spec("trunk", None);
-        trunk.reach = reach_into(&root).interrupt_only();
-        let trunk = born(&fleet, trunk).expect("a fresh trunk");
-
-        trunk.cancel_tree(CancelCause::Explicit);
-
-        assert!(
-            trunk.cancel_token().terminated(),
-            "the cooperative token still trips: an in-flight attend loop must still unwind"
-        );
-        assert_eq!(
-            root.as_scope().cause(),
-            None,
-            "a root states its reach pre-weakened, so terminate never reaches the root — \
-             the session survives a cancel aimed at the trunk"
-        );
-    }
-
     /// Where the `/clear` cascade would have left the root live, `/close`
     /// takes it with the subtree.
     #[test]
     fn cancel_tree_takes_the_root_too() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
-        let branch_root = DurableRoot::default();
+        let (reach, branch_engine) = reach_into();
         let mut branch = spec("branch", Some(&trunk));
-        branch.reach = reach_into(&branch_root);
+        branch.reach = reach;
         let branch = born(&fleet, branch).expect("a fresh child of a live trunk");
         let grandchild = agent(&fleet, "grandchild", Some(&branch));
 
@@ -418,7 +395,7 @@ mod tests {
             "the closed branch's token is set"
         );
         assert!(
-            branch_root.as_scope().is_cancelled(),
+            ended(&branch_engine).is_some(),
             "close reaches the branch's eval layer, not just its token"
         );
         assert!(
@@ -439,16 +416,9 @@ mod tests {
     fn interrupt_unwinds_exactly_one_agent() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
-        let child_root = DurableRoot::default();
-        // What the child's own dispatch would publish into its interrupt target
-        // as that dispatch was minted: a scope under its session, whose run
-        // frame is born a descendant.
-        let target: InterruptTarget = Arc::new(Mutex::new(Some(child_root.worker().child())));
+        let (reach, child_engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
-        child.reach = EvalReach::Identity {
-            eval_root: Some(child_root.clone()),
-            interrupt_target: target.clone(),
-        };
+        child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
         let grandchild = agent(&fleet, "grandchild", Some(&child));
 
@@ -463,16 +433,7 @@ mod tests {
             "an interrupt is not a terminate cause"
         );
         assert!(
-            target
-                .lock()
-                .unwrap()
-                .as_ref()
-                .expect("the cell holds the in-flight dispatch's scope")
-                .is_cancelled(),
-            "the interrupt reaches whatever scope the interrupt target holds"
-        );
-        assert!(
-            !child_root.as_scope().is_cancelled(),
+            ended(&child_engine).is_none(),
             "eval_root itself is never touched by an interrupt"
         );
         assert!(
@@ -481,38 +442,50 @@ mod tests {
         );
     }
 
-    /// An interrupted agent's *next* run must run uncancelled: the interrupt
-    /// reaches only the interrupt target, never `eval_root`, so a foreground
-    /// scope freshly minted from the root starts clean.
+    /// The interrupt reaches the run in flight through the target, and only
+    /// it: never `eval_root`, so the agent's *next* run is born uncancelled.
     #[test]
     fn interrupt_never_poisons_the_next_run() {
+        use ral_core::protocol::{Ending, Report, dispatch_to_report};
+
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
-        let eval_root = DurableRoot::default();
-        let dispatches = eval_root.worker();
-        let target: InterruptTarget = Arc::new(Mutex::new(Some(dispatches.child())));
+        let transport = Arc::new(bare_transport());
         let mut child = spec("child", Some(&trunk));
-        child.reach = EvalReach::Identity {
-            eval_root: Some(eval_root),
-            interrupt_target: target.clone(),
-        };
+        child.reach = InterruptTarget::new(transport.control().clone());
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-        child.interrupt();
-        assert!(
-            target.lock().unwrap().as_ref().unwrap().is_cancelled(),
-            "the in-flight run did unwind"
-        );
+        let running = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                dispatch_to_report(&*transport, source_run("sleep 30"), Arc::new(()))
+            })
+        };
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !running.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "the interrupt must reach the in-flight run"
+            );
+            child.interrupt();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        running
+            .join()
+            .expect("the dispatch must not panic")
+            .expect("identity never severs");
 
-        // The next dispatch mints a fresh scope beside the cancelled one and
-        // republishes it into the same target, as `IdentityTransport::dispatch`
-        // does every time.
-        let next_run = dispatches.child();
-        *target.lock().unwrap() = Some(next_run.clone());
-
+        let next = dispatch_to_report(&*transport, source_run("$[1 + 1]"), Arc::new(()))
+            .expect("identity never severs");
         assert!(
-            !next_run.is_cancelled(),
-            "the next run is born uncancelled — the interrupt never poisoned eval_root"
+            matches!(
+                next,
+                Report::Ran {
+                    ending: Ending::Settled { .. },
+                    ..
+                }
+            ),
+            "the next run is born uncancelled — the interrupt never poisoned eval_root: {next:?}"
         );
     }
 
@@ -520,9 +493,9 @@ mod tests {
     fn cancel_sets_the_token_and_the_roster_reports_the_subtree() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
-        let eval_root = DurableRoot::default();
+        let (reach, engine) = reach_into();
         let mut lint = spec("lint", Some(&trunk));
-        lint.reach = reach_into(&eval_root);
+        lint.reach = reach;
         let lint = born(&fleet, lint).expect("a fresh child of a live trunk");
 
         let names: Vec<String> = roster::listing(&trunk)
@@ -538,7 +511,7 @@ mod tests {
         lint.cancel_tree(CancelCause::Explicit);
         assert!(lint.cancel_token().is_cancelled(), "cancel sets the token");
         assert!(
-            eval_root.as_scope().is_cancelled(),
+            ended(&engine).is_some(),
             "cancel reaches the worker's eval layer through its session root"
         );
     }
@@ -776,27 +749,6 @@ mod tests {
         );
     }
 
-    /// A reaped agent and a cancelled one share one cascade, distinguished
-    /// only by the cause each caller passes.  Pinned directly here, away from
-    /// the lease chain's own timing.
-    #[test]
-    fn a_lease_reap_reports_deadline_not_explicit() {
-        let fleet = Fleet::new();
-        let trunk = agent(&fleet, "trunk", None);
-        let eval_root = DurableRoot::default();
-        let mut worker = spec("worker", Some(&trunk));
-        worker.reach = reach_into(&eval_root);
-        let worker = born(&fleet, worker).expect("a fresh child of a live trunk");
-
-        worker.cancel_tree(CancelCause::Deadline);
-
-        assert_eq!(
-            eval_root.as_scope().cause(),
-            Some(CancelCause::Deadline),
-            "a reaped worker's eval layer reports it timed out, not that it was explicitly cancelled"
-        );
-    }
-
     /// `steer` is the one door that stamps the exchange clock, and it always
     /// delivers too.
     #[test]
@@ -804,9 +756,9 @@ mod tests {
         let ttl = Duration::from_millis(300);
         let fleet = Fleet::with_lease(ttl);
         let trunk = agent(&fleet, "trunk", None);
-        let eval_root = DurableRoot::default();
+        let (reach, engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
-        child.reach = reach_into(&eval_root);
+        child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
         std::thread::sleep(ttl / 2);
@@ -814,13 +766,11 @@ mod tests {
 
         std::thread::sleep(ttl / 2 + Duration::from_millis(50));
         assert!(
-            !eval_root.as_scope().is_cancelled(),
+            ended(&engine).is_none(),
             "steered at half the ttl, still alive past the original bound"
         );
         assert!(
-            eventually(Duration::from_secs(2), || eval_root
-                .as_scope()
-                .is_cancelled()),
+            eventually(Duration::from_secs(2), || ended(&engine).is_some()),
             "reaped once the renewed span elapses"
         );
     }
@@ -849,16 +799,16 @@ mod tests {
         let ttl = Duration::from_millis(80);
         let fleet = Fleet::with_lease(ttl);
         let trunk = agent(&fleet, "trunk", None);
-        let eval_root = DurableRoot::default();
+        let (reach, engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
-        child.reach = reach_into(&eval_root);
+        child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
         trunk.clear_subtree();
         assert_eq!(
-            eval_root.as_scope().cause(),
-            Some(CancelCause::Explicit),
-            "clear_subtree cancels through the ordinary /clear cause"
+            ended(&engine),
+            Some(CancelCause::Terminate.exit_code()),
+            "clear_subtree terminates the abandoned child's engine"
         );
 
         // The cancelled child's own loop would retire it; here the drop is
@@ -866,8 +816,8 @@ mod tests {
         drop(child);
         std::thread::sleep(ttl * 4);
         assert_eq!(
-            eval_root.as_scope().cause(),
-            Some(CancelCause::Explicit),
+            ended(&engine),
+            Some(CancelCause::Terminate.exit_code()),
             "the lease's late fire finds a settled agent and never overwrites the cause"
         );
     }

@@ -2,7 +2,7 @@
 //! protocol has drifted from this host's.
 //!
 //! Packaging's business, so it runs from `beforeBuildCommand` rather than
-//! `build.rs`, where a stale image was a compile error for the whole
+//! `build.rs`, where a stale image would be a compile error for the whole
 //! workspace.  Absent media is not a failure: the bundler names the missing
 //! resource itself.
 

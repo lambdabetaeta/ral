@@ -216,7 +216,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    the script a call ran wears `CODE_BG`, what it read, ran and searched wears
    the darker `EFFECT_BG`, one plane below. Every intent in a run opens flush in
    content space — the rail's margin is its only indent, so the head call's
-   intent no longer sits a column left of its siblings — and both panels step in
+   intent sits in the same column as its siblings — and both panels step in
    by one `BODY_INDENT` of two columns. Model prose sits unwashed at
    the base; the human's submitted prompt is opened by a full-width
    `PROMPT_INK` rule fence (`line::prompt_fence`) and neutral prompt ink, found

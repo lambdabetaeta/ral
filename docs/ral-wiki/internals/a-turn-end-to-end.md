@@ -1,7 +1,7 @@
 ---
 verified_at_commit: cd4b16e4
 verified_at_date: 2026-09-02
-anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
+anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
 # A run, end to end
@@ -12,11 +12,13 @@ host starts it through a synchronous, runtime-agnostic run door** —
 already holds a foreground scope) in
 [`core/src/run.rs`](../../../core/src/run.rs). The request's `Run`
 carries a `Program` sum naming what runs: source text, or a *registered hook*
-applied to first-order arguments — a `Block`/`Lambda` the host stored by name
-in the session-lived hook table (`Shell::register_hook`), so the host conveys
-data, never closures, across the dispatch boundary. No host reimplements
-evaluation; each is a *request supplier* that hands the door a `RunRequest` and
-renders `RunReport` its own way
+applied to first-order arguments — a block, lambda, or builtin registered by
+name in the session-lived hook table (`Shell::register_hook`), so the host
+conveys data, never closures, across the dispatch boundary. No host
+reimplements evaluation, and no front-end calls the door itself: each is a
+*run supplier* that dispatches a `Run` through a transport, whose engine
+(`Engine::run`) enters the door and projects the `RunReport` onto the wire's
+`Report` for the front-end to render its own way
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). **Completion is the
 door returning** — never a channel disconnecting — so a detached `spawn`ed
@@ -26,15 +28,14 @@ reduction primitive behind the door is crate-private, so a host cannot start an
 unframed evaluation against a stale frame
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
-**There are three doors, and which one you use is decided by what you hold.**
+**There are two doors, and which one you use is decided by what you hold.**
 `Shell::run` is for a host with no run in hand: its frame is minted under
 `SessionState::anchor`. A host that already holds a pre-minted
 `ForegroundScope` uses `Shell::run_under(&scope, req)`; the identity and wire
 transports use this form so cancellation can land before a frame exists. Code
-*already inside* a run — a builtin body, a lifecycle hook — uses
-`Shell::run_nested(&mooring, req)`, handing it the `Mooring` it was given, so
-the nested frame is a child of the enclosing run's cancel scope: the outer
-run's interrupt unwinds the nest, and the outer wall reaches into it
+*already inside* a run — a builtin body — opens no second run: it applies a
+function under the `Mooring` it was given, so the outer run's interrupt and
+wall reach whatever it calls
 ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 
 **The request carries the policy axes as types, never flags.** A `RunRequest`
@@ -47,18 +48,17 @@ is exactly the places hosts differ:
   reads the session's fd 0 (terminal, pipe, or file), `Empty` installs an
   immediate-EOF source with no fall-through.
 - **Terminal** — a `RequestedTerminalAccess`: `Leased` may foreground a
-  terminal-bound child, `Denied` may not. `Capture` no longer implies terminal
+  terminal-bound child, `Denied` may not. `Capture` does not imply terminal
   ownership — a piped `ral -c` is `Denied` yet `Inherit`s its stdin
   ([[decisions/260619_terminal-lease|terminal-lease]]).
-- **Capabilities** — the `Capabilities` ceiling pushed for the run's dynamic
-  extent (`root()` for the REPL, a grant profile for exarch).
+- **Capabilities** — the `GrantStack` ceiling pushed for the run's dynamic
+  extent, every layer of it (`GrantStack::root()` for the ral hosts, a grant
+  profile for exarch).
 - **Limits** — `wall` (the foreground deadline) and `deferred_lease` /
   `worker_cap` (the idle/backstop lease and the concurrency cap governing
   workers the run defers at the durable root).
 - **Surface** — an optional run-local `SurfaceSink` (`Arc<dyn EventSink>`),
   installed only for this run; `None` is the identity.
-- **Lifecycle** — optional pre/post-exec hooks (`Box::new(())` for a host with
-  none).
 - **Trail** — `trail: Option<CapturePolicy>` ([[design/audit|audit]]). `Some`
   delimits this dispatch's own extent as an audit scope and carries it home on
   `RunReport::Ran`; `None` neither opens a scope nor collects one.
@@ -80,20 +80,24 @@ module's framed scaffold:
   live session's schemes ([[internals/compilation-ladder|the ladder]];
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]). A
   parse or type failure returns `RunReport::Static { diagnostics }` at once —
-  no run state, no root context, no hooks. The diagnostic carries the `Source`
+  no run state, no root context. The diagnostic carries the `Source`
   its carets point into rather than registering it: a run that failed to
   compile leaves no live span, so its text has no business in a registry that
   is append-only precisely because live spans index it
   ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
   The hook arm skips this: its program is an
   already-compiled value resolved by name in the hook table, and the hook's
-  registered `DefaultPolicy` (capture, terminal authority) folds into
-  the run's conditions — the hook's to decide, not the dispatching host's.
+  registered `DefaultPolicy` (capture, terminal authority, and `aside` —
+  run on a `join_session` sibling, so nothing flows back) folds into the run's
+  conditions — the hook's to decide, not the dispatching host's. A fault in
+  it is labelled by `HookName::fault_label` (`plugin 'p' hook 'h'`,
+  `prompt`), and a hook run is no ready boundary: only a source run emits
+  the boundary notices.
 - `run_built` materialises the IO regime — `Capture` mints the buffers it reads
   back, `Inherit` leaves the ambient streams to flow — then assembles the run's
   frame **in two halves, split by mutability**. What the run fixes once (the
   `surface` sink, the deferred rail with its `deferred_lease` and `worker_cap`,
-  the desk, the nursery, the foreground scope, and the run's terminal
+  the desk, the `Fork` arm, the foreground scope, and the run's terminal
   authority) is a `Mooring`, an owned local on `run_built`'s own Rust stack
   frame; the surface has no liveness role, so a clone of it can never define
   run completion. What genuinely changes within the run is taken on loan: the
@@ -108,10 +112,10 @@ module's framed scaffold:
   never moved, so an outer run's is back the instant this stack frame ends, and
   the `NurseryGuard` beside it empties the nursery on the unwinding path as
   surely as on the clean one. The root context is installed — for a source run
-  only, a hook having no text to register — the pre-exec hook
-  fires (taking `&Mooring` beside the shell, as every in-run body does), and
-  `with_capabilities(caps, body)` runs the run's program under the request's
-  capability ceiling — `run_phrases(&top.phrases, shell.env.clone(),
+  only, a hook having no text to register — and
+  `with_layers(caps, body)` runs the run's program under the request's
+  capability ceiling, pushed layer by layer and removed by position after, so
+  a session frame the program pushes survives the run — `run_phrases(&top.phrases, shell.env.clone(),
   Mode::Session, mooring, shell)` for the source arm, the in-frame
   `builtins::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
@@ -124,16 +128,15 @@ module's framed scaffold:
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
   read, `run_framed` polls `process::check(mooring)` once more so a sticky
   cancellation cannot be absorbed by `try`; it then computes the transport
-  status, fires the post-exec hook, and emits ready-boundary notices while the
+  status and emits ready-boundary notices while the
   run frame and sinks are still installed. Only then does the IO guard drop.
 - Back in `run_built`, the wall is **disarmed before the cause is read**, so a
   reaper tripping in the gap between eval returning and classification cannot
   misread a run that finished inside its budget as timed out. `classify_ending`
   then folds the settled `Result`, the transport status, `single_command`,
   `root`, and whether a `Deadline` cause genuinely elapsed into one
-  `run::Ending` — `Settled`, `Raised`, `Walled`, `Exited`, or (unix) `Stopped`
-  — so `Ok` beside a stray "timed out" flag is no longer a state the type can
-  hold. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
+  `run::Ending` — `Settled`, `Raised`, `Walled`, or `Exited` — so `Ok`
+  beside a stray "timed out" flag is not a state the type can hold. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
   starts `Vec::new()` here — `run_built` has no view of the dispatch's own
   scope, only of what a body opened and closed on its own account.
 - One level up, at `Shell::enter` — the durability wrapper all three run doors
@@ -146,8 +149,11 @@ module's framed scaffold:
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
   and discarded — the panicked dispatch reports `Static`, never a trail.
   `RunReport::into_report` then renders the engine's `Ending` against the
-  `SourceDb` — a `Raised`/`Walled` error becomes the string the host prints
-  verbatim, `command_exit`/`status` computed alongside it; a `Static` renders
+  shell — a `Raised`/`Walled` error becomes the string the host prints
+  verbatim and the `{cmd, status, message, site}` record `try` would hand its
+  handler, `command_exit`/`status` computed alongside it; a `Settled` value
+  the wire cannot carry (a handle, block, or function) becomes `Unreturnable`,
+  its own rendered failure with a hint; a `Static` renders
   the same way through `format_static_diagnostics`, which also settles its exit
   status (2 parse, 1 type) — onto the wire's own
   `protocol::Ending`, and projects each `Observation` through
@@ -157,17 +163,17 @@ module's framed scaffold:
 
 **The hosts differ only in the request they supply.**
 
-- The REPL's `execute_input` (`ral/src/repl/exec.rs`) supplies `script_name:
-  "<stdin>"`, `Capabilities::root()`, no limits, `RunIo::Inherit`,
-  `RequestedTerminalAccess::Leased`, `RunStdin::Inherit`, no surface, and the
-  `pre-exec` / `chpwd` / `post-exec` plugin hooks; it builds a `Program::Source`
-  `Run` and drains it through `protocol::dispatch_to_report` on its prompt
-  thread with the mute `Arc::new(())` host, rendering the terminal `Report`
-  with `print_result` — an `Err(Severed)` prints the cause and ends the line
-  instead. Its plugin hooks
-  and prompt body (`ral/src/repl/plugin.rs`, `prompt.rs`) dispatch
-  `Program::Hook` runs instead — hooks the REPL registered by name, run through
-  the same frame.
+- The REPL's `exec::step` (`ral/src/repl/exec.rs`) supplies `script_name:
+  "<stdin>"`, `GrantStack::root()`, no limits, `RunIo::Inherit`,
+  `RequestedTerminalAccess::Leased`, `RunStdin::Inherit`; it builds a
+  `Program::Source` `Run` and drains it through `protocol::dispatch_to_report`
+  on its `IdentityTransport` with the REPL's own `Host` (`ReplHost`),
+  rendering the terminal `Report` with `print_result` — an `Err(Severed)`
+  prints the cause and ends the session. The `pre-exec`, `chpwd` and
+  `post-exec` plugin hooks are dispatches of their own around it, as are the
+  prompt body and every other hook (`ral/src/repl/plugin.rs`, `prompt.rs`):
+  `Program::Hook` runs of hooks registered by name, through the same door
+  ([[map/repl/loop|loop]]).
 - exarch's `run_shell` (`exarch/src/shell_eval.rs`) supplies `script_name:
   "<tool>"`, its session grant profile, a per-tool `wall` and a 1 h idle
   `deferred_lease` under a 24 h backstop, plus a `worker_cap` on concurrently
@@ -183,11 +189,12 @@ module's framed scaffold:
   [[design/grant|grant]], not a source-level `grant { … }` the model could
   escape — which is why exarch needs no runtime of its own
   ([[design/exarch-architecture|exarch-architecture]]).
-- ral's batch path (`ral/src/batch.rs`) supplies `RunIo::Inherit`, no surface,
-  and a `()` lifecycle, with `RequestedTerminalAccess` keyed to whether it owns
-  the terminal — the third source-run client of `Shell::run`, closing the one
-  entry [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
-  flagged.
+- ral's batch path (`ral/src/batch.rs`) boots an `IdentityTransport` from the
+  `batch` installer, dispatches the `_ral-boot` hook, then the script as one
+  `Program::Source` run under the mute host, with `RunIo::Inherit` and
+  `RequestedTerminalAccess` keyed to whether it owns the terminal — the same
+  door, the same ending law, and the same typecheck as the REPL
+  ([[map/repl/startup|startup]]).
 
 The human and the model are interchangeable suppliers of top-level runs over
 one persistent `Shell`.

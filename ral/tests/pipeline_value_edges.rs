@@ -173,10 +173,10 @@ echo $lines[1]
 
 #[test]
 fn a_value_producer_into_a_block_writes_nothing_and_is_accepted() {
-    let o = run_pipe("5 | { |x| echo $x }");
+    let o = run_pipe("5 | { |x| echo $x }\nreturn ()");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     // The block literal is a value: it is returned, never applied, so the
-    // `echo` inside it never runs.
+    // `echo` inside it never runs. `return ()` keeps the run's result data.
     assert!(
         o.stdout.is_empty(),
         "a returned thunk must not run: {}",
@@ -189,7 +189,7 @@ fn a_value_producer_into_a_block_writes_nothing_and_is_accepted() {
 /// and a returned thunk is never forced.  Acceptance changed; this did not.
 #[test]
 fn a_thunk_stage_is_accepted_and_never_forced() {
-    let o = run_pipe("5 | { echo hi }");
+    let o = run_pipe("5 | { echo hi }\nreturn ()");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert!(
         !o.stdout.contains("hi"),

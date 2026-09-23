@@ -1,27 +1,53 @@
 //! Plugin manifest types and parsing.
 //!
-//! A plugin manifest is a Map returned by a plugin's top-level block.
-//! The parser validates its shape, extracts hook handlers, keybindings,
-//! and alias thunks, and yields a [`LoadedPlugin`] record plus the
-//! [`ManifestHandlers`] the caller registers into the shell hook table and
-//! env.
+//! A plugin manifest is a Map returned by a plugin's top-level block.  The
+//! engine's load door parses it into the first-order [`Manifest`] the host is
+//! told, plus the [`ManifestHandlers`] it registers itself; the host
+//! re-validates the manifest into a [`LoadedPlugin`].
 
 use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
+use ral_core::record;
+use ral_core::serial::FOValue;
 use ral_core::types::Error;
 use ral_core::{Map, Value};
-use std::sync::Arc;
 
 /// Hook events recognised in manifests.  Typos are load errors so a
 /// plugin cannot silently register a handler that never fires.
 pub(super) const KNOWN_HOOKS: &[&str] =
     &["buffer-change", "pre-exec", "post-exec", "chpwd", "prompt"];
 
-/// One keybinding manifest entry.  `chord` is the parsed form of `key`,
-/// validated at load so nothing downstream re-parses or skips.  `guard`,
-/// when present, is a regex compiled at load; the binding claims its chord
-/// only when the regex matches the text left of the cursor, otherwise
-/// dispatch falls to the next table entry or the editor's built-in action.
+/// A manifest's first-order part: what the host needs to route keys and
+/// fire hooks.  Handlers never cross; they stay registered engine-side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Manifest {
+    pub(crate) name: String,
+    pub(crate) hooks: Vec<String>,
+    pub(crate) keybindings: Vec<KeySpec>,
+}
+
+record!(Manifest {
+    name: "name",
+    hooks: "hooks",
+    keybindings: "keybindings",
+});
+
+/// One keybinding as the manifest spells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeySpec {
+    pub(crate) key: String,
+    pub(crate) guard: Option<String>,
+}
+
+record!(KeySpec {
+    key: "key",
+    guard: "guard",
+});
+
+/// One keybinding, validated.  `chord` is the parsed form of `key`; `guard`,
+/// when present, is a regex the binding claims its chord under only when it
+/// matches the text left of the cursor, otherwise dispatch falls to the next
+/// table entry or the editor's built-in action.
 #[derive(Debug, Clone)]
 pub(crate) struct KeyBinding {
     pub(crate) key: String,
@@ -29,11 +55,43 @@ pub(crate) struct KeyBinding {
     pub(crate) guard: Option<regex::Regex>,
 }
 
-/// A loaded plugin.  Hooks fire from the rustyline event loop;
-/// keybindings register against rustyline on the next sync; `bindings`
-/// records the env entries installed at load so `unload` can remove
-/// exactly those.  `state_cell` is the plugin's persistent state (read
-/// and updated via `_ed-state` from inside hook handlers).
+impl KeySpec {
+    /// The one validation both ends run: the door to refuse early, the host
+    /// because its router is what the binding must fit.
+    pub(crate) fn bind(&self) -> Result<KeyBinding, String> {
+        let key = &self.key;
+        let chord = parse_key_notation(key)
+            .ok_or_else(|| format!("keybinding '{key}': unrecognised key notation"))?;
+        if let Some(action) = reserved_action(chord) {
+            return Err(format!(
+                "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
+            ));
+        }
+        let guard = self
+            .guard
+            .as_deref()
+            .map(regex::Regex::new)
+            .transpose()
+            .map_err(|e| format!("keybinding '{key}': invalid guard regex: {e}"))?;
+        if guard.is_none()
+            && let Some(action) = builtin_action(chord)
+        {
+            return Err(format!(
+                "unguarded keybinding '{key}' would shadow the built-in {action} on every \
+                 press; add a 'guard:' regex so unmatched presses fall through"
+            ));
+        }
+        Ok(KeyBinding {
+            key: key.clone(),
+            chord,
+            guard,
+        })
+    }
+}
+
+/// A loaded plugin, as the host keeps it.  Hooks fire from the editor loop;
+/// keybindings register against rustyline on the next sync.  `state_cell` is
+/// the plugin's persistent state, read and updated via `_ed-state`.
 ///
 /// Plugins run with host authority — the manifest cannot narrow it.  A
 /// `capabilities:` key is rejected as a load error rather than accepted and
@@ -43,25 +101,34 @@ pub(crate) struct KeyBinding {
 pub(crate) struct LoadedPlugin {
     pub(crate) name: String,
     /// Hook event names this plugin registered.  The handler values
-    /// themselves live only in the shell hook table.
+    /// themselves live only in the engine's hook table.
     pub(crate) hooks: Vec<String>,
     pub(crate) keybindings: Vec<KeyBinding>,
-    /// Names installed into env at load time; removed on unload.
-    pub(crate) bindings: Vec<String>,
-    pub(crate) state_cell: Option<Value>,
-    /// The plugin file's source text, installed as the root context of every
-    /// framed hook run so a fault inside a handler renders against the right
-    /// line of the right file.  Set by the loader once the file is read;
-    /// [`parse`](Self::parse) leaves it empty (it sees only the manifest value).
-    pub(crate) source: Arc<str>,
+    pub(crate) state_cell: Option<FOValue>,
     /// Circuit-breaker state for this plugin's buffer-change hook — the only
     /// hook that fires on every keystroke and so needs a per-session brake.
     pub(crate) buffer_change_health: HookHealth,
 }
 
-/// The handler values a manifest parse extracts, separate from the
-/// [`LoadedPlugin`] record so the loader can register them into the shell
-/// hook table and env without the record retaining a second copy.
+impl LoadedPlugin {
+    /// The host's record of `manifest`, its keybindings re-validated.
+    pub(crate) fn admit(manifest: Manifest) -> Result<Self, String> {
+        Ok(Self {
+            keybindings: manifest
+                .keybindings
+                .iter()
+                .map(KeySpec::bind)
+                .collect::<Result<_, _>>()?,
+            name: manifest.name,
+            hooks: manifest.hooks,
+            state_cell: None,
+            buffer_change_health: HookHealth::default(),
+        })
+    }
+}
+
+/// The handler values a manifest parse extracts, which the engine registers
+/// into its hook table and env; `aliases` are also what unload removes.
 #[derive(Debug)]
 pub(super) struct ManifestHandlers {
     pub(super) hooks: Vec<(String, Value)>,
@@ -69,86 +136,80 @@ pub(super) struct ManifestHandlers {
     pub(super) aliases: Vec<(String, Value)>,
 }
 
-impl LoadedPlugin {
-    /// Parse a plugin manifest value into the plugin record plus the
-    /// handler values the caller registers into the hook table and env.
-    pub(super) fn parse(val: &Value) -> Result<(Self, ManifestHandlers), Error> {
-        let Value::Map(map) = val else {
-            return Err(load_err(format!(
-                "plugin manifest: expected Map, got {}",
-                val.type_name()
-            )));
-        };
-        // The keyset is `Form::Manifest`'s declared table, the same one the
-        // checker holds a manifest's returned row to.  A manifest arriving
-        // from a factory has no row to check, so this door meets it here — and
-        // a key with a refusal of its own says that rather than "unknown key".
-        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
-        for key in map.keys() {
-            match table.holds(key) {
-                Some(ral_core::typecheck::contract::Holds::Refused(advice)) => {
-                    return Err(load_err(*advice));
-                }
-                Some(_) => {}
-                None => return Err(load_err(format!("manifest: {}", table.unknown_key(key)))),
+/// Parse a plugin manifest value into its first-order part plus the handler
+/// values the engine registers.
+pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> {
+    let Value::Map(map) = val else {
+        return Err(load_err(format!(
+            "plugin manifest: expected Map, got {}",
+            val.type_name()
+        )));
+    };
+    // The keyset is `Form::Manifest`'s declared table, the same one the
+    // checker holds a manifest's returned row to.  A manifest arriving from a
+    // factory has no row to check, so this door meets it here — and a key
+    // with a refusal of its own says that rather than "unknown key".
+    let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
+    for key in map.keys() {
+        match table.holds(key) {
+            Some(ral_core::typecheck::contract::Holds::Refused(advice)) => {
+                return Err(load_err(*advice));
             }
+            Some(_) => {}
+            None => return Err(load_err(format!("manifest: {}", table.unknown_key(key)))),
         }
-        let name = match map.get("name") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => {
-                return Err(load_err(format!(
-                    "manifest 'name': expected String, got {}",
-                    other.type_name()
-                )));
-            }
-            None => return Err(load_err("manifest missing required 'name' field")),
-        };
-        let aliases = match map.get("aliases") {
-            Some(Value::Map(m)) => parse_aliases(m)?,
-            Some(other) => {
-                return Err(load_err(format!(
-                    "manifest 'aliases': expected Map, got {}",
-                    other.type_name()
-                )));
-            }
-            None => Vec::new(),
-        };
-        let hooks = match map.get("hooks") {
-            Some(Value::Map(m)) => parse_hooks(m)?,
-            Some(other) => {
-                return Err(load_err(format!(
-                    "manifest 'hooks': expected Map, got {}",
-                    other.type_name()
-                )));
-            }
-            None => Vec::new(),
-        };
-        let (keybindings, keybinding_handlers) = match map.get("keybindings") {
-            Some(Value::List(l)) => parse_keybindings(l.iter().cloned())?,
-            Some(other) => {
-                return Err(load_err(format!(
-                    "manifest 'keybindings': expected List, got {}",
-                    other.type_name()
-                )));
-            }
-            None => (Vec::new(), Vec::new()),
-        };
-        let plugin = Self {
-            hooks: hooks.iter().map(|(event, _)| event.clone()).collect(),
-            keybindings,
-            bindings: aliases.iter().map(|(n, _)| n.clone()).collect(),
-            state_cell: None,
-            source: Arc::from(""),
-            buffer_change_health: HookHealth::default(),
-            name,
-        };
-        let handlers = ManifestHandlers {
-            hooks,
-            keybindings: keybinding_handlers,
-            aliases,
-        };
-        Ok((plugin, handlers))
     }
+    let name = match map.get("name") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(load_err(format!(
+                "manifest 'name': expected String, got {}",
+                other.type_name()
+            )));
+        }
+        None => return Err(load_err("manifest missing required 'name' field")),
+    };
+    let aliases = match map.get("aliases") {
+        Some(Value::Map(m)) => parse_aliases(m)?,
+        Some(other) => {
+            return Err(load_err(format!(
+                "manifest 'aliases': expected Map, got {}",
+                other.type_name()
+            )));
+        }
+        None => Vec::new(),
+    };
+    let hooks = match map.get("hooks") {
+        Some(Value::Map(m)) => parse_hooks(m)?,
+        Some(other) => {
+            return Err(load_err(format!(
+                "manifest 'hooks': expected Map, got {}",
+                other.type_name()
+            )));
+        }
+        None => Vec::new(),
+    };
+    let (keybindings, keybinding_handlers) = match map.get("keybindings") {
+        Some(Value::List(l)) => parse_keybindings(l.iter().cloned())?,
+        Some(other) => {
+            return Err(load_err(format!(
+                "manifest 'keybindings': expected List, got {}",
+                other.type_name()
+            )));
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let manifest = Manifest {
+        name,
+        hooks: hooks.iter().map(|(event, _)| event.clone()).collect(),
+        keybindings,
+    };
+    let handlers = ManifestHandlers {
+        hooks,
+        keybindings: keybinding_handlers,
+        aliases,
+    };
+    Ok((manifest, handlers))
 }
 
 fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
@@ -173,7 +234,7 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 
 type KeybindingHandlers = Vec<(String, Value)>;
 
-fn parse_keybindings<I>(entries: I) -> Result<(Vec<KeyBinding>, KeybindingHandlers), Error>
+fn parse_keybindings<I>(entries: I) -> Result<(Vec<KeySpec>, KeybindingHandlers), Error>
 where
     I: Iterator<Item = Value>,
 {
@@ -196,13 +257,6 @@ where
             }
             None => return Err(load_err("keybinding entry missing 'key' field")),
         };
-        let chord = parse_key_notation(&key)
-            .ok_or_else(|| load_err(format!("keybinding '{key}': unrecognised key notation")))?;
-        if let Some(action) = reserved_action(chord) {
-            return Err(load_err(format!(
-                "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
-            )));
-        }
         let handler = match map.get("handler") {
             Some(h @ Value::Thunk(_)) => h.clone(),
             Some(other) => {
@@ -213,29 +267,20 @@ where
             }
             None => return Err(load_err("keybinding entry missing 'handler' field")),
         };
-        let guard =
-            match map.get("guard") {
-                Some(Value::String(g)) => Some(regex::Regex::new(g).map_err(|e| {
-                    load_err(format!("keybinding '{key}': invalid guard regex: {e}"))
-                })?),
-                Some(other) => {
-                    return Err(load_err(format!(
-                        "keybinding '{key}': guard: expected String, got {}",
-                        other.type_name()
-                    )));
-                }
-                None => None,
-            };
-        if guard.is_none()
-            && let Some(action) = builtin_action(chord)
-        {
-            return Err(load_err(format!(
-                "unguarded keybinding '{key}' would shadow the built-in {action} on every \
-                 press; add a 'guard:' regex so unmatched presses fall through"
-            )));
-        }
-        handlers.push((key.clone(), handler));
-        out.push(KeyBinding { key, chord, guard });
+        let guard = match map.get("guard") {
+            Some(Value::String(g)) => Some(g.clone()),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "keybinding '{key}': guard: expected String, got {}",
+                    other.type_name()
+                )));
+            }
+            None => None,
+        };
+        let spec = KeySpec { key, guard };
+        spec.bind().map_err(load_err)?;
+        handlers.push((spec.key.clone(), handler));
+        out.push(spec);
     }
     Ok((out, handlers))
 }
@@ -267,8 +312,7 @@ mod tests {
             ("name".into(), Value::String("p".into())),
             ("capabilities".into(), Value::map(vec![])),
         ]);
-        let err = LoadedPlugin::parse(&manifest)
-            .expect_err("a manifest with capabilities: must be rejected");
+        let err = parse(&manifest).expect_err("a manifest with capabilities: must be rejected");
         assert!(
             err.message.contains("capabilities") && err.message.contains("grant"),
             "error should name the key and point at grant, got: {}",
@@ -285,7 +329,7 @@ mod tests {
             ("name".into(), Value::String("p".into())),
             ("hookz".into(), Value::map(vec![])),
         ]);
-        let err = LoadedPlugin::parse(&manifest).expect_err("an unknown key must be rejected");
+        let err = parse(&manifest).expect_err("an unknown key must be rejected");
         assert!(
             err.message.contains("'hookz'") && err.message.contains("name, aliases, hooks"),
             "error should name the key and the list, got: {}",
@@ -314,7 +358,7 @@ mod tests {
                 fields.push((key.label.into(), value));
             }
             let manifest = Value::map(fields);
-            let result = LoadedPlugin::parse(&manifest);
+            let result = parse(&manifest);
             match &key.holds {
                 Holds::Refused(advice) => {
                     let err = result.expect_err("refused key must error");
@@ -335,8 +379,8 @@ mod tests {
     /// `name` is required, and its absence is not an unknown key.
     #[test]
     fn a_manifest_without_a_name_is_refused() {
-        let err = LoadedPlugin::parse(&Value::map(vec![]))
-            .expect_err("a manifest without a name must be rejected");
+        let err =
+            parse(&Value::map(vec![])).expect_err("a manifest without a name must be rejected");
         assert!(err.message.contains("name"), "got: {}", err.message);
     }
 
@@ -345,8 +389,8 @@ mod tests {
     #[test]
     fn manifest_without_capabilities_parses() {
         let manifest = Value::map(vec![("name".into(), Value::String("p".into()))]);
-        let (plugin, handlers) = LoadedPlugin::parse(&manifest).expect("clean manifest parses");
-        assert_eq!(plugin.name, "p");
+        let (manifest, handlers) = parse(&manifest).expect("clean manifest parses");
+        assert_eq!(manifest.name, "p");
         assert!(handlers.aliases.is_empty());
     }
 
@@ -387,7 +431,7 @@ mod tests {
                 ("name".into(), Value::String("p".into())),
                 (field.into(), value),
             ]);
-            let err = LoadedPlugin::parse(&manifest).expect_err("wrong type must be rejected");
+            let err = parse(&manifest).expect_err("wrong type must be rejected");
             assert!(
                 err.message.contains(field)
                     && err.message.contains(expected)
@@ -402,7 +446,7 @@ mod tests {
     /// as a missing field.
     #[test]
     fn non_map_manifest_is_load_error() {
-        let err = LoadedPlugin::parse(&Value::Int(42)).expect_err("non-map must be rejected");
+        let err = parse(&Value::Int(42)).expect_err("non-map must be rejected");
         assert!(
             err.message.contains("manifest") && err.message.contains("Int"),
             "error should name the manifest shape, got: {}",

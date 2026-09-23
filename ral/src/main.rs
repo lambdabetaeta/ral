@@ -3,10 +3,12 @@
 //! turns out to be one.
 
 mod batch;
+mod boot_door;
 mod cli;
 mod platform;
 mod repl;
 mod startup;
+mod surface;
 
 use cli::{InteractiveOpts, Mode};
 use startup::Invocation;

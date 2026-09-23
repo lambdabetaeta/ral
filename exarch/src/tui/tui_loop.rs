@@ -222,9 +222,9 @@ pub fn run(
         recorder: &recorder,
     };
     // This is the process's trunk — a fact of the launch, not of any position
-    // in the tree — so its token is what an OS signal must reach, held for as
-    // long as it attends.
-    let _slot = crate::agent::cancel::publish(session.cancel_token());
+    // in the tree — so it is what an OS signal must reach, for as long as it
+    // attends.
+    let _signals = crate::agent::cancel::face(&session.agent);
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
@@ -411,11 +411,9 @@ fn ui_loop(
                             // that just ended — and never the durable root: the
                             // exchange dies, its descendants do not, and the
                             // agent lives to take a next run. The trunk alone
-                            // also raises the ambient interrupt, gated to it
-                            // because only the trunk publishes the process-wide
-                            // slot; that path alone re-creates the SIGINT for a
-                            // foreground external child and stamps the ambient
-                            // foreground cause, which needs no dispatch to name.
+                            // also re-creates the SIGINT a foreground external
+                            // child would have received, the process's
+                            // terminal being the trunk's.
                             KeyAction::Cancel | KeyAction::Interrupt => {
                                 if let Some(agent) = tui.app.tabs.agent(focused) {
                                     agent.interrupt();

@@ -88,7 +88,8 @@ host the harness runs under, whose `enquire` answers the honest
 lease constant this module owns but does not put on the request: it is not
 per-run policy, it is per-*shell* policy, armed once by
 `bootstrap::arm_session_ledgers` — the one ledger-policy site, applied by
-the identity seat's ceremony and the wire engine's boot recipe alike
+the one recipe both carriers boot through (`bootstrap::engine_boot_shell`)
+and to each fork before it is parked
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
@@ -106,7 +107,7 @@ from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Frame
 teardown is core's: `IoLoan` brackets the byte streams and registers a run takes
 on loan from the shell, self-healing on a caught worker panic as well as on the
 normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
-the run's invariant half — surface, deferred sink, desk, nursery, cancel, the
+the run's invariant half — surface, deferred sink, desk, fork arm, cancel, the
 leases — threads as an immutable `&Mooring` the stack itself restores. Exarch
 needs no bracket of its own: its `RunHost` is a plain `Arc` `Avatar::ral`
 builds and passes to the dispatch, never installed as shared state, so an
@@ -183,8 +184,8 @@ order, and exits 124:
    desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
    across the seam: the dispatch's own trail carries an `Observed::Worker`
    for every birth its extent gave, and `shell_eval/report.rs`'s `render`
-   joins those ids against the `` `workers `` probe, decoded by
-   `Avatar::probe_workers` at the run boundary — legal there on a wire seat
+   joins those ids against the `` `workers `` probe, decoded into core's
+   `WorkerRow` by `reading::workers` at the run boundary — legal there on a wire seat
    exactly as on the identity seat, since the registry never crosses. A birth
    still present in the registry, running or settled-unclaimed, is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
@@ -207,10 +208,11 @@ regimes share: the live path — `dispatch_to_report`'s drain loop calling
 `host.surface(val)` for every `Event::Surface`, which `SurfaceApplier::live`
 decodes — and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
-flushes, both calling it directly — the `accepted_surface` wrapper that once
-layered a protected-pin guard over it is gone with the guard itself. The
-codomain is `Surface`, the shell's own closed vocabulary: five channels (the
-`Pin`/`Unpin` variants are one pin channel), tried pin-first. It carries only
+flushes, both calling it directly, with no guard layered over it. The
+codomain is `Surface`, the shell's own closed vocabulary, wrapped in
+`Decoded` beside `Landed` and `Unknown`. The decoder tries observation, then
+notice, card, and done — the shapes are disjoint, so the order carries no
+meaning — and has no pin arm. It carries only
 the structured value each channel names —
 no `Card` mark tree, since that is built by whoever renders — a printer's fold
 over the recorded `Display` commit ([[map/exarch/frontend|frontend]]) — and
@@ -225,7 +227,8 @@ never by the decoder or by the seam that records it (`absorb_surface`):
   store rather than adding a second one ([[design/pins|pins]]);
 - a `Map` core emits at a redirect, exec, or capability-check door decodes
   through `Observation::from_wire` into `Surface::Observation`, the raw
-  observation alone ([[map/exarch/io-surface|io-surface]]);
+  observation alone ([[map/exarch/io-surface|io-surface]]); one `landing`
+  declines is `Decoded::Landed`, kept off the rail without a word;
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
   idle-binding prune, a large-binding warning) decodes to `Surface::Notice`
   ([[map/core/engine-protocol|engine-protocol]]);
@@ -234,8 +237,9 @@ never by the decoder or by the seam that records it (`absorb_surface`):
   / `render_card` decode-and-bind path live in [[map/exarch/cards|cards]];
 - the `` `done `` completion event a detached worker flushes at the end of its
   batch decodes to `Surface::Done`;
-- a value that is none of these is dropped, the same graceful degradation
-  `value_to_card` gives an unknown mark.
+- a value that is none of these is `Decoded::Unknown`: its caller records a
+  `Forensic::SystemNote` (`unknown_surface_note`) naming the shape it dropped,
+  the extension law's loud unknown class.
 
 The producer is a direct `exarch-surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; detached workers do
@@ -260,7 +264,7 @@ remote shell is dressed with the same atoms.
 
 A tool command that fails under an active OS sandbox carries a kernel-denial
 diagnostic — the blocked syscall, the exact path to grant, the symlink caveat —
-appended to the error's `hint`. That harvesting now lives in core
+appended to the error's `hint`. That harvesting lives in core
 (`core::sandbox::diag`), driven by the command and pipeline runners over the
 failing call's wall window and rendered identically by both the `ral-sh` REPL and
 exarch ([[map/core/capabilities|capabilities]]).

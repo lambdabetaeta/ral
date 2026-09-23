@@ -1,21 +1,19 @@
-//! Single-input parse / typecheck / evaluate cycle, routed through the
-//! engine protocol.
+//! One input line, dispatched through the engine protocol.
 //!
-//! [`step`] is the per-line entry point.  It dispatches a source run
-//! through the [`IdentityTransport`] and drains the event stream for the
-//! terminal [`Report`].  Lifecycle hooks (`pre-exec`, `chpwd`,
-//! `post-exec`) fire around the dispatch through
-//! [`IdentityTransport::with_shell`].
-//!
-//! Plugin-lifecycle commands are handled by the captured builtins installed
-//! at boot (see [`super::host_handlers`]).
+//! [`step`] runs a source line through the transport with the REPL host,
+//! drains to its [`Report`], and fires the lifecycle hooks around it —
+//! `pre-exec` before, a fresh `chpwd` then `post-exec` after, each a
+//! dispatch of its own.
 
-use ral_core::protocol::{self, IdentityTransport, Program, Report, Run};
+use ral_core::protocol::{Ending, Program, Report, Run, Transport, reading};
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum as _;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use ral_core::{Value, builtins};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use super::plugin::{PluginRuntime, run_lifecycle_hook};
+use super::host::ReplHost;
+use super::plugin::fire;
 
 pub(super) enum Step {
     Continue,
@@ -48,74 +46,24 @@ fn print_result(val: &Value) {
     }
 }
 
-/// Fire the `pre-exec` lifecycle hook before a dispatch.
-fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, src: &str) {
-    run_lifecycle_hook(
-        runtime,
-        &ral_core::types::Mooring::adrift(),
-        shell,
-        "pre-exec",
-        &[Value::map(vec![(
-            "src".into(),
-            Value::String(src.to_string()),
-        )])],
-    );
-}
-
-/// Drain a pending `chpwd` then fire `post-exec` after a dispatch — both
-/// side-effects; neither redefines the run status, which the transport
-/// already computed.
-fn post_exec(
-    runtime: &Arc<Mutex<PluginRuntime>>,
-    shell: &mut ral_core::Shell,
-    src: &str,
-    status: i32,
-) {
-    if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
-        run_lifecycle_hook(
-            runtime,
-            &ral_core::types::Mooring::adrift(),
-            shell,
-            "chpwd",
-            &[Value::map(vec![
-                (
-                    "old".into(),
-                    Value::String(old.to_string_lossy().into_owned()),
-                ),
-                (
-                    "new".into(),
-                    Value::String(new.to_string_lossy().into_owned()),
-                ),
-            ])],
-        );
+fn record(entries: Vec<(&str, FOValue)>) -> FOValue {
+    FOValue::Map {
+        entries: entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
     }
-    run_lifecycle_hook(
-        runtime,
-        &ral_core::types::Mooring::adrift(),
-        shell,
-        "post-exec",
-        &[Value::map(vec![
-            ("src".into(), Value::String(src.to_string())),
-            ("status".into(), Value::Int(i64::from(status))),
-        ])],
-    );
 }
 
-/// Parse, typecheck, and evaluate one trimmed REPL input through the
-/// transport, running pre-exec and post-exec hooks around evaluation.
-/// Returns `Some(code)` when the shell should exit.
-pub(super) fn execute_input(
-    trimmed: &str,
-    transport: &IdentityTransport,
-    runtime: &Arc<Mutex<PluginRuntime>>,
-    #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
-) -> Option<u8> {
-    // Fire pre-exec hook through transport shell access.
-    transport.with_shell(|shell| pre_exec(runtime, shell, trimmed));
+/// The session's latest `cd`, if the engine will say.
+fn last_chpwd(t: &dyn Transport) -> Option<ral_core::types::Chpwd> {
+    reading::last_chpwd(t).ok().flatten()
+}
 
-    // Build the transport-level Run from the source text.
-    let run = Run {
-        program: Program::Source(trimmed.to_string()),
+/// An input line's run: the terminal leased, as a foreground command has it.
+pub(super) fn line_run(src: &str) -> Run {
+    Run {
+        program: Program::Source(src.to_string()),
         script_name: "<stdin>".to_string(),
         caps: ral_core::types::GrantStack::root(),
         wall: None,
@@ -125,82 +73,96 @@ pub(super) fn execute_input(
         terminal: RequestedTerminalAccess::Leased,
         stdin: RunStdin::Inherit,
         trail: None,
-    };
-
-    // The REPL renders no live surface values, answers no enquiries, and
-    // adopts no fork: the mute host.
-    let report = match protocol::dispatch_to_report(transport, run, Arc::new(())) {
-        Ok(report) => report,
-        Err(severed) => {
-            eprintln!("ral: {severed}");
-            return None;
-        }
-    };
-
-    match report {
-        Report::Static { rendered, .. } => {
-            eprint!("{rendered}");
-            None
-        }
-        Report::Ran { ending, .. } => {
-            let status = ending.status();
-            let exit_code = match ending {
-                protocol::Ending::Settled { value, .. } => {
-                    print_result(&Value::from(value));
-                    // The run installed its bindings: record their dependency
-                    // edges and effect verdict into the worksheet model.
-                    #[cfg(feature = "structural")]
-                    transport.with_shell(|shell| worksheet.record(trimmed, shell));
-                    None
-                }
-                protocol::Ending::Raised { rendered, .. }
-                | protocol::Ending::Walled { rendered, .. }
-                | protocol::Ending::Unreturnable { rendered } => {
-                    eprint!("{rendered}");
-                    None
-                }
-                protocol::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
-            };
-
-            // Fire post-exec hook.
-            transport.with_shell(|shell| post_exec(runtime, shell, trimmed, status));
-
-            exit_code
-        }
     }
 }
 
-/// Parse, typecheck, and evaluate one trimmed non-empty input line.
+/// Dispatch one trimmed non-empty input line, firing the lifecycle hooks
+/// around it: `post-exec` for every `pre-exec`, with the line's status, a
+/// static failure's included.
 pub(super) fn step(
     trimmed: &str,
-    transport: &IdentityTransport,
-    runtime: &Arc<Mutex<PluginRuntime>>,
+    t: &dyn Transport,
+    host: &Arc<ReplHost>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Step {
-    match execute_input(
-        trimmed,
-        transport,
-        runtime,
-        #[cfg(feature = "structural")]
-        worksheet,
-    ) {
-        Some(code) => Step::Exit(code),
-        None => Step::Continue,
+    let src = trimmed.to_string().encode();
+    fire(t, host, "pre-exec", &record(vec![("src", src.clone())]));
+    let seen = last_chpwd(t).map(|c| c.seq);
+
+    let (report, _) = host.dispatch(t, line_run(trimmed), None);
+    let (status, step) = match report {
+        Err(severed) => {
+            eprintln!("ral: {severed}");
+            return Step::Exit(1);
+        }
+        Ok(Report::Static { rendered, status }) => {
+            eprint!("{rendered}");
+            (status, Step::Continue)
+        }
+        Ok(Report::Ran { ending, .. }) => {
+            let status = ending.status();
+            let step = match ending {
+                Ending::Settled { value, .. } => {
+                    print_result(&Value::from(value));
+                    #[cfg(feature = "structural")]
+                    worksheet.record(
+                        trimmed,
+                        &reading::bind_effects(t, trimmed).unwrap_or_default(),
+                    );
+                    Step::Continue
+                }
+                Ending::Raised { rendered, .. }
+                | Ending::Walled { rendered, .. }
+                | Ending::Unreturnable { rendered, .. } => {
+                    eprint!("{rendered}");
+                    Step::Continue
+                }
+                Ending::Exited(code) => Step::Exit(crate::platform::exit_byte(code)),
+            };
+            (status, step)
+        }
+    };
+
+    if let Some(ral_core::types::Chpwd { seq, old, new }) = last_chpwd(t)
+        && Some(seq) != seen
+    {
+        fire(
+            t,
+            host,
+            "chpwd",
+            &record(vec![("old", old.encode()), ("new", new.encode())]),
+        );
     }
+    fire(
+        t,
+        host,
+        "post-exec",
+        &record(vec![
+            ("src", src),
+            (
+                "status",
+                FOValue::Int {
+                    value: status.into(),
+                },
+            ),
+        ]),
+    );
+    step
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
-    use crate::repl::plugin::HookHealth;
-    use crate::repl::plugin::manifest::LoadedPlugin;
-    use ral_core::Shell;
+    use crate::repl::plugin::PluginRuntime;
+    use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
+    use ral_core::protocol::IdentityTransport;
     use ral_core::source::Span;
     use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig};
     use std::borrow::Cow;
+    use std::sync::Mutex;
 
     /// The sink's type: an argv in, `Unit` out — the base-frame convention,
     /// since the sink takes whatever a hook body hands it, however much of it.
@@ -223,92 +185,81 @@ mod tests {
         )
     }
 
-    /// Parse, elaborate, typecheck, and run `src` through the run door into
-    /// a handler value.
-    fn handler(shell: &mut Shell, src: &str) -> Value {
-        match shell.run(ral_core::RunRequest {
-            run: ral_core::protocol::Run {
-                program: ral_core::protocol::Program::Source(src.to_string()),
-                script_name: "<test>".to_string(),
-                caps: ral_core::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: ral_core::RunIo::Inherit,
-                terminal: ral_core::RequestedTerminalAccess::Leased,
-                stdin: ral_core::RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        }) {
-            ral_core::RunReport::Ran { ending, .. } => ending.into_result().expect("evaluate"),
-            ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-        }
-    }
-
-    /// A dressed shell, the plugin runtime holding `p`, and the sink its
-    /// builtin appends every call to.
-    type Dressed = (Shell, Arc<Mutex<PluginRuntime>>, Arc<Mutex<Vec<Value>>>);
-
-    /// Dress a shell with the sink builtin and one plugin `p` whose
-    /// `hook_event` handler is compiled from `handler_src`, mirroring
-    /// `register_plugin_hooks`' lifecycle registration.
-    fn dressed(hook_event: &str, handler_src: &str) -> Dressed {
+    /// An engine carrying the sink builtin and one plugin `p` whose
+    /// `hook_event` handler is compiled from `handler_src`, the host told of
+    /// it, and the sink its builtin appends every call to.
+    fn dressed(
+        hook_event: &str,
+        handler_src: &str,
+    ) -> (IdentityTransport, Arc<ReplHost>, Arc<Mutex<Vec<Value>>>) {
         let sink = Arc::new(Mutex::new(Vec::new()));
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.install_captured_builtins(&vec![sink_builtin(sink.clone())].into());
-
-        let h = handler(&mut shell, handler_src);
-        shell
-            .register_hook(
-                HookName::plugin("p", hook_event),
-                h,
-                HookSig::Lifecycle {
-                    kind: hook_event.into(),
-                },
-                DefaultPolicy::denied(),
-                Span::synthetic(),
-            )
-            .expect("register");
-
+        let (event, handler_src) = (hook_event.to_owned(), handler_src.to_owned());
+        let recorder = sink_builtin(sink.clone());
+        let t = crate::repl::engine(move |shell| {
+            ral_core::builtins::register(shell, crate::PRELUDE.comp());
+            shell.install_captured_builtins(&vec![recorder].into());
+            let h = crate::repl::eval(shell, &handler_src);
+            shell
+                .register_hook(
+                    HookName::plugin("p", &event),
+                    h,
+                    HookSig::Lifecycle { kind: event },
+                    DefaultPolicy::denied(),
+                    Span::synthetic(),
+                )
+                .expect("register");
+        });
+        let plugin = LoadedPlugin::admit(Manifest {
+            name: "p".into(),
+            hooks: vec![hook_event.into()],
+            keybindings: Vec::new(),
+        })
+        .expect("admit");
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        super::super::plugin::lock(&runtime)
-            .plugins
-            .push(LoadedPlugin {
-                name: "p".into(),
-                hooks: vec![hook_event.into()],
-                keybindings: Vec::new(),
-                bindings: Vec::new(),
-                state_cell: None,
-                source: Arc::from(""),
-                buffer_change_health: HookHealth::default(),
-            });
-        (shell, runtime, sink)
+        crate::repl::plugin::lock(&runtime).plugins.push(plugin);
+        (t, ReplHost::new(runtime), sink)
     }
 
-    /// `post-exec` dispatch hands the handler one event record carrying the
-    /// source line under `src` and the exit status under `status`.
-    #[test]
-    fn post_exec_passes_src_and_status_in_one_event_record() {
-        let (mut shell, runtime, sink) =
-            dressed("post-exec", "{ |ev| record $ev[src] $ev[status] }");
-        post_exec(&runtime, &mut shell, "true", 7);
-        assert_eq!(
-            *sink.lock().unwrap(),
-            vec![Value::String("true".into()), Value::Int(7)]
+    fn run(line: &str, t: &IdentityTransport, host: &Arc<ReplHost>) {
+        step(
+            line,
+            t,
+            host,
+            #[cfg(feature = "structural")]
+            &mut super::super::worksheet::Worksheet::default(),
         );
     }
 
-    /// `pre-exec` dispatch hands the handler one event record carrying the
-    /// source line under `src`.
+    /// `post-exec` hands the handler one event record carrying the source
+    /// line under `src` and the line's status under `status`.
+    #[test]
+    fn post_exec_passes_src_and_status_in_one_event_record() {
+        let (t, host, sink) = dressed("post-exec", "{ |ev| record $ev[src] $ev[status] }");
+        let line = "fail [status: 7, message: 'x']";
+        run(line, &t, &host);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![Value::String(line.into()), Value::Int(7)]
+        );
+    }
+
+    /// A static failure still closes its `pre-exec` with a `post-exec`.
+    #[test]
+    fn post_exec_fires_after_a_static_failure() {
+        let (t, host, sink) = dressed("post-exec", "{ |ev| record $ev[status] }");
+        run("if", &t, &host);
+        assert_eq!(sink.lock().unwrap().len(), 1, "one post-exec per line");
+    }
+
+    /// `pre-exec` hands the handler one event record carrying the source
+    /// line under `src`.
     #[test]
     fn pre_exec_passes_src_in_one_event_record() {
-        let (mut shell, runtime, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
-        pre_exec(&runtime, &mut shell, "ls -l");
-        assert_eq!(*sink.lock().unwrap(), vec![Value::String("ls -l".into())]);
+        let (t, host, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
+        run("return ()", &t, &host);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![Value::String("return ()".into())]
+        );
     }
 }

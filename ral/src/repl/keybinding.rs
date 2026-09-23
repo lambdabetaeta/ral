@@ -3,18 +3,20 @@
 //! When a plugin-registered key fires during readline, rustyline stores a
 //! [`PendingKeybinding`] and immediately accepts the line.  The REPL loop
 //! then calls [`dispatch_keybinding`] to run the handler outside the
-//! readline borrow, with a fresh [`PluginContext`](super::plugin::editor::PluginContext) reflecting the current
+//! readline borrow, with a fresh editor context reflecting the current
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
-use ral_core::{HookName, RequestedTerminalAccess, Shell, Value};
-use std::sync::{Arc, Mutex};
+use ral_core::HookName;
+use ral_core::protocol::Transport;
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum as _;
+use std::sync::Arc;
 
 use super::frontend::EditBuffer;
-use super::plugin::{
-    FramedHook, HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
-    defer_plugin_message, keymap_name, lock,
-};
+use super::host::ReplHost;
+use super::plugin::editor::{EditorState, PluginContext};
+use super::plugin::{Keymap, PendingKeybinding, defer_plugin_message, keymap_name, lock};
 use ral_core::text::byte_to_char;
 
 /// Outcome of running a plugin keybinding handler.
@@ -28,111 +30,82 @@ pub(super) enum KeybindingOutcome {
     Edit(String, usize),
 }
 
-/// Character offset of the end of `s`.  Used on early-return paths so
-/// the resulting `EditBuffer`/`KeybindingOutcome::Edit` carries a unit-
-/// correct cursor (chars), not a byte length.
-fn end_of(s: &str) -> usize {
-    s.chars().count()
-}
-
-/// Execute a pending keybinding handler with the current editor state.
-///
-/// Resolves the pending binding against the plugin runtime, builds a
-/// [`PluginContext`](super::plugin::editor::PluginContext), invokes the hook through [`call_plugin_hook`], and
-/// inspects the resulting context to decide whether to accept or re-edit
-/// the line.
+/// Execute a pending keybinding handler with the current editor state, and
+/// decide from the context it leaves whether to accept or re-edit the line.
 pub(super) fn dispatch_keybinding(
     pk: &PendingKeybinding,
     current: &str,
-    shell: &mut Shell,
-    runtime: &Arc<Mutex<PluginRuntime>>,
+    t: &dyn Transport,
+    host: &Arc<ReplHost>,
     keymap: Keymap,
 ) -> KeybindingOutcome {
-    // Resolve the owning plugin by name, not by position: a stale
-    // binding's index could address whatever plugin now occupies that
-    // slot.  A miss (the plugin was unloaded between keypress
-    // and dispatch) is benign — the line re-edits unchanged, and the
-    // sequence is unbound on the next `sync_plugins`.
+    let unchanged = || KeybindingOutcome::Edit(current.to_string(), current.chars().count());
+    // Resolve the owning plugin by name, not by position: a stale binding's
+    // index could address whatever plugin now occupies that slot.  A miss
+    // (the plugin was unloaded between keypress and dispatch) is benign —
+    // the line re-edits unchanged, and the sequence is unbound on the next
+    // `sync_plugins`.
     let resolved = {
-        let rt = lock(runtime);
+        let rt = lock(&host.runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
-            .map(|key_str| (key_str, rt.state_cell(&pk.plugin)))
+            .map(|key| (key, rt.state_cell(&pk.plugin), rt.hooks.history.clone()))
     };
-    let Some((key_str, state_cell)) = resolved else {
-        return KeybindingOutcome::Edit(current.to_string(), end_of(current));
+    let Some((key, state_cell, history)) = resolved else {
+        return unchanged();
     };
 
-    let hook = HookName::plugin(pk.plugin.clone(), format!("key:{key_str}"));
-
-    // rustyline supplied `pk.cursor_byte` in bytes; convert once for the
-    // plugin surface (which speaks chars throughout).
-    let cursor_chars = byte_to_char(current, pk.cursor_byte);
-
-    // Snapshot history once, reused for the context and the args map.
-    let history = lock(runtime).hooks.history.clone();
-
-    // Load the plugin's persistent cell into the context and save any
-    // mutation back afterwards, mirroring `run_buffer_change_hooks`; a
-    // keybinding handler's `_ed-state` must survive between keypresses.
-    let ctx_in = PluginRuntime::build_plugin_context(
-        current.to_string(),
-        cursor_chars,
-        keymap_name(keymap).into(),
-        history.clone(),
-        false,
-        state_cell.clone(),
+    // rustyline supplied `pk.cursor_byte` in bytes; the plugin surface
+    // speaks chars throughout.
+    let cursor = byte_to_char(current, pk.cursor_byte);
+    let arg = FOValue::Map {
+        entries: vec![
+            ("line".into(), current.to_string().encode()),
+            (
+                "cursor".into(),
+                FOValue::Int {
+                    value: cursor.try_into().unwrap_or(i64::MAX),
+                },
+            ),
+            ("history".into(), history.clone().encode()),
+            ("keymap".into(), keymap_name(keymap).to_string().encode()),
+            ("state".into(), state_cell.clone().unwrap_or(FOValue::Unit)),
+        ],
+    };
+    // The plugin's persistent cell rides the context and is saved back, so a
+    // handler's `_ed-state` survives between keypresses.
+    let ctx = PluginContext {
+        editor_state: EditorState {
+            text: current.to_string(),
+            cursor,
+            keymap: keymap_name(keymap).into(),
+        },
+        history,
+        state_cell,
+        ..PluginContext::default()
+    };
+    let hr = host.run_hook(
+        t,
+        HookName::plugin(pk.plugin.clone(), format!("key:{key}")),
+        vec![arg],
+        None,
+        Some(ctx),
     );
 
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "cursor char offset, far below i64::MAX"
-    )]
-    let cursor = cursor_chars as i64;
-    let hr = call_plugin_hook(
-        shell,
-        HookFor { name: &pk.plugin },
-        &hook,
-        &[Value::map(vec![
-            ("line".into(), Value::String(current.to_string())),
-            ("cursor".into(), Value::Int(cursor)),
-            (
-                "history".into(),
-                Value::List(history.into_iter().map(Value::String).collect()),
-            ),
-            (
-                "keymap".into(),
-                Value::String(keymap_name(keymap).to_string()),
-            ),
-            ("state".into(), state_cell.unwrap_or(Value::Unit)),
-        ])],
-        Some(ctx_in),
-        HookFraming::Framed(FramedHook {
-            terminal: RequestedTerminalAccess::Leased,
-            kind: "keybinding",
-            budget: None,
-        }),
-    );
-
-    if let Some(rendered) = &hr.rendered_error {
-        // Defer printing: the REPL loop is about to emit `\x1b[A\r\x1b[K`
-        // to erase rustyline's stray newline, which would clobber an
-        // immediate `eprintln!` on that very line.  Flushed afterward.
-        defer_plugin_message(runtime, rendered.clone());
+    if let Some(fault) = hr.fault {
+        // Deferred: the REPL loop is about to emit `\x1b[A\r\x1b[K` to erase
+        // rustyline's stray newline, which would clobber an immediate
+        // `eprintln!` on that very line.  Flushed afterward.
+        defer_plugin_message(&host.runtime, fault);
     }
-
     let Some(ctx) = hr.ctx else {
-        return KeybindingOutcome::Edit(current.to_string(), end_of(current));
+        return unchanged();
     };
-
-    lock(runtime).write_back_state_cell(&pk.plugin, ctx.state_cell.as_ref());
-
+    let mut rt = lock(&host.runtime);
+    rt.write_back_state_cell(&pk.plugin, ctx.state_cell);
     if let Some((text, cursor)) = ctx.outputs.pushed_buffer {
-        lock(runtime)
-            .keybindings
-            .buffers
-            .push(EditBuffer { text, cursor });
+        rt.keybindings.buffers.push(EditBuffer { text, cursor });
     }
-
+    drop(rt);
     if ctx.outputs.accept_line {
         KeybindingOutcome::Accept(ctx.editor_state.text)
     } else {
@@ -157,9 +130,7 @@ mod tests {
                 chord: parse_key_notation(key).expect("test key parses"),
                 guard: None,
             }],
-            bindings: Vec::new(),
             state_cell: None,
-            source: std::sync::Arc::from(""),
             buffer_change_health: crate::repl::plugin::HookHealth::default(),
         }
     }

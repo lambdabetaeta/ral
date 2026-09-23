@@ -44,7 +44,6 @@ mod dial;
 pub mod digest;
 pub mod event;
 pub mod nudge;
-mod probe;
 pub mod resources;
 pub(crate) mod seat;
 mod shell;
@@ -58,11 +57,10 @@ pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
 pub use build::{RecordedAccount, RootConfig, RootSeat};
 pub use dial::Dial;
-pub(crate) use probe::ProbedWorker;
 pub use seat::{EngineLost, EnginePhase};
 pub(crate) use shell::{LogCell, ReplyCell};
 
-use crate::agent::cancel::EvalReach;
+use crate::agent::cancel::InterruptTarget;
 use crate::agent::seat::Seat;
 use crate::bus::{
     AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post, Stamp, Stamped,
@@ -131,9 +129,8 @@ pub struct Agent {
     /// One sticky token for this agent's life, so the subtree cascade reaches
     /// the live exchange.  The attend loop
     /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
-    /// never bleeds into the next; the process's trunk is additionally
-    /// [`publish`](cancel::publish)ed for OS signals by the site that launches
-    /// it.
+    /// never bleeds into the next; the process's trunk additionally hears OS
+    /// signals through [`cancel::face`], called by the site that launches it.
     cancel: cancel::Token,
     /// `provider.complete` (advertisement) and [`Avatar::invoke`] (dispatch)
     /// read this one value, so they cannot disagree about whether the call
@@ -166,12 +163,9 @@ pub struct Agent {
     /// fork, so a child that names its own model is built through the same
     /// door the trunk was.
     bureau: Arc<crate::provider::Bureau>,
-    /// The seat's own reach into this agent's running eval, fixed at
-    /// construction — a self-registering root states it pre-weakened
-    /// ([`EvalReach::interrupt_only`]) precisely because its seat rebuilds in
-    /// place on `/clear`, so nothing here ever goes stale enough to need
-    /// updating.
-    reach: EvalReach,
+    /// The seat's own reach into this agent's running eval: the cell its
+    /// seat republishes on every rebuild, so it never goes stale.
+    reach: InterruptTarget,
     /// The sender end of this agent's own inbox; the [`Inbox`] itself stays on
     /// [`Avatar`], reachable only by the attend thread.
     mailbox: Mailbox,
@@ -499,11 +493,10 @@ impl Agent {
     }
 
     /// Cancel this agent across both terminate-class layers: the cooperative
-    /// [`cancel::Token`] the attend loop polls and its eval-layer reach — a
-    /// no-op on the eval side for an agent whose reach is interrupt-only.
+    /// [`cancel::Token`] the attend loop polls and its engine's durable root.
     pub(crate) fn cancel(&self, cause: CancelCause) {
         self.cancel.cancel(cause);
-        self.reach.terminate(cause);
+        self.reach.terminate();
     }
 
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
@@ -751,18 +744,7 @@ impl Avatar {
     /// The engine's severance — never a program error, since a `cwd` probe
     /// is always legal at a run boundary.
     pub(crate) fn cwd(&self) -> Result<std::path::PathBuf, ral_core::protocol::Severed> {
-        match self.seat.transport().probe(FOValue::Variant {
-            label: "cwd".into(),
-            payload: None,
-        }) {
-            Ok(FOValue::String { value }) => Ok(std::path::PathBuf::from(value)),
-            Err(ral_core::protocol::ProbeError::Severed(s)) => Err(s),
-            other => Err(self
-                .seat
-                .fault(ral_core::protocol::Severed::Faulted(format!(
-                    "`cwd probe answered {other:?}"
-                )))),
-        }
+        self.seat.read(ral_core::protocol::reading::cwd)
     }
 
     /// For a test polling an async spawn's settle without a full deliberation.

@@ -2,8 +2,8 @@
 //!
 //! The completion *engine*, owned by no frontend: it classifies the token
 //! under the cursor (a `$`-variable, a command-position name, or a path),
-//! gathers candidates from a [`Sources`] view of the live shell, and ranks
-//! them.  Both the rustyline helper ([`super::complete::RalHelper`]) and the
+//! gathers candidates from a [`Sources`] view the engine's probes answer,
+//! and ranks them.  Both the rustyline helper ([`super::complete::RalHelper`]) and the
 //! structural surface's menu call [`complete`] against a shared
 //! [`SourceCache`]; neither owns the classification, the candidate sources,
 //! or the ranking.
@@ -11,7 +11,7 @@
 //! The sources are split in two by cost.  The cheap half — bindings,
 //! builtins, handlers, the logical cwd — is recomputed once per prompt, so a
 //! new `let` binding is offerable on the next line.  The expensive half is the
-//! `PATH` enumeration, which `read_dir`s every entry on the search list; that
+//! `PATH` enumeration, which lists every entry on the search list; that
 //! one is lazy, taken on the first completion request that needs it and reused
 //! until [`SCAN_TTL`] runs out or the search list moves.  A prompt therefore
 //! reaches the screen without touching the disk, which where `PATH` holds
@@ -21,7 +21,8 @@
 //! Ranking is fuzzy — the `nucleo` matcher, the Helix team's — for every
 //! surface; [`ral_core::text::rank`] is its single home.
 
-use ral_core::Shell;
+use ral_core::protocol::Transport;
+use ral_core::protocol::reading::{self, PathEntry};
 use ral_core::text::rank;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -40,32 +41,28 @@ pub(super) struct Candidate {
 }
 
 /// What one completion request draws on: the two halves of the command-name
-/// pool, the `$`-variable names (bindings only), and the shell's logical cwd
-/// that path completion anchors relative directories against.
+/// pool, the `$`-variable names (bindings only), and the engine whose
+/// filesystem path completion lists — relative directories anchored against
+/// its logical cwd, since `cd` moves only that.
 ///
 /// Borrowed from the [`SourceCache`] rather than owned, because the `PATH`
 /// half runs to thousands of names and an owned merge would clone every one of
 /// them per Tab.
-///
-/// `cd` and `within [dir: …]` mutate only the shell's logical cwd (the
-/// process cwd would race spawned threads), so completion anchors relative
-/// dirs against this pair rather than `read_dir`'s default of the process
-/// cwd.
 pub(super) struct Sources<'a> {
     /// The executables reachable through the effective `PATH`.
     path_commands: &'a [String],
     /// Bindings, builtins and handlers — what costs no disk access to learn.
     shell_commands: &'a [String],
     variables: &'a [String],
-    cwd: &'a Path,
+    engine: &'a dyn Transport,
 }
 
 impl Sources<'_> {
     /// Every name offerable at command position, deduplicated across the two
     /// halves as well as within them: a binding name is also a command-position
-    /// name, and [`ral_core::path::commands_on_path`] repeats a name once per
-    /// directory holding it.  Only the references are sorted, and that order is
-    /// not load-bearing — [`rank`] re-sorts by score.
+    /// name, and the `PATH` scan repeats a name once per directory holding it.
+    /// Only the references are sorted, and that order is not load-bearing —
+    /// [`rank`] re-sorts by score.
     fn command_names(&self) -> Vec<&String> {
         let mut names: Vec<&String> = self
             .path_commands
@@ -88,7 +85,7 @@ impl Sources<'_> {
 /// for.
 const SCAN_TTL: Duration = Duration::from_mins(1);
 
-/// The completion sources a frontend owns across prompts: the cheap shell
+/// The completion sources a frontend owns across prompts: the cheap engine
 /// state, refreshed every prompt, and the lazily-taken `PATH` enumeration.
 ///
 /// One type shared by both frontends, so the two cannot drift on the freshness
@@ -96,9 +93,7 @@ const SCAN_TTL: Duration = Duration::from_mins(1);
 pub(super) struct SourceCache {
     shell_commands: Vec<String>,
     variables: Vec<String>,
-    cwd: PathBuf,
-    /// What the scan was taken against, captured at refresh so
-    /// [`SourceCache::sources`] needs no `&Shell`.
+    /// What the scan was taken against, captured at refresh.
     key: PathKey,
     /// The `PATH` walk, absent until the first request that needs it.
     ///
@@ -119,13 +114,7 @@ pub(super) struct SourceCache {
 /// `Option` so that an unset `PATH` is a key of its own rather than a hole that
 /// looks cold on every Tab.  `cwd` is here because the walk anchors relative
 /// entries (`./bin`) against it.
-///
-/// There is no member for the Windows executable-suffix list, unlike the
-/// dispatch memo's key: [`ral_core::path::commands_on_path`] never consults it,
-/// listing every executable file in a directory rather than probing one name
-/// against a set of suffixes.  (Naming that list's reader here would link a
-/// `cfg(windows)`-only item from an unguarded doc, which fails elsewhere.)
-#[derive(PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct PathKey {
     path: Option<String>,
     cwd: PathBuf,
@@ -137,6 +126,11 @@ struct PathScan {
     taken: Instant,
 }
 
+/// The names not hidden behind a leading `_`.
+fn public(names: Vec<String>) -> impl Iterator<Item = String> {
+    names.into_iter().filter(|name| !name.starts_with('_'))
+}
+
 impl SourceCache {
     /// A cache that has touched no disk: constructing a frontend must not walk
     /// `PATH`, or startup pays the disk-walk cost each prompt otherwise avoids.
@@ -144,63 +138,45 @@ impl SourceCache {
         Self {
             shell_commands: Vec::new(),
             variables: Vec::new(),
-            cwd: PathBuf::new(),
-            key: PathKey {
-                path: None,
-                cwd: PathBuf::new(),
-            },
+            key: PathKey::default(),
             scan: OnceCell::new(),
         }
     }
 
-    /// Recompute the cheap completion state from the live shell, and age the
+    /// Recompute the cheap completion state from the engine, and age the
     /// `PATH` scan.  Called once per prompt.
-    pub(super) fn refresh(&mut self, shell: &Shell) {
-        self.refresh_at(shell, Instant::now());
+    pub(super) fn refresh(&mut self, engine: &dyn Transport) {
+        self.refresh_at(engine, Instant::now());
     }
 
     /// [`SourceCache::refresh`] with the clock passed in, so [`SCAN_TTL`] is
     /// testable without sleeping through it.
-    fn refresh_at(&mut self, shell: &Shell, now: Instant) {
-        // The cheap half, eagerly: a scope fold and no I/O, so "a new binding
-        // completes immediately" stays true for free.  Holding it in its own
-        // fields is also what makes it impossible for a binding change to
-        // invalidate a `PATH` enumeration.
-        let mut variables: Vec<String> = shell
-            .bindings()
-            .into_iter()
-            .filter_map(|(name, _)| (!name.starts_with('_')).then_some(name))
+    fn refresh_at(&mut self, engine: &dyn Transport, now: Instant) {
+        // The cheap half, eagerly: no I/O, so "a new binding completes
+        // immediately" stays true for free.  Holding it in its own fields is
+        // also what makes it impossible for a binding change to invalidate a
+        // `PATH` enumeration.
+        let (bindings, handlers) = reading::completion_names(engine)
+            .map_or_else(|_| Default::default(), |n| (n.bindings, n.handlers));
+        self.variables = public(bindings).collect();
+        let mut shell_commands: Vec<String> = self
+            .variables
+            .iter()
+            .cloned()
+            .chain(public(reading::builtin_names(engine).unwrap_or_default()))
+            .chain(public(handlers))
             .collect();
-        variables.sort();
-        variables.dedup();
-
-        let mut shell_commands = variables.clone();
-        shell_commands.extend(
-            shell
-                .builtin_names()
-                .filter(|name| !name.starts_with('_'))
-                .map(str::to_string),
-        );
-        shell_commands.extend(
-            shell
-                .handler_names()
-                .filter(|name| !name.starts_with('_'))
-                .map(str::to_string),
-        );
         shell_commands.sort();
         shell_commands.dedup();
-
-        self.variables = variables;
         self.shell_commands = shell_commands;
-        self.cwd = shell.cwd();
 
         // The expensive half is only invalidated here, never taken: a prompt
         // must not read a directory.  The search list comes through the dynamic
         // env overlay, so a `within [shell: PATH=…]` override keys differently
         // and drops the enclosing scope's answer.
         let key = PathKey {
-            path: shell.env_var("PATH"),
-            cwd: self.cwd.clone(),
+            path: reading::env_var(engine, "PATH").ok().flatten(),
+            cwd: reading::cwd(engine).unwrap_or_default(),
         };
         let aged = self
             .scan
@@ -216,19 +192,23 @@ impl SourceCache {
     /// this is the first request since the scan was dropped.
     ///
     /// The enumeration mirrors `locate`'s rules — relative entries anchored
-    /// against the shell's cwd, the executable bit required, and an empty
+    /// against the engine's cwd, the executable bit required, and an empty
     /// `PATH` element dropped rather than read as the cwd, so a trailing `;`
     /// does not offer every file of the current directory as a command.
     /// Dispatch still goes through the fresh `locate`, so a scan gone stale can
     /// only misinform a menu, never misdirect a spawn.
-    pub(super) fn sources(&self) -> Sources<'_> {
+    pub(super) fn sources<'a>(&'a self, engine: &'a dyn Transport) -> Sources<'a> {
         let scan = self.scan.get_or_init(|| PathScan {
             names: self
                 .key
                 .path
                 .as_deref()
                 .map(|path| {
-                    ral_core::path::commands_on_path(path, ral_core::path::SearchCwd::of(&self.cwd))
+                    std::env::split_paths(path)
+                        .filter(|dir| !dir.as_os_str().is_empty())
+                        .flat_map(|dir| entries(engine, &dir))
+                        .filter_map(|e| e.exec.then_some(e.name))
+                        .collect()
                 })
                 .unwrap_or_default(),
             taken: Instant::now(),
@@ -237,7 +217,7 @@ impl SourceCache {
             path_commands: &scan.names,
             shell_commands: &self.shell_commands,
             variables: &self.variables,
-            cwd: &self.cwd,
+            engine,
         }
     }
 
@@ -249,6 +229,11 @@ impl SourceCache {
     fn has_scanned(&self) -> bool {
         self.scan.get().is_some()
     }
+}
+
+/// `dir`'s entries in the engine's filesystem; none, if it will not say.
+fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
+    reading::path_entries(engine, dir).unwrap_or_default()
 }
 
 // ── The entry point ──────────────────────────────────────────────────────────
@@ -264,7 +249,7 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
             rank_names(sources.variables.iter().collect(), prefix),
         ),
         CompletionKind::Command { prefix } => (start, rank_names(sources.command_names(), prefix)),
-        CompletionKind::Path { token } => complete_path(token, start, sources.cwd),
+        CompletionKind::Path { token } => complete_path(token, start, sources.engine),
     }
 }
 
@@ -351,40 +336,13 @@ fn expand_tilde(dir: &str) -> Option<String> {
     .ok()
 }
 
-/// A directory entry offered as a path candidate.  Carries `is_dir` so the
-/// display can append `/`, and exposes its name as the haystack [`rank`]
-/// matches the needle against.
-struct Entry {
-    name: String,
-    is_dir: bool,
-}
+/// A path entry as the haystack [`rank`] matches the needle against.
+struct Named(PathEntry);
 
-impl AsRef<str> for Entry {
+impl AsRef<str> for Named {
     fn as_ref(&self) -> &str {
-        &self.name
+        &self.0.name
     }
-}
-
-/// List the offerable entries of `dir` — those passing the dotfile gate
-/// ([`dotfile_visible`]) — leaving the needle match to [`rank`].  Returns an
-/// empty list when the directory cannot be read.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:complete-readdir] directory listing for tab-completion candidates; not turn-time model I/O"
-)]
-fn dir_entries(dir: &Path, needle: &str) -> Vec<Entry> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    rd.flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            dotfile_visible(&name, needle).then(|| {
-                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-                Entry { name, is_dir }
-            })
-        })
-        .collect()
 }
 
 /// Whether `name` is offerable given the needle: a dotfile is hidden unless
@@ -402,7 +360,7 @@ fn dotfile_visible(name: &str, needle: &str) -> bool {
 pub(super) fn complete_path(
     token: &str,
     token_start: usize,
-    cwd: &Path,
+    engine: &dyn Transport,
 ) -> (usize, Vec<Candidate>) {
     // Bare `~`: list home directory with `~/` prefix on replacements.  The
     // replacement must include `~/` because a frontend replaces from
@@ -414,7 +372,7 @@ pub(super) fn complete_path(
         };
         return (
             token_start,
-            ranked_entries(Path::new(&home), "", "~/", false),
+            ranked_entries(entries(engine, Path::new(&home)), "", "~/", false),
         );
     }
 
@@ -428,26 +386,16 @@ pub(super) fn complete_path(
         return (token_start + prefix_offset, vec![]);
     };
 
-    // Anchor relative directories against the shell's logical cwd.  Tilde
-    // expansion has already produced an absolute path for `~`-prefixed dirs,
-    // so `is_absolute` correctly leaves those untouched.
-    let read_from = {
-        let p = Path::new(&expanded);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            cwd.join(p)
-        }
-    };
-
+    // The engine anchors a relative directory against its logical cwd;
+    // tilde expansion has already made a `~`-prefixed one absolute.
     (
         token_start + prefix_offset,
-        ranked_entries(&read_from, name_needle, "", true),
+        ranked_entries(entries(engine, Path::new(&expanded)), name_needle, "", true),
     )
 }
 
-/// Build ranked completion candidates for entries of `dir` matching
-/// `name_needle`.  Each replacement is `replacement_prefix` + name (+ `/` if a
+/// Build ranked completion candidates for the `entries` matching
+/// `name_needle` and passing the dotfile gate.  Each replacement is `replacement_prefix` + name (+ `/` if a
 /// directory), quoted using ral source syntax (via
 /// [`ral_core::syntax::quote_word_if_needed`]) when `quote` is set and the
 /// candidate name is not a bare word.
@@ -455,15 +403,20 @@ pub(super) fn complete_path(
 /// Tilde-prefix completion passes `quote = false` so the trailing `~/` keeps
 /// its expansion meaning; quoting it would suppress the expansion.
 fn ranked_entries(
-    dir: &Path,
+    entries: Vec<PathEntry>,
     name_needle: &str,
     replacement_prefix: &str,
     quote: bool,
 ) -> Vec<Candidate> {
-    rank(name_needle, dir_entries(dir, name_needle), true)
+    let visible: Vec<Named> = entries
         .into_iter()
-        .map(|e| {
-            let display = if e.is_dir {
+        .filter(|e| dotfile_visible(&e.name, name_needle))
+        .map(Named)
+        .collect();
+    rank(name_needle, visible, true)
+        .into_iter()
+        .map(|Named(e)| {
+            let display = if e.dir {
                 format!("{}/", e.name)
             } else {
                 e.name
@@ -489,12 +442,14 @@ fn ranked_entries(
 mod tests {
     use super::*;
 
+    use ral_core::protocol::IdentityTransport;
+
     /// Backing storage for a hand-built [`Sources`], which borrows its lists.
     struct Fixture {
         path_commands: Vec<String>,
         shell_commands: Vec<String>,
         variables: Vec<String>,
-        cwd: PathBuf,
+        engine: IdentityTransport,
     }
 
     impl Fixture {
@@ -503,20 +458,20 @@ mod tests {
                 path_commands: &self.path_commands,
                 shell_commands: &self.shell_commands,
                 variables: &self.variables,
-                cwd: &self.cwd,
+                engine: &self.engine,
             }
         }
     }
 
     /// Backing store for the classification and ranking tests, which care
-    /// about neither the command split nor the cwd: every name goes in the
-    /// shell half and the cwd is a throwaway path completion never reads.
+    /// about neither the command split nor the engine: every name goes in
+    /// the shell half, and path completion is never asked.
     fn sources(commands: &[&str], variables: &[&str]) -> Fixture {
         Fixture {
             path_commands: Vec::new(),
             shell_commands: commands.iter().map(ToString::to_string).collect(),
             variables: variables.iter().map(ToString::to_string).collect(),
-            cwd: PathBuf::from("/"),
+            engine: engine_at("", Path::new("/")),
         }
     }
 
@@ -531,10 +486,10 @@ mod tests {
 
     // ── Cache fixtures ──────────────────────────────────────────────────
     //
-    // A real `Shell` with a planted `PATH`, so the assertions run against the
-    // enumeration the shell would actually do rather than a stub of it.
+    // A real engine with a planted `PATH`, so the assertions run against the
+    // enumeration it would actually do rather than a stub of it.
 
-    /// Whatever `commands_on_path`'s executable test demands: the `+x` bit on
+    /// Whatever the `path-entries` executable test demands: the `+x` bit on
     /// Unix, nothing off it.
     fn make_executable(p: &Path) {
         std::fs::write(p, b"#!/bin/sh\nexit 0\n").unwrap();
@@ -547,12 +502,12 @@ mod tests {
         }
     }
 
-    /// A shell whose `PATH` is exactly `path` and whose logical cwd is `cwd`.
-    fn shell_with(path: &str, cwd: &Path) -> Shell {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.seed_cwd(cwd.to_path_buf());
-        shell.set_env_var("PATH", path);
-        shell
+    /// An engine whose `PATH` is exactly `path` and whose logical cwd is `cwd`.
+    fn engine_at(path: &str, cwd: &Path) -> IdentityTransport {
+        let mut attach =
+            ral_core::protocol::Attach::new(crate::repl::TEST_TAG, cwd.into(), cwd.into());
+        attach.env.push(("PATH".into(), path.into()));
+        crate::repl::engine_at(&attach, |_| {})
     }
 
     fn as_path_value(dir: &Path) -> String {
@@ -567,12 +522,12 @@ mod tests {
     fn a_prompt_refresh_does_not_walk_path() {
         let tmp = tempfile::tempdir().unwrap();
         make_executable(&tmp.path().join("plantedone"));
-        let shell = shell_with(&as_path_value(tmp.path()), tmp.path());
+        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell);
+        cache.refresh(&engine);
         assert!(!cache.has_scanned(), "a prompt must not enumerate PATH");
-        cache.refresh(&shell);
+        cache.refresh(&engine);
         assert!(!cache.has_scanned(), "nor must the next one");
     }
 
@@ -580,17 +535,23 @@ mod tests {
     fn a_completion_request_walks_path_once() {
         let tmp = tempfile::tempdir().unwrap();
         make_executable(&tmp.path().join("plantedone"));
-        let shell = shell_with(&as_path_value(tmp.path()), tmp.path());
+        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell);
-        assert!(command_completions(&cache.sources(), "plantedone").contains(&"plantedone".into()));
+        cache.refresh(&engine);
+        assert!(
+            command_completions(&cache.sources(&engine), "plantedone")
+                .contains(&"plantedone".into())
+        );
         assert!(cache.has_scanned());
 
         // Same PATH and cwd, so the answer stands and the walk is not repeated.
-        cache.refresh(&shell);
+        cache.refresh(&engine);
         assert!(cache.has_scanned(), "an unchanged key keeps the scan");
-        assert!(command_completions(&cache.sources(), "plantedone").contains(&"plantedone".into()));
+        assert!(
+            command_completions(&cache.sources(&engine), "plantedone")
+                .contains(&"plantedone".into())
+        );
     }
 
     #[test]
@@ -601,14 +562,19 @@ mod tests {
         make_executable(&b.path().join("plantedtwo"));
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell_with(&as_path_value(a.path()), a.path()));
-        assert!(command_completions(&cache.sources(), "plantedone").contains(&"plantedone".into()));
+        let first = engine_at(&as_path_value(a.path()), a.path());
+        cache.refresh(&first);
+        assert!(
+            command_completions(&cache.sources(&first), "plantedone")
+                .contains(&"plantedone".into())
+        );
 
         // A `within [shell: PATH=…]` block asks a different question and
         // cannot be handed the enclosing scope's answer.
-        cache.refresh(&shell_with(&as_path_value(b.path()), a.path()));
+        let second = engine_at(&as_path_value(b.path()), a.path());
+        cache.refresh(&second);
         assert!(!cache.has_scanned(), "a changed PATH drops the scan");
-        let offered = command_completions(&cache.sources(), "planted");
+        let offered = command_completions(&cache.sources(&second), "planted");
         assert!(offered.contains(&"plantedtwo".into()), "got {offered:?}");
         assert!(!offered.contains(&"plantedone".into()), "got {offered:?}");
     }
@@ -624,13 +590,18 @@ mod tests {
         make_executable(&b.path().join("bin").join("plantedtwo"));
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell_with("./bin", a.path()));
-        assert!(command_completions(&cache.sources(), "plantedone").contains(&"plantedone".into()));
+        let first = engine_at("./bin", a.path());
+        cache.refresh(&first);
+        assert!(
+            command_completions(&cache.sources(&first), "plantedone")
+                .contains(&"plantedone".into())
+        );
 
         // Same `PATH` string; only the anchor differs.
-        cache.refresh(&shell_with("./bin", b.path()));
+        let second = engine_at("./bin", b.path());
+        cache.refresh(&second);
         assert!(!cache.has_scanned(), "a changed cwd drops the scan");
-        let offered = command_completions(&cache.sources(), "planted");
+        let offered = command_completions(&cache.sources(&second), "planted");
         assert!(offered.contains(&"plantedtwo".into()), "got {offered:?}");
         assert!(!offered.contains(&"plantedone".into()), "got {offered:?}");
     }
@@ -641,15 +612,20 @@ mod tests {
     fn a_new_binding_completes_without_walking_again() {
         let tmp = tempfile::tempdir().unwrap();
         make_executable(&tmp.path().join("plantedone"));
-        let mut shell = shell_with(&as_path_value(tmp.path()), tmp.path());
+        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell);
-        assert!(command_completions(&cache.sources(), "plantedone").contains(&"plantedone".into()));
+        cache.refresh(&engine);
+        assert!(
+            command_completions(&cache.sources(&engine), "plantedone")
+                .contains(&"plantedone".into())
+        );
 
-        shell.set_var("newname".to_string(), ral_core::types::Value::Unit);
-        cache.refresh(&shell);
-        assert!(command_completions(&cache.sources(), "newname").contains(&"newname".into()));
+        crate::repl::run_line(&engine, "let newname = ()");
+        cache.refresh(&engine);
+        assert!(
+            command_completions(&cache.sources(&engine), "newname").contains(&"newname".into())
+        );
         assert!(
             cache.has_scanned(),
             "a binding change must not invalidate the PATH scan"
@@ -660,21 +636,21 @@ mod tests {
     fn an_aged_scan_is_dropped_at_the_next_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         make_executable(&tmp.path().join("plantedone"));
-        let shell = shell_with(&as_path_value(tmp.path()), tmp.path());
+        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
 
         let mut cache = SourceCache::new();
-        cache.refresh(&shell);
-        let _ = cache.sources();
+        cache.refresh(&engine);
+        let _ = cache.sources(&engine);
         assert!(cache.has_scanned());
 
         // Only the *prompt's* clock is injected, so the TTL is exercised
         // without sleeping through it; `taken` is no earlier than the scan's
         // own stamp, which is all the assertions below need.
         let taken = Instant::now();
-        cache.refresh_at(&shell, taken + SCAN_TTL / 2);
+        cache.refresh_at(&engine, taken + SCAN_TTL / 2);
         assert!(cache.has_scanned(), "inside the TTL the scan stands");
         // Past it, `cargo install foo` becomes offerable without a restart.
-        cache.refresh_at(&shell, taken + SCAN_TTL);
+        cache.refresh_at(&engine, taken + SCAN_TTL);
         assert!(
             !cache.has_scanned(),
             "past the TTL the next request re-walks"
@@ -686,9 +662,7 @@ mod tests {
     fn a_name_in_both_halves_is_offered_once() {
         let src = Fixture {
             path_commands: vec!["dup".into(), "dup".into()],
-            shell_commands: vec!["dup".into()],
-            variables: Vec::new(),
-            cwd: PathBuf::from("/"),
+            ..sources(&["dup"], &[])
         };
         let offered = command_completions(&src.view(), "dup");
         assert_eq!(offered, vec!["dup".to_string()]);
@@ -771,7 +745,7 @@ mod tests {
         if ral_core::host::home().is_none() {
             return;
         }
-        let (start, _) = complete_path("~/", 0, Path::new("/"));
+        let (start, _) = complete_path("~/", 0, &engine_at("", Path::new("/")));
         assert_eq!(start, 2);
     }
 
@@ -780,7 +754,7 @@ mod tests {
         if ral_core::host::home().is_none() {
             return;
         }
-        let (start, _) = complete_path("~", 3, Path::new("/"));
+        let (start, _) = complete_path("~", 3, &engine_at("", Path::new("/")));
         assert_eq!(start, 3);
     }
 
@@ -792,7 +766,7 @@ mod tests {
         assert!(dotfile_visible("src", ""));
     }
 
-    // ── Shell cwd anchoring ─────────────────────────────────────────────
+    // ── Engine cwd anchoring ────────────────────────────────────────────
 
     #[test]
     fn complete_path_lists_shell_cwd_for_empty_token() {
@@ -800,7 +774,7 @@ mod tests {
         std::fs::write(tmp.path().join("alpha"), "").unwrap();
         std::fs::write(tmp.path().join("beta"), "").unwrap();
 
-        let (_, cands) = complete_path("", 0, tmp.path());
+        let (_, cands) = complete_path("", 0, &engine_at("", tmp.path()));
         let mut names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["alpha", "beta"]);
@@ -812,7 +786,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub").join("gamma"), "").unwrap();
 
-        let (_, cands) = complete_path("sub/", 0, tmp.path());
+        let (_, cands) = complete_path("sub/", 0, &engine_at("", tmp.path()));
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["gamma"]);
     }
@@ -827,7 +801,7 @@ mod tests {
         std::fs::write(tmp.path().join("plain.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
 
-        let (_, cands) = complete_path("", 0, tmp.path());
+        let (_, cands) = complete_path("", 0, &engine_at("", tmp.path()));
         let replacement = |display: &str| {
             cands
                 .iter()
@@ -849,7 +823,7 @@ mod tests {
         // A wholly unrelated cwd; the absolute prefix should win.
         let wrong_cwd = tempfile::tempdir().unwrap();
         let token = format!("{}/", tmp.path().display());
-        let (_, cands) = complete_path(&token, 0, wrong_cwd.path());
+        let (_, cands) = complete_path(&token, 0, &engine_at("", wrong_cwd.path()));
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["delta"]);
     }

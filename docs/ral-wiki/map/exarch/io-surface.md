@@ -338,8 +338,7 @@ child-wait.
   application rather than the ral shell, so inside them the site set rests on
   the meta-test's per-file check and on review, never on the compiler — 165
   constructor calls, the crate that owns the model's own turn-time I/O among
-  them. synod carried two such allows, in both its crate roots, and now carries
-  none. Whether that boundary is the discipline's real edge or an artefact of
+  them. synod carries none. Whether that boundary is the discipline's real edge or an artefact of
   which crates existed when it was drawn is open. The ADR's literal `-D
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and

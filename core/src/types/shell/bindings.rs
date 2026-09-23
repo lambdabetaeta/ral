@@ -363,7 +363,6 @@ mod chokepoint_tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }) {
             RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
@@ -390,7 +389,6 @@ mod chokepoint_tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }) {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
@@ -579,7 +577,6 @@ mod chokepoint_tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("ill-typed source must not run"),
@@ -646,7 +643,6 @@ mod chokepoint_tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         });
         match report {
             RunReport::Ran { ending, .. } => {
@@ -792,7 +788,6 @@ mod chokepoint_tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }) {
             RunReport::Ran { ending, .. } => {
                 let err = ending

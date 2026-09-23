@@ -36,9 +36,9 @@ the flattened design never went wrong there.
 - `ServiceName` has two doors, because its sources differ in trust: the
   built-in table is known good, a declaration is input. `declared` refuses an
   empty, colon-bearing, or control-bearing name, each with its own sentence.
-  A declared name equal to a built-in's is refused at load, naming it — once
-  an account id is a service name, a shadow is an identity collision rather
-  than the silent shadowing it used to be.
+  A declared name equal to a built-in's is refused at load, naming it: an
+  account id is a service name, so a shadow would be an identity collision,
+  not a harmless override.
 - `AccountId` renders a key-bearing account as its service's name, and a login
   as `"{service}:{issued}"`. Service names carry no colon, so the first colon
   separates the halves and the rendering is injective. **Nothing ever parses
@@ -107,9 +107,9 @@ what a log is for.
 `Service::billing` is the sole authority on whether a turn costs money, and
 `Transport::metered` is `billing == Billing::Metered` — the whole derivation.
 chatgpt and opencode Go are both `FlatRate`; a subscription turn reports
-tokens and never a cost. The fact was previously derivable two ways that could
-disagree, and the second derivation would have reported a future *metered*
-OAuth service as free.
+tokens and never a cost. There is no second derivation to disagree with it;
+one keyed on the login kind would report a future *metered* OAuth service as
+free.
 
 `Service::meter` answers a different question, and is deliberately not derived
 from `billing`. `Billing` says *does this turn cost money*; `Meter` says *does
@@ -205,7 +205,7 @@ outranks a stale environment variable. It scrubs nothing, which is why
 and a `find` that resolves by `AccountId` alone.
 
 `config.rs` is likewise generalised without changing exarch's path: `load()`
-is now `load_declared(path, label)` over exarch's own file, and `save_declared`
+is `load_declared(path, label)` over exarch's own file, and `save_declared`
 writes the same `.ral` source back — a file a program wrote and a person can
 still edit, which is the whole reason declarations are `.ral` and not an
 opaque blob. A label or address carrying a quote is refused with a question
@@ -320,7 +320,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   all ([[decisions/260906_context-rollover|context-rollover]]).
 - `cancel` is the **request-local** cancellation handle: the foreground exchange
   passes its root token (Esc-linked), an async `agent` passes its own
-  `cancel::Token`, so two concurrent requests no longer share one
+  `cancel::Token`, so two concurrent requests never share one
   process-global slot —
   the provider-side seam of [[decisions/260617_async-agent-tool|async-agent-tool]];
   the token and inbox belong to [[map/exarch/tools|tools]] and
@@ -403,9 +403,7 @@ ADR, [[internals/session-record|session-record]] covers the persistent
 deliberately not `Clone`, so a built request cannot be kept alive and cloned
 for a later retry; `manufacture(adapter, system, transcript: &Transcript,
 tools)` is called fresh inside each retry attempt in `stream.rs`'s
-`Engine::complete`, and is the sole successor to the old free-standing
-`build_cached_request` and both engines' `request_template`s, which no longer
-exist.
+`Engine::complete`, and is the only place a request is built.
 
 `manufacture` marks `cache_control: ephemeral` breakpoints on the system
 prompt and the last two messages, for Anthropic alone: two anchors of

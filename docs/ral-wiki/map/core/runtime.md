@@ -286,9 +286,9 @@ recursion is irreducible; the evaluator reaches it at
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
 `core/src/engine_seed.rs` (crate root, beside the wire layer it rides, *not*
-under `runtime/`) now carries only `EngineSeed`/`pack_seed`, the engine seat's
-own seed wire for a wire-hatched child (`hatch.rs`); a pipeline stage no
-longer crosses a wire at all and this module carries no pipeline-stage type
+under `runtime/`) carries only `EngineSeed`/`pack_seed`, the engine seat's
+own seed wire for a wire-hatched child (`hatch.rs`); a pipeline stage never
+crosses a wire at all and this module carries no pipeline-stage type
 ([[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260610_child-eval-unification|child-eval-unification]], superseded).
 

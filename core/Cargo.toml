@@ -66,6 +66,8 @@ cap-primitives = { workspace = true }
 cap-fs-ext    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
+serde_stacker = "0.1"
+strsim = "0.11"
 ryu           = "1"
 csv           = { workspace = true }
 postcard      = { version = "1", features = ["alloc"] }

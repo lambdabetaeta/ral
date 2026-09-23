@@ -2,9 +2,7 @@
 //!
 //! Sibling to the grant pipeline, but `$PATH` is only a colon-separated
 //! list walked in turn, so the sigil/lex/canon stages do not apply.
-//! Dispatch arrives via `runtime::command::identity` and completion via
-//! [`commands_on_path`], both onto the same walk and the same
-//! executable-bit rule.
+//! Dispatch arrives via `runtime::command::identity`.
 //!
 //! The walk costs one stat per `PATH` entry, and on Windows one per
 //! `%PATHEXT%` suffix per entry, so [`locate`] memoises it for the extent of a
@@ -254,8 +252,8 @@ fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
     super::lex::fold_dots(&joined)
 }
 
-/// The one directory list behind [`locate`], [`commands_on_path`], and
-/// [`search`]; relative entries (`./bin`) anchor to `cwd`.
+/// The one directory list behind [`locate`] and [`search`]; relative
+/// entries (`./bin`) anchor to `cwd`.
 ///
 /// An **empty element is dropped, on every platform**.  POSIX reads one as the
 /// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
@@ -276,7 +274,7 @@ fn path_dirs(path_value: &str, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
     clippy::disallowed_methods,
     reason = "[silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
-fn is_executable_file(p: &Path) -> bool {
+pub(crate) fn is_executable_file(p: &Path) -> bool {
     if !p.is_file() {
         return false;
     }
@@ -289,34 +287,6 @@ fn is_executable_file(p: &Path) -> bool {
     {
         true
     }
-}
-
-/// Names of the executables reachable through `path_value`, in `PATH`
-/// order; unreadable entries are skipped.
-///
-/// Unsorted, and a name repeats once per directory holding it — completion
-/// sorts and dedupes its own.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
-)]
-pub fn commands_on_path(path_value: &str, cwd: SearchCwd<'_>) -> Vec<String> {
-    let mut out = Vec::new();
-    for dir in path_dirs(path_value, cwd) {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !is_executable_file(&path) {
-                continue;
-            }
-            if let Ok(name) = entry.file_name().into_string() {
-                out.push(name);
-            }
-        }
-    }
-    out
 }
 
 /// What one walk of `PATH` found, in the three states `runtime::command::vet`
@@ -685,16 +655,6 @@ mod memo_tests {
             PathSearch::Missing,
         ));
     }
-
-    #[test]
-    fn commands_on_path_ignores_empty_entries() {
-        let _guard = cache_guard();
-        let here = tempfile::tempdir().unwrap();
-        plant(here.path(), "runme");
-
-        let names = commands_on_path("", SearchCwd::of(here.path()));
-        assert!(names.is_empty(), "got {names:?}");
-    }
 }
 
 /// The Windows resolver's own rules: `%PATHEXT%` suffixes append to the name
@@ -763,34 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn commands_on_path_finds_executables() {
-        let tmp = tempfile::tempdir().unwrap();
-        touch(&tmp.path().join("runme"), 0o755);
-        let names = commands_on_path(tmp.path().to_str().unwrap(), SearchCwd::nowhere());
-        assert!(names.contains(&"runme".to_string()), "got {names:?}");
-    }
-
-    #[test]
-    fn commands_on_path_skips_non_executable_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        touch(&tmp.path().join("noexec"), 0o644);
-        let names = commands_on_path(tmp.path().to_str().unwrap(), SearchCwd::nowhere());
-        assert!(!names.contains(&"noexec".to_string()), "got {names:?}");
-    }
-
-    #[test]
-    fn commands_on_path_anchors_relative_entries_to_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        touch(&bin.join("runme"), 0o755);
-        // Against the supplied cwd, not the process cwd: otherwise the
-        // prompt stops reflecting the shell's notion of "here".
-        let names = commands_on_path("./bin", SearchCwd::of(tmp.path()));
-        assert!(names.contains(&"runme".to_string()), "got {names:?}");
-    }
-
-    #[test]
     fn locate_folds_the_dots_out_of_an_anchored_path() {
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("runme"), 0o755);
@@ -827,13 +759,5 @@ mod tests {
             PathSearch::FoundNotExecutable(p) => assert_eq!(p, tmp.path().join("noexec")),
             other => panic!("expected FoundNotExecutable, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn commands_on_path_skips_missing_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let absent = tmp.path().join("does-not-exist");
-        let names = commands_on_path(absent.to_str().unwrap(), SearchCwd::nowhere());
-        assert!(names.is_empty(), "got {names:?}");
     }
 }

@@ -4,7 +4,7 @@
 //! A spawned block runs on its own OS thread with a cloned environment, parked
 //! under the durable session root rather than the foreground scope, so a run
 //! deadline or interrupt cannot reach it.  Its bytes are buffered per handle
-//! (line-framed live, for `watch`) and projected out of one cached
+//! (surfaced live line by line, for `watch`) and projected out of one cached
 //! [`CompletedHandle`]; its `surface` events are buffered too — the spawning
 //! run may be over — and reach a sink exactly once, by an eliminator's replay
 //! or by the completion delivery, whichever wins the `joined` latch.
@@ -20,6 +20,7 @@ use crate::types::{
     HandleInner, HandleState, LeaseClass, Mooring, Observed, ReapCause, Settled, Shell,
     SurfaceBuffer, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
+use std::io::Write as _;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
@@ -198,20 +199,24 @@ where
     });
     let joined = Arc::new(Mutex::new(false));
     let worker_joined = joined.clone();
-    let (stdout, stderr, flush_pending) = match birth {
-        Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink, false),
+    let (stdout, stderr) = match birth {
+        Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink),
         Birth::Watch { label } => {
-            let clone_parent = || shell.io.stdout.clone();
-            let framed = |inner, prefix| Sink::LineFramed {
-                inner: Box::new(inner),
-                prefix,
+            if mooring.deferred.is_none() {
+                let _ = shell.io.stderr.write_all(
+                    format!(
+                        "note: watch '{label}': this host installs no deferred sink, \
+                         so the worker's lines are dropped\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+            let watch = |label| Sink::Watch {
+                deferred: mooring.deferred.clone(),
+                label,
                 pending: Vec::new(),
             };
-            (
-                framed(clone_parent(), format!("[{label}] ")),
-                framed(clone_parent(), format!("[{label}:err] ")),
-                true,
-            )
+            (watch(label.clone()), watch(format!("{label}:err")))
         }
     };
 
@@ -249,10 +254,8 @@ where
                 };
 
                 let result = work(mooring, child_env);
-                if flush_pending {
-                    let _ = child_env.io.stdout.flush_pending();
-                    let _ = child_env.io.stderr.flush_pending();
-                }
+                child_env.io.stdout.flush_pending();
+                child_env.io.stderr.flush_pending();
                 let outcome = match &result {
                     Ok(_) => Value::Variant {
                         label: "ok".into(),
@@ -426,12 +429,13 @@ fn spawn_buffered(
 
 // ── watch ────────────────────────────────────────────────────────────────
 
-/// `watch <label> <thunk>` -- spawn a concurrent block whose output streams
-/// live to the caller's stdout, line-framed with the given label.
+/// `watch <label> <thunk>` -- spawn a concurrent block whose output lines
+/// surface live to the host, each labelled.
 ///
-/// A watched worker writes on past the run that spawned it, so only a host with
-/// a durable stdout installs [`crate::builtins::WATCH_BUILTIN`]; naming `watch`
-/// elsewhere is an unknown-name diagnostic, not a runtime refusal.
+/// A watched worker surfaces on past the run that spawned it, so only a host
+/// that installs a deferred sink installs [`crate::builtins::WATCH_BUILTIN`];
+/// naming `watch` elsewhere is an unknown-name diagnostic, not a runtime
+/// refusal.
 pub(super) fn builtin_watch(
     args: &[Value],
     mooring: &Mooring,
@@ -450,10 +454,10 @@ pub(super) fn builtin_watch(
     spawn_labelled(body, captured, label, mooring, shell)
 }
 
-/// Line-framed spawn: the child writes through `Sink::LineFramed` over a clone
-/// of the caller's stdout, so lines arrive prefixed with no global multiplexer —
-/// siblings serialise on the OS stdout lock or the `Sink::External` adapter's
-/// mutex.  The byte buffers stay empty, so `await`'s replay drain is a no-op.
+/// Labelled spawn: the child writes through `Sink::Watch`, so each whole line
+/// is its own `` `watch `` surface on the session's deferred sink, stderr's
+/// under `label:err`.  The byte buffers stay empty, so `await`'s replay drain
+/// is a no-op.
 fn spawn_labelled(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
@@ -1500,7 +1504,7 @@ mod tests {
 
     /// The one `RunRequest` a capturing top-level test run needs, dressed
     /// only by its source and worker cap.
-    fn request(src: &str, worker_cap: Option<usize>) -> crate::RunRequest<'_> {
+    fn request(src: &str, worker_cap: Option<usize>) -> crate::RunRequest {
         use crate::protocol::{Program, Run};
         use crate::{RequestedTerminalAccess, RunIo, RunRequest, RunStdin};
         RunRequest {
@@ -1520,7 +1524,6 @@ mod tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }
     }
 
@@ -1946,6 +1949,62 @@ mod tests {
 
         let panicked = run(|_, _child| panic!("worker exploded"));
         assert_eq!(done_outcome_label(&panicked[0]), "panic");
+    }
+
+    /// A watched worker's lines each leave as a `` `watch `` batch of one on
+    /// the deferred sink, stderr's under `label:err`, a partial last line
+    /// flushed at the end.
+    #[test]
+    fn watched_lines_surface_one_by_one() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let mut m = Mooring::adrift();
+        m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+        let snap = Arc::new(shell.env.clone());
+        let birth = Birth::Watch {
+            label: "job".into(),
+        };
+        let handle = spawn_child(snap, &m, &mut shell, birth, "job", |_, child| {
+            child
+                .io
+                .stdout
+                .write_all(b"one\ntwo")
+                .map_err(|e| sig(e.to_string()))?;
+            child
+                .io
+                .stderr
+                .write_all(b"bad\r\n")
+                .map_err(|e| sig(e.to_string()))?;
+            Ok(Value::Unit)
+        })
+        .unwrap();
+        await_handle(&handle, &m, &shell).expect("await ok");
+        let lines: Vec<(String, String)> = batches
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|batch| match batch.as_slice() {
+                [
+                    FOValue::Variant {
+                        label,
+                        payload: Some(p),
+                    },
+                ] if label == "watch" => Some((
+                    p.field("label")?.as_str()?.to_string(),
+                    p.field("line")?.as_str()?.to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let pair = |l: &str, t: &str| (l.to_string(), t.to_string());
+        assert_eq!(
+            lines,
+            [
+                pair("job", "one"),
+                pair("job:err", "bad"),
+                pair("job", "two")
+            ]
+        );
     }
 
     /// The body's own events precede the trailing `` `done ``: the batch carries

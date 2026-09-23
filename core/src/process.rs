@@ -32,8 +32,8 @@ pub(crate) use reaper::Watch;
 #[cfg(unix)]
 pub(crate) use cancel::TEARDOWN_GRACE;
 pub use cancel::{
-    CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope, request_foreground_cancel,
-    request_root_cancel, watch_cancel,
+    Ambient, AmbientForward, CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope,
+    forward_ambient, request_interrupt, request_root_cancel, watch_cancel,
 };
 
 #[cfg(unix)]

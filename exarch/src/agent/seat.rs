@@ -2,43 +2,47 @@
 //! host-side state that seat kind owns.  Every engine-side reach is a
 //! method here, so a new seat kind is one more variant, not a second agent.
 
-use crate::agent::cancel::{EvalReach, InterruptTarget};
-use crate::agent::event::AgentLog;
+use crate::agent::cancel::InterruptTarget;
 use crate::bootstrap::Scratch;
 use crate::shell_eval::builtins;
-use ral_core::Shell;
-use ral_core::protocol::{IdentityTransport, Severed, Transport};
-use std::sync::{Arc, Mutex};
+use ral_core::engine::EngineInstaller;
+use ral_core::protocol::{Attach, IdentityTransport, ProbeError, Severed, Transport};
+use std::sync::Arc;
 
-/// What kind of seat a `ral` call is running against, and the one thing
-/// that differs by kind: an identity call forks its own scratch; a wire
-/// call's real scratch lives in the guest its host dials, so there is none
-/// to carry.  `` `start `` chooses its identity or wire arm on this fact
-/// alone — derived here from the seat, never stated independently.
+/// How a fork of this seat's engine reaches the desk that adopts it: parked in
+/// the parent's own transport, or dialled across a wire. `` `start `` and
+/// `/branch` choose their arm on this fact alone.
 pub(crate) enum SeatKind {
-    Identity { scratch: Arc<Scratch> },
+    Identity(Arc<IdentityTransport>),
     Wire,
 }
 
 /// One agent's engine-side attachment; what differs per call already lives
 /// off the [`Transport`] trait, so this stays a closed enum.
 pub(crate) enum Seat {
-    /// In-process.  `/clear` rebuilds it, but onto the *same* `interrupt_target`:
-    /// the cell an interrupt reaches the run through must outlive the rebuild.
+    /// In-process.  `/clear` reboots it onto the *same* `target`: the cell an
+    /// interrupt reaches the run through must outlive the rebuild.
     Identity {
-        transport: Box<IdentityTransport>,
-        scratch: Arc<Scratch>,
-        cwd: std::path::PathBuf,
-        detach: bool,
-        interrupt_target: InterruptTarget,
+        transport: Arc<IdentityTransport>,
+        target: InterruptTarget,
+        /// `None` for an adopted fork, whose authority a fresh boot would
+        /// not carry.
+        rebirth: Option<Rebirth>,
     },
-    /// Out-of-process, one engine per session, holding nothing per call: a
-    /// wire run's desk and applier ride `Avatar::ral`'s arguments into
-    /// the drain loop's enquiry arm, the real scratch lives in the guest,
-    /// and forks are refused at the desk for fuel 0, so no fork door either.
+    /// Out-of-process, one engine per session: a fork is hatched guest-side
+    /// and dialled by the desk's wire arm.
     Wire {
         transport: Box<ral_core::protocol::WireTransport>,
+        target: InterruptTarget,
     },
+}
+
+/// What an identity root reboots from: the recipes and Attach it was born
+/// from, and the scratch that Attach names, which outlives every reboot.
+pub(crate) struct Rebirth {
+    installers: &'static [EngineInstaller],
+    attach: Attach,
+    _scratch: Arc<Scratch>,
 }
 
 /// When in a session's life its engine was lost, which is the whole of what
@@ -143,9 +147,11 @@ impl std::error::Error for EngineLost {}
 /// on standing where the thing they can act on should be.
 impl std::fmt::Display for EngineLost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sentence = match self.phase {
-            EnginePhase::Starting => "The assistant could not be started. Try again.",
-            EnginePhase::Running => {
+        let sentence = match (self.phase, &self.cause) {
+            // A refusal is deterministic: trying again meets it again.
+            (EnginePhase::Starting, Severed::Refused(_)) => "The assistant could not be started.",
+            (EnginePhase::Starting, _) => "The assistant could not be started. Try again.",
+            (EnginePhase::Running, _) => {
                 "The assistant stopped, so this conversation cannot go on. Start a new one."
             }
         };
@@ -186,6 +192,14 @@ mod lost {
             running.to_lowercase().contains("start a new"),
             "a session whose state is gone is worth abandoning: {running}"
         );
+    }
+
+    /// A refusal is deterministic, so a refused start is not told to retry.
+    #[test]
+    fn a_refused_start_is_not_told_to_try_again() {
+        let shown =
+            EngineLost::starting(&Severed::Refused("protocol version 9".into()), None).to_string();
+        assert!(!shown.to_lowercase().contains("try again"), "{shown}");
     }
 
     /// A user's line carries somewhere to go and nothing else: no code, no
@@ -251,28 +265,44 @@ mod lost {
 }
 
 impl Seat {
-    /// Trunk construction, every fork, and the desk's spawn spine all seat
-    /// here; [`Self::clear`] re-runs the ceremony onto the same cell.
-    pub(crate) fn identity(
-        shell: Shell,
-        scratch: Arc<Scratch>,
+    /// An identity root, booted through `installers` from what this session
+    /// states: its cwd, terminal, scratch, and log directory.
+    ///
+    /// # Errors
+    /// The recipe's refusal.
+    pub(crate) fn root(
+        installers: &'static [EngineInstaller],
         cwd: std::path::PathBuf,
-        detach: bool,
-        log: &AgentLog,
-    ) -> Self {
-        let interrupt_target: InterruptTarget = Arc::new(Mutex::new(None));
-        let transport = Box::new(identity_ceremony(
-            shell,
-            log,
-            &interrupt_target,
-            cwd.clone(),
+        terminal: ral_core::io::TerminalState,
+        scratch: Arc<Scratch>,
+        session_dir: &std::path::Path,
+    ) -> Result<Self, Severed> {
+        let home = ral_core::host::home().unwrap_or_default();
+        let mut attach = Attach::new(builtins::INSTALLER_TAG, cwd, home.into());
+        attach.terminal = terminal;
+        attach.env = scratch.env();
+        attach.env.push((
+            "EXARCH_SESSION_DIR".into(),
+            session_dir.to_string_lossy().into_owned(),
         ));
-        Self::Identity {
+        let transport = Arc::new(IdentityTransport::boot(installers, &attach)?);
+        Ok(Self::Identity {
+            target: InterruptTarget::new(transport.control().clone()),
             transport,
-            scratch,
-            cwd,
-            detach,
-            interrupt_target,
+            rebirth: Some(Rebirth {
+                installers,
+                attach,
+                _scratch: scratch,
+            }),
+        })
+    }
+
+    /// A fork its parent's transport adopted.
+    pub(crate) fn adopted(transport: IdentityTransport) -> Self {
+        Self::Identity {
+            target: InterruptTarget::new(transport.control().clone()),
+            transport: Arc::new(transport),
+            rebirth: None,
         }
     }
 
@@ -287,18 +317,10 @@ impl Seat {
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
     ) -> Result<Self, Severed> {
-        transport.attach(
-            ral_core::protocol::TerminalEndpoint {
-                lease: None,
-                state: ral_core::io::TerminalState::default(),
-            },
-            cwd,
-            home,
-            None,
-            builtins::INSTALLER_TAG.to_string(),
-        );
+        transport.attach(Attach::new(builtins::INSTALLER_TAG, cwd, home));
         transport.await_attached()?;
         Ok(Self::Wire {
+            target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
         })
     }
@@ -312,34 +334,14 @@ impl Seat {
 
     pub(crate) fn kind(&self) -> SeatKind {
         match self {
-            Self::Identity { scratch, .. } => SeatKind::Identity {
-                scratch: scratch.clone(),
-            },
+            Self::Identity { transport, .. } => SeatKind::Identity(transport.clone()),
             Self::Wire { .. } => SeatKind::Wire,
         }
     }
 
-    /// Identity-only: the test suite's state-inspection door and
-    /// `Avatar::fork_with`'s [`Shell::fork_session`] reach.
-    pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::protocol::EngineInner> {
-        match self {
-            Self::Identity { transport, .. } => transport.shell_mut(),
-            Self::Wire { .. } => panic!(
-                "direct engine-state access has no meaning on a wire seat: the engine lives in \
-                 a separate process, reachable only through Transport's dispatch/probe/control \
-                 frames"
-            ),
-        }
-    }
-
-    /// Install the session sink a settling worker's deferred batch reaches —
-    /// the host itself now rides `dispatch_to_report`'s own `host` argument
-    /// rather than anything installed ahead of the dispatch.
+    /// Install the session sink a settling worker's deferred batch reaches.
     pub(crate) fn install_deferred(&self, sink: Arc<dyn ral_core::types::DeferredSink>) {
-        match self {
-            Self::Identity { transport, .. } => transport.set_deferred_sink(sink),
-            Self::Wire { transport } => transport.set_deferred_sink(sink),
-        }
+        self.transport().set_deferred_sink(sink);
     }
 
     /// Why no further frame will cross this seat's transport, if that has
@@ -348,127 +350,55 @@ impl Seat {
         self.transport().severed()
     }
 
-    /// Declare this seat's engine dead for a reason the host observed. An
-    /// identity engine is this process: a fault there is a program error,
-    /// and panics.
-    pub(crate) fn fault(&self, cause: Severed) -> Severed {
+    /// Take one reading through `door`. A refusal is a protocol fault here —
+    /// probes are asked only at run boundaries — so it severs the seat.
+    ///
+    /// # Errors
+    /// The engine's severance.
+    pub(crate) fn read<T>(
+        &self,
+        door: impl FnOnce(&dyn Transport) -> Result<T, ProbeError>,
+    ) -> Result<T, Severed> {
+        let t = self.transport();
+        door(t).map_err(|e| match e {
+            ProbeError::Severed(cause) => cause,
+            ProbeError::Rejected(why) => t.sever(Severed::Faulted(why)),
+        })
+    }
+
+    /// Where this agent's interrupt and terminate land.
+    pub(crate) fn reach(&self) -> InterruptTarget {
         match self {
-            Self::Wire { transport } => {
-                transport.sever(cause.clone());
-                cause
-            }
-            Self::Identity { .. } => unreachable!("an identity engine cannot fault: {cause}"),
+            Self::Identity { target, .. } | Self::Wire { target, .. } => target.clone(),
         }
     }
 
-    pub(crate) fn eval_reach(&self) -> EvalReach {
-        match self {
-            Self::Identity {
-                transport,
-                interrupt_target,
-                ..
-            } => EvalReach::Identity {
-                eval_root: Some(transport.shell_mut().shell.cancel_handle()),
-                interrupt_target: interrupt_target.clone(),
-            },
-            Self::Wire { transport, .. } => EvalReach::Wire(transport.control().clone()),
-        }
+    /// `/clear`'s engine half: boot afresh from the same Attach, onto the same
+    /// target.  Replacing the transport drops the outgoing engine, whose
+    /// teardown cancels its workers: `/clear` outranks leases.
+    ///
+    /// # Errors
+    /// A seat with no recipe to reboot from, or the recipe's refusal.
+    pub(crate) fn clear(&mut self) -> Result<(), String> {
+        let Self::Identity {
+            transport,
+            target,
+            rebirth: Some(rebirth),
+        } = self
+        else {
+            return Err(
+                "/clear cannot start this conversation over: its engine was not \
+                 booted here, and starting afresh means a new conversation"
+                    .to_string(),
+            );
+        };
+        *transport = Arc::new(
+            IdentityTransport::boot(rebirth.installers, &rebirth.attach)
+                .map_err(|s| s.to_string())?,
+        );
+        target.republish(transport.control().clone());
+        Ok(())
     }
-
-    /// `/clear`'s engine half: reboot from the owned scratch onto the
-    /// same interrupt target.  Replacing the transport drops the outgoing
-    /// shell, whose teardown cancels its workers: `/clear` outranks leases.
-    pub(crate) fn clear(&mut self, log: &AgentLog) {
-        match self {
-            Self::Identity {
-                transport,
-                scratch,
-                cwd,
-                detach,
-                interrupt_target,
-            } => {
-                **transport = identity_ceremony(
-                    boot_root_shell(scratch, cwd.clone(), *detach),
-                    log,
-                    interrupt_target,
-                    cwd.clone(),
-                );
-            }
-            Self::Wire { .. } => panic!(
-                "/clear has no meaning on a wire seat as a transport swap: a wire session clears \
-                 by killing its engine process and booting a fresh one from the same recipe, not \
-                 by rebuilding this seat in place — a front-end starts over by replacing the \
-                 child process, so no caller routes /clear here and reaching this arm is a host \
-                 bug"
-            ),
-        }
-    }
-}
-
-/// Boot a root session shell; forks instead snapshot their parent through
-/// [`Shell::fork_session`], inheriting the seeding.
-///
-/// `detach` asks whether the verb means anything on this platform at all,
-/// which is the host's question, not a capability a `grant` answers per
-/// call.  Naming the verb and arming its budget is one act so the two
-/// cannot drift, and where `detach` is false the name is simply absent —
-/// calling it is an unknown-command diagnostic, not a refusal.
-#[cfg_attr(
-    not(unix),
-    allow(
-        unused_variables,
-        reason = "detach is born by double-fork, a POSIX act: off unix core publishes no builtin to install"
-    )
-)]
-pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach: bool) -> Shell {
-    let mut shell = crate::bootstrap::boot_shell();
-    // The trunk owns this process's signals: an Esc or async SIGINT
-    // interrupts its in-flight run, a SIGTERM the session. A sub-agent's
-    // `fork_session` stays deaf; a cascade stops one by cancel handle.
-    shell.face_signals();
-    shell.seed_cwd(cwd);
-    scratch.install_into(&mut shell);
-    #[cfg(unix)]
-    if detach {
-        shell.install_builtins(ral_core::builtins::DETACH_BUILTIN);
-        shell.arm_detach(crate::shell_eval::DETACH_BIRTH_BUDGET);
-    }
-    shell
-}
-
-/// Seed first, then arm: the binding ledger exempts whatever is bound when
-/// it is armed, so a name seeded afterwards would fall under the lease and
-/// be reaped for idleness.  `cwd` is what [`boot_root_shell`] already put
-/// on the shell, restated because [`Transport::attach`]'s signature is
-/// shared with the wire transport — the one that reads it.
-fn identity_ceremony(
-    mut shell: Shell,
-    log: &AgentLog,
-    interrupt_target: &InterruptTarget,
-    cwd: std::path::PathBuf,
-) -> IdentityTransport {
-    // Must point at the live session's event-log directory, on
-    // construction and on every `/clear` rebuild alike.
-    crate::bootstrap::seed_var(
-        &mut shell,
-        "EXARCH_SESSION_DIR",
-        &log.dir().to_string_lossy(),
-    );
-    crate::bootstrap::arm_session_ledgers(&mut shell);
-    let mut transport = IdentityTransport::new(shell);
-    transport.set_interrupt_target(interrupt_target.clone());
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    transport.attach(
-        ral_core::protocol::TerminalEndpoint {
-            lease: None,
-            state: crate::bootstrap::probe_terminal(),
-        },
-        cwd,
-        std::path::PathBuf::from(&home),
-        None, // rc_path
-        builtins::INSTALLER_TAG.to_string(),
-    );
-    transport
 }
 
 // These drive a real `--engine` child, never an in-process
@@ -483,31 +413,16 @@ fn identity_ceremony(
 )]
 mod tests {
     use super::*;
+    use crate::agent::event::AgentLog;
+    use crate::agent::testkit::source_run;
     use crate::bus::{Emitter, Inbox};
     use crate::fleet::Fleet;
     use crate::fleet::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
-    use ral_core::protocol::{EnquiryError, Host, Liveness, Program, Report, Run, WireTransport};
-    use ral_core::types::{GrantStack, Nursery};
-    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+    use ral_core::protocol::{EnquiryError, Host, Liveness, Report, WireTransport};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    fn source_run(src: &str) -> Run {
-        Run {
-            program: Program::Source(src.into()),
-            script_name: "<test>".into(),
-            caps: GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: RunStdin::Empty,
-            trail: None,
-        }
-    }
 
     /// Each log takes the next session id, as in `fleet::desk`'s fixture, so
     /// two of them are never the same session to the wire.
@@ -518,9 +433,8 @@ mod tests {
             .expect("session log")
     }
 
-    /// Hand-rolls `WireTransport::new`'s fd-3 handoff so the host end can
-    /// be taken with `adopt` — the constructor `Seat::wire`, and so synod,
-    /// actually calls.
+    /// The fd-3 handoff ral-daemon's `spawn` performs, so the host end can be
+    /// taken with `adopt` — the constructor `Seat::wire`, and so synod, calls.
     fn spawn_engine(liveness: Liveness) -> (WireTransport, std::process::Child) {
         let (host, guest) = UnixStream::pair().expect("socketpair");
         let guest_fd = guest.as_raw_fd();
@@ -580,9 +494,10 @@ mod tests {
             agent: parent.clone(),
             emit: emit.clone(),
             cwd: std::env::temp_dir(),
+            home: Some(std::env::temp_dir()),
             reply: crate::agent::ReplyCell::default(),
             log: crate::agent::LogCell::new(test_log()),
-            nursery: Nursery::default(),
+            branch: None,
             acts: crate::fleet::desk::ActFragment::default(),
             principal: ral_core::host::user(),
         }
@@ -601,9 +516,6 @@ mod tests {
             _req: ral_core::serial::FOValue,
         ) -> Result<ral_core::serial::FOValue, EnquiryError> {
             unreachable!("this run raises no enquiry")
-        }
-        fn fork(&self) -> Option<ral_core::types::Fork> {
-            None
         }
     }
 
@@ -657,7 +569,6 @@ mod tests {
                 services: wire_host_services(&emit, &trunk),
             },
             apply: SurfaceApplier {
-                pins: None,
                 recorder: crate::record::Emitter::none(),
             },
         });
@@ -704,7 +615,6 @@ mod tests {
                 services: wire_host_services(&emit, &trunk),
             },
             apply: SurfaceApplier {
-                pins: None,
                 recorder: crate::record::Emitter::none(),
             },
         });
@@ -761,13 +671,13 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// `eval_reach().interrupt()` is the per-tab interrupt path.
+    /// `reach().interrupt()` is the per-tab interrupt path.
     /// Generous timing throughout: the dev fleet includes a jittery VM.
     #[test]
-    fn wire_eval_reach_cancel_settles_an_in_flight_run_promptly() {
+    fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
         const WAIT: Duration = Duration::from_secs(20);
         let (seat, mut child) = wire_seat(Liveness::default());
-        let reach = seat.eval_reach();
+        let reach = seat.reach();
 
         let settled = std::thread::scope(|s| {
             let dispatch = s.spawn(|| {
@@ -797,29 +707,17 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// No engine child needed: the panic fires before a frame would cross.
+    /// A wire seat has no recipe to reboot in place, so `/clear` answers in
+    /// words rather than panicking. No engine child needed: nothing crosses.
     #[test]
-    #[should_panic(expected = "/clear has no meaning on a wire seat")]
-    fn wire_seat_clear_panics_didactically() {
-        // Built directly, bypassing `Seat::wire`'s attach handshake: the
-        // panic under test fires on the `Seat::Wire` shape alone, with no
-        // engine on the far end of this raw socketpair to answer it.
+    fn wire_seat_clear_answers_a_sentence() {
         let (host, _guest) = UnixStream::pair().expect("socketpair");
         let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
         let mut seat = Seat::Wire {
+            target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
         };
-        seat.clear(&test_log());
-    }
-
-    #[test]
-    #[should_panic(expected = "direct engine-state access has no meaning on a wire seat")]
-    fn wire_seat_shell_mut_panics_didactically() {
-        let (host, _guest) = UnixStream::pair().expect("socketpair");
-        let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-        let seat = Seat::Wire {
-            transport: Box::new(transport),
-        };
-        let _guard = seat.shell_mut();
+        let why = seat.clear().expect_err("a wire seat cannot reboot");
+        assert!(why.contains("new conversation"), "{why}");
     }
 }

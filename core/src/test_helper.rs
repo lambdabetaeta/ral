@@ -79,7 +79,6 @@ fn try_birth_detached() -> Option<u8> {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         });
         Some(u8::from(!matches!(
             report,

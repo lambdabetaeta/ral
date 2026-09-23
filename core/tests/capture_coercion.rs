@@ -44,7 +44,6 @@ fn run_seen(shell: &mut Shell, source: &str) -> (Result<Value, String>, Vec<u8>)
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran {
             ending, captured, ..

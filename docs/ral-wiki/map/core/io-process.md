@@ -48,8 +48,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   `Terminal` precisely so denial of byte input and denial of foreground stay
   separate effects.
 - `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
-  terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee,
-  frontend printer, line-framing adapter. `child_stdout` / `child_stderr`
+  terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
+  watched worker's line surface (`Watch`, each line a `` `watch [label, line] ``
+  batch of one through the deferred sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
   hand. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
   beside them the `overflowed` flag `write_capped` raises at
@@ -59,7 +60,7 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   value ([[design/capture|capture]]).
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
   mode bits. `startup_foreground` records whether ral's group owned the
-  controlling terminal's foreground at entry; it is no longer a per-handoff
+  controlling terminal's foreground at entry; it is not a per-handoff
   oracle but the lease's *mint condition*
   ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
   On Windows it also owns `console_mode_snapshot` / `restore_console_mode`,
@@ -154,14 +155,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
   ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]). A scope's
-  cancellation is a *join*: one private `fold` over its chain's flags and the
-  ambient causes the nodes were minted folding (`Hears`), so a signal handler
-  or TUI thread contributes a cause without holding — or aliasing — a scope
-  ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]). The two ambient
-  causes have different shapes: `REQUESTED_ROOT` is an absolute `AtomicU8`,
-  while the interrupt is a per-cause watermark of instants (`CLOCK`,
-  `STAMPED`) a frame reads against its birth
-  ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
+  cancellation is a *join*: one private `fold` over its chain's flags. A
+  signal handler raises an ambient cause instead — `REQUESTED_ROOT`, an
+  absolute `AtomicU8`, or an interrupt on the `INTERRUPTS` count — which no
+  scope folds: `forward_ambient` hands each to a host thread, which forwards it
+  to its engine as `Control`
+  ([[internals/cancellation|cancellation]]).
 - `signal.rs` — *signals are causes*: the platform handlers translate each
   delivered signal into a `CancelCause` on the ambient causes — SIGINT →
   foreground `Interrupt`, SIGTERM/SIGHUP → root `Terminate` — so one
@@ -179,7 +178,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   termios, and blocks SIGTTOU for the parent-only restore window; unix
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `interrupt_handler` is the interactive SIGINT disposition —
-  a bare `request_foreground_cancel(Interrupt)`, with no delivery of its own,
+  a bare `request_interrupt()`, with no delivery of its own,
   since a pipeline's processes hear a cancellation through the collector — and
   `quit_handler` is the Ctrl-`\` root abort. `grace_signal(cause)` is the one
   cause→signal table both teardowns read (`RunningChild::terminate` and the
@@ -188,7 +187,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `None`, straight to the kill
   ([[decisions/260905_one-delivery-path|one-delivery-path]]).
   Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait now goes
+  `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait goes
   through the reaper's `waitid`, the one funnel; a pgid is signalled directly
   by `kill(-pgid, …)`, never waited on
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on

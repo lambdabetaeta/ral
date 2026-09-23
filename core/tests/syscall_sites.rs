@@ -94,7 +94,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk.rs", "surface:locate-stage"),
     ("core/src/path/walk.rs", "surface:locate-staged-read"),
     ("core/src/path/walk.rs", "surface:locate-staged-write"),
-    ("core/src/path/which.rs", "silent:which-readdir"),
     ("core/src/path/which.rs", "silent:which-stat"),
     ("core/src/path/which.rs", "silent:which-stat-absent"),
     ("core/src/process/jail/linux.rs", "silent:jail-cgroup-procs"),
@@ -107,6 +106,11 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "silent:cloexec-socketpair",
     ),
     ("core/src/process/spawn_lock.rs", "silent:spawn-door"),
+    ("core/src/protocol/reading/fs.rs", "silent:probe-path-bytes"),
+    (
+        "core/src/protocol/reading/fs.rs",
+        "silent:probe-path-entries",
+    ),
     (
         "core/src/runtime/pipeline/helper.rs",
         "silent:self-reexec-windows",
@@ -152,7 +156,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("core/src/subprocess_codec.rs", "silent:frame-dump"),
     ("core/src/subprocess_codec.rs", "silent:frame-dump-nonunix"),
-    ("core/src/protocol.rs", "silent:engine-spawn"),
     ("core/src/types/shell/cwd.rs", "silent:cwd-stat"),
     ("core/src/uutils.rs", "silent:diff-read"),
     ("core/src/wire.rs", "silent:wire-pair-windows"),
@@ -253,13 +256,12 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("ral/build.rs", "silent:git-probe"),
     ("ral/src/batch.rs", "silent:script-read"),
     ("ral/src/platform.rs", "silent:exit-hints-read"),
-    ("ral/src/repl/completion.rs", "silent:complete-readdir"),
     ("ral/src/repl/config.rs", "silent:history-mkdir"),
     ("ral/src/repl/config.rs", "silent:rc-write"),
+    ("ral/src/repl/config/source.rs", "silent:config-read"),
     ("ral/src/repl/frontend.rs", "silent:history-append"),
     ("ral/src/repl/frontend.rs", "silent:history-read"),
     ("ral/src/repl/plugin/load.rs", "silent:plugin-read"),
-    ("ral/src/repl/session/boot.rs", "silent:config-read"),
     ("ral/src/repl/session/boot.rs", "silent:crashlog-write"),
 ];
 

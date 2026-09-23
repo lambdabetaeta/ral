@@ -46,7 +46,6 @@ fn printed(src: &str) -> String {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran {
             ending, captured, ..

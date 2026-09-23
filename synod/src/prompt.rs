@@ -124,9 +124,9 @@ pub fn assemble(
 ///
 /// The agent runs inside the machine, so the facts of its situation are
 /// the machine's — the image's Linux userland, the mount point it starts
-/// in, and the disposable [`GUEST_SCRATCH`](crate::grant::GUEST_SCRATCH)
-/// tmpfs.  Only `now` is taken from the host, because the machine's clock
-/// is set from it and a letter must carry today's date.
+/// in, and the scratch its engine names, filled in once the engine is up.
+/// Only `now` is taken from the host, because the machine's clock is set
+/// from it and a letter must carry today's date.
 fn host_section(caps: &Capabilities, workspace: &Path) -> String {
     use std::fmt::Write;
     let mut s = String::new();
@@ -136,8 +136,9 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
     }
     let _ = writeln!(s, "- cwd: {}", workspace.display());
     let scratch_line = format!(
-        "`{}` — this machine's own temporary space, gone when the conversation ends",
-        crate::grant::GUEST_SCRATCH
+        "`${}` = {} — this machine's own temporary space, gone when the conversation ends",
+        exarch::bootstrap::EXARCH.scratch_var(),
+        exarch::prompt::SCRATCH_PLACEHOLDER
     );
     format!(
         "{s}\n{}",
@@ -279,8 +280,8 @@ mod tests {
     fn assemble_hosts_the_guest_not_the_host() {
         let p = prompt();
         assert!(
-            p.contains("- scratch: `/tmp`"),
-            "the guest scratch is named"
+            p.contains(exarch::prompt::SCRATCH_PLACEHOLDER),
+            "the guest scratch is left for the engine to name"
         );
         assert!(p.contains("- cwd: /work"));
         if let Some(home) = ral_core::host::home() {

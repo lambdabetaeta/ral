@@ -31,6 +31,15 @@ use provider::{Bureau, Engine};
 use std::sync::{Arc, Mutex};
 use tui::SessionInfo;
 
+/// The one boot recipe table, for the identity seat and the `--engine` child
+/// alike.
+pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
+    [ral_core::engine::EngineInstaller {
+        tag: shell_eval::builtins::INSTALLER_TAG,
+        boot: bootstrap::engine_boot_shell,
+        narrow: policy::base_layer,
+    }];
+
 /// Pre-`main` trampoline shared by the binary and every test binary: dress a
 /// sandbox-IPC child's fresh shell with exarch's host builtins, then serve
 /// any helper re-exec.
@@ -42,11 +51,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
-        ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
-            tag: shell_eval::builtins::INSTALLER_TAG,
-            boot: bootstrap::engine_boot_shell,
-            narrow: policy::base_layer,
-        }]);
+        ral_core::engine::run_engine(&INSTALLERS);
     }
     if let Some(code) = ral_core::try_run_pipeline_anchor() {
         return Some(code);
@@ -206,13 +211,11 @@ pub fn run() -> Result<(), String> {
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );
+    let (_mode, terminal, _warn) = ral_core::io::TerminalState::probe_from_env();
+    bootstrap::face_process_signals(&terminal);
     let (run_dir, run_lock, resume) = resolve_run(&cwd, c.resume)?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
-    // Whether the double fork exists on this host at all; whether a given call
-    // may spend it is asked of the live grant stack (`detach:`).  A sandboxed
-    // session keeps the verb — a survivor carries its projection for life.
-    let detach = cfg!(unix);
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
         prompt::CHAT_SYSTEM.to_string()
@@ -220,7 +223,7 @@ pub fn run() -> Result<(), String> {
         prompt::assemble(
             &c.system_files,
             &caps,
-            &scratch,
+            bootstrap::EXARCH,
             &cwd_path,
             &config_dir,
             !headless,
@@ -259,9 +262,9 @@ pub fn run() -> Result<(), String> {
             bureau: Arc::clone(&bureau),
         },
         agent::RootSeat::Identity {
-            scratch: Arc::clone(&scratch),
+            scratch,
             cwd: cwd_path,
-            detach,
+            terminal,
         },
         Arc::clone(&provider),
     )

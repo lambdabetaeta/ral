@@ -6,7 +6,8 @@
 //! plugin runtime; ghost text, highlights, and plugin keybindings are
 //! unavailable here.
 
-use ral_core::{Shell, diagnostic};
+use ral_core::diagnostic;
+use ral_core::protocol::Transport;
 use std::io::{BufRead, Write};
 
 use super::super::prompt::PromptText;
@@ -27,7 +28,7 @@ impl MinimalFrontend {
 impl Frontend for MinimalFrontend {
     fn read(
         &mut self,
-        _shell: &mut Shell,
+        _engine: &dyn Transport,
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
         #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,

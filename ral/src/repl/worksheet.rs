@@ -7,33 +7,29 @@
 //! REPL-side model records `(name, free_refs, effectful)` at each successful
 //! top-level `Bind`, owned by the [`Session`](super::session) so it
 //! accumulates as the user defines bindings.  The node's name, type, and value
-//! preview still come from the live env each `read`; this model supplements
+//! preview still come from the engine each `read`; this model supplements
 //! that live data with the edges and the effect verdict the env cannot
 //! reconstruct.
 //!
 //! Neither analysis is reimplemented here.  The edges reuse
 //! [`Ast::free_refs`](ral_core::syntax::ast) — the same free-variable
 //! analysis `syntax::group` (private to `ral_core`) uses to form a `Rec`
-//! group.  The effect verdict reuses the checker's own IR: a binding whose
-//! RHS compiles to a [`CompKind::Exec`] or one of the effect-frame forms
-//! (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`), or whose RHS
-//! the checker wrapped in the `capture` coercion, is effectful — pure
-//! otherwise.  This is the mode-system verdict the typechecker already
-//! records, not a new heuristic.
+//! group, a pure parse.  The effect verdict is the engine's `bind-effects`
+//! reading: the mode-system verdict the typechecker already records, not a
+//! new heuristic.
 //!
 //! A read-only projection of edges and classification: it records, the
 //! frontend renders a dependency tree, and nothing re-evaluates.
 
-use ral_core::Shell;
-use ral_core::ir::{CompKind, Phrase, Toplevel};
-use ral_core::syntax::ast::{Ast, Pattern};
+use ral_core::protocol::reading::BindEffect;
+use ral_core::syntax::ast::Ast;
 
 use std::collections::HashSet;
 
 /// One worksheet node: a user binding's dependency edges and effect verdict.
 ///
-/// The name/type/value preview are *not* held here — they come from the live
-/// env each `read`.  This entry carries only what the env cannot
+/// The name/type/value preview are *not* held here — they come from the
+/// engine each `read`.  This entry carries only what the env cannot
 /// reconstruct: the names this binding's RHS referenced freely (its inbound
 /// dependency edges) and whether it is effectful.
 pub(super) struct WsEntry {
@@ -62,11 +58,11 @@ impl Worksheet {
         &self.entries
     }
 
-    /// Record the top-level bindings of a *successfully evaluated* input —
-    /// see the module doc for what edges and verdicts it reuses. Called from
-    /// the success arm of the eval path. A top-level `let name = rhs` with a
-    /// `Name` pattern yields one entry; other statements are ignored.
-    pub(super) fn record(&mut self, input: &str, shell: &Shell) {
+    /// Record the top-level bindings of a *successfully evaluated* input,
+    /// with the engine's `effects` verdict for it. Called from the success arm
+    /// of the eval path. A top-level `let name = rhs` with a `Name` pattern
+    /// yields one entry; other statements are ignored.
+    pub(super) fn record(&mut self, input: &str, effects: &[BindEffect]) {
         let Ok(stmts) = ral_core::syntax::parser::parse(input) else {
             return;
         };
@@ -83,31 +79,16 @@ impl Worksheet {
             }
         }
 
-        // The effect verdict comes from the checker's annotated IR: walk the
-        // compiled comp's top-level `Bind` nodes once into a name→effectful
-        // map.  A compile failure means no binding landed — record nothing.
-        let effects = match ral_core::compile_and_typecheck(
-            input,
-            shell.session_schemes(),
-            ral_core::source::FileId::DUMMY,
-            "",
-            None,
-        ) {
-            Ok(top) => bind_effects(&top),
-            Err(_) => return,
-        };
-
         for stmt in &stmts {
             let Some((name, value)) = top_level_let(&stmt.item) else {
                 continue;
             };
             let free_refs = value.free_refs(&candidates);
-            // The checker's verdict for this name; a `Bind` the walk did not
-            // reach (an unusual elaboration shape) defaults to pure.
+            // A name the engine gave no verdict for defaults to pure.
             let effectful = effects
                 .iter()
-                .find(|(n, _)| n == name)
-                .is_some_and(|(_, e)| *e);
+                .find(|e| e.name == name)
+                .is_some_and(|e| e.effectful);
             self.upsert(name, free_refs, effectful);
         }
     }
@@ -139,50 +120,12 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
         .map(|(name, value)| (name, value.item.as_ref()))
 }
 
-/// Walk an annotated toplevel's `Phrase::Define`s into `(name, effectful)`
-/// pairs, reading the checker's verdict off the IR.  A binding is effectful
-/// when its RHS compiles to a [`CompKind::Exec`] or one of the effect-frame
-/// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`), or
-/// when the checker wrapped it in the byte-to-value coercion — a `Bind`
-/// whose rest is [`CompKind::Decode`], which is the annotation pass's own
-/// verdict that the RHS is a byte-payload computation.
-///
-/// Reads each phrase's own `Define`; it does not descend into nested
-/// computations (lambda bodies, branches), whose binds are not top-level.
-fn bind_effects(top: &Toplevel) -> Vec<(String, bool)> {
-    top.phrases
-        .iter()
-        .filter_map(|phrase| {
-            let Phrase::Define { pattern, comp, .. } = &phrase.item else {
-                return None;
-            };
-            let Pattern::Name(name) = pattern.as_ref() else {
-                return None;
-            };
-            let effectful = matches!(
-                comp.item,
-                CompKind::Exec(_)
-                    | CompKind::Try { .. }
-                    | CompKind::Guard { .. }
-                    | CompKind::Audit { .. }
-                    | CompKind::Within { .. }
-                    | CompKind::Grant { .. }
-                    | CompKind::Redirect { .. }
-            ) || matches!(&comp.item, CompKind::Bind { rest, .. }
-                if matches!(rest.item, CompKind::Decode(_)));
-            Some((name.clone(), effectful))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A shell seeded with the prelude, so `compile_and_typecheck` resolves
-    /// builtin heads (`map`, …) as the live session would.
-    fn shell() -> Shell {
-        Shell::new(ral_core::io::TerminalState::default())
+    fn record(ws: &mut Worksheet, input: &str) {
+        ws.record(input, &[]);
     }
 
     /// The names of every recorded entry, in order.
@@ -209,10 +152,9 @@ mod tests {
     /// later binding's free-ref set holds the earlier name.
     #[test]
     fn records_dependency_edge_to_a_prior_binding() {
-        let shell = shell();
         let mut ws = Worksheet::default();
-        ws.record("let a = 1", &shell);
-        ws.record("let b = $a", &shell);
+        record(&mut ws, "let a = 1");
+        record(&mut ws, "let b = $a");
         assert_eq!(names(&ws), vec!["a", "b"]);
         assert!(refs(&ws, "a").is_empty(), "a depends on nothing");
         assert_eq!(refs(&ws, "b"), vec!["a"], "b depends on a");
@@ -222,9 +164,8 @@ mod tests {
     /// names are candidates for each other's free-ref analysis.
     #[test]
     fn records_edges_within_one_run() {
-        let shell = shell();
         let mut ws = Worksheet::default();
-        ws.record("let a = 1\nlet b = $a\nlet c = $[$a + $b]", &shell);
+        record(&mut ws, "let a = 1\nlet b = $a\nlet c = $[$a + $b]");
         assert_eq!(names(&ws), vec!["a", "b", "c"]);
         assert_eq!(refs(&ws, "b"), vec!["a"]);
         assert_eq!(refs(&ws, "c"), vec!["a", "b"]);
@@ -234,40 +175,11 @@ mod tests {
     /// its first-definition position rather than appending a duplicate.
     #[test]
     fn rebind_updates_in_place() {
-        let shell = shell();
         let mut ws = Worksheet::default();
-        ws.record("let a = 1", &shell);
-        ws.record("let b = 2", &shell);
-        ws.record("let a = $b", &shell);
+        record(&mut ws, "let a = 1");
+        record(&mut ws, "let b = 2");
+        record(&mut ws, "let a = $b");
         assert_eq!(names(&ws), vec!["a", "b"], "no duplicate, order preserved");
         assert_eq!(refs(&ws, "a"), vec!["b"], "a's edges were updated");
-    }
-
-    /// A pure `let` (arithmetic, a list literal) is classified pure; a `let`
-    /// whose RHS runs an external command is classified effectful.  Both
-    /// verdicts come from the checker's annotated IR, not a heuristic here.
-    #[test]
-    fn classifies_pure_versus_effectful() {
-        let shell = shell();
-        let mut ws = Worksheet::default();
-        ws.record("let n = $[1 + 2]", &shell);
-        ws.record("let xs = [1, 2, 3]", &shell);
-        ws.record("let p = /bin/echo hi", &shell);
-        assert!(!entry(&ws, "n").effectful, "arithmetic is pure");
-        assert!(!entry(&ws, "xs").effectful, "a list literal is pure");
-        assert!(
-            entry(&ws, "p").effectful,
-            "an external command is effectful"
-        );
-    }
-
-    /// An input that does not typecheck records nothing — the checker
-    /// rejected it, so no binding landed.
-    #[test]
-    fn ill_typed_input_records_nothing() {
-        let shell = shell();
-        let mut ws = Worksheet::default();
-        ws.record("let a = if \"x\" { 1 } else { 2 }", &shell);
-        assert!(ws.entries().is_empty());
     }
 }

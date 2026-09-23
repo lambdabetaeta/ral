@@ -22,8 +22,9 @@ decision record; this page is how it runs.
 Only names the model itself binds at the session's top level. Everything
 visible when exarch arms the ledger — prelude, agent library, rc and host
 seeds, and on a fork the entire inherited parent scope — is sealed as
-baseline, permanently exempt (`Shell::arm_binding_lease`, called where each
-agent's shell is installed, so `/clear`'s rebuilt shell re-seals for free).
+baseline, permanently exempt (`Shell::arm_binding_lease`, armed by
+`bootstrap::arm_session_ledgers` in the engine's own boot recipe and on each
+fork before it is parked, so `/clear`'s rebooted engine re-seals for free).
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
 are invisible to the ledger by the same predicate that classifies installs
 (`Env::at_session_scope` at the `note_define` chokepoint): they die
@@ -62,7 +63,7 @@ come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
 at *run entry*, after any earlier prune, so the rollback target
 already excludes what fell. Pruning is the ready boundary's own door — reached
 only between runs, on the session scope by construction — so a mid-frame caller
-such as a lifecycle hook is refused rather than allowed to unset from a
+such as a builtin body is refused rather than allowed to unset from a
 transient frame.
 
 What it does not do: it never frees memory by itself (it removes the future

@@ -1,26 +1,26 @@
-//! REPL-only editor scratch on `Shell.local`: no part of the language
-//! semantics, in no wire format.  Every fork starts from `default()`.
+//! REPL-only scratch on `Shell.local`: no part of the language semantics, in
+//! no wire format.  Every fork starts from `default()`.
 
-/// The channel between core's builtins and the host's line editor.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ReplScratch {
-    /// Type-erased `PluginContext` — it lives in the `ral` crate, so core
-    /// holds the slot and never looks inside.  `Send` because the whole
-    /// `Shell` moves onto the engine's worker thread.
-    pub plugin_context: Option<Box<dyn std::any::Any + Send + Sync>>,
-    /// `(old, new)` queued by `cd`, which moves only the shell's logical cwd;
-    /// the REPL drains it after a dispatch to fire the `chpwd` hook.
-    pub pending_chpwd: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// The plugins this shell's load door committed, in load order.
+    pub plugins: Vec<PluginEntry>,
+    /// The latest `cd`, which moves only the shell's logical cwd; a host reads
+    /// it, never takes it, and fires `chpwd` on a `seq` it has not seen.
+    pub last_chpwd: Option<Chpwd>,
 }
 
-impl std::fmt::Debug for ReplScratch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReplScratch")
-            .field(
-                "plugin_context",
-                &self.plugin_context.as_ref().map(|_| "<opaque>"),
-            )
-            .field("pending_chpwd", &self.pending_chpwd)
-            .finish()
-    }
+/// What unload must undo beyond the plugin's hooks: the aliases it installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginEntry {
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+/// One directory change: `seq` counts them, from 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chpwd {
+    pub seq: u64,
+    pub old: String,
+    pub new: String,
 }

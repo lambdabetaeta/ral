@@ -5,7 +5,6 @@ pub mod host;
 
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
-use ral_core::Shell;
 use ral_core::types::{Capabilities, GrantStack};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -29,7 +28,7 @@ pub const CHAT_SYSTEM: &str = ".";
 pub fn assemble(
     files: &[PathBuf],
     caps: &GrantStack,
-    scratch: &crate::bootstrap::Scratch,
+    app: crate::bootstrap::App,
     cwd: &Path,
     config_dir: &Path,
     interactive: bool,
@@ -70,7 +69,7 @@ pub fn assemble(
         Some("Context management"),
         include_str!("../data/context.md").into(),
     ));
-    sections.push((Some("Host"), host_section(caps, scratch)));
+    sections.push((Some("Host"), host_section(caps, app)));
     let agents = discover_agents(cwd, config_dir);
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
@@ -96,6 +95,10 @@ pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 /// only way it picks its own row out of a roster, so it cannot be baked with
 /// the rest of [`host_section`] — [`BuiltinIndex::apply`] fills it.
 pub(crate) const NAME_PLACEHOLDER: &str = "@@EXARCH_AGENT_NAME@@";
+
+/// The same stand-in for the scratch path, which is the engine's to name: the
+/// trunk fills it from the booted engine's own environment.
+pub const SCRATCH_PLACEHOLDER: &str = "@@EXARCH_SCRATCH_PATH@@";
 
 /// One agent's construction-fixed authorities — the same bits the desk reads
 /// when refusing, so prompt and refusal cannot disagree.
@@ -135,31 +138,32 @@ fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 4] {
     ]
 }
 
-/// Every verb the product installs, resolved once from a booted shell — the
-/// surface is fixed per product, so no later prompt resolution needs a live
-/// `Shell` again, on either side of the engine protocol. Shared by a whole fleet: a
-/// fork or desk spawn applies its own grants against its parent's resolution.
+/// Every verb the product installs, resolved once from a booted engine's
+/// builtin names — the surface is fixed per product, so no later prompt
+/// resolution asks an engine again. Shared by a whole fleet: a fork or desk
+/// spawn applies its own grants against its parent's resolution.
 pub(crate) struct BuiltinIndex {
     /// Sorted and deduped: the shell's installed builtins, the documented
     /// prelude, and the agent library — ral closures sourced from `agent.ral`,
     /// not registered builtins, hence
     /// [`agent_library_docs`](crate::shell_eval::builtins::agent_library_docs).
-    /// [`Shell::builtin_names`] keeps the `_`-prefixed internals, so the
-    /// filter lives here and covers all three.
+    /// The engine's names keep the `_`-prefixed internals, so the filter
+    /// lives here and covers all three.
     names: Vec<String>,
 }
 
 impl BuiltinIndex {
-    pub(crate) fn resolve(shell: &Shell) -> std::sync::Arc<Self> {
+    /// `builtins` is the engine's own table, as `reading::builtin_names`
+    /// reads it.
+    pub(crate) fn resolve(builtins: Vec<String>) -> std::sync::Arc<Self> {
         let prelude = ral_core::builtins::help::prelude_names()
             .into_iter()
             .map(str::to_string);
         let library = crate::shell_eval::builtins::agent_library_docs()
             .into_iter()
             .map(|(name, _doc)| name);
-        let mut names: Vec<String> = shell
-            .builtin_names()
-            .map(str::to_string)
+        let mut names: Vec<String> = builtins
+            .into_iter()
             .chain(prelude)
             .chain(library)
             .filter(|n| !n.starts_with('_'))
@@ -305,11 +309,9 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// Every line is a *host* truth, which is why the composition is exarch's
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
-pub fn host_section(caps: &GrantStack, scratch: &crate::bootstrap::Scratch) -> String {
-    let state = scratch
-        .app()
-        .xdg_dir(ral_core::path::basedir::XdgKind::State);
-    let scratch_line = format!("`${}` = {}", scratch.var(), scratch.path().display());
+pub fn host_section(caps: &GrantStack, app: crate::bootstrap::App) -> String {
+    let state = app.xdg_dir(ral_core::path::basedir::XdgKind::State);
+    let scratch_line = format!("`${}` = {SCRATCH_PLACEHOLDER}", app.scratch_var());
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{}",
         host::snapshot(&state),
@@ -474,9 +476,13 @@ mod tests {
         list.split(", ").collect()
     }
 
+    fn index_of_boot() -> std::sync::Arc<BuiltinIndex> {
+        let shell = crate::bootstrap::test_shell();
+        BuiltinIndex::resolve(shell.builtin_names().map(str::to_string).collect())
+    }
+
     fn index_for(grants: &Grants) -> String {
-        let shell = crate::bootstrap::boot_shell();
-        BuiltinIndex::resolve(&shell).section(grants)
+        index_of_boot().section(grants)
     }
 
     #[test]
@@ -548,8 +554,7 @@ mod tests {
     /// not the former.
     #[test]
     fn builtin_index_apply_gates_agents_and_reply_sections_independently() {
-        let shell = crate::bootstrap::boot_shell();
-        let index = BuiltinIndex::resolve(&shell);
+        let index = index_of_boot();
         let resolved = index.apply(
             BUILTIN_INDEX_PLACEHOLDER,
             &Grants {
@@ -565,8 +570,7 @@ mod tests {
 
     #[test]
     fn builtin_index_apply_substitutes_the_placeholder() {
-        let shell = crate::bootstrap::boot_shell();
-        let index = BuiltinIndex::resolve(&shell);
+        let index = index_of_boot();
         let grants = Grants {
             returns: false,
             allow_schedule: true,
@@ -584,9 +588,8 @@ mod tests {
     /// A custom base need not carry either placeholder.
     #[test]
     fn builtin_index_apply_is_a_noop_without_the_placeholder() {
-        let shell = crate::bootstrap::boot_shell();
         assert_eq!(
-            BuiltinIndex::resolve(&shell).apply(
+            index_of_boot().apply(
                 "plain text",
                 &Grants {
                     returns: false,
@@ -604,8 +607,7 @@ mod tests {
     /// messaged, so it still needs to know which row is its own.
     #[test]
     fn apply_names_the_agent_to_itself() {
-        let shell = crate::bootstrap::boot_shell();
-        let index = BuiltinIndex::resolve(&shell);
+        let index = index_of_boot();
         let template = format!("before\n\n{NAME_PLACEHOLDER}\n\nafter");
         let resolved = index.apply(
             &template,

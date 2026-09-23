@@ -47,10 +47,7 @@ impl ForegroundDecision {
             && shell.terminal_lease(mooring).is_some()
             && !needs_pump
             && !enveloped
-            && matches!(
-                shell.io.stdout,
-                crate::io::Sink::Terminal | crate::io::Sink::External(_)
-            );
+            && matches!(shell.io.stdout, crate::io::Sink::Terminal);
         Self {
             want_fg,
             own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,

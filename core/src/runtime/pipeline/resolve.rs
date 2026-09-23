@@ -84,10 +84,7 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     // `/dev/tty` and must own the foreground pgid or `tcsetattr` raises
     // SIGTTOU.
     let loan = matches!(mooring.terminal_access, TerminalAccess::ExplicitLoan);
-    let terminal_bound = matches!(
-        shell.io.stdout,
-        crate::io::Sink::Terminal | crate::io::Sink::External(_)
-    );
+    let terminal_bound = matches!(shell.io.stdout, crate::io::Sink::Terminal);
     if terminal_bound || loan {
         TerminalPlan::ForegroundExternalGroup
     } else {

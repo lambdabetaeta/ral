@@ -13,13 +13,15 @@ use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
-use ral_core::protocol::Severed;
+use ral_core::protocol::{Severed, reading};
 use ral_core::serial::FOValue;
 
-/// What the surrounding loop does next: `Stop` on `/quit` or a headless root's `reply`.
+/// What the surrounding loop does next: `Stop` on `/quit` or a headless root's
+/// `reply`; `Severed` hands the loop the engine's loss to record once it ends.
 enum Flow {
     Continue,
     Stop,
+    Severed(Severed),
 }
 
 /// ral calls between disk-warn ceiling checks: the walk is a full scan of the
@@ -83,19 +85,16 @@ impl Avatar {
     ) -> (AgentOutcome, Option<FOValue>) {
         self.couple(emit);
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        loop {
+        let lost = loop {
             if let Some(s) = self.seat.severed() {
-                self.severed(&s, &mut final_outcome);
-                break;
+                break Some(s);
             }
             // Every pass is a settled ready boundary.  A lease-chain reap is
             // deliberately not drained here: core pushes its `` `notice `` on
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
-            if let Err(s) = self.check_disk_warn()
-                && matches!(self.severed(&s, &mut final_outcome), Flow::Stop)
-            {
-                break;
+            if let Err(s) = self.check_disk_warn() {
+                break Some(s);
             }
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
@@ -114,21 +113,16 @@ impl Avatar {
                 |engaged| policy(self, self.park_mode(engaged)),
                 &self.agent.cancel,
             ) else {
-                break;
+                break None;
             };
             self.agent.set_resting(false);
-            if matches!(
-                self.take_up(&item, control, emit, &mut final_outcome),
-                Flow::Stop
-            ) {
-                break;
+            match self.take_up(&item, control, emit, &mut final_outcome) {
+                Flow::Continue => {}
+                Flow::Stop => break None,
+                Flow::Severed(s) => break Some(s),
             }
-        }
-        // A park that quiesced on severance must report `EngineLost`, not
-        // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
-        if let Some(s) = self.seat.severed() {
-            self.severed(&s, &mut final_outcome);
-        }
+        };
+        self.settle_severance(lost, &mut final_outcome);
         // `take_up` quiesces per item; this catches whichever path breaks the
         // loop, so the agent is ReadyForUser however it ends.
         if !self.log.lock().is_ready() {
@@ -153,31 +147,23 @@ impl Avatar {
         self.couple(emit);
         let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        loop {
+        let lost = loop {
             if let Some(s) = self.seat.severed() {
-                self.severed(&s, &mut final_outcome);
-                break;
+                break Some(s);
             }
-            if let Err(s) = self.check_disk_warn()
-                && matches!(self.severed(&s, &mut final_outcome), Flow::Stop)
-            {
-                break;
+            if let Err(s) = self.check_disk_warn() {
+                break Some(s);
             }
             let Some(item) = self.inbox.next_item() else {
-                break;
+                break None;
             };
-            if matches!(
-                self.take_up(&item, &mut control, emit, &mut final_outcome),
-                Flow::Stop
-            ) {
-                break;
+            match self.take_up(&item, &mut control, emit, &mut final_outcome) {
+                Flow::Continue => {}
+                Flow::Stop => break None,
+                Flow::Severed(s) => break Some(s),
             }
-        }
-        // A park that quiesced on severance must report `EngineLost`, not
-        // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
-        if let Some(s) = self.seat.severed() {
-            self.severed(&s, &mut final_outcome);
-        }
+        };
+        self.settle_severance(lost, &mut final_outcome);
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
@@ -264,13 +250,13 @@ impl Avatar {
             eprintln!("exarch: a provider error was not recorded: {error}");
         }
         if let Ok(deliberate::Outcome::Severed(s)) = &outcome {
-            return self.severed(s, final_outcome);
+            return Flow::Severed(s.clone());
         }
         // A boundary read, legal here: the batch has fully drained and no
         // dispatch is in flight.
-        let workers_idle = match self.probe_workers() {
+        let workers_idle = match self.seat.read(reading::workers) {
             Ok(workers) => workers.is_empty(),
-            Err(s) => return self.severed(&s, final_outcome),
+            Err(s) => return Flow::Severed(s),
         };
         let facts = nudge::Facts {
             must_reply: self.returns(),
@@ -410,8 +396,8 @@ impl Avatar {
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
         let mut total = crate::agent::resources::dir_size(self.log.lock().dir());
-        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH")? {
-            total += crate::agent::resources::dir_size(&std::path::PathBuf::from(&scratch));
+        if let Some((_, bytes)) = self.scratch_bytes()? {
+            total += bytes;
         }
         if total > ceiling {
             if !self.disk_warn_latched {
@@ -433,20 +419,29 @@ impl Avatar {
         Ok(())
     }
 
-    /// The one edge every caller ends on when it learns its engine is
-    /// severed: record the sentence, fail the outcome, quiesce the log if a
-    /// deliberation left it mid-protocol, and stop the loop that called this.
-    fn severed(&self, s: &Severed, final_outcome: &mut (AgentOutcome, Option<FOValue>)) -> Flow {
-        let lost = EngineLost::running(s, self.agent.run_dir());
+    /// The one edge both loops end on: a severance they broke on, or one a
+    /// park quiesced behind, is recorded here exactly once — the sentence,
+    /// the failed outcome in place of `NO_REPLY_REASON`, and a quiesce if a
+    /// deliberation left the log mid-protocol.
+    fn settle_severance(
+        &self,
+        lost: Option<Severed>,
+        final_outcome: &mut (AgentOutcome, Option<FOValue>),
+    ) {
+        let Some(s) = lost.or_else(|| self.seat.severed()) else {
+            return;
+        };
+        let lost = EngineLost::running(&s, self.agent.run_dir());
         // Two renderings of one failure, and the difference is the point: the
         // durable note keeps the engine's own account of itself, while the
         // outcome the loop settles on is the plain sentence a person reads.
-        self.note_error(lost.logged());
+        // A note, not an error record: a window shows errors, and the
+        // engine's words stay out of windows.
+        Self::note(lost.logged(), self);
         *final_outcome = (AgentOutcome::Failed(lost.to_string()), None);
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
-        Flow::Stop
     }
 }
 
@@ -640,7 +635,7 @@ mod tests {
         assert_eq!(held.park_mode(held.agent.engaged()), ParkMode::Held);
 
         let parent = Avatar::for_test("system").unwrap();
-        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        let child = parent.fork().expect("fork child");
         assert_eq!(
             child.park_mode(child.agent.engaged()),
             ParkMode::Quiesce,
@@ -669,7 +664,7 @@ mod tests {
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // fleet, and names are unique among the live.
         let mut branch = root
-            .branch("branch".into())
+            .branch("branch".into(), &crate::bus::dummy_emitter().0)
             .expect("branch a conversing child");
         let (branch_result, _) = branch.ral("exarch-agents `reply 1", 5, &emit);
         assert!(
@@ -688,7 +683,7 @@ mod tests {
     #[test]
     fn sub_agent_without_reply_is_re_nudged_then_fails() {
         let parent = Avatar::for_test("system").unwrap();
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        let mut child = parent.fork().expect("fork child");
         child.seed("do the thing".into());
         // More prose-only replies than the budget will consume, so the test
         // does not couple to the exact budget.
@@ -714,7 +709,7 @@ mod tests {
     #[test]
     fn deposited_reply_suppresses_every_nudge() {
         let parent = Avatar::for_test("system").unwrap();
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        let mut child = parent.fork().expect("fork child");
         child.agent.deposit_reply(FOValue::String {
             value: "already replied".into(),
         });
@@ -832,12 +827,8 @@ mod tests {
     /// surfaces at the next run, and exactly once.
     #[test]
     fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut session =
+            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
         dispatch_with_lease(
             &session,
@@ -850,7 +841,7 @@ mod tests {
 
         // Past the idle bound, unpolled: the lease chain reaps it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while probe_int(&session, "worker-count") > 0 {
+        while probe_count(&session, ral_core::test_access::worker_count) > 0 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the unpolled worker must be reaped within the budget"
@@ -1029,15 +1020,12 @@ mod tests {
     /// nothing is left idle.  The tiny re-armed bound is for speed only.
     #[test]
     fn boundary_prune_notice_rides_the_runs_own_stream() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .arm_binding_lease(ral_core::types::BindingLease {
+        let mut session = dressed_trunk(|shell| {
+            shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
             });
+        });
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
@@ -1209,15 +1197,12 @@ mod tests {
     /// model-view `record.jsonl`.
     #[test]
     fn prune_does_not_add_model_events() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .arm_binding_lease(ral_core::types::BindingLease {
+        let mut session = dressed_trunk(|shell| {
+            shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1,
                 large_binding_bytes: u64::MAX,
             });
+        });
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);

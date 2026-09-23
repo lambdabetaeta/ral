@@ -1,18 +1,5 @@
-//! Plugin context and editor state.
-//!
-//! Runtime state for the line-editor plugin system.  The [`PluginContext`]
-//! is installed on `Shell` (via `ReplScratch.plugin_context` in core) before
-//! running plugin hooks and keybinding handlers; the `_ed-*` builtins
-//! defined in [`super::ed_builtins`] read and write through it
-//! rather than touching shared REPL state directly.
-//!
-//! ## Layering
-//!
-//! These types live in the `ral` crate rather than `ral-core` because the
-//! editor surface is purely a host concern: core compiles and runs without
-//! ever inspecting the editor state.  Core stores the context in
-//! `ReplScratch.plugin_context` type-erased through `Box<dyn Any>` and
-//! never looks inside.
+//! The editor context the host installs around a plugin hook's dispatch, and
+//! the `` `repl-editor `` requests the engine's `_ed-*` doors put to it.
 //!
 //! ## Cursor unit
 //!
@@ -24,7 +11,10 @@
 //! think about UTF-8.  Use [`ral_core::text::char_to_byte`] and
 //! [`ral_core::text::byte_to_char`] for the conversion.
 
-use ral_core::Value;
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum as _;
+
+use super::super::enquiry::{Data, EditorOp, EditorSnapshot};
 
 /// Line editor state visible to plugins.  `cursor` is a character offset
 /// into `text` (see the module-level note on cursor units).
@@ -87,17 +77,6 @@ pub struct HighlightSpan {
     pub style: std::string::String,
 }
 
-/// Execution context for plugin hooks and keybinding handlers.
-///
-/// Read-only information the runtime supplies before a plugin handler runs.
-#[derive(Debug, Clone, Default)]
-pub struct PluginInputs {
-    pub history_entries: Vec<std::string::String>,
-    /// True when the handler is firing inside the readline loop (e.g. for
-    /// `buffer-change`); `_ed-tui` is forbidden in that mode.
-    pub in_readline: bool,
-}
-
 /// Effects produced by a plugin handler that the runtime applies after the
 /// call returns.  Default-initialised before each call; populated only by the
 /// handler via `_ed-*` builtins.
@@ -114,25 +93,115 @@ pub struct PluginOutputs {
     pub accept_line: bool,
 }
 
-/// Set on `Shell` before running plugin hooks/keybinding handlers.
-/// The `_ed-*` builtins read and write through this rather than
-/// touching shared REPL state directly, avoiding reentrancy.
-///
-/// The `inputs` / `outputs` split makes the data-flow direction visible at
-/// every access site: callsites populate `inputs` before the call and inspect
-/// `outputs` after.  `editor_state` is the live buffer (read and written by
-/// the handler); `state_cell` is internal scratch.  The TUI-active state
-/// is a derived `Mooring`'s `TerminalAccess::ExplicitLoan`, minted via
-/// `Mooring::lend_terminal` and queried via `Mooring::in_terminal_loan`,
-/// not a field here.
-#[derive(Debug, Clone)]
+/// The editor context of one plugin hook's dispatch: the live buffer, what
+/// the handler may read, what it produced, and the plugin's state cell.
+#[derive(Debug, Clone, Default)]
 pub struct PluginContext {
-    pub inputs: PluginInputs,
-    pub outputs: PluginOutputs,
-    /// Live editor buffer.  Pre-populated by the runtime; the handler may
-    /// mutate via `_ed-set` / `_ed-push`; the runtime reads after.
     pub editor_state: EditorState,
-    /// Per-plugin scratch cell exposed via `_ed-state`.
-    pub state_cell: Option<Value>,
-    pub state_default_used: bool,
+    pub history: Vec<std::string::String>,
+    /// True inside the readline loop (`buffer-change`), where `_ed-tui` is
+    /// forbidden.
+    pub in_readline: bool,
+    pub outputs: PluginOutputs,
+    pub state_cell: Option<FOValue>,
+}
+
+/// Split `text` at a character-offset `cursor` into the substrings left and
+/// right of it.
+pub(crate) fn split_at_cursor(text: &str, cursor: usize) -> (String, String) {
+    let left: String = text.chars().take(cursor).collect();
+    let right: String = text.chars().skip(cursor).collect();
+    (left, right)
+}
+
+impl PluginContext {
+    /// Answer one request.
+    pub(crate) fn apply(&mut self, op: EditorOp) -> FOValue {
+        let st = &mut self.editor_state;
+        match op {
+            EditorOp::Get => {
+                return EditorSnapshot {
+                    text: st.text.clone(),
+                    cursor: st.cursor,
+                    keymap: st.keymap.clone(),
+                    in_readline: self.in_readline,
+                }
+                .encode();
+            }
+            EditorOp::History => return self.history.clone().encode(),
+            EditorOp::StateGet => return self.state_cell.clone().map(Data).encode(),
+            // The cursor clamps against the *new* text.
+            EditorOp::Set { text, cursor } => {
+                if let Some(text) = text {
+                    st.text = text;
+                }
+                if let Some(n) = cursor {
+                    st.cursor = n.min(st.text.chars().count());
+                }
+            }
+            EditorOp::SetLbuffer(left) => {
+                let (_, right) = split_at_cursor(&st.text, st.cursor);
+                st.cursor = left.chars().count();
+                st.text = format!("{left}{right}");
+            }
+            EditorOp::Insert(s) => {
+                let (left, right) = split_at_cursor(&st.text, st.cursor);
+                st.cursor += s.chars().count();
+                st.text = format!("{left}{s}{right}");
+            }
+            EditorOp::Push => {
+                let text = std::mem::take(&mut st.text);
+                self.outputs.pushed_buffer = Some((text, std::mem::take(&mut st.cursor)));
+            }
+            EditorOp::Accept => self.outputs.accept_line = true,
+            EditorOp::Ghost(text) => self.outputs.ghost_text = (!text.is_empty()).then_some(text),
+            EditorOp::Highlight(spans) => {
+                let bound = st.text.chars().count();
+                self.outputs.highlight_spans = spans
+                    .into_iter()
+                    .map(|h| HighlightSpan {
+                        span: Span::clamped(h.start, h.end, bound),
+                        style: h.style,
+                    })
+                    .collect();
+            }
+            EditorOp::StateSet(Data(v)) => self.state_cell = Some(v),
+        }
+        FOValue::Unit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_text(text: &str) -> PluginContext {
+        let mut pc = PluginContext::default();
+        pc.editor_state.text = text.to_string();
+        pc
+    }
+
+    /// Setting `text` and `cursor` together clamps the cursor against the
+    /// **new** text, not the old (shorter) buffer.
+    #[test]
+    fn set_clamps_cursor_against_new_text() {
+        let mut pc = with_text("");
+        pc.apply(EditorOp::Set {
+            text: Some("hello world".into()),
+            cursor: Some(11),
+        });
+        assert_eq!(pc.editor_state.text, "hello world");
+        assert_eq!(pc.editor_state.cursor, 11);
+    }
+
+    /// An over-long cursor clamps to the new text's character count.
+    #[test]
+    fn set_clamps_over_long_cursor_to_new_len() {
+        let mut pc = with_text("");
+        pc.apply(EditorOp::Set {
+            text: Some("abc".into()),
+            cursor: Some(99),
+        });
+        assert_eq!(pc.editor_state.cursor, 3);
+    }
 }

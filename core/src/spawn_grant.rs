@@ -8,19 +8,19 @@
 use serde::{Deserialize, Serialize};
 
 use crate::serial::FOValue;
-use crate::types::Capabilities;
+use crate::types::{Capabilities, Shell};
 
-/// A base tag and the cwd — in, one [`Capabilities`] layer out.
+/// A base tag and the cwd in, one [`Capabilities`] layer out.
 ///
 /// Pushed onto the spawned shell's stack rather than folded against what it
 /// already carries: the stack itself is the meet, so the child's own ceiling
 /// only needs to be resolved, not composed here. Evaluated where the host's
 /// own capability vocabulary lives, since core carries no base-tag lexicon. A
 /// field of [`crate::engine::EngineInstaller`] rather than a registered hook:
-/// an installer is chosen at `Attach`, before [`crate::hatch`] applies a seed,
-/// so the policy can be demanded of every host that dresses an engine instead
-/// of left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&str, &str) -> Result<Capabilities, String>;
+/// an installer is chosen at `Attach`, before a seed is applied or a fork
+/// adopted, so the policy can be demanded of every host that dresses an engine
+/// instead of left in a slot one of them might forget to fill.
+pub type GrantNarrower = fn(&str, &std::path::Path) -> Result<Capabilities, String>;
 
 /// A spawn's grant, as it crosses to a child that has not yet resolved it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ impl SpawnGrant {
 
         match self {
             Self::Inherit => Ok(Capabilities::root()),
-            Self::Base(name) => narrow(name, &cwd.to_string_lossy()),
+            Self::Base(name) => narrow(name, cwd),
             Self::Restrict(record) => crate::capability::decode_capability_map(
                 &Value::from(record.clone()),
                 "grant",
@@ -63,6 +63,22 @@ impl SpawnGrant {
                 None => e.message,
             }),
         }
+    }
+
+    /// Push this grant's layer onto `shell`, frozen against the shell's own
+    /// cwd and home: the one resolution a hatched seed and an adopted fork
+    /// share.
+    ///
+    /// # Errors
+    /// Whatever [`Self::layer`] refuses.
+    pub(crate) fn narrow_onto(
+        &self,
+        shell: &mut Shell,
+        narrow: GrantNarrower,
+    ) -> Result<(), String> {
+        let layer = self.layer(narrow, &shell.cwd(), shell.context.home().as_deref())?;
+        shell.push_session_capabilities(layer);
+        Ok(())
     }
 }
 
@@ -80,7 +96,7 @@ mod tests {
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.
-    fn unreachable_narrower(_grant: &str, _cwd: &str) -> Result<Capabilities, String> {
+    fn unreachable_narrower(_grant: &str, _cwd: &Path) -> Result<Capabilities, String> {
         panic!("only a Base grant consults the narrower")
     }
 

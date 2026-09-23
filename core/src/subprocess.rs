@@ -179,9 +179,6 @@ impl WireContext {
 /// Frames go through [`HandlerStack::push_frame`], which mints a handle from
 /// the receiver's counter and keeps every other field, so an alias frame
 /// stays removable by `unalias` in the child.
-///
-/// `hatch::apply_seed` (Unix-only) is the sole production caller.
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 pub(crate) fn install_wire_shell(
     state: WireShell,
     shell: &mut Shell,

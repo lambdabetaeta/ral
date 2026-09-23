@@ -53,7 +53,7 @@ pub(crate) fn identify() -> Invocation {
     // The engine never returns: it takes the process over on fd 3.
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
-        ral_core::engine::run_engine(&[engine::INSTALLER]);
+        ral_core::engine::run_engine(&engine::INSTALLERS);
     }
 
     // Served off raw argv, which these read for themselves.
@@ -85,31 +85,106 @@ pub(crate) fn identify() -> Invocation {
     Invocation::Shell(Mode::from_argv(&argv))
 }
 
-/// What a `--engine` child of this binary boots into.
-#[cfg(unix)]
-mod engine {
-    use ral_core::engine::EngineInstaller;
+/// What an engine of this binary boots into: `repl` for the interactive
+/// session, `batch` for a script.
+pub(crate) mod engine {
+    use crate::boot_door;
+    use ral_core::engine::{Booted, EngineInstaller};
+    use ral_core::protocol::Attach;
+    use ral_core::record;
+    use ral_core::serial::datum::Datum as _;
 
-    pub(super) const INSTALLER: EngineInstaller = EngineInstaller {
-        tag: TAG,
-        boot: boot_shell,
-        narrow: no_seeded_children,
-    };
+    pub(crate) static INSTALLERS: [EngineInstaller; 2] = [
+        EngineInstaller {
+            tag: REPL,
+            boot: boot_repl,
+            narrow: no_seeded_children,
+        },
+        EngineInstaller {
+            tag: BATCH,
+            boot: boot_batch,
+            narrow: no_seeded_children,
+        },
+    ];
 
-    /// The REPL captures its host builtins (`load-plugin`/`unload-plugin`/…)
-    /// as boot-time closures over co-resident state (`repl::host_handlers`),
-    /// which a wire engine child cannot construct — so this tag maps to the
-    /// empty surface, the honest absence the bare REPL already gives every
-    /// other host facility.
-    const TAG: &str = "repl";
+    pub(crate) const REPL: &str = "repl";
+    pub(crate) const BATCH: &str = "batch";
 
-    fn boot_shell() -> ral_core::Shell {
-        ral_core::boot::boot_shell(
-            ral_core::io::TerminalState::default(),
-            &crate::PRELUDE,
-            &ral_core::HostSurface::default(),
-        )
+    /// The REPL surface: the batch surface plus the editor builtins and the
+    /// plugin doors.
+    fn repl_surface() -> ral_core::HostSurface {
+        let mut surface = batch_surface();
+        surface
+            .statics
+            .extend([crate::repl::ED_BUILTINS, crate::repl::PLUGIN_DOORS]);
+        surface
     }
+
+    /// The batch surface: core plus `watch` and `surface` (their docs say why
+    /// they are host-installed) and the boot door. `--check` types against
+    /// the same value, so the two agree by construction.
+    pub(crate) fn batch_surface() -> ral_core::HostSurface {
+        ral_core::HostSurface {
+            statics: vec![
+                ral_core::builtins::WATCH_BUILTIN,
+                ral_core::builtins::SURFACE_BUILTIN,
+                boot_door::DOOR,
+            ],
+            captured: Vec::new(),
+        }
+    }
+
+    /// The `repl` installer's `Attach.config`.
+    pub(crate) struct ReplConfig {
+        pub(crate) login: bool,
+    }
+
+    record!(ReplConfig { login: "login" });
+
+    /// Everything an interactive session is before rc.
+    fn boot_repl(attach: &Attach) -> Result<Booted, String> {
+        let config = ReplConfig::decode(&attach.config)?;
+        let mut shell =
+            ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &repl_surface());
+        shell.set_exit_hints(crate::platform::load_exit_hints());
+        shell.set_interactive(true);
+        let terminal = shell.terminal().to_value();
+        shell.set_var("TERMINAL".into(), terminal);
+        if config.login {
+            set_login_umask();
+        }
+        boot_door::register(&mut shell)?;
+        Ok(Booted {
+            shell,
+            keep: Box::new(()),
+        })
+    }
+
+    fn set_login_umask() {
+        #[cfg(unix)]
+        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
+    }
+
+    /// Everything a script's session is before its boot dispatch.
+    fn boot_batch(attach: &Attach) -> Result<Booted, String> {
+        let config = BatchConfig::decode(&attach.config)?;
+        let mut shell =
+            ral_core::boot::boot_shell(attach.terminal, &crate::PRELUDE, &batch_surface());
+        shell.set_exit_hints(crate::platform::load_exit_hints());
+        shell.set_args(config.args);
+        boot_door::register(&mut shell)?;
+        Ok(Booted {
+            shell,
+            keep: Box::new(()),
+        })
+    }
+
+    /// The `batch` installer's `Attach.config`.
+    pub(crate) struct BatchConfig {
+        pub(crate) args: Vec<String>,
+    }
+
+    record!(BatchConfig { args: "args" });
 
     /// The REPL hatches nothing — only exarch spawns agents, and only exarch
     /// has a base-tag lexicon to resolve a grant against — so this engine's
@@ -119,7 +194,7 @@ mod engine {
     /// rather than silently admitted.
     fn no_seeded_children(
         _grant: &str,
-        _cwd: &str,
+        _cwd: &std::path::Path,
     ) -> Result<ral_core::types::Capabilities, String> {
         Err(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \

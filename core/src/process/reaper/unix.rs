@@ -92,8 +92,8 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
 }
 
 /// Wake the reaper thread without a `SIGCHLD`: the same async-signal-safe
-/// `write` the handler does, so a cancel raised from a signal handler can
-/// have its cause scanned on the reaper thread without locking here.
+/// `write` the handler does, so an ambient cause raised from a signal handler
+/// is forwarded from the reaper thread without locking here.
 pub(crate) fn kick() {
     wake();
 }
@@ -131,8 +131,8 @@ fn scan_all() {
         scan_one(pid, entry);
     }
     drop(table);
-    // Cancels last: a kick may have coalesced with a pid's own wake.
-    crate::process::cancel::scan_cancels();
+    // Last: a kick may have coalesced with a pid's own wake.
+    crate::process::cancel::scan_ambient();
 }
 
 /// A stop or exit already pending when `pid` is registered raised its

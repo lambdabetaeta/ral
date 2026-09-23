@@ -105,7 +105,7 @@ inline rendering belongs to that page, not here. `text.rs` is also the single
 home of the `nucleo` fuzzy matcher (`rank`, and `rank_by` for an item that is
 not its own haystack), so every filtered list a user is offered — completion
 menus, pickers, the exarch command popup — ranks the same way. Type-error *prose* generally
-lives beside the checker now: provenance is data on the error (`Reason`,
+lives beside the checker: provenance is data on the error (`Reason`,
 `typecheck/error.rs`) and every user-facing sentence is a pure function of it
 in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 

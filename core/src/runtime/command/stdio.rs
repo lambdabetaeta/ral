@@ -79,17 +79,13 @@ pub(crate) enum StderrRoute {
 /// Should the child inherit ral's fd 1 directly, so it can detect a TTY?
 ///
 /// Only when nothing redirects stdout, fd 1 was a tty at startup, and the
-/// sink still targets that real fd — `Sink::External` counts, the REPL's
-/// printer writing there with no prompt drawn under a foreground child.
-/// An `audit` capture installs a `Sink::Tee`, which fails here and so
-/// falls through to the pump path unaided.
+/// sink still targets that real fd.  An `audit` capture installs a
+/// `Sink::Tee`, which fails here and so falls through to the pump path
+/// unaided.
 pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
     plan.stdout_file.is_none()
         && shell.io.terminal.startup_stdout_tty
-        && matches!(
-            shell.io.stdout,
-            crate::io::Sink::Terminal | crate::io::Sink::External(_)
-        )
+        && matches!(shell.io.stdout, crate::io::Sink::Terminal)
 }
 
 /// Classify the call-site redirects into a stdout/stderr plan.  Every shape

@@ -127,12 +127,11 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
     clippy::disallowed_methods,
     reason = "host-env: the child's base freezes against the launching user's real home, like for_invocation's"
 )]
-pub fn base_layer(base_name: &str, cwd: &str) -> Result<Capabilities, String> {
-    let cwd_path = PathBuf::from(cwd);
+pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
     let home = host::home();
     let ctx = FreezeCtx {
         home: home.as_deref(),
-        cwd: &cwd_path,
+        cwd,
     };
     resolve_base(base_name, &ctx)
 }
@@ -202,9 +201,9 @@ mod tests {
     /// they were pushed.
     #[test]
     fn narrow_cannot_escalate_a_restricted_parent() {
-        let confined = base_layer("confined", "/work/proj").unwrap();
+        let confined = base_layer("confined", Path::new("/work/proj")).unwrap();
         assert_eq!(confined.net, Some(false), "confined layer has net off");
-        let minimal = base_layer("minimal", "/work/proj").unwrap();
+        let minimal = base_layer("minimal", Path::new("/work/proj")).unwrap();
 
         let mut stack = GrantStack::root();
         stack.push(confined);

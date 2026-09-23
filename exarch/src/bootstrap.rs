@@ -51,67 +51,93 @@ fn hold_exclusive(file: File) -> io::Result<fd_lock::RwLock<File>> {
     Ok(lock)
 }
 
-/// The one terminal probe both boot sites take: [`boot_shell`] here, and the
-/// `TerminalEndpoint` the identity seat attaches with in `agent::seat`.
-pub fn probe_terminal() -> TerminalState {
-    let (_mode, terminal, _warn) = TerminalState::probe_from_env();
-    terminal
-}
-
-/// Build a shell ready for an exarch session, and the one site of the signal
-/// ceremony: exarch's cancel chain layers over ral's handlers here, so callers
-/// seed per-session variables and nothing more.
-///
-/// # Panics
-/// Panics if the embedded agent library fails to load.
-pub fn boot_shell() -> Shell {
+/// The process-level signal ceremony, once at each entry point that hosts an
+/// identity engine: exarch's cancel chain layers over ral's handlers.
+pub fn face_process_signals(terminal: &TerminalState) {
     ral_core::process::clear();
     ral_core::process::install_handlers();
     cancel::install();
-
-    let terminal = probe_terminal();
-    diagnostic::set_terminal(&terminal);
-    exarch_shell(terminal)
+    diagnostic::set_terminal(terminal);
 }
 
-/// The dressing both seats share: [`boot_shell`] and [`engine_boot_shell`]
-/// differ only in what they wrap around this.
+/// Exarch's one `EngineInstaller::boot`, under either carrier.
+///
+/// The dressed shell, `detach` where the double fork exists, and the Attach's
+/// env seeded as bindings before the ledgers arm. A scratch the Attach names
+/// is the host's; with none named — a guest engine — it mints its own, kept
+/// as long as the engine.
+///
+/// # Errors
+/// A scratch that could not be created, which refuses the attach.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
-pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
-    let mut shell =
-        ral_core::boot::boot_shell(terminal, &shell_eval::PRELUDE, &builtins::host_surface());
+pub fn engine_boot_shell(
+    attach: &ral_core::protocol::Attach,
+) -> Result<ral_core::engine::Booted, String> {
+    let mut shell = ral_core::boot::boot_shell(
+        attach.terminal,
+        &shell_eval::PRELUDE,
+        &builtins::host_surface(),
+    );
     builtins::install_agent_library(&ral_core::types::Mooring::adrift(), &mut shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(&mut shell);
     shell.set_exit_hints(ral_core::exit_hints::ExitHints::from_text(include_str!(
         "../../data/exit-hints.txt"
     )));
-    shell
-}
-
-/// The wire engine's `EngineInstaller::boot`, run in the engine process at
-/// Attach: [`exarch_shell`] plus an engine-local [`Scratch`] and the identity
-/// ceremony's ledgers.
-///
-/// It carries no signal ceremony (a cancel arrives as a `Control` frame) and
-/// no terminal probe (that state is conveyed at Attach).
-///
-/// # Panics
-/// Panics if the agent library or the engine-local scratch cannot be set up.
-pub fn engine_boot_shell() -> Shell {
-    let mut shell = exarch_shell(TerminalState::default());
-    Scratch::new(EXARCH)
-        .unwrap_or_else(|e| panic!("exarch engine: scratch creation failed: {e}"))
-        .install_into(&mut shell);
+    #[cfg(unix)]
+    {
+        shell.install_builtins(ral_core::builtins::DETACH_BUILTIN);
+        shell.arm_detach(shell_eval::DETACH_BIRTH_BUDGET);
+    }
+    let named = attach
+        .env
+        .iter()
+        .any(|(name, _)| *name == EXARCH.scratch_var());
+    let keep: Box<dyn Send> = if named {
+        Box::new(())
+    } else {
+        let scratch = Scratch::new(EXARCH)
+            .map_err(|e| format!("exarch engine: could not create its scratch directory: {e}"))?;
+        scratch.install_into(&mut shell);
+        Box::new(scratch)
+    };
+    for (name, value) in &attach.env {
+        seed_var(&mut shell, name, value);
+    }
     arm_session_ledgers(&mut shell);
-    shell
+    Ok(ral_core::engine::Booted { shell, keep })
 }
 
-/// The ledger half of exarch's session policy — one site for both seats,
-/// reached from [`engine_boot_shell`] and from the identity seat's ceremony.
-pub fn arm_session_ledgers(shell: &mut Shell) {
+/// An Attach for a test engine, naming a scratch so the recipe mints none.
+#[cfg(test)]
+pub(crate) fn test_attach() -> ral_core::protocol::Attach {
+    let temp = std::env::temp_dir();
+    let mut attach =
+        ral_core::protocol::Attach::new(builtins::INSTALLER_TAG, temp.clone(), temp.clone());
+    attach
+        .env
+        .push((EXARCH.scratch_var(), temp.to_string_lossy().into_owned()));
+    attach
+}
+
+/// A dressed shell for a test, over no scratch of its own.
+#[cfg(test)]
+pub(crate) fn test_shell() -> Shell {
+    engine_boot_shell(&test_attach())
+        .expect("a named scratch boots without minting one")
+        .shell
+}
+
+/// An identity engine for a test, booted through the one recipe.
+#[cfg(test)]
+pub(crate) fn test_transport() -> ral_core::protocol::IdentityTransport {
+    ral_core::protocol::IdentityTransport::boot(&crate::INSTALLERS, &test_attach())
+        .expect("the recipe boots a test engine")
+}
+
+pub(crate) fn arm_session_ledgers(shell: &mut Shell) {
     shell.arm_binding_lease(ral_core::types::BindingLease {
         idle_calls: shell_eval::BINDING_IDLE_CALLS,
         large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
@@ -219,15 +245,9 @@ impl Scratch {
         &self.dir
     }
 
-    pub fn app(&self) -> App {
-        self.app
-    }
-
-    /// The environment variable naming this scratch to the agent.  Public so
-    /// [`crate::prompt::host_section`] can ask the scratch for its own name
-    /// rather than spell one product's into text both products read.
+    /// The environment variable naming this scratch to the agent.
     pub fn var(&self) -> String {
-        format!("{}_SCRATCH", self.app.name().to_uppercase())
+        self.app.scratch_var()
     }
 
     /// A scratch for one test, deleted when the returned value falls.  A test
@@ -286,15 +306,24 @@ impl Scratch {
     /// exarch was launched in.  One seeder for all three, because the seat's
     /// test double mirrors this call and a second site would drift from it.
     pub fn install_into(&self, shell: &mut Shell) {
+        for (name, value) in self.env() {
+            seed_var(shell, &name, &value);
+        }
+    }
+
+    /// What [`Self::install_into`] seeds, as the pairs an `Attach` names.
+    pub fn env(&self) -> Vec<(String, String)> {
         let scratch = self.dir.to_string_lossy().into_owned();
-        seed_var(shell, &self.var(), &scratch);
-        for (var, sub) in LEGACY_TOOL_HOMES {
-            let value = format!("{scratch}/{sub}");
-            seed_var(shell, var, &value);
-        }
-        for (var, value) in CONFINED_TOOL_SETTINGS {
-            seed_var(shell, var, value);
-        }
+        let homes = LEGACY_TOOL_HOMES
+            .iter()
+            .map(|(var, sub)| ((*var).to_string(), format!("{scratch}/{sub}")));
+        let settings = CONFINED_TOOL_SETTINGS
+            .iter()
+            .map(|(var, value)| ((*var).to_string(), (*value).to_string()));
+        std::iter::once((self.var(), scratch.clone()))
+            .chain(homes)
+            .chain(settings)
+            .collect()
     }
 }
 
@@ -382,6 +411,12 @@ impl App {
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.0
+    }
+
+    /// The variable naming this app's scratch to the agent.
+    #[must_use]
+    pub fn scratch_var(self) -> String {
+        format!("{}_SCRATCH", self.0.to_uppercase())
     }
 
     /// This app's directory under an XDG base: `$XDG_<kind>_HOME/<app>/`.  The
@@ -614,7 +649,7 @@ mod tests {
     fn a_confined_session_tells_cargo_to_fetch_through_git() {
         let scratch =
             super::Scratch::for_test(super::EXARCH, "confined-settings").expect("test scratch");
-        let mut shell = super::boot_shell();
+        let mut shell = super::test_shell();
         scratch.install_into(&mut shell);
         assert_eq!(
             shell.env_var("CARGO_NET_GIT_FETCH_WITH_CLI"),

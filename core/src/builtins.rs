@@ -430,18 +430,19 @@ pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
     table
 }
 
-/// `watch` — a spawn whose output streams live to the caller's stdout,
-/// line-framed, kept out of [`CORE_BUILTINS`] for a host's boot surface to carry.
+/// `watch` — a spawn whose output lines surface live to the host as
+/// `` `watch [label, line] ``, kept out of [`CORE_BUILTINS`] for a host's boot
+/// surface to carry.
 ///
-/// That sink must outlive the run, so only the interactive and batch ral hosts
-/// install it; exarch's active streams are per-call capture buffers, and naming
-/// `watch` there is an unknown-name diagnostic at compile time rather than a
-/// builtin that resolves and then refuses.  [`SERVICE_BUILTIN`] is the same
-/// shape with the hosts swapped.
+/// The lines ride the session's deferred sink, which outlives the run, so only
+/// a host that installs a deferred sink installs this; elsewhere naming `watch`
+/// is an unknown-name diagnostic at compile time rather than a builtin that
+/// resolves and then refuses.  [`SERVICE_BUILTIN`] is the same shape for a
+/// host with a lease frame.
 static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("watch"),
     scheme::watch,
-    "watch <label> <thunk>  — spawn a concurrent block whose output streams live to the caller's stdout, line-framed with the given label.",
+    "watch <label> <thunk>  — spawn a concurrent block whose output lines surface live to the host, each labelled with the given label.",
     BuiltinBody::Static(concurrency::builtin_watch),
 )];
 pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
@@ -450,10 +451,10 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
 /// class: no idle reap, no absolute backstop, bounded instead by the description
 /// its birth requires.
 ///
-/// Availability inverts [`WATCH_BUILTIN`]'s.  Only a host with a lease frame has
-/// anything to exempt a worker from, so exarch installs it while the ral hosts —
-/// whose spawns already live until cancel or exit — leave it out, making the name
-/// a compile-time unknown there rather than a call-time refusal.
+/// Only a host with a lease frame has anything to exempt a worker from, so
+/// exarch installs it while the ral hosts — whose spawns already live until
+/// cancel or exit — leave it out, making the name a compile-time unknown there
+/// rather than a call-time refusal.
 static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("service"),
     scheme::service,

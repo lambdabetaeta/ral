@@ -24,18 +24,6 @@ pub enum RosterState {
     Waiting,
 }
 
-impl RosterState {
-    /// The variant label the roster row carries.
-    pub(crate) fn tag(self) -> &'static str {
-        match self {
-            Self::Busy => "busy",
-            Self::WaitingOnAgents => "waiting-on-agents",
-            Self::Replied => "replied",
-            Self::Waiting => "waiting",
-        }
-    }
-}
-
 /// Who started a listed agent — the edge that keeps a flat fleet listing a
 /// tree.  A root was started by a human, and there is no name to give.
 pub enum Spawner {

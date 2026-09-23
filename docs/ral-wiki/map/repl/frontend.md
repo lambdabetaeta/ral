@@ -11,7 +11,9 @@ covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/co
 a typed `Read` event (`Line` / `Edit` / `Interrupt` / `Eof`); the session never
 sees keybindings, escape sequences, or the buffer stack. The frontend owns
 plugin sync, keybinding dispatch, continuation reads, and flushing deferred
-diagnostics before returning. `EditBuffer` carries a re-feed buffer whose
+diagnostics before returning. **A frontend reads the engine only through the
+transport `read` is handed** — probes, and hook dispatches through the
+`ReplHost` — never a `Shell`. `EditBuffer` carries a re-feed buffer whose
 `cursor` is a **character** offset (matching the plugin surface — see
 [[map/repl/plugins|plugins]]); the rustyline boundary converts to bytes.
 
@@ -20,8 +22,7 @@ which folds backend-supplied lines into the buffer until it parses complete
 (or is abandoned by a `Continuation::Discard`). The loop, the newline joining,
 and the abandon semantics live there once, so Ctrl-C / Ctrl-D / a read error
 behave identically — abandoning the partial buffer keeps the session alive
-rather than ending it (the prior per-frontend copies had drifted, letting
-Ctrl-D kill the shell from the rustyline path). History saves *append* the
+rather than ending it, on every path alike. History saves *append* the
 session's own entries rather than rewriting the file, so concurrent sessions do
 not clobber each other.
 
@@ -34,12 +35,13 @@ dumb terminals whatever was asked):
   features; just `read_line` with a `> ` continuation prompt.
 - `rustyline.rs::RustylineFrontend` — the default editor: completion, plugin
   keybindings, ghost text, highlights, and rustyline history, on TTYs that
-  support raw mode and ANSI. Its constructor wires the shell's stdout onto
-  rustyline's `ExternalPrinter`, so background `watch` output lands above the
-  live prompt.
+  support raw mode and ANSI. Its `printer` hands rustyline's
+  `ExternalPrinter` to the `ReplHost`, so a surfaced `` `watch `` line lands
+  above the live prompt.
 - `structural.rs::StructuralFrontend` — the ratatui inline-viewport projection
-  surface (`structural` feature, `--surface structural`): the typed spine,
-  worksheet, and handles matrix around the prompt, plus Tab completion (below).
+  surface (`structural` feature, `--surface structural`): the typed spine
+  (the `spine` reading of the buffer), worksheet and handles matrix (the
+  `bindings` reading's rows) around the prompt, plus Tab completion (below).
   See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
   It drives the same in-editor plugin surface the rustyline backend does, off the
   shared [[map/repl/plugins|`PluginRuntime`]] rather than a parallel copy: each
@@ -71,8 +73,11 @@ only an empty buffer reads as `Eof`.
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the
 token under the cursor (`$`-variable / command-position name / path), gathers
-candidates from a `Sources` snapshot of the live shell (PATH commands +
-builtins + handlers + bindings; cwd-anchored path entries), and ranks them.
+candidates from a `Sources` view the engine's readings answer — the cheap
+half (`completion-names`, `builtin-names`) once per prompt, the `PATH`
+enumeration lazily through `path-entries` in the engine's own filesystem,
+keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
+cwd-anchored path entries likewise — and ranks them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
 is the single entry point both surfaces call. Ranking is `nucleo` fuzzy
 matching for every surface — path-tuned for path entries, ties broken

@@ -385,20 +385,6 @@ pub fn format_runtime_error_auto(
     }
 }
 
-/// The run epilogue every host shares: render into `out`, return the clamped
-/// exit code.  A host whose audit trace already reports the error passes
-/// [`std::io::sink`] and still gets the code.
-pub fn report_runtime_error(
-    out: &mut dyn std::io::Write,
-    db: &SourceDb,
-    err: &crate::types::Error,
-    compact_root: Option<crate::source::FileId>,
-) -> i32 {
-    let rendered = format_runtime_error_auto(db, err, compact_root);
-    let _ = out.write_all(rendered.as_bytes());
-    err.exit_code().clamp(0, 255)
-}
-
 // ── Ad-hoc error helpers ──────────────────────────────────────────────────
 
 /// Print `{cmd}: {msg}` to stderr.

@@ -28,7 +28,9 @@ outside the crate names it, `pub(crate)` otherwise, so `dead_code` can name an
 internal whose last caller went away
 ([[decisions/260909_pub-crate-by-default|pub-crate-by-default]]). Core's own
 integration tests link `ral-core` as an external crate and reach internals
-through one gated door, `core::test_access`.
+through one gated door, `core::test_access` — its engine reads go through
+`IdentityTransport::inspect`, the one `test-util`-only read of an identity
+engine's shell; core's unit tests boot engines through `engine::testkit`.
 
 ## The evaluation seam
 

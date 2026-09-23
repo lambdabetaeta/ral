@@ -3,7 +3,6 @@
 //! and its [`Build`] bundle. `clear` rebuilds a node's context in place
 //! rather than ending it; `Drop` is the one exit every life takes.
 
-use crate::agent::cancel::EvalReach;
 use crate::agent::dial::Dial;
 use crate::agent::event::{AgentLog, EditAuthority};
 use crate::agent::seat::{self, Seat};
@@ -15,6 +14,7 @@ use crate::fleet::{Fleet, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
 use crate::shell_eval::tools::Toolset;
+use ral_core::protocol::{Ending, Report, Severed};
 use ral_core::sync::LockExt;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,9 +49,8 @@ fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
 const TRUNK_NAME: &str = "main";
 
 /// What `Avatar::assemble` needs.  Fields are `pub(crate)` because a desk
-/// handler builds a spawned child's literal from its captured `HostServices`,
-/// the one place lawfully holding the adopted nursery shell; `fork_with` is
-/// the ordinary in-thread path.
+/// handler builds every child's literal from its captured `HostServices`,
+/// where the adopted fork is seated.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
@@ -108,33 +107,30 @@ pub(crate) struct Build {
     /// inherited verbatim: a spawn that names its own selection mints the
     /// child's provider through this and nothing else.
     pub(crate) bureau: Arc<crate::provider::Bureau>,
-    /// This agent's reach into its own running eval, read off `seat` before it
-    /// moves into this bundle — a root states it pre-weakened
-    /// ([`EvalReach::interrupt_only`]).
-    pub(crate) reach: EvalReach,
 }
 
-/// Why a fork did not happen.
-#[derive(Debug)]
-pub(crate) enum Unforked {
-    /// The child's own session log could not be opened off its parent's.
-    Log(io::Error),
-    /// The fleet refused the child — see [`Unborn`].
-    Unborn(Unborn),
-}
+/// Long enough for a fork, never a turn's worth of wall.
+const BRANCH_TIMEOUT_SECS: u64 = 30;
 
-impl From<Unborn> for Unforked {
-    fn from(why: Unborn) -> Self {
-        Self::Unborn(why)
-    }
-}
-
-impl std::fmt::Display for Unforked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Log(error) => write!(f, "could not fork the session log: {error}"),
-            Self::Unborn(why) => write!(f, "{why}"),
+/// A run's refusal in its own words; `None` for one that settled.
+fn refusal(report: Report) -> Option<String> {
+    match report {
+        Report::Ran {
+            ending: Ending::Settled { .. },
+            ..
+        } => None,
+        Report::Ran {
+            ending:
+                Ending::Raised { rendered, .. }
+                | Ending::Walled { rendered, .. }
+                | Ending::Unreturnable { rendered, .. },
+            ..
         }
+        | Report::Static { rendered, .. } => Some(rendered),
+        Report::Ran {
+            ending: Ending::Exited(status),
+            ..
+        } => Some(format!("the fork's run exited with status {status}")),
     }
 }
 
@@ -217,12 +213,12 @@ pub struct RootConfig {
 pub enum RootSeat {
     /// In-process, over an identity transport. `cwd` is stated rather than
     /// read from the process, since a GUI host has no per-conversation
-    /// process directory to chdir into; `detach` says whether the host judged
-    /// the verb meaningful here at all.
+    /// process directory to chdir into; the scratch is the session's, and
+    /// outlives every `/clear`.
     Identity {
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
-        detach: bool,
+        terminal: ral_core::io::TerminalState,
     },
     /// Out-of-process: an already-built `transport` onto an engine elsewhere,
     /// a spawned `--engine` child or synod's adopted control-plane stream into
@@ -267,7 +263,6 @@ impl Avatar {
             egress,
             dial,
             bureau,
-            reach,
         } = b;
         let nudges = (!tools.is_empty()).then(nudge::Nudges::new);
         let log_dir = log.dir().to_path_buf();
@@ -300,7 +295,7 @@ impl Avatar {
             dial,
             bureau,
             cancel: cancel::Token::new(),
-            reach,
+            reach: seat.reach(),
             mailbox,
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             pins: Arc::default(),
@@ -335,11 +330,12 @@ impl Avatar {
     /// trunk; off it, a one-shot headless one.
     ///
     /// # Errors
-    /// If the trunk's session directory or its event log cannot be opened.
+    /// If the trunk's session directory or its event log cannot be opened, or
+    /// its engine is lost before it starts.
     ///
     /// # Panics
-    /// Never: the `expect` below only restates for the compiler that an
-    /// identity seat's shell was built a few lines above.
+    /// Never: the `expect` below restates that a brand-new fleet refuses no
+    /// trunk.
     pub fn root(cfg: RootConfig, root_seat: RootSeat, provider: Arc<Provider>) -> io::Result<Self> {
         let RootConfig {
             system,
@@ -382,27 +378,54 @@ impl Avatar {
         }
         // Read before `egress` moves into `Build` below.
         let search = egress.policy.search;
-        // An identity seat resolves its builtin index off the very shell it
-        // goes on to run calls through; a wire seat's real shell lives in the
-        // remote engine, so `exarch_shell` dresses a throwaway with the same
-        // compiled-in surface and index resolution reads that instead.
-        let identity_shell = match &root_seat {
+        let root_dir = resume.as_deref().unwrap_or(&run_dir);
+        let sessions_root = root_dir.join("sessions");
+        let run_lock = Some(match run_lock {
+            Some(lock) => lock,
+            None => crate::bootstrap::RunLock::try_acquire(root_dir)?,
+        });
+        if resume.is_some() {
+            seed_id_counter(&sessions_root)?;
+        }
+        // Only session 0 resumes.
+        let id = if resume.is_some() { 0 } else { fresh_id() };
+        // A trunk's attach: nothing has run here yet, so this is a start
+        // failure and says so, and it names the run directory it has just
+        // made — which is where the engine's own output was captured, if
+        // anything was. Carried whole, not flattened: synod downcasts this to
+        // tell a dead engine from a log directory it could not make, and only
+        // the former has a guest console worth saving.
+        let lost = |s: Severed| io::Error::other(seat::EngineLost::starting(&s, Some(root_dir)));
+        let seat = match root_seat {
             RootSeat::Identity {
                 scratch,
                 cwd,
-                detach,
-            } => Some(seat::boot_root_shell(scratch, cwd.clone(), *detach)),
-            RootSeat::Wire { .. } => None,
+                terminal,
+            } => Seat::root(
+                &crate::INSTALLERS,
+                cwd,
+                terminal,
+                scratch,
+                &AgentLog::dir_of(&sessions_root, id),
+            )
+            .map_err(lost)?,
+            RootSeat::Wire {
+                transport,
+                cwd,
+                home,
+            } => Seat::wire(*transport, cwd, home).map_err(lost)?,
         };
-        // A binding of its own, so the stand-in outlives the borrow below.
-        let throwaway_wire_shell;
-        let index = crate::prompt::BuiltinIndex::resolve(if let Some(shell) = &identity_shell {
-            shell
-        } else {
-            throwaway_wire_shell =
-                crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
-            &throwaway_wire_shell
-        });
+        let index = crate::prompt::BuiltinIndex::resolve(
+            seat.read(ral_core::protocol::reading::builtin_names)
+                .map_err(lost)?,
+        );
+        // The scratch is the engine's to name, under either carrier.
+        let scratch_var = crate::bootstrap::EXARCH.scratch_var();
+        let scratch = seat
+            .read(|t| ral_core::protocol::reading::env_var(t, &scratch_var))
+            .map_err(lost)?
+            .ok_or_else(|| io::Error::other(format!("the engine names no ${scratch_var}")))?;
+        let system = system.replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch);
         // Chat advertises no tool, so its prompt takes no builtin surface at
         // all — no index, no taught section, the bare stand-in verbatim.
         let system_prompt = if chat {
@@ -418,54 +441,16 @@ impl Avatar {
                 TRUNK_NAME,
             )
         };
-        let root_dir = resume.as_deref().unwrap_or(&run_dir);
-        let sessions_root = root_dir.join("sessions");
-        let run_lock = Some(match run_lock {
-            Some(lock) => lock,
-            None => crate::bootstrap::RunLock::try_acquire(root_dir)?,
-        });
         let (log, resume_summary) = if resume.is_some() {
-            seed_id_counter(&sessions_root)?;
-            let mut log = AgentLog::resume(&sessions_root, 0)?;
+            let mut log = AgentLog::resume(&sessions_root, id)?;
             let summary = log.resumed_summary();
             let at_unix_ms = crate::bootstrap::now_unix_ms();
             log.record_resumed(&model, &account, system_prompt.len(), at_unix_ms)?;
             (log, Some(summary))
         } else {
-            let id = fresh_id();
             let log = AgentLog::root(&sessions_root, id, &model, &account, system_prompt.len())?;
             (log, None)
         };
-        let seat = match root_seat {
-            RootSeat::Identity {
-                scratch,
-                cwd,
-                detach,
-            } => Seat::identity(
-                identity_shell.expect("built above for an identity seat"),
-                scratch,
-                cwd,
-                detach,
-                &log,
-            ),
-            RootSeat::Wire {
-                transport,
-                cwd,
-                home,
-            } => Seat::wire(*transport, cwd, home).map_err(|s| {
-                // A trunk's attach: nothing has run here yet, so this is a
-                // start failure and says so, and it names the run directory
-                // it has just made — which is where the engine's own output
-                // was captured, if anything was.
-                // Carried whole, not flattened: synod downcasts this to tell
-                // a dead engine from a log directory it could not make, and
-                // only the former has a guest console worth saving.
-                io::Error::other(seat::EngineLost::starting(&s, Some(root_dir)))
-            })?,
-        };
-        // This seat is rebuilt in place under a standing root, so a raw reach
-        // captured now would go stale — see `EvalReach::interrupt_only`.
-        let reach = seat.eval_reach().interrupt_only();
         let avatar = Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
             system: system.into(),
@@ -493,7 +478,6 @@ impl Avatar {
             egress,
             dial,
             bureau,
-            reach,
         })
         // A brand-new fleet, so this can never collide or find its rootless
         // self dead.
@@ -518,6 +502,13 @@ impl Avatar {
         // and belongs to the new one.  Sweeping it afterwards eats it in
         // silence — the queue holds no record of what it dropped.
         self.inbox.clear();
+        // Rebooting the seat drops the outgoing shell, whose teardown cancels
+        // its registered workers — `/clear` outranks every lease. First of
+        // the rest, so a seat that cannot reboot refuses before anything goes.
+        self.seat.clear().map_err(io::Error::other)?;
+        // A delivery's cooperative cancel died with its run; its escalation
+        // tick must not outlive it into the rebuilt session.
+        ral_core::process::clear();
         // Abandon the subtree — this agent itself stays live — before the
         // segment rotates below, so no live descendant can still resolve an
         // ancestry link into a replaced file.
@@ -525,9 +516,6 @@ impl Avatar {
         self.agent.schedules.clear();
         let record = self.log.lock().clear(self.agent.system.len(), at_unix_ms)?;
         let error = record.rotation_error;
-        // Rebooting the seat drops the outgoing shell, whose teardown cancels
-        // its registered workers — `/clear` outranks every lease.
-        self.seat.clear(&self.log.lock());
         // The rebuilt context is empty: the next step's usage sets this afresh.
         self.last_input = (0, 0);
         // A rebuilt context has been told nothing.
@@ -559,134 +547,68 @@ impl Avatar {
         Ok(())
     }
 
-    /// A plain returning fork, under a minted name.  Tests only: a production
-    /// spawn assembles its own `Build` through the desk's spawn spine
-    /// (`ExarchDesk::launch`), and `/branch` calls `fork_with` directly with
-    /// the name it already chose.
+    /// A plain returning fork, under a minted name, for a test.
     #[cfg(test)]
-    pub(crate) fn fork(&self, caps: ral_core::types::GrantStack) -> Result<Self, Unforked> {
+    pub(crate) fn fork(&self) -> Result<Self, String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        self.fork_named(
-            caps,
-            &format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)),
-        )
+        self.fork_named(&format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
     }
 
-    /// A returning fork under a chosen name — the shape a production spawn
-    /// assembles, for a test that goes on to name the child in an assertion.
+    /// A returning fork under a chosen name, for a test that goes on to name
+    /// the child in an assertion.
     #[cfg(test)]
-    pub(crate) fn fork_named(
-        &self,
-        caps: ral_core::types::GrantStack,
-        name: &str,
-    ) -> Result<Self, Unforked> {
-        self.fork_with(caps, true, name.to_string())
-    }
-
-    /// An independent child of this agent capped at `caps`; `returns` decides
-    /// whether it holds `reply` — both the prompt's advertised builtin index
-    /// and the desk's refusal read that one bit, so they cannot disagree.
-    fn fork_with(
-        &self,
-        caps: ral_core::types::GrantStack,
-        returns: bool,
-        name: String,
-    ) -> Result<Self, Unforked> {
-        // Scope, dynamic context, and installed builtin table cross in this
-        // one step, because core owns the flow matrix — no hand-copied field
-        // here can drift from it.  Per-agent state starts fresh.
-        let shell = self.seat.shell_mut().shell.fork_session();
-        let child_id = fresh_id();
-        let fuel = self.agent.fuel.saturating_sub(1);
-        // Against the *child's* grants, never this agent's: a `/branch` child
-        // withholds `reply` however its creator's own bit reads.
-        let system_prompt = self.agent.index.apply(
-            &self.agent.system_base,
-            &Grants {
-                returns,
-                allow_schedule: self.agent.allow_schedule,
-                spawns: fuel > 0,
-            },
-            &name,
-        );
-        // Seeded from the parent's *current* provider, so a later `/model` on
-        // either never disturbs the other — and so the child's log header
-        // names the selection it actually runs.
-        let current = self.agent.provider.current();
-        let account = RecordedAccount::of(current.account(), &self.agent.bureau.available());
-        let log = self
-            .log
-            .lock()
-            .fork(child_id, system_prompt.len(), current.model(), &account)
-            .map_err(Unforked::Log)?;
-        let seat = match &self.seat {
-            // No detach: `fork_session` carries no such policy across, so
-            // granting it here would grant nothing now and conjure the verb
-            // at the child's first `/clear`, which reboots from the seat.
-            Seat::Identity { scratch, cwd, .. } => {
-                Seat::identity(shell, scratch.clone(), cwd.clone(), false, &log)
-            }
-            Seat::Wire { .. } => {
-                unreachable!("shell_mut already panicked above for a wire seat")
-            }
-        };
-        let reach = seat.eval_reach();
-        Ok(Self::assemble(Build {
-            name,
-            system: self.agent.system_base.clone(),
-            system_prompt,
-            index: self.agent.index.clone(),
-            caps,
-            seat,
-            log,
-            // A branch converses and never returns, so it reports to nobody and
-            // roots its own tree.  Its fuel, caps, and prompt are copied from
-            // its creator right here, which is the whole of what an edge to the
-            // creator would have bounded.
-            parent: returns.then(|| self.agent.clone()),
-            fuel,
-            provider: ProviderHandle::new(current),
-            // Human-attachment is inherited; engagement is not, being read off
-            // the child's own exchange clock from its first exchange.
-            interactive: self.agent.interactive,
-            returns,
-            allow_schedule: self.agent.allow_schedule,
-            tools: self.agent.tools,
-            // Never a fresh grant: a child's reach is bounded by its parent's.
-            search: self.agent.search,
-            fleet: self.fleet.clone(),
-            run_lock: None,
-            resume_summary: None,
-            disk_warn_bytes: self.agent.disk_warn_bytes,
-            egress: self.agent.egress.clone(),
-            dial: self.agent.dial.clone(),
-            bureau: self.agent.bureau.clone(),
-            reach,
-        })?)
+    pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        self.fork_with(name.to_string(), true, &emit)
     }
 
     /// Fork a conversing child under `name`: the creator's context and
-    /// capabilities verbatim, but `reply` withheld, so it parks for the
-    /// human instead of returning a value.
+    /// authority verbatim, but `reply` withheld, so it parks for the human
+    /// instead of returning a value.
     ///
     /// # Errors
     /// Whatever [`Self::fork_with`] refuses.
-    pub(crate) fn branch(&self, name: String) -> Result<Self, Unforked> {
-        let child = self.fork_with(self.agent.caps.clone(), false, name)?;
-        self.inherit_context(&child)?;
-        Ok(child)
+    pub(crate) fn branch(&self, name: String, emit: &Emitter) -> Result<Self, String> {
+        self.fork_with(name, false, emit)
     }
 
-    /// Import the creator's model-visible context into `child`, mnemon-style:
-    /// its spans under the creator's own exchange ids, and the link that
-    /// makes the rest of the lineage's store readable from there.
-    fn inherit_context(&self, child: &Self) -> Result<(), Unforked> {
-        let inherited = self.log.lock().inherited_context();
-        child
-            .log
-            .lock()
-            .import_context(inherited)
-            .map_err(|why| Unforked::Log(io::Error::other(why)))
+    /// A child of this agent, forked by its own engine through the door a
+    /// spawn uses — `_exarch-branch`, answered by the desk — so no shell ever
+    /// crosses here. `returns` decides whether it holds `reply`.
+    fn fork_with(&self, name: String, returns: bool, emit: &Emitter) -> Result<Self, String> {
+        let lost = |s: Severed| seat::EngineLost::running(&s, self.agent.run_dir()).to_string();
+        let order = Arc::new(crate::fleet::desk::BranchOrder {
+            name,
+            returns,
+            child: Mutex::default(),
+        });
+        let mut services = self
+            .host_services(emit, crate::agent::ReplyCell::default())
+            .map_err(lost)?;
+        services.branch = Some(order.clone());
+        let host = Arc::new(crate::fleet::desk::RunHost {
+            desk: crate::fleet::desk::ExarchDesk { services },
+            apply: crate::fleet::desk::SurfaceApplier {
+                recorder: self.recorder(),
+            },
+        });
+        let report = crate::shell_eval::run_shell(
+            self.seat.transport(),
+            &self.agent.caps,
+            "/branch",
+            "_exarch-branch",
+            BRANCH_TIMEOUT_SECS,
+            host,
+        )
+        .map_err(lost)?;
+        if let Some(why) = refusal(report) {
+            return Err(why);
+        }
+        order
+            .child
+            .lock_ignore_poison()
+            .take()
+            .ok_or_else(|| "the engine forked, but the desk was never asked to take it up".into())
     }
 
     /// Seed a freshly forked child's inbox with its launch prompt — the spawn
@@ -723,24 +645,37 @@ impl Avatar {
             egress,
             disk_warn_bytes,
             lease,
+            installers,
         } = cfg;
         // Derived from the policy, exactly as `root` derives it, so a fixture
         // can never claim a reach its own egress denies.
         let search = egress.policy.search;
-        let mut shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
-        // contend on one dir.  Seeded into the shell exactly as a real boot
-        // seeds it, and before the seat arms the ledgers: unseeded, an
-        // `$EXARCH_SCRATCH` probe falls through to the host process env, and a
-        // suite run from inside a live exarch session would measure *that*
-        // session's scratch.
+        // contend on one dir.  Named in the Attach exactly as a real root
+        // names it: unnamed, an `$EXARCH_SCRATCH` probe falls through to the
+        // host process env, and a suite run from inside a live exarch session
+        // would measure *that* session's scratch.
         let scratch = Arc::new(Scratch::for_test(
             crate::bootstrap::EXARCH,
             &format!("agent-{id}"),
         )?);
-        scratch.install_into(&mut shell);
-        let index = crate::prompt::BuiltinIndex::resolve(&shell);
+        // Beside the scratch, which the seat below owns: the session's whole
+        // footprint is then one directory, and it goes when the agent does.
+        let sessions_root = scratch.test_sibling("sessions")?;
+        let cwd = std::env::current_dir().expect("test process has a cwd");
+        let seat = Seat::root(
+            installers,
+            cwd,
+            ral_core::io::TerminalState::default(),
+            scratch,
+            &AgentLog::dir_of(&sessions_root, id),
+        )
+        .map_err(|s| io::Error::other(s.to_string()))?;
+        let index = crate::prompt::BuiltinIndex::resolve(
+            seat.read(ral_core::protocol::reading::builtin_names)
+                .map_err(|s| io::Error::other(s.to_string()))?,
+        );
         let system_prompt = index.apply(
             &system,
             &Grants {
@@ -750,10 +685,8 @@ impl Avatar {
             },
             TRUNK_NAME,
         );
-        // Beside the scratch, which the seat below owns: the session's whole
-        // footprint is then one directory, and it goes when the agent does.
         let log = AgentLog::root(
-            &scratch.test_sibling("sessions")?,
+            &sessions_root,
             id,
             "test-model",
             &RecordedAccount::for_test("test"),
@@ -763,10 +696,6 @@ impl Avatar {
             "test-model",
             crate::provider::scripted::Script::new(),
         )));
-        let cwd = std::env::current_dir().expect("test process has a cwd");
-        let seat = Seat::identity(shell, scratch, cwd, false, &log);
-        // Pre-weakened for the same reason a real root's is — see `root`.
-        let reach = seat.eval_reach().interrupt_only();
         Ok(Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
             system: system.into(),
@@ -790,7 +719,6 @@ impl Avatar {
             egress,
             dial: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
-            reach,
         })
         .expect("a fresh fleet's trunk is born unrefused"))
     }
@@ -805,6 +733,8 @@ pub(crate) struct TestTrunk {
     pub(crate) disk_warn_bytes: Option<u64>,
     /// The idle bound of the fleet this trunk is born into.
     pub(crate) lease: std::time::Duration,
+    /// The recipes its engine boots from.
+    pub(crate) installers: &'static [ral_core::engine::EngineInstaller],
 }
 
 impl TestTrunk {
@@ -815,6 +745,7 @@ impl TestTrunk {
             egress: crate::egress::Egress::for_test(),
             disk_warn_bytes: None,
             lease: crate::fleet::AGENT_LEASE_IDLE,
+            installers: &crate::INSTALLERS,
         }
     }
 }
@@ -829,6 +760,11 @@ impl Drop for Avatar {
     /// `/clear` never reaches this — it rebuilds in place, clearing its own.
     fn drop(&mut self) {
         self.agent.schedules.clear();
+        // A panic may have poisoned the log under its guard, and a second
+        // panic here would abort the process.
+        if std::thread::panicking() {
+            return;
+        }
         let recorded = self.log.lock().record_session_ended();
         if let Err(error) = recorded {
             eprintln!("exarch: the session's tail bookend was not recorded: {error}");
@@ -853,22 +789,21 @@ mod tests {
     /// just the core set a bare `Shell::new` seeds.
     #[test]
     fn fork_inherits_host_builtins() {
-        let session = Avatar::for_test("system").unwrap();
-        assert!(
+        let names = |session: &Avatar| {
             session
                 .seat
-                .shell_mut()
-                .shell
-                .lookup_builtin("view-text")
-                .is_some(),
+                .read(ral_core::protocol::reading::builtin_names)
+                .expect("an identity seat never severs")
+        };
+        let session = Avatar::for_test("system").unwrap();
+        assert!(
+            names(&session).iter().any(|n| n == "view-text"),
             "the parent boot shell must carry the exarch host builtins"
         );
-        let child = session
-            .fork(session.caps().clone())
-            .expect("fork child session");
+        let child = names(&session.fork().expect("fork child session"));
         for name in ["view-text", "grep-files", "edit-hash", "explore-dir"] {
             assert!(
-                child.seat.shell_mut().shell.lookup_builtin(name).is_some(),
+                child.iter().any(|n| n == name),
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
@@ -882,7 +817,7 @@ mod tests {
         let parent = Avatar::for_test("system").unwrap();
         assert_eq!(parent.agent.fuel, SPAWN_FUEL);
         for _ in 0..3 {
-            let child = parent.fork(parent.caps().clone()).expect("fork child");
+            let child = parent.fork().expect("fork child");
             assert_eq!(
                 child.agent.fuel,
                 SPAWN_FUEL - 1,
@@ -896,7 +831,7 @@ mod tests {
 
         let mut chain = parent;
         for expected in (0..SPAWN_FUEL).rev() {
-            chain = chain.fork(chain.caps().clone()).expect("fork child");
+            chain = chain.fork().expect("fork child");
             assert_eq!(chain.agent.fuel, expected);
         }
         assert_eq!(
@@ -910,14 +845,10 @@ mod tests {
     #[test]
     fn fork_inherits_its_parents_search_reach() {
         let parent = Avatar::for_test("system").unwrap();
-        assert!(parent.fork(parent.caps().clone()).unwrap().agent.search);
+        assert!(parent.fork().unwrap().agent.search);
         let searchless = searchless_trunk();
         assert!(
-            !searchless
-                .fork(searchless.caps().clone())
-                .unwrap()
-                .agent
-                .search,
+            !searchless.fork().unwrap().agent.search,
             "a searchless parent can hand out no search of its own"
         );
     }
@@ -928,7 +859,7 @@ mod tests {
     fn fork_seeds_its_own_provider_handle() {
         let parent = Avatar::for_test("system").unwrap();
         parent.agent.provider.swap(scripted("p-a", Script::new()));
-        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        let child = parent.fork().expect("fork child");
         assert_eq!(
             child.agent.provider.current().model(),
             "p-a",
@@ -963,7 +894,9 @@ mod tests {
             )
             .unwrap();
 
-        let child = parent.branch("branch".into()).expect("branch child");
+        let child = parent
+            .branch("branch".into(), &crate::bus::dummy_emitter().0)
+            .expect("branch child");
 
         let view = serde_json::to_string(
             &child
@@ -1049,13 +982,13 @@ mod tests {
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
+                terminal: ral_core::io::TerminalState::default(),
             },
             scripted("test-model", Script::new()),
         )
         .expect("root trunk");
 
-        let child = root.fork(root.caps().clone()).expect("fork child");
+        let child = root.fork().expect("fork child");
         assert_ne!(
             child.agent.system.len(),
             root.agent.system.len(),
@@ -1070,7 +1003,7 @@ mod tests {
         );
 
         let grandchild = child
-            .branch("grandchild".into())
+            .branch("grandchild".into(), &crate::bus::dummy_emitter().0)
             .expect("branch grandchild");
         assert_ne!(
             grandchild.agent.system.len(),
@@ -1095,12 +1028,8 @@ mod tests {
     /// batch instead, leaving this straggler path unexercised.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut session =
+            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
         // The deferred sink `Avatar::ral` wires captures `emit`'s mailbox, which
         // must be this session's own inbox for the late-surface assertion
@@ -1114,7 +1043,7 @@ mod tests {
             &emit,
         );
 
-        let entries = session.seat.shell_mut().shell.workers();
+        let entries = workers(&session);
         assert_eq!(entries.len(), 2, "one ordinary worker, one service");
         let durable = entries
             .iter()
@@ -1138,7 +1067,7 @@ mod tests {
             );
         }
         assert_eq!(
-            probe_int(&session, "worker-count"),
+            probe_count(&session, ral_core::test_access::worker_count),
             0,
             "the rebuilt shell's registry must start empty"
         );
@@ -1218,18 +1147,14 @@ mod tests {
     /// `Drop` is the only thing that reaches its workers.
     #[test]
     fn agent_drop_cancels_its_own_unclosed_workers() {
-        let mut avatar = Avatar::for_test("system").unwrap();
-        avatar
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut avatar =
+            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());
         let _ = avatar.ral("spawn { test-clear-block-forever }", 30, &emit);
 
-        let entries = avatar.seat.shell_mut().shell.workers();
+        let entries = workers(&avatar);
         assert_eq!(entries.len(), 1, "the agent's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
@@ -1353,8 +1278,8 @@ mod tests {
         );
     }
 
-    /// `assemble` arms the child over the whole scope `fork_session`
-    /// snapshotted, sealing parent scratch included as its baseline: a name
+    /// A fork is armed over the whole scope it snapshotted, sealing parent
+    /// scratch included as its baseline: a name
     /// the parent leased is never a lease candidate in the child, however
     /// many idle calls it runs.
     #[test]
@@ -1364,28 +1289,16 @@ mod tests {
         let emit = Emitter::new(tx, session.agent.id);
         session.ral("let parent_scratch = 1", 5, &emit);
 
-        let mut child = session
-            .fork(ral_core::types::GrantStack::root())
-            .expect("fork");
+        let mut child = session.fork().expect("fork");
         assert!(
             scope_has(&mut child, "parent_scratch"),
-            "fork_session snapshots the parent's whole scope"
+            "a fork snapshots the parent's whole scope"
         );
 
-        // Re-arm with a tiny bound: `assemble` already armed this same scope
-        // with the production constant, and re-arming reseals identically,
-        // just fast enough to idle out inside a test.
-        child
-            .seat
-            .shell_mut()
-            .shell
-            .arm_binding_lease(ral_core::types::BindingLease {
-                idle_calls: 1,
-                large_binding_bytes: u64::MAX,
-            });
+        // Against the production bound the fork was armed with.
         let (child_tx, _child_rx) = crate::bus::channel();
         let child_emit = Emitter::new(child_tx, child.agent.id);
-        for _ in 0..3 {
+        for _ in 0..(crate::shell_eval::BINDING_IDLE_CALLS + 5) {
             child.ral("let _child_spin = 0", 5, &child_emit);
         }
         assert!(
@@ -1437,7 +1350,7 @@ mod tests {
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
+                terminal: ral_core::io::TerminalState::default(),
             },
             scripted("new-model", Script::new()),
         )
@@ -1577,14 +1490,12 @@ mod tests {
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
+                terminal: ral_core::io::TerminalState::default(),
             },
             scripted("new-model", Script::new()),
         )
         .expect("resumed root");
-        let child = root
-            .fork(ral_core::types::GrantStack::root())
-            .expect("post-resume child");
+        let child = root.fork().expect("post-resume child");
         let child_id = child
             .log_dir()
             .file_name()

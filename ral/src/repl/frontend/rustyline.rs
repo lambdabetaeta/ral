@@ -2,21 +2,23 @@
 //! highlights, and history.  The real editor for interactive sessions
 //! on TTYs that support raw mode and ANSI.
 
-use ral_core::sync::LockExt as _;
-use ral_core::{Shell, diagnostic};
-use rustyline::config::{BellStyle, Builder, CompletionType, EditMode};
+use ral_core::diagnostic;
+use ral_core::io::TerminalState;
+use ral_core::protocol::Transport;
+use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::{Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::super::complete::RalHelper;
 use super::super::config::dirs_history;
+use super::super::host::{Printer, ReplHost};
 use super::super::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use super::super::plugin::rustyline::{snapshot_history, sync_plugins};
 use super::super::plugin::{
-    HookEnvGuard, PluginRuntime, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
+    Keymap, flush_pending_messages, lock, pop_buffer_stack, reset_editor_hooks,
 };
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
@@ -24,21 +26,23 @@ use ral_core::text::char_to_byte;
 
 pub(in crate::repl) struct RustylineFrontend {
     rl: Editor<RalHelper, DefaultHistory>,
-    pub(in crate::repl) runtime: Arc<Mutex<PluginRuntime>>,
-    pub(in crate::repl) edit_mode: EditMode,
+    host: Arc<ReplHost>,
+    keymap: Keymap,
+    terminal: TerminalState,
     history_path: Option<String>,
 }
 
 impl RustylineFrontend {
     pub(in crate::repl) fn new(
-        shell: &mut Shell,
-        edit_mode: EditMode,
+        engine: Arc<dyn Transport>,
+        host: Arc<ReplHost>,
+        terminal: TerminalState,
+        keymap: Keymap,
         bell: BellStyle,
-        runtime: Arc<Mutex<PluginRuntime>>,
     ) -> Self {
-        let helper = RalHelper::new(shell, runtime.clone());
+        let helper = RalHelper::new(engine, host.clone(), terminal);
         let config = Builder::new()
-            .edit_mode(edit_mode)
+            .edit_mode(keymap.into())
             .bell_style(bell)
             .completion_type(CompletionType::List)
             .completion_show_all_if_ambiguous(false)
@@ -57,40 +61,13 @@ impl RustylineFrontend {
             let _ = rl.load_history(path);
         }
 
-        let mut frontend = Self {
+        Self {
             rl,
-            runtime,
-            edit_mode,
+            host,
+            keymap,
+            terminal,
             history_path,
-        };
-        frontend.wire_external_printer(shell);
-        frontend
-    }
-
-    /// Route the shell's stdout through rustyline's `ExternalPrinter` so
-    /// background output (from `watch` blocks) prints above the active prompt
-    /// instead of colliding with the line being edited.  A terminal that
-    /// cannot supply an external printer leaves stdout as it was.
-    fn wire_external_printer(&mut self, shell: &mut Shell) {
-        let Ok(printer) = self.rl.create_external_printer() else {
-            return;
-        };
-        use std::sync::Mutex as StdMutex;
-        struct RustylineSink<P: rustyline::ExternalPrinter + Send>(StdMutex<P>);
-        impl<P: rustyline::ExternalPrinter + Send + 'static> ral_core::io::ExternalWrite
-            for RustylineSink<P>
-        {
-            fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
-                let s = String::from_utf8_lossy(bytes).into_owned();
-                self.0
-                    .lock_ignore_poison()
-                    .print(s)
-                    .map_err(|e| std::io::Error::other(e.to_string()))
-            }
         }
-        shell.set_stdout(ral_core::io::Sink::External(Arc::new(RustylineSink(
-            StdMutex::new(printer),
-        ))));
     }
 
     /// Run rustyline's `readline` (with or without an initial buffer) and
@@ -152,30 +129,29 @@ impl RustylineFrontend {
 impl Frontend for RustylineFrontend {
     fn read(
         &mut self,
-        shell: &mut Shell,
+        engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         // Pre-readline housekeeping: partial-line marker, plugin sync,
-        // helper refresh (cheap shell state only — the `PATH` enumeration waits
-        // for the first Tab, so nothing here delays the prompt), history
-        // snapshot, hook env prep.
-        if shell.terminal().ui_round_trips_ok() {
+        // helper refresh (cheap engine state only — the `PATH` enumeration
+        // waits for the first Tab, so nothing here delays the prompt), history
+        // snapshot, editor-hook reset.
+        if self.terminal.ui_round_trips_ok() {
             super::super::cursor::partial_line_marker();
         }
         if let Some(h) = self.rl.helper_mut() {
-            h.refresh(shell);
+            h.refresh();
         }
-        sync_plugins(&self.runtime, &mut self.rl);
-        snapshot_history(&self.rl, &self.runtime);
-
-        prepare_hook_env(shell, &self.runtime, self.edit_mode.into());
-        let _guard = HookEnvGuard(self.runtime.clone());
+        let runtime = &self.host.runtime;
+        sync_plugins(runtime, &mut self.rl);
+        snapshot_history(&self.rl, runtime);
+        reset_editor_hooks(runtime, self.keymap);
 
         // Caller-supplied pending wins; otherwise fall through to a buffer
         // pushed onto the stack by `_ed-push`.
-        let initial = pending.or_else(|| pop_buffer_stack(&self.runtime));
+        let initial = pending.or_else(|| pop_buffer_stack(runtime));
 
         let raw = match self.readline_with_continuation(prompt, initial) {
             Ok(s) => s,
@@ -188,14 +164,15 @@ impl Frontend for RustylineFrontend {
         // read.  Plugin diagnostics buffered during readline or dispatch
         // are flushed on every return path so they land on a durable line
         // above the next prompt — after any line-erase escape we emit.
-        let pk = lock(&self.runtime).keybindings.pending.take();
+        let runtime = &self.host.runtime;
+        let pk = lock(runtime).keybindings.pending.take();
         let Some(pk) = pk else {
-            flush_pending_messages(&self.runtime);
+            flush_pending_messages(runtime);
             return Read::Line(raw);
         };
-        match dispatch_keybinding(&pk, &raw, shell, &self.runtime, self.edit_mode.into()) {
+        match dispatch_keybinding(&pk, &raw, engine, &self.host, self.keymap) {
             KeybindingOutcome::Accept(line) => {
-                flush_pending_messages(&self.runtime);
+                flush_pending_messages(runtime);
                 Read::Line(line)
             }
             KeybindingOutcome::Edit(text, cursor) => {
@@ -203,11 +180,11 @@ impl Frontend for RustylineFrontend {
                 // *then* flush plugin diagnostics so they land on a durable
                 // line above the next prompt.  Order matters: printing
                 // before the escape would have its line clobbered.
-                if shell.terminal().ui_round_trips_ok() {
+                if self.terminal.ui_round_trips_ok() {
                     let _ = std::io::stdout().write_all(b"\x1b[A\r\x1b[K");
                     let _ = std::io::stdout().flush();
                 }
-                flush_pending_messages(&self.runtime);
+                flush_pending_messages(runtime);
                 Read::Edit(EditBuffer { text, cursor })
             }
         }
@@ -226,5 +203,12 @@ impl Frontend for RustylineFrontend {
             // `add_history_entry` then seeds it on the next append.
             let _ = self.rl.append_history(path);
         }
+    }
+
+    fn printer(&mut self) -> Option<Printer> {
+        self.rl
+            .create_external_printer()
+            .ok()
+            .map(|p| Box::new(p) as Printer)
     }
 }

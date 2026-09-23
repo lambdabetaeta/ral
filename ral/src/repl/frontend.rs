@@ -13,8 +13,11 @@
 //!   plugin keybindings, ghost text, highlights, and rustyline history.
 //! - `structural::StructuralFrontend` — the ratatui projection surface
 //!   ([`Surface::Structural`], `structural` builds only): a line editor
-//!   drawn in an inline viewport that projects the live shell's typed
-//!   spine, worksheet bindings, and handles matrix around the prompt.
+//!   drawn in an inline viewport that projects the engine's typed spine,
+//!   worksheet bindings, and handles matrix around the prompt.
+//!
+//! Every frontend reads the engine only through the transport — probes, and
+//! hook dispatches — never a `Shell`.
 
 mod minimal;
 mod rustyline;
@@ -26,9 +29,10 @@ pub(super) use rustyline::RustylineFrontend;
 #[cfg(feature = "structural")]
 pub(super) use structural::StructuralFrontend;
 
-use ral_core::Shell;
+use ral_core::protocol::Transport;
 
 use super::config::dirs_history;
+use super::host::Printer;
 use super::prompt::PromptText;
 #[cfg(feature = "structural")]
 use super::worksheet::Worksheet;
@@ -212,7 +216,7 @@ pub(super) trait Frontend {
     /// it.
     fn read(
         &mut self,
-        shell: &mut Shell,
+        engine: &dyn Transport,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(feature = "structural")] worksheet: &Worksheet,
@@ -220,6 +224,12 @@ pub(super) trait Frontend {
 
     fn add_history(&mut self, entry: &str);
     fn save_history(&mut self);
+
+    /// Where a line printed while the user edits should go, if this frontend
+    /// can put it above the prompt.
+    fn printer(&mut self) -> Option<Printer> {
+        None
+    }
 }
 
 #[cfg(test)]

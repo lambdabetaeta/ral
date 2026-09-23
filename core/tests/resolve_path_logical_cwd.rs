@@ -37,7 +37,6 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result().expect("evaluation succeeds"),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),

@@ -31,7 +31,6 @@ fn top_level(shell: &mut Shell, source: &str) -> String {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     });
     match report {
         RunReport::Ran { ending, .. } => match ending.into_result().expect("evaluation succeeds") {

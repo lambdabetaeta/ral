@@ -24,8 +24,16 @@ fn fuse(len: usize) -> io::Result<u32> {
     }
 }
 
+/// Encode and decode both grow their stack onto the heap rather than capping
+/// depth: a frame nests as deep as the data or IR it carries, and only the
+/// fuse bounds it.
 pub(crate) fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
-    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    let mut bytes = Vec::new();
+    value
+        .serialize(serde_stacker::Serializer::new(
+            &mut serde_json::Serializer::new(&mut bytes),
+        ))
+        .map_err(io::Error::other)?;
     let len = fuse(bytes.len())?;
     let _no_sigpipe = sigpipe::Suppress::install();
     w.write_all(&len.to_le_bytes())?;
@@ -104,10 +112,7 @@ mod sigpipe {
 pub(crate) fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(
     r: &mut R,
 ) -> io::Result<Option<T>> {
-    let Some(body) = read_body(r)? else {
-        return Ok(None);
-    };
-    decode_body(&body).map(Some)
+    read_body(r)?.map(|body| decode_body(&body)).transpose()
 }
 
 /// `Ok(None)` is a clean EOF at a frame boundary, not a truncated frame.
@@ -137,12 +142,13 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// A failed decode dumps the raw body and names the dump in the error.
-/// A frame nests as deep as the IR it carries — a block is a right-nested
-/// binder chain — so the decoder takes no depth cap of its own.
 fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
     let mut de = serde_json::Deserializer::from_slice(body);
+    // Unbounded depth is safe: `serde_stacker` grows the stack onto the heap.
     de.disable_recursion_limit();
-    match T::deserialize(&mut de).and_then(|value| de.end().map(|()| value)) {
+    match T::deserialize(serde_stacker::Deserializer::new(&mut de))
+        .and_then(|value| de.end().map(|()| value))
+    {
         Ok(value) => Ok(value),
         Err(e) => {
             let path = std::env::temp_dir().join(format!(
@@ -256,6 +262,48 @@ mod tests {
         let err = read_frame::<_, String>(&mut partial).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         assert_eq!(err.to_string(), "subprocess: partial frame length");
+    }
+
+    #[test]
+    fn a_deep_nest_round_trips_on_a_default_stack() {
+        const DEPTH: usize = 5000;
+        let nest = format!("{}{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+        let mut framed = fuse(nest.len()).unwrap().to_le_bytes().to_vec();
+        framed.extend_from_slice(nest.as_bytes());
+
+        let deep: serde_json::Value = read_frame(&mut std::io::Cursor::new(framed.clone()))
+            .unwrap()
+            .expect("a whole frame decodes");
+        let mut again = Vec::new();
+        write_frame(&mut again, &deep).unwrap();
+        assert_eq!(again, framed);
+    }
+
+    #[test]
+    fn a_deep_result_crosses_in_a_report_frame() {
+        use crate::protocol::{DispatchId, Ending, Event, Frame, Report};
+        use crate::serial::FOValue;
+
+        let lists = (0..5000).fold(FOValue::Unit, |inner, _| FOValue::List {
+            items: vec![inner],
+        });
+        let maps = (0..5000).fold(FOValue::Unit, |inner, _| FOValue::Map {
+            entries: vec![("k".into(), inner)],
+        });
+        for value in [lists, maps] {
+            let frame = Frame::Event(
+                DispatchId(1),
+                Event::Report(Report::Ran {
+                    ending: Ending::Settled { value, status: 0 },
+                    captured: None,
+                    trail: Vec::new(),
+                }),
+            );
+            let mut framed = Vec::new();
+            write_frame(&mut framed, &frame).unwrap();
+            let decoded: Option<Frame> = read_frame(&mut std::io::Cursor::new(framed)).unwrap();
+            assert!(decoded == Some(frame), "a deep result must cross intact");
+        }
     }
 
     #[cfg(unix)]

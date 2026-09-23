@@ -1,30 +1,28 @@
-//! The engine process: a connection-lived child holding one `Shell`, running
-//! what the front-end dispatches over a framed socket.
+//! The engine side of one session: a booted [`Shell`] and the scopes that stop
+//! its runs.
 //!
-//! Two laws shape the loop. Any received frame is proof the front-end lives, so
-//! the first `Ping` arms a read deadline, while a peer that never pings leaves
-//! the patience infinite — its death arrives as a kernel-guaranteed EOF. And no
-//! teardown abandons a run: however the loop exits, it cancels the in-flight run
-//! and the durable root under it, then waits for the worker to report and park.
+//! Two carriers drive it and differ only in carriage — how a dispatch's events
+//! leave, and how a forked session is adopted: [`IdentityTransport`] calls it
+//! in this process, [`wire`] frames it over a socket.
+//!
+//! [`IdentityTransport`]: crate::protocol::IdentityTransport
 
-use std::collections::HashMap;
-use std::io;
-use std::os::unix::io::FromRawFd;
-use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
-use crate::process::{CancelCause, ForegroundScope};
-use crate::protocol::{
-    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
-    answer_probe,
-};
+use crate::engine_seed::EngineSeed;
+use crate::process::{CancelCause, DurableRoot, ForegroundScope};
+use crate::protocol::{Attach, Control, DispatchId, Event, PROTOCOL_VERSION, Report, Run};
 use crate::serial::FOValue;
-use crate::sync::LockExt;
-use crate::types::{DeferredSink, EnquiryDesk, Error, Fork, Shell, SurfaceSink};
-use crate::wire::WireChannel;
+use crate::spawn_grant::GrantNarrower;
+use crate::sync::LockExt as _;
+use crate::types::{DeferredSink, Desk, Fork, Shell};
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(unix)]
+mod wire;
+#[cfg(unix)]
+pub(crate) use wire::HOST_SILENCE_DEADLINE;
+#[cfg(unix)]
+pub use wire::run_engine;
 
 /// One compiled-in boot recipe the engine can be told, at `Attach`, to become.
 ///
@@ -33,957 +31,295 @@ use std::sync::{Arc, Mutex, mpsc};
 /// the function.
 pub struct EngineInstaller {
     pub tag: &'static str,
-    /// Prelude, host surface, libraries, env seeding, ledger arming — at
-    /// Attach, once.
-    pub boot: fn() -> Shell,
-    /// How a wire-seeded child's grant becomes a ceiling. A field and not a
-    /// registered hook: core has no base-tag lexicon to resolve a grant
-    /// against, and a host that boots an engine has to state the policy its
-    /// seeded children are held to rather than be trusted to install one.
-    pub narrow: crate::spawn_grant::GrantNarrower,
+    /// Prelude, host surface, libraries, ledger arming — at Attach, once. An
+    /// `Err` refuses the attach, in the recipe's own words.
+    pub boot: fn(&Attach) -> Result<Booted, String>,
+    /// How a seeded or adopted child's grant becomes a ceiling. A field and
+    /// not a registered hook: core has no base-tag lexicon to resolve a grant
+    /// against, so a host that boots an engine must state the policy its
+    /// children are held to.
+    pub narrow: GrantNarrower,
 }
 
-/// The engine's half of the severance law: [`crate::wire::write_or_sever`]
-/// recording into `fault` — the flag the reader loop consults on exit so a
-/// front-end that stopped reading is never mistaken for one that cleanly
-/// detached.
-///
-/// Every engine-side write crosses here: a surface emit, a deferred batch, an
-/// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
-/// stalled write becomes exactly the same fatal, non-blocking event a severed
-/// pipe already is.
-fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
-    crate::wire::write_or_sever(writer, frame, |_| fault.store(true, Ordering::SeqCst))
+/// What a recipe boots.
+pub struct Booted {
+    pub shell: Shell,
+    /// Whatever must live as long as the engine — a scratch directory, say.
+    pub keep: Box<dyn Send>,
 }
 
-/// Writes `Event::Surface` frames as values are produced, stamped at emit time
-/// with whatever dispatch is then in flight.
-struct ChannelSurfaceSink {
-    current_dispatch: Arc<AtomicU64>,
-    writer: Arc<Mutex<WireChannel>>,
-    fault: Arc<AtomicBool>,
+/// One session's engine: its shell, the scopes that stop its runs, and the
+/// installer it was born from.
+pub(crate) struct Engine {
+    pub(crate) shell: Shell,
+    scopes: Arc<Scopes>,
+    installer: &'static EngineInstaller,
+    /// Declared after `shell`, so it outlives the shell's teardown.
+    _keep: Box<dyn Send>,
 }
 
-impl crate::types::EventSink for ChannelSurfaceSink {
+/// Where a carrier sends one dispatch's events; `false` if it could not.
+pub(crate) type Outlet = Arc<dyn Fn(DispatchId, Event) -> bool + Send + Sync>;
+
+/// One dispatch's host-facing rails, as its carrier lays them.
+pub(crate) struct Rails {
+    pub(crate) outlet: Outlet,
+    pub(crate) deferred: Option<Arc<dyn DeferredSink>>,
+    pub(crate) desk: Desk,
+    pub(crate) fork: Fork,
+}
+
+/// A dispatch's live surface: every value leaves stamped with its dispatch.
+struct Surface {
+    id: DispatchId,
+    outlet: Outlet,
+}
+
+impl crate::types::EventSink for Surface {
     fn emit(&self, ev: &FOValue) {
-        let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
-        let _ = engine_write(
-            &self.writer,
-            &self.fault,
-            &Frame::Event(id, Event::Surface(ev.clone())),
-        );
+        (self.outlet)(self.id, Event::Surface(ev.clone()));
     }
 }
 
-/// A detached worker's batch outlives the run that spawned it, so it has no
-/// dispatch to stamp and rides `Frame::Session` instead.
-struct ChannelDeferredSink {
-    writer: Arc<Mutex<WireChannel>>,
-    fault: Arc<AtomicBool>,
-}
-
-impl crate::types::DeferredSink for ChannelDeferredSink {
-    fn deliver(&self, batch: Vec<FOValue>) {
-        let _ = engine_write(
-            &self.writer,
-            &self.fault,
-            &Frame::Session(SessionEvent::DeferredSurface(batch)),
-        );
-    }
-}
-
-/// A cancel trips the enquiring run's scope from the reader thread, never this
-/// rendezvous, so the park must poll; this bounds how stale a cancel can go.
-const ENQUIRY_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(75);
-
-/// Wake cadence while armed: brisk enough to notice a death, slow enough that
-/// an idle engine does not spin.
-const TICK: Duration = Duration::from_secs(1);
-
-/// The armed silence the engine reads as the front-end's death — six times the
-/// host's default 5s ping interval, so no scheduling jitter can fake one.
-pub(crate) const HOST_SILENCE_DEADLINE: Duration = Duration::from_secs(30);
-
-/// How long the engine tolerates a silent front-end and a stalled write before
-/// declaring it dead. The two deadlines are conceptually distinct — one
-/// bounds an absent read, the other a stuck write — so a test that must see a
-/// write stall resolved without waiting out the production silence deadline
-/// gets its own brisk `Patience`, rather than the constant being hollowed out
-/// into a knob. Production always runs [`Patience::default`].
-#[derive(Debug, Clone, Copy)]
-struct Patience {
-    silence: Duration,
-    write_stall: Duration,
-}
-
-impl Default for Patience {
-    fn default() -> Self {
-        Self {
-            silence: HOST_SILENCE_DEADLINE,
-            write_stall: HOST_SILENCE_DEADLINE,
-        }
-    }
-}
-
-/// Bounds the settle against a run that ignores cancellation, so a dead peer
-/// can never wedge the exit. The bound is paid for in cleanup: the exit runs no
-/// destructor on the worker's thread, so an atomic write still in flight at the
-/// bound leaves its staged `.ral-write.tmp` sibling behind.
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
-
-const SETTLE_POLL: Duration = Duration::from_millis(50);
-
-/// The wire engine's enquiry desk. `enquire` mints an [`EnquiryId`], writes
-/// `Event::Enquiry` inside the in-flight dispatch, and parks on a oneshot
-/// registered under that id until the front-end's `Frame::Answer` sends down
-/// it — or the run's own cancel scope fires, polled at the receive timeout.
-struct WireDesk {
-    writer: Arc<Mutex<WireChannel>>,
-    fault: Arc<AtomicBool>,
-    /// Stamped by the worker, so an enquiry names the run that raised it.
-    current_dispatch: Arc<AtomicU64>,
-    next_eid: AtomicU64,
-    /// The answering half of every live park; the parked `enquire` owns the
-    /// receiving half, so an id absent here has no park left to serve.
-    /// Every mutation is a whole-entry insert or remove, so poison here is
-    /// recovered ([`LockExt`]) rather than propagated.
-    parked: Mutex<HashMap<EnquiryId, mpsc::SyncSender<Result<FOValue, EnquiryError>>>>,
-}
-
-impl WireDesk {
-    /// Called from the reader loop. An answer whose park has gone finds no
-    /// sender, or races its receiver's drop and fails to send; either way it
-    /// is dropped.
-    fn fill(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
-        let park = self.parked.lock_ignore_poison().remove(&eid);
-        if let Some(tx) = park {
-            let _ = tx.send(answer);
-        }
-    }
-}
-
-impl EnquiryDesk for WireDesk {
-    fn enquire(
-        &self,
-        req: FOValue,
-        cancel: &crate::process::CancelScope,
-    ) -> Result<FOValue, Error> {
-        let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
-        let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
-        // Registered before the write: the answer may be back before this
-        // thread reaches the park below.
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.parked.lock_ignore_poison().insert(eid, tx);
-
-        if engine_write(
-            &self.writer,
-            &self.fault,
-            &Frame::Event(id, Event::Enquiry(eid, req)),
-        )
-        .is_err()
-        {
-            self.parked.lock_ignore_poison().remove(&eid);
-            return Err(Error::new("enquiry lost: the host connection is down", 1));
-        }
-
-        // The sender leaves `parked` only into `fill`'s send or this park's own
-        // exit, so a disconnect can only trail an answer already returned.
-        const ORPHANED: &str = "an enquiry's sender outlives its park";
-
-        // Answer, then cancel, then park — in that order, so an answer already
-        // in hand outranks a cancel pending beside it, and an enquiry raised
-        // under an already-cancelled scope returns without parking at all. The
-        // park mints its error through `Error::cancelled`, as every poll point
-        // does.
-        let deliver = |answer: Result<FOValue, EnquiryError>| {
-            answer.map_err(|e| Error::new(e.message, e.status))
-        };
-        loop {
-            match rx.try_recv() {
-                Ok(answer) => return deliver(answer),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => unreachable!("{ORPHANED}"),
-            }
-            if let Some(cause) = cancel.cause() {
-                self.parked.lock_ignore_poison().remove(&eid);
-                return Err(Error::cancelled(cause));
-            }
-            match rx.recv_timeout(ENQUIRY_CANCEL_POLL) {
-                Ok(answer) => return deliver(answer),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => unreachable!("{ORPHANED}"),
-            }
-        }
-    }
-}
-
-/// A `Result` rather than a direct exit, so the refusal path is testable;
-/// `engine_session`, its only caller, does the exiting.
+/// The version check, then the installer-table lookup.
 fn resolve_installer<'a>(
     installers: &'a [EngineInstaller],
     proto_version: u32,
     installer: &str,
 ) -> Result<&'a EngineInstaller, String> {
-    use crate::protocol::PROTOCOL_VERSION;
     if proto_version != PROTOCOL_VERSION {
         return Err(format!(
-            "engine: protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
+            "protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
         ));
     }
     installers
         .iter()
         .find(|i| i.tag == installer)
-        .ok_or_else(|| format!("engine: unknown builtin installer '{installer}'"))
+        .ok_or_else(|| format!("unknown builtin installer '{installer}'"))
 }
 
-fn write_report(writer: &Mutex<WireChannel>, fault: &AtomicBool, id: DispatchId, report: Report) {
-    let _ = engine_write(writer, fault, &Frame::Event(id, Event::Report(report)));
-}
-
-/// The engine's rendezvous, held for one run or one probe. Winning a claim is
-/// the only way to mint one and only a `Dispatch` rides the channel, so the
-/// busy flag can never stand raised without work behind it.
-struct Dispatch {
-    id: DispatchId,
-    busy: Arc<AtomicBool>,
-    stamp: Arc<AtomicU64>,
-}
-
-impl Dispatch {
-    fn claim(busy: &Arc<AtomicBool>, stamp: &Arc<AtomicU64>, id: DispatchId) -> Option<Self> {
-        busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self {
-                id,
-                busy: busy.clone(),
-                stamp: stamp.clone(),
-            })
-    }
-}
-
-/// The one place the stamp and the flag are lowered, so no path can skip it —
-/// including an unwind out of the worker. Only infallible work belongs here: a
-/// panic raised during an unwind aborts the process.
-impl Drop for Dispatch {
-    fn drop(&mut self) {
-        self.stamp.store(0, Ordering::Relaxed);
-        self.busy.store(false, Ordering::Release);
-    }
-}
-
-/// Raised while the worker holds an item, lowered once that item's Report is
-/// on the wire. Admission ([`Dispatch`]) and this are different questions: a
-/// claim is released *before* its own report write, so only this answers the
-/// teardown's — is the worker still producing frames? A guard, like the claim,
-/// so an unwind cannot leave it raised.
-struct Writing(Arc<AtomicBool>);
-
-impl Writing {
-    fn raise(flag: &Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::Release);
-        Self(flag.clone())
-    }
-}
-
-impl Drop for Writing {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-/// Adopt the socket the front-end left on fd 3 and run the engine on it.
-///
-/// Only the adoption and the final `exit` live here; the protocol itself is
-/// [`engine_session`], separated so a test can drive a real engine over a
-/// [`WireChannel`] pair without leaving the process.
-///
-/// # Panics
-/// Panics if the inherited wire channel cannot be cloned for the writer.
-pub fn run_engine(installers: &[EngineInstaller]) -> ! {
-    // SAFETY: fd 3 is the socket inherited from the front-end
-    let stream = unsafe { UnixStream::from_raw_fd(3) };
-    // The handoff must leave fd 3 open across exec, so set CLOEXEC the instant
-    // the engine owns it: no external command a run spawns may inherit the wire.
-    if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {
-        eprintln!("engine: failed to set CLOEXEC on the wire fd: {e}");
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the process has adopted fd 3 and nothing else: no shell is booted, so there is no lease, no watched child and no staged write to unwind"
-        )]
-        std::process::exit(1);
-    }
-    let reader_ch = WireChannel::from_stream(stream);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the foreground, cancels the durable root, tears the hatched children down and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no ForegroundGuard can exist to strand."
-    )]
-    std::process::exit(engine_session(reader_ch, installers, Patience::default()));
-}
-
-/// The engine's whole protocol life over one already-open channel: `Attach`
-/// handshake, worker rendezvous, reader loop, teardown settle.
-///
-/// Returns the process exit code — `0` for a clean detach or EOF, `1` for a
-/// protocol fault, a read error, a dead worker, silence past the deadline, or
-/// a write that stalled past `patience.write_stall`: a front-end that stops
-/// reading is, within that bound, treated exactly as one that has gone
-/// silent. An unrecognised installer tag refuses as loudly as a version
-/// mismatch: an engine speaking the wrong builtins is exactly the incoherence
-/// this rail rules out.
-///
-/// # Panics
-/// Panics if the wire channel cannot be cloned for the writer.
-fn engine_session(
-    reader_ch: WireChannel,
-    installers: &[EngineInstaller],
-    patience: Patience,
-) -> i32 {
-    // A hatched parent starts writing only once this process exists, so the
-    // seed is taken before the wait for Attach: a seed larger than the
-    // socketpair's buffer would otherwise wedge parent and child. It is applied
-    // later, once Attach has selected and booted an installer.
-    let seed = match crate::hatch::seed_from_env() {
-        Ok(seed) => seed,
-        Err(msg) => {
-            eprintln!("engine: {msg}");
-            return 1;
+impl Engine {
+    /// Become what `attach` names: resolve its installer, boot the recipe,
+    /// seat the session's cwd and env, and apply a hatch `seed` if there is
+    /// one.
+    ///
+    /// # Errors
+    /// The attach refusal, in the words of whichever step refused.
+    pub(crate) fn boot(
+        installers: &'static [EngineInstaller],
+        attach: &Attach,
+        seed: Option<EngineSeed>,
+    ) -> Result<Self, String> {
+        let installer = resolve_installer(installers, attach.proto_version, &attach.installer)?;
+        let Booted { mut shell, keep } = (installer.boot)(attach)?;
+        shell.seed_cwd(attach.cwd.clone());
+        for (name, value) in &attach.env {
+            shell.set_env_var(name, value);
         }
-    };
+        // Gated on the env var, never the installer tag: only ral-daemon's
+        // closed environment sets it, so every recipe is jailed alike.
+        #[cfg(target_os = "linux")]
+        if std::env::var("RAL_GUEST").is_ok() {
+            shell.install_guest_jail(Arc::new(crate::process::jail::GuestJail::new(
+                std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
+                100_000,
+                crate::process::jail::JailLimits::default(),
+            )));
+        }
+        if let Some(seed) = seed {
+            seed.apply(&mut shell, installer.narrow)?;
+        }
+        Ok(Self::new(shell, installer, keep))
+    }
 
-    let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
-    writer_ch
-        .set_write_deadline(patience.write_stall)
-        .expect("set write deadline on engine channel");
-    let writer = Arc::new(Mutex::new(writer_ch));
-    let wire_fault = Arc::new(AtomicBool::new(false));
-    let mut reader_ch = reader_ch;
-
-    // Nothing but Attach is a legal first frame, so this is one read, not a
-    // loop: the engine speaks no shell until told a version and an installer.
-    let shell = match reader_ch.read_frame() {
-        Ok(Some(Frame::Attach {
-            endpoint,
-            cwd,
-            home,
-            rc_path,
-            proto_version,
+    /// An engine over a shell already booted.
+    pub(crate) fn new(
+        shell: Shell,
+        installer: &'static EngineInstaller,
+        keep: Box<dyn Send>,
+    ) -> Self {
+        let scopes = Arc::new(Scopes {
+            dispatches: shell.run_cancel_handle(),
+            root: shell.cancel_handle(),
+            slot: Mutex::default(),
+        });
+        Self {
+            shell,
+            scopes,
             installer,
-        })) => {
-            let target = match resolve_installer(installers, proto_version, &installer) {
-                Ok(target) => target,
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    let _ = engine_write(
-                        &writer,
-                        &wire_fault,
-                        &Frame::Session(SessionEvent::Refused(msg)),
-                    );
-                    return 1;
-                }
-            };
-            // Both restores skip when the value already holds: an in-process
-            // engine attaches with its host's own cwd and HOME, and must not
-            // disturb either.
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "engine cwd restore during Attach — sets engine process cwd, not Shell logical cwd"
-            )]
-            if std::env::current_dir().is_ok_and(|d| d != cwd)
-                && let Err(e) = std::env::set_current_dir(&cwd)
-            {
-                eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
-            }
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "engine HOME restore during Attach — process env, not Shell state"
-            )]
-            if std::env::var_os("HOME").as_deref() != Some(home.as_os_str()) {
-                // SAFETY: single-threaded engine startup, no other threads
-                unsafe {
-                    std::env::set_var("HOME", &home);
-                }
-            }
-            // Conveyed but unused: no terminal fds cross the socket, and rc
-            // loading belongs to the REPL host that owns the rc machinery.
-            let _ = endpoint;
-            let _ = rc_path;
-
-            let mut shell = (target.boot)();
-            // This process is the session's host, so its runs must fold the
-            // signals the process is sent, not just the `Control::Cancel` arm.
-            shell.face_signals();
-            // Only ral-daemon's closed environment sets RAL_GUEST. Gated on the
-            // env var and never on the installer tag, so every boot recipe is
-            // jailed alike without any of them knowing jails exist.
-            #[cfg(target_os = "linux")]
-            if std::env::var("RAL_GUEST").is_ok() {
-                shell.install_guest_jail(std::sync::Arc::new(
-                    crate::process::jail::GuestJail::new(
-                        std::path::PathBuf::from("/sys/fs/cgroup/ral-exec"),
-                        100_000,
-                        crate::process::jail::JailLimits::default(),
-                    ),
-                ));
-            }
-            // A wire-hatched child's whole reason for existing: the seed read
-            // before Attach becomes this shell's scope and ceiling before
-            // anything else runs.
-            if let Some(seed) = seed
-                && let Err(msg) = crate::hatch::apply_seed(seed, &mut shell, target.narrow)
-            {
-                eprintln!("engine: {msg}");
-                let _ = engine_write(
-                    &writer,
-                    &wire_fault,
-                    &Frame::Session(SessionEvent::Refused(msg)),
-                );
-                return 1;
-            }
-            shell
+            _keep: keep,
         }
-        Ok(Some(Frame::Detach) | None) => return 0,
-        Ok(Some(_)) => {
-            eprintln!("engine: expected Attach as the first frame");
-            return 1;
-        }
-        Err(e) => {
-            eprintln!("engine: read error awaiting attach: {e}");
-            return 1;
-        }
-    };
-
-    // The shell is booted and, where hatched, seeded: the engine now takes
-    // dispatches, and the front-end's `await_attached` unblocks.
-    let _ = engine_write(
-        &writer,
-        &wire_fault,
-        &Frame::Session(SessionEvent::Attached),
-    );
-
-    // A probe rides the same rendezvous as a run, so it serialises with
-    // dispatches for free: sent mid-run it gets "engine busy", the same arm a
-    // second dispatch gets.
-    enum WorkItem {
-        /// Boxed so a probe is not sized to `Run`'s stack footprint. The scope
-        /// is the one its frame is born under.
-        Run(Box<Run>, ForegroundScope),
-        Probe(FOValue),
     }
 
-    // Taken before the shell moves into the worker: the teardown must reach the
-    // shell's deferred workers without the shell in hand.
-    let root = shell.cancel_handle();
-    // Each dispatch hangs a child off this and is cancelled through it, so one
-    // dispatch's cancel cannot reach the next.
-    let dispatches = shell.run_cancel_handle();
-
-    // Lowered by the claimed `Dispatch`'s `Drop`, right before the worker
-    // writes its Report, so a probe or dispatch the front-end sends the
-    // instant it has the Report in hand is never refused as busy.
-    let busy = Arc::new(AtomicBool::new(false));
-    // The other half of the teardown's span: raised from the moment the worker
-    // takes an item until its Report is written.
-    let writing = Arc::new(AtomicBool::new(false));
-    let (run_tx, run_rx) = mpsc::channel::<(Dispatch, WorkItem)>();
-
-    let current_dispatch = Arc::new(AtomicU64::new(0));
-    let desk = Arc::new(WireDesk {
-        writer: writer.clone(),
-        fault: wire_fault.clone(),
-        current_dispatch: current_dispatch.clone(),
-        next_eid: AtomicU64::new(1),
-        parked: Mutex::new(HashMap::new()),
-    });
-    let surface = Arc::new(ChannelSurfaceSink {
-        current_dispatch: current_dispatch.clone(),
-        writer: writer.clone(),
-        fault: wire_fault.clone(),
-    });
-    let deferred = Arc::new(ChannelDeferredSink {
-        writer: writer.clone(),
-        fault: wire_fault.clone(),
-    });
-
-    // ── Worker thread: owns the Shell ──────────────────────────────
-    let worker_writer = writer.clone();
-    let worker_fault = wire_fault.clone();
-    let worker_desk = desk.clone();
-    let worker_writing = writing.clone();
-    std::thread::spawn(move || {
-        let mut shell = shell;
-        while let Ok((dispatch, item)) = run_rx.recv() {
-            let _writing = Writing::raise(&worker_writing);
-            let id = dispatch.id;
-            // `Shell::run` already catches, rolls back, and reports a panic in
-            // the run itself; this outer catch is for one escaping the report
-            // plumbing, or `answer_probe`'s own lock poisoning, either of which
-            // would otherwise kill the thread unreported.
-            let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match item {
-                WorkItem::Run(run, scope) => {
-                    // What the desk and the sinks read to stamp their frames.
-                    dispatch.stamp.store(id.0, Ordering::Relaxed);
-
-                    let req = crate::run::RunRequest {
-                        run: *run,
-                        surface: Some(surface.clone() as SurfaceSink),
-                        deferred: Some(deferred.clone() as Arc<dyn DeferredSink>),
-                        desk: Some(worker_desk.clone() as crate::types::Desk),
-                        fork: Some(Fork::Listen),
-                        lifecycle: Box::new(()),
-                    };
-                    let run_report = shell.run_under(&scope, req);
-                    run_report.into_report(shell.sources())
-                }
-                WorkItem::Probe(reading) => match answer_probe(&mut shell, &reading) {
-                    Ok(v) => Report::Ran {
-                        ending: crate::protocol::Ending::Settled {
-                            value: v,
-                            status: 0,
-                        },
-                        captured: None,
-                        trail: Vec::new(),
-                    },
-                    Err(message) => Report::Ran {
-                        ending: crate::protocol::Ending::Raised {
-                            rendered: message,
-                            command_exit: false,
-                            single_command: false,
-                            status: 1.into(),
-                        },
-                        captured: None,
-                        trail: Vec::new(),
-                    },
-                },
-            }))
-            .unwrap_or_else(|_| {
-                Report::host_fault("engine: dispatch panicked in the engine worker")
-            });
-
-            // `dispatch` drops before this, never after: the same thread
-            // writes this Report and any later run's frames, so the wire
-            // order is unchanged, and a probe the front-end sends on
-            // receiving the Report is never refused "engine busy".
-            drop(dispatch);
-            write_report(&worker_writer, &worker_fault, id, report);
-        }
-    });
-
-    // Only the frame that wins the `false → true` flip may hand the worker
-    // work; the rest get the refusal below. `WorkerGone` is reachable because an
-    // unwind lowers the flag on its way out, so a closed channel here is a dead
-    // thread rather than a stale claim. `Busy` is distinguished from `Took` so a
-    // refused dispatch leaves the in-flight run's cancel handle standing.
-    enum Claimed {
-        Took,
-        Busy,
-        WorkerGone,
-    }
-    let claim = |id: DispatchId, item: WorkItem| -> Claimed {
-        if let Some(dispatch) = Dispatch::claim(&busy, &current_dispatch, id) {
-            if run_tx.send((dispatch, item)).is_ok() {
-                Claimed::Took
-            } else {
-                Claimed::WorkerGone
-            }
-        } else {
-            write_report(&writer, &wire_fault, id, Report::host_fault("engine busy"));
-            Claimed::Busy
-        }
-    };
-
-    // ── Reader loop (this thread) ──────────────────────────────────
-    /// How the reader loop ended — the distinction the parent needs, named
-    /// rather than spelled as an exit code, so no break site can report a
-    /// corrupted session as one that ended on request.
-    enum SessionEnd {
-        /// `Detach`, or the front-end's EOF.
-        Requested,
-        Corrupt,
+    pub(crate) fn scopes(&self) -> &Arc<Scopes> {
+        &self.scopes
     }
 
-    let mut armed = false;
-    // Silence counted in ticks this loop observed, never in elapsed clock: a
-    // suspended guest resumes having watched one tick, not the thousands its
-    // clock ran through, so waking is not the front-end's death.
-    let mut silent_ticks: u32 = 0;
-    // The dispatch a `Cancel` may name and the scope that stops it. Replaced,
-    // never cleared: a cancel that has outlived its run no longer finds the id
-    // it names, so it cannot touch the run that followed.
-    let mut cancellable: Option<(DispatchId, ForegroundScope)> = None;
-    // The converse: a `Cancel` naming a dispatch not yet arrived. The host
-    // stamps the id before taking the write lock, so a cancel raised in that
-    // window crosses first; it waits here for the `Dispatch` that claims it.
-    let mut foretold: Option<DispatchId> = None;
+    pub(crate) fn installer(&self) -> &'static EngineInstaller {
+        self.installer
+    }
 
-    let end = loop {
-        // Armed, park on a `TICK` so silence past the deadline is noticed;
-        // unarmed, block in `read_frame`, that front-end's death being EOF.
-        let read = if armed {
-            match reader_ch.poll_readable(Some(TICK)) {
-                Ok(true) => reader_ch.read_frame(),
-                Ok(false) => {
-                    silent_ticks += 1;
-                    if TICK.saturating_mul(silent_ticks) >= patience.silence {
-                        eprintln!(
-                            "engine: front-end silent for {}s — failing the in-flight run and exiting",
-                            patience.silence.as_secs()
-                        );
-                        break SessionEnd::Corrupt;
+    /// Run dispatch `id` under the scope [`Scopes::open`] minted for it.
+    pub(crate) fn run(
+        &mut self,
+        id: DispatchId,
+        run: Run,
+        rails: Rails,
+        scope: &ForegroundScope,
+    ) -> Report {
+        let req = crate::run::RunRequest {
+            run,
+            surface: Some(Arc::new(Surface {
+                id,
+                outlet: rails.outlet,
+            })),
+            deferred: rails.deferred,
+            desk: Some(rails.desk),
+            fork: Some(rails.fork),
+        };
+        self.shell.run_under(scope, req).into_report(&self.shell)
+    }
+
+    /// Read one probe class, at a run boundary.
+    pub(crate) fn probe(&self, reading: &FOValue) -> Result<FOValue, String> {
+        crate::protocol::reading::answer(&self.shell, reading)
+    }
+}
+
+/// What stops an engine's runs, shared with whichever thread carries its
+/// `Control`: each dispatch's scope hangs off `dispatches`, and everything —
+/// detached workers too — off `root`.
+pub(crate) struct Scopes {
+    dispatches: ForegroundScope,
+    root: DurableRoot,
+    slot: Mutex<Slot>,
+}
+
+#[derive(Default)]
+struct Slot {
+    /// The dispatch `Interrupt` and `Cancel` strike. Replaced, never cleared:
+    /// a settled run's scope is dead, so striking it is a no-op, and a stale
+    /// `Cancel` names an id the next run does not bear.
+    current: Option<(DispatchId, ForegroundScope)>,
+    /// A `Cancel` that overtook the dispatch it names.
+    foretold: Option<DispatchId>,
+}
+
+impl Scopes {
+    /// Mint `id`'s scope ahead of its run's frame, so a cancel raised
+    /// meanwhile has somewhere to land; struck already if a `Cancel` foretold
+    /// it.
+    pub(crate) fn open(&self, id: DispatchId) -> ForegroundScope {
+        let scope = self.dispatches.child();
+        let mut slot = self.slot.lock_ignore_poison();
+        if slot.foretold.take_if(|pending| *pending == id).is_some() {
+            scope.cancel(CancelCause::Explicit);
+        }
+        slot.current = Some((id, scope.clone()));
+        scope
+    }
+
+    /// One `Control` verb, meaning the same under either carrier.
+    pub(crate) fn apply(&self, control: Control) {
+        match control {
+            Control::Interrupt => self.strike(CancelCause::Interrupt),
+            Control::Cancel(id) => {
+                let mut slot = self.slot.lock_ignore_poison();
+                match &slot.current {
+                    Some((current, scope)) if *current == id => {
+                        scope.cancel(CancelCause::Explicit);
                     }
-                    continue;
+                    _ => slot.foretold = Some(id),
                 }
-                Err(e) => Err(e),
             }
-        } else {
-            reader_ch.read_frame()
-        };
+            Control::Terminate => self.end(CancelCause::Terminate),
+            Control::Abort => self.end(CancelCause::RootAbort),
+        }
+    }
 
-        let frame = match read {
-            Ok(Some(frame)) => frame,
-            Ok(None) => break SessionEnd::Requested, // EOF: gone, but cleanly
-            Err(e) => {
-                eprintln!("engine: read error: {e}");
-                break SessionEnd::Corrupt;
-            }
-        };
-        // Any frame at all is proof of life, not just a `Ping`.
-        silent_ticks = 0;
+    /// The dispatch `Interrupt` and `Cancel` strike now.
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Option<DispatchId> {
+        self.slot
+            .lock_ignore_poison()
+            .current
+            .as_ref()
+            .map(|(id, _)| *id)
+    }
 
-        match frame {
-            Frame::Dispatch(id, run) => {
-                // Minted ahead of the handoff, so a `Cancel` arriving while the
-                // worker is still waking finds a scope to land on.
-                let scope = dispatches.child();
-                if foretold.take_if(|pending| *pending == id).is_some() {
-                    scope.cancel(CancelCause::Explicit);
-                }
-                match claim(id, WorkItem::Run(run, scope.clone())) {
-                    Claimed::Took => cancellable = Some((id, scope)),
-                    Claimed::Busy => {}
-                    // The worker thread is gone: nothing will report this
-                    // dispatch, which is corruption, not a requested end.
-                    Claimed::WorkerGone => break SessionEnd::Corrupt,
-                }
-            }
-            Frame::Probe(id, reading) => match claim(id, WorkItem::Probe(reading)) {
-                Claimed::Took | Claimed::Busy => {}
-                Claimed::WorkerGone => break SessionEnd::Corrupt,
+    /// Cancel the dispatch in flight, if there is one.
+    pub(crate) fn strike(&self, cause: CancelCause) {
+        if let Some((_, scope)) = &self.slot.lock_ignore_poison().current {
+            scope.cancel(cause);
+        }
+    }
+
+    /// Cancel the durable root: every run, and every detached worker.
+    pub(crate) fn end(&self, cause: CancelCause) {
+        self.root.cancel(cause);
+    }
+}
+
+/// Engines for core's own tests, booted as every engine is.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use super::{Booted, EngineInstaller, Shell};
+    use crate::protocol::{Attach, IdentityTransport, Program, Report, Run};
+
+    /// An installer that never hatches, so it states the one policy a host
+    /// with no grant lexicon can: no seeded child.
+    pub(crate) const fn installer(
+        tag: &'static str,
+        boot: fn(&Attach) -> Result<Booted, String>,
+    ) -> EngineInstaller {
+        EngineInstaller {
+            tag,
+            boot,
+            narrow: |base, _| {
+                Err(format!(
+                    "this engine hatches no children, so it has no policy to resolve `{base}` by"
+                ))
             },
-            Frame::Answer(eid, answer) => {
-                desk.fill(eid, answer);
-            }
-            Frame::Control(Control::Cancel(did)) => {
-                // The dispatch's own scope, not the interrupt watermark: the
-                // watermark reaches only frames already born, and cancellation
-                // on a scope is sticky, so a run not yet started still reads it.
-                match &cancellable {
-                    Some((id, scope)) if *id == did => scope.cancel(CancelCause::Explicit),
-                    // Either it overtook the `Dispatch` it names or it names a
-                    // run already reported; ids are minted once, so holding it
-                    // can only ever serve the first.
-                    _ => foretold = Some(did),
-                }
-            }
-            Frame::Ping(seq) => {
-                armed = true;
-                let _ = engine_write(&writer, &wire_fault, &Frame::Pong(seq));
-            }
-            Frame::Pong(_) => {
-                eprintln!("engine: unexpected Pong — the engine never pings");
-            }
-            Frame::Attach { .. } => {
-                eprintln!("engine: unexpected second Attach");
-            }
-            Frame::Detach => break SessionEnd::Requested,
-            Frame::Event(..) => {
-                eprintln!("engine: unexpected Event frame");
-            }
-            Frame::Session(..) => {
-                eprintln!("engine: unexpected Session frame");
-            }
-        }
-    };
-
-    // ── Teardown settle ────────────────────────────────────────────
-    // The loop may have exited with a run in flight: cancel it and the durable
-    // root under it, then wait.
-    crate::process::request_foreground_cancel(CancelCause::Explicit);
-    root.cancel(CancelCause::Explicit);
-    crate::hatch::teardown_hatched();
-    // Claimed *or* still writing: a claim is released ahead of its own report
-    // write, so neither flag alone spans the work a settle must wait out.
-    let settling = || writing.load(Ordering::Acquire) || busy.load(Ordering::Acquire);
-    let settle_by = Instant::now() + SETTLE_TIMEOUT;
-    while settling() && Instant::now() < settle_by {
-        std::thread::sleep(SETTLE_POLL);
-    }
-    // A severed wire is never the requested end it may look like: a front-end
-    // that stopped reading loses its in-flight run exactly as one that fell
-    // silent does, and the exit code must say so.
-    match end {
-        SessionEnd::Requested if !wire_fault.load(Ordering::SeqCst) => 0,
-        _ => 1,
-    }
-}
-
-// ── Wire desk tests ───────────────────────────────────────────────────
-//
-// A peer `WireChannel` end plays the front-end and `fill` is called by hand, as
-// the reader loop calls it; each test states its own scope, so none touch
-// process-global state. A real wire child is out of reach here —
-// `WireTransport::new` re-execs the current binary with `--engine`, a flag only
-// the host binaries handle, so a core test binary would re-run the harness.
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
-mod wire_desk_tests {
-    use super::*;
-    use crate::process::{CancelCause, CancelScope};
-
-    /// The enquiry is stamped with the in-flight dispatch, and the answer
-    /// `fill` delivers is what `enquire` returns.
-    #[test]
-    fn enquire_round_trips_through_the_rendezvous() {
-        let (ours, mut peer) = WireChannel::pair().expect("socketpair");
-        let desk = Arc::new(WireDesk {
-            writer: Arc::new(Mutex::new(ours)),
-            fault: Arc::new(AtomicBool::new(false)),
-            current_dispatch: Arc::new(AtomicU64::new(7)),
-            next_eid: AtomicU64::new(1),
-            parked: Mutex::new(HashMap::new()),
-        });
-
-        let filler = desk.clone();
-        let front_end = std::thread::spawn(move || {
-            let frame = peer.read_frame().expect("read").expect("open");
-            let Frame::Event(did, Event::Enquiry(eid, req)) = frame else {
-                panic!("expected Event::Enquiry, got {frame:?}");
-            };
-            assert_eq!(did, DispatchId(7), "stamped with the in-flight dispatch");
-            assert_eq!(req, FOValue::Int { value: 41 });
-            filler.fill(eid, Ok(FOValue::Int { value: 42 }));
-        });
-
-        let answer = desk.enquire(FOValue::Int { value: 41 }, &CancelScope::default());
-        front_end.join().expect("front-end thread");
-        assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
-        assert!(
-            desk.parked.lock().unwrap().is_empty(),
-            "an answered park is deregistered"
-        );
-    }
-
-    /// A refusal raises with the front-end's own message and status, so an
-    /// enquiry fails alike under either transport.
-    #[test]
-    fn refused_enquiry_raises_message_and_status() {
-        let (ours, mut peer) = WireChannel::pair().expect("socketpair");
-        let desk = Arc::new(WireDesk {
-            writer: Arc::new(Mutex::new(ours)),
-            fault: Arc::new(AtomicBool::new(false)),
-            current_dispatch: Arc::new(AtomicU64::new(1)),
-            next_eid: AtomicU64::new(1),
-            parked: Mutex::new(HashMap::new()),
-        });
-
-        let filler = desk.clone();
-        let front_end = std::thread::spawn(move || {
-            let frame = peer.read_frame().expect("read").expect("open");
-            let Frame::Event(_, Event::Enquiry(eid, _)) = frame else {
-                panic!("expected Event::Enquiry, got {frame:?}");
-            };
-            filler.fill(eid, Err(EnquiryError::no_desk()));
-        });
-
-        let err = desk
-            .enquire(FOValue::Unit, &CancelScope::default())
-            .expect_err("refused");
-        front_end.join().expect("front-end thread");
-        assert_eq!(err.message, crate::types::NO_DESK);
-        assert_eq!(
-            err.status,
-            crate::types::Status::Code(crate::types::NO_DESK_STATUS)
-        );
-    }
-
-    fn lone_desk() -> (WireDesk, WireChannel) {
-        let (ours, peer) = WireChannel::pair().expect("socketpair");
-        let desk = WireDesk {
-            writer: Arc::new(Mutex::new(ours)),
-            fault: Arc::new(AtomicBool::new(false)),
-            current_dispatch: Arc::new(AtomicU64::new(1)),
-            next_eid: AtomicU64::new(1),
-            parked: Mutex::new(HashMap::new()),
-        };
-        (desk, peer)
-    }
-
-    /// A cancel raised *while* the enquiry is parked wakes it at the next poll
-    /// tick and deregisters it, so the answer that never came has nowhere to
-    /// land.
-    #[test]
-    fn cancel_wakes_a_parked_enquiry() {
-        let (desk, _peer) = lone_desk();
-        let scope = CancelScope::default();
-
-        // Long enough that `enquire` is provably parked before the cancel
-        // lands, so this test cannot pass by the pre-park check alone.
-        let lead = ENQUIRY_CANCEL_POLL * 2;
-        let canceller = {
-            let scope = scope.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(lead);
-                scope.cancel(CancelCause::Explicit);
-            })
-        };
-
-        let started = std::time::Instant::now();
-        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
-        let waited = started.elapsed();
-        canceller.join().expect("canceller thread");
-
-        assert_eq!(err.message, "cancelled");
-        assert!(
-            waited >= lead,
-            "the enquiry parked until the cancel: {waited:?}"
-        );
-        assert!(
-            desk.parked.lock().unwrap().is_empty(),
-            "a cancelled park deregisters itself"
-        );
-
-        // `EnquiryId(1)` is the one this park minted and abandoned.
-        desk.fill(EnquiryId(1), Ok(FOValue::Unit));
-        assert!(desk.parked.lock().unwrap().is_empty());
-    }
-
-    /// An enquiry raised under an already-cancelled scope answers at once: it
-    /// checks the cancel before it parks, so it never waits out a poll tick.
-    #[test]
-    fn cancel_before_the_enquiry_never_parks() {
-        let (desk, _peer) = lone_desk();
-        let scope = CancelScope::default();
-        scope.cancel(CancelCause::Explicit);
-
-        let started = std::time::Instant::now();
-        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
-        let waited = started.elapsed();
-
-        assert_eq!(err.message, "cancelled");
-        assert!(
-            waited < ENQUIRY_CANCEL_POLL,
-            "returned without parking for a tick: {waited:?}"
-        );
-        assert!(
-            desk.parked.lock().unwrap().is_empty(),
-            "a cancelled park deregisters itself"
-        );
-    }
-
-    #[test]
-    fn late_answer_for_a_dead_id_is_dropped() {
-        let (desk, _peer) = lone_desk();
-        desk.fill(EnquiryId(99), Ok(FOValue::Unit));
-        assert!(
-            desk.parked.lock().unwrap().is_empty(),
-            "an unknown id must not mint a park"
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::PROTOCOL_VERSION;
-
-    fn stub_boot() -> Shell {
-        Shell::new(crate::io::TerminalState::default())
-    }
-
-    /// These tests never hatch, so the honest policy is the one a host with no
-    /// grant lexicon states: no seeded child is admitted.
-    fn no_seeded_children(_grant: &str, _cwd: &str) -> Result<crate::types::Capabilities, String> {
-        Err("this engine hatches no children".to_string())
-    }
-
-    fn stub_installers() -> Vec<EngineInstaller> {
-        vec![EngineInstaller {
-            tag: "exarch-agent",
-            boot: stub_boot,
-            narrow: no_seeded_children,
-        }]
-    }
-
-    #[test]
-    fn resolve_installer_matches_known_tag() {
-        let installers = stub_installers();
-        match resolve_installer(&installers, PROTOCOL_VERSION, "exarch-agent") {
-            Ok(target) => assert_eq!(target.tag, "exarch-agent"),
-            Err(msg) => panic!("known tag must resolve, got {msg}"),
         }
     }
 
-    #[test]
-    fn resolve_installer_refuses_unknown_tag() {
-        let installers = stub_installers();
-        match resolve_installer(&installers, PROTOCOL_VERSION, "no-such-installer") {
-            Ok(_) => panic!("unknown tag must be refused"),
-            Err(msg) => {
-                assert!(msg.contains("unknown builtin installer"));
-                assert!(msg.contains("no-such-installer"));
-            }
-        }
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+    )]
+    fn bare(_attach: &Attach) -> Result<Booted, String> {
+        Ok(Booted {
+            shell: Shell::new(crate::io::TerminalState::default()),
+            keep: Box::new(()),
+        })
     }
 
-    #[test]
-    fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
-        let installers = stub_installers();
-        match resolve_installer(&installers, PROTOCOL_VERSION + 1, "exarch-agent") {
-            Ok(_) => panic!("a mismatched protocol version must be refused"),
-            Err(msg) => assert!(msg.contains("protocol version mismatch")),
-        }
-    }
-}
+    /// A shell with no prelude and no surface.
+    pub(crate) static BARE: [EngineInstaller; 1] = [installer("bare", bare)];
 
-// ── Engine-session tests ────────────────────────────────────────────────
-//
-// A real `engine_session` on a thread over one end of a `WireChannel` pair, the
-// test playing the host on the other; timing is poll-until with multi-second
-// slack, the dev fleet including a jittery VM. `engine_session` faces this
-// process's signals, so every test that dispatches must hold `REQUEST_SERIAL`
-// against the siblings that raise or spend an ambient cancel cause.
-#[cfg(test)]
-mod engine_session_tests {
-    use super::*;
-    use crate::process::cancel::REQUEST_SERIAL;
-    use crate::protocol::{PROTOCOL_VERSION, TerminalEndpoint};
-
-    const WAIT: Duration = Duration::from_secs(20);
-
-    fn boot() -> Shell {
-        static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
-        crate::boot::boot_shell(
-            crate::io::TerminalState::default(),
-            PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime),
-            &crate::boot::HostSurface::default(),
-        )
+    /// An attach to `installers`' first recipe, seated in the temp dir.
+    pub(crate) fn attach(installers: &[EngineInstaller]) -> Attach {
+        let temp = std::env::temp_dir();
+        Attach::new(installers[0].tag, temp.clone(), temp)
     }
 
-    /// This engine is attached to in-process and never hatches, so it states
-    /// the only policy a host without a grant lexicon can: no seeded child.
-    fn no_seeded_children(_grant: &str, _cwd: &str) -> Result<crate::types::Capabilities, String> {
-        Err("this engine hatches no children".to_string())
+    /// Boot `attach` in this process.
+    pub(crate) fn boot_at(
+        installers: &'static [EngineInstaller],
+        attach: &Attach,
+    ) -> IdentityTransport {
+        IdentityTransport::boot(installers, attach).expect("a test recipe boots")
     }
 
-    static INSTALLERS: &[EngineInstaller] = &[EngineInstaller {
-        tag: "test",
-        boot,
-        narrow: no_seeded_children,
-    }];
+    /// Boot `installers`' first recipe, seated in the temp dir.
+    pub(crate) fn boot(installers: &'static [EngineInstaller]) -> IdentityTransport {
+        boot_at(installers, &attach(installers))
+    }
 
-    /// One capturing run under the ⊤ capability ceiling.
-    fn run(src: &str) -> Run {
+    /// One capturing run of `src` under the ⊤ capability ceiling.
+    pub(crate) fn run(src: &str) -> Run {
         Run {
-            program: crate::protocol::Program::Source(src.into()),
+            program: Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: crate::types::GrantStack::root(),
             wall: None,
@@ -996,215 +332,41 @@ mod engine_session_tests {
         }
     }
 
-    /// `seen` holds the frames read past while awaiting a particular one, so a
-    /// later await can still find them.
-    struct Host {
-        ch: WireChannel,
-        seen: Vec<Frame>,
-        engine: std::thread::JoinHandle<i32>,
+    /// Dispatch `src` under the mute host.
+    pub(crate) fn eval(transport: &IdentityTransport, src: &str) -> Report {
+        crate::protocol::dispatch_to_report(transport, run(src), std::sync::Arc::new(()))
+            .expect("an identity transport answers synchronously")
     }
+}
 
-    fn start() -> Host {
-        start_with(Patience::default())
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn start_with(patience: Patience) -> Host {
-        let (host_ch, engine_ch) = WireChannel::pair().expect("socketpair");
-        let engine = std::thread::spawn(move || engine_session(engine_ch, INSTALLERS, patience));
-        let mut host = Host {
-            ch: host_ch,
-            seen: Vec::new(),
-            engine,
-        };
-        host.send(&Frame::Attach {
-            endpoint: TerminalEndpoint {
-                lease: None,
-                state: crate::io::TerminalState::default(),
-            },
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "[test] attach with the test process's own cwd/HOME so the engine's restore is a no-op"
-            )]
-            cwd: std::env::current_dir().expect("test cwd"),
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "[test] see cwd above"
-            )]
-            home: std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from),
-            rc_path: None,
-            proto_version: PROTOCOL_VERSION,
-            installer: "test".into(),
-        });
-        host
-    }
-
-    impl Host {
-        fn send(&mut self, frame: &Frame) {
-            self.ch.write_frame(frame).expect("write to engine");
+    #[test]
+    fn resolve_installer_matches_known_tag() {
+        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION, "bare") {
+            Ok(target) => assert_eq!(target.tag, "bare"),
+            Err(msg) => panic!("known tag must resolve, got {msg}"),
         }
+    }
 
-        fn dispatch(&mut self, id: u64, src: &str) {
-            self.send(&Frame::Dispatch(DispatchId(id), Box::new(run(src))));
-        }
-
-        /// Every frame that does not match is buffered, not discarded.
-        fn await_frame(&mut self, pred: impl Fn(&Frame) -> bool) -> Frame {
-            if let Some(i) = self.seen.iter().position(&pred) {
-                return self.seen.remove(i);
-            }
-            let deadline = Instant::now() + WAIT;
-            loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                assert!(
-                    self.ch.poll_readable(Some(left)).expect("poll engine"),
-                    "awaited frame must arrive within {WAIT:?}; buffered: {:?}",
-                    self.seen
-                );
-                let frame = self
-                    .ch
-                    .read_frame()
-                    .expect("read from engine")
-                    .expect("engine hung up mid-await");
-                if pred(&frame) {
-                    return frame;
-                }
-                self.seen.push(frame);
+    #[test]
+    fn resolve_installer_refuses_unknown_tag() {
+        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION, "no-such-installer") {
+            Ok(_) => panic!("unknown tag must be refused"),
+            Err(msg) => {
+                assert!(msg.contains("unknown builtin installer"));
+                assert!(msg.contains("no-such-installer"));
             }
         }
-
-        fn report(&mut self, id: u64) -> Report {
-            let frame = self.await_frame(
-                |f| matches!(f, Frame::Event(d, Event::Report(_)) if *d == DispatchId(id)),
-            );
-            let Frame::Event(_, Event::Report(report)) = frame else {
-                unreachable!("await_frame matched a Report");
-            };
-            report
-        }
-
-        fn run(&mut self, id: u64, src: &str) -> Report {
-            self.dispatch(id, src);
-            self.report(id)
-        }
-
-        fn cancel(&mut self, id: u64) {
-            self.send(&Frame::Control(Control::Cancel(DispatchId(id))));
-        }
-
-        fn detach_and_join(mut self) -> i32 {
-            self.send(&Frame::Detach);
-            self.engine.join().expect("engine thread")
-        }
-    }
-
-    fn ran_int(report: &Report) -> i64 {
-        match report {
-            Report::Ran {
-                ending:
-                    crate::protocol::Ending::Settled {
-                        value: FOValue::Int { value },
-                        ..
-                    },
-                ..
-            } => *value,
-            other => panic!("expected Ran Ok Int, got {other:?}"),
-        }
-    }
-
-    fn is_engine_busy(report: &Report) -> bool {
-        matches!(report, Report::Static { rendered, .. } if rendered.contains("engine busy"))
     }
 
     #[test]
-    fn dispatch_round_trips_to_a_report() {
-        let _g = REQUEST_SERIAL.lock();
-        let mut host = start();
-        assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        assert_eq!(host.detach_and_join(), 0);
-    }
-
-    /// One rendezvous, so one refusal arm for both riders.
-    #[test]
-    fn busy_refuses_a_second_dispatch_and_a_probe() {
-        let _g = REQUEST_SERIAL.lock();
-        let mut host = start();
-        host.dispatch(1, "sleep 15");
-        assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
-        host.send(&Frame::Probe(
-            DispatchId(3),
-            FOValue::Variant {
-                label: "cwd".into(),
-                payload: None,
-            },
-        ));
-        assert!(is_engine_busy(&host.report(3)));
-        assert_eq!(host.detach_and_join(), 0, "teardown cancels the sleep");
-    }
-
-    /// `sleep 30` proves promptness: it could not report inside the await
-    /// ceiling on its own. Cancelling with no delay proves the launch race is
-    /// closed — the scope exists before the worker has the work.
-    #[test]
-    fn cancel_settles_an_in_flight_run_promptly() {
-        let _g = REQUEST_SERIAL.lock();
-        let mut host = start();
-        host.dispatch(1, "sleep 30");
-        host.cancel(1);
-        host.report(1);
-        assert_eq!(host.detach_and_join(), 0);
-    }
-
-    #[test]
-    fn deferred_batch_crosses_as_a_session_frame() {
-        let _g = REQUEST_SERIAL.lock();
-        let mut host = start();
-        host.run(1, "let h = spawn { sleep 1 }");
-        let frame =
-            host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::DeferredSurface(_))));
-        let Frame::Session(SessionEvent::DeferredSurface(batch)) = frame else {
-            unreachable!("await_frame matched a deferred batch");
-        };
-        match batch.last() {
-            Some(FOValue::Variant { label, .. }) if label == "done" => {}
-            other => panic!("expected the batch to end in a `done` record, got {other:?}"),
+    fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
+        match resolve_installer(&testkit::BARE, PROTOCOL_VERSION + 1, "bare") {
+            Ok(_) => panic!("a mismatched protocol version must be refused"),
+            Err(msg) => assert!(msg.contains("protocol version mismatch")),
         }
-        assert_eq!(host.detach_and_join(), 0);
-    }
-
-    /// A front-end that keeps pinging, dispatches a run whose surface value
-    /// overflows the socket buffer, and then simply stops reading must be
-    /// treated exactly like one gone silent: the engine's own write stalls
-    /// past `patience.write_stall`, and that — not a graceful EOF — is what
-    /// ends the session. `engine_session` must return on its own, and with
-    /// `1`, never wedged in its reader loop forever.
-    #[test]
-    fn a_front_end_that_stops_reading_is_treated_as_dead() {
-        let _g = REQUEST_SERIAL.lock();
-        let brisk = Patience {
-            silence: Duration::from_millis(500),
-            write_stall: Duration::from_millis(300),
-        };
-        let mut host = start_with(brisk);
-        host.send(&Frame::Ping(1));
-
-        let payload = "x".repeat(4 * 1024 * 1024);
-        host.dispatch(1, &format!("let big = \"{payload}\"\nsurface `data $big\n"));
-
-        // No further read: the host abandons the connection exactly like a
-        // dead peer would, and never drains the surface write the engine now
-        // owes it.
-        let deadline = Instant::now() + WAIT;
-        while !host.engine.is_finished() {
-            assert!(
-                Instant::now() < deadline,
-                "engine_session must return once its surface write stalls past patience.write_stall"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let code = host.engine.join().expect("engine thread");
-        assert_eq!(
-            code, 1,
-            "a front-end that stopped reading must exit 1, not the clean-detach 0"
-        );
     }
 }

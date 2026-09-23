@@ -14,9 +14,7 @@ use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
-use crate::types::{
-    AuditFragment, BuiltinEntry, Convention, ReapNotice, Value, WorkerEntry, WorkerId,
-};
+use crate::types::{BuiltinEntry, Convention, ReapNotice, Value, WorkerEntry, WorkerId};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -27,17 +25,16 @@ impl Shell {
         &self.session.sources
     }
 
-    /// The session's durable cancel root, under which every run's foreground
-    /// scope is minted.  Crate-private: frame assembly stays behind the run
-    /// doors in `run.rs`.
+    /// The session's durable cancel root, under which every run and detached
+    /// worker hangs.
     pub(crate) fn durable_root(&self) -> &DurableRoot {
         &self.session.root
     }
 
     /// A clonable cancel handle: cancelling it unwinds the in-flight run at the
-    /// evaluator's poll points and stops the session's detached workers.  A
-    /// [`Shell::fork_session`] child is deaf to the ambient causes, so for that
-    /// one this handle is the *only* way to stop a running eval.
+    /// evaluator's poll points and stops the session's detached workers.  No
+    /// session folds the process's signals, so this — or a `Control` over it —
+    /// is how a host stops a running eval.
     pub fn cancel_handle(&self) -> DurableRoot {
         self.session.root.clone()
     }
@@ -58,9 +55,8 @@ impl Shell {
         self.session.exit_hints = hints;
     }
 
-    /// Install the guest process jail — called only by
-    /// [`crate::engine::run_engine`] when it sees `RAL_GUEST`, so every other
-    /// host bootstrap stays unaware that jails exist.
+    /// Install the guest process jail — called only by an engine's boot when
+    /// it sees `RAL_GUEST`, so every recipe stays unaware that jails exist.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn install_guest_jail(&mut self, jail: Arc<crate::process::jail::GuestJail>) {
         self.session.guest_jail = Some(jail);
@@ -89,26 +85,6 @@ impl Shell {
 
     pub fn stderr_mut(&mut self) -> &mut Sink {
         &mut self.io.stderr
-    }
-
-    /// Turn on top-level audit collection (`ral --audit`) under
-    /// `CapturePolicy::Bytes`, as `audit { … }` does: every command
-    /// observation must carry its stdout/stderr, which `Off` would leave empty.
-    ///
-    /// The session is its own extent — there is no later `close` to pair
-    /// with this open, only [`Self::take_audit_fragment`] draining what
-    /// accrued.  Unlike `try`/`audit`, which delimit a body inside one run,
-    /// this trail stays open for the process's whole life.
-    pub fn enable_audit(&mut self) {
-        self.local
-            .audit
-            .install_active_policy(Some(crate::types::CapturePolicy::Bytes));
-    }
-
-    /// Drain what the session trail collected since the last drain, leaving
-    /// it open for the next.
-    pub fn take_audit_fragment(&mut self) -> AuditFragment {
-        self.local.audit.take_fragment()
     }
 
     /// Every installed builtin's name, for tab completion.
@@ -146,7 +122,6 @@ impl Shell {
         &self.local.repl
     }
 
-    /// Handing the REPL host its own state back is the seam, not a leak.
     pub fn repl_mut(&mut self) -> &mut ReplScratch {
         &mut self.local.repl
     }
@@ -200,7 +175,7 @@ impl Shell {
     }
 
     /// Distinct lexical names visible in scope, a shadowed one counted once —
-    /// what `crate::protocol::answer_probe` serves exarch's `/resources` fold.
+    /// what `crate::protocol::reading` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
     pub(crate) fn binding_count(&self) -> usize {
         self.env.distinct_name_count()
@@ -220,8 +195,8 @@ impl Shell {
     }
 
     /// This run's ready-boundary housekeeping — [`crate::run::run_framed`] calls
-    /// it once per settled run, *before* the frame tears down, so it rides the
-    /// run's own streams and lands ahead of its report.
+    /// it once per settled source run, *before* the frame tears down, so it
+    /// rides the run's own streams and lands ahead of its report.
     ///
     /// The large-binding warning goes to stderr, reaching the model in its tool
     /// result rather than becoming a frontend card, and is ungated: stderr is
@@ -432,6 +407,7 @@ impl Shell {
     /// `grant` / `within` attenuation — with which a host asserts stack balance
     /// across a run boundary.  [`Shell::has_active_capabilities`] asks
     /// qualitatively.
+    #[cfg(feature = "test-util")]
     pub(crate) fn grant_depth(&self) -> usize {
         self.context.grants.len()
     }

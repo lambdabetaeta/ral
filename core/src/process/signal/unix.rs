@@ -2,8 +2,8 @@
 //! platform half of `super`.
 //!
 //! A termination signal unwinds nothing by itself: the handler translates it
-//! into a `CancelCause` on the ambient cells that every wait loop already
-//! polls, and ticks an escalation ladder whose third delivery forces `_exit`.
+//! into an ambient cause its host forwards to the engine as `Control`, and
+//! ticks an escalation ladder whose third delivery forces `_exit`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +14,7 @@ use rustix::termios::{OptionalActions, Termios};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::Signal;
-use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
+use crate::process::cancel::{CancelCause, request_interrupt, request_root_cancel};
 
 // ── Termination handler ────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ extern "C" fn handler(sig: libc::c_int) {
     // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
     // land on the durable root, so detached workers hear them too.
     if sig == libc::SIGINT {
-        request_foreground_cancel(CancelCause::Interrupt);
+        request_interrupt();
     } else {
         request_root_cancel(CancelCause::Terminate);
     }
@@ -55,15 +55,15 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 }
 
 extern "C" fn sigint_handler(_: libc::c_int) {
-    // The watermark reaches only the runs already in flight, so an idle Ctrl-C
-    // at the prompt stays the line editor's and detached workers, carrying no
-    // birth instant at all, are spared.
-    request_foreground_cancel(CancelCause::Interrupt);
+    // Forwarded as `Control::Interrupt`, which strikes only the dispatch in
+    // flight: an idle Ctrl-C stays the line editor's, and detached workers are
+    // spared.
+    request_interrupt();
 }
 
 /// The SIGINT handler the interactive shell installs in place of `handler`:
 /// non-escalating, and no delivery of its own — a run in flight hears the
-/// interrupt through its foreground scope.
+/// interrupt through its host's `Control`.
 pub fn interrupt_handler() -> extern "C" fn(libc::c_int) {
     sigint_handler
 }
@@ -510,7 +510,7 @@ pub fn interrupt_foreground_child() {
 mod tests {
     use super::super::{clear, escalation_pending};
     use super::*;
-    use crate::process::cancel::{DurableRoot, REQUEST_SERIAL, clear_root_request};
+    use crate::process::cancel::{REQUEST_SERIAL, clear_root_request};
 
     fn sigttou_is_blocked() -> bool {
         SigSet::thread_get_mask()
@@ -552,25 +552,38 @@ mod tests {
 
     // ── Signal translation ─────────────────────────────────────────────────
 
+    /// A listener on the ambient causes, and how long a forwarded one may take.
+    fn listen() -> (
+        crate::process::AmbientForward,
+        std::sync::mpsc::Receiver<crate::process::Ambient>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let guard = crate::process::forward_ambient(move |ambient| {
+            let _ = tx.send(ambient);
+        });
+        (guard, rx)
+    }
+    const OWED: std::time::Duration = std::time::Duration::from_secs(5);
+
     /// SIGINT interrupts the run in flight and leaves the durable root — and
     /// with it every detached worker — untouched.
     #[test]
-    fn handler_translates_sigint_into_foreground_interrupt() {
+    fn handler_translates_sigint_into_an_interrupt() {
+        use crate::process::Ambient;
         let _serial = REQUEST_SERIAL.lock();
         clear();
-
-        let root = DurableRoot::signal_facing();
-        let foreground = root.foreground(&root.worker());
+        let (_guard, heard) = listen();
 
         handler(libc::SIGINT);
         assert_eq!(
-            foreground.cause(),
-            Some(CancelCause::Interrupt),
-            "SIGINT must interrupt a facing run's foreground scope"
+            heard.recv_timeout(OWED),
+            Ok(Ambient::Interrupt),
+            "SIGINT must interrupt the run in flight"
         );
-        assert_eq!(
-            root.as_scope().cause(),
-            None,
+        assert!(
+            heard
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
             "SIGINT must not reach the durable root"
         );
         assert!(
@@ -580,35 +593,28 @@ mod tests {
         clear();
     }
 
-    /// SIGTERM and SIGHUP are shutdown requests, reaching the foreground run
-    /// *and* every detached worker under the durable root.  The watermark is
-    /// never stamped: the foreground hears the cause through its root ancestry.
+    /// SIGTERM and SIGHUP are one shutdown request, reaching the durable root
+    /// and with it every detached worker.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
+        use crate::process::Ambient;
         let _serial = REQUEST_SERIAL.lock();
         clear();
         clear_root_request();
-
-        let root = DurableRoot::signal_facing();
-        let foreground = root.foreground(&root.worker());
+        let (_guard, heard) = listen();
 
         handler(libc::SIGTERM);
         assert_eq!(
-            root.as_scope().cause(),
-            Some(CancelCause::Terminate),
-            "SIGTERM must terminate a facing session's durable root"
+            heard.recv_timeout(OWED),
+            Ok(Ambient::Root(CancelCause::Terminate)),
+            "SIGTERM must terminate the session's durable root"
         );
-        assert_eq!(
-            foreground.cause(),
-            Some(CancelCause::Terminate),
-            "the foreground observes the termination through its root ancestry"
-        );
-
         handler(libc::SIGHUP);
-        assert_eq!(
-            root.as_scope().cause(),
-            Some(CancelCause::Terminate),
-            "SIGHUP is the same shutdown request as SIGTERM"
+        assert!(
+            heard
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "SIGHUP is the same shutdown request as SIGTERM, already heard"
         );
         clear();
         clear_root_request();

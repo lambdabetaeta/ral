@@ -280,7 +280,6 @@ fn trace_io_wiring(
 ) {
     let sink = match &shell.io.stdout {
         crate::io::Sink::Terminal => "Terminal",
-        crate::io::Sink::External(_) => "External",
         _ => "Other",
     };
     crate::dbg_trace!(

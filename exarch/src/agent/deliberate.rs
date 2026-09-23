@@ -12,6 +12,7 @@ use crate::agent::attend::announce;
 use crate::agent::cancel;
 use crate::agent::digest::{EVICT_THRESHOLD, suffix_keep_budget};
 use crate::agent::event::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
+use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter, Item};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
@@ -369,6 +370,15 @@ impl Avatar {
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
                 break;
             }
+            // A severed seat runs nothing more, so the rest answer its loss.
+            if let Some(s) = self.seat.severed() {
+                let lost = EngineLost::running(&s, self.agent.run_dir()).to_string();
+                results.extend(std::iter::once(call).chain(it).map(|r| SessionToolResult {
+                    id: r.call_id,
+                    content: lost.clone(),
+                }));
+                break;
+            }
             results.push(self.invoke(call, emit));
         }
         // A cancelled batch admits nothing: a steer drained here would be
@@ -525,7 +535,7 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 mod tests {
     use super::*;
     use crate::agent::NoControl;
-    use crate::agent::cancel::{EvalReach, InterruptTarget};
+    use crate::agent::cancel::InterruptTarget;
     use crate::agent::testkit::*;
     use crate::bus::{AgentOutcome, Post, Stamped};
     use crate::provider::scripted::{Reply, Script};
@@ -542,7 +552,7 @@ mod tests {
     #[test]
     fn sub_agent_returns_through_reply() {
         let parent = Avatar::for_test("system").unwrap();
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        let mut child = parent.fork().expect("fork child");
         child.seed("write a report".into());
         let provider = scripted(
             "test-model",
@@ -575,16 +585,14 @@ mod tests {
     #[test]
     fn reply_cancels_live_descendants() {
         let parent = Avatar::for_test("system").unwrap();
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        let mut child = parent.fork().expect("fork child");
         child.seed("return early".into());
 
-        let direct_root = ral_core::process::DurableRoot::default();
         let mut direct = TestAgentSpec::new("direct");
         direct.parent = Some(child.agent.clone());
-        direct.reach = EvalReach::Identity {
-            eval_root: Some(direct_root.clone()),
-            interrupt_target: InterruptTarget::default(),
-        };
+        let transport = bare_transport();
+        direct.reach =
+            InterruptTarget::new(ral_core::protocol::Transport::control(&transport).clone());
         let direct = test_agent(&child.fleet, direct).expect("a live child of the replying agent");
         let mut grandchild = TestAgentSpec::new("grandchild");
         grandchild.parent = Some(direct.clone());
@@ -616,7 +624,9 @@ mod tests {
             "the direct child is cancelled by the reply itself"
         );
         assert!(
-            direct_root.as_scope().is_cancelled(),
+            ral_core::protocol::reading::session_ended(&transport)
+                .expect("an identity transport answers")
+                .is_some(),
             "the cascade cancels the abandoned child's eval layer too"
         );
         assert!(
@@ -938,12 +948,7 @@ mod tests {
     /// token `deliberate` watches, landing between `run_batch` and the drain.
     #[test]
     fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(T2_CANCEL_BUILTINS);
+        let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
 
         let token = cancel::Token::new();
         T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(token.clone()));
@@ -985,12 +990,7 @@ mod tests {
     /// exchange's request still carries the interrupted work in full.
     #[test]
     fn a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(T2_CANCEL_BUILTINS);
+        let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
         T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.cancel.clone()));
         T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
         session.agent.provider.swap(scripted(
@@ -1162,19 +1162,14 @@ mod tests {
     /// Pinned because it must keep holding with no wiring of its own.
     #[test]
     fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
-        let parent = Avatar::for_test("system").unwrap();
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
-        child
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let parent = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+        let mut child = parent.fork().expect("fork child");
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
         let _ = child.ral("spawn { test-clear-block-forever }", 30, &emit);
 
-        let entries = child.seat.shell_mut().shell.workers();
+        let entries = workers(&child);
         assert_eq!(entries.len(), 1, "the child's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 

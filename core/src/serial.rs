@@ -11,6 +11,8 @@
 //! tiers never cross.  `into_runtime`, given a [`WireDecoder`], is the sole
 //! wire→runtime conversion.
 
+pub mod datum;
+
 use crate::ir::Comp;
 use crate::types::{Binding, BuiltinTable, Env, Error, Shell, Value};
 use serde::{Deserialize, Serialize};
@@ -39,7 +41,7 @@ mod float_bits {
 /// is uninhabited by default, so a bare `FOValue` is first-order by
 /// construction rather than by a checked invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum FOValue<X = NoExt> {
     Unit,
     Bool {
@@ -278,9 +280,6 @@ impl WireDecoder {
     /// # Errors
     /// A row reference out of range or unresolved, a binding that fails to
     /// decode, or a cycle — a pass in which no row makes progress.
-    ///
-    /// `hatch` (Unix-only) is the sole production caller.
-    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     pub(crate) fn for_shell(shell: &Shell, scope_table: &ScopeTable) -> Result<Self, Error> {
         let n = scope_table.len();
         let mut dec = Self {

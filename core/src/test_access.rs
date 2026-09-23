@@ -1,14 +1,16 @@
-//! The reach `core/tests/*` has, and no host does.
+//! The reach tests have, and no host does.
 //!
-//! Core's integration tests link `ral-core` as an external crate, so an
-//! internal they assert on would otherwise have to be public to every
-//! embedder (`docs/ral-wiki/decisions/260909_pub-crate-by-default.md`).
+//! Core's integration tests and the front-ends' tests link `ral-core` as an
+//! external crate, so an internal they assert on would otherwise have to be
+//! public to every embedder
+//! (`docs/ral-wiki/decisions/260909_pub-crate-by-default.md`).
 //! Each door here goes through a `pub(crate)` item behaviourally, never by
 //! handing out core's representation, and the whole test-only reach is one
 //! auditable list.
 //!
 //! Gated on `test-util`, which `core`'s own dev-dependency on itself turns on
-//! for every test, example and benchmark target of this package.  With the
+//! for every test, example and benchmark target of this package, and a
+//! front-end's dev-dependency on `core` turns on for its own.  With the
 //! feature off the module does not exist, so the items behind it stay
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
@@ -130,4 +132,43 @@ pub fn wire_read_frame(
 /// The full ariadne rendering of one type error, as the REPL prints it.
 pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
     crate::diagnostic::format_type_error_ariadne(file, source, err)
+}
+
+/// The engine's answer to one probe request, read straight off `shell`.
+///
+/// # Errors
+/// The refusal a malformed or unknown request earns.
+pub fn answer_probe(
+    shell: &Shell,
+    req: &crate::serial::FOValue,
+) -> Result<crate::serial::FOValue, String> {
+    crate::protocol::reading::answer(shell, req)
+}
+
+/// How many workers the engine behind `transport` still holds.
+///
+/// # Errors
+/// As [`crate::protocol::reading::cwd`].
+pub fn worker_count(
+    transport: &dyn crate::protocol::Transport,
+) -> Result<u64, crate::protocol::ProbeError> {
+    use crate::protocol::reading::{Class, read};
+    read(transport, Class::WorkerCount, None)
+}
+
+/// How many capability frames the engine behind `transport` carries.
+///
+/// # Errors
+/// As [`crate::protocol::reading::cwd`].
+pub fn grant_depth(
+    transport: &dyn crate::protocol::Transport,
+) -> Result<u64, crate::protocol::ProbeError> {
+    use crate::protocol::reading::{Class, read};
+    read(transport, Class::GrantDepth, None)
+}
+
+/// `Shell::workers` on the engine behind `transport`, each entry's handle
+/// included, for a test watching a worker outlive its engine.
+pub fn workers(transport: &crate::protocol::IdentityTransport) -> Vec<crate::types::WorkerEntry> {
+    transport.inspect(Shell::workers)
 }

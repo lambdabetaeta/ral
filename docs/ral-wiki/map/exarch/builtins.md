@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 451d1ab5
 generated_at_date: 2026-09-22
-covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
+covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/enquiry.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / builtins
@@ -89,12 +89,12 @@ frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]
 
 ## Legibility by lease class — `service`, `service-handle`
 
-There is no model-facing listing over the worker registry at all —
-`workers` was retired: a listing carrying live `Value::Handle`s cannot cross
+There is no model-facing listing over the worker registry at all: a listing
+carrying live `Value::Handle`s cannot cross
 the engine protocol (`SerialValue`'s decoder rejects them), and returning the
 registry as a language value was mislayered in the first place — enumeration,
 reaping, and caps belong to the host and the lease layer, never this door.
-Legibility now
+Legibility
 splits by class instead:
 
 - An ordinary `spawn`-born worker (`class: Worker`) gets no listing at all.
@@ -103,16 +103,14 @@ splits by class instead:
   reap card at death are the whole story
   ([[map/exarch/shell-eval|shell-eval]]).
 - A `service`-born worker (`class: Durable`) is bound only by legibility, and
-  that bound is now the same one an ordinary worker gets, plus one aggregate:
+  that bound is the same one an ordinary worker gets, plus one aggregate:
   the birth trail card (`worker #id cmd durable`,
   [[map/exarch/shell-eval|shell-eval]]) shown at the moment of the `service`
   call, and `/resources`' `workers.running[durable]` count. The register
-  once carried a protected `services` pin the host reconciled — one row per
-  live service, unwritable by the program — but that mechanism is deleted
-  outright, on no rationale beyond the operator's own: protected pins should
+  carries no host-reconciled `services` pin, because protected pins should
   not exist
   ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
-  2026-08-27 amendment). There is no per-service listing left; a durable
+  2026-08-27 amendment). There is no per-service listing; a durable
   worker's id must be read off its birth card or kept from the `Handle` the
   `service` call returned.
 
@@ -168,29 +166,32 @@ Every verb below is a `BuiltinEntry` in
 (`HARNESS_BUILTINS`, carried on `host_surface()` beside the atoms above — one
 surface for the boot install and the prompt's `builtin_index` alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
-over the rail [[map/core/engine-protocol|engine-protocol]] built. A
-verb's body validates its arguments engine-side and calls
-`shell.enquire(class)`; `exarch/src/fleet/desk.rs`'s `ExarchDesk` decodes the class
-label and answers from shared handles (`HostServices`) captured at
-install — never `&mut Agent` — installed per `ral` call in `Agent::run_shell`
-and swapped back to an absent desk immediately after. A closed label set the
-retiring JSON tools validated as a schema enum is an open row checked at the
-door instead of a closed variant type: an unknown label errors before any
-enquiry crosses, naming the legal set, rather than a static row-unification
-error with no room for a didactic message.
+over the rail [[map/core/engine-protocol|engine-protocol]] built. A verb's
+body reads the model's argument, as first-order data, into a `Request` and
+calls `shell.enquire` with it; `exarch/src/fleet/desk.rs`'s `ExarchDesk`
+decodes the same `Request` and matches it exhaustively, answering from shared
+handles (`HostServices`) captured at install — never `&mut Agent` — installed
+per `ral` call in `Agent::run_shell` and swapped back to an absent desk
+immediately after. The door then admits the host's answer only in the shape
+the request owes (`Request::owed`). A closed label set is an open row checked
+at the door instead of a closed variant type: an unknown label errors before
+any enquiry crosses, naming the legal set, rather than a static
+row-unification error with no room for a didactic message.
 
-**The desk answers five classes, each a tagged family.**
-`` `exarch-agents ``, `` `exarch-schedules ``, `` `exarch-context ``,
-`` `exarch-transcript `` and `` `exarch-pins `` each carry
-a tag naming what to do (`family_tag`), and an unrecognised tag is as loud one
-level down as an unrecognised class is at the top (`unknown_tag`) — never a
-silent default. A family tag's own **record** crosses by field name, through
-`FOValue::try_from(&Value)` and out through `Fields`, `` `evict ``'s and
-`` `grep ``'s included. The desk's decode is not a
-duplicate of the builtin's door but the **trust boundary**: the door checks
-engine-side so a bad value reaches the model with the parser's own message, and
-the desk checks again because a guest can send whatever it likes — which is why
-`CronSchedule::parse` runs on both sides deliberately.
+**One vocabulary, typed once: `exarch/src/fleet/enquiry.rs`.** The desk
+answers five classes, each a `Family` of tags — `` `exarch-agents ``,
+`` `exarch-schedules ``, `` `exarch-context ``, `` `exarch-transcript `` and
+`` `exarch-pins `` — every class, tag, field and answer a `Datum`, with one
+`encode` and one strict, total `decode`. An unrecognised tag is as loud one
+level down as an unrecognised class is at the top, the refusal offering the
+tags the family takes; a tag's record crosses by field name, strict in its
+keys (`record!`), `` `evict ``'s and `` `grep ``'s included. Because door and
+desk decode with the one function, they refuse in the one wording. The
+desk's decode is still not a duplicate of the door's but the **trust
+boundary**: the door refuses engine-side so a bad value reaches the model with
+the parser's own message, and the desk refuses again because a guest can send
+whatever it likes — which is why a cron expression is parsed
+(`CronSchedule::parse`, inside the one decode) on both sides.
 
 ### Context stewardship
 
@@ -338,7 +339,7 @@ so the model has the address before it asks for one.
   wider than what it spawned. The climb stops at a root, so one `/branch` tab
   never lists another's. `` `read `` answers `[name: Str, reply: α]`,
   the value a replied child deposited, which is why the family's answer type is
-  a bare `α` (the `` exarch-pins `read `` precedent) rather than the roster it once was
+  a bare `α` (the `` exarch-pins `read `` precedent) rather than a roster
   ([[decisions/260826_reply-parks|reply-parks]]). `` `reply `` is the sole
   return path of a returning agent — first-orderness checked at the door,
   refused on every non-returning agent with the desk's own didactic text, last
@@ -424,8 +425,7 @@ so the model has the address before it asks for one.
   register: `` `set ``/`` `clear `` write it, `` `read ``/`` `list `` read it
   back, and it is the register's only door — with the same
   foreground-only discipline `exarch-agents` and `exarch-context` already have: a call
-  inside `spawn { … }` errors rather than degrading. `` `set `` was legal
-  there before the merge; the uniformity is now the point.
+  inside `spawn { … }` errors rather than degrading.
   - `` `set [key: Str, body: Card] `` → `Unit`.
   - `` `clear <key> `` → `Unit`.
   - `` `read <key> `` → `∀α. F α`. The card pinned at `key`, canonically
@@ -439,8 +439,8 @@ so the model has the address before it asks for one.
     `` `read ``, not its content.
 
 Receipts and listings are ral records the model can bind, filter, and fan out
-over, rather than stringly-typed JSON it re-parses — the composability the
-retired tool form lacked. Acting verbs render as *acts* — the
+over, rather than stringly-typed JSON it re-parses — the composability a
+provider-advertised tool's JSON lacks. Acting verbs render as *acts* — the
 `Display::HarnessCall`/`Forensic::HarnessResult` rail pair
 ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; a spawn
 additionally derives a child tab);

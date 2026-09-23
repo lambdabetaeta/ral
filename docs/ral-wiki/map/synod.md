@@ -40,16 +40,19 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 ## synod/ — the library
 
 - `lib.rs` — the crate doc names the five differences from exarch. Every
-  mutex here and in exarch is locked through `ral_core::sync::LockExt`, now
-  `pub` as the workspace's one poison policy — exarch's and synod's own
-  local copies of it are gone.
-- `build.rs` — the Tauri build, plus the one thing the bundle cannot check for
-  itself: `boot_contract` reads `vm-image/out/boot/boot-manifest.txt` at the
-  resource map's own path and puts it to `ral_daemon::boot::check_media`, so
-  media whose boot contract is not this host's fails the *build* rather than
-  the guest's own reading of its command line
+  mutex here and in exarch is locked through `ral_core::sync::LockExt`,
+  `pub` as the workspace's one poison policy; neither crate keeps a copy of
+  its own.
+- `build.rs` — the Tauri build and nothing else (`tauri_build::build()`).
+- `examples/check-media.rs` — the one thing the bundle cannot check for
+  itself, run as `tauri.conf.json`'s `beforeBuildCommand`: it reads
+  `vm-image/out/boot/boot-manifest.txt` and puts it to both
+  `ral_daemon::boot::check_media` and `ral_core::protocol::check_media`, so
+  media whose boot contract or engine protocol is not this host's fails
+  *packaging* rather than the guest's own reading of its command line or the
+  engine's refusal of `Attach`
   ([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
-  `ral-daemon` is a build dependency for exactly this; absent media is not a
+  `ral-daemon` is a dev-dependency for exactly this; absent media is not a
   failure here, since the bundle is where Tauri names a missing resource.
 - `boot.rs` — the media this build ships, found and readied once.
   `boot_media()` looks in three places, each simply *a place a file might be*
@@ -79,7 +82,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   assembled through exarch's own section renderer (`exarch::prompt::render`)
   and grant rendering (`exarch::prompt::grant_summary`), over a `host_section`
   of synod's own that tells the agent guest truths only. The ral language
-  body itself is now exarch's shared `data/ral.md`, included verbatim
+  body itself is exarch's shared `data/ral.md`, included verbatim
   (`include_str!("../../exarch/data/ral.md")`), with synod's own
   `data/ral-examples.md` supplying the per-product examples beside it —
   exarch keeps its own `data/ral-examples.md` the same way for itself. One
@@ -91,7 +94,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   so synod's prompt composition stays on the shared construction rules.
 - `session.rs` — `Conversation`, one folder held open from first message to
   last, split by concern into `session.rs` itself plus
-  `session/{menu,signin,baseline,opening}.rs` (no `mod.rs`): `session.rs`
+  `session/{menu,signin,baseline,opening,engine_log}.rs` (no `mod.rs`): `session.rs`
   keeps `SYNOD`, `Choice`, `Conversation`, `seat_machine`, `unseat_machine`,
   `select_account`, `control_seat`, `net_seat`, and `resolve_tuning`,
   re-exporting the rest. `begin` opens the grant, boots the machine, and
@@ -110,9 +113,8 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   Before any of that, `begin` spawns the folder's opening walk on its own
   thread as a `session/baseline.rs` `Baseline`. That walk is stat-only —
   path, kind, size, `mtime_ns`, mode, and not one byte of the user's folder
-  read — so it is the same single walk that used to be a stat pre-flight
-  followed by a full-byte capture, and it costs a stat walk however large
-  the folder is. Nothing is copied, so nothing asks whether a copy would
+  read — so it is one walk, not a stat pre-flight followed by a full-byte
+  capture, and it costs a stat walk however large the folder is. Nothing is copied, so nothing asks whether a copy would
   fit: there is no store, no free-space pre-flight, and no opening line
   about either. `begin` never joins the thread itself, so the boot runs
   alongside the walk rather than after it and the conversation opens the
@@ -138,7 +140,11 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   back — taken even after a failed run, since whatever changed before the
   failure still changed. That closing walk waits for fleet quiescence, not
   merely the trunk's own silence, so a helper still writing to the folder
-  never races the report. `end` closes the wire — the guest halts itself —
+  never races the report. **A lost engine ends the conversation**: after that
+  walk, `capture_a_dead_engine` reads the agent's severance, writes
+  `engine.log` while the machine is still up, and stores the `EngineLost`
+  sentence as `ended`, which that exchange and every later one answer with
+  rather than reaching the dead engine. `end` closes the wire — the guest halts itself —
   and only then joins a walk still running (a conversation closed before its
   first message). There is nothing to wipe: a conversation leaves nothing on
   disk at all. The trunk's fuel is
@@ -146,7 +152,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
   `Dial` implementation over `Machine::connect_guest` (below), so synod's
   office assistant may delegate to helpers that run concurrently in the
-  same guest, against the same folder, and in the same report.
+  same guest, against the same folder, and in the same report. Only `vz.rs`
+  implements `connect_guest`; on Hyper-V a spawn is refused with the trait's
+  `Unsupported` default.
 - `session/menu.rs` — the model picker: `menu`/`refresh_menu` list what the
   computer's credentials can reach (cached-instant and fetched-complete), and
   a `Choice` names an `AccountId`, model, and effort — an id and never a
@@ -163,13 +171,17 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   `Mutex` for exactly that reason, taken only for an account list or an
   admission, never across a fetch or a boot. `admit_login` and
   `pricing::ensure_loaded_blocking` (`session.rs`'s `resolve_tuning` calls
-  the latter) are the shared provider facts both front-ends now call;
+  the latter) are the shared provider facts both front-ends call;
   synod's own `Cargo.toml` names no `tokio` dependency. `prepare` itself
   only delegates: where synod's accounts come from is `accounts.rs`.
 - `session/opening.rs` — `Opening`, what the window shows before the first
-  message: who is answering, and at what effort. There is no line about the
-  folder any more — the copy it used to warn about, and the free space that
-  copy needed, are both gone.
+  message: who is answering, and at what effort. It says nothing about the
+  folder: nothing is copied, so there is no copy or free space to warn about.
+- `session/engine_log.rs` — `capture` writes `engine.log` into the run
+  directory when a conversation's engine is lost: the sentence the user was
+  shown, then the guest console's capped copy (`vm_manager::GuestConsole`),
+  the one place an engine's dying words reach the host. On macOS no copy is
+  kept, and the file says so rather than reading as a silent guest.
 - `accounts.rs` — **synod's own credential story**, and the one place it
   stops borrowing exarch's. A key reaches exarch through the environment
   because exarch is started from a shell; synod is double-clicked, inherits
@@ -181,7 +193,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   first, because it is the one a person can see and change from inside
   synod, and the environment underneath it — the same sweep and scrub as
   exarch, still run first because it is the step that must happen while the
-  process is single-threaded. That order is now one call:
+  process is single-threaded. That order is one call:
   `CredentialStore::admit_from` over a `SecretVault`, which `Keychain`
   implements — one call, not a two-step synod performs by hand.
   Which services *exist* is a third thing and no secret, and synod re-derives
@@ -258,7 +270,7 @@ cargo) is the one process: it holds the `Conversation` in-process — no child
 binary, no stdin framing. One window, three states: choose a folder and a
 model (with a Thinking control beside the Assistant picker) and describe the
 job; watch the assistant work, its narration streamed in; then read what
-changed and put anything back. `mod.rs` owns `Accounts` — the credential
+changed. `mod.rs` owns `Accounts` — the credential
 scrub's outcome paired with the model catalog, a private field reached only
 through `resolved()`. Both halves are `Arc<Mutex<_>>`, because a conversation
 outlives no store of its own: `Conversation::begin` builds an
@@ -284,12 +296,12 @@ commands — list, save or forget a key, declare or withdraw an endpoint — eac
 returning the fresh list and ending in the same `models-refreshed` event a
 sign-in ends in, so the picker converges the same way whichever door a
 credential arrived through; `sink.rs` is the bridge that streams the
-conversation's narration into the window, and knows the root agent's id so it
-can route by depth rather than by blindly assuming there is only one agent —
-the two comments that once justified id-blindness by `fuel: 0` are retired
-along with the fuel figure. A helper's `Token`/`Thinking`/`State` events are
-dropped (a helper's prose is not the conversation); its `Observation`/`Done`/`Notice`/
-`Resources` fold to `ProcessCard` exactly as the root's already do, and its
+conversation's narration into the window, and routes by agent id: its
+`Router` takes the first id it ever sees as the trunk's (`Router::root`),
+since a fresh trunk always turns before any `agent` call can reach the model,
+and every other id is a helper's. A helper's `Token`/`Thinking`/`State` events are
+dropped (a helper's prose is not the conversation); its `Observation`/`Notice`/`Context`/
+`Resources` fold to `ProcessCard` exactly as the root's do, `Done` is dropped for both, and its
 `Card` folds in beside them — deliberately, where the root's own `Card` stays
 first-class, since a helper's card is process, not conversation; `Usage`
 still counts, the bill being the exchange's whoever spent it. `Born`/`Died`
@@ -311,8 +323,7 @@ markdown block is closed. Every enum on this wire is `#[serde(rename_all = "snak
 against is written *from* the Rust rather than kept in step with it by hand:
 `just ui-check` generates it into `synod/ui/js/bindings/` and runs `deno
 check` over `synod/ui/js/`, which is the one check that reads both languages.
-A `case` the Rust has no variant for is now a type error — the shape the dead
-`listing` renderer had — and a variant the window ignores is caught by the
+A `case` the Rust has no variant for is a type error, and a variant the window ignores is caught by the
 `never` assertion in each switch's `default`. A mark's *payload* is
 deliberately not typed: those four shapes are exarch's card vocabulary, and
 typing them would put `ts-rs` in exarch to serve synod's window alone, so they
@@ -376,7 +387,7 @@ the unsettled tail alone, everything before the block still open is rendered
 once into the bubble and never touched again, and only the tail is rebuilt as
 tokens land. That is what makes rendering *every* token affordable, where
 re-parsing the whole message per token is quadratic in it (3.3s of main
-thread by 8,000 tokens, measured): the window no longer shows raw markdown
+thread by 8,000 tokens, measured): the window never shows raw markdown
 between flushes, and settled prose — with its coloured ral and its laid-out
 KaTeX — never reflows under the reader. Two facts decide where the cut may
 fall. A list or an indented code block is *rejoined* across a blank line by a
@@ -636,8 +647,8 @@ pinned **Ubuntu 26.04 LTS (resolute)** office userland (LibreOffice headless,
 the Python document stack, pandoc, OCR, wide fonts, full locales, no
 toolchain) via mmdebstrap → ext4 → zstd in a native container, checksummed and
 version-manifested. `build-boot.sh` builds the boot pair, stamping the git hash
-and `boot_contract=` into `boot-manifest.txt` — the one line a host build reads
-back — and the kernel is where the two guests part: arm64
+`boot_contract=`, and `proto_version=` into `boot-manifest.txt` — the two
+lines packaging reads back — and the kernel is where the two guests part: arm64
 takes Ubuntu's generic kernel apart to the raw Image `VZLinuxBootLoader` wants,
 amd64 keeps that same `vmlinuz` verbatim, because it already *is* the bzImage
 `LinuxKernelDirect` loads. So do the module sets — virtio on arm64; on amd64
@@ -658,8 +669,13 @@ and refuses by naming every candidate it looked for.
 
 ## What is not here
 
-Two things about the Windows machine, neither of them settled by the code
+Three things about the Windows machine, none of them settled by the code
 compiling:
+
+- **Delegation.** Neither Hyper-V `Machine` (`hcs/mod.rs`'s `Guest`,
+  `broker/client.rs`'s `BrokeredGuest`) implements `connect_guest`, so the
+  trait's `Unsupported` default refuses every helper a Windows trunk spawns;
+  only macOS delegates.
 
 - **A completed guest boot is not witnessed yet.** What is: a machine created
   and started through the broker, booting a kernel and an initramfs that formats

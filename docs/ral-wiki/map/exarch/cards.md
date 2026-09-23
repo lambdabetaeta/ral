@@ -202,7 +202,7 @@ two writes to one path being two facts, never merged.
 
 ## Machine log
 
-There is no independent operational trace any more: `record.jsonl`, written
+There is no independent operational trace: `record.jsonl`, written
 through `record::Emitter` at the seam, is the one durable log. A deliberate
 `Display::Card` records the rendered card itself — the mark tree *is* the fact
 here — while every other `Display`/`Forensic` commit carries only the
@@ -229,7 +229,7 @@ new list, and writes it back through
 is the kit's only state; there is no bound list threaded alongside it to drift
 from what's pinned.
 
-The agent library's surfacing constructors are gone: `view-text`, `grep-files`,
+The agent library has no surfacing constructors: `view-text`, `grep-files`,
 and `edit-hash`/`edit-replace` are Rust host builtins
 ([[map/exarch/io-surface|io-surface]]), their file I/O sunk below the redirect
 frame so each is one logical surface. An edit builds its own whole-file diff
@@ -239,7 +239,7 @@ landed against the empty side instead, an all-adds diff rather than a shape of
 its own. Both cards retain every hunk; disclosure belongs to the renderer, so
 `Tally` is the header, `Summary` its first twenty rows, and `Full` the
 complete diff. The read
-redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
+redirect and exec cards are likewise composed from core's I/O events. `agent.ral` carries
 only the `-around` readers, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).
 

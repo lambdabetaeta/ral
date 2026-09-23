@@ -7,9 +7,9 @@
 //! itself.
 
 use super::{ToolResult, ral_value_to_text};
-use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::protocol::Ending;
+use ral_core::protocol::reading::WorkerRow;
 use ral_core::serial::FOValue;
 use ral_core::types::{Observation, Observed};
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ pub(crate) fn tool_result(
     captured: Option<ral_core::Captured>,
     trail: &[FOValue],
     fragment: &ActFragment,
-    workers: &[ProbedWorker],
+    workers: &[WorkerRow],
     timeout_secs: u64,
 ) -> ToolResult {
     let ral_core::Captured { stdout, mut stderr } = captured.unwrap_or_default();
@@ -55,7 +55,7 @@ fn render(
     ending: &Ending,
     trail: &[FOValue],
     fragment: &ActFragment,
-    workers: &[ProbedWorker],
+    workers: &[WorkerRow],
     timeout_secs: u64,
 ) -> (String, i32) {
     let mut out = String::new();
@@ -74,6 +74,7 @@ fn render(
             command_exit,
             single_command,
             status,
+            ..
         } => {
             out.push_str(rendered);
             if *command_exit {
@@ -81,7 +82,7 @@ fn render(
             }
             status.get()
         }
-        Ending::Unreturnable { rendered } => {
+        Ending::Unreturnable { rendered, .. } => {
             out.push_str(rendered);
             ending.status()
         }
@@ -150,7 +151,7 @@ fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
 /// settled-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
-fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
+fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[WorkerRow]) -> Option<String> {
     let births = trail_worker_ids(trail);
     let mut cmds: Vec<String> = workers
         .iter()
@@ -201,8 +202,8 @@ mod tests {
         obs.to_wire()
     }
 
-    fn worker_row(id: u64, cmd: &str, running: bool) -> ProbedWorker {
-        ProbedWorker {
+    fn worker_row(id: u64, cmd: &str, running: bool) -> WorkerRow {
+        WorkerRow {
             id,
             cmd: cmd.to_string(),
             class: LeaseClass::Worker,
@@ -244,6 +245,7 @@ mod tests {
     fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
         let ending = Ending::Walled {
             rendered: "error: sleep 30\n".into(),
+            record: FOValue::Unit,
             status: 143.into(),
         };
         let trail = vec![worker_birth(1, "sleep 20")];
@@ -266,6 +268,7 @@ mod tests {
     fn raise_without_command_exit_carries_no_remedy() {
         let ending = Ending::Raised {
             rendered: "error: boom\n".into(),
+            record: FOValue::Unit,
             command_exit: false,
             single_command: true,
             status: 7.into(),
@@ -309,6 +312,7 @@ mod tests {
     fn an_unreturnable_result_says_its_handle_was_lost_with_it() {
         let ending = Ending::Unreturnable {
             rendered: "error: the result is a handle, and a run can return only data\n".into(),
+            record: FOValue::Unit,
         };
         let trail = vec![worker_birth(4, "block at turn 1, line 1")];
         let workers = vec![worker_row(4, "block at turn 1, line 1", true)];
@@ -324,7 +328,7 @@ mod tests {
         let trail: Vec<FOValue> = (0..NAMED as u64 + 2)
             .map(|id| worker_birth(id, "job"))
             .collect();
-        let workers: Vec<ProbedWorker> = (0..NAMED as u64 + 2)
+        let workers: Vec<WorkerRow> = (0..NAMED as u64 + 2)
             .map(|id| worker_row(id, "job", true))
             .collect();
         let (out, _) = render(
@@ -353,6 +357,7 @@ mod tests {
                 "raise",
                 Ending::Raised {
                     rendered: "error: boom\n".into(),
+                    record: FOValue::Unit,
                     command_exit: false,
                     single_command: true,
                     status: 7.into(),
@@ -363,6 +368,7 @@ mod tests {
                 "wall",
                 Ending::Walled {
                     rendered: "error: wall\n".into(),
+                    record: FOValue::Unit,
                     status: 143.into(),
                 },
                 124,
@@ -371,6 +377,7 @@ mod tests {
                 "unreturnable",
                 Ending::Unreturnable {
                     rendered: "error: the result is a block\n".into(),
+                    record: FOValue::Unit,
                 },
                 1,
             ),

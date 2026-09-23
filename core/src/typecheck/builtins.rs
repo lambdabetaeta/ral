@@ -890,9 +890,6 @@ pub mod scheme {
     }
     scheme!(unalias: [Ty::String] -> Ty::Unit);
 
-    // Shared by `fg`/`bg`/`disown`, registered by the REPL host in
-    // `ral/src/repl/host_handlers.rs`: the job to act on, named.
-    scheme!(int_to_unit: [Ty::Int] -> Ty::Unit);
     scheme!(string_to_unit: [Ty::String] -> Ty::Unit);
 
     // ── Divergence ───────────────────────────────────────────────────────

@@ -1,16 +1,34 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
-use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Escape, Settled};
-use ral_core::{
-    Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, diagnostic,
-    elaborator::elaborate, syntax::parser::parse,
+use ral_core::protocol::{
+    Ending, IdentityTransport, Program, Report, Run, Transport as _, dispatch_to_report,
 };
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum as _;
+use ral_core::types::{CapturePolicy, DeferredSink, GrantStack, Observation};
+use ral_core::{RequestedTerminalAccess, RunIo, RunStdin, diagnostic};
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use crate::PRELUDE;
+use crate::boot_door::{self, Boot};
 use crate::cli::{BatchOpts, RunOpts};
-use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, probe_terminal};
+use crate::platform::{exit_byte, local_attach, probe_terminal};
+use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS, batch_surface};
+
+/// Batch's session surface: a watched worker's lines on stdout.
+struct Stdout;
+
+impl DeferredSink for Stdout {
+    fn deliver(&self, batch: Vec<FOValue>) {
+        for v in &batch {
+            if let Some(line) = crate::surface::watch_line(v) {
+                println!("{line}");
+            } else if let Some(note) = crate::surface::dropped(v) {
+                eprintln!("{note}");
+            }
+        }
+    }
+}
 
 /// Run the script at `path`.
 #[allow(
@@ -47,22 +65,17 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 /// same envelope `audit { … }` returns, with the whole run as its body.  An
 /// escape (`exit`) is not a failure: the process still exits with its code,
 /// but the report reads `` `ok () ``.
-fn emit_audit_report(
-    result: &Settled<ral_core::types::Value>,
-    shell: &ral_core::types::Shell,
-    fragment: ral_core::types::AuditFragment,
-    pretty: bool,
-) {
-    use ral_core::types::{Value, error_record_of, report_value};
-    let outcome = match result {
-        Ok(v) => Ok(v.clone()),
-        Err(Break::Error(e)) => Err(error_record_of(e, shell)),
-        Err(Break::Escape(_)) => Ok(Value::Unit),
+fn emit_audit_report(ending: &Ending, trail: &[ral_core::serial::FOValue], pretty: bool) {
+    use ral_core::types::{Value, report_value};
+    let outcome = match ending {
+        Ending::Settled { value, .. } => Ok(Value::from(value.clone())),
+        Ending::Raised { record, .. }
+        | Ending::Walled { record, .. }
+        | Ending::Unreturnable { record, .. } => Err(Value::from(record.clone())),
+        Ending::Exited(_) => Ok(Value::Unit),
     };
-    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&report_value(
-        outcome,
-        &fragment.into_observations(),
-    ));
+    let trail: Vec<Observation> = trail.iter().filter_map(Observation::from_wire).collect();
+    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&report_value(outcome, &trail));
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
     } else {
@@ -74,9 +87,9 @@ fn emit_audit_report(
 /// Execute `source` non-interactively, under the name diagnostics will use
 /// for it: a script path, `<stdin>`, or `-c`.
 ///
-/// Parses, elaborates, optionally typechecks, and evaluates the program. When
-/// `--audit` is active, reports the whole execution as one report envelope and
-/// emits it as JSON on stderr.
+/// Boots a `batch` engine, dispatches its boot door, then the script; when
+/// `--audit` is active, reports the script's run as one report envelope on
+/// stderr. `--check` and `--dump-ast` are static, and boot nothing.
 ///
 /// Every batch source passes through here, so line endings are normalised
 /// here too — one door, one rule.
@@ -86,8 +99,7 @@ pub(crate) fn run_source(
     script_args: Vec<String>,
     opts: BatchOpts,
 ) -> ExitCode {
-    let normalized = ral_core::source::normalize_source_text(source);
-    let source = normalized.as_str();
+    let source = ral_core::source::normalize_source_text(source);
     let BatchOpts {
         audit,
         pretty,
@@ -98,200 +110,146 @@ pub(crate) fn run_source(
             capabilities,
         },
     } = opts;
+    if check || dump_ast {
+        return static_only(name, &source, dump_ast);
+    }
     ral_core::process::install_handlers();
-    // Seed the ANSI color gate so `_ansi-ok` and the prelude ansi-* constants
-    // work correctly in batch (script / -c) mode, not just the REPL.
+    // Seeds the ANSI color gate, so `_ansi-ok` and the prelude ansi-*
+    // constants work in batch too.
     let (_, terminal) = probe_terminal(false);
 
     // RAL_TIMING is a presence probe, not a basedir.
     #[allow(clippy::disallowed_methods)]
     let timing = std::env::var_os("RAL_TIMING").is_some();
     let t0 = std::time::Instant::now();
-    macro_rules! tick {
-        ($label:literal) => {
-            if timing {
-                eprintln!(
-                    "[timing] {:12} {:.3}ms",
-                    $label,
-                    t0.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        };
-    }
-
-    // The batch surface: core plus `watch` and `surface` (their docs explain
-    // why they're host-installed).  One value seeds `--check`'s table and
-    // boots the shell below, so the two agree by construction.
-    let host_surface = ral_core::HostSurface {
-        statics: vec![
-            ral_core::builtins::WATCH_BUILTIN,
-            ral_core::builtins::SURFACE_BUILTIN,
-        ],
-        captured: Vec::new(),
-    };
-    let check_table = host_surface.builtin_table();
-    let run_check =
-        |top: &ral_core::ir::Toplevel| -> Result<ral_core::ir::Toplevel, Vec<ral_core::TypeError>> {
-            ral_core::typecheck(
-                top,
-                ral_core::SessionSchemes::from_schemes(PRELUDE.schemes(), check_table.clone()),
-                None,
-            )
-        };
-
-    let ast = match parse(source) {
-        Ok(ast) => ast,
-        Err(e) => {
-            eprint!(
-                "{}",
-                diagnostic::format_parse_error_ariadne(name, source, &e)
+    let tick = |label: &str| {
+        if timing {
+            eprintln!(
+                "[timing] {label:12} {:.3}ms",
+                t0.elapsed().as_secs_f64() * 1000.0
             );
+        }
+    };
+
+    let terminal_access = if terminal.startup_foreground {
+        RequestedTerminalAccess::Leased
+    } else {
+        RequestedTerminalAccess::Denied
+    };
+    let attach = local_attach(BATCH, terminal, BatchConfig { args: script_args }.encode());
+    let transport = match IdentityTransport::boot(&INSTALLERS, &attach) {
+        Ok(transport) => transport,
+        Err(severed) => {
+            eprintln!("ral: {severed}");
             return ExitCode::from(2);
         }
     };
-    tick!("parse");
+    let _signals = transport.control().forward_signals();
+    transport.set_deferred_sink(Arc::new(Stdout));
+    let run = |program, trail| Run {
+        program,
+        script_name: name.to_string(),
+        caps: GrantStack::root(),
+        wall: None,
+        deferred_lease: None,
+        worker_cap: None,
+        io: RunIo::Inherit,
+        terminal: terminal_access,
+        stdin: RunStdin::Inherit,
+        trail,
+    };
+    let boot = Boot {
+        login: false,
+        no_rc: true,
+        recursion_limit,
+        capabilities: capabilities
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+    };
+    let booted = run(boot.program(), None);
+    if let Err(status) = boot_door::settle(dispatch_to_report(&transport, booted, Arc::new(()))) {
+        return ExitCode::from(exit_byte(status));
+    }
+    tick("boot");
 
+    let script = run(
+        Program::Source(source),
+        audit.then_some(CapturePolicy::Bytes),
+    );
+    let status = dispatch(&transport, script, audit.then_some(pretty));
+    tick("evaluate");
+    ExitCode::from(exit_byte(status))
+}
+
+/// Dispatch `run` under the mute host and print what it rendered — or, under
+/// `--audit` (`Some(pretty)`), its report envelope instead of a runtime error.
+/// The run's status.
+fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32 {
+    let report = match dispatch_to_report(transport, run, Arc::new(())) {
+        Ok(report) => report,
+        Err(severed) => {
+            eprintln!("ral: {severed}");
+            return 1;
+        }
+    };
+    match report {
+        Report::Static { rendered, status } => {
+            eprint!("{rendered}");
+            status
+        }
+        Report::Ran { ending, trail, .. } => {
+            match (&ending, audit) {
+                (_, Some(pretty)) => emit_audit_report(&ending, &trail, pretty),
+                (
+                    Ending::Raised { rendered, .. }
+                    | Ending::Walled { rendered, .. }
+                    | Ending::Unreturnable { rendered, .. },
+                    None,
+                ) => eprint!("{rendered}"),
+                _ => {}
+            }
+            ending.status()
+        }
+    }
+}
+
+/// `--check` and `--dump-ast`: static work on the source alone.
+fn static_only(name: &str, source: &str, dump_ast: bool) -> ExitCode {
+    let parse_failed = |e| {
+        eprint!(
+            "{}",
+            diagnostic::format_parse_error_ariadne(name, source, &e)
+        );
+        ExitCode::from(2)
+    };
+    let ast = match ral_core::syntax::parser::parse(source) {
+        Ok(ast) => ast,
+        Err(e) => return parse_failed(e),
+    };
     if dump_ast {
         for node in &ast {
             eprintln!("{node:#?}");
         }
         return ExitCode::SUCCESS;
     }
-
-    let bare = match elaborate(&ast, std::collections::HashSet::default(), name) {
-        Ok(comp) => comp,
-        Err(e) => {
-            eprint!(
-                "{}",
-                diagnostic::format_parse_error_ariadne(name, source, &e)
-            );
-            return ExitCode::from(2);
-        }
-    };
-    tick!("elaborate");
-
-    if check {
-        if let Err(errors) = run_check(&bare) {
+    let top =
+        match ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), name) {
+            Ok(top) => top,
+            Err(e) => return parse_failed(e),
+        };
+    let schemes = ral_core::SessionSchemes::from_schemes(
+        crate::PRELUDE.schemes(),
+        batch_surface().builtin_table(),
+    );
+    match ral_core::typecheck(&top, schemes, None) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(errors) => {
             eprint!(
                 "{}",
                 diagnostic::format_type_errors_ariadne(name, source, &errors)
             );
-            return ExitCode::from(1u8);
+            ExitCode::from(1)
         }
-        return ExitCode::SUCCESS;
     }
-
-    let mut shell = ral_core::boot::boot_shell(terminal, &PRELUDE, &host_surface);
-    // The script owns this process's signals: SIGINT interrupts its run,
-    // SIGTERM/SIGHUP terminate the session.
-    shell.face_signals();
-    shell.set_exit_hints(load_exit_hints());
-    tick!("builtins");
-    if let Some(n) = recursion_limit {
-        shell.set_stack_limit(n);
-    }
-    shell.set_args(script_args);
-
-    if let Err(code) = apply_session_capabilities(&mut shell, &capabilities) {
-        return code;
-    }
-    tick!("caps");
-
-    if audit {
-        shell.enable_audit();
-    }
-
-    if let Err(errs) = run_check(&bare) {
-        eprint!(
-            "{}",
-            diagnostic::format_type_errors_ariadne(name, source, &errs)
-        );
-        return ExitCode::from(1u8);
-    }
-    tick!("typecheck");
-
-    let terminal_access = if shell.terminal().startup_foreground {
-        RequestedTerminalAccess::Leased
-    } else {
-        RequestedTerminalAccess::Denied
-    };
-    let (ending, compact_root) = match shell.run(RunRequest {
-        run: Run {
-            program: Program::Source(normalized),
-            script_name: name.to_string(),
-            caps: ral_core::types::GrantStack::root(),
-            wall: None,
-            deferred_lease: None,
-            worker_cap: None,
-            io: RunIo::Inherit,
-            terminal: terminal_access,
-            stdin: RunStdin::Inherit,
-            trail: None,
-        },
-        surface: None,
-        deferred: None,
-        desk: None,
-        fork: None,
-        lifecycle: Box::new(()),
-    }) {
-        RunReport::Ran { ending, .. } => {
-            let compact_root = match &ending {
-                Ending::Raised {
-                    single_command,
-                    root,
-                    ..
-                }
-                | Ending::Walled {
-                    single_command,
-                    root,
-                    ..
-                } => single_command.then_some(*root),
-                _ => None,
-            };
-            (ending, compact_root)
-        }
-        // Batch already typechecked above, so a static report should not occur
-        // here; render it anyway rather than exit mutely if it ever does.
-        RunReport::Static { diagnostics } => {
-            let (rendered, status) = diagnostic::format_static_diagnostics(&diagnostics);
-            eprint!("{rendered}");
-            (Ending::Exited(status), None)
-        }
-    };
-    let result = ending.into_result();
-    tick!("evaluate");
-
-    let fragment = if audit {
-        shell.take_audit_fragment()
-    } else {
-        ral_core::types::AuditFragment::empty()
-    };
-
-    let exit_code = match &result {
-        Ok(_) => 0,
-        Err(Break::Escape(Escape::Exit(code))) => (*code).clamp(0, 255),
-        Err(Break::Error(e)) => {
-            if audit {
-                diagnostic::report_runtime_error(
-                    &mut std::io::sink(),
-                    shell.sources(),
-                    e,
-                    compact_root,
-                )
-            } else {
-                diagnostic::report_runtime_error(
-                    &mut std::io::stderr(),
-                    shell.sources(),
-                    e,
-                    compact_root,
-                )
-            }
-        }
-    };
-
-    if audit {
-        emit_audit_report(&result, &shell, fragment, pretty);
-    }
-
-    ExitCode::from(exit_byte(exit_code))
 }

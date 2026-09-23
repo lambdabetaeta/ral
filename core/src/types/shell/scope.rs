@@ -28,10 +28,11 @@ impl Shell {
         capabilities: Capabilities,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
+        let at = self.context.grants.len();
         self.context.grants.push(capabilities);
         self.audit_deputy_prefixes();
         let r = f(self);
-        self.context.grants.pop();
+        self.context.grants.remove(at, 1);
         r
     }
 
@@ -43,15 +44,13 @@ impl Shell {
         stack: GrantStack,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let depth = stack.len();
+        let (at, depth) = (self.context.grants.len(), stack.len());
         for layer in stack {
             self.context.grants.push(layer);
         }
         self.audit_deputy_prefixes();
         let r = f(self);
-        for _ in 0..depth {
-            self.context.grants.pop();
-        }
+        self.context.grants.remove(at, depth);
         r
     }
 

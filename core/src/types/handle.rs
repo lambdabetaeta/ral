@@ -78,7 +78,7 @@ pub struct HandleInner {
     /// rather than leaving the caller to.
     pub state: Arc<Mutex<HandleState>>,
     /// Buffered stdout, drained into `cached` on completion.  Empty for a
-    /// watched handle, whose bytes flow live through `Sink::LineFramed`.
+    /// watched handle, whose lines surface live through `Sink::Watch`.
     pub stdout_buf: ByteBuffer,
     pub stderr_buf: ByteBuffer,
     /// Where a *detached* worker's `surface` events land, the spawning run's

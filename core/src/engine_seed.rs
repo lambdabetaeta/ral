@@ -1,9 +1,10 @@
 //! The engine seat's seed wire: `hatch` packs a forked shell into an
-//! [`EngineSeed`] for a freshly spawned engine process.
+//! [`EngineSeed`] for a freshly spawned engine process, which applies it once
+//! its installer has booted.
 
-use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot};
-use crate::spawn_grant::SpawnGrant;
-use crate::subprocess::WireShell;
+use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, WireDecoder};
+use crate::spawn_grant::{GrantNarrower, SpawnGrant};
+use crate::subprocess::{WireShell, install_wire_shell};
 use crate::types::{Settled, Shell};
 use serde::{Deserialize, Serialize};
 
@@ -49,12 +50,41 @@ pub(crate) fn pack_seed(shell: &Shell, grant: SpawnGrant) -> Settled<EngineSeed>
     })
 }
 
+impl EngineSeed {
+    /// Hydrate the seed's scope and context into `shell`, then push the
+    /// child's own grant layer, resolved against the hydrated shell's cwd —
+    /// `narrow`, the booting installer's, answers for the base names core has
+    /// no lexicon for. The hydrated stack already carries the parent's layers,
+    /// so this only adds the child's.
+    ///
+    /// # Errors
+    /// Returns a sentence naming a decode failure, a restriction record the
+    /// capability decoder will not read, or whatever `narrow` refuses a base
+    /// with — a seeded child is refused rather than admitted above its ceiling.
+    pub(crate) fn apply(self, shell: &mut Shell, narrow: GrantNarrower) -> Result<(), String> {
+        let dec = WireDecoder::for_shell(shell, &self.scope_table).map_err(|e| {
+            format!(
+                "hatch: the seed's scope table failed to decode: {}",
+                e.message
+            )
+        })?;
+        install_wire_shell(self.shell, shell, &dec)
+            .map_err(|e| format!("hatch: the seed's context failed to decode: {}", e.message))?;
+        shell.env = self.captured.into_runtime(&dec).map_err(|e| {
+            format!(
+                "hatch: the seed's captured environment failed to decode: {}",
+                e.message
+            )
+        })?;
+        self.grant.narrow_onto(shell, narrow)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
-    use crate::serial::WireDecoder;
-    use crate::subprocess::{bare_child_shell, install_wire_shell};
+    use crate::subprocess::bare_child_shell;
     use crate::types::{Fork, Mooring, Nursery, Value};
     use std::sync::{Arc, OnceLock};
 
@@ -103,7 +133,7 @@ mod tests {
 
         // Arm B: wire — pack the (separately parked, equally scrubbed) fork
         // into an `EngineSeed` and hydrate a fresh shell from it, exactly as
-        // `hatch::apply_seed` does.
+        // `EngineSeed::apply` does.
         let id_b = parent
             .fork_into_nursery(&mooring)
             .expect("a nursery is installed");

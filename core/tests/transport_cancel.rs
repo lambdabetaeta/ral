@@ -1,37 +1,52 @@
-//! The transport's control door, driven the way a front-end drives it: a
-//! `Control::Cancel` arriving mid-dispatch must actually stop the run.
+//! The transport's control door, driven the way a front-end drives it: an
+//! interrupt arriving mid-dispatch must actually stop the run.
 //!
-//! The identity arm of `ControlSender::send` trips the `ForegroundScope` that
-//! `dispatch` files under the cancelled id, and `run_under` seats the run's
-//! frame beneath it.  The id is the hinge: the dispatch counter starts at one
-//! and `dispatch` restores nought on the way out, so a cancel naming
-//! `DispatchId(0)` — or any dispatch but the one in flight — finds nothing
-//! filed and is dropped on the floor.  Hence the cancel here is minted by
-//! `cancel_in_flight`, the call the REPL's Ctrl-C makes, rather than by hand.
-//! The wall clock is the discriminating half: the child would sleep far longer
-//! than the ceiling asserted here.
-//!
-//! The ambient interrupt watermark is the other, independent leg of the same
-//! fold, driven by SIGINT and exercised by the `run` and `process::cancel`
-//! suites; nothing here rests on the session being signal-facing.
+//! The identity arm of `ControlSender` strikes the `ForegroundScope` that
+//! `dispatch` opened for the dispatch in flight, and `run_under` seats the
+//! run's frame beneath it — the interrupt the REPL's Ctrl-C sends, which names
+//! no dispatch and so needs none minted by hand. The wall clock is the
+//! discriminating half: the child would sleep far longer than the ceiling
+//! asserted here.  A SIGINT reaches the engine the same way, forwarded by its
+//! host as this very `Control::Interrupt`.
 
 #![cfg(unix)]
 
-use ral_core::protocol::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
+use ral_core::engine::{Booted, EngineInstaller};
+use ral_core::protocol::{
+    Attach, IdentityTransport, Program, Report, Run, Transport, dispatch_to_report,
+};
 use ral_core::types::{CapturePolicy, GrantStack, Observed, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "must match EngineInstaller::boot's signature, which can genuinely refuse"
+)]
+fn bare(_attach: &Attach) -> Result<Booted, String> {
+    Ok(Booted {
+        shell: Shell::new(ral_core::io::TerminalState::default()),
+        keep: Box::new(()),
+    })
+}
+
+static BARE: [EngineInstaller; 1] = [EngineInstaller {
+    tag: "bare",
+    boot: bare,
+    narrow: |_, _| Err("this engine hatches no children".into()),
+}];
+
 #[test]
-fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
-    let shell = Shell::new(ral_core::io::TerminalState::default());
-    let transport = IdentityTransport::new(shell);
+fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
+    let temp = std::env::temp_dir();
+    let transport = IdentityTransport::boot(&BARE, &Attach::new("bare", temp.clone(), temp))
+        .expect("a bare engine boots");
 
     let sender = transport.control().clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
-        sender.cancel_in_flight();
+        sender.interrupt();
     });
 
     let started = Instant::now();
@@ -61,13 +76,12 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
     let Report::Ran { ending, trail, .. } = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
-    // `grace_signal` reserves SIGINT for `Interrupt` and opens with SIGTERM
-    // for `Explicit`, so the child dies of signal 15 and the run reports the
-    // death it actually died of.
+    // `grace_signal` reserves SIGINT for `Interrupt`, so the child dies of
+    // signal 2 and the run reports the death it actually died of.
     assert_eq!(
         ending.status(),
-        143,
-        "an explicitly cancelled child is torn down with SIGTERM"
+        130,
+        "an interrupted child is torn down with SIGINT"
     );
 
     // The cancel unwinds as a `Break::Error`, so the struck `/bin/sleep`

@@ -99,13 +99,10 @@ pub struct Context {
 pub struct SessionState {
     /// Detached workers (`spawn`, `watch`, `par`) parent here, not under the
     /// run's swappable foreground scope, so a foreground cancel never reaches
-    /// them.  Minted deaf to the ambient causes; [`Shell::face_signals`]
-    /// re-mints it facing, for the one host that owns the process's signals.
+    /// them.
     pub(crate) root: DurableRoot,
-    /// The scope a *top-level* run nests its foreground frame under.  A run
-    /// entered through [`Shell::run`](crate::Shell::run) hangs off this, while
-    /// [`Shell::run_nested`](crate::Shell::run_nested) hangs off the mooring of
-    /// the run it nests in, so the tree is the LIFO extent it claims to be.
+    /// The scope a run entered through [`Shell::run`](crate::Shell::run) nests
+    /// its foreground frame under.
     pub(crate) anchor: ForegroundScope,
     /// Durable source registry, read by hosts *after* a run returns to render
     /// its runtime errors.  Append-only for the whole session, so a nested
@@ -129,7 +126,7 @@ pub struct SessionState {
     /// backgrounded, tty-less, or off Unix.  Lent — never moved or cloned — to
     /// the handoff, and only when the run's [`TerminalAccess`] permits.
     pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
-    /// Installed by [`crate::engine::run_engine`] only when `RAL_GUEST` is set.
+    /// Installed by an engine's boot only when `RAL_GUEST` is set.
     /// Shared by `Arc` across every fork and spawned worker, so concurrent
     /// spawns from sibling Shells mint distinct uids and cgroups off one counter.
     pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
@@ -486,49 +483,30 @@ mod tests {
 
     /// The run door's nursery-emptying promise holds on unwind too:
     /// `NurseryGuard`'s `Drop` fires whether the body panics or returns, so a
-    /// fork parked in `pre_exec` and never adopted cannot outlive the run.
+    /// fork parked mid-run and never adopted cannot outlive the run.
     #[test]
     fn run_door_panic_still_empties_nursery() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let nursery = Nursery::default();
         let parked_id: Arc<Mutex<Option<NurseryId>>> = Arc::new(Mutex::new(None));
-
-        struct ParkThenPanic(Arc<Mutex<Option<NurseryId>>>);
-        impl crate::run::RunLifecycle for ParkThenPanic {
-            fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
-                let id = shell
-                    .fork_into_nursery(mooring)
-                    .expect("a nursery is installed on this run");
-                *self.0.lock().unwrap() = Some(id);
-                panic!("run-door test: deliberate panic after parking a fork");
-            }
-        }
+        let parked = parked_id.clone();
+        crate::run::tests::install_act(&mut shell, "park-then-panic", move |mooring, shell| {
+            let id = shell
+                .fork_into_nursery(mooring)
+                .expect("a nursery is installed on this run");
+            *parked.lock().unwrap() = Some(id);
+            panic!("run-door test: deliberate panic after parking a fork");
+        });
 
         let _ = shell.run(crate::run::RunRequest {
-            run: crate::protocol::Run {
-                program: crate::protocol::Program::Source("$[1 + 1]".into()),
-                script_name: "<test>".into(),
-                caps: crate::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: crate::run::RunIo::Capture,
-                terminal: crate::run::RequestedTerminalAccess::Denied,
-                stdin: crate::run::RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
             fork: Some(Fork::Park(nursery.clone())),
-            lifecycle: Box::new(ParkThenPanic(parked_id.clone())),
+            ..crate::run::tests::capture_req("park-then-panic")
         });
 
         let id = parked_id
             .lock()
             .unwrap()
-            .expect("pre_exec must park a fork before panicking");
+            .expect("the run must park a fork before panicking");
         assert!(
             nursery.adopt(id).is_none(),
             "a run-door panic must still empty the nursery on unwind"

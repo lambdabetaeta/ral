@@ -15,8 +15,7 @@ use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::AGENT_LEASE_IDLE;
 use crate::shell_eval;
 use crate::tui::DEMOTE_IDLE;
-use ral_core::protocol::{ProbeError, Severed};
-use ral_core::serial::FOValue;
+use ral_core::protocol::{Severed, reading};
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
@@ -320,6 +319,20 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
 }
 
 impl Avatar {
+    /// The engine's scratch and its size, both read where the scratch is.
+    ///
+    /// # Errors
+    /// The engine's severance.
+    pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
+        let Some(scratch) = self.seat.read(|t| reading::env_var(t, "EXARCH_SCRATCH"))? else {
+            return Ok(None);
+        };
+        let bytes = self
+            .seat
+            .read(|t| reading::path_bytes(t, Path::new(&scratch)))?;
+        Ok(Some((scratch, bytes)))
+    }
+
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
     /// registry and bindings, the inbox, the event log, the log-dir and
@@ -331,7 +344,7 @@ impl Avatar {
     fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.probe_workers()?;
+        let entries = self.seat.read(reading::workers)?;
         let mut running_worker = 0u64;
         let mut running_durable = 0u64;
         let mut settled = 0u64;
@@ -424,35 +437,16 @@ impl Avatar {
             self.current_provider().context_window(),
         ));
 
-        let probe_count = |label: &str| -> Result<u64, Severed> {
-            match self.seat.transport().probe(FOValue::Variant {
-                label: label.into(),
-                payload: None,
-            }) {
-                Ok(FOValue::Int { value }) => {
-                    #[allow(
-                        clippy::cast_sign_loss,
-                        reason = "probe binding-count is a non-negative cardinality"
-                    )]
-                    let count = value as u64;
-                    Ok(count)
-                }
-                Err(ProbeError::Severed(s)) => Err(s),
-                other => Err(self.seat.fault(Severed::Faulted(format!(
-                    "`{label} probe answered {other:?}"
-                )))),
-            }
-        };
         rows.push(ProbeRow::new(
             "bindings.count",
-            probe_count("binding-count")?,
+            self.seat.read(reading::binding_count)?,
             None,
             "reap",
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            probe_count("leased-binding-count")?,
+            self.seat.read(reading::leased_binding_count)?,
             None,
             "reap",
             Some(format!(
@@ -462,7 +456,7 @@ impl Avatar {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            probe_count("largest-binding-bytes")?,
+            self.seat.read(reading::largest_binding_bytes)?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             "warn",
             Some("shallow estimate; a closure's captures are never chased".to_string()),
@@ -476,10 +470,10 @@ impl Avatar {
             "warn",
             Some(log_dir.display().to_string()),
         ));
-        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH")? {
+        if let Some((scratch, bytes)) = self.scratch_bytes()? {
             rows.push(ProbeRow::new(
                 "disk.scratch",
-                dir_size(&std::path::PathBuf::from(&scratch)),
+                bytes,
                 None,
                 "warn",
                 Some(scratch),
@@ -721,12 +715,8 @@ mod tests {
     /// fallback when nothing has forked.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut session =
+            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
@@ -734,7 +724,8 @@ mod tests {
         session.ral("spawn { return 7 }", 30, &emit);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !session
-            .probe_workers()
+            .seat
+            .read(reading::workers)
             .expect("an identity seat never severs")
             .iter()
             .any(|w| !w.running)
@@ -831,8 +822,7 @@ mod tests {
         );
 
         // End the blocked worker so the test does not leak a live thread.
-        let workers = session.seat.shell_mut().shell.workers();
-        for entry in workers {
+        for entry in workers(&session) {
             entry
                 .handle
                 .cancel
@@ -844,21 +834,13 @@ mod tests {
     /// `last_observed` cell without touching it.
     #[test]
     fn resource_rows_renew_no_lease() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut session =
+            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.ral("spawn { test-clear-block-forever }", 30, &emit);
 
-        let entry = session
-            .seat
-            .shell_mut()
-            .shell
-            .workers()
+        let entry = workers(&session)
             .pop()
             .expect("the spawn registered its worker");
         let before = *entry.handle.last_observed.lock().unwrap();

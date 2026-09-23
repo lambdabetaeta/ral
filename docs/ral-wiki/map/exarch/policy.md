@@ -10,7 +10,7 @@ covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 [[map/core/capabilities|ral's capability lattice]] — from the CLI flags. The
 boundary *is* ral's grant: exarch never invents its own sandbox, it just hands a
 frozen `GrantStack` to the host that pushes it. There is no `Capabilities::meet`
-any more — composition is layering, and the stack's own per-check fold is the
+— composition is layering, and the stack's own per-check fold is the
 one meet that ever runs ([[decisions/260906_object-not-name|object-not-name]],
 [[map/core/capabilities|capabilities]]).
 
@@ -32,12 +32,12 @@ pushed layer**:
   [[decisions/260905_a-grant-does-not-hand-out-its-own-key|exarch's and synod's own credential files]]
   the same way, for every base but `dangerous`.
 
-Composition emits no confused-deputy warning. It used to: a stderr line naming
-every prefix both exec-admitted and writable. The predicate is not the one that
-matters — in-projection overlap escalates nothing and every bake-in requires it,
-so the line fired on every session naming `cwd:`, `/tmp`, and `tempdir:`, all
-three deliberate ([[design/grant|grant]] §Concessions). The report survives
-where it is asked for rather than announced: `ral`'s audit trail still records
+Composition emits no confused-deputy warning naming every prefix both
+exec-admitted and writable. That predicate is not the one that matters —
+in-projection overlap escalates nothing and every bake-in requires it, so such
+a line would fire on every session naming `cwd:`, `/tmp`, and `tempdir:`, all
+three deliberate ([[design/grant|grant]] §Concessions). The report lives
+where it is asked for rather than announced: `ral`'s audit trail records
 one `deputy` check per flagged prefix when a grant frame is entered
 ([[map/core/capabilities|capabilities]]).
 

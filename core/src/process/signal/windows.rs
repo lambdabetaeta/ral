@@ -20,7 +20,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{ESCALATION, Pgid, PgidPolicy};
-use crate::process::cancel::{CancelCause, request_foreground_cancel};
+use crate::process::cancel::request_interrupt;
 use crate::sync::LockExt as _;
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -32,7 +32,7 @@ pub fn install_handlers() {
     // exarch registers later, Windows runs the newest handler first, and its
     // Ctrl-C arm claims the event before this one runs.
     let _ = ctrlc::set_handler(|| {
-        request_foreground_cancel(CancelCause::Interrupt);
+        request_interrupt();
         let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
         match prev {
             0 => win_groups::break_all(),
@@ -48,14 +48,14 @@ pub fn install_handlers() {
     });
 }
 
-/// Cancel the foreground scope and fan `CTRL_BREAK_EVENT` out to every live,
+/// Raise an interrupt and fan `CTRL_BREAK_EVENT` out to every live,
 /// non-detached group — the Windows analogue of Unix's `interrupt_handler`.
 ///
 /// A frontend with its own exchange-cancel ladder (exarch) calls this in-process
 /// rather than re-injecting a console event, which would re-enter the escalating
 /// disposition [`install_handlers`] registers.
 pub fn relay_interrupt() {
-    request_foreground_cancel(CancelCause::Interrupt);
+    request_interrupt();
     win_groups::break_foreground();
 }
 

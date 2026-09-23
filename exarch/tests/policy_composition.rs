@@ -11,7 +11,7 @@
 
 use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
-use exarch::prompt::host_section;
+use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
 use ral_core::capability::FsOp;
 use ral_core::path::basedir::XdgKind;
 use ral_core::path::{NormalizedPrefix, SearchCwd, resolve_in_path};
@@ -297,7 +297,7 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let (stack, _) = for_invocation(&cwd, "minimal", None, &[]).expect("minimal composes");
-    let text = host_section(&stack, &dir);
+    let text = host_section(&stack, EXARCH);
 
     assert!(
         !text.contains("Ambient authority"),
@@ -321,21 +321,21 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let frozen_cwd = NormalizedPrefix::from_surface(&cwd).into_string();
     assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
     assert!(bullet(&text, "- fs write:").contains(&frozen_cwd), "{text}");
-    assert!(bullet(&text, "- scratch:").contains(&*dir.path().to_string_lossy()));
+    assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
 /// `dangerous` attenuates nothing, so the denial legend would describe an
 /// event that cannot happen: the summary collapses to one line, and still
-/// names the scratch path the agent needs.
+/// names the scratch the agent needs.
 #[test]
 fn the_grant_summary_collapses_for_an_unattenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
     let (stack, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    let text = host_section(&stack, &dir);
+    let text = host_section(&stack, EXARCH);
 
     assert!(text.contains("Ambient authority"), "{text}");
-    assert!(bullet(&text, "- scratch:").contains(&*dir.path().to_string_lossy()));
+    assert!(bullet(&text, "- scratch:").contains(SCRATCH_PLACEHOLDER));
 }
 
 /// A misspelt base names every live one back, and each name it offers really

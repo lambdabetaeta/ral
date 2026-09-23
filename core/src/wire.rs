@@ -31,7 +31,7 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the socket error if the pair cannot be made.
-    #[cfg(unix)]
+    #[cfg(all(unix, test))]
     pub(crate) fn pair() -> io::Result<(Self, Self)> {
         let (a, b) = crate::process::cloexec_socketpair()?;
         Ok((Self { stream: a }, Self { stream: b }))
@@ -46,12 +46,11 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the socket error if the loopback pair cannot be established.
-    #[cfg(windows)]
+    #[cfg(all(windows, test))]
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:wire-pair-windows] the Windows twin of `process::cloexec_socketpair` ([silent:cloexec-socketpair]): the same one-connection-for-a-process-tree, spelled as a loopback bind-connect-accept because Windows has no socketpair(2). No outside name is reached — the port is ephemeral and the peer is this process — so it is silent for the same reason its Unix hemisphere is."
     )]
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn pair() -> io::Result<(Self, Self)> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let a = std::net::TcpStream::connect(listener.local_addr()?)?;
@@ -97,15 +96,6 @@ impl WireChannel {
         Ok(Self {
             stream: self.stream.try_clone()?,
         })
-    }
-
-    /// The raw fd, for `pre_exec` to place on fd 3 in the engine child
-    /// ([`WireTransport::new`](crate::protocol::WireTransport::new)).  Unix
-    /// only: a Windows engine is a guest, adopted through [`Self::from_stream`].
-    #[cfg(unix)]
-    pub(crate) fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-        use std::os::unix::io::AsRawFd;
-        self.stream.as_raw_fd()
     }
 
     /// Wait until a frame is readable, or `timeout` passes; `None` waits

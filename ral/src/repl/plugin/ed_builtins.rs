@@ -2,18 +2,14 @@
 //!
 //! Each op (`_ed-get`, `_ed-set`, `_ed-push`, …) is its own builtin so the
 //! type checker sees the actual return type, arity is fixed per op, and the
-//! `_` prefix hides them from `help`.  Every op requires an active
-//! [`PluginContext`], set up by the REPL before dispatching into a plugin
-//! handler — outside a handler every op fails with a "no plugin context"
-//! error.
-//!
-//! These builtins live in the `ral` crate rather than in `ral-core`
-//! because the editor surface is purely a host concern: core has no
-//! knowledge of editor state or plugin handlers.  [`ED_BUILTINS`] is
-//! installed into the REPL's own shell at startup
-//! (see [`super::super::session::Session::boot`]).
+//! `_` prefix hides them from `help`.  Each is a thin engine-side door: it
+//! keeps its capability and argument checks, and puts the rest to the host
+//! as a `` `repl-editor `` enquiry, which the host answers only while an
+//! editor context is installed for the dispatch — inside a plugin handler.
 
 use ral_core::builtins::util::arg0_str;
+use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
@@ -25,26 +21,32 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
+use super::super::enquiry::{Data, EditorOp, EditorSnapshot, Enquiry, HighlightReq};
 use super::super::highlight_style::style_ansi;
-use super::editor::{HighlightSpan, PluginContext, Span};
+use super::editor::split_at_cursor;
 use ral_core::text::{byte_to_char, char_to_byte};
 
-fn ctx(shell: &Shell) -> Settled<&PluginContext> {
-    shell
-        .repl()
-        .plugin_context
-        .as_ref()
-        .and_then(|b| b.downcast_ref::<PluginContext>())
-        .ok_or_else(|| sig("editor op: no plugin context (not inside a plugin handler)"))
+/// Put `op` to the host's editor context.
+fn ask(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<FOValue> {
+    Ok(shell.enquire(mooring, Enquiry::Editor(op).encode())?)
 }
 
-fn ctx_mut(shell: &mut Shell) -> Settled<&mut PluginContext> {
-    shell
-        .repl_mut()
-        .plugin_context
-        .as_mut()
-        .and_then(|b| b.downcast_mut::<PluginContext>())
-        .ok_or_else(|| sig("editor op: no plugin context (not inside a plugin handler)"))
+/// `op`'s answer, decoded as a `T`.
+fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<T> {
+    T::decode(&ask(shell, mooring, op)?).map_err(|why| {
+        sig(format!(
+            "editor op: the host answered outside its shape: {why}"
+        ))
+    })
+}
+
+fn snapshot(shell: &Shell, mooring: &Mooring) -> Settled<EditorSnapshot> {
+    answer(shell, mooring, EditorOp::Get)
+}
+
+/// Write `op`, answering `()`.
+fn write(shell: &Shell, mooring: &Mooring, op: EditorOp) -> Settled<Value> {
+    ask(shell, mooring, op).map(|_| Value::Unit)
 }
 
 fn require_interactive(name: &str, shell: &Shell) -> Settled<()> {
@@ -56,163 +58,120 @@ fn require_interactive(name: &str, shell: &Shell) -> Settled<()> {
     Ok(())
 }
 
-/// Split `text` at a character-offset `cursor` into the substrings left and
-/// right of it.
-fn split_at_cursor(text: &str, cursor: usize) -> (String, String) {
-    let left: String = text.chars().take(cursor).collect();
-    let right: String = text.chars().skip(cursor).collect();
-    (left, right)
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "editor cursor is a buffer char offset, far below i64::MAX"
+)]
+fn int(n: usize) -> Value {
+    Value::Int(n as i64)
+}
+
+/// A non-negative offset, flooring a negative one at zero.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "floored to 0; char offsets far below usize::MAX"
+)]
+fn offset(n: i64) -> usize {
+    n.max(0) as usize
 }
 
 // ─── State read ──────────────────────────────────────────────────────────────
 
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
-pub fn builtin_ed_get(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-get", shell)?;
     shell.check_editor_read("get")?;
-    let pc = ctx(shell)?;
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "editor cursor is a buffer char offset, far below i64::MAX"
-    )]
-    let cursor = pc.editor_state.cursor as i64;
+    let st = snapshot(shell, mooring)?;
     Ok(Value::map(vec![
-        ("text".into(), Value::String(pc.editor_state.text.clone())),
-        ("cursor".into(), Value::Int(cursor)),
-        (
-            "keymap".into(),
-            Value::String(pc.editor_state.keymap.clone()),
-        ),
+        ("text".into(), Value::String(st.text)),
+        ("cursor".into(), int(st.cursor)),
+        ("keymap".into(), Value::String(st.keymap)),
     ]))
 }
 
 /// `_ed-text` → `Str` — current buffer text.
-pub fn builtin_ed_text(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_text(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-text", shell)?;
     shell.check_editor_read("text")?;
-    let pc = ctx(shell)?;
-    Ok(Value::String(pc.editor_state.text.clone()))
+    Ok(Value::String(snapshot(shell, mooring)?.text))
 }
 
 /// `_ed-cursor` → `Int` — current cursor offset (chars).
-pub fn builtin_ed_cursor(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_cursor(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-cursor", shell)?;
     shell.check_editor_read("cursor")?;
-    let pc = ctx(shell)?;
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "editor cursor is a buffer char offset, far below i64::MAX"
-    )]
-    let cursor = pc.editor_state.cursor as i64;
-    Ok(Value::Int(cursor))
+    Ok(int(snapshot(shell, mooring)?.cursor))
 }
 
 /// `_ed-keymap` → `Str` — current keymap name.
-pub fn builtin_ed_keymap(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_keymap(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-keymap", shell)?;
     shell.check_editor_read("keymap")?;
-    let pc = ctx(shell)?;
-    Ok(Value::String(pc.editor_state.keymap.clone()))
+    Ok(Value::String(snapshot(shell, mooring)?.keymap))
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
-pub fn builtin_ed_lbuffer(
-    _args: &[Value],
-    _mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
+pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
-    let pc = ctx(shell)?;
-    let (left, _) = split_at_cursor(&pc.editor_state.text, pc.editor_state.cursor);
-    Ok(Value::String(left))
+    let st = snapshot(shell, mooring)?;
+    Ok(Value::String(split_at_cursor(&st.text, st.cursor).0))
 }
 
 // ─── State write ─────────────────────────────────────────────────────────────
 
-/// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
-/// Unknown fields are ignored.
-pub fn builtin_ed_set(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    require_interactive("_ed-set", shell)?;
-    shell.check_editor_write("set")?;
-    let map = as_map(&args[0], "_ed-set")?;
-    let text = map.get("text").map(std::string::ToString::to_string);
+/// `_ed-set`'s request: row-polymorphic, so unknown fields are ignored.
+fn set_op(arg: &Value) -> Settled<EditorOp> {
+    let map = as_map(arg, "_ed-set")?;
     let cursor = match map.get("cursor") {
-        Some(Value::Int(n)) => Some(*n),
+        Some(Value::Int(n)) => Some(offset(*n)),
         Some(_) => return Err(sig("_ed-set: cursor must be Int")),
         None => None,
     };
-    let pc = ctx_mut(shell)?;
-    if let Some(text) = text {
-        pc.editor_state.text = text;
-    }
-    if let Some(n) = cursor {
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "buffer char count is far below i64::MAX"
-        )]
-        let max = pc.editor_state.text.chars().count() as i64;
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "clamped to [0, char_count]; non-negative and within buffer length"
-        )]
-        let cursor = n.clamp(0, max) as usize;
-        pc.editor_state.cursor = cursor;
-    }
-    Ok(Value::Unit)
+    Ok(EditorOp::Set {
+        text: map.get("text").map(std::string::ToString::to_string),
+        cursor,
+    })
+}
+
+/// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
+pub fn builtin_ed_set(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    require_interactive("_ed-set", shell)?;
+    shell.check_editor_write("set")?;
+    write(shell, mooring, set_op(&args[0])?)
 }
 
 /// `_ed-set-lbuffer <l>` — replace text left of cursor; right side preserved.
 pub fn builtin_ed_set_lbuffer(
     args: &[Value],
-    _mooring: &Mooring,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-set-lbuffer", shell)?;
     shell.check_editor_write("set-lbuffer")?;
-    let l = args[0].to_string();
-    let pc = ctx_mut(shell)?;
-    let (_, right) = split_at_cursor(&pc.editor_state.text, pc.editor_state.cursor);
-    let new_cursor = l.chars().count();
-    pc.editor_state.text = format!("{l}{right}");
-    pc.editor_state.cursor = new_cursor;
-    Ok(Value::Unit)
+    write(shell, mooring, EditorOp::SetLbuffer(args[0].to_string()))
 }
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
-pub fn builtin_ed_insert(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-insert", shell)?;
     shell.check_editor_write("insert")?;
-    let s = args[0].to_string();
-    let pc = ctx_mut(shell)?;
-    let cursor = pc.editor_state.cursor;
-    let (left, right) = split_at_cursor(&pc.editor_state.text, cursor);
-    let s_chars = s.chars().count();
-    pc.editor_state.text = format!("{left}{s}{right}");
-    pc.editor_state.cursor = cursor + s_chars;
-    Ok(Value::Unit)
+    write(shell, mooring, EditorOp::Insert(args[0].to_string()))
 }
 
 /// `_ed-push` — save buffer to stack, clear.
-pub fn builtin_ed_push(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_push(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-push", shell)?;
     shell.check_editor_write("push")?;
-    let pc = ctx_mut(shell)?;
-    let text = std::mem::take(&mut pc.editor_state.text);
-    let cursor = pc.editor_state.cursor;
-    pc.editor_state.cursor = 0;
-    pc.outputs.pushed_buffer = Some((text, cursor));
-    Ok(Value::Unit)
+    write(shell, mooring, EditorOp::Push)
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
-pub fn builtin_ed_accept(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_accept(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-accept", shell)?;
     shell.check_editor_write("accept")?;
-    let pc = ctx_mut(shell)?;
-    pc.outputs.accept_line = true;
-    Ok(Value::Unit)
+    write(shell, mooring, EditorOp::Accept)
 }
 
 // ─── TUI ─────────────────────────────────────────────────────────────────────
@@ -261,14 +220,11 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             1,
         ));
     }
-    {
-        let pc = ctx(shell)?;
-        if pc.inputs.in_readline {
-            return Ok(tui_result(
-                Value::String("_ed-tui: not available inside buffer-change hooks".into()),
-                1,
-            ));
-        }
+    if snapshot(shell, mooring)?.in_readline {
+        return Ok(tui_result(
+            Value::String("_ed-tui: not available inside buffer-change hooks".into()),
+            1,
+        ));
     }
     let loaned = mooring.lend_terminal();
     // A TUI plugin's own screen output, not a value the program binds: the
@@ -296,31 +252,24 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
 /// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
-pub fn builtin_ed_history(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-history", shell)?;
     shell.check_editor_read("history")?;
     let prefix = args[0].to_string();
     let limit = match &args[1] {
-        #[allow(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "negatives floored to 0 (the unbounded sentinel); count is far below usize::MAX"
-        )]
-        Value::Int(n) => (*n).max(0) as usize,
+        Value::Int(n) => offset(*n),
         _ => return Err(sig("_ed-history: limit must be Int")),
     };
-    let pc = ctx(shell)?;
+    let history: Vec<String> = answer(shell, mooring, EditorOp::History)?;
     let mut results: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for entry in &pc.inputs.history_entries {
-        if !prefix.is_empty() && !entry.starts_with(&prefix) {
+    for entry in history {
+        if !entry.starts_with(&prefix) || !seen.insert(entry.clone()) {
             continue;
         }
-        if seen.insert(entry.clone()) {
-            results.push(Value::String(entry.clone()));
-            if limit > 0 && results.len() >= limit {
-                break;
-            }
+        results.push(Value::String(entry));
+        if limit > 0 && results.len() >= limit {
+            break;
         }
     }
     Ok(Value::list(results))
@@ -364,12 +313,10 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 }
 
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
-pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-parse", shell)?;
     shell.check_editor_read("parse")?;
-    let pc = ctx(shell)?;
-    let text = &pc.editor_state.text;
-    let cursor = pc.editor_state.cursor;
+    let EditorSnapshot { text, cursor, .. } = snapshot(shell, mooring)?;
 
     let empty = || {
         Value::map(vec![
@@ -386,14 +333,14 @@ pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
     // A buffer that doesn't lex is mid-typing (an open quote, an open
     // brace, …) rather than a well-formed command line; there is nothing
     // sound to tokenize yet, so report no words rather than guessing.
-    let Ok(tokens) = lex(text) else {
+    let Ok(tokens) = lex(&text) else {
         return Ok(empty());
     };
 
     let words: Vec<(usize, String)> = tokens
         .iter()
         .filter(|(tok, _)| is_word_token(tok))
-        .map(|(tok, span)| (span.start as usize, word_text(text, tok, *span)))
+        .map(|(tok, span)| (span.start as usize, word_text(&text, tok, *span)))
         .collect();
 
     if words.is_empty() {
@@ -401,7 +348,7 @@ pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
     }
 
     // Determine which word the cursor is in/after.
-    let cursor_byte = char_to_byte(text, cursor);
+    let cursor_byte = char_to_byte(&text, cursor);
 
     let mut current = 0usize;
     let mut offset = 0usize;
@@ -412,7 +359,7 @@ pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
         }
     }
 
-    let offset_chars = byte_to_char(text, offset);
+    let offset_chars = byte_to_char(&text, offset);
 
     let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::String(w)).collect();
 
@@ -430,13 +377,10 @@ pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
 // ─── Output channels ─────────────────────────────────────────────────────────
 
 /// `_ed-ghost <text>` — set ghost text (empty string clears).
-pub fn builtin_ed_ghost(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-ghost", shell)?;
     shell.check_editor_write("ghost")?;
-    let text = arg0_str(args);
-    let pc = ctx_mut(shell)?;
-    pc.outputs.ghost_text = (!text.is_empty()).then_some(text);
-    Ok(Value::Unit)
+    write(shell, mooring, EditorOp::Ghost(arg0_str(args)))
 }
 
 /// `_ed-hyperlink <uri> <text>` — wrap `text` in an OSC 8 hyperlink to
@@ -503,75 +447,66 @@ pub fn builtin_ed_clipboard(
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
 pub fn builtin_ed_highlight(
     args: &[Value],
-    _mooring: &Mooring,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-highlight", shell)?;
     shell.check_editor_write("highlight")?;
-    let spans_val = as_list(&args[0], "_ed-highlight")?;
-    if spans_val.is_empty() {
-        ctx_mut(shell)?.outputs.highlight_spans.clear();
-        return Ok(Value::Unit);
-    }
-    let text_len = ctx(shell)?.editor_state.text.chars().count();
+    let spans = as_list(&args[0], "_ed-highlight")?
+        .iter()
+        .map(highlight_req)
+        .collect::<Settled<_>>()?;
+    write(shell, mooring, EditorOp::Highlight(spans))
+}
+
+/// One `_ed-highlight` span: row-polymorphic, its style checked here.
+fn highlight_req(v: &Value) -> Settled<HighlightReq> {
     let int_field = |v: &Value, field: &'static str| match v {
-        Value::Int(n) => Ok(*n),
+        Value::Int(n) => Ok(offset(*n)),
         _ => Err(sig(format!("highlight span: {field} must be Int"))),
     };
-    let mut spans = Vec::with_capacity(spans_val.len());
-    for sv in &spans_val {
-        let m = as_map(sv, "_ed-highlight span")?;
-        let mut start: i64 = 0;
-        let mut end: i64 = 0;
-        let mut style = String::new();
-        for (k, v) in &m {
-            match k.as_str() {
-                "start" => start = int_field(v, "start")?,
-                "end" => end = int_field(v, "end")?,
-                "style" => style = v.to_string(),
-                _ => {} // row polymorphism
-            }
+    let m = as_map(v, "_ed-highlight span")?;
+    let mut span = HighlightReq {
+        start: 0,
+        end: 0,
+        style: String::new(),
+    };
+    for (k, v) in &m {
+        match k.as_str() {
+            "start" => span.start = int_field(v, "start")?,
+            "end" => span.end = int_field(v, "end")?,
+            "style" => span.style = v.to_string(),
+            _ => {}
         }
-        if style_ansi(&style).is_none() {
-            return Err(sig(format!("_ed-highlight: unknown style '{style}'")));
-        }
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "floored to 0 then clamped to text_len by Span::clamped; char offsets far below usize::MAX"
-        )]
-        let (lo, hi) = (start.max(0) as usize, end.max(0) as usize);
-        spans.push(HighlightSpan {
-            span: Span::clamped(lo, hi, text_len),
-            style,
-        });
     }
-    ctx_mut(shell)?.outputs.highlight_spans = spans;
-    Ok(Value::Unit)
+    if style_ansi(&span.style).is_none() {
+        return Err(sig(format!(
+            "_ed-highlight: unknown style '{}'",
+            span.style
+        )));
+    }
+    Ok(span)
 }
 
 // ─── Plugin-local state ──────────────────────────────────────────────────────
 
 /// `_ed-state <default> <updater>` — read-modify-write on the plugin's
 /// persistent cell.  `default` is used on first call; `updater` is invoked
-/// with the current value and its return becomes the new value.
+/// with the current value and its return becomes the new value, which the
+/// host keeps, so it must be data.
 pub fn builtin_ed_state(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-state", shell)?;
     shell.check_editor_write("state")?;
-    let default = &args[0];
-    let updater = &args[1];
-    let current = {
-        let pc = ctx(shell)?;
-        if pc.state_default_used {
-            pc.state_cell.clone().unwrap_or_else(|| default.clone())
-        } else {
-            default.clone()
-        }
-    };
-    let new_val = ral_core::builtins::apply(updater, vec![current], mooring, shell)?;
-    let pc = ctx_mut(shell)?;
-    pc.state_cell = Some(new_val.clone());
-    pc.state_default_used = true;
+    let current = answer::<Option<Data>>(shell, mooring, EditorOp::StateGet)?
+        .map_or_else(|| args[0].clone(), |Data(v)| Value::from(v));
+    let new_val = ral_core::builtins::apply(&args[1], vec![current], mooring, shell)?;
+    let data = FOValue::try_from(&new_val).map_err(|e| {
+        sig(format!(
+            "_ed-state: the updater returned {}, but the state cell holds only data",
+            e.leaf
+        ))
+    })?;
+    write(shell, mooring, EditorOp::StateSet(Data(data)))?;
     Ok(new_val)
 }
 
@@ -610,10 +545,6 @@ fn scheme_ed_set(u: &mut Unifier) -> Scheme {
     let rho = u.fresh_row_var();
     let record = open_record(&[("text", Ty::String), ("cursor", Ty::Int)], rho);
     scheme(&[], &[], &[rho], thunk(fun(record, pure(Ty::Unit))))
-}
-
-fn scheme_string_to_unit(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
 }
 
 fn scheme_string_to_bool(_u: &mut Unifier) -> Scheme {
@@ -736,13 +667,13 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     ),
     BuiltinEntry::new(
         Cow::Borrowed("_ed-set-lbuffer"),
-        scheme_string_to_unit,
+        ral_core::typecheck::builtins::scheme::string_to_unit,
         "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
         BuiltinBody::Static(builtin_ed_set_lbuffer),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("_ed-insert"),
-        scheme_string_to_unit,
+        ral_core::typecheck::builtins::scheme::string_to_unit,
         "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
         BuiltinBody::Static(builtin_ed_insert),
     ),
@@ -778,7 +709,7 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     ),
     BuiltinEntry::new(
         Cow::Borrowed("_ed-ghost"),
-        scheme_string_to_unit,
+        ral_core::typecheck::builtins::scheme::string_to_unit,
         "_ed-ghost <text>  — set ghost text (empty string clears).",
         BuiltinBody::Static(builtin_ed_ghost),
     ),
@@ -814,7 +745,6 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 
 #[cfg(test)]
 mod tests {
-    use super::super::editor::{EditorState, PluginInputs, PluginOutputs};
     use super::*;
 
     /// Every `_ed-*` entry must carry all static facets directly.
@@ -832,67 +762,26 @@ mod tests {
         }
     }
 
-    /// An interactive shell carrying a plugin context whose buffer holds
-    /// `text`, ready to drive `builtin_ed_set`.
-    fn shell_with_buffer(text: &str) -> Shell {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.set_interactive(true);
-        let mut pc = PluginContext {
-            inputs: PluginInputs::default(),
-            outputs: PluginOutputs::default(),
-            editor_state: EditorState::default(),
-            state_cell: None,
-            state_default_used: false,
-        };
-        pc.editor_state.text = text.to_string();
-        shell.repl_mut().plugin_context = Some(Box::new(pc));
-        shell
-    }
-
-    fn editor_state(shell: &Shell) -> EditorState {
-        ctx(shell).unwrap().editor_state.clone()
-    }
-
-    /// The dependency-order regression: setting `text` and `cursor`
-    /// together clamps the cursor against the **new** text, not the old
-    /// (shorter) buffer.  `OrdMap` visits `"cursor"` before `"text"`, so
-    /// a fold over entries would clamp `11` against the empty buffer and
-    /// silently lose it.
-    #[test]
-    fn ed_set_clamps_cursor_against_new_text() {
-        let mut shell = shell_with_buffer("");
-        let arg = Value::map(vec![
-            ("text".into(), Value::String("hello world".into())),
-            ("cursor".into(), Value::Int(11)),
-        ]);
-        builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).unwrap();
-        let st = editor_state(&shell);
-        assert_eq!(st.text, "hello world");
-        assert_eq!(st.cursor, 11);
-    }
-
-    /// An over-long cursor clamps to the new text's character count.
-    #[test]
-    fn ed_set_clamps_over_long_cursor_to_new_len() {
-        let mut shell = shell_with_buffer("");
-        let arg = Value::map(vec![
-            ("text".into(), Value::String("abc".into())),
-            ("cursor".into(), Value::Int(99)),
-        ]);
-        builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).unwrap();
-        assert_eq!(editor_state(&shell).cursor, 3);
-    }
-
-    /// A non-Int cursor errors before any mutation.
+    /// A non-Int cursor is refused at the door, before any request is put.
     #[test]
     fn ed_set_rejects_non_int_cursor() {
-        let mut shell = shell_with_buffer("old");
         let arg = Value::map(vec![
             ("text".into(), Value::String("new".into())),
             ("cursor".into(), Value::String("3".into())),
         ]);
-        assert!(builtin_ed_set(&[arg], &Mooring::adrift(), &mut shell).is_err());
-        let st = editor_state(&shell);
-        assert_eq!(st.text, "old");
+        assert!(set_op(&arg).is_err());
+    }
+
+    /// A negative cursor floors at zero; the host clamps the rest.
+    #[test]
+    fn ed_set_floors_a_negative_cursor() {
+        let arg = Value::map(vec![("cursor".into(), Value::Int(-4))]);
+        assert!(matches!(
+            set_op(&arg),
+            Ok(EditorOp::Set {
+                text: None,
+                cursor: Some(0)
+            })
+        ));
     }
 }

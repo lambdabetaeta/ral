@@ -6,8 +6,9 @@
 //! [`super::completion`] engine; this type only holds the [`SourceCache`] the
 //! engine ranks against and adapts the engine's
 //! [`Candidate`](super::completion::Candidate)s to rustyline `Pair`s.
-//! Highlighting and ghost text come from plugin buffer-change hooks recorded
-//! in [`super::plugin::PluginRuntime`].
+//! Highlighting and ghost text come from plugin buffer-change hooks, which it
+//! dispatches through the engine it holds and records in
+//! [`super::plugin::PluginRuntime`].
 //!
 //! Of the traits this helper implements, only `Completer` reads the cache, and
 //! that is load-bearing: the cache enumerates `PATH` on first use, while
@@ -15,48 +16,56 @@
 //! highlight rule wanting a command list must not reach for `sources()`, or it
 //! puts a disk walk between a keypress and the character appearing.
 
-use ral_core::Shell;
 use ral_core::ansi;
+use ral_core::protocol::Transport;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::completion::{self, SourceCache};
 use super::highlight_style::apply_highlights;
-use super::plugin::{PluginRuntime, lock, run_buffer_change_hooks};
+use super::host::ReplHost;
+use super::plugin::{lock, run_buffer_change_hooks};
 
 // ── RalHelper ────────────────────────────────────────────────────────────
 
+/// rustyline calls back into this outside any `read` argument list, so it
+/// holds its own handle on the engine.
 pub(super) struct RalHelper {
     /// The command/variable names and cwd the completion engine ranks
     /// against, kept across prompts and aged by [`RalHelper::refresh`].
     sources: SourceCache,
-    pub(super) plugin_runtime: Arc<Mutex<PluginRuntime>>,
-    pub(super) terminal: ral_core::io::TerminalState,
+    engine: Arc<dyn Transport>,
+    host: Arc<ReplHost>,
+    terminal: ral_core::io::TerminalState,
 }
 
 impl RalHelper {
     /// Starts with a cold cache, so constructing the line editor reads no
     /// directories; the first Tab pays for what it needs.
-    pub(super) fn new(shell: &Shell, plugin_runtime: Arc<Mutex<PluginRuntime>>) -> Self {
+    pub(super) fn new(
+        engine: Arc<dyn Transport>,
+        host: Arc<ReplHost>,
+        terminal: ral_core::io::TerminalState,
+    ) -> Self {
         Self {
             sources: SourceCache::new(),
-            plugin_runtime,
-            terminal: shell.terminal(),
+            engine,
+            host,
+            terminal,
         }
     }
 
-    /// Refresh completion state from the live shell.  Called once per prompt
-    /// so new `let` bindings, `within [shell: PATH=…]` overrides, and
+    /// Refresh completion state from the engine.  Called once per prompt so
+    /// new `let` bindings, `within [shell: PATH=…]` overrides, and
     /// `cd`-tracked cwd changes appear immediately — and cheaply enough that
     /// the prompt is not held up by it.
-    pub(super) fn refresh(&mut self, shell: &Shell) {
-        self.sources.refresh(shell);
-        self.terminal = shell.terminal();
+    pub(super) fn refresh(&mut self) {
+        self.sources.refresh(&*self.engine);
     }
 }
 
@@ -69,7 +78,8 @@ impl Completer for RalHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (start, candidates) = completion::complete(line, pos, &self.sources.sources());
+        let (start, candidates) =
+            completion::complete(line, pos, &self.sources.sources(&*self.engine));
         let pairs = candidates
             .into_iter()
             .map(|c| Pair {
@@ -102,12 +112,8 @@ impl Hinter for RalHelper {
     type Hint = GhostHint;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<GhostHint> {
-        run_buffer_change_hooks(&self.plugin_runtime, line, pos);
-        lock(&self.plugin_runtime)
-            .hooks
-            .ghost
-            .clone()
-            .map(GhostHint)
+        run_buffer_change_hooks(&*self.engine, &self.host, line, pos);
+        lock(&self.host.runtime).hooks.ghost.clone().map(GhostHint)
     }
 }
 
@@ -116,7 +122,7 @@ impl Highlighter for RalHelper {
         if !self.terminal.ui_ansi_ok() {
             return Cow::Borrowed(line);
         }
-        let rt = lock(&self.plugin_runtime);
+        let rt = lock(&self.host.runtime);
         if rt.hooks.highlights.is_empty() {
             Cow::Borrowed(line)
         } else {

@@ -101,4 +101,5 @@ windows-sys = { workspace = true, features = [
 ral-core = { path = "../core" }
 
 [dev-dependencies]
+ral-core = { path = "../core", features = ["test-util"] }
 ctor = "1"

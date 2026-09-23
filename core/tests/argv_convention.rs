@@ -50,7 +50,6 @@ fn report(src: &str) -> RunReport {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     })
 }
 

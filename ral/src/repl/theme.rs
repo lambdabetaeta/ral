@@ -33,6 +33,11 @@ pub(crate) struct OutputTheme {
     pub value_color: Option<String>,
 }
 
+ral_core::record!(OutputTheme {
+    value_prefix: "value_prefix",
+    value_color: "value_color",
+});
+
 impl Default for OutputTheme {
     fn default() -> Self {
         Self {

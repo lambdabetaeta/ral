@@ -1,16 +1,16 @@
 //! Cooperative structured-concurrency cancellation.
 //!
-//! A scope's cancellation is the join of its own flag with every ancestor's and
-//! with the ambient causes those nodes fold — walked, not flattened, so a
-//! subscope carries its own flag while still observing its parents.  Workers
-//! read it wherever [`check`](crate::process::check) is called.
+//! A scope's cancellation is the join of its own flag with every ancestor's —
+//! walked, not flattened, so a subscope carries its own flag while still
+//! observing its parents.  Workers read it wherever
+//! [`check`](crate::process::check) is called.
 //!
-//! The ambient causes let a signal handler or a TUI input thread, holding no
-//! scope, contribute to that join.  A shutdown request is absolute — once
-//! raised it holds for every observer forever — so it is a plain lattice
-//! element; an interrupt is aimed at whatever ran when the key was struck, so
-//! it is a monotone watermark read against a frame's birth instant, and a run
-//! born after a Ctrl-C is deaf to it by construction.
+//! A signal handler holds no scope, so it raises one of two ambient causes
+//! instead, and no scope folds either: a host hears them through
+//! [`forward_ambient`] and delivers each to its engine as `Control`.  A
+//! shutdown request is absolute — once raised it holds for every listener
+//! forever; an interrupt is aimed at whatever ran when the key was struck, so a
+//! listener registered after it never hears it.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -108,42 +108,27 @@ impl CancelCause {
 
 // ── The ambient causes ─────────────────────────────────────────────────────
 
-/// The process-wide shutdown request (SIGTERM / SIGHUP, Ctrl-\).  Absolute and
-/// one-way, so a signal delivered while the session sits idle latches and is
-/// read at the next boundary.
+/// The process-wide shutdown request (SIGTERM / SIGHUP, Ctrl-\\).  Absolute and
+/// one-way, so a signal delivered before a host listens still reaches it.
 static REQUESTED_ROOT: AtomicU8 = AtomicU8::new(0);
 
-/// The instant counter the interrupt watermark is indexed by.  Only its own
-/// modification order is load-bearing — it orders a frame's birth against every
-/// interrupt and synchronises nothing else.
-static CLOCK: AtomicU64 = AtomicU64::new(0);
+/// Interrupts raised so far.  Only its own modification order is load-bearing:
+/// it orders each interrupt against a listener's registration.
+static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
-/// The interrupt watermark: per [`CancelCause`], the instant it was last raised
-/// at, `0` for never.  A frame born at `b` observes cause `c` exactly when
-/// `STAMPED[c] > b`, so causes aimed at settled runs retire themselves as the
-/// clock passes them.
+/// Raise an interrupt, reaching every [`forward_ambient`] listener registered
+/// before this instant.
 ///
-/// One stamp per cause and not one packed `(instant, cause)` word, because a
-/// frame reads a *suffix* of the escalation order and one word keeps only one
-/// coordinate: instant-major, a young weak cause erases an old strong one;
-/// cause-major, an old strong one hides a young weak one from every frame born
-/// between them.
-static STAMPED: [AtomicU64; CancelCause::RootAbort as usize] =
-    [const { AtomicU64::new(0) }; CancelCause::RootAbort as usize];
-
-/// Raise `cause` on the interrupt watermark, reaching the foreground of every
-/// run already in flight and of none born after this instant.
-///
-/// Async-signal-safe: two atomic read-modify-writes and a reaper `kick` —
+/// Async-signal-safe: one atomic read-modify-write and a reaper `kick` —
 /// itself one `write(2)` on Unix — no allocation, no lock.
-pub fn request_foreground_cancel(cause: CancelCause) {
-    let now = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
-    STAMPED[cause as usize - 1].fetch_max(now, Ordering::Release);
+pub fn request_interrupt() {
+    INTERRUPTS.fetch_add(1, Ordering::Release);
     super::reaper::kick();
 }
 
-/// Deliver `cause` to the signal-facing session's durable root, reaching its
-/// foreground run and every detached worker parented under it.
+/// Request the session's end with `cause`, reaching every [`forward_ambient`]
+/// listener, whenever it registers.  Async-signal-safe, as
+/// [`request_interrupt`] is.
 pub fn request_root_cancel(cause: CancelCause) {
     REQUESTED_ROOT.fetch_max(cause as u8, Ordering::Release);
     super::reaper::kick();
@@ -151,30 +136,98 @@ pub fn request_root_cancel(cause: CancelCause) {
 
 /// Hand the shutdown request back, which no host ever does.  The ral-core test
 /// binary is one process hosting many sessions, so a test that raises it clears
-/// it again rather than terminating every session that follows.
+/// it again rather than terminating every listener that follows.
 #[cfg(test)]
 pub(crate) fn clear_root_request() {
     REQUESTED_ROOT.store(0, Ordering::Release);
 }
 
-/// What a node folds from the ambient causes — fixed at mint, never installed
-/// later.
-#[derive(Debug, Clone, Copy)]
-enum Hears {
-    /// Nothing of its own: a deaf session's scopes, a detached worker, and
-    /// every nested scope, which hears its ancestors' by walking to them.
-    Nothing,
-    /// `REQUESTED_ROOT`: the signal-facing session's durable root.
-    Shutdown,
-    /// Every cause on `STAMPED` raised after this instant: a run's foreground
-    /// frame, born under a root that faces signals.
-    InterruptsSince(u64),
+// ── Forwarding the ambient causes ──────────────────────────────────────────
+
+/// One ambient cause, as a host hears it: aimed at the run in flight, or at
+/// the session's durable root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ambient {
+    Interrupt,
+    Root(CancelCause),
+}
+
+/// A forwarder's high-water marks: the interrupts and the root request it has
+/// already passed on.
+struct Listener {
+    interrupts_heard: u64,
+    root_heard: u8,
+    tx: std::sync::mpsc::Sender<Ambient>,
+}
+
+static LISTENERS: Mutex<Vec<(u64, Listener)>> = Mutex::new(Vec::new());
+
+/// Hand every ambient cause raised from now on to `forward`, on a thread of
+/// its own, until the guard drops.
+///
+/// A root request already standing is handed on at once, being absolute; an
+/// interrupt raised before now is not, having been aimed at a run that was in
+/// flight then.
+///
+/// # Panics
+/// If the forwarding thread cannot be spawned.
+pub fn forward_ambient(forward: impl Fn(Ambient) + Send + 'static) -> AmbientForward {
+    #[cfg(unix)]
+    super::reaper::ensure_installed();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("ral-signals".into())
+        .spawn(move || rx.iter().for_each(forward))
+        .expect("spawn the signal forwarder");
+    let listener = Listener {
+        interrupts_heard: INTERRUPTS.load(Ordering::Acquire),
+        root_heard: 0,
+        tx,
+    };
+    LISTENERS.lock_ignore_poison().push((id, listener));
+    scan_ambient();
+    AmbientForward { id }
+}
+
+/// Pass each listener what was raised since it last heard; interrupts raised
+/// together pass on as one.  Run on every reaper kick, so a signal handler's
+/// raise arrives here off signal context.
+pub(crate) fn scan_ambient() {
+    let interrupts = INTERRUPTS.load(Ordering::Acquire);
+    let root = REQUESTED_ROOT.load(Ordering::Acquire);
+    for (_, l) in LISTENERS.lock_ignore_poison().iter_mut() {
+        if interrupts > l.interrupts_heard {
+            l.interrupts_heard = interrupts;
+            let _ = l.tx.send(Ambient::Interrupt);
+        }
+        if root > l.root_heard {
+            l.root_heard = root;
+            if let Some(cause) = CancelCause::from_u8(root) {
+                let _ = l.tx.send(Ambient::Root(cause));
+            }
+        }
+    }
+}
+
+/// A registered [`forward_ambient`]; dropping it ends the forwarding thread.
+#[must_use]
+pub struct AmbientForward {
+    id: u64,
+}
+
+impl Drop for AmbientForward {
+    fn drop(&mut self) {
+        LISTENERS
+            .lock_ignore_poison()
+            .retain(|(id, _)| *id != self.id);
+    }
 }
 
 #[derive(Debug)]
 struct ScopeNode {
     flag: AtomicU8,
-    hears: Hears,
     parent: Option<std::sync::Arc<Self>>,
 }
 
@@ -188,25 +241,22 @@ pub struct CancelScope(std::sync::Arc<ScopeNode>);
 
 impl CancelScope {
     /// The one constructor every scope in the tree goes through.
-    fn mint(hears: Hears, parent: Option<std::sync::Arc<ScopeNode>>) -> Self {
+    fn mint(parent: Option<std::sync::Arc<ScopeNode>>) -> Self {
         Self(std::sync::Arc::new(ScopeNode {
             flag: AtomicU8::new(0),
-            hears,
             parent,
         }))
     }
 
-    /// A fresh top-level scope, deaf to the ambient causes.  Spawned workers
-    /// take a [`child`](Self::child) instead, so cancellation reaches them.
+    /// A fresh top-level scope.  Spawned workers take a
+    /// [`child`](Self::child) instead, so cancellation reaches them.
     pub(crate) fn root() -> Self {
-        Self::mint(Hears::Nothing, None)
+        Self::mint(None)
     }
 
-    /// A scope nested under `self`, cancelled by `self` or any ancestor.  It
-    /// folds nothing of its own: what `self` hears from the ambient causes, the
-    /// child hears by walking to the very nodes that fold them.
+    /// A scope nested under `self`, cancelled by `self` or any ancestor.
     pub fn child(&self) -> Self {
-        Self::mint(Hears::Nothing, Some(self.0.clone()))
+        Self::mint(Some(self.0.clone()))
     }
 
     /// Raise this scope's flag to `cause`, never downgrading, then fire every
@@ -216,24 +266,14 @@ impl CancelScope {
         scan_cancels();
     }
 
-    /// The join of every flag on this scope's chain with the ambient causes
-    /// those nodes fold — `0` when nothing is in force.  The single reader of
-    /// either, so no observer sees a cancellation except as the whole join.
+    /// The join of every flag on this scope's chain — `0` when nothing is in
+    /// force.  The single reader, so no observer sees a cancellation except as
+    /// the whole join.
     fn fold(&self) -> u8 {
         let mut node: &std::sync::Arc<ScopeNode> = &self.0;
         let mut join = 0u8;
         loop {
             join = join.max(node.flag.load(Ordering::Acquire));
-            join = join.max(match node.hears {
-                Hears::Nothing => 0,
-                Hears::Shutdown => REQUESTED_ROOT.load(Ordering::Acquire),
-                // The strongest cause stamped after this frame was born is the
-                // join of every cause stamped after it.
-                Hears::InterruptsSince(birth) => (1..=CancelCause::RootAbort as u8)
-                    .rev()
-                    .find(|c| STAMPED[*c as usize - 1].load(Ordering::Acquire) > birth)
-                    .unwrap_or(0),
-            });
             match &node.parent {
                 Some(p) => node = p,
                 None => return join,
@@ -262,11 +302,8 @@ impl Default for CancelScope {
 //
 // A registration table beside the scope tree, for a subscriber with no poll
 // point of its own: the pipeline collector, `RunningChild::wait`, the engine
-// enquiry park.  `request_foreground_cancel`/`request_root_cancel` run inside
-// signal handlers and are documented async-signal-safe, so they cannot lock
-// this table directly — they kick the reaper thread, whose own wake ends by
-// scanning it.  `CancelScope::cancel` scans synchronously instead, since a
-// direct call is never a signal handler.
+// enquiry park.  A cause lands only through `CancelScope::cancel`, which scans
+// the table synchronously.
 
 type OnCancel = Box<dyn FnOnce(CancelCause) + Send>;
 
@@ -288,10 +325,6 @@ pub fn watch_cancel(
     scope: CancelScope,
     on_cancel: impl FnOnce(CancelCause) + Send + 'static,
 ) -> CancelWatch {
-    // So a kick from a signal handler always has a pipe to land in.
-    #[cfg(unix)]
-    super::reaper::ensure_installed();
-
     let armed = Arc::new(AtomicBool::new(true));
     let mut table = watches().lock_ignore_poison();
     table.push(WatchEntry {
@@ -318,7 +351,7 @@ pub fn watch_cancel(
 /// under the table lock, entries are only taken out; their closures run
 /// after the lock is released, so a closure may itself cancel a scope
 /// without deadlocking on this same table.
-pub(crate) fn scan_cancels() {
+fn scan_cancels() {
     let mut fired: Vec<(OnCancel, CancelCause)> = Vec::new();
     {
         let mut table = watches().lock_ignore_poison();
@@ -367,40 +400,17 @@ impl Drop for CancelWatch {
 pub struct DurableRoot(CancelScope);
 
 impl DurableRoot {
-    /// Mint a fresh session root, deaf to the ambient causes.  One per
-    /// [`Shell`](crate::types::Shell); a host that owns the process's signals
-    /// re-mints it with [`face_signals`](crate::types::Shell::face_signals).
+    /// Mint a fresh session root.  One per [`Shell`](crate::types::Shell).
     pub(crate) fn new() -> Self {
         Self(CancelScope::root())
     }
 
-    /// Mint the signal-facing session's root: it folds the ambient shutdown
-    /// request, so a SIGTERM reaches this session's foreground run and every
-    /// detached worker parented under it — and latches while it is idle.
-    pub(crate) fn signal_facing() -> Self {
-        Self(CancelScope::mint(Hears::Shutdown, None))
-    }
-
-    /// Mint the foreground frame of a run entering under `displaced`.
-    ///
-    /// Nested under that frame rather than beside it, so the tree *is* the
-    /// runs' dynamic extent: a nested run observes the interrupt its outer run
-    /// carries, and an outer run's wall reaches into the nest.  Stamped with
-    /// its birth instant under a signal-facing root, deaf under any other.
-    pub(crate) fn foreground(&self, displaced: &ForegroundScope) -> ForegroundScope {
-        let hears = match self.0.0.hears {
-            Hears::Shutdown => Hears::InterruptsSince(CLOCK.load(Ordering::Acquire)),
-            _ => Hears::Nothing,
-        };
-        ForegroundScope(CancelScope::mint(hears, Some(displaced.0.0.clone())))
-    }
-
     /// Mint a scope under this root that is *not* a run's foreground — a
-    /// detached worker's, and the anchor a session boots with.  It folds the
-    /// shutdown request through this root, while no node on its chain carries a
-    /// birth instant, so by that shape it cannot absorb a foreground interrupt.
+    /// detached worker's, and the anchor a session boots with.  A run's frame
+    /// nests under the anchor, so by that shape cancelling it never reaches a
+    /// worker, while cancelling the root reaches both.
     pub fn worker(&self) -> ForegroundScope {
-        ForegroundScope(CancelScope::mint(Hears::Nothing, Some(self.0.0.clone())))
+        ForegroundScope(self.0.child())
     }
 
     /// Record `cause` on the root, reaching the foreground run and every
@@ -479,8 +489,8 @@ impl Serial {
 }
 
 /// Serializes every test in the ral-core binary that touches the ambient causes
-/// — by raising one, or by minting a scope that folds one: a frame born beside
-/// a concurrent raise may fall on either side of it.
+/// — by raising one, or by listening for them: a raise beside a concurrent
+/// listener would reach it.
 #[cfg(test)]
 pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 
@@ -548,76 +558,14 @@ mod tests {
         );
     }
 
-    /// The watermark retires itself as the clock passes it, which is what keeps
-    /// a Ctrl-C for a settled command off the next one.
-    #[test]
-    fn an_interrupt_reaches_the_frames_older_than_it_and_no_other() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let older = root.foreground(&boot);
-        request_foreground_cancel(CancelCause::Interrupt);
-        assert_eq!(
-            older.cause(),
-            Some(CancelCause::Interrupt),
-            "an interrupt must reach the run that was in flight when it was raised"
-        );
-        assert_eq!(
-            root.foreground(&boot).cause(),
-            None,
-            "and no frame born after it, with nothing handed back for it to miss"
-        );
-    }
-
-    #[test]
-    fn an_older_frame_joins_every_interrupt_raised_after_it() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let frame = root.foreground(&boot);
-        request_foreground_cancel(CancelCause::Deadline);
-        request_foreground_cancel(CancelCause::Interrupt);
-        assert_eq!(
-            frame.cause(),
-            Some(CancelCause::Deadline),
-            "the join is the strongest cause raised after the frame, not the latest"
-        );
-    }
-
-    /// Why the watermark is one stamp per cause and not one `(instant, cause)`
-    /// word: no single word records both readings — instant-major loses the
-    /// first assertion, cause-major the second.
-    #[test]
-    fn each_cause_keeps_its_own_instant() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let before = root.foreground(&boot);
-        request_foreground_cancel(CancelCause::Deadline);
-        let between = root.foreground(&boot);
-        request_foreground_cancel(CancelCause::Interrupt);
-        assert_eq!(
-            before.cause(),
-            Some(CancelCause::Deadline),
-            "the older frame keeps the stronger cause a younger weak one must not erase"
-        );
-        assert_eq!(
-            between.cause(),
-            Some(CancelCause::Interrupt),
-            "the younger frame hears the weak cause the older strong one must not hide"
-        );
-    }
-
     /// Sharing, not shadowing — a Ctrl-C during a nested run unwinds the whole
     /// nest, as a POSIX shell's would.
     #[test]
     fn a_nested_frame_observes_its_parents_interrupt() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let outer = root.foreground(&boot);
-        request_foreground_cancel(CancelCause::Interrupt);
-        let inner = root.foreground(&outer);
+        let root = DurableRoot::new();
+        let outer = root.worker().child();
+        outer.cancel(CancelCause::Interrupt);
+        let inner = outer.child();
         assert_eq!(
             inner.cause(),
             Some(CancelCause::Interrupt),
@@ -634,11 +582,8 @@ mod tests {
     /// ancestors the runs enclosing it.
     #[test]
     fn an_outer_frames_deadline_reaches_the_nest() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let outer = root.foreground(&boot);
-        let inner = root.foreground(&outer);
+        let outer = DurableRoot::new().worker().child();
+        let inner = outer.child();
         outer.cancel(CancelCause::Deadline);
         assert_eq!(
             inner.cause(),
@@ -647,65 +592,25 @@ mod tests {
         );
     }
 
-    /// Detached is detached by the shape of the chain — no birth instant on it
-    /// to read the watermark against — whoever spawned the worker.
+    /// Detached is detached by the shape of the chain: a worker hangs beside
+    /// the anchor a run's frame nests under, so only the root reaches both.
     #[test]
     fn a_worker_is_spared_the_interrupt_and_hears_the_shutdown() {
-        let _g = REQUEST_SERIAL.lock();
-        let worker = DurableRoot::signal_facing().worker();
-        request_foreground_cancel(CancelCause::Interrupt);
+        let root = DurableRoot::new();
+        let frame = root.worker().child();
+        let worker = root.worker();
+        frame.cancel(CancelCause::Interrupt);
         assert_eq!(
             worker.cause(),
             None,
-            "a foreground interrupt must not reach a detached worker"
+            "a run's interrupt must not reach a detached worker"
         );
-        request_root_cancel(CancelCause::Terminate);
+        root.cancel(CancelCause::Terminate);
         assert_eq!(
             worker.cause(),
             Some(CancelCause::Terminate),
-            "but a shutdown request reaches it through its root"
+            "but a shutdown reaches it through its root"
         );
-        clear_root_request();
-    }
-
-    #[test]
-    fn root_request_is_independent_of_the_watermark() {
-        let _g = REQUEST_SERIAL.lock();
-        let root = DurableRoot::signal_facing();
-        let boot = root.worker();
-        let facing = root.foreground(&boot);
-        let deaf_root = DurableRoot::new();
-        let deaf = deaf_root.foreground(&deaf_root.worker());
-
-        request_foreground_cancel(CancelCause::Interrupt);
-        assert_eq!(
-            facing.cause(),
-            Some(CancelCause::Interrupt),
-            "an interrupt reaches a facing run's frame"
-        );
-        assert_eq!(
-            root.as_scope().cause(),
-            None,
-            "an interrupt must not touch the durable root"
-        );
-
-        request_root_cancel(CancelCause::RootAbort);
-        assert_eq!(
-            root.as_scope().cause(),
-            Some(CancelCause::RootAbort),
-            "a root request reaches the facing durable root"
-        );
-        assert_eq!(
-            facing.cause(),
-            Some(CancelCause::RootAbort),
-            "and the foreground observes it through its root ancestry"
-        );
-        assert_eq!(
-            deaf.cause(),
-            None,
-            "a session that faces no signals is deaf to both ambient causes"
-        );
-        clear_root_request();
     }
 
     /// A cause raised before registration is not missed: `watch_cancel`
@@ -773,6 +678,55 @@ mod tests {
         assert!(
             fired_b.load(Ordering::Acquire),
             "the second watch must fire"
+        );
+    }
+
+    /// A forwarder hears the interrupts raised after it and none before, and a
+    /// root request whenever it stands, being absolute.
+    #[test]
+    fn a_forwarder_hears_what_it_is_owed() {
+        use std::time::Duration;
+        let _g = REQUEST_SERIAL.lock();
+        let listen = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let guard = forward_ambient(move |ambient| {
+                let _ = tx.send(ambient);
+            });
+            (guard, rx)
+        };
+        let owed = Duration::from_secs(5);
+        let unowed = Duration::from_millis(200);
+
+        request_interrupt();
+        let (_first, first) = listen();
+        assert!(
+            first.recv_timeout(unowed).is_err(),
+            "an interrupt raised before the forwarder was aimed at other runs"
+        );
+        request_interrupt();
+        assert_eq!(
+            first.recv_timeout(owed),
+            Ok(Ambient::Interrupt),
+            "an interrupt raised after it is forwarded"
+        );
+        request_root_cancel(CancelCause::Terminate);
+        assert_eq!(
+            first.recv_timeout(owed),
+            Ok(Ambient::Root(CancelCause::Terminate)),
+            "a shutdown request is forwarded"
+        );
+
+        let (_second, second) = listen();
+        let standing = second.recv_timeout(owed);
+        clear_root_request();
+        assert_eq!(
+            standing,
+            Ok(Ambient::Root(CancelCause::Terminate)),
+            "a shutdown request already standing is forwarded at once"
+        );
+        assert!(
+            second.recv_timeout(unowed).is_err(),
+            "and nothing else: the older interrupts were not its to hear"
         );
     }
 }

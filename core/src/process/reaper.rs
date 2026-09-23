@@ -32,8 +32,8 @@ mod windows;
 pub(crate) use windows::{Watch, watch};
 
 /// No self-pipe on Windows: the console handler already runs on an ordinary
-/// thread, so a kick simply scans the cancel table itself.
+/// thread, so a kick simply scans the forwarders itself.
 #[cfg(windows)]
 pub(crate) fn kick() {
-    super::cancel::scan_cancels();
+    super::cancel::scan_ambient();
 }

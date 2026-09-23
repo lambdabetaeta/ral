@@ -173,9 +173,8 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
     format!("[{label}: {body}]")
 }
 
-/// [`providerErrorClass`]'s Rust twin: an API failure or an unclassified one
-/// reads as a failure the exchange cannot recover from; every other kind is a
-/// warning.
+/// An API failure or an unclassified one reads as a failure the exchange
+/// cannot recover from; every other kind is a warning.
 fn provider_error_severity(record: &ProviderErrorRecord) -> Severity {
     match record {
         ProviderErrorRecord::Api { .. } | ProviderErrorRecord::Other { .. } => Severity::Bad,

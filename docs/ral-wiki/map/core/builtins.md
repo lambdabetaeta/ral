@@ -49,9 +49,10 @@ shell must seed through `install_builtins` or re-link a native by name.
 Three entries sit *outside* the macro, implemented in core but installed by a
 host. Two are a pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
-`scheme::watch` so a host with a durable stdout sink (the interactive and
-batch ral hosts) installs it while an agent host omits it
-([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
+`scheme::watch` — a watched worker's lines leave as `` `watch [label, line] ``
+surfaces through the session's deferred sink (`Sink::Watch`), which outlives
+the run — so the ral hosts, which print them, install it while the agent host
+omits it ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
 `SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
 the agent host (exarch), whose lease frame reaps ordinary workers, installs
 the durable-birth verb while the ral hosts — which grant no lease, so every
@@ -143,7 +144,7 @@ Bodies are grouped by concern, one submodule each:
   running or reserved, with an error naming the verb the caller actually
   wrote and `await`/`cancel` as the remedies, the reservation held across thread spawn and released into the
   registered entry, so a racing sibling birth never sees a filling seat as
-  free (`workers` is retired — [[map/exarch/builtins|builtins]]); settled
+  free (there is no `workers` listing — [[map/exarch/builtins|builtins]]); settled
   entries lingering under retention hold no seat. A
   settled entry's own lease is retention, armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease): the registry

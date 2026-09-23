@@ -38,7 +38,6 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         // A parse or type failure is a static diagnostic, not a run

@@ -45,7 +45,7 @@ DO NOT POLL AGENTS. Wait to be notified of their completion.
 
 There are two types of agents. `` `amnemon `` is the default; it begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
 
-Every tag but `` `list `` and `` `read `` answers `` `summary [live: Int, replied: Int] `` afterwards: how many other agents are alive around you, and how many of the agents you started are parked holding a value you have not fetched. A non-zero `replied` means go and `` `read ``.
+Every tag but `` `list `` and `` `read `` answers `[live: Int, replied: Int]` afterwards: how many other agents are alive around you, and how many of the agents you started are parked holding a value you have not fetched. A non-zero `replied` means go and `` `read ``.
 
 `` exarch-agents `list `` gives the rows, `[[name, spawner, state, idle-s, elapsed-s, log-dir]]` — every live agent in your tree, you included, not only what you started. `spawner` says who started each one: `` `root `` for an agent a human started, `` `agent <name> `` otherwise. `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting ``.
 

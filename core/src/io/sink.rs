@@ -7,6 +7,7 @@
 
 use super::edge::{DeadEdge, Edge};
 use crate::sync::LockExt as _;
+use crate::types::DeferredSink;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,21 +20,6 @@ use std::sync::{Arc, Mutex};
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
-
-/// Frontend-provided byte writer — the REPL installs rustyline's
-/// `ExternalPrinter` here so bytes land above the active prompt instead of
-/// over it.
-///
-/// `Send + Sync` because one `External` sink is cloned into every watcher
-/// and pump thread.
-pub trait ExternalWrite: Send + Sync {
-    /// Implementors must serialise whole calls — `LineFramed` leans on that for
-    /// line atomicity.
-    ///
-    /// # Errors
-    /// Returns `Err` if the underlying frontend write fails.
-    fn write(&self, bytes: &[u8]) -> io::Result<()>;
-}
 
 /// Captured bytes, and the one thing about them the write path cannot say:
 /// that [`SINK_BUFFER_CAP`] cut the stream short.
@@ -98,15 +84,13 @@ pub enum Sink {
     Buffer(ByteBuffer),
     /// Both branches in order; a failure on the first skips the second.
     Tee(Box<Self>, Box<Self>),
-    /// The frontend's own writer — rustyline's printer under the REPL.
-    External(Arc<dyn ExternalWrite>),
-    /// Buffers up to each `\n`, then emits `prefix + line + '\n'` to `inner` as
-    /// one write.  `watch` frames a background block's output this way, so it
-    /// stays line-atomic against the parent's without a global multiplexer;
-    /// `pending` holds the partial line that `flush_pending` later emits.
-    LineFramed {
-        inner: Box<Self>,
-        prefix: String,
+    /// A watched worker's stream: each line leaves as one
+    /// `` `watch [label, line] `` surface, a batch of one, through the
+    /// session's deferred sink — or, with none, is dropped. `pending` holds
+    /// the partial line `flush_pending` later emits.
+    Watch {
+        deferred: Option<Arc<dyn DeferredSink>>,
+        label: String,
         pending: Vec<u8>,
     },
     /// A stage thread's interior edge: the write end, the stage's wake, and
@@ -182,46 +166,37 @@ fn write_interruptible(
 }
 
 impl Sink {
-    /// Emit a `LineFramed`'s unterminated tail, recursing through `Tee`; a no-op
+    /// Emit a `Watch`'s unterminated tail, recursing through `Tee`; a no-op
     /// elsewhere.  End-of-stream only — nothing else ever emits that tail.
-    ///
-    /// # Errors
-    /// Returns `Err` if writing the tail to an inner sink fails.
-    pub(crate) fn flush_pending(&mut self) -> io::Result<()> {
+    pub(crate) fn flush_pending(&mut self) {
         match self {
-            Self::LineFramed {
-                inner,
-                prefix,
+            Self::Watch {
+                deferred,
+                label,
                 pending,
-            } => {
-                if pending.is_empty() {
-                    return Ok(());
-                }
-                let tail = std::mem::take(pending);
-                emit_framed(inner, prefix, &tail)
+            } if !pending.is_empty() => {
+                surface_line(deferred.as_deref(), label, &std::mem::take(pending));
             }
             Self::Tee(a, b) => {
-                a.flush_pending()?;
-                b.flush_pending()
+                a.flush_pending();
+                b.flush_pending();
             }
-            _ => Ok(()),
+            _ => {}
         }
     }
 
     /// Plan a child's stdout into this sink.
     ///
     /// `Terminal` always inherits; with `inherit_tty` — the caller's assertion
-    /// that fd 1 really is this shell's terminal — so do `Stderr` and
-    /// `External`, since a direct dup is the only way the child sees a TTY.
+    /// that fd 1 really is this shell's terminal — so does `Stderr`, since a
+    /// direct dup is the only way the child sees a TTY.
     /// Both halves of the plan bind the caller: `plan.stdio` before spawn, then
     /// the child's fd into [`Sink::pump`] if `plan.pump` is `Some`.
     ///
     /// # Errors
     /// Returns `Err` if cloning the sink to pump fails.
     pub(crate) fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
-        if matches!(self, Self::Terminal)
-            || (inherit_tty && matches!(self, Self::Stderr | Self::External(_)))
-        {
+        if matches!(self, Self::Terminal) || (inherit_tty && matches!(self, Self::Stderr)) {
             return Ok(ChildStdioPlan::inherit());
         }
         self.child_stdio_plan()
@@ -274,7 +249,7 @@ impl Sink {
                     Err(_) => break,
                 }
             }
-            let _ = sink.flush_pending();
+            sink.flush_pending();
         })
     }
 }
@@ -289,10 +264,11 @@ impl Clone for Sink {
             Self::File(f) => Self::File(f.clone()),
             Self::Buffer(b) => Self::Buffer(b.clone()),
             Self::Tee(a, b) => Self::Tee(Box::new((**a).clone()), Box::new((**b).clone())),
-            Self::External(w) => Self::External(w.clone()),
-            Self::LineFramed { inner, prefix, .. } => Self::LineFramed {
-                inner: Box::new((**inner).clone()),
-                prefix: prefix.clone(),
+            Self::Watch {
+                deferred, label, ..
+            } => Self::Watch {
+                deferred: deferred.clone(),
+                label: label.clone(),
                 // Each clone carries its own partial line: sharing `pending`
                 // would let two threads interleave halves of one.
                 pending: Vec::new(),
@@ -392,10 +368,24 @@ fn write_capped(buf: &CapturedBytes, bytes: &[u8]) {
     }
 }
 
-/// One write, so the line cannot be split: shared by the mid-stream and tail
-/// paths of `LineFramed`.
-fn emit_framed(inner: &mut Sink, prefix: &str, line: &[u8]) -> io::Result<()> {
-    inner.write_all(&[prefix.as_bytes(), line, b"\n"].concat())
+/// One line of a `Watch`, whole: shared by its mid-stream and tail paths.
+fn surface_line(deferred: Option<&dyn DeferredSink>, label: &str, line: &[u8]) {
+    let Some(deferred) = deferred else {
+        return;
+    };
+    let text = |value: String| crate::serial::FOValue::String { value };
+    deferred.deliver(vec![crate::serial::FOValue::Variant {
+        label: "watch".into(),
+        payload: Some(Box::new(crate::serial::FOValue::Map {
+            entries: vec![
+                ("label".into(), text(label.to_string())),
+                (
+                    "line".into(),
+                    text(String::from_utf8_lossy(line).into_owned()),
+                ),
+            ],
+        })),
+    }]);
 }
 
 impl Write for Sink {
@@ -418,21 +408,20 @@ impl Write for Sink {
                 a.write_all(bytes)?;
                 b.write_all(bytes)
             }
-            Self::External(w) => w.write(bytes),
             Self::Pipe { writer, wake, edge } => write_interruptible(writer, wake, edge, bytes),
-            Self::LineFramed {
-                inner,
-                prefix,
+            Self::Watch {
+                deferred,
+                label,
                 pending,
             } => {
-                // One write per line is what buys atomicity: the OS stdout lock
-                // or the `External` adapter's mutex serialises whole writes, so
-                // sibling watchers interleave lines rather than halves of one.
                 pending.extend_from_slice(bytes);
                 while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
                     let line = &pending[..pos];
-                    let line = line.strip_suffix(b"\r").unwrap_or(line);
-                    emit_framed(inner, prefix, line)?;
+                    surface_line(
+                        deferred.as_deref(),
+                        label,
+                        line.strip_suffix(b"\r").unwrap_or(line),
+                    );
                     pending.drain(..=pos);
                 }
                 Ok(())
@@ -440,7 +429,7 @@ impl Write for Sink {
         }
     }
 
-    /// `LineFramed` deliberately keeps its tail here: flushing a partial line
+    /// `Watch` deliberately keeps its tail here: flushing a partial line
     /// would terminate it and frame the rest as a new one.  That belongs to
     /// [`Sink::flush_pending`], at end of stream.
     fn flush(&mut self) -> io::Result<()> {

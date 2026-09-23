@@ -13,7 +13,7 @@ use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
-use ral_core::protocol::{Report, Severed};
+use ral_core::protocol::{Report, Severed, reading};
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
 use std::fmt::Write;
@@ -120,11 +120,10 @@ impl Avatar {
     /// fresh at each [`Self::ral`] install, so no capture goes stale.
     ///
     /// # Errors
-    /// The engine's severance, from the live `cwd` probe.
+    /// The engine's severance, from the live `cwd` and `home` probes.
     pub(crate) fn host_services(
         &self,
         emit: &Emitter,
-        nursery: ral_core::types::Nursery,
         reply: ReplyCell,
     ) -> Result<desk::HostServices, Severed> {
         Ok(desk::HostServices {
@@ -133,9 +132,10 @@ impl Avatar {
             agent: self.agent.clone(),
             emit: emit.clone(),
             cwd: self.cwd()?,
+            home: self.seat.read(reading::home)?,
             reply,
             log: self.log.clone(),
-            nursery,
+            branch: None,
             stamp: self.agent.mailbox().stamp(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
@@ -154,11 +154,8 @@ impl Avatar {
         // is the id of the turn this result closes — and the call's source name.
         let turn = self.log.lock().current_turn();
         let source = turn.map_or_else(|| "tool call".to_string(), |turn| format!("turn {turn}"));
-        // The adoption end of a handler's body-side `Shell::fork_into_nursery`,
-        // read back by `RunHost::fork`.
-        let nursery = ral_core::types::Nursery::default();
         let reply_cell = ReplyCell::default();
-        let services = match self.host_services(emit, nursery, reply_cell.clone()) {
+        let services = match self.host_services(emit, reply_cell.clone()) {
             Ok(services) => services,
             Err(s) => {
                 return (
@@ -170,7 +167,6 @@ impl Avatar {
         let host = Arc::new(desk::RunHost {
             desk: desk::ExarchDesk { services },
             apply: desk::SurfaceApplier {
-                pins: Some(self.agent.pins.clone()),
                 recorder: self.recorder(),
             },
         });
@@ -194,7 +190,7 @@ impl Avatar {
                 ending,
                 captured,
                 trail,
-            }) => match self.probe_workers() {
+            }) => match self.seat.read(reading::workers) {
                 Ok(workers) => {
                     let result = shell_eval::report::tool_result(
                         &ending,
@@ -327,13 +323,8 @@ mod tests {
     /// recovery under test is the engine's own run door catching the unwind.
     #[test]
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(PANIC_BUILTINS);
-        let baseline_grant_depth = probe_int(&session, "grant-depth");
+        let mut session = dressed_trunk(|shell| shell.install_builtins(PANIC_BUILTINS));
+        let baseline_grant_depth = probe_count(&session, ral_core::test_access::grant_depth);
 
         // The panicking second call surfaces to the model as an ordinary
         // failed tool result, which is why a third, closing reply follows.
@@ -354,7 +345,7 @@ mod tests {
         // `with_capabilities`.  Read before the scope probe below, which is
         // itself a call.
         assert_eq!(
-            probe_int(&session, "grant-depth"),
+            probe_count(&session, ral_core::test_access::grant_depth),
             baseline_grant_depth,
             "the panicking call's grant frame must not leak into the next run"
         );
@@ -373,7 +364,6 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         let token = cancel::Token::new();
-        let _slot = cancel::publish(&token);
         match session.deliberate(&provider2, Some("continue".into()), None, &token, &emit) {
             Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "ok"),
             other => panic!("next exchange on the healed shell must complete, got {other:?}"),
@@ -386,15 +376,12 @@ mod tests {
     /// armed out of reach, so only the size axis is in play.
     #[test]
     fn large_binding_install_warns_on_its_own_run_stderr() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .arm_binding_lease(ral_core::types::BindingLease {
+        let mut session = dressed_trunk(|shell| {
+            shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1_000_000,
                 large_binding_bytes: 8,
             });
+        });
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
@@ -528,20 +515,13 @@ mod tests {
     /// the prune is already part of the state being checkpointed.
     #[test]
     fn panic_after_prune_does_not_resurrect_binding() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(PANIC_BUILTINS);
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .arm_binding_lease(ral_core::types::BindingLease {
+        let mut session = dressed_trunk(|shell| {
+            shell.install_builtins(PANIC_BUILTINS);
+            shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
             });
+        });
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
@@ -590,14 +570,14 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
 
-        let (boot_name, _) = session
+        let boot_name = session
             .seat
-            .shell_mut()
-            .shell
-            .bindings()
+            .read(reading::bindings)
+            .expect("an identity seat never severs")
             .into_iter()
             .next()
-            .expect("the boot sequence seeds at least one binding");
+            .expect("the boot sequence seeds at least one binding")
+            .name;
 
         for _ in 0..(shell_eval::BINDING_IDLE_CALLS + 5) {
             session.ral("let _boot_spin = 0", 5, &emit);
@@ -613,10 +593,9 @@ mod tests {
     /// notice riding a later run's surface stream back to the bus.
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
-        let mut session = Avatar::for_test("system").unwrap();
         // A tiny bound so the expiry is a couple of calls away; this replaces
-        // the production constant the seat's identity ceremony armed.
-        session.seat.shell_mut().shell.arm_worker_retention(1);
+        // the production constant the recipe armed.
+        let mut session = dressed_trunk(|shell| shell.arm_worker_retention(1));
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
@@ -627,7 +606,8 @@ mod tests {
         // nothing, so the retention arithmetic below stays exact.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !session
-            .probe_workers()
+            .seat
+            .read(reading::workers)
             .expect("an identity seat never severs")
             .iter()
             .any(|w| !w.running)
@@ -667,7 +647,7 @@ mod tests {
         }
         assert_eq!(reaps, 1, "exactly one notice per retention expiry");
         assert_eq!(
-            probe_int(&session, "worker-count"),
+            probe_count(&session, ral_core::test_access::worker_count),
             0,
             "the expired entry left the registry"
         );

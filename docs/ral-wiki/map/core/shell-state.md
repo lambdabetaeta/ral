@@ -63,7 +63,11 @@ decision layer interprets: `Capabilities` (one layer), `ExecPolicy`, `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<Capabilities>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
 stack's verdicts, not a `Capabilities::meet`
-([[decisions/260906_object-not-name|object-not-name]])), `SandboxProjection`,
+([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
+`with_capabilities`, `with_layers`, `Frame::Grant` — removes its own frames by
+position (`GrantStack::remove`) rather than popping the top, so a session
+frame `push_session_capabilities` lays inside it, as the boot door's
+`--capabilities` does inside its run, survives it), `SandboxProjection`,
 and the `Join` lattice operation (tested in `capability/lattice_tests.rs`),
 which widens a base overlay for `--extend-base`; Boolean `false` permissions
 remain sticky vetoes. `Meet` survives only where a value genuinely narrows by
@@ -92,10 +96,9 @@ corrupting the store.
   `local.audit.call_site`) with it, so an unwinding evaluation cannot leave a
   stale register behind.
 - **`SessionState`** — what survives every run's teardown: the durable cancel
-  `root` that detached workers parent under (minted deaf to the ambient
-  causes; `Shell::face_signals` re-mints it facing, for the host that owns the
-  process's signals, and `Shell::join_session` *shares* it, for a second
-  `Shell` the host runs beside that session,
+  `root` that detached workers parent under (`Shell::join_session` *shares*
+  it, for a second
+  `Shell` the engine runs beside that session — an aside hook,
   [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]), the
   `anchor` a *top-level* run nests its foreground frame under — re-minted
   wherever the root is and never afterwards, so the scope tree is the LIFO
@@ -222,8 +225,11 @@ The `fork` door is a two-armed sum, `Fork` (`mooring.rs`), read through
 - **`Fork::Park(Nursery)`** — in-process. The reentrancy law bars a
   same-process desk handler from holding `&mut Shell`, so it cannot fork a
   session itself: the builtin body forks through `Shell::fork_into_nursery`,
-  the fork waits in the run-local `Nursery`, and the handler redeems it by
-  `NurseryId` with `Nursery::adopt`.
+  the fork waits in the `Nursery` the identity carrier owns and lays on each
+  dispatch, and the handler redeems its `NurseryId` through the parent's own
+  transport, `IdentityTransport::adopt_parked` — a new transport over the
+  fork, never a `Shell` in the host's hands (`Nursery::adopt` is
+  `pub(crate)`).
 - **`Fork::Listen`** — across a wire. The builtin binds a guest port and names
   it in its enquiry; the desk dials back and the child engine is spawned onto
   that connection ([[map/core/transport|transport]]). There is no pen, and
@@ -237,9 +243,9 @@ thing regardless of seat.
 Immutability is what makes the frame free. A value that never moves needs no
 putting back: an outer run's mooring is restored by the stack unwinding, and
 a `NurseryGuard` beside it empties a `Park` arm's pen on that same unwinding.
-In effect terms the split separates a Reader (`&Mooring`, with `Shell::run_nested` as its
-`local` — a nested run's frame is a child of the mooring it is handed) from
-State (`Io` under a loan). **Borrow when you can, loan when you must.**
+In effect terms the split separates a Reader (`&Mooring`, whose `local` is
+applying a function under the mooring it is handed) from State (`Io` under a
+loan). **Borrow when you can, loan when you must.**
 
 `&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
 an event while holding the shell mutably. `Mooring` is not `Clone`:
@@ -314,9 +320,14 @@ Methods on `Shell` live by concern, one submodule each:
   directory is not the process cwd state it directly), `inherit.rs` (the
   flow matrix, below), `modules.rs`, `detached.rs` (the `detach` budget),
   `control.rs`, `hooks.rs` (the session-lived hook table of named run-entry
-  points — prompt render, startup, plugin hooks — resolved by the run door's
-  hook-program arm), `repl.rs` (`ReplScratch`, owned by the [[map/repl|REPL]]
-  layer).
+  points — prompt render, startup, plugin hooks — each a block, a lambda or a
+  builtin, resolved by the run door's hook-program arm under the hook's
+  registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
+  fault in a hook run is labelled by `HookName::fault_label`, and a hook run
+  is no ready boundary), `repl.rs` (`ReplScratch`, the
+  [[map/repl|REPL]]'s engine-side scratch: the typed registry of the plugins
+  its load door committed, and `last_chpwd`, the monotone record `cd` writes
+  and the `last-chpwd` reading answers).
 
 ## The flow matrix
 
@@ -347,7 +358,7 @@ default for a store that is not the session's:
 
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
   helper) *and* a ral-written pipeline stage
-  ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline no longer
+  ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO; nothing
   flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
   calling thread (so the door can hand the caller the worker's scope) and moved
@@ -357,12 +368,13 @@ default for a store that is not the session's:
   *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
   transitively and the pipeline's own surface/deferred rail carries over
   rather than a worker's fresh one.
-- `child_from` — a REPL aside (the hook shell, one call site in the
-  [[map/repl|REPL plugin runtime]]): an independent sibling that clones the
-  parent's `context`, source cursor, and builtin table without touching its IO /
+- `child_from` — an aside: an independent sibling that clones the parent's
+  `context`, source cursor, and builtin table without touching its IO /
   audit / REPL scratch; no flow-back. `join_session` is its aside
-  specialisation, sharing the parent's cancel root, so plugin code there is
-  interruptible while it runs and older interrupts stay out of its reach.
+  specialisation, sharing the parent's cancel root, so code there is
+  interruptible while it runs and older interrupts stay out of its reach; the
+  run door runs a hook there when its registered `DefaultPolicy` says
+  `aside` (the REPL's buffer-change hooks).
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
   specialisation of `child_from`. `fork_scrubbed` is the door every sub-agent
   fork actually passes through: `fork_session` plus a scope stripped of

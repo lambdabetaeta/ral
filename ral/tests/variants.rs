@@ -246,8 +246,12 @@ fn stream_each_on_empty_stream_runs_body_zero_times() {
 fn a_variant_piped_into_a_block_goes_nowhere() {
     // A variant is a value, and no value crosses an edge: the producer's
     // `ok 5` is discarded, the block literal is returned rather than
-    // applied, and so `$v` never prints.
-    let out = common::run("non_step_variant", "return `ok 5 | { |v| echo $v }\n");
+    // applied, and so `$v` never prints. `return ()` keeps the run's result
+    // data.
+    let out = common::run(
+        "non_step_variant",
+        "return `ok 5 | { |v| echo $v }\nreturn ()\n",
+    );
     assert_eq!(out.status, 0, "expected acceptance: {}", out.stderr);
     assert!(
         out.stdout.is_empty(),
@@ -260,7 +264,10 @@ fn a_variant_piped_into_a_block_goes_nowhere() {
 /// special treatment at an edge, because no value reaches one.
 #[test]
 fn a_done_labelled_variant_piped_into_a_block_goes_nowhere() {
-    let out = common::run("done_payload_variant", "return `done 5 | { |v| echo $v }\n");
+    let out = common::run(
+        "done_payload_variant",
+        "return `done 5 | { |v| echo $v }\nreturn ()\n",
+    );
     assert_eq!(out.status, 0, "expected acceptance: {}", out.stderr);
     assert!(
         out.stdout.is_empty(),

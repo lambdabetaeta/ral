@@ -76,7 +76,6 @@ fn confined_child_env(src: &str) -> String {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     });
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");

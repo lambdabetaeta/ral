@@ -24,18 +24,6 @@ use crate::{CompileError, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Optional per-run lifecycle hooks; a host with none uses the `()` impl.
-///
-/// Every production host does: the live implementors are all in tests. A hook
-/// holds the run's [`Mooring`], which is what lets it surface, enquire, or
-/// nest a run under the run it is hooking.
-pub trait RunLifecycle {
-    fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {}
-    fn post_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str, _status: i32) {}
-}
-
-impl RunLifecycle for () {}
-
 /// Parse/type diagnostics from a run that never reached evaluation.
 ///
 /// The spanned arms carry the [`Source`](crate::source::Source) their carets
@@ -101,7 +89,7 @@ pub enum RunStdin {
 ///
 /// Composition, not mirroring — a field added to [`Run`] reaches the engine
 /// in one declaration.
-pub struct RunRequest<'a> {
+pub struct RunRequest {
     pub run: Run,
     /// Run-local sink for structured events; `None` is the identity.
     pub surface: Option<SurfaceSink>,
@@ -113,7 +101,6 @@ pub struct RunRequest<'a> {
     pub desk: Option<Desk>,
     /// How a forked session reaches this run's desk; `None` adopts none.
     pub fork: Option<Fork>,
-    pub lifecycle: Box<dyn RunLifecycle + 'a>,
 }
 
 /// The byte streams captured under [`RunIo::Capture`], carried verbatim onto
@@ -221,7 +208,7 @@ impl Shell {
     /// run alive. It is also the durability boundary — a panic anywhere in the
     /// run restores the `env`/`context` checkpointed at entry, so the shell
     /// rolls itself back and no snapshot crosses the engine protocol.
-    pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
+    pub fn run(&mut self, req: RunRequest) -> RunReport {
         let anchor = self.session.anchor.clone();
         self.run_under(&anchor, req)
     }
@@ -231,29 +218,6 @@ impl Shell {
     /// door a host takes when it must be able to cancel this run from another
     /// thread, including before the run has begun.  [`Shell::run`] is this door
     /// with the anchor.
-    pub(crate) fn run_under(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
-        // A run is the extent of ral's picture of `PATH`: whatever happened to
-        // the filesystem between runs is admitted here, and within a run a
-        // walk is paid once per name.  Here and not in `enter` or `dispatch`,
-        // because a nested run lives *inside* an outer run's extent —
-        // forgetting there would throw the memo away for exactly the scripts
-        // whose bodies enter builtins, which is where it pays most.
-        crate::path::forget_located_commands();
-        self.enter(under, req)
-    }
-
-    /// Run `req` with its frame a child of `parent` rather than of the session
-    /// anchor — the door a builtin body or lifecycle hook uses, both holding the
-    /// enclosing run's mooring. Nesting is what makes the cancel tree the runs'
-    /// LIFO extent: the nested run observes the interrupt its outer run already
-    /// carries, and the outer run's wall reaches into the nest.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn run_nested(&mut self, parent: &Mooring, req: RunRequest<'_>) -> RunReport {
-        self.enter(&parent.cancel, req)
-    }
-
-    /// Both doors' body, so that the durability wrapper is the only way
-    /// through either.
     ///
     /// A dispatch that asks for a trail (`req.run.trail: Some`) gets its
     /// scope held *here*, outside the `catch_unwind` below: the checkpoint
@@ -262,7 +226,11 @@ impl Shell {
     /// cannot skip keeps the opener's close law true at dispatch
     /// granularity. A panic reports `Static` by declaration — the trail
     /// closes and is discarded, never attached.
-    fn enter(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
+    pub(crate) fn run_under(&mut self, under: &ForegroundScope, req: RunRequest) -> RunReport {
+        // A run is the extent of ral's picture of `PATH`: whatever happened to
+        // the filesystem between runs is admitted here, and within a run a
+        // walk is paid once per name.
+        crate::path::forget_located_commands();
         let checkpoint = (self.env.clone(), self.context.clone());
         let saved_capture = self.local.audit.capture_policy();
         let scope: Option<TrailScope> = req.run.trail.map(|policy| {
@@ -305,12 +273,14 @@ impl Shell {
 
     /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
     /// this run's foreground frame minted under `under`.
-    fn dispatch(&mut self, under: &ForegroundScope, mut req: RunRequest<'_>) -> RunReport {
+    fn dispatch(&mut self, under: &ForegroundScope, mut req: RunRequest) -> RunReport {
         // Armed *before* compiling, so the limit bounds compile and typecheck
         // too: `compile_run`'s `process::clear` touches only the signal
         // escalation count, never the reaper. The guard disarms on drop, so
         // an early `Static` return leaves no entry.
-        let foreground = self.durable_root().foreground(under);
+        // Nested under the frame it displaces, so the tree *is* the runs'
+        // dynamic extent: an outer run's cancel or wall reaches into the nest.
+        let foreground = under.child();
         let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
         match req.run.program {
@@ -362,8 +332,8 @@ impl Shell {
                 // first-order by type (`FOValue`).
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
-                // Capture and terminal authority are the registered hook's to
-                // decide, not the dispatching host's.
+                // Capture, terminal authority and aside are the registered
+                // hook's to decide, not the dispatching host's.
                 if hook.policy.capture {
                     req.run.io = RunIo::Capture;
                 }
@@ -372,9 +342,20 @@ impl Shell {
                     TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
                 };
 
-                self.run_built(req, foreground, wall, false, FileId::DUMMY, |m, s| {
-                    crate::builtins::apply(&hook.binding.value, args, m, s)
-                })
+                let label = name.fault_label();
+                let body = move |m: &Mooring, s: &mut Self| {
+                    crate::builtins::apply(&hook.binding.value, args, m, s).map_err(|brk| match brk
+                    {
+                        Break::Error(e) => Break::Error(e.context(label)),
+                        escape @ Break::Escape(_) => escape,
+                    })
+                };
+                if hook.policy.aside {
+                    let mut aside = self.join_session();
+                    aside.io = build_run(self, None, Source::Empty);
+                    return aside.run_built(req, foreground, wall, false, FileId::DUMMY, body);
+                }
+                self.run_built(req, foreground, wall, false, FileId::DUMMY, body)
             }
         }
     }
@@ -388,7 +369,7 @@ impl Shell {
     /// panic path too, both being locals inside `enter`'s `catch_unwind`.
     fn run_built(
         &mut self,
-        req: RunRequest<'_>,
+        req: RunRequest,
         foreground: ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
@@ -401,7 +382,6 @@ impl Shell {
             deferred,
             desk,
             fork,
-            lifecycle,
         } = req;
 
         // A hook run has no text: its program is an already-compiled value.
@@ -450,7 +430,6 @@ impl Shell {
             &run.script_name,
             src,
             run.caps.clone(),
-            lifecycle,
             body,
         );
 
@@ -541,10 +520,6 @@ impl<'s> IoLoan<'s> {
             saved_site,
         }
     }
-
-    fn shell_mut(&mut self) -> &mut Shell {
-        self.shell
-    }
 }
 
 impl Drop for IoLoan<'_> {
@@ -633,35 +608,27 @@ pub(crate) fn compile_run(
     Ok((top, single_command, file))
 }
 
-/// Install the built run state, fire the lifecycle hooks around `body` under
-/// `capabilities`, compute the transport status, and tear the frame down. Both
+/// Install the built run state, run `body` under `capabilities`, compute the transport status, and tear the frame down. Both
 /// program arms settle to one [`Settled<Value>`], so this spine is shared
 /// verbatim; the caller keeps the mooring, the limits and the classification.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the run spine's whole frame in one place; a carrier struct would just relay the same fields"
-)]
-pub(crate) fn run_framed<'a>(
+pub(crate) fn run_framed(
     mooring: &Mooring,
     shell: &mut Shell,
     next: Io,
     script_name: &str,
     src: Option<&str>,
     capabilities: GrantStack,
-    mut lifecycle: Box<dyn RunLifecycle + 'a>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
-    let mut guard = IoLoan::install(shell, next);
-    let shell = guard.shell_mut();
+    let guard = IoLoan::install(shell, next);
+    let shell = &mut *guard.shell;
     // Only a source run registers: a hook's spans point into the file the hook
     // was defined in, so an entry for its absent text would name nothing and
     // never be reclaimed — the registry is append-only for the session's life.
     if let Some(src) = src {
         shell.install_root_context(script_name, src);
     }
-
-    let src = src.unwrap_or("");
-    lifecycle.pre_exec(mooring, shell, src);
+    let boundary = src.is_some();
 
     let result = shell.with_layers(capabilities, |s| body(mooring, s));
 
@@ -669,19 +636,20 @@ pub(crate) fn run_framed<'a>(
     // recovery construct (`try`) classifies the cancellation `Break::Error`
     // like any other and may absorb it into a clean value, but the scope is
     // monotone, so this final poll re-raises it before the status is read —
-    // `post_exec` and the transport both see the true verdict. Demotes only a
+    // the transport sees the true verdict. Demotes only a
     // successful settle; an error or escape already carries its own.
     let result = result.and_then(|value| crate::process::check(mooring).map(|()| value));
 
     let status = status(&result);
 
-    lifecycle.post_exec(mooring, shell, src, status);
-
     // Ready-boundary housekeeping — reap notices as `` `notice `` surface
     // classes, the large-binding warning onto stderr — must go out while this
     // run's frame is still installed, so each rides this run's own stream and
     // is ordered before its Report. Once `guard` drops there is no sink left.
-    shell.emit_ready_boundary_notices(mooring);
+    // A hook run is no ready boundary.
+    if boundary {
+        shell.emit_ready_boundary_notices(mooring);
+    }
 
     drop(guard);
 
@@ -696,7 +664,7 @@ pub(crate) mod tests {
 
     /// The minimal request, shaped like exarch's tool run: ⊤ ceiling, no
     /// surface, foreground `Denied`, stdin `Empty`.
-    pub(crate) fn capture_req<'a>(src: &str) -> RunRequest<'a> {
+    pub(crate) fn capture_req(src: &str) -> RunRequest {
         RunRequest {
             run: Run {
                 program: Program::Source(src.into()),
@@ -714,13 +682,37 @@ pub(crate) mod tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }
+    }
+
+    /// Install `name`, a builtin running `act` inside whichever run calls it,
+    /// with that run's mooring — how a test acts mid-run, as an engine-side
+    /// door does.
+    pub(crate) fn install_act(
+        shell: &mut Shell,
+        name: &'static str,
+        act: impl Fn(&Mooring, &mut Shell) + Send + Sync + 'static,
+    ) {
+        use crate::typecheck::builtins::{mk_scheme, pure, thunk};
+        let entry = crate::types::BuiltinEntry::new(
+            std::borrow::Cow::Borrowed(name),
+            |_| mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit))),
+            "test-only: act from inside the run.",
+            crate::types::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
+                act(mooring, shell);
+                Ok(crate::types::Value::Unit)
+            })),
+        );
+        shell.install_captured_builtins(&vec![entry].into());
+    }
+
+    /// An act striking its own run with `cause`, as a `Control` does.
+    fn strike(cause: crate::process::CancelCause) -> impl Fn(&Mooring, &mut Shell) + Send + Sync {
+        move |mooring, _| mooring.cancel.cancel(cause)
     }
 
     #[test]
     fn clean_run_settles_with_zero_status() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + 1]")) {
             RunReport::Ran { ending, .. } => {
@@ -734,7 +726,6 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_failure_is_static() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("let = ")) {
             RunReport::Static { diagnostics } => {
@@ -759,7 +750,6 @@ pub(crate) mod tests {
     /// draw, and one per keystroke under a `buffer-change` hook.
     #[test]
     fn a_hook_run_registers_no_source() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.run(capture_req("let body = { 1 }"));
         let thunk = shell
@@ -800,9 +790,80 @@ pub(crate) mod tests {
         );
     }
 
+    /// Register the block `src` as hook `name` under `policy`, and run it.
+    fn run_block_hook(
+        shell: &mut Shell,
+        name: crate::types::HookName,
+        src: &str,
+        policy: crate::types::DefaultPolicy,
+    ) -> Ending {
+        shell.run(capture_req(&format!("let hook_body = {src}")));
+        let body = shell
+            .scope_lookup("hook_body")
+            .cloned()
+            .expect("hook_body is bound");
+        shell
+            .register_hook(
+                name.clone(),
+                body,
+                crate::types::HookSig::Prompt,
+                policy,
+                Span::synthetic(),
+            )
+            .expect("register the hook");
+        let RunReport::Ran { ending, .. } = shell.run(RunRequest {
+            run: Run {
+                program: Program::Hook { name, args: vec![] },
+                ..capture_req("").run
+            },
+            ..capture_req("")
+        }) else {
+            panic!("the registered hook must run");
+        };
+        ending
+    }
+
+    /// A hook run's fault names its hook, so no host needs a wrapper.
+    #[test]
+    fn a_hook_fault_names_its_hook() {
+        let deny = crate::types::DefaultPolicy::denied;
+        for (name, label) in [
+            (crate::types::HookName::session("prompt"), "prompt: "),
+            (
+                crate::types::HookName::plugin("p", "h"),
+                "plugin 'p' hook 'h': ",
+            ),
+        ] {
+            let mut shell = Shell::new(crate::io::TerminalState::default());
+            let Ending::Raised { error, .. } =
+                run_block_hook(&mut shell, name, "{ cd '' }", deny())
+            else {
+                panic!("`cd ''` must raise");
+            };
+            assert!(error.message.starts_with(label), "{}", error.message);
+        }
+    }
+
+    /// An aside hook runs beside the session: its `cd` dies with it.
+    #[test]
+    fn an_aside_hook_leaves_the_session_where_it_was() {
+        let dir = tempfile::tempdir().expect("a tempdir");
+        for (policy, moved) in [
+            (crate::types::DefaultPolicy::denied(), true),
+            (crate::types::DefaultPolicy::denied().aside(), false),
+        ] {
+            let mut shell = Shell::new(crate::io::TerminalState::default());
+            shell.seed_cwd(dir.path().to_path_buf());
+            let start = shell.cwd();
+            let name = crate::types::HookName::session("buffer-change");
+            let ending = run_block_hook(&mut shell, name, "{ cd .. }", policy);
+            assert!(matches!(ending, Ending::Settled { .. }), "{ending:?}");
+            assert_eq!(shell.cwd() != start, moved);
+        }
+    }
+
     #[test]
     fn type_failure_is_static() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + true]")) {
             RunReport::Static { diagnostics } => {
@@ -823,7 +884,6 @@ pub(crate) mod tests {
 
     #[test]
     fn exit_escape_reports_code() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("exit 3")) {
             RunReport::Ran { ending, .. } => {
@@ -840,7 +900,6 @@ pub(crate) mod tests {
 
     #[test]
     fn capture_returns_stdout_bytes() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("echo hi")) {
             RunReport::Ran { captured, .. } => {
@@ -859,7 +918,6 @@ pub(crate) mod tests {
     /// the next top-level run hangs off the anchor and not off the last run's.
     #[test]
     fn a_settled_run_leaves_the_anchor_untouched() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pre = shell.session.anchor.clone();
         assert!(!pre.is_cancelled(), "pre-run anchor is live");
@@ -883,37 +941,31 @@ pub(crate) mod tests {
         );
     }
 
-    /// Parks a fork mid-run, as a desk handler's builtin body would.
-    struct ParkDuringRun(std::sync::Arc<Mutex<Option<crate::types::NurseryId>>>);
-    impl RunLifecycle for ParkDuringRun {
-        fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
-            let id = shell
-                .fork_into_nursery(mooring)
-                .expect("a nursery is installed on this run");
-            *self.0.lock().unwrap() = Some(id);
-        }
-    }
-
     /// The host's own `Nursery` clone is empty afterward: teardown reaches
     /// through the clone, not just the run's copy.
     #[test]
     fn nursery_is_emptied_at_run_teardown() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         let nursery = crate::types::Nursery::default();
         let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
+        let parked = parked_id.clone();
+        install_act(&mut shell, "park-fork", move |mooring, shell| {
+            let id = shell
+                .fork_into_nursery(mooring)
+                .expect("a nursery is installed on this run");
+            *parked.lock().unwrap() = Some(id);
+        });
 
         let _ = shell.run(RunRequest {
             fork: Some(crate::types::Fork::Park(nursery.clone())),
-            lifecycle: Box::new(ParkDuringRun(parked_id.clone())),
-            ..capture_req("$[1 + 1]")
+            ..capture_req("park-fork")
         });
 
         let id = parked_id
             .lock()
             .unwrap()
-            .expect("pre_exec must fork into the nursery");
+            .expect("the run must fork into the nursery");
         assert!(
             nursery.adopt(id).is_none(),
             "a fork parked during the run and never adopted must not survive the run's teardown"
@@ -925,7 +977,6 @@ pub(crate) mod tests {
     /// ordered before that run's own settling.
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // Never polled, under a millisecond-scale idle lease, so the background
@@ -980,66 +1031,17 @@ pub(crate) mod tests {
         );
     }
 
+    /// An interrupt struck mid-run is read at the next poll point, so
+    /// `process::check` unwinds the eval at 130.
     #[test]
-    fn lifecycle_hooks_fire_with_status() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        #[derive(Clone)]
-        struct Spy {
-            pre: Arc<Mutex<bool>>,
-            post_status: Arc<Mutex<Option<i32>>>,
-        }
-        impl RunLifecycle for Spy {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                *self.pre.lock().unwrap() = true;
-            }
-            fn post_exec(
-                &mut self,
-                _mooring: &Mooring,
-                _shell: &mut Shell,
-                _src: &str,
-                status: i32,
-            ) {
-                *self.post_status.lock().unwrap() = Some(status);
-            }
-        }
-
+    fn an_interrupt_mid_run_unwinds_the_eval() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let spy = Spy {
-            pre: Arc::new(Mutex::new(false)),
-            post_status: Arc::new(Mutex::new(None)),
-        };
-        let _ = shell.run(RunRequest {
-            lifecycle: Box::new(spy.clone()),
-            ..capture_req("exit 7")
-        });
-
-        assert!(*spy.pre.lock().unwrap(), "pre_exec must fire");
-        assert_eq!(
-            *spy.post_status.lock().unwrap(),
-            Some(7),
-            "post_exec must see the computed transport status"
+        install_act(
+            &mut shell,
+            "interrupt",
+            strike(crate::process::CancelCause::Interrupt),
         );
-    }
-
-    /// A run reads the interrupt watermark against its own birth: one raised
-    /// from `pre_exec` — the role a signal handler plays — is younger than the
-    /// run's mooring, so `process::check` unwinds the eval at 130.
-    #[test]
-    fn facing_session_carries_an_interrupt_into_eval() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct CancelInPreExec;
-        impl RunLifecycle for CancelInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-            }
-        }
-
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        match shell.run(RunRequest {
-            lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("let rpv = 42\nreturn $rpv")
-        }) {
+        match shell.run(capture_req("interrupt\nlet rpv = 42\nreturn $rpv")) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
@@ -1063,20 +1065,15 @@ pub(crate) mod tests {
     /// interrupt entirely.
     #[test]
     fn a_try_handler_cannot_settle_a_cancelled_run() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct CancelInPreExec;
-        impl RunLifecycle for CancelInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-            }
-        }
-
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        match shell.run(RunRequest {
-            lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("try { let x = ()\nreturn $x } { |_| return () }")
-        }) {
+        install_act(
+            &mut shell,
+            "interrupt",
+            strike(crate::process::CancelCause::Interrupt),
+        );
+        match shell.run(capture_req(
+            "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
+        )) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
@@ -1095,75 +1092,32 @@ pub(crate) mod tests {
         }
     }
 
-    /// A nested run observes what the run it nests in observes. Both unwind at
-    /// 130 though the nested frame is younger than the interrupt and deaf to it
-    /// on its own account: it reads it off the outer frame it descends from.
-    #[test]
-    fn a_nested_run_observes_the_interrupt_through_the_run_it_nests_in() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct NestARun(Arc<Mutex<Option<i32>>>);
-        impl RunLifecycle for NestARun {
-            fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-                match shell.run_nested(mooring, capture_req("let y = 1\nreturn $y")) {
-                    RunReport::Ran { ending, .. } => {
-                        *self.0.lock().unwrap() = Some(ending.status());
-                    }
-                    RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-                }
-            }
-        }
-
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        let inner = Arc::new(Mutex::new(None));
-        match shell.run(RunRequest {
-            lifecycle: Box::new(NestARun(inner.clone())),
-            ..capture_req("let rpv = 42\nreturn $rpv")
-        }) {
-            RunReport::Ran { ending, .. } => assert_eq!(
-                ending.status(),
-                130,
-                "the outer run must still observe the interrupt the nested run ran under"
-            ),
-            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-        }
-        assert_eq!(
-            *inner.lock().unwrap(),
-            Some(130),
-            "and the nested run observes it too — sharing, not shadowing"
-        );
-    }
-
     /// An aside — a separate `Shell` beside the session, as the REPL runs plugin
     /// hooks ([`Shell::join_session`]) — can neither absorb an interrupt aimed
-    /// at the session's run nor withhold it. Not authority but age: the aside
-    /// mints its frames under its own boot frame, so an interrupt older than all
-    /// of them is unreadable from there.
+    /// at the session's run nor withhold it: the aside mints its frames under
+    /// its own anchor, off the struck run's chain.
     #[test]
-    fn an_aside_cannot_absorb_an_interrupt_older_than_its_frames() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct RunAnAside(Shell, Arc<Mutex<Option<i32>>>);
-        impl RunLifecycle for RunAnAside {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-                match self.0.run(capture_req("let y = 1\nreturn $y")) {
-                    RunReport::Ran { ending, .. } => {
-                        *self.1.lock().unwrap() = Some(ending.status());
-                    }
-                    RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-                }
-            }
-        }
-
+    fn an_aside_cannot_absorb_its_callers_interrupt() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        let aside = shell.join_session();
+        let aside = Mutex::new(shell.join_session());
         let hook_status = Arc::new(Mutex::new(None));
-        match shell.run(RunRequest {
-            lifecycle: Box::new(RunAnAside(aside, hook_status.clone())),
-            ..capture_req("let rpv = 42\nreturn $rpv")
-        }) {
+        let status = hook_status.clone();
+        install_act(&mut shell, "interrupt-then-aside", move |mooring, _| {
+            mooring
+                .cancel
+                .cancel(crate::process::CancelCause::Interrupt);
+            let report = aside
+                .lock()
+                .unwrap()
+                .run(capture_req("let y = 1\nreturn $y"));
+            match report {
+                RunReport::Ran { ending, .. } => *status.lock().unwrap() = Some(ending.status()),
+                RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+            }
+        });
+        match shell.run(capture_req(
+            "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
+        )) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
                 130,
@@ -1174,7 +1128,7 @@ pub(crate) mod tests {
         assert_eq!(
             *hook_status.lock().unwrap(),
             Some(0),
-            "while the aside's own run, born after the interrupt, is deaf to it"
+            "while the aside's own run, off the struck chain, is deaf to it"
         );
     }
 
@@ -1182,21 +1136,14 @@ pub(crate) mod tests {
     /// it, so plugin code is interruptible for its whole life.
     #[test]
     fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct CancelInPreExec;
-        impl RunLifecycle for CancelInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-            }
-        }
-
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
+        let shell = Shell::new(crate::io::TerminalState::default());
         let mut aside = shell.join_session();
-        match aside.run(RunRequest {
-            lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("let y = 1\nreturn $y")
-        }) {
+        install_act(
+            &mut aside,
+            "interrupt",
+            strike(crate::process::CancelCause::Interrupt),
+        );
+        match aside.run(capture_req("interrupt\nlet y = 1\nreturn $y")) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
                 130,
@@ -1211,9 +1158,7 @@ pub(crate) mod tests {
     /// names the very root the aside shares.
     #[test]
     fn cancelling_a_session_by_handle_reaches_its_aside() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
+        let shell = Shell::new(crate::io::TerminalState::default());
         let mut aside = shell.join_session();
 
         shell
@@ -1237,127 +1182,48 @@ pub(crate) mod tests {
         }
     }
 
-    /// A forked session ([`Shell::fork_session`]) does not face signals, so
-    /// nothing on its runs' chains folds the ambient causes and a mid-run
-    /// interrupt leaves the eval undisturbed. Its host stops it through
-    /// [`Shell::cancel_handle`] instead, as the second half asserts.
+    /// No session folds the ambient causes: a signal reaches a run only as
+    /// the `Control` its host forwards, so one raised mid-run with nobody
+    /// listening leaves the eval undisturbed.
     #[test]
-    fn a_forked_session_is_deaf_to_the_requested_causes() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct CancelInPreExec;
-        impl RunLifecycle for CancelInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
-            }
-        }
-
-        let mut trunk = Shell::new(crate::io::TerminalState::default());
-        // Face the trunk, so the fork's deafness below is `fork_session`'s
-        // doing rather than the minting default's.
-        trunk.face_signals();
-        let mut forked = trunk.fork_session();
-        match forked.run(RunRequest {
-            lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("let rpv = 42\nreturn $rpv")
-        }) {
-            RunReport::Ran { ending, .. } => {
-                assert_eq!(
-                    ending.status(),
-                    0,
-                    "a foreground-cancel request must not reach a forked session's run"
-                );
-                let result = ending.into_result();
-                assert!(
-                    result.is_ok(),
-                    "the forked session's eval completes undisturbed, got {result:?}"
-                );
-            }
-            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-        }
-
-        struct CancelHandleInPreExec(crate::process::DurableRoot);
-        impl RunLifecycle for CancelHandleInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                self.0.cancel(crate::process::CancelCause::Explicit);
-            }
-        }
-        let handle = forked.cancel_handle();
-        match forked.run(RunRequest {
-            lifecycle: Box::new(CancelHandleInPreExec(handle)),
-            ..capture_req("let rpv = 42\nreturn $rpv")
-        }) {
-            RunReport::Ran { ending, .. } => {
-                assert_eq!(ending.status(), 130, "a cancelled handle unwinds the run");
-                let result = ending.into_result();
-                assert!(
-                    matches!(result, Err(Break::Error(_))),
-                    "the handle cancel must unwind into a Break::Error, got {result:?}"
-                );
-            }
-            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-        }
-    }
-
-    /// A signal-facing session's durable root folds the requested shutdown cause
-    /// — the role a SIGQUIT handler plays — and the run's foreground scope,
-    /// being its child, observes it through the parent chain.
-    #[test]
-    fn facing_session_carries_a_root_abort_into_eval() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct AbortInPreExec;
-        impl RunLifecycle for AbortInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_root_cancel(crate::process::CancelCause::RootAbort);
-            }
-        }
-
+    fn a_session_is_deaf_to_the_ambient_causes() {
+        let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        let report = shell.run(RunRequest {
-            lifecycle: Box::new(AbortInPreExec),
-            ..capture_req("let rpv = 42\nreturn $rpv")
+        install_act(&mut shell, "raise", |_, _| {
+            crate::process::request_interrupt();
+            crate::process::request_root_cancel(crate::process::CancelCause::RootAbort);
         });
-        // One-way in production, so nothing clears it: without this, every
-        // later session in the test binary would inherit the abort.
+        let report = shell.run(capture_req("raise\nlet rpv = 42\nreturn $rpv"));
         crate::process::cancel::clear_root_request();
         match report {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
-                    130,
-                    "a root abort observed mid-eval reports 130"
+                    0,
+                    "an ambient cause must not reach the run"
                 );
-                let result = ending.into_result();
-                assert!(
-                    matches!(result, Err(Break::Error(_))),
-                    "the abort must unwind into a Break::Error, got {result:?}"
-                );
+                assert!(ending.into_result().is_ok());
             }
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 
-    /// The hook fires the `Deadline` cause directly, pinning the `Walled`
+    /// The act fires the `Deadline` cause directly, pinning the `Walled`
     /// classification without sleeping on the reaper.
     #[test]
     fn deadline_cancel_reports_walled() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        struct DeadlineInPreExec;
-        impl RunLifecycle for DeadlineInPreExec {
-            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Deadline);
-            }
-        }
-
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
-        let req = capture_req("let rpv = 42\nreturn $rpv");
+        install_act(
+            &mut shell,
+            "expire",
+            strike(crate::process::CancelCause::Deadline),
+        );
+        let req = capture_req("expire\nlet rpv = 42\nreturn $rpv");
         match shell.run(RunRequest {
             run: Run {
                 wall: Some(std::time::Duration::from_secs(30)),
                 ..req.run
             },
-            lifecycle: Box::new(DeadlineInPreExec),
             ..req
         }) {
             RunReport::Ran { ending, .. } => {
@@ -1370,15 +1236,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// A real wall, so the cancel lands *during* the script rather than
-    /// before it: `deadline_cancel_reports_walled`'s `pre_exec` hook fires
-    /// ahead of evaluation, so no binding has landed there for the wall to
-    /// be measured against.
+    /// A real wall, so the cancel lands *during* the script: in
+    /// `deadline_cancel_reports_walled` it fires ahead of every binding, so
+    /// none has landed there for the wall to be measured against.
     #[test]
     fn mid_script_wall_keeps_the_bindings_that_landed() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.face_signals();
         let req = capture_req("let pre_wall = 1\nsleep 30\nlet post_wall = 2");
         match shell.run(RunRequest {
             run: Run {
@@ -1408,7 +1271,6 @@ pub(crate) mod tests {
     /// it.
     #[test]
     fn inherit_leaves_session_streams_untouched() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let (marker_sink, marker) = crate::io::new_buffer();
         shell.io.stdout = marker_sink;
@@ -1468,7 +1330,6 @@ pub(crate) mod tests {
     /// partial binding goes, a pre-run one stays, and the shell runs on.
     #[test]
     fn panicking_run_reports_failed_and_rolls_back() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
 
@@ -1515,35 +1376,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A panic after evaluation, outside the evaluator proper: the whole run
-    /// spine is inside the checkpoint, not just the eval.
-    struct PanicInPostExec;
-    impl RunLifecycle for PanicInPostExec {
-        fn post_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str, _status: i32) {
-            panic!("run-door test: post_exec panic");
-        }
-    }
-
-    #[test]
-    fn lifecycle_panic_is_caught_at_the_door() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-
-        match shell.run(RunRequest {
-            lifecycle: Box::new(PanicInPostExec),
-            ..capture_req("let post_panic = 3")
-        }) {
-            RunReport::Static {
-                diagnostics: StaticDiagnostics::Host(e),
-            } => assert!(e.message.contains("run panicked")),
-            _ => panic!("a lifecycle panic must report Static{{Host}}"),
-        }
-        assert!(
-            shell.scope_lookup("post_panic").is_none(),
-            "a post-exec panic rolls the whole run back — its binding included"
-        );
-    }
-
     /// A host-supplied handler panicking mid-enquiry unwinds back through the
     /// run, so the door catches it like any other.
     struct PanickingDesk;
@@ -1557,22 +1389,16 @@ pub(crate) mod tests {
         }
     }
 
-    struct EnquireInPreExec;
-    impl RunLifecycle for EnquireInPreExec {
-        fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
-            let _ = shell.enquire(mooring, crate::serial::FOValue::Unit);
-        }
-    }
-
     #[test]
     fn desk_handler_panic_is_caught_at_the_door() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
+        install_act(&mut shell, "enquire", |mooring, shell| {
+            let _ = shell.enquire(mooring, crate::serial::FOValue::Unit);
+        });
 
         match shell.run(RunRequest {
             desk: Some(Arc::new(PanickingDesk)),
-            lifecycle: Box::new(EnquireInPreExec),
-            ..capture_req("let desk_panic = 4")
+            ..capture_req("let desk_panic = 4\nenquire")
         }) {
             RunReport::Static {
                 diagnostics: StaticDiagnostics::Host(e),
@@ -1589,7 +1415,7 @@ pub(crate) mod tests {
 
     /// The rendered runtime error of a run that must fault.
     fn rendered_fault(shell: &mut Shell, src: &str) -> String {
-        let report = shell.run(capture_req(src)).into_report(shell.sources());
+        let report = shell.run(capture_req(src)).into_report(shell);
         let crate::protocol::Report::Ran { ending, .. } = report else {
             panic!("{src:?} must reach evaluation");
         };
@@ -1604,7 +1430,6 @@ pub(crate) mod tests {
     /// remedy that kind of value suggests.
     #[test]
     fn a_result_that_is_not_data_says_what_it_holds() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         for (src, says, hint) in [
             ("spawn { echo hi }", "the result is a handle", "let h ="),
@@ -1617,11 +1442,11 @@ pub(crate) mod tests {
             ),
             ("[k: { echo hi }]", "the result holds a block", "!{ … }"),
         ] {
-            let report = shell.run(capture_req(src)).into_report(shell.sources());
+            let report = shell.run(capture_req(src)).into_report(&shell);
             let crate::protocol::Report::Ran { ending, .. } = report else {
                 panic!("{src:?} must reach evaluation");
             };
-            let crate::protocol::Ending::Unreturnable { rendered } = &ending else {
+            let crate::protocol::Ending::Unreturnable { rendered, .. } = &ending else {
                 panic!("{src:?} must end unreturnable, got {ending:?}");
             };
             assert!(rendered.contains(says), "{src:?}: {rendered:?}");
@@ -1630,12 +1455,91 @@ pub(crate) mod tests {
         }
     }
 
+    /// A shell whose `_narrow` pushes a `net: false` session ceiling and whose
+    /// `_narrowed` reports whether any ceiling holds.
+    fn narrowing_shell() -> Shell {
+        use crate::types::{BuiltinBody, BuiltinEntry, Capabilities};
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let entries: Arc<[BuiltinEntry]> = vec![
+            BuiltinEntry::new(
+                "_narrow".into(),
+                crate::typecheck::builtins::scheme::pure_bool,
+                "",
+                BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
+                    s.push_session_capabilities(Capabilities {
+                        net: Some(false),
+                        ..Capabilities::root()
+                    });
+                    Ok(Value::Bool(true))
+                })),
+            ),
+            BuiltinEntry::new(
+                "_narrowed".into(),
+                crate::typecheck::builtins::scheme::pure_bool,
+                "",
+                BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
+                    Ok(Value::Bool(s.has_active_capabilities()))
+                })),
+            ),
+        ]
+        .into();
+        shell.install_captured_builtins(&entries);
+        shell
+    }
+
+    /// Run `narrow`, then assert its session ceiling alone outlived it and
+    /// narrows the next run.
+    fn assert_ceiling_survives(mut shell: Shell, narrow: RunRequest) {
+        let before = shell.context.grants.len();
+        assert!(matches!(shell.run(narrow), RunReport::Ran { .. }));
+        assert_eq!(
+            shell.context.grants.len(),
+            before + 1,
+            "the run's own frames must leave with it, and only they"
+        );
+        assert_eq!(shell.context.grants.net().collect::<Vec<_>>(), [false]);
+        let RunReport::Ran {
+            ending: Ending::Settled { value, .. },
+            ..
+        } = shell.run(capture_req("_narrowed"))
+        else {
+            panic!("the probe run must settle");
+        };
+        assert!(
+            matches!(value, Value::Bool(true)),
+            "the ceiling must narrow the next run"
+        );
+    }
+
+    /// A session ceiling pushed inside a run outlives it and narrows the next,
+    /// while the run's own `Run.caps` frames leave with it.
+    #[test]
+    fn a_session_ceiling_pushed_in_a_run_outlives_it() {
+        let mut caps = GrantStack::root();
+        caps.push(crate::types::Capabilities {
+            detach: Some(false),
+            ..crate::types::Capabilities::root()
+        });
+        let mut narrow = capture_req("_narrow");
+        narrow.run.caps = caps;
+        assert_ceiling_survives(narrowing_shell(), narrow);
+    }
+
+    /// The same inside a `grant { }` block: its frame leaves by position, not
+    /// by count, so the ceiling pushed above it stays.
+    #[test]
+    fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
+        assert_ceiling_survives(
+            narrowing_shell(),
+            capture_req("grant [net: true] { _narrow }"),
+        );
+    }
+
     /// A lambda compiled by one run and called by the next draws its caret into
     /// the text that defined it: the registry only grows, so a run boundary
     /// costs a value nothing of its origin.
     #[test]
     fn a_lambda_faults_against_the_run_that_compiled_it() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(matches!(
             shell.run(capture_req("let boom = { |x| $undefined_name }")),
@@ -1654,7 +1558,6 @@ pub(crate) mod tests {
     /// A fault in text the user can already see needs no header and no caret.
     #[test]
     fn a_single_command_faulting_in_its_own_text_renders_compact() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "no-such-command-xyz"));
         assert!(
@@ -1667,7 +1570,6 @@ pub(crate) mod tests {
     /// anything after it, so the flag must keep reporting the input's shape.
     #[test]
     fn single_command_still_reports_the_input_shape() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         for (src, shape) in [
             ("no-such-command-xyz", true),
@@ -1693,7 +1595,6 @@ pub(crate) mod tests {
     /// `to_wire` onto the wire — the whole path a dispatching host takes.
     #[test]
     fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let req = capture_req("echo hi");
         let report = shell.run(RunRequest {
@@ -1703,7 +1604,7 @@ pub(crate) mod tests {
             },
             ..req
         });
-        let crate::protocol::Report::Ran { trail, .. } = report.into_report(shell.sources()) else {
+        let crate::protocol::Report::Ran { trail, .. } = report.into_report(&shell) else {
             panic!("valid source must reach evaluation");
         };
         assert!(
@@ -1726,7 +1627,6 @@ pub(crate) mod tests {
     /// choice, and every other test's, `capture_req` included.
     #[test]
     fn a_dispatch_asking_no_trail_reports_none() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + 1]")) {
             RunReport::Ran { trail, .. } => assert!(
@@ -1744,7 +1644,6 @@ pub(crate) mod tests {
     /// fresh scope and sees nothing left over.
     #[test]
     fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
 

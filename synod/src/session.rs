@@ -130,10 +130,10 @@ pub struct Conversation {
     /// The guest's whole network, running on its own threads since before
     /// the first exchange — see [`net_seat`].
     net: guest_net::Session<NetWire>,
-    /// Whether the engine's death has already been written down.  A severed
-    /// seat stays severed, so without this every later exchange would append
-    /// the same epitaph again to a file whose whole value is that it is short.
-    engine_captured: bool,
+    /// The sentence a lost engine ended this conversation with.  Set once:
+    /// the epitaph is written down once, and every later exchange answers
+    /// with it rather than reaching the dead engine.
+    ended: Option<String>,
 }
 
 impl Conversation {
@@ -303,7 +303,7 @@ impl Conversation {
                 baseline,
                 report: None,
                 net,
-                engine_captured: false,
+                ended: None,
             },
             Opening {
                 label,
@@ -331,14 +331,19 @@ impl Conversation {
     /// after the walk and being blamed on the user.
     ///
     /// # Errors
-    /// Returns `Err` if the baseline walk failed or its thread panicked;
-    /// otherwise if the exchange itself fails; otherwise if the closing
-    /// walk could not be taken, that error is returned instead.
+    /// Returns `Err` with the loss's sentence, and without touching the
+    /// agent, once a lost engine has ended the conversation; otherwise if the
+    /// baseline walk failed or its thread panicked; otherwise if the exchange
+    /// itself fails; otherwise if the closing walk could not be taken, that
+    /// error is returned instead.
     pub fn exchange<S: exarch::bus::Sink>(
         &mut self,
         message: String,
         sink: &mut S,
     ) -> Result<(), String> {
+        if let Some(sentence) = &self.ended {
+            return Err(sentence.clone());
+        }
         // Asked for before the turn, so a baseline that failed is reported
         // now rather than after the guest has already written to a folder
         // nothing can be judged against.
@@ -351,7 +356,7 @@ impl Conversation {
         // After the closing walk, before either result is reported: a dead
         // engine must be written down while its machine is still up, and the
         // walk has to be taken whether the engine survived or not.
-        self.capture_a_dead_engine();
+        self.capture_a_dead_engine()?;
         outcome.and_then(|()| after.map(drop))
     }
 
@@ -365,28 +370,27 @@ impl Conversation {
         self.report.as_ref()
     }
 
-    /// Write down what the guest said, if this exchange is the one the engine
-    /// did not survive.
+    /// End the conversation, if this exchange is the one the engine did not
+    /// survive, writing down what the guest said.
     ///
-    /// Asked after every exchange and answered by doing nothing after almost
-    /// all of them: only a severed seat has an engine whose last words are
-    /// worth fetching, and it can only be severed once.  The timing is the
-    /// whole point — the guest's console is swept when its machine goes, so
-    /// the moment to read it is now, while the conversation is still standing
-    /// and long before [`Self::end`] tears the machine down.
-    fn capture_a_dead_engine(&mut self) {
-        if self.engine_captured {
-            return;
-        }
+    /// The timing is the whole point — the guest's console is swept when its
+    /// machine goes, so the moment to read it is now, while the conversation
+    /// is still standing and long before [`Self::end`] tears the machine down.
+    ///
+    /// # Errors
+    /// The loss's own sentence, once the engine is gone.
+    fn capture_a_dead_engine(&mut self) -> Result<(), String> {
         let Some(cause) = self.agent.severance() else {
-            return;
+            return Ok(());
         };
-        self.engine_captured = true;
-        let Some(run_dir) = self.agent.run_dir() else {
-            return;
-        };
-        let lost = exarch::agent::EngineLost::running(&cause, Some(&run_dir));
-        engine_log::capture(&run_dir, &lost.logged(), &self.dial.console());
+        let run_dir = self.agent.run_dir();
+        let lost = exarch::agent::EngineLost::running(&cause, run_dir.as_deref());
+        if let Some(run_dir) = &run_dir {
+            engine_log::capture(run_dir, &lost.logged(), &self.dial.console());
+        }
+        let sentence = lost.to_string();
+        self.ended = Some(sentence.clone());
+        Err(sentence)
     }
 
     /// Shut the machine down, ending the conversation.  Nothing is put
@@ -577,8 +581,8 @@ fn select_account(
     if available.is_empty() {
         return Err(
             "no assistant account is set up on this computer — sign in with ChatGPT on the \
-             opening screen, or ask whoever administers this computer to set a \n             provider API key \
-             (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
+             opening screen, or ask whoever administers this computer to set a \
+             provider API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)"
                 .into(),
         );
     }

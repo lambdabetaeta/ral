@@ -480,8 +480,10 @@ impl GrantStack {
         self.0.push(layer);
     }
 
-    pub(crate) fn pop(&mut self) -> Option<Capabilities> {
-        self.0.pop()
+    /// Remove the `n` frames pushed at `at`, keeping any session frame pushed
+    /// above them meanwhile.
+    pub(crate) fn remove(&mut self, at: usize, n: usize) {
+        self.0.drain(at..at + n);
     }
 
     pub fn len(&self) -> usize {

@@ -29,9 +29,8 @@ use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::io::TerminalState;
 use ral_core::protocol::{
-    Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport, dispatch_to_report,
+    Attach, Liveness, Program, Report, Run, Transport, WireTransport, dispatch_to_report,
 };
 use ral_core::types::GrantStack;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -196,17 +195,12 @@ fn prove_the_host_can_dial_in(
             return;
         }
     };
-    transport.attach(
-        TerminalEndpoint {
-            lease: None,
-            state: TerminalState::default(),
-        },
+    transport.attach(Attach::new(
+        INSTALLER_TAG,
         workspace,
         // The guest's own tmpfs, as every seat on this wire uses for `$HOME`.
         std::path::PathBuf::from("/tmp"),
-        None,
-        INSTALLER_TAG.to_string(),
-    );
+    ));
     if let Err(severed) = transport.await_attached() {
         eprintln!("the guest refused to attach: {severed}");
         return;

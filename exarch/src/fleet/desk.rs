@@ -8,37 +8,27 @@
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
-use crate::agent::event::{
-    AgentLog, ContextSurvey, EditAuthority, GrepAnswer, TranscriptMessage, TranscriptPart,
-    TranscriptTurn, role_label,
-};
-use crate::agent::seat::SeatKind;
+use crate::agent::event::{AgentLog, ContextSurvey, EditAuthority};
+use crate::agent::seat::{Seat, SeatKind};
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
+use crate::bus::card::{Card, encode_card};
 use crate::bus::{Emitter, Stamp};
-use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
-use crate::fleet::{
-    Fleet, check_name,
-    roster::{Spawner, listing, summary},
+use crate::fleet::Fleet;
+use crate::fleet::enquiry::{
+    Add, Agents, Context, Deposit, Evict, ForkClaim, Hits, Indexed, Material, Memory, Message,
+    Name, Note, Pins, Request, Schedules, Selection, Start, Survey, Transcript,
 };
+use crate::fleet::roster::{listing, summary};
 use crate::provider::Provider;
-use crate::shell_eval::{self, PinDigests, Surface};
+use crate::shell_eval::{self, Surface};
 use ral_core::SpawnGrant;
 use ral_core::protocol::{EnquiryError, Host};
 use ral_core::serial::FOValue;
+use ral_core::serial::datum::Datum;
 use ral_core::sync::LockExt;
-use ral_core::types::{Error, GrantStack, Nursery, NurseryId, Observation, Observed};
-use regex::Regex;
+use ral_core::types::{Error, Observation, Observed};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-/// A hatched child's cwd — `vm_manager::MachineSpec::GUEST_WORKSPACE`
-/// restated as a literal, since the desk may not depend on `vm_manager`.
-const HATCHED_CWD: &str = "/work";
-/// A hatched child's home — the guest's disposable scratch tmpfs, restated
-/// for the same reason (`synod::grant::GUEST_SCRATCH`): `$HOME` pointed at
-/// the workspace would litter it with whatever XDG-defaulting tools drop.
-const HATCHED_HOME: &str = "/tmp";
 
 /// The two words that bracket one hatch, in opposite directions: the host
 /// writes the eight token bytes the guest's listener is waiting for, and reads
@@ -208,20 +198,22 @@ pub(crate) struct HostServices {
     /// immutable-config read (`caps`, `fuel`, `returns`, …) is taken from.
     pub agent: Arc<Agent>,
     pub fleet: Arc<Fleet>,
-    /// Which seat this call is running against, and the identity arm's own
-    /// scratch: `` `start `` chooses its identity or wire arm on this fact.
+    /// How this call's forks reach the desk: `` `start `` and `` `branch ``
+    /// choose their arm on this fact.
     pub kind: SeatKind,
     pub emit: Emitter,
-    /// Frozen at install: the path root `narrow` and every handler resolves from.
+    /// Frozen at install: the path root `narrow` and every handler resolves
+    /// from, and a hatched child's cwd.
     pub cwd: PathBuf,
+    /// The engine's `$HOME`, frozen at install: a hatched child's home.
+    pub home: Option<PathBuf>,
     /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
     /// write it any other way.
     pub reply: ReplyCell,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
-    /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
-    /// `` `start `` redeems a [`NurseryId`] here.
-    pub nursery: Nursery,
+    /// The `/branch` this call serves, if it is the host's own.
+    pub branch: Option<Arc<BranchOrder>>,
     /// The calling agent's own envelope, minted at install, so a desk older
     /// than *its* `/clear` refuses to spawn.
     pub stamp: Stamp,
@@ -234,6 +226,14 @@ pub(crate) struct HostServices {
     /// `None` where the host names nobody, the same fact `Context::principal`
     /// reports for an unbound `$USER` in the same record.
     pub principal: Option<String>,
+}
+
+/// A `/branch` under way: the name the host chose, whether the fork reports
+/// back, and the child the desk builds for it.
+pub(crate) struct BranchOrder {
+    pub name: String,
+    pub returns: bool,
+    pub child: std::sync::Mutex<Option<Avatar>>,
 }
 
 impl HostServices {
@@ -292,89 +292,6 @@ pub(crate) struct ExarchDesk {
     pub(crate) services: HostServices,
 }
 
-/// Whole seconds, saturating: nothing this desk answers comes near `i64::MAX`,
-/// and saturation stays total where an `as` cast would wrap in silence.
-fn secs_to_i64(d: Duration) -> i64 {
-    i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
-}
-
-/// A roster count as ral's one integer type, saturating as [`secs_to_i64`]
-/// does — no fleet approaches the clamp, and a wrapped count would lie.
-fn count(n: usize) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
-}
-
-/// Decode a payload as an `N`-element list, or a didactic error naming the
-/// shape. The builtin's door checked already; the desk trusts nothing that
-/// crossed the wire.
-fn payload_list<const N: usize>(
-    payload: Option<Box<FOValue>>,
-    class: &str,
-    shape: &str,
-) -> Result<[FOValue; N], Error> {
-    let Some(payload) = payload else {
-        return Err(Error::new(
-            format!("`{class}` requires a payload {shape}"),
-            1,
-        ));
-    };
-    let FOValue::List { items } = *payload else {
-        return Err(Error::new(
-            format!("`{class}` payload must be a list {shape}"),
-            1,
-        ));
-    };
-    <[FOValue; N]>::try_from(items).map_err(|items| {
-        Error::new(
-            format!(
-                "`{class}` payload must have exactly {N} element(s) {shape}, got {}",
-                items.len()
-            ),
-            1,
-        )
-    })
-}
-
-fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
-    match v {
-        FOValue::Int { value } => Ok(value),
-        other => Err(Error::new(
-            format!("`{class}`: `{field}` must be an Int, got {}", other.shape()),
-            1,
-        )),
-    }
-}
-
-/// A turn id: one non-negative Int, refused under the name of what the field
-/// holds.
-fn payload_id(v: FOValue, class: &str, field: &str, what: &str) -> Result<u64, Error> {
-    let value = payload_int(v, class, field)?;
-    u64::try_from(value).map_err(|_| {
-        Error::new(
-            format!("`{class}`: `{field}` must be a non-negative {what} number"),
-            1,
-        )
-    })
-}
-
-/// A turn address: a list of turn ids, however the model built it. What the
-/// set may name — and that it must name something — is the fold's.
-fn payload_turns(v: FOValue, class: &str) -> Result<Vec<u64>, Error> {
-    let FOValue::List { items } = v else {
-        return Err(Error::new(
-            format!(
-                "`{class}`: `turns` must be a list of turn ids — `!{{range a b}}` builds a run"
-            ),
-            1,
-        ));
-    };
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| payload_id(item, class, &format!("turns[{index}]"), "turn"))
-        .collect()
-}
-
 /// The rail subject a cut mints from a turn address, as runs: `"turns 41–43,
 /// 50"`. Sorted here, since the model's own list need not be.
 fn turns_subject(turns: &[u64]) -> String {
@@ -383,502 +300,67 @@ fn turns_subject(turns: &[u64]) -> String {
     format!("turns {}", crate::record::model::runs(&sorted))
 }
 
-fn usize_to_i64(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn u64_to_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn payload_string(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
-    match v {
-        FOValue::String { value } => Ok(value),
-        other => Err(Error::new(
-            format!("`{class}`: `{field}` must be a Str, got {}", other.shape()),
-            1,
-        )),
-    }
-}
-
-fn payload_tag(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: None,
-        } => Ok(label),
-        other => Err(Error::new(
-            format!(
-                "`{class}`: `{field}` must be a bare variant tag, got {}",
-                other.shape()
-            ),
-            1,
-        )),
-    }
-}
-
-fn payload_bool(v: FOValue, class: &str, field: &str) -> Result<bool, Error> {
-    match v {
-        FOValue::Bool { value } => Ok(value),
-        other => Err(Error::new(
-            format!("`{class}`: `{field}` must be a Bool, got {}", other.shape()),
-            1,
-        )),
-    }
-}
-
-/// Split a family's payload into the tag it names and that tag's own payload.
-fn family_tag(
-    payload: Option<Box<FOValue>>,
-    family: &str,
-) -> Result<(String, Option<Box<FOValue>>), Error> {
-    match payload.map(|payload| *payload) {
-        Some(FOValue::Variant { label, payload }) => Ok((label, payload)),
-        other => Err(Error::new(
-            format!(
-                "`{family}` requires a tag naming what to do, got {}",
-                other.map_or_else(|| "no payload at all".to_string(), |v| v.shape())
-            ),
-            1,
-        )),
-    }
-}
-
-/// A tag this desk does not answer. Tags extend a family the way classes
-/// extend the desk, so an unknown one is as loud one level down as it is at
-/// the top — never a silent default.
-fn unknown_tag(family: &str, tag: &str) -> Error {
-    Error::new(format!("unrecognised `{family} tag `{tag}`"), 1)
-}
-
-/// A tag whose whole payload is one bare value rather than a record.
-fn payload_value(
-    payload: Option<Box<FOValue>>,
-    class: &str,
-    shape: &str,
-) -> Result<FOValue, Error> {
-    payload.map_or_else(
-        || {
-            Err(Error::new(
-                format!("`{class}` requires a payload {shape}"),
-                1,
-            ))
-        },
-        |payload| Ok(*payload),
-    )
-}
-
-/// One payload read by field name — the dual of the builtin door's `spec.get`
-/// arms. The names the tag reads are fixed at construction, so a field the
-/// desk never asks for is refused rather than silently dropped: no operation
-/// reads, or discards, a field the row does not name.
-struct Fields<'a> {
-    class: &'a str,
-    entries: Vec<(String, FOValue)>,
-}
-
-impl<'a> Fields<'a> {
-    /// The tag's whole payload, as a record.
-    fn payload(
-        payload: Option<Box<FOValue>>,
-        class: &'a str,
-        shape: &str,
-        fields: &[&str],
-    ) -> Result<Self, Error> {
-        Self::of(
-            payload_value(payload, class, shape)?,
-            class,
-            "the payload",
-            shape,
-            fields,
-        )
-    }
-
-    /// A named field that is itself a record — `` `start ``'s `spec`.
-    fn of(
-        v: FOValue,
-        class: &'a str,
-        subject: &str,
-        shape: &str,
-        fields: &[&str],
-    ) -> Result<Self, Error> {
-        match v {
-            FOValue::Map { entries } => {
-                match entries
-                    .iter()
-                    .find(|(key, _)| !fields.contains(&key.as_str()))
-                {
-                    Some((name, _)) => Err(Error::new(
-                        format!(
-                            "`{class}`: unknown field `{name}` — {subject} takes {}{}",
-                            accepted(fields),
-                            suggestion(name, fields)
-                        ),
-                        1,
-                    )),
-                    None => Ok(Self { class, entries }),
-                }
-            }
-            other => Err(Error::new(
-                format!(
-                    "`{class}`: {subject} must be a record {shape}, got {}",
-                    other.shape()
-                ),
-                1,
-            )),
-        }
-    }
-
-    /// Take one field by name if the record carries it; the caller decides
-    /// what its absence means.
-    fn optional(&mut self, field: &str) -> Option<FOValue> {
-        let at = self.entries.iter().position(|(key, _)| key == field)?;
-        Some(self.entries.swap_remove(at).1)
-    }
-
-    /// Take one field by name; a missing one is told what it was for.
-    fn take(&mut self, field: &str, purpose: &str) -> Result<FOValue, Error> {
-        let at = self
-            .entries
-            .iter()
-            .position(|(key, _)| key == field)
-            .ok_or_else(|| {
-                Error::new(
-                    format!(
-                        "`{}`: the record needs a `{field}` field — {purpose}",
-                        self.class
-                    ),
-                    1,
-                )
-            })?;
-        Ok(self.entries.swap_remove(at).1)
-    }
-}
-
-/// The names a record accepts, in prose: `` `a`, `b` and `c` ``.
-fn accepted(fields: &[&str]) -> String {
-    match fields {
-        [] => "no fields".to_string(),
-        [one] => format!("only `{one}`"),
-        [rest @ .., last] => format!(
-            "{} and `{last}`",
-            rest.iter()
-                .map(|name| format!("`{name}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-/// The one accepted name an unknown one plausibly misspells — offered only
-/// when it is unambiguous, since two candidates are no help at all.
-fn suggestion(unknown: &str, fields: &[&str]) -> String {
-    let mut near = fields
-        .iter()
-        .filter(|name| name.starts_with(unknown) || distance(name, unknown) <= 2);
-    match (near.next(), near.next()) {
-        (Some(name), None) => format!(" — did you mean `{name}`?"),
-        _ => String::new(),
-    }
-}
-
-/// Levenshtein distance, over chars.
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut row = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            row.push(
-                (prev[j] + usize::from(ca != *cb))
-                    .min(prev[j + 1] + 1)
-                    .min(row[j] + 1),
-            );
-        }
-        prev = row;
-    }
-    prev[b.len()]
-}
-
-/// `` `start ``'s `fork` field: the one part of that payload no model wrote,
-/// minted engine-side because the reentrancy law bars a desk handler from
-/// holding the `&mut Shell` a fork needs. Which tag is legal is the *host's*
-/// fact, not the guest's — see [`ExarchDesk::launch`].
-enum ForkClaim {
-    /// The fork is parked in this host's own nursery, under this id.
-    Parked(NurseryId),
-    /// The fork's engine holds a listener on `port`, and will hand its
-    /// connection to a child only for a dial that writes `token` first.
-    Listening { port: u32, token: u64 },
-}
-
-fn payload_fork(v: FOValue, class: &str) -> Result<ForkClaim, Error> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "parked" => {
-            let id = payload_int(*payload, class, "fork")?;
-            let id = u64::try_from(id).map_err(|_| {
-                Error::new(
-                    format!("`{class}`: `fork `parked` carries a nursery id, never a negative Int"),
-                    1,
-                )
-            })?;
-            Ok(ForkClaim::Parked(NurseryId(id)))
-        }
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "listening" => {
-            let mut fields = Fields::of(
-                *payload,
-                class,
-                "`fork `listening`",
-                "[port, token]",
-                &["port", "token"],
-            )?;
-            let port = payload_int(
-                fields.take("port", "the guest port the host must dial")?,
-                class,
-                "port",
-            )?;
-            let port = u32::try_from(port).map_err(|_| {
-                Error::new(
-                    format!("`{class}`: `fork `listening`'s port must be a bound vsock port"),
-                    1,
-                )
-            })?;
-            // Bit-preserving: the eight bytes the host writes are the eight
-            // the listener compares, never arithmetic on them.
-            let token = payload_int(
-                fields.take("token", "the eight bytes the guest's listener expects")?,
-                class,
-                "token",
-            )?
-            .cast_unsigned();
-            Ok(ForkClaim::Listening { port, token })
-        }
-        other => Err(Error::new(
-            format!(
-                "`{class}`: `fork` must be `parked <nursery id>` or `listening [port, token]`, \
-                 got {}",
-                other.shape()
-            ),
-            1,
-        )),
-    }
-}
-
-/// Decode `` `start ``'s `grant`: the one layer the child's stack gains.
-/// `` `dangerous `` is not among the tags — at a spawn it only ever meant
-/// "narrow nothing", which `` `inherit `` now says outright.
-fn payload_grant(v: FOValue, class: &str) -> Result<SpawnGrant, Error> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: None,
-        } if label == "inherit" => Ok(SpawnGrant::Inherit),
-        FOValue::Variant {
-            label,
-            payload: None,
-        } if crate::policy::SPAWN_BASES.contains(&label.as_str()) => Ok(SpawnGrant::Base(label)),
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "restrict" => match *payload {
-            record @ FOValue::Map { .. } => Ok(SpawnGrant::Restrict(record)),
-            other => Err(Error::new(
-                format!(
-                    "`{class}`: `grant `restrict` must carry a capability record \
-                     [exec, fs, net, detach, editor, shell], got {}",
-                    other.shape()
-                ),
-                1,
-            )),
-        },
-        other => Err(Error::new(
-            format!(
-                "`{class}`: `grant` must be `inherit`, `confined`, `read-only`, `edit-only`, \
-                 `reasonable` or `restrict <record>`, got {}",
-                other.shape()
-            ),
-            1,
-        )),
-    }
-}
-
-/// Decode an `` `add `` trigger into a live [`Trigger`], re-running the parsers
-/// the builtin's door already ran: that check is never the only line of defence.
-fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "cron" => {
-            let expr = payload_string(*payload, class, "trigger")?;
-            let schedule =
-                CronSchedule::parse(&expr).map_err(|e| Error::new(format!("`{class}`: {e}"), 1))?;
-            Ok(Trigger::Cron { schedule, expr })
-        }
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "after" => {
-            let dur = payload_string(*payload, class, "trigger")?;
-            let d = parse_duration(&dur).map_err(|e| Error::new(format!("`{class}`: {e}"), 1))?;
-            Ok(Trigger::After(d))
-        }
-        other => Err(Error::new(
-            format!(
-                "`{class}`: `trigger` must be `cron <expr>` or `after <dur>`, got {}",
-                other.shape()
-            ),
-            1,
-        )),
-    }
-}
-
-/// Decode an `` `add `` payload's `label`: a required `Str`, since every
-/// caller now names its own schedule.
-fn payload_label(v: FOValue, class: &str) -> Result<String, Error> {
-    match v {
-        FOValue::String { value } => Ok(value),
-        other => Err(Error::new(
-            format!("`{class}`: `label` must be a Str, got {}", other.shape()),
-            1,
-        )),
-    }
-}
-
-/// What a spawn asks of one half of the child's model selection: the
-/// spawning agent's own, or one named outright. ral has no optional field, so
-/// the absence of a choice is data, and this variant is what carries it.
-pub(crate) enum Selection {
-    Inherit,
-    Named(String),
-}
-
-/// Decode a `provider`/`model` field. The door already closed this row
-/// engine-side; a guest may still send whatever it likes.
-fn payload_selection(v: FOValue, class: &str, field: &str) -> Result<Selection, Error> {
-    match v {
-        FOValue::Variant {
-            label,
-            payload: None,
-        } if label == "inherit" => Ok(Selection::Inherit),
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "named" => match *payload {
-            FOValue::String { value } if !value.is_empty() => Ok(Selection::Named(value)),
-            other => Err(Error::new(
-                format!(
-                    "`{class}`: `{field}`'s `named` must carry a non-empty Str, got {}",
-                    other.shape()
-                ),
-                1,
-            )),
-        },
-        other => Err(Error::new(
-            format!(
-                "`{class}`: `{field}` must be `inherit` or `named '<name>'`, got {}",
-                other.shape()
-            ),
-            1,
-        )),
-    }
-}
-
-/// All that varies across `` `start ``'s two spawn kinds (`amnemon`/`mnemon`,
-/// the `agent` builtin's `type`); every other step of the spawn spine is
-/// identical for both and lives once in [`ExarchDesk::launch`].
-struct Launch {
-    /// How the builtin body left its fork for this desk to reach.
-    fork: ForkClaim,
-    grant: SpawnGrant,
-    /// Import the parent's model-visible conversation — a `mnemon` spawn only.
-    inherit_context: bool,
-    /// Which account the child authenticates as.
-    provider: Selection,
-    /// Which model it runs, on that account.
-    model: Selection,
-    /// Refused if any live agent already bears it.
-    name: String,
-    prompt: String,
-    /// The caller's request, clamped rather than taken at face value.
-    search: bool,
-}
-
 impl ExarchDesk {
-    /// Decode one enquiry class and answer it. An unrecognised class draws the
-    /// extension law's error — never a silent default.
+    /// Decode one enquiry and answer it. The decode is the vocabulary's, so
+    /// an ill-shaped request is refused here in the words its door would use.
     ///
     /// # Errors
-    /// Returns `Err` if `req` is not a [`FOValue::Variant`], names a class this
-    /// desk does not answer, or the named class itself refuses.
-    pub(crate) fn handle(&self, req: FOValue) -> Result<FOValue, Error> {
-        let FOValue::Variant { label, payload } = req else {
-            return Err(Error::new(
-                format!(
-                    "enquiry request must be a variant naming its class, got {}",
-                    req.shape()
-                ),
-                1,
-            ));
-        };
-        match label.as_str() {
-            "agents" => self.agents(payload),
-            "schedules" => self.schedules(payload),
-            "pins" => self.pins(payload),
-            "context" => self.context(payload),
-            "transcript" => self.transcript(payload),
-            other => Err(Error::new(
-                format!("unrecognised enquiry class `{other}`"),
-                1,
-            )),
-        }
-    }
-
-    /// `` `exarch-agents `` — the fleet, one class for the whole family.
-    /// Every tag but `` `list `` and `` `read `` answers the summary, both
-    /// spawn arms included: a wire spawn does not answer until its child
-    /// exists, so it is counted by the time it answers.
-    fn agents(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let (tag, payload) = family_tag(payload, "agents")?;
-        match tag.as_str() {
-            "list" => Ok(self.roster()),
-            "start" => self.agent_start(payload),
-            "message" => self.message(payload),
-            "cancel" => self.agent_cancel(payload),
-            "reply" => self.agent_reply(payload),
-            "read" => self.agent_read(payload),
-            other => Err(unknown_tag("agents", other)),
-        }
-    }
-
-    /// `` `exarch-schedules `` — the wakeup table, one class for the whole family.
-    /// Every tag answers the table; the self-wakeup grant gates all three,
-    /// each naming the tag the model typed.
-    fn schedules(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let (tag, payload) = family_tag(payload, "schedules")?;
-        match tag.as_str() {
-            "list" => {
+    /// The decoder's refusal, or the addressed handler's.
+    pub(crate) fn handle(&self, req: &FOValue) -> Result<FOValue, Error> {
+        match Request::decode(req).map_err(|why| Error::new(why, 1))? {
+            Request::Agents(Agents::List) => Ok(listing(&self.services.agent).encode()),
+            Request::Agents(Agents::Start(start)) => self.launch(start),
+            Request::Agents(Agents::Message(message)) => self.message(message),
+            Request::Agents(Agents::Cancel(name)) => self.agent_cancel(&name),
+            Request::Agents(Agents::Reply(value)) => self.agent_reply(value),
+            Request::Agents(Agents::Read(name)) => self.agent_read(name),
+            Request::Agents(Agents::Branch(fork)) => self.agent_branch(fork),
+            Request::Schedules(Schedules::List) => {
                 self.require_schedule_grant("exarch-schedules `list")?;
                 Ok(self.schedule_table())
             }
-            "add" => self.schedule(payload),
-            "remove" => self.unschedule(payload),
-            other => Err(unknown_tag("schedules", other)),
+            Request::Schedules(Schedules::Add(add)) => self.schedule(add),
+            Request::Schedules(Schedules::Remove(label)) => self.unschedule(&label),
+            Request::Pins(Pins::Set(pin)) => Ok(self.apply_pin(pin.key, Some(pin.body))),
+            Request::Pins(Pins::Clear(key)) => Ok(self.apply_pin(key, None)),
+            Request::Pins(Pins::Read(key)) => Ok(self.pin_read(&key)),
+            Request::Pins(Pins::List) => Ok(self.pin_list()),
+            Request::Context(Context::Survey) => Ok(Survey::from(self.context_survey()).encode()),
+            Request::Context(Context::Evict(evict)) => self.context_evict(evict),
+            // The index stays whole under the lock: it is a projection of
+            // rows the structure already holds, touching no file.
+            Request::Transcript(Transcript::Index) => self.locate_then_read(
+                |log| {
+                    Ok(Vec::from_iter(
+                        log.transcript_index().into_iter().map(Indexed::from),
+                    ))
+                },
+                |index| Ok(index.encode()),
+            ),
+            Request::Transcript(Transcript::Read(read)) => self.locate_then_read(
+                |log| log.locate_read(&read.turns),
+                |read| {
+                    read.turns()
+                        .map(|turns| Vec::from_iter(turns.into_iter().map(Material::from)).encode())
+                },
+            ),
+            Request::Transcript(Transcript::Grep(grep)) => self.locate_then_read(
+                |log| log.locate_grep(grep.turns.as_deref()),
+                |read| {
+                    read.grep(&grep.pattern)
+                        .map(|hits| Hits::from(hits).encode())
+                },
+            ),
         }
     }
 
-    /// The spawn spine behind `` `start ``: adopt the parked fork, narrow its
-    /// authority, fork its log off the parent's, assemble it at one less unit of
-    /// fuel, hand it to `spawn_async`. Every cheap guard runs before
-    /// [`Nursery::adopt`]; a refusal after it simply drops the adopted `Shell`.
-    fn launch(&self, spec: Launch) -> Result<FOValue, Error> {
+    /// The spawn spine behind `` `start ``: take up the fork, fork its log off
+    /// the parent's, assemble it at one less unit of fuel, hand it to
+    /// `spawn_async`. Every cheap guard runs before the fork is taken up; a
+    /// refusal after it simply drops the child's engine.
+    fn launch(&self, Start { spec, fork }: Start) -> Result<FOValue, Error> {
         let s = &self.services;
+        let Name(name) = spec.name;
 
         // The captured fuel, caps, and grant are only as fresh as the
         // envelope they were snapshotted under — this caller's own, so a
@@ -905,25 +387,14 @@ impl ExarchDesk {
             ));
         }
 
-        // Before a log is forked or a listener dialled: the in-process door
-        // checked this name, but a wire peer need not have come through one,
-        // and `register` — the authority — only refuses after all that work.
-        if let Err(why) = check_name(&spec.name) {
-            return Err(Error::new(
-                format!("`exarch-agents `start` refused: {why}"),
-                1,
-            ));
-        }
-
         // Didactic, not race-free: `register` below re-checks under its own
         // lock, and that is what closes a same-name race.
-        if s.fleet.name_live(&spec.name) {
+        if s.fleet.name_live(&name) {
             return Err(Error::new(
                 format!(
-                    "`exarch-agents `start` refused: a live agent already bears the name '{}' — pick \
+                    "`exarch-agents `start` refused: a live agent already bears the name '{name}' — pick \
                      another, or wait for it to settle. Names identify live agents; agents \
-                     lists yours.",
-                    spec.name
+                     lists yours."
                 ),
                 1,
             ));
@@ -931,98 +402,49 @@ impl ExarchDesk {
 
         // Before the seat split, so both arms share one resolution and a
         // refusal unwinds nothing: no adopted shell, no forked log, no dial.
-        let provider = self.child_provider(&spec)?;
+        let provider = self.child_provider(&spec.provider, &spec.model)?;
 
-        let scratch = match &s.kind {
-            SeatKind::Wire => return self.launch_wire(spec, provider),
-            SeatKind::Identity { scratch } => scratch.clone(),
-        };
-
-        let ForkClaim::Parked(session) = spec.fork else {
-            return Err(Error::new(
-                "`exarch-agents `start` refused: this host runs its children in its own process, so the \
-                 fork must be `parked <nursery id>` — a session that says it is listening for a \
-                 dial is describing a wire this desk does not have",
-                1,
-            ));
-        };
-        let Some(shell) = s.nursery.adopt(session) else {
-            return Err(Error::new(
-                "`exarch-agents `start`: no forked session parked under this id — it may already have \
-                 started, or the run that forked it has ended",
-                1,
-            ));
-        };
-
-        let (child_caps, child_log, system_prompt) = self.fork_child(&spec, &provider)?;
-
-        // Mirrors `Avatar::fork_with`'s `Build` literal, with the adopted shell
-        // and forked log standing in for `fork_session`'s fresh ones.
-        let fuel = s.agent.fuel() - 1;
-        // No detach: the shell was forked, not booted, so it carries no policy.
-        let seat =
-            crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), false, &child_log);
-        // Stated so a terminate-class cancel can unwind a `ral` eval already
-        // in flight, and a per-tab interrupt can unwind just the in-flight
-        // exchange without touching the root a later exchange would inherit.
-        let reach = seat.eval_reach();
-        let child = Avatar::assemble(Build {
-            name: spec.name.clone(),
-            system: s.agent.system_base().clone(),
-            system_prompt,
-            index: s.agent.index().clone(),
-            caps: child_caps,
+        let seat = self.fork_seat("start", fork, &spec.grant.0)?;
+        let child = self.child(
+            "start",
+            name.clone(),
             seat,
-            log: child_log,
-            parent: Some(s.agent.clone()),
-            fuel,
-            provider: ProviderHandle::new(provider),
-            interactive: s.agent.interactive(),
-            returns: true,
-            allow_schedule: s.agent.allow_schedule,
-            tools: s.agent.tools(),
+            provider,
+            true,
             // A child may narrow its parent's search reach, never widen it.
-            search: s.agent.search() && spec.search,
-            fleet: s.fleet.clone(),
-            run_lock: None,
-            resume_summary: None,
-            disk_warn_bytes: s.agent.disk_warn_bytes(),
-            egress: s.agent.egress().clone(),
-            dial: s.agent.dial().cloned(),
-            bureau: s.agent.bureau().clone(),
-            reach,
-        })
-        .map_err(|why| Error::new(format!("`exarch-agents `start` refused: {why}"), 1))?;
-
-        self.spawn_child(child, spec.name, spec.prompt)
+            s.agent.search() && spec.search,
+            spec.memory == Memory::Mnemon,
+        )?;
+        self.spawn_child(child, name, spec.prompt)
     }
 
     /// The child's provider: the parent's own `Arc` verbatim when neither
-    /// field names a selection, and a freshly minted one otherwise.
+    /// half names a selection, and a freshly minted one otherwise.
     ///
     /// No catalog and no network: `` `inherit `` *states* which account the
     /// child is on, so a named model never has to be attributed to one, and a
     /// spawn can never block the fleet on a model-list round trip.
-    fn child_provider(&self, spec: &Launch) -> Result<Arc<Provider>, Error> {
+    fn child_provider(
+        &self,
+        provider: &Selection,
+        model: &Selection,
+    ) -> Result<Arc<Provider>, Error> {
         let s = &self.services;
         let current = s.agent.current_provider();
-        if matches!(
-            (&spec.provider, &spec.model),
-            (Selection::Inherit, Selection::Inherit)
-        ) {
+        if matches!((provider, model), (Selection::Inherit, Selection::Inherit)) {
             return Ok(current);
         }
         let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"), 1);
         let bureau = s.agent.bureau();
         let available = bureau.available();
-        let account = match &spec.provider {
+        let account = match provider {
             Selection::Inherit => current.account().clone(),
             Selection::Named(name) => {
                 crate::provider::models::resolve_pinned_provider(name, &available)
                     .map_err(refused)?
             }
         };
-        let model = match &spec.model {
+        let model = match model {
             Selection::Named(model) => model.clone(),
             Selection::Inherit if account.id == current.account().id => current.model().to_string(),
             Selection::Inherit => account.service.default_model.clone().ok_or_else(|| {
@@ -1035,170 +457,144 @@ impl ExarchDesk {
         };
         bureau.reselect(&current, &account, model).map_err(refused)
     }
-
-    /// The child-log/capability half of the spawn spine, shared by both arms:
-    /// an identity spawn runs it once it has adopted its shell, a wire spawn
-    /// before it dials, since the host has no shell of its own to gate on.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "host-env: a host-side spawn's grant freezes against the launching user's real home, like base_layer's own"
-    )]
-    fn fork_child(
-        &self,
-        spec: &Launch,
-        provider: &Provider,
-    ) -> Result<(GrantStack, crate::agent::event::AgentLog, String), Error> {
-        let s = &self.services;
-        // Both seats resolve a spawn's grant through this one function, so the
-        // host's vocabulary and a hatched guest's cannot drift apart.
-        let home = ral_core::host::home();
-        let layer = spec
-            .grant
-            .layer(crate::policy::base_layer, &s.cwd, home.as_deref())
-            .map_err(|reason| Error::new(reason, 1))?;
-        let mut child_caps = s.agent.caps().clone();
-        child_caps.push(layer);
-
-        // On the raw `AgentLog`, not through `Avatar::inherit_context`, which
-        // needs a `&Self` the child is not yet. The index resolves here, off the
-        // same bits the `Build` below fixes, so the opening bookend records the
-        // child's real system length rather than the template's.
-        let child_id = crate::agent::fresh_id();
-        let system_prompt = s.agent.index().apply(
-            s.agent.system_base(),
-            &crate::prompt::Grants {
-                returns: true,
-                allow_schedule: s.agent.allow_schedule,
-                spawns: s.agent.fuel().saturating_sub(1) > 0,
-            },
-            &spec.name,
-        );
-        let child_account =
-            crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
-        let child_log = {
-            let parent_log = s.log.lock();
-            let mut child_log = parent_log
-                .fork(
-                    child_id,
-                    system_prompt.len(),
-                    provider.model(),
-                    &child_account,
-                )
-                .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
-            let inherited = spec.inherit_context.then(|| parent_log.inherited_context());
-            drop(parent_log);
-            if let Some(inherited) = inherited {
-                child_log
-                    .import_context(inherited)
-                    .map_err(|e| Error::new(e, 1))?;
+    /// Take up the fork a builtin body left for this desk: adopt it out of
+    /// the parent's own transport, narrowed there by `grant`, or dial the
+    /// listener it opened across the wire, whose engine narrows itself by the
+    /// seed it carries.
+    fn fork_seat(&self, verb: &str, fork: ForkClaim, grant: &SpawnGrant) -> Result<Seat, Error> {
+        let refused =
+            |why: String| Error::new(format!("`exarch-agents `{verb}` refused: {why}"), 1);
+        match (&self.services.kind, fork) {
+            (SeatKind::Identity(parent), ForkClaim::Parked(id)) => parent
+                .adopt_parked(id, grant)
+                .map(Seat::adopted)
+                .map_err(refused),
+            (SeatKind::Wire, ForkClaim::Listening { port, token }) => {
+                self.dial_seat(port, token).map_err(refused)
             }
-            child_log
-        };
-        Ok((child_caps, child_log, system_prompt))
+            (SeatKind::Identity(_), ForkClaim::Listening { .. }) => Err(refused(
+                "this host runs its children in its own process, so the fork must be `parked \
+                 <nursery id>` — a session that says it is listening for a dial is describing a \
+                 wire this desk does not have"
+                    .into(),
+            )),
+            (SeatKind::Wire, ForkClaim::Parked(_)) => Err(refused(
+                "this host reaches its children across a wire, so the fork must be `listening \
+                 [port, token]` — a session that says it is parked in process is naming a \
+                 nursery this desk does not have"
+                    .into(),
+            )),
+        }
     }
 
-    /// `` `start ``'s wire arm: nothing is parked host-side, so the host
-    /// dials the listener the guest opened for this one spawn, writes the
-    /// token that listener is waiting for, and does not answer until the
-    /// guest acknowledges — which it does only once the child process
-    /// exists. The answer is the roster the identity arm gives; the builtin
-    /// cannot tell which served it.
-    fn launch_wire(&self, spec: Launch, provider: Arc<Provider>) -> Result<FOValue, Error> {
+    /// The wire arm: dial the listener the guest opened for this one fork,
+    /// write the token it is waiting for, and seat the child once the guest
+    /// acknowledges — which it does only once the child process exists.
+    fn dial_seat(&self, port: u32, token: u64) -> Result<Seat, String> {
         let s = &self.services;
-        let ForkClaim::Listening { port, token } = spec.fork else {
-            return Err(Error::new(
-                "`exarch-agents `start` refused: this host reaches its children across a wire, so the \
-                 fork must be `listening [port, token]` — a session that says it is parked in \
-                 process is naming a nursery this desk does not have",
-                1,
-            ));
-        };
-        let Some(dial) = s.agent.dial().cloned() else {
-            return Err(Error::new(
-                "`exarch-agents `start` refused: this wire session has no dialler installed to reach a \
-                 helper engine's listener — a construction bug, since a fuelled wire trunk is \
-                 refused at Avatar::root without one",
-                1,
-            ));
-        };
-        let (child_caps, child_log, system_prompt) = self.fork_child(&spec, &provider)?;
-
+        let dial = s.agent.dial().ok_or(
+            "this wire session has no dialler installed to reach a helper engine's listener — a \
+             construction bug, since a fuelled wire trunk is refused at Avatar::root without one",
+        )?;
+        let home = s.home.clone().ok_or(
+            "this engine has no `$HOME` for its child to inherit — is `HOME` unset in it?",
+        )?;
         let mut stream = dial.dial(port).map_err(|reason| {
-            Error::new(
-                format!(
-                    "`exarch-agents `start` refused: could not dial the helper engine's listener on \
-                     guest port {port} — {reason}"
-                ),
-                1,
-            )
+            format!("could not dial the helper engine's listener on guest port {port} — {reason}")
         })?;
-        greet_hatch(&mut stream, token)
-            .map_err(|reason| Error::new(format!("`exarch-agents `start` refused: {reason}"), 1))?;
-
+        greet_hatch(&mut stream, token)?;
         // Past the ack the child is alive, so a refusal from here on simply
         // drops the stream: the child reads EOF on fd 3 and the guest's own
-        // table reaps it. Nothing to kill, and nothing to tell it.
+        // table reaps it.
         let transport = ral_core::protocol::WireTransport::adopt(
             stream,
             ral_core::protocol::Liveness::default(),
         )
-        .map_err(|e| {
-            Error::new(
-                format!("`exarch-agents `start`: could not adopt the hatched wire: {e}"),
-                1,
-            )
-        })?;
-        // Bound out here because the closure below rebinds `s` to the
-        // severance.  A hatched helper has no run directory of its own — its
-        // logs live under the run that hatched it — so this is the one the
-        // refusal invites a reader into.
-        let hatching_run_dir = s.agent.run_dir();
-        // The same two paths synod's own trunk seat uses.
-        let seat = crate::agent::seat::Seat::wire(
-            transport,
-            PathBuf::from(HATCHED_CWD),
-            PathBuf::from(HATCHED_HOME),
-        )
-        .map_err(|s| {
-            Error::new(
-                format!(
-                    "`exarch-agents `start` refused: {}",
-                    crate::agent::seat::EngineLost::starting(&s, hatching_run_dir)
-                ),
-                1,
-            )
-        })?;
+        .map_err(|e| format!("could not adopt the hatched wire: {e}"))?;
+        // The parent engine's own two paths, as read at this call's install.
+        // A hatched helper's logs live under the run that hatched it.
+        Seat::wire(transport, s.cwd.clone(), home).map_err(|lost| {
+            crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string()
+        })
+    }
 
-        let fuel = s.agent.fuel() - 1;
-        let reach = seat.eval_reach();
-        let child = Avatar::assemble(Build {
-            name: spec.name.clone(),
+    /// A child of this call's agent, seated on `seat`: its fuel one less, and
+    /// its log forked off the parent's. A returning child reports to its
+    /// parent; one that does not roots its own tree and converses.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one axis a spawn kind decides; a struct would only rename them"
+    )]
+    fn child(
+        &self,
+        verb: &str,
+        name: String,
+        seat: Seat,
+        provider: Arc<Provider>,
+        returns: bool,
+        search: bool,
+        inherit_context: bool,
+    ) -> Result<Avatar, Error> {
+        let s = &self.services;
+        let fuel = s.agent.fuel().saturating_sub(1);
+        // Against the *child's* grants, never this agent's, so the opening
+        // bookend records the child's real system length.
+        let system_prompt = s.agent.index().apply(
+            s.agent.system_base(),
+            &crate::prompt::Grants {
+                returns,
+                allow_schedule: s.agent.allow_schedule,
+                spawns: fuel > 0,
+            },
+            &name,
+        );
+        let account =
+            crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
+        let log = {
+            let parent_log = s.log.lock();
+            let mut log = parent_log
+                .fork(
+                    crate::agent::fresh_id(),
+                    system_prompt.len(),
+                    provider.model(),
+                    &account,
+                )
+                .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
+            let inherited = inherit_context.then(|| parent_log.inherited_context());
+            drop(parent_log);
+            if let Some(inherited) = inherited {
+                log.import_context(inherited)
+                    .map_err(|e| Error::new(e, 1))?;
+            }
+            log
+        };
+        Avatar::assemble(Build {
+            name,
             system: s.agent.system_base().clone(),
             system_prompt,
             index: s.agent.index().clone(),
-            caps: child_caps,
+            // The child's engine holds its own layer; the stack it runs under
+            // is its parent's.
+            caps: s.agent.caps().clone(),
             seat,
-            log: child_log,
-            parent: Some(s.agent.clone()),
+            log,
+            parent: returns.then(|| s.agent.clone()),
             fuel,
             provider: ProviderHandle::new(provider),
             interactive: s.agent.interactive(),
-            returns: true,
+            returns,
             allow_schedule: s.agent.allow_schedule,
             tools: s.agent.tools(),
-            search: s.agent.search() && spec.search,
+            search,
             fleet: s.fleet.clone(),
             run_lock: None,
             resume_summary: None,
             disk_warn_bytes: s.agent.disk_warn_bytes(),
             egress: s.agent.egress().clone(),
-            dial: Some(dial),
+            dial: s.agent.dial().cloned(),
             bureau: s.agent.bureau().clone(),
-            reach,
         })
-        .map_err(|why| Error::new(format!("`exarch-agents `start` refused: {why}"), 1))?;
-
-        self.spawn_child(child, spec.name, spec.prompt)
+        .map_err(|why| Error::new(format!("`exarch-agents `{verb}` refused: {why}"), 1))
     }
 
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
@@ -1228,173 +624,50 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `start `` — the desk half of the `exarch-agents` builtin. The `spec` record
-    /// is the model's own, read field by field; `fork` is the engine's.
-    fn agent_start(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-agents `start";
-        let mut req = Fields::payload(payload, CLASS, "[spec: …, fork: …]", &["spec", "fork"])?;
-        let mut spec = Fields::of(
-            req.take("spec", "the model's own spawn record")?,
-            CLASS,
-            "`spec`",
-            "[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]",
-            &[
-                "prompt", "name", "type", "grant", "search", "provider", "model",
-            ],
-        )?;
-        let fork = payload_fork(
-            req.take("fork", "how this spawn's forked session is to be reached")?,
-            CLASS,
-        )?;
-
-        let prompt = payload_string(
-            spec.take("prompt", "the instruction the child starts with")?,
-            CLASS,
-            "prompt",
-        )?;
-        let name = payload_string(spec.take("name", "the child's identity")?, CLASS, "name")?;
-        let kind = payload_tag(spec.take("type", "`amnemon or `mnemon")?, CLASS, "type")?;
-        let mnemon = match kind.as_str() {
-            "amnemon" => false,
-            "mnemon" => true,
-            other => {
-                return Err(Error::new(
-                    format!(
-                        "`{CLASS}`: `type` must be `amnemon` (blank context) or `mnemon` \
-                         (inherits your conversation), got `{other}`"
-                    ),
-                    1,
-                ));
-            }
-        };
-        let grant = payload_grant(
-            spec.take("grant", "the one layer the child's authority gains")?,
-            CLASS,
-        )?;
-        let search = payload_bool(
-            spec.take(
-                "search",
-                "whether the child may use the provider's built-in web search",
-            )?,
-            CLASS,
-            "search",
-        )?;
-        let provider = payload_selection(
-            spec.take("provider", "which account the child authenticates as")?,
-            CLASS,
-            "provider",
-        )?;
-        let model = payload_selection(
-            spec.take("model", "which model the child runs")?,
-            CLASS,
-            "model",
-        )?;
-
-        self.launch(Launch {
-            fork,
-            grant,
-            inherit_context: mnemon,
-            provider,
-            model,
-            name,
-            prompt,
-            search,
-        })
-    }
-
-    /// The world after a transition, tagged `` `summary `` — what every tag
-    /// but `` `list `` and `` `read `` answers.  A roster here would cost
-    /// O(fleet) on every spawn of a fan-out to restate what the caller mostly
-    /// knew; these two integers are what it could not have derived.
-    fn summary(&self) -> FOValue {
-        let counts = summary(&self.services.agent);
-        FOValue::Variant {
-            label: "summary".to_string(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    (
-                        "live".to_string(),
-                        FOValue::Int {
-                            value: count(counts.live),
-                        },
-                    ),
-                    (
-                        "replied".to_string(),
-                        FOValue::Int {
-                            value: count(counts.replied),
-                        },
-                    ),
-                ],
-            })),
-        }
-    }
-
-    /// The listing of the reader's own tree, tagged `` `roster `` — the answer
-    /// to `` `list `` alone.
-    fn roster(&self) -> FOValue {
+    /// `` `branch `` — the desk half of the host's `/branch`: the fork takes
+    /// the parent's whole authority and context, and waits for the host to
+    /// take it up. Refused on any call that is not the host's own `/branch`.
+    fn agent_branch(&self, fork: ForkClaim) -> Result<FOValue, Error> {
         let s = &self.services;
-        let rows = FOValue::List {
-            items: listing(&s.agent)
-                .into_iter()
-                .map(|a| {
-                    let elapsed_s = secs_to_i64(a.elapsed);
-                    let idle_s = secs_to_i64(a.idle);
-                    FOValue::Map {
-                        entries: vec![
-                            ("name".to_string(), FOValue::String { value: a.name }),
-                            (
-                                "spawner".to_string(),
-                                match a.spawner {
-                                    Spawner::Root => FOValue::Variant {
-                                        label: "root".to_string(),
-                                        payload: None,
-                                    },
-                                    Spawner::Agent(name) => FOValue::Variant {
-                                        label: "agent".to_string(),
-                                        payload: Some(Box::new(FOValue::String { value: name })),
-                                    },
-                                },
-                            ),
-                            (
-                                "state".to_string(),
-                                FOValue::Variant {
-                                    label: a.state.tag().to_string(),
-                                    payload: None,
-                                },
-                            ),
-                            ("idle-s".to_string(), FOValue::Int { value: idle_s }),
-                            ("elapsed-s".to_string(), FOValue::Int { value: elapsed_s }),
-                            (
-                                "log-dir".to_string(),
-                                FOValue::String {
-                                    value: a.log_dir.display().to_string(),
-                                },
-                            ),
-                        ],
-                    }
-                })
-                .collect(),
+        let Some(order) = &s.branch else {
+            return Err(Error::new(
+                "`exarch-agents `branch` is the host's own `/branch` door, and no /branch is \
+                 under way on this call",
+                1,
+            ));
         };
-        FOValue::Variant {
-            label: "roster".to_string(),
-            payload: Some(Box::new(rows)),
-        }
+        let seat = self.fork_seat("branch", fork, &SpawnGrant::Inherit)?;
+        let child = self.child(
+            "branch",
+            order.name.clone(),
+            seat,
+            s.agent.current_provider(),
+            order.returns,
+            s.agent.search(),
+            !order.returns,
+        )?;
+        *order.child.lock_ignore_poison() = Some(child);
+        Ok(FOValue::Unit)
+    }
+
+    /// The world after a transition — what every tag but `` `list `` and
+    /// `` `read `` answers. A roster here would cost O(fleet) on every spawn
+    /// of a fan-out to restate what the caller mostly knew; these two
+    /// integers are what it could not have derived.
+    fn summary(&self) -> FOValue {
+        summary(&self.services.agent).encode()
     }
 
     /// `` `cancel `` — resolve a live descendant by name and cancel its whole
     /// subtree, scoped as [`Agent::descendant`] enforces. A real cancel and a
-    /// miss are both successful calls answering the roster; a name gone from it
-    /// is the cancel, and only a scope violation raises.
-    fn agent_cancel(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-agents `cancel";
+    /// miss are both successful calls answering the summary; only a scope
+    /// violation raises.
+    fn agent_cancel(&self, name: &str) -> Result<FOValue, Error> {
         let s = &self.services;
-        let name = payload_value(payload, CLASS, "naming the descendant to cancel")?;
-        let name = payload_string(name, CLASS, "name")?;
-
         // The row is derived after the call: one claiming "cancelled" ahead of
         // it would assert an effect the world never saw. `cancel` takes no
         // argument, so its payload column carries the outcome instead.
-        let cancelled = match s.fleet.resolve(&name) {
+        let cancelled = match s.fleet.resolve(name) {
             None => Ok(false),
             Some(found) => match s.agent.descendant(&found) {
                 Some(target) => {
@@ -1419,7 +692,7 @@ impl ExarchDesk {
                 true,
             ),
         };
-        s.commit_act(DeskAct::Cancel, Some(&name), payload, refused);
+        s.commit_act(DeskAct::Cancel, Some(name), payload, refused);
         s.record_forensic(crate::record::Forensic::HarnessResult {
             text: content.clone(),
         });
@@ -1434,13 +707,8 @@ impl ExarchDesk {
     /// `` `message `` — resolve any live agent by name and send it a note.
     /// Unscoped, unlike `` `cancel ``: a note is the fleet's one way for a
     /// child to reach an ancestor or a sibling, and it only ever queues a turn.
-    fn message(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-agents `message";
+    fn message(&self, Message { to: name, text }: Message) -> Result<FOValue, Error> {
         let s = &self.services;
-        let mut spec = Fields::payload(payload, CLASS, "[to: …, text: …]", &["to", "text"])?;
-        let name = payload_string(spec.take("to", "the recipient's name")?, CLASS, "to")?;
-        let text = payload_string(spec.take("text", "what to send")?, CLASS, "text")?;
-
         // Unlike `cancel`, an unresolved name refuses rather than no-ops:
         // `message` promises delivery and there is nothing to deliver to. A
         // target settling between the name resolving and the send lands in the
@@ -1500,27 +768,16 @@ impl ExarchDesk {
     /// [`ScheduleRegistry::schedule`](crate::fleet::schedule::ScheduleRegistry::schedule).
     /// The answer is the table it now appears in; its `next-s` column already
     /// says everything a receipt could.
-    fn schedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-schedules `add";
-        self.require_schedule_grant(CLASS)?;
+    fn schedule(
+        &self,
+        Add {
+            trigger,
+            label,
+            prompt,
+        }: Add,
+    ) -> Result<FOValue, Error> {
+        self.require_schedule_grant("exarch-schedules `add")?;
         let s = &self.services;
-
-        let mut spec = Fields::payload(
-            payload,
-            CLASS,
-            "[trigger: …, label: …, prompt: …]",
-            &["trigger", "label", "prompt"],
-        )?;
-        let trigger = payload_trigger(
-            spec.take("trigger", "`cron '<expr>' or `after '<dur>'")?,
-            CLASS,
-        )?;
-        let label = payload_label(spec.take("label", "a Str naming the wakeup")?, CLASS)?;
-        let prompt = payload_string(
-            spec.take("prompt", "the instruction delivered when the wakeup fires")?,
-            CLASS,
-            "prompt",
-        )?;
 
         // The row goes up after the registry call, so a refusal tiers instead
         // of reading as one that landed.
@@ -1535,7 +792,7 @@ impl ExarchDesk {
                 format!(
                     "scheduled '{}' ({}s to first fire)",
                     receipt.label,
-                    secs_to_i64(receipt.next_in)
+                    receipt.next_in.as_secs()
                 ),
             ),
             Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
@@ -1550,53 +807,21 @@ impl ExarchDesk {
         }
     }
 
-    /// A snapshot of this agent's live wakeups — every `` `exarch-schedules `` tag's
-    /// answer. Bare, unlike the roster: this family has only the one shape,
-    /// so there is nothing for a tag to tell it apart from.
+    /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
+    /// tag's answer.
     fn schedule_table(&self) -> FOValue {
-        let s = &self.services;
-        FOValue::List {
-            items: s
-                .agent
-                .schedules
-                .list()
-                .into_iter()
-                .map(|info| {
-                    // A cron with nothing inside `next_delay`'s search horizon
-                    // says "never" as `secs_to_i64`'s own saturated ceiling.
-                    let next_s = info.next_in.map_or(i64::MAX, secs_to_i64);
-                    let fires = i64::try_from(info.fires).unwrap_or(i64::MAX);
-                    FOValue::Map {
-                        entries: vec![
-                            ("label".to_string(), FOValue::String { value: info.label }),
-                            (
-                                "trigger".to_string(),
-                                FOValue::String {
-                                    value: info.trigger,
-                                },
-                            ),
-                            ("next-s".to_string(), FOValue::Int { value: next_s }),
-                            ("fires".to_string(), FOValue::Int { value: fires }),
-                        ],
-                    }
-                })
-                .collect(),
-        }
+        self.services.agent.schedules.list().encode()
     }
 
     /// `` `remove `` — take one scheduled wakeup off the table by label. Only
     /// the grant refusal raises; a label that was never there is a successful
     /// call answering a table that does not carry it.
-    fn unschedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-schedules `remove";
-        self.require_schedule_grant(CLASS)?;
+    fn unschedule(&self, label: &str) -> Result<FOValue, Error> {
+        self.require_schedule_grant("exarch-schedules `remove")?;
         let s = &self.services;
-        let label = payload_value(payload, CLASS, "naming the wakeup to remove")?;
-        let label = payload_string(label, CLASS, "label")?;
-
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.
-        let removed = s.agent.schedules.unschedule(&label);
+        let removed = s.agent.schedules.unschedule(label);
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {
@@ -1605,7 +830,7 @@ impl ExarchDesk {
                 format!("no live schedule labelled '{label}'"),
             )
         };
-        s.commit_act(DeskAct::Unschedule, Some(&label), payload, !removed);
+        s.commit_act(DeskAct::Unschedule, Some(label), payload, !removed);
         s.record_forensic(crate::record::Forensic::HarnessResult { text: content });
         Ok(self.schedule_table())
     }
@@ -1615,7 +840,7 @@ impl ExarchDesk {
     /// it parks the agent and hands the value to the parent's `` exarch-agents `read ``,
     /// rather than ending the run. Refused on every non-returning agent, keyed
     /// on `returns` and never on trunk-ness.
-    fn agent_reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+    fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
         let s = &self.services;
         if !s.agent.returns() {
             return Err(Error::new(
@@ -1626,7 +851,6 @@ impl ExarchDesk {
                 1,
             ));
         }
-        let [value] = payload_list(payload, "exarch-agents `reply", "[value]")?;
         let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();
         let payload = if display.is_empty() {
             "(empty reply)".into()
@@ -1641,15 +865,12 @@ impl ExarchDesk {
 
     /// `` `read `` — fetch the value the live descendant named by the payload
     /// last handed to `` `reply ``, scoped as `` `message `` is. The
-    /// one tag that does not answer the roster: it answers the fetched record
+    /// one tag that answers neither summary nor roster, but the fetched record
     /// instead, since that is the whole point of the call. A read is an
     /// observation, not an act, so nothing is committed to [`DeskAct`] — it
     /// changes nothing, exactly like `` `list ``.
-    fn agent_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-agents `read";
+    fn agent_read(&self, name: String) -> Result<FOValue, Error> {
         let s = &self.services;
-        let name = payload_value(payload, CLASS, "naming the descendant to read")?;
-        let name = payload_string(name, CLASS, "name")?;
 
         let content = match s.fleet.resolve(&name) {
             None => Err(format!(
@@ -1675,12 +896,7 @@ impl ExarchDesk {
                 s.record_forensic(crate::record::Forensic::HarnessResult {
                     text: format!("read agent '{name}'s reply"),
                 });
-                Ok(FOValue::Map {
-                    entries: vec![
-                        ("name".to_string(), FOValue::String { value: name }),
-                        ("reply".to_string(), reply),
-                    ],
-                })
+                Ok(Deposit { name, reply }.encode())
             }
             Err(text) => {
                 s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
@@ -1689,54 +905,11 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `exarch-pins `` — one class for the whole register family:
-    /// `` `set ``/`` `clear `` write the slot and mirror the same forensic
-    /// row and transient [`absorb_surface`] draws for a `` `pin ``/
-    /// `` `unpin `` surface value, `` `read ``/`` `list `` answer the mirror.
-    fn pins(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let (tag, payload) = family_tag(payload, "exarch-pins")?;
-        match tag.as_str() {
-            "set" => self.pin_set(payload),
-            "clear" => self.pin_clear(payload),
-            "read" => self.pin_read(payload),
-            "list" => Ok(self.pin_list()),
-            other => Err(unknown_tag("exarch-pins", other)),
-        }
-    }
-
-    /// `` `set `` — overwrite the register slot under `key` with `body`.
-    /// An empty or unrecognised body clears the slot instead: a pin with
-    /// nothing left to show drops it.
-    fn pin_set(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-pins `set";
-        let mut spec = Fields::payload(payload, CLASS, "[key: Str, body: Card]", &["key", "body"])?;
-        let key = payload_string(
-            spec.take("key", "the register slot to write")?,
-            CLASS,
-            "key",
-        )?;
-        let body = spec.take("body", "the card to pin")?;
-        let card = crate::bus::card::value_to_card(&body).filter(|c| !c.marks().is_empty());
-        self.apply_pin(key, card);
-        Ok(FOValue::Unit)
-    }
-
-    /// `` `clear `` — empty the register slot under `key`.
-    fn pin_clear(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-pins `clear";
-        let key = payload_string(
-            payload_value(payload, CLASS, "naming the slot to clear")?,
-            CLASS,
-            "key",
-        )?;
-        self.apply_pin(key, None);
-        Ok(FOValue::Unit)
-    }
-
-    /// The write half of [`Self::pin_set`]/[`Self::pin_clear`]: update the
-    /// mirror [`Self::pin_read`]/[`Self::pin_list`] answer from, then draw
-    /// the forensic row and transient through [`absorb_surface`].
-    fn apply_pin(&self, key: String, card: Option<crate::bus::card::Card>) {
+    /// `` `set ``/`` `clear `` — write or empty the register slot under
+    /// `key`: update the mirror `` `read ``/`` `list `` answer from, then draw
+    /// the forensic row and transient through [`absorb_surface`]. Answers
+    /// `()`.
+    fn apply_pin(&self, key: String, card: Option<Card>) -> FOValue {
         {
             let mut m = self.services.agent.pins.lock_ignore_poison();
             match &card {
@@ -1756,117 +929,30 @@ impl ExarchDesk {
         if let Err(error) = absorb_surface(&recorder, &surface) {
             recorder.report_fault(&error);
         }
+        FOValue::Unit
     }
 
     /// `` `read `` — the card stored under `key` on this agent's own
     /// register, canonically re-encoded, or `()` on a miss. Read-after-write
     /// within one run is sound: `` `set ``/`` `clear `` write the mirror
     /// synchronously, on this same enquiry desk.
-    fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-pins `read";
-        let key = payload_string(
-            payload_value(payload, CLASS, "naming the slot to read")?,
-            CLASS,
-            "key",
-        )?;
+    fn pin_read(&self, key: &str) -> FOValue {
         let m = self.services.agent.pins.lock_ignore_poison();
-        Ok(match m.get(&key) {
-            Some(digest) => crate::bus::card::encode_card(&digest.card),
-            None => FOValue::Unit,
-        })
+        m.get(key)
+            .map_or(FOValue::Unit, |digest| encode_card(&digest.card))
     }
 
     /// `` `list `` — the keys currently occupied on this agent's own
     /// register, in `BTreeMap` order.
     fn pin_list(&self) -> FOValue {
-        FOValue::List {
-            items: self
-                .services
-                .agent
-                .pins
-                .lock_ignore_poison()
-                .keys()
-                .map(|key| FOValue::String { value: key.clone() })
-                .collect(),
-        }
-    }
-
-    /// `` `exarch-context `` — what the provider is sent, one class for the whole
-    /// family. Every tag answers the survey: an edit changes what is
-    /// addressable, so what the model reads back is what its next edit must be
-    /// written against, never a receipt for the one it just made.
-    fn context(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let (tag, payload) = family_tag(payload, "context")?;
-        match tag.as_str() {
-            "survey" => Ok(survey_answer(&self.context_survey())),
-            "evict" => self.context_evict(payload),
-            other => Err(unknown_tag("context", other)),
-        }
+        let pins = self.services.agent.pins.lock_ignore_poison();
+        Vec::from_iter(pins.keys().cloned()).encode()
     }
 
     /// The context as the log holds it. Silent, like the roster: a survey
     /// commits no act, and every edit tag answers one of these too.
     fn context_survey(&self) -> ContextSurvey {
         self.services.log.lock().context_survey()
-    }
-
-    /// `` `exarch-transcript `` — the record: every tag reads it and none writes it.
-    /// A read commits no act, so the verb string its trace line carries is a
-    /// second mint outside [`DeskAct::verb`] on purpose.
-    fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let (tag, payload) = family_tag(payload, "transcript")?;
-        match tag.as_str() {
-            // The index stays whole under the lock: it is a projection of
-            // rows the structure already holds, touching no file.
-            "index" => self.locate_then_read(
-                |log| Ok(transcript_index_answer(log.transcript_index())),
-                Ok,
-            ),
-            "read" => self.transcript_read(payload),
-            "grep" => self.transcript_grep(payload),
-            other => Err(unknown_tag("transcript", other)),
-        }
-    }
-
-    /// `` `exarch-transcript `read `` — the turns the address names, as material:
-    /// one record per turn, in transcript order.
-    fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-transcript `read";
-        let mut spec = Fields::payload(payload, CLASS, "[turns: [Int]]", &["turns"])?;
-        let turns = payload_turns(spec.take("turns", "the turns to read")?, CLASS)?;
-        self.locate_then_read(
-            |log| log.locate_read(&turns),
-            |read| read.turns().map(transcript_answer),
-        )
-    }
-
-    /// `` `exarch-transcript `grep `` — a Rust regex over the transcript's text, the
-    /// whole of it or the turns an address names. The pattern is compiled
-    /// here, so an invalid one is refused in the regex crate's own words.
-    fn transcript_grep(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-transcript `grep";
-        let mut spec = Fields::payload(
-            payload,
-            CLASS,
-            "[pattern: Str, turns: [Int]]",
-            &["pattern", "turns"],
-        )?;
-        let pattern = payload_string(
-            spec.take("pattern", "the Rust regex to search the transcript for")?,
-            CLASS,
-            "pattern",
-        )?;
-        let turns = spec
-            .optional("turns")
-            .map(|value| payload_turns(value, CLASS))
-            .transpose()?;
-        self.locate_then_read(
-            |log| {
-                let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
-                Ok((log.locate_grep(turns.as_deref())?, regex))
-            },
-            |(read, regex)| read.grep(&regex).map(grep_answer),
-        )
     }
 
     /// The tail every `` `exarch-transcript `` tag shares: `locate` under the
@@ -1883,93 +969,39 @@ impl ExarchDesk {
         located.and_then(read).map_err(|error| Error::new(error, 1))
     }
 
-    /// What a note may weigh. It lands in the marker that stands where the
-    /// turns were and stays there for the session, so it is one short line,
-    /// not a summary.
-    const NOTE_CAP: usize = 240;
-
-    /// `` `exarch-context `evict `` — the turns the address names leave the context
-    /// at once, wherever they lie, but for a user turn whose answers still
-    /// have a resident turn outside the set; the model's optional `note`
-    /// stands in the marker left where they were.
-    fn context_evict(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "exarch-context `evict";
-        let mut spec = Fields::payload(
-            payload,
-            CLASS,
-            "[turns: [Int], note: Str]",
-            &["turns", "note"],
-        )?;
-        let turns = payload_turns(spec.take("turns", "the turns to evict")?, CLASS)?;
-        let note = match spec.optional("note") {
-            Some(value) => {
-                let note = payload_string(value, CLASS, "note")?;
-                if note.is_empty() {
-                    return Err(Error::new(
-                        format!("`{CLASS}`: `note` must not be empty — omit it to leave none"),
-                        1,
-                    ));
-                }
-                if note.len() > Self::NOTE_CAP {
-                    return Err(Error::new(
-                        format!(
-                            "`{CLASS}`: `note` is {} bytes; the marker keeps one short line — {} at most. What is the one thing your future self needs to know?",
-                            note.len(),
-                            Self::NOTE_CAP
-                        ),
-                        1,
-                    ));
-                }
-                if note.contains(['\n', '\r']) {
-                    return Err(Error::new(
-                        format!(
-                            "`{CLASS}`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
-                        ),
-                        1,
-                    ));
-                }
-                Some(note)
-            }
-            None => None,
-        };
-        let payload = match &note {
-            Some(note) => format!("note {note}"),
-            None => String::new(),
-        };
-        self.context_edit(&turns_subject(&turns), payload, &turns, note)
-    }
-
-    /// The eviction's tail: apply the cut, commit the act under `refused` on
-    /// either outcome, and mirror the surviving weight or the refusal onto
-    /// the trace before answering the survey.
-    fn context_edit(
-        &self,
-        subject: &str,
-        payload: String,
-        turns: &[u64],
-        note: Option<String>,
-    ) -> Result<FOValue, Error> {
+    /// `` `exarch-context `evict `` — the turns the address names leave the
+    /// context at once, wherever they lie, but for a user turn whose answers
+    /// still have a resident turn outside the set; the model's optional
+    /// `note` stands in the marker left where they were. Commits the act
+    /// under `refused` on either outcome, and mirrors the surviving weight or
+    /// the refusal onto the trace before answering the survey.
+    fn context_evict(&self, Evict { turns, note }: Evict) -> Result<FOValue, Error> {
+        let note = note.map(|Note(note)| note);
+        let payload = note
+            .as_ref()
+            .map_or_else(String::new, |note| format!("note {note}"));
+        let subject = turns_subject(&turns);
         let result = self
             .services
             .log
             .lock()
-            .evict(turns, note, EditAuthority::Model);
+            .evict(&turns, note, EditAuthority::Model);
         match result {
             // `evict` records `Evicted` through the seam, and the live row
             // derives from that published record: nothing separate to emit
             // here.
             Ok(()) => {
                 self.services
-                    .commit_act(DeskAct::ContextEvict, Some(subject), payload, false);
+                    .commit_act(DeskAct::ContextEvict, Some(&subject), payload, false);
                 let survey = self.context_survey();
                 let text = format!("context is now {} serialized bytes", survey.total_bytes);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult { text });
-                Ok(survey_answer(&survey))
+                Ok(Survey::from(survey).encode())
             }
             Err(error) => {
                 self.services
-                    .commit_act(DeskAct::ContextEvict, Some(subject), payload, true);
+                    .commit_act(DeskAct::ContextEvict, Some(&subject), payload, true);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult {
                         text: error.clone(),
@@ -1980,227 +1012,12 @@ impl ExarchDesk {
     }
 }
 
-/// The `` `exarch-context `` family's one answer: one row per turn in the context,
-/// then what the whole of it weighs.
-fn survey_answer(survey: &ContextSurvey) -> FOValue {
-    FOValue::Map {
-        entries: vec![
-            (
-                "rows".to_string(),
-                FOValue::List {
-                    items: survey
-                        .rows
-                        .iter()
-                        .map(|turn| FOValue::Map {
-                            entries: turn_row(turn),
-                        })
-                        .collect(),
-                },
-            ),
-            (
-                "total-bytes".to_string(),
-                FOValue::Int {
-                    value: usize_to_i64(survey.total_bytes),
-                },
-            ),
-        ],
-    }
-}
-
-/// One turn as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
-/// it, so a row and an index line can never be two opinions.
-fn turn_row(turn: &crate::record::TurnRow) -> Vec<(String, FOValue)> {
-    vec![
-        (
-            "id".to_string(),
-            FOValue::Int {
-                value: u64_to_i64(turn.id),
-            },
-        ),
-        text_field("role", turn.role.as_str().to_string()),
-        text_field("kind", turn.kind.as_str().to_string()),
-        text_field("label", turn.label.clone()),
-        (
-            "bytes".to_string(),
-            FOValue::Int {
-                value: usize_to_i64(turn.bytes),
-            },
-        ),
-    ]
-}
-
-/// `` `exarch-transcript `index ``'s answer: one row per turn the transcript holds,
-/// oldest first, `held` saying which of them the model is still paying for.
-fn transcript_index_answer(turns: Vec<crate::record::TurnRow>) -> FOValue {
-    FOValue::List {
-        items: turns
-            .into_iter()
-            .map(|turn| {
-                let mut entries = turn_row(&turn);
-                entries.push(text_field("held", turn.held.as_str().to_string()));
-                FOValue::Map { entries }
-            })
-            .collect(),
-    }
-}
-
-/// `` `exarch-transcript `grep ``'s answer: the hits it kept, and how many there
-/// were in all.
-fn grep_answer(answer: GrepAnswer) -> FOValue {
-    let hits = answer
-        .hits
-        .into_iter()
-        .map(|hit| FOValue::Map {
-            entries: vec![
-                (
-                    "turn".to_string(),
-                    FOValue::Int {
-                        value: u64_to_i64(hit.turn),
-                    },
-                ),
-                text_field("role", role_label(&hit.role).to_string()),
-                (
-                    "line".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(hit.line),
-                    },
-                ),
-                text_field("text", hit.text),
-            ],
-        })
-        .collect();
-    FOValue::Map {
-        entries: vec![
-            ("hits".to_string(), FOValue::List { items: hits }),
-            (
-                "total".to_string(),
-                FOValue::Int {
-                    value: usize_to_i64(answer.total),
-                },
-            ),
-        ],
-    }
-}
-
-/// `` `exarch-transcript `read ``'s answer: one record per turn the read named,
-/// each naming its role and carrying the model's own messages
-/// narrowed to variant parts — never a serialization of the provider's own
-/// content structs.
-fn transcript_answer(read: Vec<TranscriptTurn>) -> FOValue {
-    FOValue::List {
-        items: read.into_iter().map(transcript_turn_value).collect(),
-    }
-}
-
-fn transcript_turn_value(read: TranscriptTurn) -> FOValue {
-    FOValue::Map {
-        entries: vec![
-            (
-                "turn".to_string(),
-                FOValue::Int {
-                    value: u64_to_i64(read.turn),
-                },
-            ),
-            text_field("role", read.role.as_str().to_string()),
-            (
-                "messages".to_string(),
-                FOValue::List {
-                    items: read
-                        .messages
-                        .into_iter()
-                        .map(transcript_message_value)
-                        .collect(),
-                },
-            ),
-        ],
-    }
-}
-
-fn transcript_message_value(message: TranscriptMessage) -> FOValue {
-    FOValue::Map {
-        entries: vec![
-            (
-                "role".to_string(),
-                FOValue::Variant {
-                    label: role_label(&message.role).to_string(),
-                    payload: None,
-                },
-            ),
-            (
-                "parts".to_string(),
-                FOValue::List {
-                    items: message
-                        .parts
-                        .into_iter()
-                        .map(transcript_part_value)
-                        .collect(),
-                },
-            ),
-        ],
-    }
-}
-
-fn transcript_part_value(part: TranscriptPart) -> FOValue {
-    let (label, entries) = match part {
-        TranscriptPart::Text(content) => ("text", vec![text_field("content", content)]),
-        TranscriptPart::Program { tool, source, keys } => (
-            "program",
-            vec![
-                text_field("tool", tool),
-                text_field("source", source),
-                (
-                    "keys".to_string(),
-                    FOValue::List {
-                        items: keys
-                            .into_iter()
-                            .map(|key| FOValue::String { value: key })
-                            .collect(),
-                    },
-                ),
-            ],
-        ),
-        TranscriptPart::Result(content) => ("result", vec![text_field("content", content)]),
-        TranscriptPart::Reasoning(content) => ("reasoning", vec![text_field("content", content)]),
-        TranscriptPart::Binary {
-            content_type,
-            name,
-            bytes,
-        } => (
-            "binary",
-            vec![
-                text_field("content-type", content_type),
-                text_field("name", name),
-                (
-                    "bytes".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(bytes),
-                    },
-                ),
-            ],
-        ),
-        TranscriptPart::Custom { provider, model } => (
-            "custom",
-            vec![text_field("provider", provider), text_field("model", model)],
-        ),
-    };
-    FOValue::Variant {
-        label: label.to_string(),
-        payload: Some(Box::new(FOValue::Map { entries })),
-    }
-}
-
-fn text_field(name: &str, value: String) -> (String, FOValue) {
-    (name.to_string(), FOValue::String { value })
-}
-
-/// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
-/// into the pin mirror and every other surface class straight into the record.
+/// Decodes a surfaced value straight into the record.
 /// [`RunHost::apply`] is what every dispatch's drain loop
 /// ([`ral_core::protocol::dispatch_to_report`]) reaches through the protocol,
 /// so a call's surfaced values always render off the one applier it was built
 /// with.
 pub(crate) struct SurfaceApplier {
-    pub(crate) pins: Option<PinDigests>,
     pub(crate) recorder: crate::record::Emitter,
 }
 
@@ -2223,20 +1040,6 @@ impl SurfaceApplier {
                 return;
             }
         };
-        if let Some(pins) = &self.pins {
-            // Fatal, never skipped: dropping a disposition here would
-            // desync the mirror from the stream with no signal at all.
-            let mut m = pins.lock_ignore_poison();
-            match &surface {
-                Surface::Pin { key, card } => {
-                    m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
-                }
-                Surface::Unpin { key } => {
-                    m.remove(key);
-                }
-                _ => {}
-            }
-        }
         if let Err(error) = absorb_surface(&self.recorder, &surface) {
             self.recorder.report_fault(&error);
         }
@@ -2244,7 +1047,7 @@ impl SurfaceApplier {
 }
 
 /// An applier alone is the mute host the bare harness runs under:
-/// nothing answers, nothing forks.
+/// nothing answers.
 impl Host for SurfaceApplier {
     fn surface(&self, val: &FOValue) {
         self.live(val);
@@ -2252,10 +1055,6 @@ impl Host for SurfaceApplier {
 
     fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
         Err(EnquiryError::no_desk())
-    }
-
-    fn fork(&self) -> Option<ral_core::types::Fork> {
-        None
     }
 }
 
@@ -2269,8 +1068,7 @@ impl Host for SurfaceApplier {
 /// merging a file's consecutive hunks belong to the frontend, which derives
 /// them online and so needs no coalesced log to rebuild from.
 ///
-/// A pin publishes twice, per the mirror it also feeds in
-/// [`SurfaceApplier::live`]: [`crate::record::Forensic::Pin`]/`Unpin` is the
+/// A pin publishes twice: [`crate::record::Forensic::Pin`]/`Unpin` is the
 /// durable breadcrumb a resume replays, [`crate::record::Transient::Pin`]/
 /// `Unpin` is the register the live process is holding, which a resume does
 /// not restore.
@@ -2354,16 +1152,10 @@ impl Host for RunHost {
     }
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
-        self.desk.handle(req).map_err(|e| EnquiryError {
+        self.desk.handle(&req).map_err(|e| EnquiryError {
             status: e.exit_code(),
             message: e.message,
         })
-    }
-
-    fn fork(&self) -> Option<ral_core::types::Fork> {
-        Some(ral_core::types::Fork::Park(
-            self.desk.services.nursery.clone(),
-        ))
     }
 }
 
@@ -2377,13 +1169,18 @@ mod tests {
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
+    use crate::fleet::enquiry::{Grant, Grep, Launch, Pin, Reading};
+    use crate::fleet::roster::AgentInfo;
+    use crate::fleet::schedule::{Trigger, parse_duration};
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
     };
     use crate::record::{Display, FleetSink, Record, Transient};
-    use crate::shell_eval::builtins::harness;
-    use ral_core::Value as RalValue;
+    use ral_core::serial::datum::tag;
+    use ral_core::types::NurseryId;
+    use regex::Regex;
+    use std::time::Duration;
 
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
@@ -2413,22 +1210,15 @@ mod tests {
         let (emit, _rx) = crate::bus::dummy_emitter();
         let services = HostServices {
             fleet: fleet.clone(),
-            kind: SeatKind::Identity {
-                scratch: Arc::new(
-                    crate::bootstrap::Scratch::for_test(
-                        crate::bootstrap::EXARCH,
-                        &format!("desk-{}", crate::agent::fresh_id()),
-                    )
-                    .expect("scratch dir"),
-                ),
-            },
+            kind: SeatKind::Identity(Arc::new(crate::bootstrap::test_transport())),
             stamp: agent.mailbox().stamp(),
             agent,
             emit,
             cwd: PathBuf::from("/"),
+            home: Some(PathBuf::from("/tmp")),
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
-            nursery: Nursery::default(),
+            branch: None,
             acts: ActFragment::default(),
             principal: ral_core::host::user(),
         };
@@ -2457,44 +1247,34 @@ mod tests {
         .expect("answer");
     }
 
-    /// Every context-verb test request below goes through the same encoders
-    /// [`harness::builtin_context`] and [`harness::builtin_transcript`] call,
-    /// so a change to an encoder breaks these tests instead of leaving them to
-    /// hand-build a payload that has quietly drifted from what the builtin
-    /// actually sends.
-    fn turns_value(turns: &[i64]) -> RalValue {
-        RalValue::list(turns.iter().map(|value| RalValue::Int(*value)).collect())
+    impl ExarchDesk {
+        /// `request` as its door sends it: encoded by the vocabulary, and
+        /// decoded again on arrival.
+        pub(super) fn ask(&self, request: Request) -> Result<FOValue, Error> {
+            self.handle(&request.encode())
+        }
     }
 
-    fn context_evict_request(turns: &[i64], note: Option<&str>) -> FOValue {
-        let mut fields = vec![("turns".to_string(), turns_value(turns))];
-        fields.extend(note.map(|note| ("note".to_string(), RalValue::String(note.to_string()))));
-        let payload =
-            harness::context_evict_payload(&RalValue::map(fields)).expect("valid evict spec");
-        family_req("context", "evict", Some(payload))
-    }
-
-    /// The `` `exarch-context `survey `` call, shaped exactly as `builtin_context`
-    /// sends it: a bare tag, since the answer is the whole survey.
-    fn context_survey_request() -> FOValue {
-        family_req("context", "survey", None)
+    fn context_evict_request(turns: &[u64], note: Option<&str>) -> Request {
+        Request::Context(Context::Evict(Evict {
+            turns: turns.to_vec(),
+            note: note.map(|note| Note(note.to_string())),
+        }))
     }
 
     /// An empty address is well-typed, so a read naming no turn is the shape
     /// the fold refuses rather than one the encoder cannot build.
-    fn transcript_read_request(turns: &[i64]) -> FOValue {
-        let fields = vec![("turns".to_string(), turns_value(turns))];
-        let payload =
-            harness::transcript_read_payload(&RalValue::map(fields)).expect("valid read spec");
-        family_req("transcript", "read", Some(payload))
+    fn transcript_read_request(turns: &[u64]) -> Request {
+        Request::Transcript(Transcript::Read(Reading {
+            turns: turns.to_vec(),
+        }))
     }
 
-    fn transcript_grep_request(pattern: &str, turns: Option<&[i64]>) -> FOValue {
-        let mut fields = vec![("pattern".to_string(), RalValue::String(pattern.to_string()))];
-        fields.extend(turns.map(|turns| ("turns".to_string(), turns_value(turns))));
-        let payload =
-            harness::transcript_grep_payload(&RalValue::map(fields)).expect("valid grep spec");
-        family_req("transcript", "grep", Some(payload))
+    fn transcript_grep_request(pattern: &str, turns: Option<&[u64]>) -> Request {
+        Request::Transcript(Transcript::Grep(Grep {
+            pattern: Regex::new(pattern).expect("a test pattern compiles"),
+            turns: turns.map(<[u64]>::to_vec),
+        }))
     }
 
     fn int_field(value: &FOValue, key: &str) -> i64 {
@@ -2508,193 +1288,84 @@ mod tests {
         row.field(key).and_then(FOValue::as_str)
     }
 
-    pub(super) fn bare(label: &str) -> FOValue {
-        FOValue::Variant {
-            label: label.to_string(),
-            payload: None,
-        }
-    }
-
     fn text(value: &str) -> FOValue {
-        FOValue::String {
-            value: value.to_string(),
+        value.to_string().encode()
+    }
+
+    /// A malformed request, spelt by hand because the vocabulary will not
+    /// build it: the family names the class, the tag what to do.
+    fn family_req(family: &str, label: &str, payload: Option<FOValue>) -> FOValue {
+        tag(family, Some(tag(label, payload)))
+    }
+
+    /// The model's plainest spawn record: `` `amnemon ``, inheriting
+    /// provider and model.
+    pub(super) fn spec(prompt: &str, name: &str, grant: SpawnGrant, search: bool) -> Launch {
+        Launch {
+            prompt: prompt.to_string(),
+            name: Name(name.to_string()),
+            memory: Memory::Amnemon,
+            grant: Grant(grant),
+            search,
+            provider: Selection::Inherit,
+            model: Selection::Inherit,
         }
     }
 
-    fn named(value: &str) -> FOValue {
-        FOValue::Variant {
-            label: "named".to_string(),
-            payload: Some(Box::new(text(value))),
-        }
+    pub(super) fn confined() -> SpawnGrant {
+        SpawnGrant::Base("confined".to_string())
     }
 
-    /// The nested request both registries now take: the family names the
-    /// class, the tag names what to do, and the payload is the model's value.
-    pub(super) fn family_req(family: &str, tag: &str, payload: Option<FOValue>) -> FOValue {
-        FOValue::Variant {
-            label: family.to_string(),
-            payload: Some(Box::new(FOValue::Variant {
-                label: tag.to_string(),
-                payload: payload.map(Box::new),
-            })),
-        }
-    }
-
-    /// `` `exarch-agents `start ``: the model's own spec record beside whichever
-    /// `fork` tag the engine minted. Always `` `amnemon ``, the only kind the
-    /// desk tests exercise, and `selection` is the `provider`/`model` pair —
-    /// `` `inherit ``/`` `inherit `` for every test but the selection ones.
-    pub(super) fn start_req_selecting(
-        fork: FOValue,
-        prompt: &str,
-        name: &str,
-        grant: FOValue,
-        search: bool,
-        selection: (FOValue, FOValue),
-    ) -> FOValue {
-        let (provider, model) = selection;
-        let spec = FOValue::Map {
-            entries: vec![
-                ("prompt".to_string(), text(prompt)),
-                ("name".to_string(), text(name)),
-                ("type".to_string(), bare("amnemon")),
-                ("grant".to_string(), grant),
-                ("search".to_string(), FOValue::Bool { value: search }),
-                ("provider".to_string(), provider),
-                ("model".to_string(), model),
-            ],
-        };
-        family_req(
-            "agents",
-            "start",
-            Some(FOValue::Map {
-                entries: vec![("spec".to_string(), spec), ("fork".to_string(), fork)],
-            }),
-        )
-    }
-
-    /// The inheriting pair every test but the selection ones sends.
-    pub(super) fn inherits() -> (FOValue, FOValue) {
-        (bare("inherit"), bare("inherit"))
-    }
-
-    pub(super) fn start_req_forked(
-        fork: FOValue,
-        prompt: &str,
-        name: &str,
-        grant: FOValue,
-        search: bool,
-    ) -> FOValue {
-        start_req_selecting(fork, prompt, name, grant, search, inherits())
+    pub(super) fn start(fork: ForkClaim, spec: Launch) -> Request {
+        Request::Agents(Agents::Start(Start { spec, fork }))
     }
 
     /// The in-process shape: the fork waits in this host's own nursery.
-    pub(super) fn start_req(
-        session: NurseryId,
-        prompt: &str,
-        name: &str,
-        grant: &str,
-        search: bool,
-    ) -> FOValue {
-        start_req_forked(parked(session), prompt, name, bare(grant), search)
-    }
-
-    /// A `` `start `` whose `grant` is not a bare tag: the `` `restrict ``
-    /// forms, which the `&str` shorthand above cannot spell.
-    pub(super) fn start_req_granting(session: NurseryId, name: &str, grant: FOValue) -> FOValue {
-        start_req_forked(parked(session), "go", name, grant, false)
-    }
-
-    /// `` `restrict `` carrying `payload`.
-    fn restrict_req(payload: FOValue) -> FOValue {
-        FOValue::Variant {
-            label: "restrict".to_string(),
-            payload: Some(Box::new(payload)),
-        }
-    }
-
-    /// A `fork` tag naming a session parked in this host's own nursery.
-    pub(super) fn parked(session: NurseryId) -> FOValue {
-        FOValue::Variant {
-            label: "parked".to_string(),
-            payload: Some(Box::new(FOValue::Int {
-                value: i64::try_from(session.0).expect("small test id"),
-            })),
-        }
-    }
-
-    /// `` `exarch-agents `message ``: the model's record, by the surface's own names.
-    pub(super) fn message_req(to: &str, body: &str) -> FOValue {
-        family_req(
-            "agents",
-            "message",
-            Some(FOValue::Map {
-                entries: vec![
-                    ("to".to_string(), text(to)),
-                    ("text".to_string(), text(body)),
-                ],
-            }),
+    pub(super) fn start_req(session: NurseryId, prompt: &str, name: &str, search: bool) -> Request {
+        start(
+            ForkClaim::Parked(session),
+            spec(prompt, name, confined(), search),
         )
     }
 
-    /// `` `exarch-schedules `add `` with an `` `after `` trigger — the only kind these
-    /// tests arm, since a cron's first fire is not a fixed delay.
-    fn add_req(after: &str, label: &str, prompt: &str) -> FOValue {
-        family_req(
-            "schedules",
-            "add",
-            Some(FOValue::Map {
-                entries: vec![
-                    (
-                        "trigger".to_string(),
-                        FOValue::Variant {
-                            label: "after".to_string(),
-                            payload: Some(Box::new(text(after))),
-                        },
-                    ),
-                    ("label".to_string(), text(label)),
-                    ("prompt".to_string(), text(prompt)),
-                ],
-            }),
-        )
+    pub(super) fn message_req(to: &str, text: &str) -> Request {
+        Request::Agents(Agents::Message(Message {
+            to: to.to_string(),
+            text: text.to_string(),
+        }))
     }
 
-    /// Unwrap a `` `summary `` answer into `(live, replied)`.
-    pub(super) fn summary_counts(answer: FOValue) -> (i64, i64) {
-        let FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } = answer
-        else {
-            panic!("every `exarch-agents tag answers a tagged variant")
-        };
-        assert_eq!(label, "summary", "a transition answers the summary");
-        (int_field(&payload, "live"), int_field(&payload, "replied"))
+    fn reply_req(value: FOValue) -> Request {
+        Request::Agents(Agents::Reply(value))
+    }
+
+    /// `` `exarch-schedules `add `` with an `` `after `` trigger — the only
+    /// kind these tests arm, since a cron's first fire is not a fixed delay.
+    fn add_req(after: &str, label: &str, prompt: &str) -> Request {
+        Request::Schedules(Schedules::Add(Add {
+            trigger: Trigger::After(parse_duration(after).expect("a test duration parses")),
+            label: label.to_string(),
+            prompt: prompt.to_string(),
+        }))
+    }
+
+    fn remove_req(label: &str) -> Request {
+        Request::Schedules(Schedules::Remove(label.to_string()))
+    }
+
+    /// Unwrap a summary answer into `(live, replied)`.
+    pub(super) fn summary_counts(answer: &FOValue) -> (usize, usize) {
+        let counts = crate::fleet::roster::Summary::decode(answer).expect("a summary answer");
+        (counts.live, counts.replied)
     }
 
     /// The rows `` `list `` answers, for a test whose transition no longer
     /// carries them.
-    pub(super) fn listed(desk: &ExarchDesk) -> Vec<FOValue> {
-        roster(
-            desk.handle(family_req("agents", "list", None))
-                .expect("`list answers the rows"),
-        )
-    }
-
-    /// Unwrap a `` `roster `` answer into its rows.
-    pub(super) fn roster(answer: FOValue) -> Vec<FOValue> {
-        let FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } = answer
-        else {
-            panic!("every `exarch-agents tag answers a tagged variant")
-        };
-        assert_eq!(label, "roster", "the answer must be the roster");
-        let FOValue::List { items } = *payload else {
-            panic!("a roster carries a list of rows")
-        };
-        items
+    pub(super) fn listed(desk: &ExarchDesk) -> Vec<AgentInfo> {
+        let rows = desk
+            .ask(Request::Agents(Agents::List))
+            .expect("`list answers the rows");
+        Vec::decode(&rows).expect("`list answers roster rows")
     }
 
     /// Unwrap a `` `exarch-schedules `` answer into its rows.
@@ -2715,9 +1386,9 @@ mod tests {
     /// A desk whose parent holds the very inbox this returns, so
     /// `` `start ``/`` `cancel ``/`` `message `` run end to end and a child's
     /// result is observable — unlike [`desk`].
-    fn spawnable_desk(fuel: u32) -> (ExarchDesk, Arc<Fleet>, Inbox) {
+    fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox) {
         let (services, fleet, parent_inbox) = services_with(fuel, |_| {});
-        (ExarchDesk { services }, fleet, parent_inbox)
+        (Arc::new(ExarchDesk { services }), fleet, parent_inbox)
     }
 
     /// Poll `inbox` for the next exchange-boundary item — a spawned child's
@@ -2736,23 +1407,69 @@ mod tests {
         }
     }
 
-    /// Booted exactly once per test. `boot_shell` resets process-global signal
-    /// state, the ceremony the fleet runs once at its root; booting again per
-    /// spawn races that reset against a sibling's in-flight run and deadlocks.
-    fn root_shell() -> ral_core::Shell {
-        crate::bootstrap::boot_shell()
+    type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
+
+    /// Answers the one `` `branch `` a real run enquires by running its `f`
+    /// against the fork that run parked, while the fork is still in its pen.
+    struct Parking<R> {
+        desk: Arc<ExarchDesk>,
+        f: Mutex<Option<Parked<R>>>,
+        out: Mutex<Option<R>>,
     }
 
-    /// The fork [`ral_core::Shell::fork_into_nursery`] would perform on a live
-    /// session, off the shared [`root_shell`] rather than a freshly booted one.
-    fn forkable_child_shell(root: &ral_core::Shell) -> ral_core::Shell {
-        root.fork_session()
+    impl<R: Send> Host for Parking<R> {
+        fn surface(&self, _val: &FOValue) {}
+
+        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+            let Ok(Request::Agents(Agents::Branch(ForkClaim::Parked(id)))) = Request::decode(&req)
+            else {
+                panic!("an identity run's `branch parks its fork")
+            };
+            let f = self.f.lock().unwrap().take().expect("one enquiry per run");
+            *self.out.lock().unwrap() = Some(f(&self.desk, id));
+            Ok(FOValue::Unit)
+        }
+    }
+
+    /// `f`'s answer about a fork a real run parked in the desk's own parent
+    /// transport — the one door an identity fork reaches a desk by.
+    fn with_parked<R: Send + 'static>(
+        desk: &Arc<ExarchDesk>,
+        f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
+    ) -> R {
+        let SeatKind::Identity(parent) = &desk.services.kind else {
+            panic!("an identity desk parks in process")
+        };
+        let host = Arc::new(Parking {
+            desk: desk.clone(),
+            f: Mutex::new(Some(Box::new(f))),
+            out: Mutex::default(),
+        });
+        let report = ral_core::protocol::dispatch_to_report(
+            &**parent,
+            crate::agent::testkit::source_run("_exarch-branch"),
+            host.clone(),
+        )
+        .expect("an identity engine never severs");
+        host.out
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| panic!("the run never enquired: {report:?}"))
+    }
+
+    /// Whether the fork `id` still waits in the desk's parent's pen.
+    fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
+        let SeatKind::Identity(parent) = &desk.services.kind else {
+            panic!("an identity desk parks in process")
+        };
+        parent.adopt_parked(id, &SpawnGrant::Inherit).is_ok()
     }
 
     #[test]
     fn unknown_class_answers_the_extension_error() {
         let err = desk()
-            .handle(FOValue::Variant {
+            .handle(&FOValue::Variant {
                 label: "no-such-class".into(),
                 payload: None,
             })
@@ -2764,13 +1481,16 @@ mod tests {
     /// down: a tag extends a family the way a class extends the desk.
     #[test]
     fn unknown_tag_answers_the_extension_error_too() {
-        for family in ["agents", "schedules", "context"] {
+        for class in ["agents", "schedules", "pins", "context", "transcript"] {
             let err = desk()
-                .handle(family_req(family, "no-such-tag", None))
+                .handle(&family_req(class, "no-such-tag", None))
                 .expect_err("an unrecognised tag must not answer Ok");
-            assert_eq!(
-                err.message,
-                format!("unrecognised `{family} tag `no-such-tag`")
+            assert!(
+                err.message.starts_with(&format!(
+                    "unrecognised tag in `exarch-{class} `no-such-tag` — "
+                )),
+                "got: {}",
+                err.message
             );
         }
     }
@@ -2779,7 +1499,7 @@ mod tests {
     #[test]
     fn non_variant_request_errors_didactically() {
         let err = desk()
-            .handle(FOValue::Unit)
+            .handle(&FOValue::Unit)
             .expect_err("a non-variant request must not answer Ok");
         assert!(
             err.message.contains("must be a variant"),
@@ -2804,7 +1524,7 @@ mod tests {
         let expected_bytes = desk.services.log.lock().history_bytes();
 
         let answer = desk
-            .handle(context_survey_request())
+            .ask(Request::Context(Context::Survey))
             .expect("context survey");
         let kinds = survey_rows(&answer)
             .iter()
@@ -2836,7 +1556,7 @@ mod tests {
         desk.services.emit = Emitter::new(tx, 0);
 
         let FOValue::List { items } = desk
-            .handle(transcript_read_request(&[1, 2]))
+            .ask(transcript_read_request(&[1, 2]))
             .expect("exarch-transcript `read")
         else {
             panic!("exarch-transcript `read must answer a list, one record per turn")
@@ -2862,7 +1582,7 @@ mod tests {
         );
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
 
-        desk.handle(transcript_read_request(&[]))
+        desk.ask(transcript_read_request(&[]))
             .expect_err("a read that names no turn is not meaningful");
         let drawn = crate::bus::drain_records(&rx)
             .into_iter()
@@ -2886,7 +1606,7 @@ mod tests {
             append_prompt_and_answer(&mut log, "second prompt", "second answer");
         }
         let FOValue::List { items } = desk
-            .handle(transcript_read_request(&[2, 3]))
+            .ask(transcript_read_request(&[2, 3]))
             .expect("closed turns are readable")
         else {
             panic!("exarch-transcript `read must answer a list, one record per turn")
@@ -2907,7 +1627,7 @@ mod tests {
         );
 
         let error = desk
-            .handle(transcript_read_request(&[9]))
+            .ask(transcript_read_request(&[9]))
             .expect_err("a read must not reach past what is recorded");
         assert_eq!(error.message, "turn 9 is not recorded — the latest is 4");
 
@@ -2917,7 +1637,7 @@ mod tests {
             .append_user("live".into(), None)
             .expect("live prompt");
         let error = desk
-            .handle(transcript_read_request(&[5]))
+            .ask(transcript_read_request(&[5]))
             .expect_err("the turn being written is not readable");
         assert_eq!(
             error.message,
@@ -2925,8 +1645,8 @@ mod tests {
         );
     }
 
-    /// The pattern is compiled at the desk, so an invalid one is refused in
-    /// the regex crate's own words rather than in a paraphrase of them.
+    /// The pattern is compiled on decode, so an invalid one is refused in the
+    /// regex crate's own words rather than in a paraphrase of them.
     #[test]
     #[expect(
         clippy::invalid_regex,
@@ -2939,9 +1659,15 @@ mod tests {
             .expect_err("an unclosed group is not a regex")
             .to_string();
         let error = desk
-            .handle(transcript_grep_request(UNCLOSED, None))
+            .handle(&family_req(
+                "transcript",
+                "grep",
+                Some(FOValue::Map {
+                    entries: vec![("pattern".to_string(), text(UNCLOSED))],
+                }),
+            ))
             .expect_err("an invalid regex is not searchable");
-        assert_eq!(error.message, expected);
+        assert!(error.message.ends_with(&expected), "got: {}", error.message);
     }
 
     /// `turn` for `turns` once searched the whole transcript in silence: the
@@ -2954,7 +1680,7 @@ mod tests {
             append_prompt_and_answer(&mut log, "first prompt", "first answer");
         }
         let err = desk
-            .handle(family_req(
+            .handle(&family_req(
                 "transcript",
                 "grep",
                 Some(FOValue::Map {
@@ -2972,9 +1698,9 @@ mod tests {
             .expect_err("`turn` is not a field `grep` reads");
         assert_eq!(
             err.message,
-            "`exarch-transcript `grep`: unknown field `turn` — the payload takes `pattern` and `turns` — did you mean `turns`?"
+            "`exarch-transcript `grep`: unknown field `turn — did you mean `turns?"
         );
-        desk.handle(transcript_grep_request("answer", Some(&[1, 2])))
+        desk.ask(transcript_grep_request("answer", Some(&[1, 2])))
             .expect("the spelt field still narrows the search");
     }
 
@@ -2987,7 +1713,7 @@ mod tests {
             live.append_user("live".into(), None).expect("live prompt");
         }
         let err = live_desk
-            .handle(context_evict_request(&[1], None))
+            .ask(context_evict_request(&[1], None))
             .expect_err("the turn being written is not editable");
         assert_eq!(
             err.message,
@@ -3000,7 +1726,7 @@ mod tests {
             append_prompt_and_answer(&mut log, "one", "answer");
         }
         let err = unknown_desk
-            .handle(context_evict_request(&[7], None))
+            .ask(context_evict_request(&[7], None))
             .expect_err("an unrecorded turn is not editable");
         assert_eq!(err.message, "turn 7 is not recorded — the latest is 2");
 
@@ -3012,10 +1738,10 @@ mod tests {
             append_prompt_and_answer(&mut log, "three", "answer");
         }
         evicted_desk
-            .handle(context_evict_request(&[1, 2], None))
+            .ask(context_evict_request(&[1, 2], None))
             .expect("evict");
         let err = evicted_desk
-            .handle(context_evict_request(&[1], None))
+            .ask(context_evict_request(&[1], None))
             .expect_err("a turn that has left is not addressable");
         assert_eq!(
             err.message,
@@ -3023,7 +1749,7 @@ mod tests {
         );
 
         evicted_desk
-            .handle(context_evict_request(&[], None))
+            .ask(context_evict_request(&[], None))
             .expect_err("an empty address is not an edit");
     }
 
@@ -3040,7 +1766,7 @@ mod tests {
             append_prompt_and_answer(&mut log, "two", "another answer");
         }
         let answer = desk
-            .handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
+            .ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
             .expect("context evict");
         assert_eq!(
             int_field(&answer, "total-bytes"),
@@ -3079,7 +1805,7 @@ mod tests {
     }
 
     /// An empty note would render `Your note at eviction: ""` in the marker,
-    /// so the door refuses it rather than the shape allowing it.
+    /// so its decode refuses it rather than the shape allowing it.
     #[test]
     fn context_evict_refuses_an_empty_note() {
         let desk = desk();
@@ -3089,11 +1815,11 @@ mod tests {
             append_prompt_and_answer(&mut log, "two", "answer");
         }
         let err = desk
-            .handle(context_evict_request(&[1], Some("")))
+            .ask(context_evict_request(&[1], Some("")))
             .expect_err("an empty note is not a note");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note` must not be empty — omit it to leave none"
+            "`exarch-context `evict`: `note: must not be empty — omit it to leave none"
         );
     }
 
@@ -3109,11 +1835,11 @@ mod tests {
         }
         let note = "x".repeat(241);
         let err = desk
-            .handle(context_evict_request(&[1], Some(&note)))
+            .ask(context_evict_request(&[1], Some(&note)))
             .expect_err("241 bytes is over the 240-byte cap");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note` is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+            "`exarch-context `evict`: `note: is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
         );
     }
 
@@ -3130,11 +1856,11 @@ mod tests {
         }
         for note in ["line one\nline two", "line one\rline two"] {
             let err = desk
-                .handle(context_evict_request(&[1], Some(note)))
+                .ask(context_evict_request(&[1], Some(note)))
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`exarch-context `evict`: `note` must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
+                "`exarch-context `evict`: `note: must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
             );
         }
     }
@@ -3150,7 +1876,7 @@ mod tests {
             append_prompt_and_answer(&mut log, "two", "answer");
         }
         let err = desk
-            .handle(family_req(
+            .handle(&family_req(
                 "context",
                 "evict",
                 Some(FOValue::Map {
@@ -3168,51 +1894,37 @@ mod tests {
             .expect_err("`through` is not a field `evict` reads");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: unknown field `through` — the payload takes `turns` and `note`"
+            "`exarch-context `evict`: unknown field `through — expected `turns, `note"
         );
-        desk.handle(context_evict_request(&[1, 2], Some("the parser is fixed")))
+        desk.ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
             .expect("the fields the tag does read still evict");
     }
 
-    /// The `[key: Str, body: Card]` payload `` `exarch-pins `set `` takes —
-    /// a one-span text card under `key`.
-    fn pin_value(key: &str, text: &str) -> FOValue {
-        FOValue::Map {
-            entries: vec![
-                ("key".into(), FOValue::String { value: key.into() }),
-                (
-                    "body".into(),
-                    FOValue::Variant {
-                        label: "text".into(),
-                        payload: Some(Box::new(FOValue::Map {
-                            entries: vec![(
-                                "spans".into(),
-                                FOValue::List {
-                                    items: vec![FOValue::Map {
-                                        entries: vec![(
-                                            "text".into(),
-                                            FOValue::String { value: text.into() },
-                                        )],
-                                    }],
-                                },
-                            )],
-                        })),
-                    },
-                ),
-            ],
-        }
+    /// `` `exarch-pins `set ``: a one-span text card under `key`.
+    fn pin_set_req(key: &str, text: &str) -> Request {
+        let body = FOValue::Map {
+            entries: vec![(
+                "spans".into(),
+                FOValue::List {
+                    items: vec![FOValue::Map {
+                        entries: vec![("text".into(), text.to_string().encode())],
+                    }],
+                },
+            )],
+        };
+        let body = Card::decode(&tag("text", Some(body))).expect("a one-span text card");
+        Request::Pins(Pins::Set(Pin {
+            key: key.to_string(),
+            body,
+        }))
     }
 
-    fn pin_set_req(key: &str, text: &str) -> FOValue {
-        family_req("pins", "set", Some(pin_value(key, text)))
+    fn pin_clear_req(key: &str) -> Request {
+        Request::Pins(Pins::Clear(key.to_string()))
     }
 
-    fn pin_clear_req(key: &str) -> FOValue {
-        family_req("pins", "clear", Some(text(key)))
-    }
-
-    fn pin_read_req(key: &str) -> FOValue {
-        family_req("pins", "read", Some(text(key)))
+    fn pin_read_req(key: &str) -> Request {
+        Request::Pins(Pins::Read(key.to_string()))
     }
 
     /// A pin written through `` `exarch-pins `set `` comes back from
@@ -3222,12 +1934,10 @@ mod tests {
     #[test]
     fn pin_read_returns_the_canonical_card() {
         let d = desk();
-        d.handle(pin_set_req("tasks", "hi"))
+        d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
 
-        let answer = d
-            .handle(pin_read_req("tasks"))
-            .expect("a hit must answer Ok");
+        let answer = d.ask(pin_read_req("tasks")).expect("a hit must answer Ok");
         let card =
             crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
         assert!(
@@ -3247,14 +1957,14 @@ mod tests {
         let d = desk();
 
         assert!(
-            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "an unset key must answer unit"
         );
 
-        d.handle(pin_set_req("tasks", "hi"))
+        d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
         let answer = d
-            .handle(pin_read_req("tasks"))
+            .ask(pin_read_req("tasks"))
             .expect("a set key must read back");
         let card =
             crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
@@ -3267,10 +1977,10 @@ mod tests {
             "`set` must write the canonical card, got {card:?}"
         );
 
-        d.handle(pin_clear_req("tasks"))
+        d.ask(pin_clear_req("tasks"))
             .expect("`exarch-pins `clear` must answer Ok");
         assert!(
-            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "`clear` must empty the slot `set` wrote"
         );
     }
@@ -3282,16 +1992,16 @@ mod tests {
         let d = desk();
 
         assert!(
-            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "a key never pinned must answer unit"
         );
 
-        d.handle(pin_set_req("tasks", "hi"))
+        d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
-        d.handle(pin_clear_req("tasks"))
+        d.ask(pin_clear_req("tasks"))
             .expect("`exarch-pins `clear` must answer Ok");
         assert!(
-            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
             "an unpinned key must answer unit"
         );
     }
@@ -3302,7 +2012,7 @@ mod tests {
     fn pin_list_tracks_set_and_clear() {
         let d = desk();
         let keys = |d: &ExarchDesk| match d
-            .handle(family_req("pins", "list", None))
+            .ask(Request::Pins(Pins::List))
             .expect("`exarch-pins `list` must answer Ok")
         {
             FOValue::List { items } => items
@@ -3317,9 +2027,9 @@ mod tests {
 
         assert!(keys(&d).is_empty(), "an empty register lists no keys");
 
-        d.handle(pin_set_req("b", "one"))
+        d.ask(pin_set_req("b", "one"))
             .expect("`exarch-pins `set` must answer Ok");
-        d.handle(pin_set_req("a", "two"))
+        d.ask(pin_set_req("a", "two"))
             .expect("`exarch-pins `set` must answer Ok");
         assert_eq!(
             keys(&d),
@@ -3327,7 +2037,7 @@ mod tests {
             "keys list in BTreeMap (lexicographic) order"
         );
 
-        d.handle(pin_clear_req("b"))
+        d.ask(pin_clear_req("b"))
             .expect("`exarch-pins `clear` must answer Ok");
         assert_eq!(keys(&d), vec!["a"], "a clear drops its key from the list");
     }
@@ -3354,7 +2064,6 @@ mod tests {
                 meter: crate::bus::UsageMeter::default(),
             });
         let applier = SurfaceApplier {
-            pins: Some(d.services.agent.pins.clone()),
             recorder: d.services.log.lock().record_emitter(),
         };
 
@@ -3416,9 +2125,9 @@ mod tests {
                 ],
             })),
         });
-        d.handle(pin_set_req("tasks", "hi"))
+        d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
-        d.handle(pin_clear_req("tasks"))
+        d.ask(pin_clear_req("tasks"))
             .expect("`exarch-pins `clear` must answer Ok");
 
         let mut facts: Vec<&'static str> = Vec::new();
@@ -3472,23 +2181,20 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
+        let answer = with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "say hi", "helper", true))
+        })
+        .expect("a valid `start must succeed");
 
-        let answer = desk
-            .handle(start_req(session, "say hi", "helper", "confined", true))
-            .expect("a valid `start must succeed");
-
-        let (live, _) = summary_counts(answer);
+        let (live, _) = summary_counts(&answer);
         assert_eq!(live, 1, "the child is the one other agent alive");
         let rows = listed(&desk);
         let child = rows
             .iter()
-            .find(|row| str_field(row, "name") == Some("helper"))
+            .find(|row| row.name == "helper")
             .expect("the child stands on the listing");
         assert!(
-            str_field(child, "log-dir").is_some(),
+            !child.log_dir.as_os_str().is_empty(),
             "a roster row carries the agent's log directory"
         );
 
@@ -3530,15 +2236,14 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-        desk.handle(start_req(session, "say hi", "helper", "confined", true))
-            .expect("a valid `start must succeed");
+        with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "say hi", "helper", true))
+        })
+        .expect("a valid `start must succeed");
         let _ = wait_for_settle(&parent_inbox);
 
         let answer = desk
-            .handle(family_req("agents", "read", Some(text("helper"))))
+            .ask(Request::Agents(Agents::Read("helper".into())))
             .expect("a descendant that has replied must answer its reply");
         assert_eq!(str_field(&answer, "name"), Some("helper"));
         assert_eq!(
@@ -3571,21 +2276,18 @@ mod tests {
         let _already_there = crate::agent::testkit::test_agent(&fleet, sibling)
             .expect("a fresh child of a live parent");
 
-        let root = root_shell();
-        let session = desk.services.nursery.park(forkable_child_shell(&root));
         let (live, _) = summary_counts(
-            desk.handle(start_req(session, "go", "helper", "confined", false))
-                .expect("the spawn must succeed"),
+            &with_parked(&desk, |desk, session| {
+                desk.ask(start_req(session, "go", "helper", false))
+            })
+            .expect("the spawn must succeed"),
         );
         assert_eq!(
             live, 2,
             "the spawn counts the fleet's state, the sibling it did not start included"
         );
         let rows = listed(&desk);
-        let mut names: Vec<&str> = rows
-            .iter()
-            .filter_map(|row| str_field(row, "name"))
-            .collect();
+        let mut names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
             names,
@@ -3596,31 +2298,6 @@ mod tests {
         let _ = wait_for_settle(&parent_inbox);
     }
 
-    /// A `Launch` asking for `grant`, and otherwise the plainest spawn there
-    /// is — every test below differs in nothing else.
-    fn launch_granting(grant: SpawnGrant) -> Launch {
-        Launch {
-            fork: ForkClaim::Parked(NurseryId(0)),
-            grant,
-            inherit_context: false,
-            provider: Selection::Inherit,
-            model: Selection::Inherit,
-            name: "helper".to_string(),
-            prompt: "go".to_string(),
-            search: false,
-        }
-    }
-
-    /// The same, naming `selection` — the two provider tests differ in
-    /// nothing else.
-    fn launch_selecting(provider: Selection, model: Selection) -> Launch {
-        Launch {
-            provider,
-            model,
-            ..launch_granting(SpawnGrant::Base("confined".to_string()))
-        }
-    }
-
     /// Naming neither half is an inheritance, not a decision: the child gets
     /// the parent's own `Arc<Provider>`, allocating nothing and asking the
     /// bureau nothing.
@@ -3629,7 +2306,7 @@ mod tests {
         let desk = desk();
         let parent = desk.services.agent.current_provider();
         let child = desk
-            .child_provider(&launch_selecting(Selection::Inherit, Selection::Inherit))
+            .child_provider(&Selection::Inherit, &Selection::Inherit)
             .expect("an inheriting spawn resolves nothing");
         assert!(
             Arc::ptr_eq(&parent, &child),
@@ -3642,10 +2319,9 @@ mod tests {
     #[test]
     fn a_named_selection_under_a_scripted_bureau_is_refused() {
         let desk = desk();
-        let Err(err) = desk.child_provider(&launch_selecting(
-            Selection::Inherit,
-            Selection::Named("other-model".to_string()),
-        )) else {
+        let Err(err) =
+            desk.child_provider(&Selection::Inherit, &Selection::Named("other-model".into()))
+        else {
             panic!("a scripted bureau must refuse to mint");
         };
         assert!(
@@ -3660,16 +2336,14 @@ mod tests {
     #[test]
     fn a_refused_selection_never_registers_a_child() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-        let root = root_shell();
-        let session = desk.services.nursery.park(forkable_child_shell(&root));
+        // Refused before any fork is taken up, so none need be parked.
         let err = desk
-            .handle(start_req_selecting(
-                parked(session),
-                "go",
-                "helper",
-                bare("confined"),
-                false,
-                (bare("inherit"), named("other-model")),
+            .ask(start(
+                ForkClaim::Parked(NurseryId(0)),
+                Launch {
+                    model: Selection::Named("other-model".into()),
+                    ..spec("go", "helper", confined(), false)
+                },
             ))
             .expect_err("a scripted bureau must refuse to mint");
         assert!(
@@ -3684,86 +2358,45 @@ mod tests {
         );
     }
 
+    /// A `` `start `` whose spec record `edit` has spoilt, as no door sends it.
+    fn spoilt_start(edit: impl FnOnce(&mut Vec<(String, FOValue)>)) -> FOValue {
+        let mut spec = spec("go", "scout", confined(), false).encode();
+        let FOValue::Map { entries } = &mut spec else {
+            unreachable!("a spec is a record")
+        };
+        edit(entries);
+        let fork = ForkClaim::Parked(NurseryId(0)).encode();
+        family_req(
+            "agents",
+            "start",
+            Some(FOValue::Map {
+                entries: vec![("spec".into(), spec), ("fork".into(), fork)],
+            }),
+        )
+    }
+
     /// The desk reads the model's record by field name, so a missing field is
-    /// named and told what it was for — never a position the model never wrote.
+    /// named — never a position the model never wrote.
     #[test]
     fn start_refuses_a_spec_missing_a_field_by_name() {
         let err = desk()
-            .handle(family_req(
-                "agents",
-                "start",
-                Some(FOValue::Map {
-                    entries: vec![
-                        (
-                            "spec".to_string(),
-                            FOValue::Map {
-                                entries: vec![
-                                    ("prompt".to_string(), text("go")),
-                                    ("type".to_string(), bare("amnemon")),
-                                    ("grant".to_string(), bare("confined")),
-                                    ("search".to_string(), FOValue::Bool { value: false }),
-                                    ("provider".to_string(), bare("inherit")),
-                                    ("model".to_string(), bare("inherit")),
-                                ],
-                            },
-                        ),
-                        (
-                            "fork".to_string(),
-                            FOValue::Variant {
-                                label: "parked".to_string(),
-                                payload: Some(Box::new(FOValue::Int { value: 0 })),
-                            },
-                        ),
-                    ],
-                }),
-            ))
+            .handle(&spoilt_start(|spec| spec.retain(|(key, _)| key != "name")))
             .expect_err("a spec missing `name` must be refused");
-        assert!(
-            err.message.contains("`name`") && err.message.contains("the child's identity"),
-            "the refusal must name the field and say what it is for, got: {}",
-            err.message
+        assert_eq!(
+            err.message,
+            "`exarch-agents `start`: `spec: no `name field in a record of 6 fields"
         );
     }
 
-    /// A misspelt spec field once lost the child its name in silence; the
-    /// refusal names the record it belongs to and the name it plausibly meant.
+    /// A misspelt spec field is refused with the field it most likely meant.
     #[test]
     fn start_refuses_a_misspelt_spec_field() {
         let err = desk()
-            .handle(family_req(
-                "agents",
-                "start",
-                Some(FOValue::Map {
-                    entries: vec![
-                        (
-                            "spec".to_string(),
-                            FOValue::Map {
-                                entries: vec![
-                                    ("prompt".to_string(), text("go")),
-                                    ("nmae".to_string(), text("scout")),
-                                    ("type".to_string(), bare("amnemon")),
-                                    ("grant".to_string(), bare("confined")),
-                                    ("search".to_string(), FOValue::Bool { value: false }),
-                                    ("provider".to_string(), bare("inherit")),
-                                    ("model".to_string(), bare("inherit")),
-                                ],
-                            },
-                        ),
-                        (
-                            "fork".to_string(),
-                            FOValue::Variant {
-                                label: "parked".to_string(),
-                                payload: Some(Box::new(FOValue::Int { value: 0 })),
-                            },
-                        ),
-                    ],
-                }),
-            ))
+            .handle(&spoilt_start(|spec| spec[1].0 = "nmae".into()))
             .expect_err("`nmae` is not a field the spec carries");
         assert_eq!(
             err.message,
-            "`exarch-agents `start`: unknown field `nmae` — `spec` takes `prompt`, `name`, `type`, \
-             `grant`, `search`, `provider` and `model` — did you mean `name`?"
+            "`exarch-agents `start`: `spec: unknown field `nmae — did you mean `name?"
         );
     }
 
@@ -3775,7 +2408,7 @@ mod tests {
     #[test]
     fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
         let (services, _fleet, parent_inbox) = services_with(3, |spec| spec.search = false);
-        let desk = ExarchDesk { services };
+        let desk = Arc::new(ExarchDesk { services });
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -3785,11 +2418,9 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-
-        let answer = desk.handle(start_req(session, "go", "searcher", "confined", true));
+        let answer = with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "go", "searcher", true))
+        });
         assert!(
             answer.is_ok(),
             "a spawn asking for more search reach than its parent holds is narrowed, not refused"
@@ -3797,87 +2428,25 @@ mod tests {
         let _ = wait_for_settle(&parent_inbox);
     }
 
-    /// A `restriction` record naming `net` alone — the one axis a folded
-    /// stack answers with a single question.
-    fn restrict_net(on: bool) -> SpawnGrant {
-        SpawnGrant::Restrict(FOValue::Map {
-            entries: vec![("net".to_string(), FOValue::Bool { value: on })],
-        })
-    }
-
-    /// The pushed layer of a spawn granting `grant`, folded onto the parent's
-    /// own stack, as [`ExarchDesk::fork_child`] resolves it.
-    fn child_stack(desk: &ExarchDesk, grant: SpawnGrant) -> GrantStack {
-        let provider = desk.services.agent.current_provider();
-        desk.fork_child(&launch_granting(grant), &provider)
-            .expect("a grant this desk can resolve")
-            .0
-    }
-
-    /// `` `inherit `` is the lattice top: the spawn still pushes its one
-    /// layer, and that layer withholds nothing the parent holds.
-    #[test]
-    fn an_inheriting_spawn_pushes_a_layer_that_withholds_nothing() {
-        let desk = desk();
-        let parent = desk.services.agent.caps().len();
-        let child = child_stack(&desk, SpawnGrant::Inherit);
-        assert_eq!(child.len(), parent + 1, "a spawn pushes exactly one layer");
-        assert!(
-            !child
-                .iter()
-                .next_back()
-                .expect("the layer the spawn pushed")
-                .is_restrictive(),
-            "`inherit must attenuate nothing beyond what the parent already holds"
-        );
-    }
-
-    /// And a `` `restrict `` record is a real layer: what it withholds, the
-    /// child does not hold.
-    #[test]
-    fn a_restricting_spawn_pushes_the_record_it_names() {
-        let child = child_stack(&desk(), restrict_net(false));
-        assert!(
-            !child.net().all(|n| n),
-            "a record naming `net: false` must take the network away"
-        );
-    }
-
-    /// The spawn-side reading of `crate::policy`'s
-    /// `narrow_cannot_escalate_a_restricted_parent`: the stack is the meet, so
-    /// a record asking for an axis the parent withheld gets nothing back.
-    #[test]
-    fn a_restricting_spawn_cannot_escalate_a_restricted_parent() {
-        let (services, _fleet, _parent_inbox) = services_with(3, |spec| {
-            spec.caps.push(ral_core::types::Capabilities {
-                net: Some(false),
-                ..ral_core::types::Capabilities::default()
-            });
-        });
-        let child = child_stack(&ExarchDesk { services }, restrict_net(true));
-        assert!(
-            !child.net().all(|n| n),
-            "asking for the network back must not turn it on"
-        );
-    }
-
     /// A `` `restrict `` carrying anything but a record is refused by the
     /// desk's own decoder, before a base is named or a path is frozen.
     #[test]
     fn start_refuses_a_restriction_that_is_not_a_record() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-        let root = root_shell();
-        let session = desk.services.nursery.park(forkable_child_shell(&root));
         let err = desk
-            .handle(start_req_granting(
-                session,
-                "helper",
-                restrict_req(text("everything")),
+            .ask(start(
+                ForkClaim::Parked(NurseryId(0)),
+                spec(
+                    "go",
+                    "helper",
+                    SpawnGrant::Restrict(text("everything")),
+                    false,
+                ),
             ))
             .expect_err("a `restrict that carries no record at all");
         assert_eq!(
             err.message,
-            "`exarch-agents `start`: `grant `restrict` must carry a capability record \
+            "`exarch-agents `start`: `spec: `grant: `restrict must carry a capability record \
              [exec, fs, net, detach, editor, shell], got a Str"
         );
     }
@@ -3907,15 +2476,19 @@ mod tests {
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
         );
-        let root = root_shell();
         // The production seam: the index table resolves from the same booted
         // surface the parked child shells fork from.
-        let index = crate::prompt::BuiltinIndex::resolve(&root);
+        let index = crate::prompt::BuiltinIndex::resolve(
+            crate::bootstrap::test_shell()
+                .builtin_names()
+                .map(str::to_string)
+                .collect(),
+        );
         let (services, _fleet, parent_inbox) = services_with(3, |spec| {
             spec.system_base = template.clone();
             spec.index = index.clone();
         });
-        let desk = ExarchDesk { services };
+        let desk = Arc::new(ExarchDesk { services });
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -3925,20 +2498,17 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
+        let answer = with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "say hi", "helper", true))
+        })
+        .expect("a valid `start must succeed");
 
-        let answer = desk
-            .handle(start_req(session, "say hi", "helper", "confined", true))
-            .expect("a valid `start must succeed");
-
-        let _ = summary_counts(answer);
+        let _ = summary_counts(&answer);
         let rows = listed(&desk);
         let child = rows
             .iter()
-            .find(|row| str_field(row, "name") == Some("helper"))
+            .find(|row| row.name == "helper")
             .expect("the child stands on the listing");
-        let log_dir = str_field(child, "log-dir").expect("a roster row carries its log dir");
 
         let expected = desk
             .services
@@ -3955,7 +2525,7 @@ mod tests {
             )
             .len();
         assert_eq!(
-            recorded_system_prompt_bytes(std::path::Path::new(&log_dir)),
+            recorded_system_prompt_bytes(&child.log_dir),
             expected,
             "the bookend must record the spawned child's own resolved \
              system, not the unresolved template HostServices captured"
@@ -3968,12 +2538,11 @@ mod tests {
     #[test]
     fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(0);
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-        let err = desk
-            .handle(start_req(session, "hi", "helper", "confined", true))
-            .expect_err("zero fuel must refuse");
+        let (err, left_parked) = with_parked(&desk, |desk, session| {
+            let answer = desk.ask(start_req(session, "hi", "helper", true));
+            (answer, still_parked(desk, session))
+        });
+        let err = err.expect_err("zero fuel must refuse");
         assert!(
             err.message.contains("no spawn fuel remains"),
             "got: {}",
@@ -3985,7 +2554,7 @@ mod tests {
             err.message
         );
         assert!(
-            desk.services.nursery.adopt(session).is_some(),
+            left_parked,
             "a fuel refusal happens before adopt, so the parked fork must \
              stay for the run guard to reap, never claimed by a refused call"
         );
@@ -4005,24 +2574,23 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
-        let shell1 = forkable_child_shell(&root);
-        let session1 = desk.services.nursery.park(shell1);
-        let answer = desk.handle(start_req(session1, "go", "helper", "confined", true));
+        let answer = with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "go", "helper", true))
+        });
         assert!(answer.is_ok(), "the first spawn must succeed");
 
-        let shell2 = forkable_child_shell(&root);
-        let session2 = desk.services.nursery.park(shell2);
-        let err = desk
-            .handle(start_req(session2, "go again", "helper", "confined", true))
-            .expect_err("a second spawn naming a live agent must be refused");
+        let (err, left_parked) = with_parked(&desk, |desk, session| {
+            let answer = desk.ask(start_req(session, "go again", "helper", true));
+            (answer, still_parked(desk, session))
+        });
+        let err = err.expect_err("a second spawn naming a live agent must be refused");
         assert!(
             err.message.contains("already bears the name 'helper'"),
             "got: {}",
             err.message
         );
         assert!(
-            desk.services.nursery.adopt(session2).is_some(),
+            left_parked,
             "a name-collision refusal happens before adopt, so the parked \
              fork must stay for the run guard to reap, never claimed by a \
              refused call"
@@ -4041,19 +2609,18 @@ mod tests {
     fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
 
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-        let err = desk
-            .handle(start_req(session, "go", "help/er", "confined", true))
-            .expect_err("a malformed name must be refused");
+        let (err, left_parked) = with_parked(&desk, |desk, session| {
+            let answer = desk.ask(start_req(session, "go", "help/er", true));
+            (answer, still_parked(desk, session))
+        });
+        let err = err.expect_err("a malformed name must be refused");
         assert!(
             err.message.contains("ASCII letters"),
             "the refusal must carry the name rule; got: {}",
             err.message
         );
         assert!(
-            desk.services.nursery.adopt(session).is_some(),
+            left_parked,
             "the name is refused before adopt, so the parked fork must stay \
              for the run guard to reap"
         );
@@ -4087,11 +2654,10 @@ mod tests {
         ));
         desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
         for i in 0..3 {
-            let shell = forkable_child_shell(&root);
-            let session = desk.services.nursery.park(shell);
-            let answer = desk.handle(start_req(session, "go", &format!("t{i}"), "confined", true));
+            let answer = with_parked(&desk, move |desk, session| {
+                desk.ask(start_req(session, "go", &format!("t{i}"), true))
+            });
             assert!(
                 answer.is_ok(),
                 "sibling {i} must not be refused for lack of fuel — fuel \
@@ -4117,12 +2683,10 @@ mod tests {
     fn agent_start_refuses_after_clear() {
         let (desk, _fleet, parent_inbox) = spawnable_desk(3);
         parent_inbox.clear(); // the /clear gesture, on this caller
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-        let err = desk
-            .handle(start_req(session, "hi", "helper", "confined", true))
-            .expect_err("a stale epoch must refuse");
+        let err = with_parked(&desk, |desk, session| {
+            desk.ask(start_req(session, "hi", "helper", true))
+        })
+        .expect_err("a stale epoch must refuse");
         assert!(
             err.message.contains("cleared"),
             "must name the /clear cause, got: {}",
@@ -4130,32 +2694,30 @@ mod tests {
         );
     }
 
-    /// A refusal after [`Nursery::adopt`] — here, a restriction record the
-    /// capability decoder will not read, which only the freeze in
-    /// [`ExarchDesk::fork_child`] discovers — drops the adopted `Shell`
-    /// rather than leaving it to be adopted twice.
+    /// A refusal at adoption — here, a restriction record the capability
+    /// decoder will not read, which only the engine's own freeze discovers —
+    /// drops the adopted fork rather than leaving it to be adopted twice.
     #[test]
     fn refused_enquiry_leaves_the_nursery_empty() {
         let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-        let root = root_shell();
-        let shell = forkable_child_shell(&root);
-        let session = desk.services.nursery.park(shell);
-        let err = desk
-            .handle(start_req_granting(
-                session,
-                "helper",
-                restrict_req(FOValue::Map {
-                    entries: vec![("net".to_string(), text("yes"))],
-                }),
-            ))
-            .expect_err("a `net axis that is not a Bool must refuse");
+        let (err, left_parked) = with_parked(&desk, |desk, session| {
+            let restriction = FOValue::Map {
+                entries: vec![("net".to_string(), text("yes"))],
+            };
+            let answer = desk.ask(start(
+                ForkClaim::Parked(session),
+                spec("go", "helper", SpawnGrant::Restrict(restriction), false),
+            ));
+            (answer, still_parked(desk, session))
+        });
+        let err = err.expect_err("a `net axis that is not a Bool must refuse");
         assert!(
             err.message.contains("net"),
             "must name the axis it could not read, got: {}",
             err.message
         );
         assert!(
-            desk.services.nursery.adopt(session).is_none(),
+            !left_parked,
             "a refusal downstream of adopt must not leave the fork \
              re-adoptable — it was already claimed and simply drops"
         );
@@ -4165,7 +2727,8 @@ mod tests {
     /// reaches any live agent but this one.
     #[test]
     fn cancel_scopes_to_descendants_and_message_does_not() {
-        let (desk_root, fleet, _root_inbox) = spawnable_desk(3);
+        let (services, fleet, _root_inbox) = services_with(3, |_| {});
+        let desk_root = ExarchDesk { services };
         // root -> mid -> grandchild, and root -> sibling (mid's sibling).
         let under = |name: &str, parent: &Arc<Agent>| {
             let mut spec = crate::agent::testkit::TestAgentSpec::new(name);
@@ -4182,13 +2745,13 @@ mod tests {
 
         for who in ["sibling", "parent", "grandchild"] {
             assert!(
-                desk1.handle(message_req(who, "hi")).is_ok(),
+                desk1.ask(message_req(who, "hi")).is_ok(),
                 "a message must reach {who}, whichever way across the tree it runs"
             );
         }
 
         let err = desk1
-            .handle(message_req("mid", "hi"))
+            .ask(message_req("mid", "hi"))
             .expect_err("a message to oneself must be refused");
         assert_eq!(
             err.message,
@@ -4196,7 +2759,7 @@ mod tests {
         );
 
         let cancel_err = desk1
-            .handle(family_req("agents", "cancel", Some(text("parent"))))
+            .ask(Request::Agents(Agents::Cancel("parent".into())))
             .expect_err("cancelling an ancestor must be refused");
         assert_eq!(
             cancel_err.message,
@@ -4205,7 +2768,7 @@ mod tests {
 
         assert!(
             desk1
-                .handle(family_req("agents", "cancel", Some(text("grandchild"))))
+                .ask(Request::Agents(Agents::Cancel("grandchild".into())))
                 .is_ok(),
             "cancelling a proper descendant must succeed"
         );
@@ -4249,26 +2812,23 @@ mod tests {
         );
     }
 
-    /// Refused before the payload is even decoded, naming the flag that grants
-    /// — and naming the tag the model typed, not a wire word it never saw.
+    /// Refused before anything is armed, naming the flag that grants — and
+    /// naming the tag the model typed, not a wire word it never saw.
     #[test]
     fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
-        for (request, tag) in [
+        for (request, verb) in [
             (add_req("1s", "nightly", "wake"), "exarch-schedules `add"),
             (
-                family_req("schedules", "list", None),
+                Request::Schedules(Schedules::List),
                 "exarch-schedules `list",
             ),
-            (
-                family_req("schedules", "remove", Some(text("sched-0"))),
-                "exarch-schedules `remove",
-            ),
+            (remove_req("sched-0"), "exarch-schedules `remove"),
         ] {
             let err = desk()
-                .handle(request)
+                .ask(request)
                 .expect_err("every schedule tag is refused without the grant");
             assert!(
-                err.message.starts_with(&format!("`{tag}` refused:")),
+                err.message.starts_with(&format!("`{verb}` refused:")),
                 "the refusal must name the tag the model typed, got: {}",
                 err.message
             );
@@ -4287,25 +2847,19 @@ mod tests {
     fn schedule_without_a_label_is_refused() {
         let desk = granted_desk();
         let err = desk
-            .handle(family_req(
+            .handle(&family_req(
                 "schedules",
                 "add",
                 Some(FOValue::Map {
                     entries: vec![
-                        (
-                            "trigger".to_string(),
-                            FOValue::Variant {
-                                label: "after".to_string(),
-                                payload: Some(Box::new(text("1s"))),
-                            },
-                        ),
+                        ("trigger".to_string(), tag("after", Some(text("1s")))),
                         ("prompt".to_string(), text("wake")),
                     ],
                 }),
             ))
             .expect_err("a schedule with no label must be refused");
         assert!(
-            err.message.contains("`label`"),
+            err.message.contains("no `label field"),
             "must name the missing field, got: {}",
             err.message
         );
@@ -4322,7 +2876,7 @@ mod tests {
     fn schedules_lists_what_add_registered() {
         let desk = granted_desk();
         let rows = table(
-            desk.handle(add_req("2h", "nightly", "wake"))
+            desk.ask(add_req("2h", "nightly", "wake"))
                 .expect("a valid `add must succeed"),
         );
         assert_eq!(rows.len(), 1);
@@ -4331,13 +2885,13 @@ mod tests {
         assert!(rows[0].field("id").is_none(), "the table carries no id");
 
         let listed = table(
-            desk.handle(family_req("schedules", "list", None))
+            desk.ask(Request::Schedules(Schedules::List))
                 .expect("`list must succeed"),
         );
         assert_eq!(listed.len(), 1, "`list sees what `add armed");
 
         let after_removal = table(
-            desk.handle(family_req("schedules", "remove", Some(text("nightly"))))
+            desk.ask(remove_req("nightly"))
                 .expect("`remove must succeed"),
         );
         assert!(
@@ -4350,10 +2904,10 @@ mod tests {
     #[test]
     fn schedule_at_the_desk_refuses_a_duplicate_label() {
         let desk = granted_desk();
-        desk.handle(add_req("1s", "nightly", "wake"))
+        desk.ask(add_req("1s", "nightly", "wake"))
             .expect("the first schedule must succeed");
         let err = desk
-            .handle(add_req("1s", "nightly", "wake"))
+            .ask(add_req("1s", "nightly", "wake"))
             .expect_err("a duplicate label must be refused");
         assert!(err.message.contains("nightly"), "got: {}", err.message);
         assert_eq!(
@@ -4376,9 +2930,9 @@ mod tests {
             meter: crate::bus::UsageMeter::default(),
         });
         desk.services.emit = Emitter::new(tx, 0);
-        desk.handle(add_req("1s", "nightly", "wake"))
+        desk.ask(add_req("1s", "nightly", "wake"))
             .expect("the first schedule must succeed");
-        desk.handle(add_req("1s", "nightly", "wake"))
+        desk.ask(add_req("1s", "nightly", "wake"))
             .expect_err("a duplicate label must be refused");
 
         let acts: Vec<(String, bool)> = crate::bus::drain_records(&rx)
@@ -4417,13 +2971,7 @@ mod tests {
         let mut d = ExarchDesk { services };
         d.services.emit = emit;
         let err = d
-            .handle(family_req(
-                "agents",
-                "reply",
-                Some(FOValue::List {
-                    items: vec![FOValue::Int { value: 1 }],
-                }),
-            ))
+            .ask(reply_req(FOValue::Int { value: 1 }))
             .expect_err("a non-returning agent's reply must be refused");
         assert!(
             err.message
@@ -4450,14 +2998,8 @@ mod tests {
         d.services.emit = Emitter::new(tx, 0);
 
         for text in ["first", "second"] {
-            d.handle(family_req(
-                "agents",
-                "reply",
-                Some(FOValue::List {
-                    items: vec![FOValue::String { value: text.into() }],
-                }),
-            ))
-            .expect("a returning agent's reply must succeed");
+            d.ask(reply_req(FOValue::String { value: text.into() }))
+                .expect("a returning agent's reply must succeed");
         }
 
         assert_eq!(
@@ -4496,19 +3038,13 @@ mod tests {
     #[test]
     fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
         let desk = granted_desk();
-        desk.handle(add_req("2h", "nightly", "wake"))
+        desk.ask(add_req("2h", "nightly", "wake"))
             .expect("a valid schedule must succeed");
-        desk.handle(family_req("schedules", "remove", Some(text("nightly"))))
+        desk.ask(remove_req("nightly"))
             .expect("unscheduling the label just armed must remove it");
-        desk.handle(family_req(
-            "agents",
-            "reply",
-            Some(FOValue::List {
-                items: vec![FOValue::String {
-                    value: "done".into(),
-                }],
-            }),
-        ))
+        desk.ask(reply_req(FOValue::String {
+            value: "done".into(),
+        }))
         .expect("a returning agent's reply must succeed");
 
         assert_eq!(
@@ -4525,7 +3061,7 @@ mod tests {
     #[test]
     fn a_refused_act_leaves_the_fragment_empty() {
         let desk = desk();
-        desk.handle(message_req("nobody", "hi"))
+        desk.ask(message_req("nobody", "hi"))
             .expect_err("a message to an unknown name must be refused");
         assert!(
             desk.services.acts.audit().is_none(),
@@ -4547,9 +3083,9 @@ mod tests {
         });
         desk.services.emit = Emitter::new(tx, 0);
 
-        desk.handle(add_req("1s", "nightly", "wake"))
+        desk.ask(add_req("1s", "nightly", "wake"))
             .expect("a valid schedule must land");
-        desk.handle(message_req("nobody", "hi"))
+        desk.ask(message_req("nobody", "hi"))
             .expect_err("a message to an unknown name must be refused");
 
         let rows: Vec<(String, bool)> = crate::bus::drain_records(&rx)
@@ -4627,9 +3163,7 @@ mod tests {
     #[test]
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let parent = Avatar::for_test("system").unwrap();
-        let child = parent
-            .fork_named(parent.caps().clone(), "helper")
-            .expect("fork child");
+        let child = parent.fork_named("helper").expect("fork child");
         child.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
             Script::new()
@@ -4694,9 +3228,7 @@ mod tests {
             ..crate::agent::TestTrunk::new("system")
         })
         .unwrap();
-        let child = parent
-            .fork_named(parent.caps().clone(), "child-a")
-            .expect("fork child a");
+        let child = parent.fork_named("child-a").expect("fork child a");
         let mut long_script = Script::new();
         for i in 0..2_000u32 {
             long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
@@ -4738,9 +3270,7 @@ mod tests {
         let fleet = parent.fleet.clone();
         // Parked by a keepalive grandchild and given no script to race, so the
         // renewal alone must be what defers its reap.
-        let child = parent
-            .fork_named(parent.caps().clone(), "child-b")
-            .expect("fork child b");
+        let child = parent.fork_named("child-b").expect("fork child b");
         let agent = child.agent.clone();
         let keepalive = keepalive(&fleet, &agent);
         let handle = attend_and_deliver(child);
@@ -4776,11 +3306,12 @@ mod tests {
     reason = "[test] test fs/process scaffolding"
 )]
 mod wire_tests {
-    use super::tests::{bare, message_req, start_req_forked};
+    use super::tests::{confined, message_req, spec, start};
     use super::*;
-    use crate::agent::cancel::EvalReach;
+    use crate::agent::cancel::InterruptTarget;
     use crate::agent::event::AgentLog;
     use crate::bus::Inbox;
+    use ral_core::types::NurseryId;
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -4826,7 +3357,7 @@ mod wire_tests {
     /// What the guest at the far end of a [`FakeDial`] does with the dial.
     enum Guest {
         /// The whole spine: read the token, spawn the child, then ack — the
-        /// order [`ral_core::hatch::hatch_over`] keeps, since the ack is the
+        /// order the guest's hatch in `ral_core::hatch` keeps, since the ack is the
         /// claim that the child exists.
         Hatches,
         /// A guest-side hatch that failed: read the token and close, saying
@@ -4897,11 +3428,11 @@ mod wire_tests {
         }
     }
 
-    /// A [`EvalReach::Wire`] with a genuine `ControlSender` behind it — a
-    /// disposable `--engine` child adopted and killed at once, since these
-    /// fixtures need a real reach value's *shape* but never actually cancel
-    /// or interrupt through it.
-    fn fake_wire_reach() -> EvalReach {
+    /// A wire reach with a genuine `ControlSender` behind it — a disposable
+    /// `--engine` child adopted and killed at once, since these fixtures need
+    /// a real reach value's *shape* but never actually cancel or interrupt
+    /// through it.
+    fn fake_wire_reach() -> InterruptTarget {
         let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
         let mut child = spawn_engine_on(&guest);
         drop(guest);
@@ -4911,7 +3442,7 @@ mod wire_tests {
         let control = ral_core::protocol::Transport::control(&transport).clone();
         let _ = child.kill();
         let _ = child.wait();
-        EvalReach::Wire(control)
+        InterruptTarget::new(control)
     }
 
     /// A wire-seat desk fixture whose parent holds the very inbox this
@@ -4938,9 +3469,10 @@ mod wire_tests {
                 agent,
                 emit,
                 cwd: PathBuf::from("/work"),
+                home: Some(PathBuf::from("/tmp")),
                 reply: ReplyCell::default(),
                 log: LogCell::new(fresh_log()),
-                nursery: Nursery::default(),
+                branch: None,
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
             },
@@ -4951,27 +3483,11 @@ mod wire_tests {
     /// `` `exarch-agents `start `` as a listening engine sends it: the port its
     /// listener is bound to, and the token that listener will check the
     /// host's dial against.
-    fn wire_start_req(name: &str, port: u32, token: u64) -> FOValue {
-        let fork = FOValue::Variant {
-            label: "listening".to_string(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    (
-                        "port".to_string(),
-                        FOValue::Int {
-                            value: i64::from(port),
-                        },
-                    ),
-                    (
-                        "token".to_string(),
-                        FOValue::Int {
-                            value: token.cast_signed(),
-                        },
-                    ),
-                ],
-            })),
-        };
-        start_req_forked(fork, "go", name, bare("confined"), false)
+    fn wire_start_req(name: &str, port: u32, token: u64) -> Request {
+        start(
+            ForkClaim::Listening { port, token },
+            spec("go", name, confined(), false),
+        )
     }
 
     /// A guest whose own hatch failed closes without acking. The host has a
@@ -4982,7 +3498,7 @@ mod wire_tests {
         let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
 
         let err = desk
-            .handle(wire_start_req("unacked", 41_731, 7))
+            .ask(wire_start_req("unacked", 41_731, 7))
             .expect_err("an unacknowledged hatch must be refused");
         assert!(
             err.message
@@ -5006,7 +3522,7 @@ mod wire_tests {
         let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
 
         let err = desk
-            .handle(wire_start_req("never-reached", 41_731, 7))
+            .ask(wire_start_req("never-reached", 41_731, 7))
             .expect_err("a refused dial must be refused");
         assert!(
             err.message.contains("could not dial") && err.message.contains("41731"),
@@ -5023,11 +3539,10 @@ mod wire_tests {
         let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
         let err = desk
-            .handle(super::tests::start_req(
+            .ask(super::tests::start_req(
                 NurseryId(0),
                 "go",
                 "in-process",
-                "confined",
                 false,
             ))
             .expect_err("a wire desk has no nursery to adopt a parked fork from");
@@ -5082,17 +3597,18 @@ mod wire_tests {
                 agent: parent,
                 emit,
                 cwd: PathBuf::from("/"),
+                home: Some(PathBuf::from("/tmp")),
                 reply: ReplyCell::default(),
                 log: LogCell::new(fresh_log()),
-                nursery: Nursery::default(),
+                branch: None,
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
             },
         };
 
-        desk.handle(message_req("identity-peer", "note for identity"))
+        desk.ask(message_req("identity-peer", "note for identity"))
             .expect("the parent may message its identity-reach descendant");
-        desk.handle(message_req("wire-peer", "note for wire"))
+        desk.ask(message_req("wire-peer", "note for wire"))
             .expect("the parent may message its wire-reach descendant");
 
         match identity_inbox.next_item() {

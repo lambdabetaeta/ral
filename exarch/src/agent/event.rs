@@ -485,7 +485,7 @@ impl AgentLog {
                 "cannot resume session {session_id}: children are transient by design and only session 0 can be resumed"
             )));
         }
-        let dir = sessions_root.join(session_id.to_string());
+        let dir = Self::dir_of(sessions_root, session_id);
         let record_path = dir.join("record.jsonl");
         if !record_path.exists() {
             return Err(io::Error::other(format!(
@@ -582,6 +582,11 @@ impl AgentLog {
 
     pub fn id(&self) -> AgentId {
         self.id
+    }
+
+    /// Where session `id`'s log lives under `sessions_root`, before it opens.
+    pub(crate) fn dir_of(sessions_root: &Path, id: AgentId) -> PathBuf {
+        sessions_root.join(id.to_string())
     }
 
     /// The per-session directory `<sessions_root>/<id>/`.
@@ -1036,7 +1041,7 @@ impl AgentLog {
         model: String,
         account: RecordedAccount,
     ) -> io::Result<Self> {
-        let dir = sessions_root.join(session_id.to_string());
+        let dir = Self::dir_of(&sessions_root, session_id);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }

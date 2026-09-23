@@ -79,7 +79,6 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     });
     match report {
         RunReport::Ran {
@@ -117,7 +116,6 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     });
     match report {
         RunReport::Ran {
@@ -323,8 +321,8 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
         shell.workers().is_empty(),
         "a birth files nothing in the worker registry"
     );
-    match ral_core::protocol::answer_probe(
-        &mut shell,
+    match ral_core::test_access::answer_probe(
+        &shell,
         &FOValue::Variant {
             label: "workers".into(),
             payload: None,

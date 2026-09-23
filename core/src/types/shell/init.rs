@@ -10,8 +10,8 @@ impl Shell {
     ///
     /// Terminal flags are explicit so a caller cannot leave them all-false,
     /// which would show external commands piped I/O in place of the real
-    /// terminal.  The session faces no signals — Ctrl-C and SIGTERM pass it by
-    /// — until a host claims them with [`Self::face_signals`].
+    /// terminal.  The session faces no signals: its host forwards them as
+    /// `Control`.
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
@@ -48,20 +48,6 @@ impl Shell {
             .env
             .install_natives(crate::types::builtin::language_constants());
         shell
-    }
-
-    /// Declare this session the process's signal-facing one: the re-minted root
-    /// folds the ambient shutdown cause, and stamps every foreground frame with
-    /// a birth instant to judge the ambient interrupt watermark against.
-    ///
-    /// Called at boot by whoever owns the process's signals.  A session forked
-    /// with [`Self::fork_session`] starts deaf again and stops through
-    /// [`Self::cancel_handle`] instead; several facing sessions in one process
-    /// are well-defined, each reading the shared watermark against its own
-    /// frames.
-    pub fn face_signals(&mut self) {
-        self.session.root = crate::process::DurableRoot::signal_facing();
-        self.session.anchor = self.session.root.worker();
     }
 
     /// Adopt the host process env at startup, defaulting anything unset, and

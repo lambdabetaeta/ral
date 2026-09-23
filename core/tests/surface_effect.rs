@@ -80,7 +80,6 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
         deferred: None,
         desk: None,
         fork: None,
-        lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),

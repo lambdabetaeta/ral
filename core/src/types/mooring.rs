@@ -72,7 +72,7 @@ pub trait EnquiryDesk: Send + Sync {
 pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
 /// Identifier for a shell session parked in a [`Nursery`], redeemed once by
-/// [`Nursery::adopt`].
+/// [`IdentityTransport::adopt_parked`](crate::protocol::IdentityTransport::adopt_parked).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NurseryId(pub u64);
 
@@ -91,7 +91,7 @@ struct NurseryState {
 /// handler from holding `&mut Shell`, so it cannot fork a session itself. The
 /// builtin body forks through
 /// [`Shell::fork_into_nursery`](crate::types::Shell::fork_into_nursery) and the
-/// fork reaches the handler as a [`NurseryId`] to [`adopt`](Self::adopt).
+/// fork reaches the handler as a [`NurseryId`] its transport adopts.
 /// [`NurseryGuard`] empties it, so an unadopted fork dies with its run.
 #[derive(Clone, Default)]
 pub struct Nursery(Arc<Mutex<NurseryState>>);
@@ -110,7 +110,7 @@ impl Nursery {
     }
 
     /// Remove and return the shell parked under `id`, if one is still there.
-    pub fn adopt(&self, id: NurseryId) -> Option<Shell> {
+    pub(crate) fn adopt(&self, id: NurseryId) -> Option<Shell> {
         self.0.lock_ignore_poison().parked.remove(&id.0)
     }
 

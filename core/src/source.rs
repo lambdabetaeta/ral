@@ -238,10 +238,9 @@ impl Source {
 /// draws its caret into the module's own bytes rather than the top-level
 /// script's.
 ///
-/// Append-only for the session's whole life: a nested run
-/// ([`Shell::run_nested`](crate::Shell::run_nested)) shares the registry with
-/// the run it nests in, so reclaiming a slot would re-mint a [`FileId`] the
-/// outer run's live spans still carry.
+/// Append-only for the session's whole life: a module a run loads shares the
+/// registry with that run, so reclaiming a slot would re-mint a [`FileId`]
+/// the run's live spans still carry.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
     sources: Arc<Vec<Source>>,

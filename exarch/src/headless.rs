@@ -456,9 +456,9 @@ pub fn run(
     let root_id = session.agent.id;
     let recorder = session.recorder();
     // This is the process's trunk — a fact of the launch, not of any position
-    // in the tree — so its token is what an OS signal must reach, for as long
-    // as it attends.
-    let _slot = crate::agent::cancel::publish(session.cancel_token());
+    // in the tree — so it is what an OS signal must reach, for as long as it
+    // attends.
+    let _signals = crate::agent::cancel::face(&session.agent);
     let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
         session.attend(&mut control, emit)
     });
@@ -577,7 +577,17 @@ pub fn converse_sink<S: Sink>(
     let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
         session.attend_backlog(emit)
     });
+    exchange_ending(session, outcome)
+}
+
+/// A converse exchange's verdict. A severed session is over, not an exchange
+/// that went badly: its `Err` is the sentence `EngineLost` settled it with.
+fn exchange_ending(
+    session: &Avatar,
+    outcome: io::Result<Option<(AgentOutcome, Option<FOValue>)>>,
+) -> Result<(), String> {
     match outcome {
+        Ok(Some((AgentOutcome::Failed(lost), _))) if session.severance().is_some() => Err(lost),
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
@@ -624,8 +634,8 @@ pub fn converse_settled<S: Sink>(
     let root_id = session.agent.id;
     let recorder = session.recorder();
     // The embedder's trunk, for the extent of the exchange it drives: an OS
-    // signal reaching this process must find that token published.
-    let _slot = crate::agent::cancel::publish(session.cancel_token());
+    // signal reaching this process must reach it.
+    let _signals = crate::agent::cancel::face(&session.agent);
     let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
         session.attend_with(
             &mut crate::agent::NoControl,
@@ -633,11 +643,7 @@ pub fn converse_settled<S: Sink>(
             crate::agent::quiesce_when_childless,
         )
     });
-    match outcome {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err("worker panicked".to_string()),
-        Err(e) => Err(e.to_string()),
-    }
+    exchange_ending(session, outcome)
 }
 
 #[cfg(test)]
@@ -684,7 +690,7 @@ mod tests {
             RootSeat::Identity {
                 scratch,
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
+                terminal: ral_core::io::TerminalState::default(),
             },
             Arc::new(Provider::scripted("test-model", script)),
         )
@@ -1025,7 +1031,7 @@ mod tests {
             RootSeat::Identity {
                 scratch,
                 cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
+                terminal: ral_core::io::TerminalState::default(),
             },
             Arc::new(Provider::scripted("test-model", script)),
         )
@@ -1038,9 +1044,7 @@ mod tests {
     /// deterministically, rather than racing a real child's own thread against
     /// a sleep.
     fn live_child(parent: &Avatar, name: &str) -> Avatar {
-        parent
-            .fork_named(parent.caps().clone(), name)
-            .expect("fork child")
+        parent.fork_named(name).expect("fork child")
     }
 
     /// Every signal a caller's own `Sink` can receive, folded into one place —
@@ -1150,9 +1154,7 @@ mod tests {
         for _ in 0..8 {
             no_reply = no_reply.then(Reply::text("prose, but never a reply"));
         }
-        let child = session
-            .fork_named(session.caps().clone(), "flaky")
-            .expect("fork child");
+        let child = session.fork_named("flaky").expect("fork child");
         crate::agent::testkit::set_provider(
             &child,
             crate::agent::testkit::scripted("test-model", no_reply),

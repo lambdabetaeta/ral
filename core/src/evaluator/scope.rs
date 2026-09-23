@@ -266,7 +266,7 @@ mod tests {
     use crate::types::Mooring;
     use crate::types::{BuiltinBody, BuiltinEntry, GrantStack};
 
-    fn capture_req(src: &str) -> RunRequest<'static> {
+    fn capture_req(src: &str) -> RunRequest {
         RunRequest {
             run: Run {
                 program: Program::Source(src.into()),
@@ -284,12 +284,10 @@ mod tests {
             deferred: None,
             desk: None,
             fork: None,
-            lifecycle: Box::new(()),
         }
     }
 
     fn run_source(shell: &mut Shell, src: &str) -> RunReport {
-        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         shell.run(capture_req(src))
     }
 
