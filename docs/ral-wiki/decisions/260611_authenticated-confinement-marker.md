@@ -1,8 +1,13 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260617_sandbox-external-children
 ---
 
 # An authenticated confinement marker
+
+> Superseded by [[decisions/260617_sandbox-external-children|sandbox external children, not grant bodies]]:
+> a grant body no longer re-execs, so there is no confined interpreter to mark
+> and the marker is deleted with the machinery it guarded.
 
 **The marker that tells a ral process it is already OS-confined is trusted
 only when it carries a capability token a genuine sandbox re-exec minted —

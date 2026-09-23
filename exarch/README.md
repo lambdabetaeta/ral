@@ -6,9 +6,9 @@ ral source string in process against a persistent `Shell`.
 
 Each command the model emits is evaluated under a profile's
 `Capabilities` pushed onto ral's capability stack, so ral's in-language
-capability mechanism scopes file and exec access.  Five profiles ship
-in the binary (`dangerous`, `reasonable`, `read-only`, `minimal`,
-`confined`); see [`PROFILES.md`](PROFILES.md) for what each admits and
+capability mechanism scopes file and exec access.  Six profiles ship
+in the binary (`dangerous`, `reasonable`, `edit-only`, `read-only`,
+`minimal`, `confined`); see [`PROFILES.md`](PROFILES.md) for what each admits and
 when to use it.  `reasonable` is the default.
 
 The name is the role: in Byzantine usage, an *exarch* was a viceroy
@@ -22,11 +22,12 @@ ANTHROPIC_API_KEY=…  cargo run -p exarch
 ```
 
 A REPL prompt (`▸`) opens. Each line is a new user message in the same
-conversation; the provider keeps history in memory only.  A
-`session.log` is always written under `$EXARCH_SCRATCH` and its path is
-printed at exit; it captures the full transcript including
-unabridged stdout and stderr from every command (the TUI itself shows
-a head/tail digest for noisy commands).  Type `/quit` (or send EOF) to
+conversation.  Every session is recorded under
+`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`, whose directory is
+printed at exit: `record.jsonl` is the full record, including unabridged
+stdout and stderr from every command (the TUI itself shows a head/tail
+digest for noisy commands), `record.log` a readable rendering of it, and
+`user.log` the screen's transcript.  Type `/quit` (or send EOF) to
 exit.
 
 Run one headless exchange with `--prompt`; it implies `--headless`, writes the
@@ -107,9 +108,9 @@ like the argument of `grant [...]`:
 
 ```
 [
-  exec: [git: 'allow', cargo: 'allow', …],
-  fs:   [read:  ['<cwd>', '/tmp'],
-         write: ['<cwd>', '/tmp']],
+  exec: [git: 'allow', cargo: 'allow'],
+  fs:   [read:  ['cwd:', 'tempdir:'],
+         write: ['cwd:', 'tempdir:']],
   net:  false,
   shell: [chdir: true],
 ]
@@ -117,15 +118,15 @@ like the argument of `grant [...]`:
 
 The Exarch process itself is not sandboxed — it still needs HTTPS for
 the model API.  Each tool call is evaluated as a top-level turn under
-the profile's caps; when those caps include filesystem or network
-restrictions, ral re-execs a child process under the platform sandbox
-(Seatbelt on macOS, bwrap on Linux, a per-command AppContainer LowBox
-token on Windows) and the child evaluates the computation there,
-returning the post-run program state to the parent. Exec permissions
-are checked in ral before spawning; file/network permissions are also
-enforced by the OS sandbox where supported. On Windows the fs
-allow-list is enforced by ACEs stamped for the AppContainer's SID on
-the granted prefixes, and `net: false` withholds the network
-capability SIDs so a denied command cannot open a socket at all.
+the profile's caps.  The interpreter stays in process and checks every
+effect it performs itself; each external program it spawns is confined
+by the platform sandbox (Seatbelt on macOS, bwrap with Landlock and
+seccomp on Linux, a per-command AppContainer LowBox token on Windows),
+which enforces the same file, network and, on macOS and Linux,
+executable restrictions on whatever that program does after spawn.
+On Windows each granted path carries an ACE for a capability SID
+derived from that path, which the child's token holds only when the
+grant admits it, and `net: false` withholds the network capability
+SIDs so a denied command cannot open a socket at all.
 
 Treat Exarch as a development tool, not a hardened jail.

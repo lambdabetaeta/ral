@@ -1,6 +1,11 @@
 ---
-status: proposed
+status: active
 ---
+
+> *2026-09-23.* Landed, with two departures. `/tune` was never built: the
+> tuning knobs are rows of the `/model` overlay. And the flag surface returned
+> for headless starts — `--model`, `--provider`, `--max-tokens`, `--effort` —
+> each an explicit choice saved as the project's selection, not config.
 
 # Provider configuration: auto-discovery, live models, a searchable picker
 

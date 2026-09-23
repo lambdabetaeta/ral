@@ -43,8 +43,7 @@ identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
   ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 
 This is a deliberate mental-model fact, recorded so omission is never mistaken
-for an implicit cross-axis deny — see
-[[decisions/260601_reduced-authority-witness|reduced-authority-witness]] §B7.
+for an implicit cross-axis deny: an omitted axis is ⊤, the identity of `meet`.
 
 **Capability checks gate four dimensions:**
 

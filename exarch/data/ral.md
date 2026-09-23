@@ -315,7 +315,7 @@ Use the following instead of `rg`/`find`/`ls` to search for files; all are `.git
 Scope any of these with `within [dir: …]`.
 
 <critical>
-For dot files and gitignored files you must use `rg` bundled.
+For dot files and gitignored files you must use `rg`, the host's own where it has one.
 </critical>
 
 ## Help
