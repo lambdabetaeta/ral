@@ -10,11 +10,10 @@
 //! run time, so the wrap lands at the leaf that actually owns the bytes.
 
 use super::env::InferCtx;
-use super::scheme::Scheme;
 use super::ty::GroundRoute;
 use crate::ir::{
-    Args, CaseArm, Comp, CompKind, Exec, HandlerArmV, IrPattern, Phrase, PipeYield, RedirectV,
-    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
+    Args, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Phrase, PipeYield,
+    RedirectV, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -567,7 +566,7 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
 pub(super) fn annotate_toplevel(
     top: &Toplevel,
     ctx: &mut InferCtx,
-    schemes: Vec<Vec<(String, Scheme)>>,
+    schemes: Vec<DefineSchemes>,
 ) -> Toplevel {
     let tail_index = top.phrases.len().saturating_sub(1);
     let phrases = top
@@ -580,10 +579,7 @@ pub(super) fn annotate_toplevel(
                 Phrase::Define { pattern, comp, .. } => Phrase::Define {
                     pattern: Arc::clone(pattern),
                     comp: annotate_value_rhs(comp, ctx, true),
-                    schemes: names
-                        .into_iter()
-                        .map(|(name, scheme)| (name, Arc::new(scheme)))
-                        .collect(),
+                    schemes: names,
                 },
                 // The tail's value is reported (η-expanded if it resolved
                 // to `Fun`), but never byte-captured: nothing downstream

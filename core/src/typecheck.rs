@@ -35,6 +35,7 @@ pub use self::unify::Unifier;
 
 use self::generalize::generalize;
 use crate::ir::{Comp, Phrase, Toplevel};
+use std::sync::Arc;
 
 /// What a form holds its programs' own return value to: the declared
 /// [`Table`] whose closed keyset the returned row is checked against.
@@ -54,8 +55,8 @@ pub type ReturnContract = &'static Table;
 /// all, unsoundly.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
-    pub(crate) bindings: Vec<(String, Option<Scheme>)>,
-    pub(crate) aliases: Vec<(String, Scheme)>,
+    pub(crate) bindings: Vec<(String, Option<Arc<Scheme>>)>,
+    pub(crate) aliases: Vec<(String, Arc<Scheme>)>,
     pub(crate) builtins: crate::types::BuiltinTable,
 }
 
@@ -81,7 +82,7 @@ impl SessionSchemes {
         Self {
             bindings: schemes
                 .iter()
-                .map(|(name, scheme)| (name.clone(), Some(scheme.clone())))
+                .map(|(name, scheme)| (name.clone(), Some(Arc::new(scheme.clone()))))
                 .collect(),
             aliases: Vec::new(),
             builtins,
@@ -109,7 +110,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
         env.bind_handler(name, scheme, false);
     }
     for (name, scheme) in schemes.bindings {
-        let scheme = scheme.unwrap_or_else(|| Scheme::mono(u.fresh_ty()));
+        let scheme = scheme.unwrap_or_else(|| Arc::new(Scheme::mono(u.fresh_ty())));
         env.bind(name, scheme);
     }
     for (name, scheme) in schemes.aliases {

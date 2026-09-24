@@ -9,8 +9,8 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, Field, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
-    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Phrase, Register,
-    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, IrPattern, Phrase,
+    Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -197,7 +197,7 @@ pub(crate) fn infer_toplevel(
     env: &mut TyEnv,
     top: &Toplevel,
     contract: Option<ReturnContract>,
-) -> Vec<Vec<(String, Scheme)>> {
+) -> Vec<DefineSchemes> {
     let mut inferencer = Inferencer { ctx, env };
     let (schemes, tail) = inferencer.infer_phrases(&top.phrases);
     if let Some(table) = contract {
@@ -1122,7 +1122,7 @@ impl Inferencer<'_> {
     fn infer_phrases(
         &mut self,
         phrases: &[Spanned<Phrase>],
-    ) -> (Vec<Vec<(String, Scheme)>>, Option<CompTy>) {
+    ) -> (Vec<DefineSchemes>, Option<CompTy>) {
         let tail_index = phrases.len().saturating_sub(1);
         let mut schemes = Vec::with_capacity(phrases.len());
         let mut tail = None;
@@ -1144,11 +1144,7 @@ impl Inferencer<'_> {
     /// arrow arity is additionally read, so S3's η-expansion can rebuild it
     /// if it resolved to `Fun`.  Only a `Run` has a value, so only a `Run`
     /// hands a `CompTy` back.
-    fn infer_phrase(
-        &mut self,
-        phrase: &Phrase,
-        is_tail: bool,
-    ) -> (Vec<(String, Scheme)>, Option<CompTy>) {
+    fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> (DefineSchemes, Option<CompTy>) {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
                 let inner_ty = self.infer_comp(comp);

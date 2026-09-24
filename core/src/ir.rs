@@ -195,6 +195,9 @@ pub struct Toplevel {
     pub phrases: Vec<Spanned<Phrase>>,
 }
 
+/// A `Phrase::Define`'s names, each with its checker-closed scheme.
+pub type DefineSchemes = Vec<(String, Arc<crate::typecheck::Scheme>)>;
+
 /// One top-level statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Phrase {
@@ -205,7 +208,7 @@ pub enum Phrase {
     Define {
         pattern: Arc<IrPattern>,
         comp: Arc<Comp>,
-        schemes: Vec<(String, Arc<crate::typecheck::Scheme>)>,
+        schemes: DefineSchemes,
     },
     /// Any other statement.
     Run(Arc<Comp>),

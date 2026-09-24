@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f06a5056
-generated_at_date: 2026-09-21
+generated_at_commit: 912b3740
+generated_at_date: 2026-09-24
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -37,8 +37,11 @@ Entry points (`typecheck.rs`):
   The seed for a check is one `SessionSchemes { bindings, aliases,
   builtins }`
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]):
-  the scope's name-to-`Option<Scheme>` map, the alias arms' schemes, and the
-  shell's own `BuiltinTable`. Builtins are shell-scoped, so the checker
+  the scope's name-to-`Option<Arc<Scheme>>` map, the alias arms' schemes, and
+  the shell's own `BuiltinTable`. A scheme never changes once built, so one
+  `Arc` carries it from the `TyEnv` onto `Phrase::Define`, into the scope's
+  `Binding`, and back into the next run's `TyEnv`: neither seeding nor a
+  lookup copies one. Builtins are shell-scoped, so the checker
   types against exactly the surface the booted shell dispatches
   ([[map/core/builtins|builtins]]). `seed_env` is the one seeding routine, and
   the manifest reaches it as two: a table entry's rule, and a base-frame row's

@@ -192,8 +192,8 @@ impl Env {
 
     /// Every bound name with its scheme, session wins.  Seeds the next run's
     /// check: a name without a scheme is checked as a bare name.
-    pub fn binding_schemes(&self) -> Vec<(String, Option<Scheme>)> {
-        self.fold_union(|b| b.scheme.as_deref().cloned())
+    pub fn binding_schemes(&self) -> Vec<(String, Option<Arc<Scheme>>)> {
+        self.fold_union(|b| b.scheme.clone())
     }
 
     /// The session tier's persistent map root — `crate::serial` interns

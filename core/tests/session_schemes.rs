@@ -16,6 +16,7 @@ use ral_core::{
     CompileError, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     TypeError, Value, builtins, compile_and_typecheck, typecheck::fmt_scheme,
 };
+use std::sync::Arc;
 
 fn shell() -> Shell {
     let mut s = Shell::default();
@@ -25,7 +26,7 @@ fn shell() -> Shell {
 
 /// The scheme `name` carries on the live scope, `None` when it is unbound
 /// or bound without one.
-fn scheme_of(sh: &Shell, name: &str) -> Option<ral_core::typecheck::Scheme> {
+fn scheme_of(sh: &Shell, name: &str) -> Option<Arc<ral_core::typecheck::Scheme>> {
     sh.binding_schemes()
         .into_iter()
         .find(|(n, _)| n == name)

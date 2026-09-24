@@ -14,6 +14,7 @@ use crate::types::{
     Context, Env, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Shell,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Wire mirror of a user-installed [`HandlerFrame`].
 ///
@@ -36,7 +37,7 @@ impl WireHandlerFrame {
             entries.push((
                 entry.name.as_ref().to_string(),
                 SerialValue::from_runtime(value, ctx)?,
-                entry.scheme.clone(),
+                entry.scheme.as_deref().cloned(),
             ));
         }
         let catch_all = frame
@@ -58,7 +59,7 @@ impl WireHandlerFrame {
             .map(|(name, value, scheme)| {
                 value.into_runtime(dec).map(|v| {
                     let mut entry = HandlerEntry::ral_per_name(name, v);
-                    entry.scheme = scheme;
+                    entry.scheme = scheme.map(Arc::new);
                     entry
                 })
             })

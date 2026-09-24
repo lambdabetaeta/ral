@@ -7,6 +7,7 @@ use super::ty::{CompTy, GroundRoute, PayloadRoute, Ty};
 use super::unify::Unifier;
 use crate::source::Span;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Typing environment
@@ -14,13 +15,13 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 pub(crate) struct HandlerBinding {
-    pub(crate) scheme: Scheme,
+    pub(crate) scheme: Arc<Scheme>,
     pub(crate) removable_by_unalias: bool,
 }
 
 #[derive(Clone, Default)]
 struct NameScope {
-    bindings: HashMap<String, Scheme>,
+    bindings: HashMap<String, Arc<Scheme>>,
     handlers: HashMap<String, HandlerBinding>,
 }
 
@@ -46,7 +47,7 @@ impl TyEnv {
         }
     }
 
-    pub(crate) fn lookup_binding(&self, name: &str) -> Option<&Scheme> {
+    pub(crate) fn lookup_binding(&self, name: &str) -> Option<&Arc<Scheme>> {
         self.scopes
             .iter()
             .rev()
@@ -69,12 +70,12 @@ impl TyEnv {
 
     /// # Panics
     /// Panics if the scope stack is empty (more `pop`s than `push`es).
-    pub(crate) fn bind(&mut self, name: String, scheme: Scheme) {
+    pub(crate) fn bind(&mut self, name: String, scheme: impl Into<Arc<Scheme>>) {
         self.scopes
             .last_mut()
             .unwrap()
             .bindings
-            .insert(name, scheme);
+            .insert(name, scheme.into());
     }
 
     /// # Panics
@@ -82,13 +83,13 @@ impl TyEnv {
     pub(crate) fn bind_handler(
         &mut self,
         name: String,
-        scheme: Scheme,
+        scheme: impl Into<Arc<Scheme>>,
         removable_by_unalias: bool,
     ) {
         self.scopes.last_mut().unwrap().handlers.insert(
             name,
             HandlerBinding {
-                scheme,
+                scheme: scheme.into(),
                 removable_by_unalias,
             },
         );
@@ -124,6 +125,7 @@ impl TyEnv {
             s.bindings
                 .values()
                 .chain(s.handlers.values().map(|handler| &handler.scheme))
+                .map(Arc::as_ref)
         })
     }
 }

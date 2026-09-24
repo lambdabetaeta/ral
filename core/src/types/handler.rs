@@ -7,6 +7,7 @@ use super::value::Value;
 use crate::typecheck;
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 use super::flow::Settled;
 
@@ -36,7 +37,7 @@ pub(crate) struct HandlerEntry {
     pub(crate) thunk: Value,
     /// The arm's closed scheme, kept only on alias entries: their frames
     /// outlive the installing run and must seed the next run's check.
-    pub(crate) scheme: Option<crate::typecheck::Scheme>,
+    pub(crate) scheme: Option<Arc<typecheck::Scheme>>,
 }
 
 impl HandlerEntry {
@@ -116,7 +117,7 @@ impl HandlerEntry {
             })?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
-            entry.scheme = Some(scheme);
+            entry.scheme = Some(Arc::new(scheme));
         }
         Ok(entry)
     }
@@ -326,7 +327,7 @@ impl HandlerStack {
 
     /// The installed alias arms' schemes, outermost first — the alias half of
     /// the seed `Shell::session_schemes` hands the next run's check.
-    pub(crate) fn alias_schemes(&self) -> Vec<(String, typecheck::Scheme)> {
+    pub(crate) fn alias_schemes(&self) -> Vec<(String, Arc<typecheck::Scheme>)> {
         self.frames
             .iter()
             .filter(|f| f.removable_by_unalias)

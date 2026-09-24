@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 4dc94095
+generated_at_commit: 912b3740
 generated_at_date: 2026-09-24
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -64,8 +64,10 @@ everything `crate::types::*`.
   references copies the touched node, and copying a node clones every
   `Binding` stored inline in it. Each such clone is cheap, whatever the
   binding holds: `Binding.scheme` sits behind an `Arc`, and the value copies
-  no payload (above). The wire form and `binding_schemes` keep their own
-  types and convert at their boundaries.
+  no payload (above). An alias's `HandlerEntry.scheme` is shared the same
+  way, so `binding_schemes` and `alias_schemes` hand the next run's check the
+  very `Arc`s the scope holds; only the wire form keeps its own type and
+  converts at its boundary.
 - `coerce.rs` — the `sig` / `sig_hint` / `sig_at` runtime-error constructors
   (the last positioned at a span the caller already holds) and the `as_map`
   family of `Value` → `Map` coercions, sitting below both the builtin and

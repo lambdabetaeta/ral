@@ -9,6 +9,7 @@ use crate::types::{
     Observed, Settled, Value,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 impl Shell {
     /// The session's whole lexical environment, for a host that must hand it
@@ -208,7 +209,7 @@ impl Shell {
     /// Every bound name with its installed scheme, innermost binding wins —
     /// the scope half of [`Self::session_schemes`], surfaced on its own for
     /// the worksheet's type column.
-    pub fn binding_schemes(&self) -> Vec<(String, Option<crate::typecheck::Scheme>)> {
+    pub fn binding_schemes(&self) -> Vec<(String, Option<Arc<crate::typecheck::Scheme>>)> {
         self.env.binding_schemes()
     }
 
