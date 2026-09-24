@@ -69,7 +69,7 @@ fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>
     items
         .iter()
         .map(|item| match item {
-            Value::String(s) => Ok(s.clone()),
+            Value::String(s) => Ok(s.to_string()),
             other => Err(PolicyError::new(format!(
                 "{err_prefix}: {what} must be strings — expected a string, got {}",
                 other.type_name()
@@ -357,8 +357,8 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
     for (cmd, policy_val) in entries {
         if let Some(dir) = cmd.strip_suffix('/') {
             let is_deny = match policy_val {
-                Value::String(s) if s == "allow" => false,
-                Value::String(s) if s == "deny" => true,
+                Value::String(s) if s.as_str() == "allow" => false,
+                Value::String(s) if s.as_str() == "deny" => true,
                 _ => {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: directory key '{cmd}' must be 'allow' or 'deny'; \
@@ -434,14 +434,14 @@ mod tests {
 
     #[test]
     fn decode_exec_grant_accepts_lowercase_allow_string() {
-        let v = exec_map(&[("git", Value::String("allow".into()))]);
+        let v = exec_map(&[("git", Value::string("allow"))]);
         let m = decode_exec_grant(&v, "test").unwrap();
         assert_eq!(m.literals.get("git"), Some(&ExecPolicy::Allow));
     }
 
     #[test]
     fn decode_exec_grant_accepts_lowercase_deny_string() {
-        let v = exec_map(&[("bash", Value::String("deny".into()))]);
+        let v = exec_map(&[("bash", Value::string("deny"))]);
         let m = decode_exec_grant(&v, "test").unwrap();
         assert_eq!(m.literals.get("bash"), Some(&ExecPolicy::Deny));
     }
@@ -457,10 +457,7 @@ mod tests {
     fn decode_exec_grant_nonempty_list_is_subcommands() {
         let v = exec_map(&[(
             "cargo",
-            Value::list(vec![
-                Value::String("build".into()),
-                Value::String("test".into()),
-            ]),
+            Value::list(vec![Value::string("build"), Value::string("test")]),
         )]);
         let m = decode_exec_grant(&v, "test").unwrap();
         match m.literals.get("cargo") {
@@ -476,7 +473,7 @@ mod tests {
 
     #[test]
     fn decode_exec_grant_rejects_capitalised_string() {
-        let v = exec_map(&[("git", Value::String("Allow".into()))]);
+        let v = exec_map(&[("git", Value::string("Allow"))]);
         let msg = decode_exec_grant(&v, "test").unwrap_err().message;
         assert!(msg.contains("'allow'"), "expected lowercase hint: {msg}");
         assert!(msg.contains("Allow"), "expected offending token: {msg}");

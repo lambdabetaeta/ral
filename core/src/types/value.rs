@@ -2,6 +2,7 @@
 //! what a builtin returns.
 
 use super::builtin::BuiltinEntry;
+use super::bytes::Bytes;
 use super::closure::Closure;
 #[cfg(test)]
 use super::env::Binding;
@@ -10,6 +11,7 @@ use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
 use super::map::Map;
+use super::string::Str;
 use crate::syntax::tag::TAG_PREFIX;
 use std::fmt;
 use std::sync::Arc;
@@ -22,14 +24,17 @@ use std::sync::Arc;
 /// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and the machine's
 /// `force` rule read the shape rather than a separate variant (S10, the CEK
 /// plan §1.1).
+///
+/// Cloning copies no payload — `Str`, `Bytes`, `List`, `Map` and a closure's
+/// scope are all shared — and `Env` and variable lookup rely on it.
 #[derive(Debug, Clone)]
 pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(std::string::String),
-    Bytes(Vec<u8>),
+    String(Str),
+    Bytes(Bytes),
     List(List),
     Map(Map),
     /// `label` is stored without its leading backtick; `Display` puts it back.
@@ -94,6 +99,18 @@ impl Value {
     /// wrapping stays invisible to callers.
     pub fn list(items: Vec<Self>) -> Self {
         Self::List(items.into())
+    }
+
+    /// Every string-construction site goes through here, so the shared buffer
+    /// stays invisible to callers.
+    pub fn string(s: impl Into<Str>) -> Self {
+        Self::String(s.into())
+    }
+
+    /// Every bytes-construction site goes through here, so the shared buffer
+    /// stays invisible to callers.
+    pub fn bytes(b: impl Into<Bytes>) -> Self {
+        Self::Bytes(b.into())
     }
 
     /// Render an argv: every element through the total text conversion
@@ -341,15 +358,27 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
     format!("<|{}| block>", params.join(" "))
 }
 
-/// A chain of `n` blocks, each capturing the next in a one-binding env — the
-/// skeleton of a `from-lines` stream.  Fixture for the two walks that cross
-/// the captured-env seam once per link: the serial encoder and `Env`'s drop.
+/// A block over `env` returning `()`.
 #[cfg(test)]
-pub(crate) fn deep_block_chain(n: usize) -> Value {
+pub(crate) fn block_over(env: &Env) -> Value {
+    Value::Thunk(Closure {
+        comp: Arc::new(crate::source::Spanned::synthetic(
+            crate::ir::CompKind::Return(crate::ir::Val::Unit),
+        )),
+        env: env.clone(),
+    })
+}
+
+/// A chain of `n` blocks over `foot`, each capturing the next in a one-binding
+/// env — the skeleton of a `from-lines` stream.  Fixture for the walks that
+/// cross the captured-env seam once per link: the serial encoder, the fork's
+/// scrub, and `Env`'s drop.
+#[cfg(test)]
+pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
     let body = Arc::new(crate::source::Spanned::synthetic(
         crate::ir::CompKind::Return(crate::ir::Val::Unit),
     ));
-    let mut v = Value::Unit;
+    let mut v = foot;
     for _ in 0..n {
         let mut env = Env::new();
         env.bind(
@@ -374,13 +403,10 @@ mod tests {
     #[test]
     fn shallow_size_counts_nested_lists_and_maps() {
         assert_eq!(Value::Unit.shallow_size(), 0);
-        assert_eq!(Value::String("hello".into()).shallow_size(), 5);
-        assert_eq!(Value::Bytes(vec![0u8; 10]).shallow_size(), 10);
+        assert_eq!(Value::string("hello").shallow_size(), 5);
+        assert_eq!(Value::bytes(vec![0u8; 10]).shallow_size(), 10);
 
-        let flat = Value::list(vec![
-            Value::String("ab".into()),
-            Value::String("cde".into()),
-        ]);
+        let flat = Value::list(vec![Value::string("ab"), Value::string("cde")]);
         assert_eq!(flat.shallow_size(), 2 + 3);
 
         let nested = Value::list(vec![flat.clone(), flat]);
@@ -388,8 +414,8 @@ mod tests {
 
         // Keys' bytes count alongside their values' estimates.
         let map = Value::map(vec![
-            ("k1".to_string(), Value::String("v1".into())),
-            ("k22".to_string(), Value::String("v2345".into())),
+            ("k1".to_string(), Value::string("v1")),
+            ("k22".to_string(), Value::string("v2345")),
         ]);
         assert_eq!(
             map.shallow_size(),
@@ -404,7 +430,7 @@ mod tests {
 
         let variant = Value::Variant {
             label: "tag".into(),
-            payload: Some(Box::new(Value::String("payload".into()))),
+            payload: Some(Box::new(Value::string("payload"))),
         };
         assert_eq!(variant.shallow_size(), "tag".len() + "payload".len());
         let bare_variant = Value::Variant {
@@ -431,7 +457,7 @@ mod tests {
         heavy_env.bind(
             "heavy".into(),
             Binding {
-                value: Value::String("x".repeat(10_000)),
+                value: Value::string("x".repeat(10_000)),
                 scheme: None,
             },
         );
@@ -449,5 +475,15 @@ mod tests {
 
         let list_of_one_closure = Value::list(vec![block]);
         assert_eq!(list_of_one_closure.shallow_size(), block_size);
+    }
+
+    #[test]
+    fn a_cloned_string_shares_its_allocation() {
+        let v = Value::string("x".repeat(1 << 20));
+        let clone = v.clone();
+        let (Value::String(a), Value::String(b)) = (&v, &clone) else {
+            panic!("a string clones as a string");
+        };
+        assert_eq!(a.as_ptr(), b.as_ptr(), "a clone must not copy the bytes");
     }
 }

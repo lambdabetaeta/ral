@@ -41,6 +41,10 @@ impl List {
         self.0.push_front(v);
     }
 
+    pub(crate) fn set(&mut self, index: usize, v: Value) {
+        self.0.set(index, v);
+    }
+
     pub(crate) fn append(&mut self, other: Self) {
         self.0.append(other.0);
     }

@@ -236,7 +236,7 @@ mod tests {
     fn rest_pattern_errors_when_list_shorter_than_elems() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
-        let value = Value::list(vec![Value::String("x".into())]);
+        let value = Value::list(vec![Value::string("x")]);
         let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
         match result {
             Err(Break::Error(e)) => {
@@ -257,9 +257,9 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], None);
         let value = Value::list(vec![
-            Value::String("x".into()),
-            Value::String("y".into()),
-            Value::String("z".into()),
+            Value::string("x"),
+            Value::string("y"),
+            Value::string("z"),
         ]);
         let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
         match result {
@@ -281,16 +281,16 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![
-            Value::String("x".into()),
-            Value::String("y".into()),
-            Value::String("z".into()),
+            Value::string("x"),
+            Value::string("y"),
+            Value::string("z"),
         ]);
         let env = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell).expect("binds");
-        assert_eq!(env.get("a"), Some(&Value::String("x".into())));
-        assert_eq!(env.get("b"), Some(&Value::String("y".into())));
+        assert_eq!(env.get("a"), Some(&Value::string("x")));
+        assert_eq!(env.get("b"), Some(&Value::string("y")));
         assert_eq!(
             env.get("rest"),
-            Some(&Value::list(vec![Value::String("z".into())])),
+            Some(&Value::list(vec![Value::string("z")])),
         );
     }
 }

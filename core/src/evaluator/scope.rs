@@ -31,10 +31,10 @@ pub(crate) fn error_record(
     site: Option<&CallSite>,
 ) -> Value {
     Value::map(vec![
-        ("cmd".into(), Value::String(cmd.to_string())),
+        ("cmd".into(), Value::string(cmd)),
         ("status".into(), Value::Int(i64::from(status.code()))),
         ("reason".into(), reason_value(status)),
-        ("message".into(), Value::String(message.to_string())),
+        ("message".into(), Value::string(message)),
         ("site".into(), Value::from(site_value(site))),
     ])
 }
@@ -175,7 +175,7 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
         .into_iter()
         .map(|(name, value)| {
             let text = match value {
-                Value::String(s) => s,
+                Value::String(s) => s.into_string(),
                 Value::Int(n) => n.to_string(),
                 Value::Float(n) => crate::types::fmt_float(n),
                 Value::Bool(b) => b.to_string(),
@@ -332,7 +332,7 @@ mod tests {
                 let fact = as_map(payload.as_deref()?, "test").ok()?;
                 match (label.as_str(), fact.get("argv")) {
                     ("command", Some(Value::List(argv))) => match argv.iter().next() {
-                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(Value::String(s)) => Some(s.to_string()),
                         _ => None,
                     },
                     _ => None,

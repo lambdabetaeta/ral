@@ -6,7 +6,7 @@ use crate::types::{Chpwd, Settled, Shell, Value, sig};
 /// which the rc `aliases:` map and the plugin loader also come in through.
 pub(super) fn builtin_alias(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let (name, thunk) = match args {
-        [Value::String(name), thunk @ Value::Thunk(_)] => (name.clone(), thunk.clone()),
+        [Value::String(name), thunk @ Value::Thunk(_)] => (name.to_string(), thunk.clone()),
         [Value::String(_), other] => {
             return Err(sig(format!(
                 "alias: body must be a block, got {}",
@@ -68,7 +68,7 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
                     .to_string(),
             ));
         }
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.as_str(),
         other => {
             return Err(sig(format!(
                 "cd: expected a String path, got {}",
@@ -78,7 +78,7 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
     };
 
     shell.check_shell_chdir()?;
-    let (old, new) = shell.apply_chdir(&path)?;
+    let (old, new) = shell.apply_chdir(path)?;
     let last = &mut shell.local.repl.last_chpwd;
     let seq = last.as_ref().map_or(1, |c| c.seq + 1);
     *last = Some(Chpwd { seq, old, new });

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e43ce37
-generated_at_date: 2026-09-23
+generated_at_commit: 4dc94095
+generated_at_date: 2026-09-24
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/engine.rs, core/src/engine/, core/src/wire.rs, core/src/hatch.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
 
@@ -69,8 +69,9 @@ wire-seat child's spawn machinery.** The why is
   (a detached worker's batch, and a watched worker's lines).
 - `EnquiryError` — message plus status, the wire shape of a refused enquiry;
   `no_desk()` is the fixed wording for a host with nothing to answer.
-- `Control` — `Interrupt`, `Cancel(DispatchId)`, `Terminate`; applied by
-  `Scopes::apply` under both carriers.
+- `Control` — `Interrupt`, `Cancel(DispatchId)`, `Terminate`, `Abort` (a
+  `Terminate` whose cause is `RootAbort`); applied by `Scopes::apply` under
+  both carriers.
 - `Report` / `Ending` / `FailureStatus` — the terminal frame:
   `Static { rendered, status }` or `Ran { ending, captured, trail }`; `Ending`
   has no stop arm — ral does not suspend, so every ending is
@@ -233,9 +234,10 @@ spawn and the host dials in — see [[design/engine-protocol|engine-protocol]]'s
 hatch section for the why.
 
 - `listen_for_hatch` — waits on a caller-bound listening descriptor for the
-  one dial that hatches a child; checks the dialler's eight token bytes, and
-  packs the parent's scrubbed `Shell` into an `EngineSeed` on the caller's
-  own thread.
+  one dial that hatches a child, checking the dialler's eight token bytes. It
+  scrubs the shell it is handed (`Shell::fork_scrubbed`) and packs the fork
+  into an `EngineSeed` on the caller's own thread, so every path onto the
+  seed wire is a scrubbed fork ([[map/core/transport|transport]]).
 - `hatch_over` — re-execs this binary (`--engine` in production) with the
   dialled connection on fd 3 and a seed socketpair named by
   `RAL_ENGINE_SEED_FD`; writes the framed seed while the child drains it, and

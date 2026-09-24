@@ -115,3 +115,20 @@ impl HandleInner {
         *self.state.lock_ignore_poison() == HandleState::Running
     }
 }
+
+/// A running handle with no worker behind it.
+#[cfg(test)]
+pub(crate) fn idle_handle() -> Value {
+    Value::Handle(Box::new(HandleInner {
+        result: Arc::new(Mutex::new(None)),
+        cached: Arc::new(Mutex::new(None)),
+        state: Arc::new(Mutex::new(HandleState::Running)),
+        stdout_buf: ByteBuffer::default(),
+        stderr_buf: ByteBuffer::default(),
+        surface_buf: Arc::new(Mutex::new(Vec::new())),
+        joined: Arc::new(Mutex::new(false)),
+        last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+        cmd: "<test>".into(),
+        cancel: crate::process::CancelScope::default(),
+    }))
+}

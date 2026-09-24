@@ -132,6 +132,6 @@ pub(crate) fn detach(
     );
     Ok(Value::map(vec![
         ("pid".into(), Value::Int(i64::from(pid))),
-        ("desc".into(), Value::String(desc.to_string())),
+        ("desc".into(), Value::string(desc)),
     ]))
 }

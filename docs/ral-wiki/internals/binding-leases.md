@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 5803377b
+verified_at_commit: 4dc94095
 verified_at_date: 2026-09-24
 anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
@@ -94,11 +94,7 @@ This is correct, not a near-miss: once captured, the top-level name `big`
 routes nothing. The value's real owner is `f`'s capture, and `f` — the thing
 actually being used — is the thing whose lease renews. The cost is memory,
 not correctness: the captured bytes stay resident until `f`'s own name falls
-or is rebound and the capture drops. They can be resident more than once: a
-session write copies the `imbl` node it touches, cloning every value stored
-inline there, and a `String` or `Bytes` value clones deeply — so each capture
-followed by a write leaves another full copy of `big` behind
-([[map/core/shell-state|shell-state]]). That residency is exactly what the
+or is rebound and the capture drops. That residency is exactly what the
 large-binding warning exists to head off — bind a file path, not five
 megabytes of captured text.
 

@@ -34,7 +34,7 @@ fn top_level(shell: &mut Shell, source: &str) -> String {
     });
     match report {
         RunReport::Ran { ending, .. } => match ending.into_result().expect("evaluation succeeds") {
-            Value::String(s) => s,
+            Value::String(s) => s.into_string(),
             other => panic!("expected a String, got {other:?}"),
         },
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),

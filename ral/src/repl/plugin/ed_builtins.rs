@@ -84,9 +84,9 @@ pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     shell.check_editor_read("get")?;
     let st = snapshot(shell, mooring)?;
     Ok(Value::map(vec![
-        ("text".into(), Value::String(st.text)),
+        ("text".into(), Value::string(st.text)),
         ("cursor".into(), int(st.cursor)),
-        ("keymap".into(), Value::String(st.keymap)),
+        ("keymap".into(), Value::string(st.keymap)),
     ]))
 }
 
@@ -94,7 +94,7 @@ pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
 pub fn builtin_ed_text(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-text", shell)?;
     shell.check_editor_read("text")?;
-    Ok(Value::String(snapshot(shell, mooring)?.text))
+    Ok(Value::string(snapshot(shell, mooring)?.text))
 }
 
 /// `_ed-cursor` → `Int` — current cursor offset (chars).
@@ -108,7 +108,7 @@ pub fn builtin_ed_cursor(_args: &[Value], mooring: &Mooring, shell: &mut Shell) 
 pub fn builtin_ed_keymap(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-keymap", shell)?;
     shell.check_editor_read("keymap")?;
-    Ok(Value::String(snapshot(shell, mooring)?.keymap))
+    Ok(Value::string(snapshot(shell, mooring)?.keymap))
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
@@ -116,7 +116,7 @@ pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell)
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
     let st = snapshot(shell, mooring)?;
-    Ok(Value::String(split_at_cursor(&st.text, st.cursor).0))
+    Ok(Value::string(split_at_cursor(&st.text, st.cursor).0))
 }
 
 // ─── State write ─────────────────────────────────────────────────────────────
@@ -215,14 +215,11 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
     if mooring.in_terminal_loan() {
-        return Ok(tui_result(
-            Value::String("_ed-tui: already in TUI mode".into()),
-            1,
-        ));
+        return Ok(tui_result(Value::string("_ed-tui: already in TUI mode"), 1));
     }
     if snapshot(shell, mooring)?.in_readline {
         return Ok(tui_result(
-            Value::String("_ed-tui: not available inside buffer-change hooks".into()),
+            Value::string("_ed-tui: not available inside buffer-change hooks"),
             1,
         ));
     }
@@ -235,14 +232,14 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     match result {
         Ok(v) => {
             let v = match v {
-                Value::Unit => Value::String(decode_captured(&bytes)),
-                Value::Bytes(b) => Value::String(decode_captured(&b)),
+                Value::Unit => Value::string(decode_captured(&bytes)),
+                Value::Bytes(b) => Value::string(decode_captured(&b)),
                 other => other,
             };
             Ok(tui_result(v, 0))
         }
         Err(Break::Error(e)) => Ok(tui_result(
-            Value::String(e.message.clone()),
+            Value::string(e.message.clone()),
             i64::from(e.exit_code()),
         )),
         Err(other) => Err(other),
@@ -267,7 +264,7 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         if !entry.starts_with(&prefix) || !seen.insert(entry.clone()) {
             continue;
         }
-        results.push(Value::String(entry));
+        results.push(Value::string(entry));
         if limit > 0 && results.len() >= limit {
             break;
         }
@@ -361,7 +358,7 @@ pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -
 
     let offset_chars = byte_to_char(&text, offset);
 
-    let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::String(w)).collect();
+    let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::string(w)).collect();
 
     #[allow(clippy::cast_possible_wrap, reason = "word index, far below i64::MAX")]
     let current_i = current as i64;
@@ -407,7 +404,7 @@ pub fn builtin_ed_hyperlink(
     } else {
         text
     };
-    Ok(Value::String(rendered))
+    Ok(Value::string(rendered))
 }
 
 /// `_ed-clipboard <text>` — ask the host terminal to write `text` to the
@@ -766,8 +763,8 @@ mod tests {
     #[test]
     fn ed_set_rejects_non_int_cursor() {
         let arg = Value::map(vec![
-            ("text".into(), Value::String("new".into())),
-            ("cursor".into(), Value::String("3".into())),
+            ("text".into(), Value::string("new")),
+            ("cursor".into(), Value::string("3")),
         ]);
         assert!(set_op(&arg).is_err());
     }

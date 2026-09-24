@@ -436,7 +436,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &env, &mut shell)
+        builtin_explain(&[Value::string("frob")], &env, &mut shell)
             .expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
@@ -468,7 +468,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &env, &mut shell)
+        builtin_explain(&[Value::string("frob")], &env, &mut shell)
             .expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");

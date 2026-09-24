@@ -69,8 +69,8 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
         Ty::Bool => Value::Bool(true),
         Ty::Int | Ty::Var(_) => Value::Int(1),
         Ty::Float => Value::Float(1.5),
-        Ty::String => Value::String("ab".into()),
-        Ty::Bytes => Value::Bytes(vec![1, 2]),
+        Ty::String => Value::string("ab"),
+        Ty::Bytes => Value::bytes(vec![1, 2]),
         Ty::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
         Ty::Map(val) => {
             let pairs: Vec<(String, Value)> = vec![("k".into(), inhabitant(val)?)];

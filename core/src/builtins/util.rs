@@ -334,7 +334,7 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(n) => serde_json::json!(*n),
         Value::Float(f) => serde_json::json!(*f),
-        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::List(items) => {
             serde_json::Value::Array(items.iter().map(value_to_json_lossy_bytes).collect())
         }

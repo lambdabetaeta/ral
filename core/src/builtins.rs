@@ -281,7 +281,7 @@ builtin_registry! {
         call: |args, mooring, shell| modules::builtin_use(args, mooring, shell), },
     Cwd { names: ["cwd"], ty: scheme::pure_string,
         doc: "cwd  — return the current working directory as a String.",
-        call: |_args, _mooring, shell| Ok(Value::String(shell.cwd().to_string_lossy().into_owned())), },
+        call: |_args, _mooring, shell| Ok(Value::string(shell.cwd().to_string_lossy())), },
     Chdir { names: ["cd"], ty: scheme::chdir,
         doc: "cd <path>  — change the shell working directory; gated by shell.chdir capability. `cd ~` goes home.",
         call: |args, _mooring, shell| shell::builtin_chdir(args, shell), },

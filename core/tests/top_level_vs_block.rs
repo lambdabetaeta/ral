@@ -237,7 +237,7 @@ fn top_level_cd_persists_across_calls() {
     // same way `within_dir_carries_to_external_command` does.
     let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = match result {
-        Value::String(s) => s,
+        Value::String(s) => s.into_string(),
         other => panic!("cwd must return a String, got {other:?}"),
     };
     assert!(
@@ -285,7 +285,7 @@ fn a_cd_handler_is_shadowed_at_the_bare_head() {
     .expect("the bare head is an env hit on the native");
     let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = match moved {
-        Value::String(s) => s,
+        Value::String(s) => s.into_string(),
         other => panic!("cwd must return a String, got {other:?}"),
     };
     assert!(
@@ -505,7 +505,7 @@ fn sequence_inside_a_forced_block_prints_the_non_final_step_and_binds_the_tail()
     );
     assert_eq!(
         result.expect("sequence inside a forced block must succeed"),
-        Value::String("two".into()),
+        Value::string("two"),
         "the block's value is its tail's decoded text"
     );
     assert_eq!(
@@ -736,7 +736,7 @@ fn sandbox_parity_top_level_cd() {
     let result = top_level_under(&mut shell, caps, "cwd").expect("cwd under projection");
     let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     let got = match result {
-        Value::String(s) => s,
+        Value::String(s) => s.into_string(),
         other => panic!("cwd returned non-String: {other:?}"),
     };
     assert!(

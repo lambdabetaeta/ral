@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5803377b
+generated_at_commit: 4dc94095
 generated_at_date: 2026-09-24
 covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
@@ -26,8 +26,7 @@ indistinguishable from an in-process fork exactly when no hop drops a field or
 collapses a variant. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
 
-- *value walks* (`serial.rs`) match `Value` / `SerialValue` exhaustively (one
-  exception, below);
+- *value walks* (`serial.rs`) match `Value` / `SerialValue` exhaustively;
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
   `removable_by_unalias`, so a hydrated alias stays removable by `unalias`; a
@@ -67,13 +66,12 @@ classifies it — a block, a function, a handle:
 - `FOValue::scrubbed` makes the conversion total by writing every such leaf as
   its `` `opaque [type: …] `` placeholder — the flat wire's treatment, taken by
   `Mooring::surface`;
-- `scrub_handles` replaces only `Handle`s and keeps closures live, since this
-  wire interns them — the fork's treatment, applied to the session scope's
-  bindings alone. It is the one walk that is not exhaustive: it descends lists,
-  maps and variant payloads and passes every other value through unchanged, so
-  a handle in a closure's captured scope or a native's applied arguments
-  survives it, as does one in a handler arm, which the fork's context carries
-  unscrubbed.
+- the fork's scrub (`core/src/types/shell/scrub.rs`,
+  [[map/core/shell-state|shell-state]]) replaces only `Handle`s, with the same
+  placeholder, and keeps closures live, since this wire interns them. It
+  reaches every handle the fork holds — in a binding's data, in every scope a
+  closure captured, in a native's applied arguments, in a handler frame's
+  arms — and empties the fork's hooks.
 
 ## Scopes — `InternCtx` and `WireDecoder`
 
@@ -85,8 +83,9 @@ cannot unfold into an O(2^N) tree.
   the table's sole accessor, encodes the queue as a worklist, so encoder stack
   depth is bounded by data nesting within one scope, never by the length of a
   chain of closures ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
-  `finish` drops any binding whose value carries a handle
-  (`value_carries_handle`), so the name arrives unbound.
+  `finish` encodes every binding: every path onto this wire is a scrubbed
+  fork, so a handle reaching `SerialValue::from_runtime` is a fault in ral,
+  and its error says so.
 - `WireDecoder::for_shell` rebuilds the rows in dependency order
   (`collect_scope_deps`), refusing an out-of-range reference or a cycle, and
   seats each under the *receiver's* natives and prelude: those two constant
@@ -123,9 +122,9 @@ the wire (`bare_child_shell` is the tests' stand-in for that boot).
 - `pack_seed` builds one from a shell that `Shell::fork_scrubbed` produced — the
   fork both seats take, so an identity fork and a hatch snapshot the same
   fragment and `` exarch-agents `start `` means one thing regardless of seat
-  ([[design/agents|agents]]'s one-snapshot law). That fork replaces each handle
-  in a session binding with its placeholder (`Env::scrub_handles`, through
-  `scrub_handles` above).
+  ([[design/agents|agents]]'s one-snapshot law). `listen_for_hatch`
+  (`hatch.rs`) forks and scrubs the shell it is handed before packing it, and
+  `pack_seed` trusts that fork rather than re-checking it.
 - `seed_from_env` (in `hatch.rs`) takes the seed before the engine waits for
   `Attach`, striking the fd's env var as it takes the fd; after `Attach`,
   `Engine::boot` hands it to `EngineSeed::apply`, which hydrates through

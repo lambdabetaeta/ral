@@ -60,7 +60,7 @@ fn cwd_sigil_freezes_to_the_directory_at_the_grant() {
         a.display()
     ))
     .expect("a read inside the frozen directory must be granted");
-    assert_eq!(out, Value::String("a-pos".into()));
+    assert_eq!(out, Value::string("a-pos"));
     let _ = std::fs::remove_dir_all(&a);
 }
 

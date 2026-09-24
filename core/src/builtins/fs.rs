@@ -64,7 +64,7 @@ pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Va
         .tempdir_in(parent.real())
         .map_err(|e| sig(format!("temp-dir: {e}")))?
         .keep();
-    Ok(Value::String(path.to_string_lossy().into_owned()))
+    Ok(Value::string(path.to_string_lossy()))
 }
 
 pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -74,7 +74,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
         .tempfile_in(parent.real())
         .map_err(|e| sig(format!("temp-file: {e}")))?;
     let (_file, path) = named.keep().map_err(|e| sig(format!("temp-file: {e}")))?;
-    Ok(Value::String(path.to_string_lossy().into_owned()))
+    Ok(Value::string(path.to_string_lossy()))
 }
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
@@ -121,7 +121,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     }
     results.sort();
     Ok(Value::list(
-        results.into_iter().map(Value::String).collect(),
+        results.into_iter().map(Value::string).collect(),
     ))
 }
 
@@ -134,8 +134,8 @@ fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Break {
 fn dir_entry_value(entry: &Entry) -> (String, Value) {
     let name = entry.name.to_string_lossy().into_owned();
     let v = Value::map(vec![
-        ("name".into(), Value::String(name.clone())),
-        ("type".into(), Value::String(entry.stat.kind.name().into())),
+        ("name".into(), Value::string(name.clone())),
+        ("type".into(), Value::string(entry.stat.kind.name())),
         (
             "size".into(),
             Value::Int({
@@ -180,13 +180,13 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     } else {
         String::new()
     };
-    let name = path.file_name().map_or_else(
-        || path.to_string_lossy().into_owned(),
-        |s| s.to_string_lossy().into_owned(),
-    );
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
     Ok(Value::map(vec![
-        ("name".into(), Value::String(name)),
-        ("type".into(), Value::String(stat.kind.name().into())),
+        ("name".into(), Value::string(name)),
+        ("type".into(), Value::string(stat.kind.name())),
         (
             "size".into(),
             Value::Int({
@@ -203,7 +203,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
         ("atime".into(), Value::Int(secs_since_epoch(stat.atime))),
         ("btime".into(), Value::Int(secs_since_epoch(stat.btime))),
         ("readonly".into(), Value::Bool(stat.readonly)),
-        ("target".into(), Value::String(target)),
+        ("target".into(), Value::string(target)),
     ]))
 }
 
@@ -212,7 +212,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     let resolved = checked_read_path(shell, &s)?
         .canonicalise_strict()
         .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
-    Ok(Value::String(resolved.to_string_lossy().into_owned()))
+    Ok(Value::string(resolved.to_string_lossy()))
 }
 
 /// Lexical sibling of `resolve-path`: same anchoring, no
@@ -220,7 +220,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// and no `check_fs_read`, since that gate guards a stat this never does.
 pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Value {
     let resolved = shell.resolve(&args[0].to_string());
-    Value::String(resolved.as_path().to_string_lossy().into_owned())
+    Value::string(resolved.as_path().to_string_lossy())
 }
 
 /// Shared predicate body.  `leaf` is the whole difference between the two

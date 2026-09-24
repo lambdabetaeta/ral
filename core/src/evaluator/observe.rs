@@ -23,14 +23,14 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
                 .args
                 .iter()
                 .cloned()
-                .map(Value::String)
+                .map(Value::string)
                 .collect(),
         )),
         Register::Nproc => Ok(Value::Int(
             std::thread::available_parallelism().map_or(1, |n| i64::try_from(n.get()).unwrap_or(1)),
         )),
-        Register::Cwd => Ok(Value::String(cwd_string(shell))),
-        Register::User => Ok(Value::String(
+        Register::Cwd => Ok(Value::string(cwd_string(shell))),
+        Register::User => Ok(Value::string(
             crate::path::user_name(shell.env_overrides()).unwrap_or_else(|| "?".into()),
         )),
         Register::Tilde(path) => {
@@ -40,7 +40,7 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
                 path.suffix.as_deref(),
                 home.as_deref(),
             )
-            .map(Value::String)
+            .map(Value::string)
             .map_err(|cause| {
                 Error::new(
                     format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
@@ -70,7 +70,7 @@ fn env_map(shell: &Shell) -> Value {
     // `Map`'s `FromIterator` is last-wins, so the overrides come second.
     Value::Map(
         host.chain(overrides)
-            .map(|(k, v)| (k, Value::String(v)))
+            .map(|(k, v)| (k, Value::string(v)))
             .collect(),
     )
 }

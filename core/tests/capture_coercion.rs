@@ -73,7 +73,7 @@ fn a_byte_routed_let_binds_the_decoded_text() {
     let mut shell = fresh_shell();
     assert_eq!(
         ok(&mut shell, "let captured = echo hi\nreturn $captured"),
-        Value::String("hi".into())
+        Value::string("hi")
     );
 }
 
@@ -99,12 +99,12 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
             &mut shell,
             "let intercepted = __decode-captured anything\nreturn $intercepted"
         ),
-        Value::String("42".into()),
+        Value::string("42"),
         "the alias must really be installed and dispatchable, or this test proves nothing"
     );
     assert_eq!(
         ok(&mut shell, "let captured = echo hi\nreturn $captured"),
-        Value::String("hi".into())
+        Value::string("hi")
     );
 }
 
@@ -119,7 +119,7 @@ fn an_alias_cannot_blank_a_captured_binding() {
     );
     assert_eq!(
         ok(&mut shell, "let greeting = echo hello\nreturn $greeting"),
-        Value::String("hello".into())
+        Value::string("hello")
     );
 }
 
@@ -136,7 +136,7 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
                 "{frame} {{ let intercepted = __decode-captured anything\n return $intercepted }}"
             )
         ),
-        Value::String("42".into()),
+        Value::string("42"),
         "the frame must really intercept the name, or this test proves nothing"
     );
     assert_eq!(
@@ -144,7 +144,7 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
             &mut shell,
             &format!("{frame} {{ let captured = echo hi\n return $captured }}")
         ),
-        Value::String("hi".into())
+        Value::string("hi")
     );
 }
 
@@ -159,10 +159,7 @@ fn a_binding_named_like_the_old_synthesized_binder_survives() {
         ok(&mut shell, "let captured = echo hi\nreturn $__captured"),
         Value::Int(7)
     );
-    assert_eq!(
-        ok(&mut shell, "return $captured"),
-        Value::String("hi".into())
-    );
+    assert_eq!(ok(&mut shell, "return $captured"), Value::string("hi"));
 }
 
 /// And nothing is left behind: after a byte-routed `let`, no binding the
@@ -192,7 +189,7 @@ fn the_coercion_is_not_a_command_a_program_can_call() {
     );
     assert_eq!(
         ok(&mut shell, "let captured = echo hi\nreturn $captured"),
-        Value::String("hi".into()),
+        Value::string("hi"),
         "the session must still be alive after refusing the call"
     );
 }
@@ -221,7 +218,7 @@ fn a_capture_past_the_buffer_cap_refuses_rather_than_truncating() {
     );
     assert_eq!(
         ok(&mut shell, "let captured = echo hi\nreturn $captured"),
-        Value::String("hi".into()),
+        Value::string("hi"),
         "the session must still be alive after refusing the capture"
     );
 }

@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 
 /// A forked shell's scope, wire-ready for `hatch`.
 ///
-/// What it deliberately does not carry — `Value::Handle` bindings (scrubbed
-/// upstream, at `Shell::fork_scrubbed`, the one place both an identity
-/// fork and a wire seed pass through), terminal authority, the parent's
-/// inbox or cancel token, its provider handle — is the parity argument for
-/// shipping a seed at all: a fork and a seed must mean the same thing.
+/// What it deliberately does not carry — a handle anywhere in the scope or
+/// the handler stack, and the hooks (all scrubbed upstream by
+/// `Shell::fork_scrubbed`, the one place an identity fork and a wire seed
+/// both pass through), terminal authority, the parent's inbox or cancel
+/// token, its provider handle — is the parity argument for shipping a seed at
+/// all: a fork and a seed must mean the same thing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EngineSeed {
     pub(crate) scope_table: ScopeTable,
@@ -26,12 +27,13 @@ pub(crate) struct EngineSeed {
 }
 
 /// Reify a forked shell into a wire-ready [`EngineSeed`] — `hatch`'s only
-/// producer. `shell` is expected already scrubbed by `Shell::fork_scrubbed`;
-/// this function trusts that law rather than re-checking it.
+/// producer. `shell` is expected already scrubbed by `Shell::fork_scrubbed` —
+/// no handle in its scope or handler stack, no hooks — and this function
+/// trusts that law rather than re-checking it: a handle that slips through
+/// fails the pack as a fault in ral.
 ///
-/// `hatch` is Linux-only, and `crate::hatch`'s own tests are its only other
-/// caller, so a plain non-Linux, non-test build sees this as unreachable —
-/// accurate, not a bug.
+/// `hatch` is Linux-only, and tests are its only other callers, so a plain
+/// non-Linux, non-test build sees this as unreachable — accurate, not a bug.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 pub(crate) fn pack_seed(shell: &Shell, grant: SpawnGrant) -> Settled<EngineSeed> {
     let mut ctx = InternCtx::new();
@@ -84,8 +86,11 @@ impl EngineSeed {
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
+    use crate::source::{FileId, Span};
     use crate::subprocess::bare_child_shell;
-    use crate::types::{Fork, Mooring, Nursery, Value};
+    use crate::types::{
+        DefaultPolicy, Fork, HookName, HookSig, Mooring, Nursery, Value, block_over, idle_handle,
+    };
     use std::sync::{Arc, OnceLock};
 
     fn prelude() -> &'static BakedPrelude {
@@ -93,31 +98,52 @@ mod tests {
         P.get_or_init(BakedPrelude::bake_runtime)
     }
 
+    /// What `live` resolves to in the scope the block `v` captured.
+    fn live_in(v: Option<&Value>) -> Option<&Value> {
+        match v {
+            Some(Value::Thunk(closure)) => closure.env.get("live"),
+            other => panic!("expected a block, got {other:?}"),
+        }
+    }
+
     /// The one snapshot law: an identity fork and a wire-seeded child, both
     /// read out of the same nursery slot, resolve every name to the same
     /// value — and the same absence — because `fork_into_nursery` scrubs
-    /// `Value::Handle` bindings before either arm ever sees the scope.
+    /// every handle, wherever it stands, before either arm sees the shell.
     #[test]
     fn identity_fork_and_wire_seed_agree_on_the_scrubbed_scope() {
-        use std::sync::Mutex;
-
-        let mut parent = Shell::default();
+        let mut parent = bare_child_shell(prelude());
         parent.set_var("kept".to_string(), Value::Int(7));
+        parent.set_var("live".to_string(), idle_handle());
+        let blk = block_over(&parent.env);
+        parent.set_var("blk".to_string(), blk.clone());
+        let has = parent
+            .session
+            .builtins
+            .value("has")
+            .expect("`has` is a builtin");
         parent.set_var(
-            "live".to_string(),
-            Value::Handle(Box::new(crate::types::HandleInner {
-                result: Arc::new(Mutex::new(None)),
-                cached: Arc::new(Mutex::new(None)),
-                state: Arc::new(Mutex::new(crate::types::HandleState::Running)),
-                stdout_buf: crate::io::ByteBuffer::default(),
-                stderr_buf: crate::io::ByteBuffer::default(),
-                surface_buf: Arc::new(Mutex::new(Vec::new())),
-                joined: Arc::new(Mutex::new(false)),
-                last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-                cmd: "<test>".into(),
-                cancel: crate::process::CancelScope::default(),
-            })),
+            "nat".to_string(),
+            Value::Native {
+                entry: Arc::new(has),
+                applied: vec![idle_handle()],
+            },
         );
+        let catch_all = block_over(&parent.env);
+        parent.context.handlers.push(Vec::new(), Some(catch_all));
+        parent
+            .register_hook(
+                HookName::session("prompt"),
+                blk,
+                HookSig::Prompt,
+                DefaultPolicy::denied(),
+                Span {
+                    start: 0,
+                    end: 0,
+                    file: FileId::DUMMY,
+                },
+            )
+            .expect("register a hook");
 
         let nursery = Nursery::default();
         let mooring = Mooring {
@@ -156,13 +182,38 @@ mod tests {
             "both arms must agree on the same absence"
         );
         let opaque = |v: Option<&Value>| matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG);
-        assert!(
-            opaque(identity_child.env.get("live")),
-            "an identity fork must scrub a handle-carrying binding"
-        );
-        assert!(
-            opaque(wire_child.env.get("live")),
-            "a wire seed must scrub the same binding the same way"
-        );
+        for (arm, child) in [
+            ("an identity fork", &identity_child),
+            ("a wire seed", &wire_child),
+        ] {
+            assert!(
+                opaque(child.env.get("live")),
+                "{arm} must scrub a handle-carrying binding"
+            );
+            assert!(
+                opaque(live_in(child.env.get("blk"))),
+                "{arm} must scrub the handle a block's captured scope binds"
+            );
+            let frame = child
+                .context
+                .handlers
+                .iter()
+                .find_map(|f| f.catch_all.as_ref());
+            assert!(
+                opaque(live_in(frame)),
+                "{arm} must scrub the handle a handler frame's scope binds"
+            );
+            let Some(Value::Native { applied, .. }) = child.env.get("nat") else {
+                panic!("{arm} must keep a partially applied native");
+            };
+            assert!(
+                opaque(applied.first()),
+                "{arm} must scrub a native's applied handle"
+            );
+            assert!(
+                child.context.hooks.is_empty(),
+                "{arm} must leave the parent's hooks behind"
+            );
+        }
     }
 }

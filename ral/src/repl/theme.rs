@@ -59,7 +59,7 @@ impl OutputTheme {
         for (k, v) in pairs {
             match k.as_str() {
                 "value_prefix" => match v {
-                    Value::String(s) => theme.value_prefix.clone_from(s),
+                    Value::String(s) => theme.value_prefix = s.to_string(),
                     other => {
                         return Err(format!(
                             "rc theme 'value_prefix' must be a string; got {}",
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn theme_value_color_none_suppresses_color() {
-        let pairs = map_of(vec![("value_color".into(), Value::String("none".into()))]);
+        let pairs = map_of(vec![("value_color".into(), Value::string("none"))]);
         let theme = OutputTheme::from_map(&pairs).unwrap();
         assert_eq!(theme.value_color, None);
         assert_eq!(theme.value_prefix, "=> ");
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn theme_value_color_unknown_name_rejected() {
-        let pairs = map_of(vec![("value_color".into(), Value::String("purple".into()))]);
+        let pairs = map_of(vec![("value_color".into(), Value::string("purple"))]);
         assert!(OutputTheme::from_map(&pairs).is_err());
     }
 
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn theme_unknown_key_ignored_known_keys_apply() {
         let pairs = map_of(vec![
-            ("wat".into(), Value::String("x".into())),
-            ("value_prefix".into(), Value::String("> ".into())),
+            ("wat".into(), Value::string("x")),
+            ("value_prefix".into(), Value::string("> ")),
         ]);
         let theme = OutputTheme::from_map(&pairs).unwrap();
         assert_eq!(theme.value_prefix, "> ");

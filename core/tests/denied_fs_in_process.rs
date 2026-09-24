@@ -287,7 +287,7 @@ fn grant_fs_read_allows_stdin_redirect_inside_set() {
     let out = must_succeed(&script);
     assert_eq!(
         out,
-        Value::String("line one\nline two\n".into()),
+        Value::string("line one\nline two\n"),
         "granted stdin redirect must read the file"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -416,7 +416,7 @@ fn grant_fs_read_allows_file_info_inside_set() {
     match out {
         Value::Map(m) => assert_eq!(
             m.get("name"),
-            Some(&Value::String("seen.txt".into())),
+            Some(&Value::string("seen.txt")),
             "granted file-info must stat the file and report its name"
         ),
         other => panic!("file-info should return a Map, got {other:?}"),
@@ -461,7 +461,7 @@ fn grant_fs_read_allows_resolve_path_inside_set() {
     let out = must_succeed(&script);
     match out {
         Value::String(s) => assert!(
-            std::path::Path::new(&s).is_absolute(),
+            std::path::Path::new(s.as_str()).is_absolute(),
             "granted resolve-path must return an absolute path, got {s:?}"
         ),
         other => panic!("resolve-path should return a String, got {other:?}"),
@@ -503,10 +503,10 @@ fn grant_fs_write_allows_temp_dir_inside_set() {
     match out {
         Value::String(s) => {
             assert!(
-                std::path::Path::new(&s).is_dir(),
+                std::path::Path::new(s.as_str()).is_dir(),
                 "granted temp-dir must create and return a directory, got {s:?}"
             );
-            let _ = std::fs::remove_dir_all(&s);
+            let _ = std::fs::remove_dir_all(s.as_str());
         }
         other => panic!("temp-dir should return a String, got {other:?}"),
     }
@@ -538,10 +538,10 @@ fn grant_fs_write_allows_temp_file_inside_set() {
     match out {
         Value::String(s) => {
             assert!(
-                std::path::Path::new(&s).is_file(),
+                std::path::Path::new(s.as_str()).is_file(),
                 "granted temp-file must create and return a file, got {s:?}"
             );
-            let _ = std::fs::remove_file(&s);
+            let _ = std::fs::remove_file(s.as_str());
         }
         other => panic!("temp-file should return a String, got {other:?}"),
     }

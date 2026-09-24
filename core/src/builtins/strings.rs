@@ -43,21 +43,21 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_upper(args: &[Value]) -> Value {
-    Value::String(arg0_str(args).to_uppercase())
+    Value::string(arg0_str(args).to_uppercase())
 }
 
 pub(super) fn builtin_lower(args: &[Value]) -> Value {
-    Value::String(arg0_str(args).to_lowercase())
+    Value::string(arg0_str(args).to_lowercase())
 }
 
 pub(super) fn builtin_dedent(args: &[Value]) -> Value {
-    Value::String(dedent(&arg0_str(args)))
+    Value::string(dedent(&arg0_str(args)))
 }
 
 pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
     let sep = args[0].to_string();
     let items = as_list(&args[1], "intercalate")?;
-    Ok(Value::String(
+    Ok(Value::string(
         items
             .iter()
             .map(std::string::ToString::to_string)
@@ -70,7 +70,9 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
     let s = args[0].to_string();
     let start = as_index(&args[1], "slice start")?;
     let length = as_index(&args[2], "slice length")?;
-    Ok(Value::String(s.chars().skip(start).take(length).collect()))
+    Ok(Value::string(
+        s.chars().skip(start).take(length).collect::<String>(),
+    ))
 }
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
@@ -78,13 +80,13 @@ pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(&s)
         .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
-    Ok(Value::list(parts.into_iter().map(Value::String).collect()))
+    Ok(Value::list(parts.into_iter().map(Value::string).collect()))
 }
 
 pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
     let s = arg0_str(args);
     let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
-    Ok(Value::String(quoted.into_owned()))
+    Ok(Value::string(quoted))
 }
 
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
@@ -111,9 +113,8 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
                 "re-replace: pattern not found in input — is the file already updated, \
                  or did the pattern get whitespace-mangled?",
             )),
-            1 => Ok(Value::String(
-                re.replace(&input, args[1].to_string().as_str())
-                    .into_owned(),
+            1 => Ok(Value::string(
+                re.replace(&input, args[1].to_string().as_str()),
             )),
             n => Err(sig(format!(
                 "re-replace: pattern matches {n} times — must match exactly once; \
@@ -166,7 +167,7 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
             "string-replace: 'from' not found in input — did the pattern get \
              whitespace-mangled?",
         )),
-        1 => Ok(Value::String(input.replacen(&from, &to, 1))),
+        1 => Ok(Value::string(input.replacen(&from, &to, 1))),
         n => Err(sig(format!(
             "string-replace: 'from' matches {n} times — must match exactly once; \
              widen the pattern with surrounding context to disambiguate"
@@ -176,9 +177,9 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace-all", args, |re, args| {
-        Ok(Value::String(
-            re.replace_all(&args[2].to_string(), args[1].to_string().as_str())
-                .into_owned(),
+        let input = args[2].to_string();
+        Ok(Value::string(
+            re.replace_all(&input, args[1].to_string().as_str()),
         ))
     })
 }
@@ -186,9 +187,7 @@ pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
 pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
     with_regex("re-split", args, |re, args| {
         let input = args[1].to_string();
-        Ok(Value::list(
-            re.split(&input).map(|p| Value::String(p.into())).collect(),
-        ))
+        Ok(Value::list(re.split(&input).map(Value::string).collect()))
     })
 }
 
@@ -203,7 +202,7 @@ pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
     with_regex("re-find-match", args, |re, args| {
         let input = args[1].to_string();
         match re.find(&input) {
-            Some(m) => Ok(Value::String(m.as_str().to_owned())),
+            Some(m) => Ok(Value::string(m.as_str())),
             None => Err(sig(format!(
                 "re-find-match: no match for pattern '{}'",
                 args[0]
@@ -217,7 +216,7 @@ pub(super) fn builtin_find_matches(args: &[Value]) -> Settled<Value> {
         let input = args[1].to_string();
         Ok(Value::list(
             re.find_iter(&input)
-                .map(|m| Value::String(m.as_str().to_owned()))
+                .map(|m| Value::string(m.as_str()))
                 .collect(),
         ))
     })
@@ -323,5 +322,8 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
 /// The renderer `echo` lowers through ([`Value`]'s `Display`).  Bytes go lossy
 /// here; `from-string` is the faithful decode, and errors on invalid UTF-8.
 pub(super) fn builtin_to_string(args: &[Value]) -> Value {
-    Value::String(args[0].to_string())
+    match &args[0] {
+        s @ Value::String(_) => s.clone(),
+        v => Value::string(v.to_string()),
+    }
 }

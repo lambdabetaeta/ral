@@ -79,7 +79,8 @@ impl Env {
 
     /// Rebuild an `Env` from its three tiers — `crate::serial`'s receiving
     /// side, which decodes only `bindings` and seats it under the receiver's
-    /// own `natives`/`prelude`.
+    /// own `natives`/`prelude`, and the fork's scrub, which replaces only
+    /// `bindings`.
     pub(crate) fn from_parts(
         natives: Arc<NativeMap>,
         prelude: Arc<PreludeMap>,
@@ -147,39 +148,6 @@ impl Env {
             .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
     }
 
-    /// The serializable fragment of this environment: every `Value::Handle`
-    /// binding in the session tier replaced by its opaque placeholder.  The
-    /// prelude is untouched — it is baked before any handle exists, so no
-    /// handle ever reaches it — and neither is `natives`, seeded once at
-    /// boot from language constants.
-    ///
-    /// The one snapshot law's whole mechanism: an identity fork and a wire
-    /// seed must resolve every name to the same value or the same absence,
-    /// and a handle has no wire form, so both arms scrub it the same way —
-    /// this one, called from the one place both pass through,
-    /// `Shell::fork_scrubbed`.
-    pub(crate) fn scrub_handles(&self) -> Self {
-        let bindings = self
-            .bindings
-            .iter()
-            .map(|(name, binding)| {
-                let value = crate::serial::scrub_handles(&binding.value);
-                (
-                    name.clone(),
-                    Binding {
-                        value,
-                        scheme: binding.scheme.clone(),
-                    },
-                )
-            })
-            .collect();
-        Self {
-            natives: self.natives.clone(),
-            prelude: self.prelude.clone(),
-            bindings,
-        }
-    }
-
     /// Walk `bindings` then `prelude`, projecting each binding on first sight
     /// of its name.  The single home of the shadowing rule.
     pub(crate) fn fold_union<T>(&self, project: impl Fn(&Binding) -> T) -> Vec<(String, T)> {
@@ -229,8 +197,9 @@ impl Env {
     }
 
     /// The session tier's persistent map root — `crate::serial` interns
-    /// environments by this root's identity, and needs the map itself, not
-    /// its contents, to compare by [`imbl::GenericHashMap::ptr_eq`].
+    /// environments by this root's identity, as the fork's scrub memoises
+    /// them, and both need the map itself, not its contents, to compare by
+    /// [`imbl::GenericHashMap::ptr_eq`].
     pub(crate) fn bindings_root(&self) -> &BindingMap {
         &self.bindings
     }
@@ -408,7 +377,7 @@ mod tests {
     fn deep_closure_chain_drops_on_a_small_stack() {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
-            .spawn(|| drop(crate::types::deep_block_chain(100_000)))
+            .spawn(|| drop(crate::types::deep_block_chain(100_000, Value::Unit)))
             .expect("spawn")
             .join()
             .expect("a deep chain must drop without exhausting the stack");
@@ -423,12 +392,12 @@ mod tests {
         prelude.insert(
             "map".to_string(),
             Binding {
-                value: Value::String("prelude-map".into()),
+                value: Value::string("prelude-map"),
                 scheme: None,
             },
         );
         let mut env = Env::with_prelude(Arc::new(NativeMap::default()), Arc::new(prelude));
-        assert_eq!(env.get("map"), Some(&Value::String("prelude-map".into())));
+        assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
 
         env.bind(
             "map".to_string(),
@@ -440,6 +409,6 @@ mod tests {
         assert_eq!(env.get("map"), Some(&Value::Int(3)));
 
         env.unset("map");
-        assert_eq!(env.get("map"), Some(&Value::String("prelude-map".into())));
+        assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
     }
 }

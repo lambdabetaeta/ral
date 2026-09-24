@@ -631,7 +631,7 @@ fn project_slug(cwd: &str) -> String {
 /// children inherit it, and a scope binding, so `$name` resolves in ral source.
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
     shell.set_env_var(name, value);
-    shell.set_var(name.into(), ral_core::types::Value::String(value.into()));
+    shell.set_var(name.into(), ral_core::types::Value::string(value));
 }
 
 #[cfg(test)]

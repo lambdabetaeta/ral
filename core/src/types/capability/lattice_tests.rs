@@ -19,7 +19,7 @@ fn map(entries: Vec<(&str, Value)>) -> Value {
 }
 
 fn strs(items: &[&str]) -> Value {
-    Value::list(items.iter().map(|s| Value::String((*s).into())).collect())
+    Value::list(items.iter().map(|s| Value::string(*s)).collect())
 }
 
 /// A path literal in the host's normal form (`/usr/bin` → `\usr\bin` on
@@ -617,8 +617,8 @@ fn decode_accepts_known_tokens() {
         (
             "exec",
             map(vec![
-                ("xdg:bin/", Value::String("allow".into())),
-                ("/usr/bin/", Value::String("allow".into())),
+                ("xdg:bin/", Value::string("allow")),
+                ("/usr/bin/", Value::string("allow")),
             ]),
         ),
         (
@@ -658,8 +658,8 @@ fn decode_rewrites_sigils_to_concrete_paths() {
         (
             "exec",
             map(vec![
-                ("xdg:bin/", Value::String("allow".into())),
-                ("/usr/bin/", Value::String("allow".into())),
+                ("xdg:bin/", Value::string("allow")),
+                ("/usr/bin/", Value::string("allow")),
             ]),
         ),
         ("fs", map(vec![("read", strs(&["~/notes", "/etc"]))])),
@@ -685,10 +685,7 @@ fn decode_rewrites_sigils_to_concrete_paths() {
 #[cfg(unix)]
 #[test]
 fn decode_rejects_directory_as_literal_command() {
-    let v = map(vec![(
-        "exec",
-        map(vec![("/etc", Value::String("allow".into()))]),
-    )]);
+    let v = map(vec![("exec", map(vec![("/etc", Value::string("allow"))]))]);
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
     assert!(err.contains("/etc/"), "should hint the slash: {err}");
 }
@@ -742,20 +739,14 @@ fn decode_rejects_dot_relative_fs_paths() {
 /// It carries a `/`, so it is a path, not a bare command name.
 #[test]
 fn decode_rejects_relative_exec_literal() {
-    let v = map(vec![(
-        "exec",
-        map(vec![("./foo", Value::String("allow".into()))]),
-    )]);
+    let v = map(vec![("exec", map(vec![("./foo", Value::string("allow"))]))]);
     assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
 }
 
 /// A bare name is a name, not a path, so the absoluteness rule spares it.
 #[test]
 fn decode_accepts_bare_exec_name() {
-    let v = map(vec![(
-        "exec",
-        map(vec![("git", Value::String("allow".into()))]),
-    )]);
+    let v = map(vec![("exec", map(vec![("git", Value::string("allow"))]))]);
     let caps =
         decode_capability_map(&v, "test", &test_ctx("/h")).expect("bare command name is exempt");
     assert!(caps.exec.unwrap().literals.contains_key("git"));
@@ -776,10 +767,7 @@ fn decode_accepts_cwd_relative_fs_path() {
 /// fold to `false` that would quietly deny the capability.
 #[test]
 fn decode_rejects_non_bool_editor_field() {
-    let v = map(vec![(
-        "editor",
-        map(vec![("write", Value::String("yes".into()))]),
-    )]);
+    let v = map(vec![("editor", map(vec![("write", Value::string("yes"))]))]);
     let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
     assert!(err.contains("Bool"), "should name the expected type: {err}");
 }

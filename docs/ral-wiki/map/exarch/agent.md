@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5803377b
+generated_at_commit: 4dc94095
 generated_at_date: 2026-09-24
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -726,12 +726,14 @@ controlling terminal the TUI owns).
 
 - **The fork.** The spawn builtin (`fork_then_enquire`,
   `shell_eval/builtins/harness.rs`) forks through `Shell::fork_scrubbed`, the
-  one door both spawn arms take ([[design/agents|agents]]'s one snapshot law).
-  It replaces each `Value::Handle` in a session binding — through lists, maps
-  and variant payloads — with an `` `opaque `` placeholder, the name staying
-  bound (`Env::scrub_handles`, [[map/core/transport|transport]]). Closures stay
-  live, and the scrub does not enter them: a handle in a closure's captured
-  scope, a native's `applied` arguments or a handler arm survives it.
+  one door both spawn arms take ([[design/agents|agents]]'s one snapshot law);
+  the wire arm reaches it inside `listen_for_hatch`, which scrubs the shell it
+  is handed. The scrub replaces each `Value::Handle` the fork reaches with an
+  `` `opaque `` placeholder — in a session binding, in any scope a closure
+  captured, in a native's `applied` arguments, in a handler frame's arms — the
+  name staying bound, and empties the hooks
+  ([[map/core/shell-state|the flow matrix]]). Closures stay live, and a parent
+  that reaches no handle forks with its scope shared, not copied.
 - **The lease.** On the in-process (`Fork::Park`) arm the fork is dressed with
   `bootstrap::arm_session_ledgers`, which seals every name visible at that
   instant as baseline: inherited scratch is never pruned in the child
@@ -791,9 +793,10 @@ bars a desk handler from holding the `&mut Shell` a fork needs:
   descriptor `shell_eval/builtins/guest_port.rs` has already bound — the one
   `AF_VSOCK` endpoint exarch opens itself, and Linux-only because a guest port
   means nothing outside a VM, while core's half is plain Unix plumbing tested
-  over `UnixListener` pairs on the production path. The scrubbed fork is
-  packed into an `EngineSeed` on the caller's own thread — a `Shell` never
-  leaves it — and a thread is left on the socket. The enquiry names
+  over `UnixListener` pairs on the production path. `listen_for_hatch`
+  scrubs the shell it is handed and packs the fork into an `EngineSeed` on the
+  caller's own thread — a `Shell` never leaves it — and a thread is left on
+  the socket. The enquiry names
   `` `listening [port, token] ``.
 
 The desk's wire arm dials that port through its **`Dial`** capability

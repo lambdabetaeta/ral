@@ -25,6 +25,7 @@ mod init;
 pub(crate) mod modules;
 pub(crate) mod repl;
 mod scope;
+mod scrub;
 pub(crate) mod workers;
 
 use self::bindings::BindingLedger;
@@ -264,18 +265,6 @@ impl Shell {
                     .with_hint(crate::types::NO_DESK_HINT),
             ),
         }
-    }
-
-    /// Fork this shell ([`Self::fork_session`]) for a child engine to inherit.
-    ///
-    /// The one snapshot law lands here: the fork's scope is scrubbed of
-    /// `Value::Handle` bindings, so an identity-adopted child and a
-    /// wire-hatched one — both forked here — resolve every name to the same
-    /// value or the same absence.
-    pub fn fork_scrubbed(&self) -> Self {
-        let mut fork = self.fork_session();
-        fork.env = fork.env.scrub_handles();
-        fork
     }
 
     /// [`Self::fork_scrubbed`] plus the in-process hand-off: park the fork in

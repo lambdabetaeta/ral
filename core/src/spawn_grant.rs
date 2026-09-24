@@ -121,7 +121,7 @@ mod tests {
             "fs".to_string(),
             Value::map(vec![(
                 "read".to_string(),
-                Value::list(vec![Value::String("cwd:".to_string())]),
+                Value::list(vec![Value::string("cwd:")]),
             )]),
         )]);
         let layer = restrict(&record)
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn a_malformed_restriction_is_refused_by_the_decoder() {
-        let record = Value::map(vec![("net".to_string(), Value::String("yes".to_string()))]);
+        let record = Value::map(vec![("net".to_string(), Value::string("yes"))]);
         let refusal = restrict(&record)
             .layer(unreachable_narrower, Path::new("/work/proj"), None)
             .expect_err("a net axis that is not a Bool");

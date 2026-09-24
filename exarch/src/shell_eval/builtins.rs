@@ -275,7 +275,7 @@ fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             .map(|i| {
                 Value::map(vec![
                     ("line".into(), line_no(i)),
-                    ("text".into(), Value::String(rows[i].clone())),
+                    ("text".into(), Value::string(rows[i].clone())),
                 ])
             })
             .collect(),
@@ -293,8 +293,8 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             .map(|i| {
                 Value::map(vec![
                     ("line".into(), line_no(i)),
-                    ("hash".into(), Value::String(hashes[i].clone())),
-                    ("text".into(), Value::String(rows[i].clone())),
+                    ("hash".into(), Value::string(hashes[i].clone())),
+                    ("text".into(), Value::string(rows[i].clone())),
                 ])
             })
             .collect(),
@@ -409,9 +409,9 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             )]
             let line = hit.line as i64;
             Value::map(vec![
-                ("file".into(), Value::String(hit.file)),
+                ("file".into(), Value::string(hit.file)),
                 ("line".into(), Value::Int(line)),
-                ("text".into(), Value::String(hit.text)),
+                ("text".into(), Value::string(hit.text)),
             ])
         })
         .collect();
@@ -763,12 +763,11 @@ fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
                     .path()
                     .strip_prefix(&root)
                     .unwrap_or_else(|_| entry.path())
-                    .to_string_lossy()
-                    .into_owned();
+                    .to_string_lossy();
                 if !readable(shell, &rel) {
                     continue;
                 }
-                results.push(Value::String(rel));
+                results.push(Value::string(rel));
             }
             Err(e) => {
                 let _ = writeln!(shell.stderr_mut(), "explore-dir: {e}");
@@ -870,7 +869,7 @@ fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled
     let allowed = paths
         .into_iter()
         .filter(|rel| readable(shell, rel))
-        .map(Value::String)
+        .map(Value::string)
         .collect();
     Ok(Value::list(allowed))
 }
@@ -906,7 +905,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     let name = args[0].to_string();
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(&name) {
-        return Settled::Ok(Value::String(format!("skill not found: {name}")));
+        return Settled::Ok(Value::string(format!("skill not found: {name}")));
     }
     let cwd = shell.cwd();
     let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
@@ -924,7 +923,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             let body = match skill::read_skill_body(&dir) {
                 Ok(body) => body,
                 Err(why) => {
-                    return Settled::Ok(Value::String(format!(
+                    return Settled::Ok(Value::string(format!(
                         "could not read skill {name}: {why}"
                     )));
                 }
@@ -932,21 +931,18 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             // Only once the body is in hand, so the card never claims a load
             // that did not happen.
             mooring.surface(&Value::map(vec![
-                ("io".into(), Value::String("skill".into())),
-                ("name".into(), Value::String(name)),
-                (
-                    "dir".into(),
-                    Value::String(dir.to_string_lossy().into_owned()),
-                ),
+                ("io".into(), Value::string("skill")),
+                ("name".into(), Value::string(name)),
+                ("dir".into(), Value::string(dir.to_string_lossy())),
             ]));
-            return Settled::Ok(Value::String(format!(
+            return Settled::Ok(Value::string(format!(
                 "// skill root: {}\n\n{}",
                 dir.display(),
                 body
             )));
         }
     }
-    Settled::Ok(Value::String(format!("skill not found: {name}")))
+    Settled::Ok(Value::string(format!("skill not found: {name}")))
 }
 
 fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
@@ -982,10 +978,10 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     )]
     let count = out.lines().count() as i64;
     mooring.surface(&Value::map(vec![
-        ("io".into(), Value::String("skill-list".into())),
+        ("io".into(), Value::string("skill-list")),
         ("count".into(), Value::Int(count)),
     ]));
-    Settled::Ok(Value::String(out))
+    Settled::Ok(Value::string(out))
 }
 
 /// `service-handle :: ∀α. Int → F (Handle α)` — the per-call-site α instantiation
@@ -1213,7 +1209,7 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let m = Mooring::adrift();
         m.cancel.cancel(ral_core::process::CancelCause::Interrupt);
-        let err = builtin_grep_files(&[Value::String("x".into())], &m, &mut shell)
+        let err = builtin_grep_files(&[Value::string("x")], &m, &mut shell)
             .expect_err("a cancelled scope must abort the search walk");
         assert_eq!(status(err), 130);
     }

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5803377b
+generated_at_commit: 4dc94095
 generated_at_date: 2026-09-24
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -35,7 +35,12 @@ everything `crate::types::*`.
   one gate, declared once so the static refusal and the pre-spawn one cannot
   disagree ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - `list.rs` / `map.rs` — `List` and `Map`, opaque newtypes over persistent
-  `imbl::Vector` / `imbl::OrdMap`.
+  `imbl::Vector` / `imbl::OrdMap`; `string.rs` / `bytes.rs` — `Str` and
+  `Bytes`, newtypes over `Arc<String>` / `Arc<Vec<u8>>`, so an owned buffer
+  moves in without a copy. `Value::string` / `Value::bytes` are their one
+  construction door, as `Value::list` is a list's. **Cloning a `Value` copies
+  no payload**: a string, a byte string, a list or map spine and a closure's
+  scope are all shared, and `Env` and variable lookup rely on it.
 - `flow.rs` — the whole control-flow surface, four declarations:
   `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable, `Escape`
   propagating), `Escape` (`Exit` alone — ral does not suspend, so there is no
@@ -54,15 +59,13 @@ everything `crate::types::*`.
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  **A shared write clones a node, not an entry**: `bindings` is a persistent
-  hash map, so a `bind` into an environment another holder still references
-  copies the touched node, and copying a node clones every `Binding` stored
-  inline in it. `Binding.scheme` sits behind an `Arc` so that clone is one
-  pointer regardless of the scheme's own size; `Value::String` and
-  `Value::Bytes` are not behind one, so a large string or byte buffer bound
-  anywhere in the touched node is still cloned in full on that write. The
-  wire form and `binding_schemes` keep their own types and convert at their
-  boundaries.
+  **A shared write clones a node, and a node clones cheaply**: `bindings` is
+  a persistent hash map, so a `bind` into an environment another holder still
+  references copies the touched node, and copying a node clones every
+  `Binding` stored inline in it. Each such clone is cheap, whatever the
+  binding holds: `Binding.scheme` sits behind an `Arc`, and the value copies
+  no payload (above). The wire form and `binding_schemes` keep their own
+  types and convert at their boundaries.
 - `coerce.rs` — the `sig` / `sig_hint` / `sig_at` runtime-error constructors
   (the last positioned at a span the caller already holds) and the `as_map`
   family of `Value` → `Map` coercions, sitting below both the builtin and
@@ -338,10 +341,11 @@ Methods on `Shell` live by concern, one submodule each:
   splitting the disjoint context/audit borrow for the audit-bearing checks;
 - `cwd.rs` (`Cwd`; `seed_cwd` lets an in-process front end whose working
   directory is not the process cwd state it directly), `inherit.rs` (the
-  flow matrix, below), `modules.rs`, `detached.rs` (the `detach` budget),
-  `control.rs`, `hooks.rs` (the session-lived hook table of named run-entry
-  points — prompt render, startup, plugin hooks — each a block, a lambda or a
-  builtin, resolved by the run door's hook-program arm under the hook's
+  flow matrix, below), `scrub.rs` (`Shell::fork_scrubbed` and its `Scrub`,
+  the one snapshot law's whole mechanism, below), `modules.rs`, `detached.rs`
+  (the `detach` budget), `hooks.rs` (the session-lived hook table of named
+  run-entry points — prompt render, startup, plugin hooks — each a block, a
+  lambda or a builtin, resolved by the run door's hook-program arm under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
   fault in a hook run is labelled by `HookName::fault_label`, and a hook run
   is no ready boundary), `repl.rs` (`ReplScratch`, the
@@ -396,16 +400,25 @@ default for a store that is not the session's:
   run door runs a hook there when its registered `DefaultPolicy` says
   `aside` (the REPL's buffer-change hooks).
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
-  specialisation of `child_from`. `fork_scrubbed` is the door every sub-agent
-  fork actually passes through: `fork_session` plus `Env::scrub_handles`,
-  which rebuilds every session-tier binding through `serial::scrub_handles`,
-  replacing each `Value::Handle` reached through a list, map, or variant
-  payload with an `` `opaque `` placeholder — the binding's name and scheme
-  survive. Neither arm of the fork carries a live handle at top level, but the
-  scrub walks no closure, and never the fork's `context`: a handle inside a
-  closure's captured scope, a native's `applied` arguments or a handler arm
-  is untouched ([[map/core/transport|transport]]). See
-  [[map/exarch/agent|agent]].
+  specialisation of `child_from`. `fork_scrubbed` (`scrub.rs`) is the door
+  every sub-agent fork actually passes through: `fork_session`, then one
+  `Scrub` over every root the fork holds — the session scope and each
+  handler frame's arms (`HandlerStack::values_mut`) — then an empty hook
+  table. The scrub replaces each `Value::Handle` it reaches with an
+  `` `opaque `` placeholder, the binding's name and scheme surviving.
+  - It walks *scopes*, not values: each scope the roots reach, once, by
+    `ptr_eq` root identity, dependencies first, on an explicit stack — so a
+    chain of closures costs no host stack, and a scope many closures share
+    is visited once.
+  - Within a scope it recurses through data only — lists, maps, variant
+    payloads, a native's `applied` arguments. A closure is never entered: it
+    is re-seated over its captured scope's scrubbed replacement.
+  - A rebuilt scope or container is its original with only the changed
+    entries overwritten, and one that reaches no handle is kept whole: a
+    shell reaching no handle forks as itself, its session map `ptr_eq` to
+    the parent's.
+
+  See [[map/core/transport|transport]] and [[map/exarch/agent|agent]].
 
 Every genuine fork copies `session.builtins` (the dispatch table) and shares
 `session.guest_jail`, so dispatch reaches the child and a guest's workers,

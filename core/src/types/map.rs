@@ -34,6 +34,10 @@ impl Map {
         self.0.contains_key(key)
     }
 
+    pub(crate) fn insert(&mut self, key: String, v: Value) {
+        self.0.insert(key, v);
+    }
+
     pub fn iter(&self) -> Iter<'_> {
         Iter(self.0.iter())
     }

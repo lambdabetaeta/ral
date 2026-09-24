@@ -31,7 +31,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
         Val::Int(n) => Ok(Value::Int(*n)),
         Val::Float(f) => Ok(Value::Float(*f)),
         Val::Bool(b) => Ok(Value::Bool(*b)),
-        Val::String(s) => Ok(Value::String(s.clone())),
+        Val::String(s) => Ok(Value::string(s.clone())),
         Val::Variable(name) => env.get(name).cloned().ok_or_else(|| {
             let hint = match name.as_str() {
                 "STATUS" => {
@@ -133,7 +133,7 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env) -> Result<Value, Error> {
                     )
                     .with_hint("use str to convert"));
                 };
-                (key, v)
+                (key.into_string(), v)
             }
             MapPart::Spread(_) => continue,
         };

@@ -694,7 +694,7 @@ mod tests {
     fn rc_recursion_limit_wrong_type_rejected() {
         let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "recursion_limit".into(),
-            Value::String("lots".into()),
+            Value::string("lots"),
         )]));
         assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
         assert!(err.contains("recursion_limit"));
@@ -706,7 +706,7 @@ mod tests {
     fn rc_edit_mode_invalid_rejected() {
         let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "edit_mode".into(),
-            Value::String("typo".into()),
+            Value::string("typo"),
         )]));
         assert!(err.contains("edit_mode"));
 
@@ -718,10 +718,8 @@ mod tests {
     /// A wrong-typed `bell` refuses the whole map, naming the field.
     #[test]
     fn rc_bell_wrong_type_rejected() {
-        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "bell".into(),
-            Value::String("yes".into()),
-        )]));
+        let (_, err) =
+            apply_to_fresh_env_rejected(Value::map(vec![("bell".into(), Value::string("yes"))]));
         assert!(err.contains("bell"));
     }
 
@@ -792,7 +790,7 @@ mod tests {
         );
         let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
             "surface".into(),
-            Value::String("bogus".into()),
+            Value::string("bogus"),
         )]));
         assert!(err.contains("surface"));
     }
@@ -810,13 +808,13 @@ mod tests {
         let shell = apply_to_fresh_env(Value::map(vec![(
             "bindings".into(),
             Value::map(vec![
-                ("greeting".into(), Value::String("hello".into())),
+                ("greeting".into(), Value::string("hello")),
                 ("n".into(), Value::Int(42)),
             ]),
         )]));
         assert_eq!(
             shell.scope_lookup("greeting"),
-            Some(&Value::String("hello".into()))
+            Some(&Value::string("hello"))
         );
         assert_eq!(shell.scope_lookup("n"), Some(&Value::Int(42)));
     }
@@ -849,7 +847,7 @@ mod tests {
     fn rc_env_aliases_bindings_wrong_type_rejected() {
         let (shell, _) = apply_to_fresh_env_rejected(Value::map(vec![
             ("env".into(), Value::Int(7)),
-            ("aliases".into(), Value::String("x".into())),
+            ("aliases".into(), Value::string("x")),
             ("bindings".into(), Value::Bool(true)),
         ]));
         assert!(!shell.has_alias("x"));

@@ -221,7 +221,7 @@ impl TerminalState {
                 "ui_bracketed_paste_ok".into(),
                 Value::Bool(self.ui_bracketed_paste_ok()),
             ),
-            ("mode".into(), Value::String(mode.into())),
+            ("mode".into(), Value::string(mode)),
         ])
     }
 }
@@ -648,9 +648,6 @@ mod tests {
         expect_bool("ui_hyperlinks_ok", state.ui_hyperlinks_ok());
         expect_bool("ui_clipboard_write_ok", state.ui_clipboard_write_ok());
         expect_bool("ui_bracketed_paste_ok", state.ui_bracketed_paste_ok());
-        assert_eq!(
-            get("mode"),
-            Some(crate::types::Value::String("full".into())),
-        );
+        assert_eq!(get("mode"), Some(crate::types::Value::string("full")));
     }
 }

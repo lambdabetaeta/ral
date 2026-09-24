@@ -272,7 +272,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
 
 fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<String, String> {
     match value {
-        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::String(s)) => Ok(s.to_string()),
         Some(other) => Err(format!(
             "{where_}: '{field}' must be a string, got {}",
             other.type_name()
@@ -296,7 +296,7 @@ fn optional_string_field(
         Some(Value::String(s)) if s.is_empty() => Err(format!(
             "{where_}: '{field}' is empty — omit it entirely for a no-auth endpoint"
         )),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(Value::String(s)) => Ok(Some(s.to_string())),
         Some(other) => Err(format!(
             "{where_}: '{field}' must be a string, got {}",
             other.type_name()

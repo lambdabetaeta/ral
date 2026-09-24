@@ -332,6 +332,7 @@ impl Drop for NurseryGuard {
 mod tests {
     use super::*;
     use crate::serial::{FOValue, OPAQUE_TAG};
+    use crate::types::idle_handle;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -341,24 +342,6 @@ mod tests {
         fn emit(&self, ev: &FOValue) {
             self.0.lock().unwrap().push(ev.clone());
         }
-    }
-
-    /// A `Handle` with no worker behind it — just enough to exercise
-    /// [`Mooring::surface`]'s totality, never run.
-    fn dummy_handle() -> Value {
-        use crate::types::{HandleInner, HandleState};
-        Value::Handle(Box::new(HandleInner {
-            result: Arc::new(Mutex::new(None)),
-            cached: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(HandleState::Running)),
-            stdout_buf: crate::io::ByteBuffer::default(),
-            stderr_buf: crate::io::ByteBuffer::default(),
-            surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Arc::new(Mutex::new(false)),
-            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-            cmd: "<test>".into(),
-            cancel: crate::process::CancelScope::default(),
-        }))
     }
 
     fn mooring_with(recorder: Arc<RecordingSink>) -> Mooring {
@@ -374,7 +357,7 @@ mod tests {
         let recorder = Arc::new(RecordingSink::default());
         let mooring = mooring_with(recorder.clone());
 
-        mooring.surface(&Value::map(vec![("value".to_string(), dummy_handle())]));
+        mooring.surface(&Value::map(vec![("value".to_string(), idle_handle())]));
 
         let emitted = recorder.0.lock().unwrap().clone();
         assert_eq!(emitted.len(), 1, "the emission must not be dropped");

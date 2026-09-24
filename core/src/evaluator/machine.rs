@@ -263,11 +263,11 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
     let list = Value::list(
         Value::render_argv(argv)
             .into_iter()
-            .map(Value::String)
+            .map(Value::string)
             .collect(),
     );
     match arity {
-        HandlerArity::CatchAll => vec![Value::String(name.to_string()), list],
+        HandlerArity::CatchAll => vec![Value::string(name), list],
         HandlerArity::Unary => vec![list],
     }
 }
@@ -538,7 +538,7 @@ impl Machine {
                 for p in parts {
                     s.push_str(&interpolate_piece(&close(p, &env)?)?);
                 }
-                Focus::Return(Terminal::Value(Value::String(s)))
+                Focus::Return(Terminal::Value(Value::string(s)))
             }
 
             CompKind::Binary(op, lhs, rhs) => {
@@ -636,7 +636,10 @@ impl Machine {
 
             CompKind::Decode(val) => {
                 let v = close(val, &env)?;
-                let Value::Bytes(mut bytes) = v else {
+                // The bind's scope dies before the decode, not after it, so the
+                // capture's buffer is unshared and taken over, not copied.
+                drop(env);
+                let Value::Bytes(bytes) = v else {
                     return Err(Break::Error(
                         Error::new(
                             format!(
@@ -651,8 +654,9 @@ impl Machine {
                         ),
                     ));
                 };
+                let mut bytes = bytes.into_vec();
                 io::strip_trailing_newline(&mut bytes);
-                Focus::Return(Terminal::Value(Value::String(
+                Focus::Return(Terminal::Value(Value::string(
                     crate::builtins::util::decode_utf8_strict(
                         bytes,
                         "captured output is not valid UTF-8",
@@ -882,7 +886,7 @@ impl Machine {
                 if overflowed {
                     return abandon_capture(&bytes, capture_overflowed(), span, shell);
                 }
-                Focus::Return(Terminal::Value(Value::Bytes(bytes)))
+                Focus::Return(Terminal::Value(Value::bytes(bytes)))
             }
 
             Frame::Redirect(state) => {

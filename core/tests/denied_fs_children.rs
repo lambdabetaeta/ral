@@ -166,7 +166,7 @@ fn external_read_inside_grant_succeeds() {
     let out = result.expect("a confined external reading inside the grant must succeed");
     assert_eq!(
         out,
-        Value::String("PLAINTEXT\n".into()),
+        Value::string("PLAINTEXT\n"),
         "in-prefix read should have returned the file's bytes"
     );
     let _ = std::fs::remove_dir_all(&work);

@@ -160,7 +160,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
         }
     }
     let name = match map.get("name") {
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::String(s)) => s.to_string(),
         Some(other) => {
             return Err(load_err(format!(
                 "manifest 'name': expected String, got {}",
@@ -248,7 +248,7 @@ where
             )));
         };
         let key = match map.get("key") {
-            Some(Value::String(s)) => s.clone(),
+            Some(Value::String(s)) => s.to_string(),
             Some(other) => {
                 return Err(load_err(format!(
                     "keybinding 'key': expected String, got {}",
@@ -268,7 +268,7 @@ where
             None => return Err(load_err("keybinding entry missing 'handler' field")),
         };
         let guard = match map.get("guard") {
-            Some(Value::String(g)) => Some(g.clone()),
+            Some(Value::String(g)) => Some(g.to_string()),
             Some(other) => {
                 return Err(load_err(format!(
                     "keybinding '{key}': guard: expected String, got {}",
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn capabilities_key_is_rejected() {
         let manifest = Value::map(vec![
-            ("name".into(), Value::String("p".into())),
+            ("name".into(), Value::string("p")),
             ("capabilities".into(), Value::map(vec![])),
         ]);
         let err = parse(&manifest).expect_err("a manifest with capabilities: must be rejected");
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn unknown_key_names_the_manifests_list() {
         let manifest = Value::map(vec![
-            ("name".into(), Value::String("p".into())),
+            ("name".into(), Value::string("p")),
             ("hookz".into(), Value::map(vec![])),
         ]);
         let err = parse(&manifest).expect_err("an unknown key must be rejected");
@@ -348,7 +348,7 @@ mod tests {
 
         let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
         for key in table.keys {
-            let mut fields = vec![("name".into(), Value::String("p".into()))];
+            let mut fields = vec![("name".into(), Value::string("p"))];
             if key.label != "name" {
                 let value = if key.label == "keybindings" {
                     Value::list(vec![])
@@ -388,7 +388,7 @@ mod tests {
     /// record carrying its name and no aliases.
     #[test]
     fn manifest_without_capabilities_parses() {
-        let manifest = Value::map(vec![("name".into(), Value::String("p".into()))]);
+        let manifest = Value::map(vec![("name".into(), Value::string("p"))]);
         let (manifest, handlers) = parse(&manifest).expect("clean manifest parses");
         assert_eq!(manifest.name, "p");
         assert!(handlers.aliases.is_empty());
@@ -407,11 +407,11 @@ mod tests {
 
     fn keybinding_entry(key: &str, guard: Option<&str>) -> Value {
         let mut fields = vec![
-            ("key".into(), Value::String(key.into())),
+            ("key".into(), Value::string(key)),
             ("handler".into(), dummy_block()),
         ];
         if let Some(g) = guard {
-            fields.push(("guard".into(), Value::String(g.into())));
+            fields.push(("guard".into(), Value::string(g)));
         }
         Value::map(fields)
     }
@@ -428,7 +428,7 @@ mod tests {
             ("keybindings", Value::Int(7), "List"),
         ] {
             let manifest = Value::map(vec![
-                ("name".into(), Value::String("p".into())),
+                ("name".into(), Value::string("p")),
                 (field.into(), value),
             ]);
             let err = parse(&manifest).expect_err("wrong type must be rejected");
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn non_block_handler_is_load_error() {
         let entry = Value::map(vec![
-            ("key".into(), Value::String("ctrl-t".into())),
+            ("key".into(), Value::string("ctrl-t")),
             ("handler".into(), Value::Int(3)),
         ]);
         let err = parse_keybindings(std::iter::once(entry))
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn non_string_guard_is_load_error() {
         let entry = Value::map(vec![
-            ("key".into(), Value::String("ctrl-t".into())),
+            ("key".into(), Value::string("ctrl-t")),
             ("handler".into(), dummy_block()),
             ("guard".into(), Value::Int(3)),
         ]);

@@ -113,8 +113,8 @@ mod tests {
             (Value::Bool(true), Ty::Bool),
             (Value::Int(1), Ty::Int),
             (Value::Float(1.0), Ty::Float),
-            (Value::String("x".into()), Ty::String),
-            (Value::Bytes(vec![1]), Ty::Bytes),
+            (Value::string("x"), Ty::String),
+            (Value::bytes(vec![1]), Ty::Bytes),
             (Value::List(vec![].into()), Ty::List(Box::new(Ty::String))),
             (Value::map(vec![]), Ty::Map(Box::new(Ty::Int))),
             // A tagged value renders, so neither side refuses it.

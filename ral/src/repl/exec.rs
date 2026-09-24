@@ -239,7 +239,7 @@ mod tests {
         run(line, &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::String(line.into()), Value::Int(7)]
+            vec![Value::string(line), Value::Int(7)]
         );
     }
 
@@ -257,9 +257,6 @@ mod tests {
     fn pre_exec_passes_src_in_one_event_record() {
         let (t, host, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
         run("return ()", &t, &host);
-        assert_eq!(
-            *sink.lock().unwrap(),
-            vec![Value::String("return ()".into())]
-        );
+        assert_eq!(*sink.lock().unwrap(), vec![Value::string("return ()")]);
     }
 }

@@ -56,7 +56,7 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
         Err(b) => return b,
     };
     let message = match lookup("message") {
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::String(s)) => s.to_string(),
         _ => {
             return Break::Error(Error::new(
                 "fail: this error record has no String `message` — the message is the text the failure carries",
@@ -147,5 +147,5 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     }
     let len = crate::io::str_strip_one_terminator(&line).len();
     line.truncate(len);
-    Ok(Value::String(line))
+    Ok(Value::string(line))
 }

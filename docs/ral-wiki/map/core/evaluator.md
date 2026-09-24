@@ -69,8 +69,10 @@ Internals:
   exactly, as `Value::Bytes`, under `Frame::Capture`; the checker binds that
   value to a fresh name and composes a `Decode` node over it, which — since
   the kernel's `decode` takes a value, not a computation — has no frame of
-  its own: `step_eval` closes the bound variable and reads it as the text a
-  value boundary wants inline, no name and no frame a session can intercept
+  its own: `step_eval` closes the bound variable, drops the bind's scope so
+  the buffer is unshared and moves into the string uncopied, and reads it as
+  the text a value boundary wants inline, no name and no frame a session can
+  intercept
   ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]). `CompKind::Bind` swaps `shell.io.stdout` to the
   ambient sink before its left computation runs (`Frame::To` carries the prior

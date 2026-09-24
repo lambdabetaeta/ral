@@ -148,7 +148,7 @@ impl Drop for FlushGuard {
         if self.armed {
             let panic = Value::Variant {
                 label: "panic".into(),
-                payload: Some(Box::new(Value::String("spawned thread panicked".into()))),
+                payload: Some(Box::new(Value::string("spawned thread panicked"))),
             };
             self.surface.flush(&self.joined, &self.cmd, &panic);
         }
@@ -442,7 +442,7 @@ pub(super) fn builtin_watch(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let label = match &args[0] {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.to_string(),
         other => {
             return Err(sig(format!(
                 "watch: label must be String, got {}",
@@ -652,8 +652,8 @@ fn project_completed(completed: CompletedHandle) -> Settled<Value> {
     let value = completed.outcome?;
     Ok(Value::map(vec![
         ("value".into(), value),
-        ("stdout".into(), Value::Bytes(completed.stdout)),
-        ("stderr".into(), Value::Bytes(completed.stderr)),
+        ("stdout".into(), Value::bytes(completed.stdout)),
+        ("stderr".into(), Value::bytes(completed.stderr)),
     ]))
 }
 
@@ -740,8 +740,8 @@ pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
             Err(e) => variant("err", Some(Box::new(break_record(&e, shell)))),
         };
         let settled = Value::map(vec![
-            ("stdout".into(), Value::Bytes(completed.stdout)),
-            ("stderr".into(), Value::Bytes(completed.stderr)),
+            ("stdout".into(), Value::bytes(completed.stdout)),
+            ("stderr".into(), Value::bytes(completed.stderr)),
             ("outcome".into(), outcome),
         ]);
         variant("settled", Some(Box::new(settled)))
@@ -749,11 +749,11 @@ pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         let pending = Value::map(vec![
             (
                 "stdout".into(),
-                Value::Bytes(peek_buffer(&handle.stdout_buf)),
+                Value::bytes(peek_buffer(&handle.stdout_buf)),
             ),
             (
                 "stderr".into(),
-                Value::Bytes(peek_buffer(&handle.stderr_buf)),
+                Value::bytes(peek_buffer(&handle.stderr_buf)),
             ),
         ]);
         variant("pending", Some(Box::new(pending)))
@@ -944,8 +944,8 @@ mod tests {
 
         let settled = expect_variant(&poll1, "settled");
         let fields = expect_map(settled);
-        assert_eq!(fields.get("stdout"), Some(&Value::Bytes(b"out".to_vec())));
-        assert_eq!(fields.get("stderr"), Some(&Value::Bytes(b"err".to_vec())));
+        assert_eq!(fields.get("stdout"), Some(&Value::bytes(b"out".to_vec())));
+        assert_eq!(fields.get("stderr"), Some(&Value::bytes(b"err".to_vec())));
         let err = expect_variant(fields.get("outcome").expect("outcome field"), "err");
         let err_fields = expect_map(err);
         assert_eq!(err_fields.get("status"), Some(&Value::Int(1)));
@@ -1609,9 +1609,9 @@ mod tests {
         let birth = only_birth(trail_of(&report));
         assert_eq!(
             birth.get("cmd"),
-            Some(&Value::String("block at <test>, line 1".into()))
+            Some(&Value::string("block at <test>, line 1"))
         );
-        assert_eq!(birth.get("class"), Some(&Value::String("worker".into())));
+        assert_eq!(birth.get("class"), Some(&Value::string("worker")));
         assert!(
             matches!(birth.get("id"), Some(Value::Int(_))),
             "the birth carries the minted worker id: {birth:?}"
@@ -1635,7 +1635,7 @@ mod tests {
         let birth = only_birth(trail_of(&report));
         assert_eq!(
             birth.get("cmd"),
-            Some(&Value::String("block at <test>, line 3".into()))
+            Some(&Value::string("block at <test>, line 3"))
         );
     }
 
@@ -1819,10 +1819,7 @@ mod tests {
             2,
             "the receipt is a pid and a desc, and nothing else: {fields:?}"
         );
-        assert_eq!(
-            fields.get("desc"),
-            Some(&Value::String("the greeter".into()))
-        );
+        assert_eq!(fields.get("desc"), Some(&Value::string("the greeter")));
         assert!(matches!(fields.get("pid"), Some(Value::Int(p)) if *p > 0));
     }
 

@@ -76,8 +76,8 @@ impl WireHandlerFrame {
 /// Serialisable mirror of a shell's wire state (`env`, `session.stack_limit`,
 /// `context`).
 ///
-/// The inverses are total modulo handle-bearing values, which the serial
-/// layer drops with a clean error.
+/// The inverses are total on a scrubbed fork ([`Shell::fork_scrubbed`]),
+/// which holds no handle; encoding one is an error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireShell {
     /// Interned through the enclosing request envelope's scope table.

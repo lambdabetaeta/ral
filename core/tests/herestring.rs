@@ -43,7 +43,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
 
 fn expect_string(shell: &mut Shell, source: &str) -> String {
     match top_level(shell, source) {
-        Ok(Value::String(s)) => s,
+        Ok(Value::String(s)) => s.into_string(),
         other => panic!("expected a string from {source:?}, got {other:?}"),
     }
 }

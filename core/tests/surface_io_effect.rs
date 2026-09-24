@@ -100,7 +100,7 @@ fn single_observation<'a>(events: &'a [Value], kind: &str) -> &'a ral_core::type
 }
 
 fn s(v: &str) -> Value {
-    Value::String(v.into())
+    Value::string(v)
 }
 
 /// A fresh, unique scratch directory under the system temp dir, keyed on

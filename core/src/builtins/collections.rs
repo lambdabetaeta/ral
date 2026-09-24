@@ -184,7 +184,7 @@ pub(super) fn builtin_fold_lines(
         // The accumulator moves into the application: the closure is `FnMut`,
         // so it must leave something behind, but never a copy of the fold.
         let carried = std::mem::replace(&mut acc, Value::Unit);
-        acc = apply(&func, vec![carried, Value::String(line)], mooring, shell)?;
+        acc = apply(&func, vec![carried, Value::string(line)], mooring, shell)?;
         Ok(())
     })?;
     Ok(acc)

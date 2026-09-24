@@ -307,21 +307,22 @@ port and is dialled exactly as it was, and `fuel` bounds the recursion as it
 does in the in-process lattice.
 
 **The one snapshot law: an identity fork and a wire hatch give the child the
-same scope, every name resolving to the same value or the same absence.** A
-handle is what stands in the way — live authority over a parent-side worker,
-with no wire form — and it is exactly the class of authority every other line
-of the fork law already denies a child: the parent's cancel domain, its
-terminal, its inbox, its provider handle. So the scrub lives at
-`Shell::fork_scrubbed`, the one fork both arms take — the identity arm parks it
-in the nursery, the wire arm packs it into an `EngineSeed` — and each handle
-becomes an `` `opaque `` placeholder while its name stays bound. A round-trip
-test pins the law for the fork's own bindings: fork a scope in memory, seed the
-same scope through `EngineSeed`, and compare. **The law does not hold through a
-closure.** The scrub reaches a binding's data, but not the scope a closure
-captured, a native's applied arguments, the handler stack's arms, or the hooks
-the fork's context carries; so a handle read through any of them is live in an
-identity child and unbound in a wire one, and only the identity child keeps the
-hooks ([[map/core/transport|transport]]).
+same scope, handler stack and hooks, every name resolving to the same value or
+the same absence.** A handle is what stands in the way — live authority over a
+parent-side worker, with no wire form — and it is exactly the class of
+authority every other line of the fork law already denies a child: the parent's
+cancel domain, its terminal, its inbox, its provider handle. So the scrub lives
+at `Shell::fork_scrubbed`, the one fork both arms take — the identity arm parks
+it in the nursery, the wire arm packs it into an `EngineSeed` — and each handle
+becomes an `` `opaque `` placeholder wherever it stood: in a binding, in any
+scope a closure captured, in a native's applied arguments, in a handler frame's
+arms. The fork empties the hooks, which the wire does not carry: they are the
+installing host's lifecycle entry points, and a child engine is not that host.
+A shell that reaches no handle forks as itself, its scope shared rather than
+copied. A round-trip test pins the law: fork a shell in memory, seed the same
+shell through `EngineSeed`, and compare bindings, captured scopes, applied
+arguments and handler frames, with no hook in either child
+([[map/core/transport|transport]]).
 
 Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
 `` exarch-agents `message ``, `` exarch-agents `cancel ``, and the idle-lease reaper all

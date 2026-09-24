@@ -771,7 +771,7 @@ mod tests {
         let value = obs.to_value();
         let (tag, fact) = fact_of(&value);
         assert_eq!(tag, "read");
-        assert_eq!(fact.get("path"), Some(&Value::String("in.txt".into())));
+        assert_eq!(fact.get("path"), Some(&Value::string("in.txt")));
         let Value::Map(m) = &value else {
             panic!("an observation projects as a record")
         };
@@ -795,7 +795,7 @@ mod tests {
             fact.get("new_bytes"),
             Some(&Value::Variant {
                 label: "just".into(),
-                payload: Some(Box::new(Value::Bytes(Vec::new()))),
+                payload: Some(Box::new(Value::bytes(Vec::new()))),
             }),
             "an empty new side is known, and known-empty"
         );
@@ -858,14 +858,11 @@ mod tests {
         );
         let (tag, fact) = fact_of(&obs.to_value());
         assert_eq!(tag, "check");
-        assert_eq!(fact.get("decision"), Some(&Value::String("denied".into())));
+        assert_eq!(fact.get("decision"), Some(&Value::string("denied")));
         assert!(!fact.contains_key("status"));
         assert_eq!(
             fact.get("fields"),
-            Some(&Value::map(vec![(
-                "name".into(),
-                Value::String("curl".into())
-            )]))
+            Some(&Value::map(vec![("name".into(), Value::string("curl"))]))
         );
     }
 }

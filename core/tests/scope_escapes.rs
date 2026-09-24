@@ -165,7 +165,7 @@ fn within_overrides_survive_tail_recursion() {
          within [env: [MARK: inside]] { probe_env 3 }",
     )
     .expect("the env override must still be installed at depth 0");
-    assert_eq!(env, Value::String("inside".into()));
+    assert_eq!(env, Value::string("inside"));
 
     let handled = top_level(
         &mut shell,
@@ -173,7 +173,7 @@ fn within_overrides_survive_tail_recursion() {
          within [handlers: [within-probe: { |args| to-string pong }]] { probe_handled 3 }",
     )
     .expect("the handler frame must still be installed at depth 0");
-    assert_eq!(handled, Value::String("pong".into()));
+    assert_eq!(handled, Value::string("pong"));
 }
 
 // ── (3) consecutive audit blocks must not drop the next inner command ────

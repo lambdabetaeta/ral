@@ -54,7 +54,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
 fn expect_string(source: &str, expected: &str) {
     let mut shell = fresh_shell();
     match eval(&mut shell, source) {
-        Ok(Value::String(s)) => assert_eq!(s, expected, "{source:?}"),
+        Ok(Value::String(s)) => assert_eq!(s.as_str(), expected, "{source:?}"),
         Ok(other) => panic!("{source:?}: expected String({expected:?}), got {other:?}"),
         Err(e) => panic!("{source:?}: expected String({expected:?}), got error {e:?}"),
     }
@@ -330,7 +330,7 @@ fn string_list(source: &str) -> Vec<String> {
         Ok(Value::List(items)) => items
             .iter()
             .map(|v| match v {
-                Value::String(s) => s.clone(),
+                Value::String(s) => s.to_string(),
                 other => panic!("{source:?}: expected String element, got {other:?}"),
             })
             .collect(),

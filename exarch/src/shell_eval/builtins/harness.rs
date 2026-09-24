@@ -136,7 +136,7 @@ fn hatch_over_the_wire(
     let token = mint_token();
     let (socket, port) =
         super::guest_port::bind().map_err(|why| sig(format!("{AGENTS}: {why}")))?;
-    let listener = ral_core::hatch::listen_for_hatch(socket, token, &shell.fork_scrubbed(), grant)
+    let listener = ral_core::hatch::listen_for_hatch(socket, token, shell, grant)
         .map_err(|reason| sig(format!("{AGENTS}: {reason}")))?;
     let answer = ask(
         AGENTS,

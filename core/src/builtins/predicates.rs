@@ -11,7 +11,7 @@ use super::util::{order_cmp, values_equal};
 pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
     let m = as_map_ref(&args[0], "keys")?;
     Ok(Value::list(
-        m.keys().map(|k| Value::String(k.clone())).collect(),
+        m.keys().map(|k| Value::string(k.clone())).collect(),
     ))
 }
 

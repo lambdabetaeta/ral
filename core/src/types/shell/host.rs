@@ -237,8 +237,8 @@ impl Shell {
                             payload: None,
                         },
                     ),
-                    ("cmd".into(), Value::String(notice.cmd)),
-                    ("cause".into(), Value::String(cause.into())),
+                    ("cmd".into(), Value::string(notice.cmd)),
+                    ("cause".into(), Value::string(cause)),
                 ]))),
             });
         }
@@ -259,7 +259,7 @@ impl Shell {
                         Value::list(
                             pruned
                                 .iter()
-                                .map(|n| Value::String(n.name.clone()))
+                                .map(|n| Value::string(n.name.clone()))
                                 .collect(),
                         ),
                     ),

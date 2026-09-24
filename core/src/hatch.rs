@@ -117,9 +117,10 @@ impl HatchListener {
 /// — for the one dial that hatches a child, and answer with the thread now
 /// waiting.
 ///
-/// `token` is the eight bytes the dialler must write first. `shell` is packed
-/// here, on the caller's own thread: the seed is all the listener thread ever
-/// holds of the parent's session, and a `Shell` never leaves this one.
+/// `token` is the eight bytes the dialler must write first. `shell` is
+/// scrubbed into a fork ([`Shell::fork_scrubbed`]) and packed here, on the
+/// caller's own thread: the seed is all the listener thread ever holds of the
+/// parent's session, and a `Shell` never leaves this one.
 ///
 /// # Errors
 /// Returns a sentence if the shell will not pack, the wake pipe could not be
@@ -131,7 +132,8 @@ pub fn listen_for_hatch(
     shell: &Shell,
     grant: SpawnGrant,
 ) -> Result<HatchListener, String> {
-    hatch_listener(listener, token, packed_seed(shell, grant)?, ENGINE)
+    let seed = packed_seed(&shell.fork_scrubbed(), grant)?;
+    hatch_listener(listener, token, seed, ENGINE)
 }
 
 /// [`listen_for_hatch`] with the recipe and the packed seed exposed, so the
@@ -540,7 +542,7 @@ mod tests {
         let mut parent = Shell::new(crate::io::TerminalState::default());
         parent.set_var(
             "larger-than-a-socket-buffer".to_string(),
-            Value::String("x".repeat(2 * 1024 * 1024)),
+            Value::string("x".repeat(2 * 1024 * 1024)),
         );
         let seed =
             packed_seed(&parent, SpawnGrant::Base("read-only".to_string())).expect("pack a seed");

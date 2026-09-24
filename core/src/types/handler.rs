@@ -344,6 +344,18 @@ impl HandlerStack {
         self.frames.iter()
     }
 
+    /// Every value a frame holds — each entry's `thunk`, then its
+    /// `catch_all` — outermost frame first.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.frames.iter_mut().flat_map(|frame| {
+            frame
+                .entries
+                .iter_mut()
+                .map(|entry| &mut entry.thunk)
+                .chain(frame.catch_all.as_mut())
+        })
+    }
+
     /// Lift the frame at `depth`, as returned by [`Self::lookup`], off the
     /// stack; pair with [`Self::restore_matched`].  Only that frame goes, so
     /// outer handlers for *other* names stay visible to the running body.

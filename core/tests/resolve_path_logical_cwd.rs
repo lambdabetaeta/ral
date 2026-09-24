@@ -67,7 +67,7 @@ fn resolve_path_anchors_to_within_dir_not_process_cwd() {
 
     let expected = canonical_root.join("leaf");
     assert_eq!(
-        std::path::Path::new(&out),
+        std::path::Path::new(out.as_str()),
         expected,
         "resolve-path must return the logical-cwd-anchored path"
     );

@@ -16,9 +16,9 @@ pub use capability::{
 };
 
 mod value;
-#[cfg(test)]
-pub(crate) use value::deep_block_chain;
 pub use value::{Value, fmt_float, fmt_lambda, fmt_native};
+#[cfg(test)]
+pub(crate) use value::{block_over, deep_block_chain};
 
 mod closure;
 pub use closure::Closure;
@@ -36,6 +36,8 @@ pub(crate) use handler::{
 
 // The shared state behind `Value::Handle`.
 mod handle;
+#[cfg(test)]
+pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;
 pub use handle::{CompletedHandle, HandleInner, HandleState, SurfaceBuffer};
 
@@ -49,6 +51,14 @@ pub use list::List;
 // The inner of `Value::Map`.
 mod map;
 pub use map::Map;
+
+// The inner of `Value::String`.
+mod string;
+pub use string::Str;
+
+// The inner of `Value::Bytes`.
+mod bytes;
+pub use bytes::Bytes;
 
 mod error;
 pub use error::{Error, Status};

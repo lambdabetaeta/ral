@@ -183,19 +183,12 @@ impl InternCtx {
     /// no other accessor.
     ///
     /// # Errors
-    /// Encoding one of a binding's value fails; handle-bearing bindings are
-    /// dropped rather than raised.
+    /// A binding's value reaches a handle, which [`Shell::fork_scrubbed`]
+    /// should have scrubbed before any shell reached this wire.
     pub(crate) fn finish(mut self) -> Result<ScopeTable, Error> {
         while let Some((id, bindings)) = self.pending.pop() {
             let mut entries = Vec::with_capacity(bindings.len());
             for (k, b) in &bindings {
-                // A binding reaching a `Handle` cannot cross a process boundary.
-                // Drop it rather than fail the snapshot: an unrelated handle must
-                // not poison a stage that never names it, and one that does name
-                // it gets a clean unbound-name error instead.
-                if value_carries_handle(&b.value) {
-                    continue;
-                }
                 entries.push((
                     k.clone(),
                     SerialBinding {
@@ -223,31 +216,6 @@ fn unresolved_scope_ref(id: u32) -> Error {
         format!("serial: scope ref {id} out of range or unresolved"),
         1,
     )
-}
-
-/// Whether `value` reaches a `Handle` without crossing a closure boundary — a
-/// closure's captured env is interned through [`InternCtx::intern_env`], and
-/// [`InternCtx::finish`] drops handle-bearing bindings from the row it fills.
-/// The match is exhaustive on purpose: a new `Value` variant must be
-/// classified rather than pass as handle-free.
-fn value_carries_handle(value: &Value) -> bool {
-    match value {
-        Value::Handle(_) => true,
-        Value::List(items) => items.iter().any(value_carries_handle),
-        Value::Map(entries) => entries.iter().any(|(_, v)| value_carries_handle(v)),
-        Value::Variant {
-            payload: Some(p), ..
-        } => value_carries_handle(p),
-        Value::Native { applied, .. } => applied.iter().any(value_carries_handle),
-        Value::Variant { payload: None, .. }
-        | Value::Thunk(_)
-        | Value::Unit
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::String(_)
-        | Value::Bytes(_) => false,
-    }
 }
 
 /// One reconstructed session-tier map per scope table row (`None` until
@@ -483,8 +451,10 @@ impl FOValue<SerialClosure> {
             Value::Bool(v) => Self::Bool { value: *v },
             Value::Int(v) => Self::Int { value: *v },
             Value::Float(v) => Self::Float { value: *v },
-            Value::String(v) => Self::String { value: v.clone() },
-            Value::Bytes(v) => Self::Bytes { value: v.clone() },
+            Value::String(v) => Self::String {
+                value: v.to_string(),
+            },
+            Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
             Value::List(items) => Self::List {
                 items: items
                     .iter()
@@ -516,12 +486,12 @@ impl FOValue<SerialClosure> {
                     .collect::<Result<_, _>>()?,
             })),
             Value::Handle(_) => {
-                // A handle names a worker thread in this process, and no
-                // receiver can join a thread in another address space.
-                return Err(
-                    Error::new("cannot return a handle from sandboxed evaluation", 1)
-                        .with_hint("await the handle before leaving the confined block"),
-                );
+                return Err(Error::new(
+                    "a handle reached the seed wire, though `Shell::fork_scrubbed` should have \
+                     replaced it: this is a fault in ral rather than in your program — please \
+                     report the source that produced it",
+                    1,
+                ));
             }
         })
     }
@@ -539,8 +509,8 @@ impl FOValue<SerialClosure> {
             Self::Bool { value } => Value::Bool(value),
             Self::Int { value } => Value::Int(value),
             Self::Float { value } => Value::Float(value),
-            Self::String { value } => Value::String(value),
-            Self::Bytes { value } => Value::Bytes(value),
+            Self::String { value } => Value::string(value),
+            Self::Bytes { value } => Value::bytes(value),
             Self::List { items } => Value::list(
                 items
                     .into_iter()
@@ -643,8 +613,10 @@ impl TryFrom<&Value> for FOValue {
             Value::Bool(v) => Self::Bool { value: *v },
             Value::Int(v) => Self::Int { value: *v },
             Value::Float(v) => Self::Float { value: *v },
-            Value::String(v) => Self::String { value: v.clone() },
-            Value::Bytes(v) => Self::Bytes { value: v.clone() },
+            Value::String(v) => Self::String {
+                value: v.to_string(),
+            },
+            Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
             Value::List(items) => Self::List {
                 items: items.iter().map(inner).collect::<Result<_, _>>()?,
             },
@@ -669,8 +641,9 @@ impl TryFrom<&Value> for FOValue {
 /// genuine string can impersonate one.
 pub(crate) const OPAQUE_TAG: &str = "opaque";
 
-/// `` `opaque {type: …} ``: what a scrubbed leaf crosses as.
-fn opaque(v: &Value) -> FOValue {
+/// `` `opaque [type: …] ``: what a scrubbed leaf crosses as, and what a fork
+/// holds where a handle stood.
+pub(crate) fn opaque(v: &Value) -> FOValue {
     FOValue::Variant {
         label: OPAQUE_TAG.to_string(),
         payload: Some(Box::new(FOValue::Map {
@@ -693,8 +666,10 @@ impl FOValue {
             Value::Bool(v) => Self::Bool { value: *v },
             Value::Int(v) => Self::Int { value: *v },
             Value::Float(v) => Self::Float { value: *v },
-            Value::String(v) => Self::String { value: v.clone() },
-            Value::Bytes(v) => Self::Bytes { value: v.clone() },
+            Value::String(v) => Self::String {
+                value: v.to_string(),
+            },
+            Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
             Value::List(items) => Self::List {
                 items: items.iter().map(Self::scrubbed).collect(),
             },
@@ -713,27 +688,6 @@ impl FOValue {
     }
 }
 
-/// Every `Handle` leaf as its `` `opaque `` placeholder.  Unlike
-/// [`FOValue::scrubbed`], closures stay live: a fork or a wire seed interns
-/// them against its scope table rather than erasing them.
-pub(crate) fn scrub_handles(v: &Value) -> Value {
-    match v {
-        Value::Handle(_) => Value::from(opaque(v)),
-        Value::List(items) => Value::list(items.iter().map(scrub_handles).collect()),
-        Value::Map(entries) => Value::map(
-            entries
-                .iter()
-                .map(|(k, v)| (k.clone(), scrub_handles(v)))
-                .collect(),
-        ),
-        Value::Variant { label, payload } => Value::Variant {
-            label: label.clone(),
-            payload: payload.as_deref().map(|q| Box::new(scrub_handles(q))),
-        },
-        other => other.clone(),
-    }
-}
-
 impl From<FOValue> for Value {
     /// Total: first-order values are a subset of `Value`, and `Ext` is
     /// unreachable at `X = NoExt`.
@@ -743,8 +697,8 @@ impl From<FOValue> for Value {
             FOValue::Bool { value } => Self::Bool(value),
             FOValue::Int { value } => Self::Int(value),
             FOValue::Float { value } => Self::Float(value),
-            FOValue::String { value } => Self::String(value),
-            FOValue::Bytes { value } => Self::Bytes(value),
+            FOValue::String { value } => Self::string(value),
+            FOValue::Bytes { value } => Self::bytes(value),
             FOValue::List { items } => Self::list(items.into_iter().map(Self::from).collect()),
             FOValue::Map { entries } => Self::Map(
                 entries
@@ -969,7 +923,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                let chain = crate::types::deep_block_chain(50_000);
+                let chain = crate::types::deep_block_chain(50_000, Value::Unit);
                 let mut ctx = InternCtx::new();
                 SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
                 let table = ctx.finish().expect("finish");
@@ -984,7 +938,7 @@ mod tests {
     /// dependencies and `into_runtime` rebuilds every link.
     #[test]
     fn deep_stream_chain_round_trips() {
-        let chain = crate::types::deep_block_chain(500);
+        let chain = crate::types::deep_block_chain(500, Value::Unit);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
         let table = ctx.finish().expect("finish");
@@ -1003,7 +957,7 @@ mod tests {
     fn ipc_value_roundtrips_simple_values() {
         let value = Value::map(vec![
             ("a".into(), Value::Int(1)),
-            ("b".into(), Value::String("x".into())),
+            ("b".into(), Value::string("x")),
         ]);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");

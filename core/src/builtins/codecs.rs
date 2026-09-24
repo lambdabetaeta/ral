@@ -52,18 +52,18 @@ fn input_text(args: &[Value], name: &str, shell: &Shell) -> Settled<String> {
 }
 
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &Shell) -> Settled<Value> {
-    Ok(Value::Bytes(input_bytes(args, "from-bytes", shell)?))
+    Ok(Value::bytes(input_bytes(args, "from-bytes", shell)?))
 }
 
 pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Value> {
-    Ok(Value::String(input_text(args, "from-string", shell)?))
+    Ok(Value::string(input_text(args, "from-string", shell)?))
 }
 
 pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let text = input_text(args, "from-line", shell)?;
-    Ok(Value::String(
-        crate::io::str_strip_one_terminator(&text).to_owned(),
-    ))
+    let mut text = input_text(args, "from-line", shell)?;
+    let len = crate::io::str_strip_one_terminator(&text).len();
+    text.truncate(len);
+    Ok(Value::string(text))
 }
 
 fn stream_cons(head: String, tail: Value) -> Value {
@@ -81,7 +81,7 @@ fn stream_cons(head: String, tail: Value) -> Value {
     Value::Variant {
         label: MORE_LABEL.into(),
         payload: Some(Box::new(Value::map(vec![
-            (HEAD_FIELD.into(), Value::String(head)),
+            (HEAD_FIELD.into(), Value::string(head)),
             (
                 TAIL_FIELD.into(),
                 Value::Thunk(Closure {
@@ -110,10 +110,10 @@ pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value
     Ok(s)
 }
 
-fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
+fn json_to_value(j: serde_json::Value) -> Settled<Value> {
     Ok(match j {
         serde_json::Value::Null => Value::Unit,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Bool(b) => Value::Bool(b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Int(i)
@@ -128,13 +128,15 @@ fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
                 )));
             }
         }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            Value::list(arr.iter().map(json_to_value).collect::<Settled<Vec<_>>>()?)
-        }
+        serde_json::Value::String(s) => Value::string(s),
+        serde_json::Value::Array(arr) => Value::list(
+            arr.into_iter()
+                .map(json_to_value)
+                .collect::<Settled<Vec<_>>>()?,
+        ),
         serde_json::Value::Object(obj) => Value::Map(
-            obj.iter()
-                .map(|(k, v)| Ok((k.clone(), json_to_value(v)?)))
+            obj.into_iter()
+                .map(|(k, v)| Ok((k, json_to_value(v)?)))
                 .collect::<Settled<_>>()?,
         ),
     })
@@ -144,7 +146,7 @@ pub(super) fn builtin_from_json(args: &[Value], shell: &Shell) -> Settled<Value>
     let text = input_text(args, "from-json", shell)?;
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
-    json_to_value(&json)
+    json_to_value(json)
 }
 
 /// Decode CSV into a list of records keyed by the header row; fields stay
@@ -174,12 +176,7 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> 
         let fields = headers
             .iter()
             .enumerate()
-            .map(|(i, h)| {
-                (
-                    h.clone(),
-                    Value::String(record.get(i).unwrap_or("").to_owned()),
-                )
-            })
+            .map(|(i, h)| (h.clone(), Value::string(record.get(i).unwrap_or(""))))
             .collect::<Vec<_>>();
         rows.push(Value::map(fields));
     }
@@ -275,7 +272,7 @@ pub(crate) fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
         Value::Float(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
             .ok_or_else(|| sig(format!("to-json: {f} has no JSON representation")))?,
-        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::List(items) => {
             serde_json::Value::Array(items.iter().map(value_to_json).collect::<Settled<_>>()?)
         }

@@ -104,7 +104,7 @@ fn literal_string_in_assignment() {
     // Assign a string literal and read it back.
     assert_eq!(
         must_succeed("let xv = 'hello'\nreturn $xv"),
-        Value::String("hello".into())
+        Value::string("hello")
     );
 }
 
@@ -201,7 +201,7 @@ fn if_two_armed_returns_else() {
 fn if_elsif_first_branch() {
     assert_eq!(
         must_succeed("if true { return a } elsif true { return b } else { return c }"),
-        Value::String("a".into()),
+        Value::string("a"),
     );
 }
 
@@ -209,7 +209,7 @@ fn if_elsif_first_branch() {
 fn if_elsif_second_branch() {
     assert_eq!(
         must_succeed("if false { return a } elsif true { return b } else { return c }"),
-        Value::String("b".into()),
+        Value::string("b"),
     );
 }
 
@@ -217,7 +217,7 @@ fn if_elsif_second_branch() {
 fn if_elsif_else_branch() {
     assert_eq!(
         must_succeed("if false { return a } elsif false { return b } else { return c }"),
-        Value::String("c".into()),
+        Value::string("c"),
     );
 }
 
@@ -230,7 +230,7 @@ fn if_branches_returning_lambda() {
         must_succeed(
             "let f = if true { |x| return $x } else { |x| return nope }\nreturn !{f hello}"
         ),
-        Value::String("hello".into()),
+        Value::string("hello"),
     );
 }
 
@@ -240,7 +240,7 @@ fn if_branches_returning_lambda_else() {
         must_succeed(
             "let f = if false { |x| return nope } else { |x| return $x }\nreturn !{f world}"
         ),
-        Value::String("world".into()),
+        Value::string("world"),
     );
 }
 
@@ -250,7 +250,7 @@ fn if_branches_returning_lambda_else() {
 fn if_expr_condition() {
     assert_eq!(
         must_succeed("if $[1 + 1 == 2] { return yes } else { return no }"),
-        Value::String("yes".into()),
+        Value::string("yes"),
     );
 }
 
@@ -259,7 +259,7 @@ fn if_command_condition() {
     // Condition is a command that returns Bool.
     assert_eq!(
         must_succeed("if !{equal hello hello} { return yes } else { return no }"),
-        Value::String("yes".into()),
+        Value::string("yes"),
     );
 }
 
@@ -292,10 +292,7 @@ fn block_scoping() {
 
 #[test]
 fn wildcard_assignment_discards_value() {
-    assert_eq!(
-        must_succeed("let _ = 42\nreturn ok"),
-        Value::String("ok".into())
-    );
+    assert_eq!(must_succeed("let _ = 42\nreturn ok"), Value::string("ok"));
 }
 
 #[test]
@@ -450,7 +447,7 @@ fn map_spread_non_overlapping_fields_accessible() {
     let v = must_succeed(
         "let base = [host: localhost, port: 80]\nlet r = [port: 9090, ...$base]\nreturn $r[host]",
     );
-    assert_eq!(v, Value::String("localhost".into()));
+    assert_eq!(v, Value::string("localhost"));
 }
 
 #[test]
@@ -606,7 +603,7 @@ fn try_error_map_has_status() {
         must_succeed(
             "try { cat /nonexistent 2> /dev/null | from-string } { |err| return \"$err[status]\" }"
         ),
-        Value::String("1".into())
+        Value::string("1")
     );
 }
 
@@ -617,7 +614,7 @@ fn try_error_record_carries_the_script() {
             "try { fail [status: 1, message: 'x'] } { |err| \
              case $err[site] [`just: { |s| return \"$s[script]:$s[line]\" }, `none: { |_| return none }] }"
         ),
-        Value::String("<test>:1".into())
+        Value::string("<test>:1")
     );
 }
 
@@ -768,21 +765,15 @@ fn len_on_int_is_error() {
 
 #[test]
 fn upper_lower() {
-    assert_eq!(
-        must_succeed("!{upper 'hello'}"),
-        Value::String("HELLO".into())
-    );
-    assert_eq!(
-        must_succeed("!{lower 'HELLO'}"),
-        Value::String("hello".into())
-    );
+    assert_eq!(must_succeed("!{upper 'hello'}"), Value::string("HELLO"));
+    assert_eq!(must_succeed("!{lower 'HELLO'}"), Value::string("hello"));
 }
 
 #[test]
 fn replace_basic() {
     assert_eq!(
         must_succeed("!{re-replace 'world' 'al' 'hello world'}"),
-        Value::String("hello al".into())
+        Value::string("hello al")
     );
 }
 
@@ -792,7 +783,7 @@ fn string_replace_passes_regex_metacharacters_through() {
     // takes it as a literal.
     assert_eq!(
         must_succeed("!{string-replace '{x}' '<x>' 'a {x} b'}"),
-        Value::String("a <x> b".into())
+        Value::string("a <x> b")
     );
 }
 
@@ -888,9 +879,9 @@ fn within_dir_resolves_relative_builtin_paths() {
     let result = must_succeed(&script);
     assert_eq!(
         map_field(&result, "cwd"),
-        Value::String(dir.display().to_string())
+        Value::string(dir.display().to_string())
     );
-    assert_eq!(map_field(&result, "txt"), Value::String("hello".into()));
+    assert_eq!(map_field(&result, "txt"), Value::string("hello"));
     assert_eq!(map_field(&result, "exists"), Value::Bool(true));
     assert_eq!(map_field(&result, "count"), Value::Int(1));
 
@@ -1226,7 +1217,7 @@ fn within_handler_inner_shadows_outer_same_name() {
         must_succeed(
             "within [handlers: [cmd: { |args| echo outer }]] { within [handlers: [cmd: { |args| echo inner }]] { let r = cmd; return $r } }"
         ),
-        Value::String("inner".into())
+        Value::string("inner")
     );
 }
 
@@ -1237,7 +1228,7 @@ fn within_handler_outer_fires_when_inner_does_not_match() {
         must_succeed(
             "within [handlers: [cmd2: { |args| echo outer }]] { within [handlers: [cmd1: { |args| echo inner }]] { let r = cmd2; return $r } }"
         ),
-        Value::String("outer".into())
+        Value::string("outer")
     );
 }
 
@@ -1249,7 +1240,7 @@ fn outer_per_name_beats_inner_catch_all() {
         must_succeed(
             "within [handlers: [other: { |args| echo outer }]] { within [handler: { |n _a| echo catch }] { let r = other; return $r } }"
         ),
-        Value::String("outer".into())
+        Value::string("outer")
     );
 }
 
@@ -1272,7 +1263,7 @@ fn alias_inside_within_shadows_within_per_name() {
         must_succeed(
             "within [handlers: [foo: { |args| echo A }]] { alias foo { |args| echo B }; let r = foo; return $r }"
         ),
-        Value::String("B".into())
+        Value::string("B")
     );
 }
 
@@ -1285,7 +1276,7 @@ fn alias_last_pushed_shadows_earlier_at_runtime() {
         must_succeed(
             "alias greet { |args| echo hi }; alias greet { |args| echo 42 }; let r = greet; return $r"
         ),
-        Value::String("42".into())
+        Value::string("42")
     );
 }
 
@@ -1305,7 +1296,7 @@ fn unalias_does_not_remove_a_within_installed_handler() {
         must_succeed(
             "within [handlers: [greet: { |args| echo 41 }]] { attempt { unalias greet }; let r = greet; return $r }"
         ),
-        Value::String("41".into())
+        Value::string("41")
     );
 }
 
@@ -1409,13 +1400,13 @@ fn caret_reaches_the_external_in_lockstep_with_the_runtime() {
         must_succeed(
             "within [handlers: [cat: { |args| echo handler-cat }]] { let r = echo hi | ^cat; return $r }"
         ),
-        Value::String("hi".into())
+        Value::string("hi")
     );
     assert_eq!(
         must_succeed(
             "within [handlers: [cat: { |args| echo handler-cat }]] { let r = echo hi | cat; return $r }"
         ),
-        Value::String("handler-cat".into())
+        Value::string("handler-cat")
     );
 }
 
@@ -1466,7 +1457,7 @@ fn an_open_route_arm_under_a_byte_head_is_refused() {
 fn alias_arm_with_a_captured_byte_payload_installs() {
     assert_eq!(
         must_succeed("alias foo { |args| let u = echo hi; echo $u }; let r = foo; return $r"),
-        Value::String("hi".into())
+        Value::string("hi")
     );
 }
 
@@ -1554,10 +1545,7 @@ fn script_args_are_not_polluted_by_runner_argv() {
     let result = run_on(&mut shell, "return $ARGS").expect("evaluate $ARGS");
     assert_eq!(
         result,
-        Value::list(vec![
-            Value::String("alpha".into()),
-            Value::String("beta".into())
-        ])
+        Value::list(vec![Value::string("alpha"), Value::string("beta")])
     );
 }
 
@@ -1567,7 +1555,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
     let result = run_on(&mut shell, "return $ENV[RAL_TEST_ENV]").expect("evaluate $ENV");
-    assert_eq!(result, Value::String("override".into()));
+    assert_eq!(result, Value::string("override"));
 }
 
 #[test]
@@ -1635,9 +1623,9 @@ fn words_splits_on_space() {
     assert_eq!(
         must_succeed("!{words 'hello world foo'}"),
         Value::list(vec![
-            Value::String("hello".into()),
-            Value::String("world".into()),
-            Value::String("foo".into()),
+            Value::string("hello"),
+            Value::string("world"),
+            Value::string("foo"),
         ])
     );
 }
@@ -1659,7 +1647,7 @@ fn tco_within_handler_non_tail() {
     // value-returning.
     assert_eq!(
         must_succeed("within [handlers: [cmd: { |args| echo 6 }]] { let y = cmd; return $y }"),
-        Value::String("6".into())
+        Value::string("6")
     );
 }
 
@@ -1671,7 +1659,7 @@ fn tco_if_condition_not_tail() {
         must_succeed(
             "let check = { |x| return $[$x > 0] }\nif !{check 5} { return yes } else { return no }"
         ),
-        Value::String("yes".into())
+        Value::string("yes")
     );
 }
 
@@ -1818,7 +1806,7 @@ fn bundled_uutils_capture_honours_scoped_cwd() {
         panic!("expected pwd output string");
     };
     assert_eq!(
-        std::path::PathBuf::from(output).canonicalize().unwrap(),
+        std::fs::canonicalize(output.as_str()).unwrap(),
         dir.path().canonicalize().unwrap()
     );
 }
@@ -1872,7 +1860,7 @@ fn try_runtime_error_has_cmd_runtime() {
         "let r = try { let _ = $[1 / 0]\n return 'unreached' } { |e| return $e[cmd] }\n\
          return $r",
     );
-    assert_eq!(result, Value::String("<runtime>".into()));
+    assert_eq!(result, Value::string("<runtime>"));
 }
 
 // ── §4 rule 2: block with trailing args ─────────────────────────────────
@@ -1889,10 +1877,7 @@ fn curry_map_partial() {
     // Passing a function as data is explicit: map $upper $list
     assert_eq!(
         must_succeed("!{map $upper [hello, world]}"),
-        Value::list(vec![
-            Value::String("HELLO".into()),
-            Value::String("WORLD".into())
-        ])
+        Value::list(vec![Value::string("HELLO"), Value::string("WORLD")])
     );
 }
 
@@ -1938,7 +1923,7 @@ fn nullary_native_forced_via_dollar_reads_the_redirected_channel() {
 
 #[test]
 fn return_bare_name_is_literal_even_when_prelude_binds_it() {
-    assert_eq!(must_succeed("return upper"), Value::String("upper".into()));
+    assert_eq!(must_succeed("return upper"), Value::string("upper"));
 }
 
 /// `$upper` is a plain env hit on the native — the entry *is* the value.
@@ -1960,7 +1945,7 @@ fn return_force_expression() {
     // special-cased away from the general return-a-value path.
     assert_eq!(
         must_succeed("return !{upper hello}"),
-        Value::String("HELLO".into())
+        Value::string("HELLO")
     );
 }
 
@@ -1972,10 +1957,7 @@ fn let_named_after_a_native_shadows_it_and_restores_on_scope_exit() {
         "let inside = !{ let list-dir = 'shadowed'; return $list-dir }\n\
          return [inside: $inside, outside: $list-dir]",
     );
-    assert_eq!(
-        map_field(&result, "inside"),
-        Value::String("shadowed".into())
-    );
+    assert_eq!(map_field(&result, "inside"), Value::string("shadowed"));
     match map_field(&result, "outside") {
         Value::Native { entry, applied } => {
             assert_eq!(entry.name, "list-dir");
@@ -1997,7 +1979,7 @@ fn lexical_head_position_still_calls_bound_function() {
 fn lexical_non_head_name_is_literal_without_deref() {
     assert_eq!(
         must_succeed("let f = { |x| return $x }\nreturn f"),
-        Value::String("f".into())
+        Value::string("f")
     );
 }
 
@@ -2011,7 +1993,7 @@ fn lexical_non_head_name_uses_deref_to_get_value() {
 fn binding_position_bare_name_dispatches_in_let_rhs() {
     assert_eq!(
         must_succeed("let upper = { |x| return $x }\nlet xv = upper hello\nreturn $xv"),
-        Value::String("hello".into())
+        Value::string("hello")
     );
 }
 
@@ -2020,10 +2002,7 @@ fn list_position_bare_name_stays_literal() {
     // In list position, bare `upper` is a string literal, not a variable lookup.
     assert_eq!(
         must_succeed("let upper = { |x| return $x }\nreturn [upper, hello]"),
-        Value::list(vec![
-            Value::String("upper".into()),
-            Value::String("hello".into())
-        ]),
+        Value::list(vec![Value::string("upper"), Value::string("hello")]),
     );
 }
 
@@ -2048,7 +2027,7 @@ fn map_position_bare_name_stays_literal() {
     let v = must_succeed("let upper = { |x| return $x }\nreturn [label: upper, fn: $upper]");
     match v {
         Value::Map(m) => {
-            assert_eq!(m.get("label"), Some(&Value::String("upper".into())));
+            assert_eq!(m.get("label"), Some(&Value::string("upper")));
             assert!(
                 matches!(m.get("fn"), Some(Value::Thunk(_))),
                 "expected thunk under 'fn', got {:?}",
@@ -2113,7 +2092,7 @@ fn spawn_let_binds_handle() {
     // recovers the pipeline's return value through the record's `value` field.
     assert_eq!(
         must_succeed("let h = spawn { echo hi | from-line }\nlet r = await $h\nreturn $r[value]"),
-        Value::String("hi".into())
+        Value::string("hi")
     );
 }
 
@@ -2123,7 +2102,7 @@ fn spawn_statement_runs_detached() {
     // without awaiting the worker.
     assert_eq!(
         must_succeed("spawn { echo detached }\nreturn done"),
-        Value::String("done".into())
+        Value::string("done")
     );
 }
 
@@ -2217,7 +2196,7 @@ fn race_first_wins() {
             return $r[value]
         "
         ),
-        Value::String("winner".into())
+        Value::string("winner")
     );
 }
 
@@ -2307,9 +2286,9 @@ fn keys_returns_list() {
     assert_eq!(
         must_succeed("!{keys [:, a: 1, b: 2, c: 3]}"),
         Value::list(vec![
-            Value::String("a".into()),
-            Value::String("b".into()),
-            Value::String("c".into()),
+            Value::string("a"),
+            Value::string("b"),
+            Value::string("c"),
         ])
     );
 }
@@ -2325,8 +2304,8 @@ fn entries_returns_pairs() {
     if let Value::List(items) = result {
         assert_eq!(items.len(), 1);
         if let Value::List(pair) = &items[0] {
-            assert_eq!(pair[0], Value::String("x".into()));
-            assert_eq!(pair[1], Value::String("hello".into()));
+            assert_eq!(pair[0], Value::string("x"));
+            assert_eq!(pair[1], Value::string("hello"));
         } else {
             panic!("expected pair list");
         }
@@ -2568,7 +2547,7 @@ fn arith_negate_rejects_non_numeric() {
 fn quoted_map_key() {
     assert_eq!(
         must_succeed("let m = ['my key': hello]\nreturn $m['my key']"),
-        Value::String("hello".into())
+        Value::string("hello")
     );
 }
 
@@ -2583,7 +2562,7 @@ fn interpolation_rejects_list() {
 fn interpolation_coerces_int() {
     assert_eq!(
         must_succeed("let n = 42\nreturn \"count: $n\""),
-        Value::String("count: 42".into())
+        Value::string("count: 42")
     );
 }
 
@@ -2591,7 +2570,7 @@ fn interpolation_coerces_int() {
 fn interpolation_renders_unit_as_its_literal() {
     assert_eq!(
         must_succeed("let uu = ()\nreturn \"val: $uu end\""),
-        Value::String("val: () end".into())
+        Value::string("val: () end")
     );
 }
 
@@ -2632,8 +2611,8 @@ fn fact_field(v: &Value, tag: &str, key: &str) -> Value {
 }
 
 fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
-    fact_field(v, "check", "resource") == Value::String(resource.into())
-        && fact_field(v, "check", "decision") == Value::String(decision.into())
+    fact_field(v, "check", "resource") == Value::string(resource)
+        && fact_field(v, "check", "decision") == Value::string(decision)
 }
 
 /// `argv[0]` of a command observation, or `None` for anything else (a
@@ -2641,7 +2620,7 @@ fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
 fn command_argv0(v: &Value) -> Option<String> {
     match fact_field(v, "command", "argv") {
         Value::List(argv) => argv.into_iter().next().and_then(|a| match a {
-            Value::String(s) => Some(s),
+            Value::String(s) => Some(s.into_string()),
             _ => None,
         }),
         _ => None,
@@ -2652,7 +2631,7 @@ fn command_argv0(v: &Value) -> Option<String> {
 fn check_fields(children: &[Value], resource: &str) -> Vec<Value> {
     children
         .iter()
-        .filter(|c| fact_field(c, "check", "resource") == Value::String(resource.into()))
+        .filter(|c| fact_field(c, "check", "resource") == Value::string(resource))
         .map(|c| fact_field(c, "check", "fields"))
         .collect()
 }
@@ -2706,7 +2685,7 @@ fn a_denials_fields_are_strings() {
     assert!(
         check_fields(&children, "exec")
             .iter()
-            .any(|f| map_field(f, "name") == Value::String("/bin/false".into())),
+            .any(|f| map_field(f, "name") == Value::string("/bin/false")),
         "the denial must name the command it refused, as a string: {children:?}"
     );
 }
@@ -2795,7 +2774,7 @@ fn audit_fs_write_denied_recorded() {
     assert!(
         check_fields(&children, "fs")
             .iter()
-            .any(|f| map_field(f, "op") == Value::String("write".into())),
+            .any(|f| map_field(f, "op") == Value::string("write")),
         "the denial must name the operation it refused: {children:?}"
     );
 }
@@ -2866,10 +2845,7 @@ fn a_deputy_is_flagged_once_per_prefix() {
     // prefixes' own rather than the grant map's.
     assert_eq!(
         named,
-        vec![
-            Value::String("/tmp/bin".into()),
-            Value::String("/tmp/sbin".into())
-        ],
+        vec![Value::string("/tmp/bin"), Value::string("/tmp/sbin")],
         "each overlapping prefix earns one observation naming just itself: {children:?}"
     );
 }
@@ -2936,7 +2912,7 @@ fn caret_clear_resolves_external_not_the_native() {
     assert!(
         children.iter().any(|c| {
             command_argv0(c).as_deref() == Some("clear")
-                && fact_field(c, "command", "origin") == Value::String("external".into())
+                && fact_field(c, "command", "origin") == Value::string("external")
         }),
         "^clear must record a `clear` command observation with origin \"external\" as a direct child of the audit root: {children:?}"
     );
@@ -3083,7 +3059,7 @@ fn helper_stage_audit_observations_merge_into_parent_tree() {
 fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
     assert_eq!(
         must_succeed("!{printf 'a\\nb\\nc\\nd\\n' | wc -l | from-string}"),
-        Value::String("4\n".into()),
+        Value::string("4\n"),
         "a bundled `wc -l` over four lines must emit `4`, recovered through \
          the byte-to-value `from-string` edge"
     );
