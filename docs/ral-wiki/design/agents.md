@@ -4,8 +4,8 @@
 tree, driven by the single shared `attend` loop; the only thing that distinguishes
 one agent from another is its *position* — whether it has a parent.** A sub-agent
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
-from a value-snapshot of its parent's shell, with a narrowed capability ceiling
-and a strong `Arc<Agent>` parent edge. The thin `Fleet` holds what every node
+from a value-snapshot of its parent's shell, under its parent's capability
+stack plus one layer, with a strong `Arc<Agent>` parent edge. The thin `Fleet` holds what every node
 shares — the by-name door, the idle lease, the one event bus, and
 the transport engine ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
@@ -34,7 +34,7 @@ not decide who returns.
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
   reply gate, read off the construction-fixed bit rather than off
   `is_root && interactive`.
-- **A conversing agent had `reply` withheld at construction** and parks for a human
+- **A conversing agent has `reply` withheld at construction** and parks for a human
   instead of returning. Its `reply` call is refused at the desk, and the verb is
   dropped from its builtin index, both keyed on the same bit. The interactive
   trunk is one such agent — parent-less, its writer ever-present — but not the
@@ -82,8 +82,8 @@ less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,
 so fan-out itself is unbounded), and a `fuel == 0` agent's spawn call is refused
 at the desk with the exhaustion text: a delegation chain terminates by refusal
 a fixed number of generations down rather than recursing forever
-(uniform-agent-nodes, superseding the
-depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
+(superseding the depth-1 cap of
+[[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
 
@@ -98,19 +98,20 @@ checked at the runtime door that enumerates their legal labels
 ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
 One call:
 
-- **`fork`s a child `Agent`** through `Shell::fork_session`
-  ([[map/core/shell-state|the flow matrix]]). The child snapshots the parent's
-  **serialisable fragment** of its lexical scope, dynamic context (cwd, env,
-  grants, handlers), and the installed builtin table, sets `parent` to the
-  spawning agent's id, takes the spawn's `name` as its identity, and starts
-  fresh in everything else — its own inbox, a fresh cancel token, an owned
-  provider handle seeded from the parent's current model, no terminal
-  authority. This is a **value snapshot**: the child's `cd`, env, and new
-  bindings die with it; there is no flow-back, and the parent receives a
+- **`fork`s a child `Agent`** through `Shell::fork_scrubbed`
+  ([[map/core/shell-state|the flow matrix]]). The child snapshots the
+  **serialisable fragment** of its parent's lexical scope — every binding,
+  each handle in it replaced by an `` `opaque `` placeholder — with the
+  dynamic context (cwd, env, grants, handlers) and the installed builtin table;
+  sets `parent` to the spawning agent's id, takes the spawn's `name` as its
+  identity, and starts fresh in everything else — its own inbox, a fresh cancel
+  token, an owned provider handle seeded from the parent's current model, no
+  terminal authority. This is a **value snapshot**: the child's `cd`, env, and
+  new bindings die with it; there is no flow-back, and the parent receives a
   string, not the child's bindings. The isolation mirrors a
   [[design/pipelines|byte-pipeline stage]]'s subshell — see
   [[#Wire-seat children: the same snapshot, a different wire|below]] for why
-  "serialisable fragment" is the exact promise rather than "whole scope";
+  the promise is the serialisable fragment rather than the whole scope;
 - **runs it on a detached thread** through the same `attend` loop, answering
   at once with the roster afterwards — the child's row carrying `name`,
   `elapsed-s`, and `log-dir` — a ral record the script can bind and fan out
@@ -223,7 +224,7 @@ exarch-agents `start [
 ```
 
 `handoff` crosses in the child's forked scope, not in `prompt`'s text: `prompt`
-stays a short instruction naming the binding, so the 12000 characters travel
+stays a short instruction naming the binding, so the twelve messages travel
 once, as data, rather than twice — once as a binding and once spliced into the
 first model-visible message. The child receives `handoff` through the ordinary
 serialisable value snapshot;
@@ -305,20 +306,22 @@ parent was built with, so a helper spawning a helper of its own binds its own
 port and is dialled exactly as it was, and `fuel` bounds the recursion as it
 does in the in-process lattice.
 
-**The one snapshot law.** A wire seed cannot carry a `Value::Handle` binding —
-a handle is live authority over a parent-side resource, with no wire form —
-while a fork of a scope, left alone, would carry one unfiltered. Rather than
-let `` exarch-agents `start `` mean two different things depending on which seat
-answered it, the scrub lives at `Shell::fork_scrubbed`, the one fork both arms
-take: the identity arm is that fork parked in the nursery, the wire arm is that
-same fork packed into an `EngineSeed`, so neither snapshots more than the
-**serialisable fragment** of the parent's scope. This is why the fork
-description above says "serialisable fragment" rather than "whole lexical
-scope": every other line of the fork law already denies a child the parent's
-cancel domain, its terminal authority, its inbox, its provider handle, and a
-live handle is exactly that class of authority. A round-trip test pins the law:
-fork a scope in memory, seed the same scope through `EngineSeed`, and the two
-children resolve every name to the same value or the same absence.
+**The one snapshot law: an identity fork and a wire hatch give the child the
+same scope, every name resolving to the same value or the same absence.** A
+handle is what stands in the way — live authority over a parent-side worker,
+with no wire form — and it is exactly the class of authority every other line
+of the fork law already denies a child: the parent's cancel domain, its
+terminal, its inbox, its provider handle. So the scrub lives at
+`Shell::fork_scrubbed`, the one fork both arms take — the identity arm parks it
+in the nursery, the wire arm packs it into an `EngineSeed` — and each handle
+becomes an `` `opaque `` placeholder while its name stays bound. A round-trip
+test pins the law for the fork's own bindings: fork a scope in memory, seed the
+same scope through `EngineSeed`, and compare. **The law does not hold through a
+closure.** The scrub reaches a binding's data, but not the scope a closure
+captured, a native's applied arguments, the handler stack's arms, or the hooks
+the fork's context carries; so a handle read through any of them is live in an
+identity child and unbound in a wire one, and only the identity child keeps the
+hooks ([[map/core/transport|transport]]).
 
 Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
 `` exarch-agents `message ``, `` exarch-agents `cancel ``, and the idle-lease reaper all
@@ -428,7 +431,7 @@ cancels only the replier's proper descendants — a
 parent may abandon unfinished children, but never leave live agents registered
 beneath a node that has answered. This refines
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
-token now interrupts one exchange in place, while the subtree cascade is the
+token interrupts one exchange in place, while the subtree cascade is the
 terminators' alone.
 
 In the TUI, that break is a distinct cancelled rail shape: it wears the `╳`
@@ -443,7 +446,8 @@ inbox when the trunk was launched `--allow-schedule`: the grant is
 gated by that authority — refused at the desk without it, and the schedule
 family is dropped from an ungranted agent's builtin index
 ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). A live self-schedule
-is one of the three reasons an agent parks (`ParkMode::UntilCancelled`).
+parks its agent `ParkMode::UntilCancelled`: waiting for the wakeup, but stopped
+by a terminate-cause cancel.
 
 ## Permissions: a spawn pushes one layer
 
@@ -476,11 +480,14 @@ The child is born with its parent's whole stack, plus at most one layer:
   child_stack = parent_stack ++ [layer(grant)]
 ```
 
-`policy::base_layer` resolves a named base, `decode_capability_map` an `R`, both
-frozen against the **child's** working directory so the layer lands already
-resolved ([[design/capability-freeze|capabilities]]); the desk
-(`fleet/desk.rs`'s `fork_child`) clones the parent's stack and pushes onto the
-clone ([[map/exarch/policy|policy]]). There is no meet and no `Capabilities`
+`policy::base_layer` (the installer's `GrantNarrower`) resolves a named base,
+`decode_capability_map` an `R`, both frozen against the **child's** working
+directory so the layer lands already resolved
+([[design/capability-freeze|capabilities]]). The fork carries the parent's
+stack, and `SpawnGrant::narrow_onto` pushes the layer onto it: at adoption for
+an identity child (`IdentityTransport::adopt_parked`), at `EngineSeed::apply`
+for a hatched one ([[map/core/transport|transport]],
+[[map/exarch/policy|policy]]). There is no meet and no `Capabilities`
 folded against another: the stack's own per-check fold ANDs every layer's
 verdict, so a pushed layer can **narrow** the child below the parent and can
 **never escalate** it past the parent's reach
@@ -515,9 +522,9 @@ A spawn's `R` mints no self-denial. `--restrict` denies the restriction
 permissions; an `R` is a value computed in the parent's shell at the instant of
 the spawn, with no file for the child to reach.
 
-The ceiling is non-escalating by construction: the spawn site, not the child,
-owns the authority decision, because [[map/exarch/agent|`Avatar::fork_with`]]
-takes the child's authority as an argument rather than cloning the parent's.
+The authority decision is the spawn site's, not the child's: the desk carries
+the spawn's `SpawnGrant` into the child's seating (`ExarchDesk::fork_seat`), and
+the child receives only the layer it resolves to.
 
 ## See also
 

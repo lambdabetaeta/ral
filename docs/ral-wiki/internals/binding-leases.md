@@ -1,6 +1,6 @@
 ---
-verified_at_commit: c1bb993b
-verified_at_date: 2026-09-12
+verified_at_commit: 5803377b
+verified_at_date: 2026-09-24
 anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
@@ -26,9 +26,9 @@ baseline, permanently exempt (`Shell::arm_binding_lease`, armed by
 `bootstrap::arm_session_ledgers` in the engine's own boot recipe and on each
 fork before it is parked, so `/clear`'s rebooted engine re-seals for free).
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
-are invisible to the ledger by the same predicate that classifies installs
-(`Env::at_session_scope` at the `note_define` chokepoint): they die
-with their frame anyway.
+are invisible to the ledger, since its one chokepoint, `note_define`, is
+reached from `run_phrases`'s `Define` arm alone, under `Mode::Session`: they
+die with their frame anyway.
 
 ## The clock, and what counts as use
 
@@ -85,15 +85,20 @@ let f = { … $big … }        # then f is called every run
 reference lives inside `f`'s stored body, compiled once on the run that
 defined `f`; later calls recompile nothing, so nothing harvests `big` again.
 After 256 idle calls the live name `big` is pruned — and `f` keeps working,
-forever. A closure captures an `Arc<Env>` snapshot at creation and resolves
-its body against that captured chain; the live scopes are copy-on-write, so
-unsetting `big` in the session scope cannot reach what `f` already holds.
+forever. A closure captures its `Env` by value at creation — an O(1) clone of
+a persistent map — and resolves its body against that captured scope; the
+session scope is copy-on-write, so unsetting `big` there cannot reach what `f`
+already holds.
 
 This is correct, not a near-miss: once captured, the top-level name `big`
 routes nothing. The value's real owner is `f`'s capture, and `f` — the thing
 actually being used — is the thing whose lease renews. The cost is memory,
 not correctness: the captured bytes stay resident until `f`'s own name falls
-or is rebound and the capture drops. That residency is exactly what the
+or is rebound and the capture drops. They can be resident more than once: a
+session write copies the `imbl` node it touches, cloning every value stored
+inline there, and a `String` or `Bytes` value clones deeply — so each capture
+followed by a write leaves another full copy of `big` behind
+([[map/core/shell-state|shell-state]]). That residency is exactly what the
 large-binding warning exists to head off — bind a file path, not five
 megabytes of captured text.
 

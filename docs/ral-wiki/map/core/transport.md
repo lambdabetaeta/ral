@@ -1,167 +1,159 @@
 ---
-generated_at_commit: 451d1ab5
-generated_at_date: 2026-09-22
+generated_at_commit: 5803377b
+generated_at_date: 2026-09-24
 covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
 
 # Map: core / transport
 
-The wire layer that carries a shell across a process boundary. The one
-consumer left is the wire-seat agent hatch: when a run seats an engine on a
-remote transport, a forked shell's mobile state — `env`, `context`, the
-relevant parent state — is serialised to JSON, framed, and reconstituted on
-the other side ([[map/core/shell-state|shell-state]]). A pipeline stage
-never rides this wire — it runs on a thread of the parent process,
-sharing the parent's memory directly
-([[decisions/260902_stages-are-threads|stages-are-threads]]). (A
-[[design/grant|grant]] does
-not ride this wire either: its body evaluates locally, and external children are
-confined per-command — see
-[[decisions/260617_sandbox-external-children|sandbox-external-children]].)
-The front-end⇄engine protocol is a separate wire —
-[[map/core/engine-protocol|engine-protocol]].
+The wire layer that carries a shell across a process boundary. Its one consumer
+is the wire-seat agent hatch: a forked shell's mobile state — `env`, `context`,
+the spawn's grant — is serialised to JSON, framed, and reconstituted in a fresh
+engine process ([[map/core/shell-state|shell-state]]). A pipeline stage never
+rides it — stages are threads sharing the parent's memory
+([[decisions/260902_stages-are-threads|stages-are-threads]]) — and neither does
+a [[design/grant|grant]] body, which evaluates locally while its external
+children are confined per command
+([[decisions/260617_sandbox-external-children|sandbox-external-children]]). The
+front-end⇄engine protocol is a separate wire,
+[[map/core/engine-protocol|engine-protocol]], though it shares this layer's
+value vocabulary and codec.
 
-**Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
-through a constructor that defaults a field the wire carries, and no kind may
-round-trip through a string with a catch-all decode arm.** This is what keeps
-helper-stage evaluation indistinguishable from local — a divergence between the
-two is exactly a field the hop dropped or a variant it collapsed. The discipline
-is mechanical: an exhaustive match makes a new variant fail the build, and a
-field-complete struct literal makes a new field fail it. Three
-realisations:
+**Every wire↔runtime hop is an exhaustive, field-complete map: no hop passes
+through a constructor that defaults a field the wire carries, and no kind
+round-trips through a string with a catch-all decode arm.** A hatched child is
+indistinguishable from an in-process fork exactly when no hop drops a field or
+collapses a variant. The discipline is mechanical — an exhaustive match makes a
+new variant fail the build, a field-complete struct literal a new field:
 
-- *value walks* (`serial.rs`) match `Value`/`SerialValue` exhaustively;
+- *value walks* (`serial.rs`) match `Value` / `SerialValue` exhaustively (one
+  exception, below);
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
-  `removable_by_unalias`, so a wire-hydrated alias stays removable by `unalias`;
-  a per-name entry's calling convention rides as `HandlerArity::Unary` by
-  construction, never re-sniffed from the thunk's shape — the values cleared
-  install-time arity validation on the sender, so hydration does not re-check
+  `removable_by_unalias`, so a hydrated alias stays removable by `unalias`; a
+  per-name entry is unary by construction and hydration does not re-check its
+  arity, which the sender's install already validated
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]);
-- *kinds* ride as serde enums — `WireObservation`'s `what` mirrors `Observed`,
-  not a string — and *floats* ride by IEEE-754 bits (`f64::to_bits`/`from_bits`
-  in the serde mirror), total and exact where JSON's number coerces NaN/±∞ to
-  `null`.
+- *kinds* ride as serde enums (`SerialClosure`, `SpawnGrant`), and *floats* by
+  their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
+  into `null`.
 
-## Value & environment mirror — `core/src/serial.rs`
+## Values — `core/src/serial.rs`
 
-`FOValue` is the serde-round-trippable *first-order* value — data all the way
-down, first-order by construction via an uninhabited-by-default extension slot
-— and the engine protocol's shared value vocabulary, externally tagged on the
-wire. `SerialValue = FOValue<Closure>`
-fills that slot with closures, the mirror of the runtime `Value` this wire
-carries. `serial/datum.rs` types it: `Datum` (`encode`, a strict `decode`
-naming what arrived ill-shaped) is the one first-order codec every typed
-protocol payload goes through, with `tag`/`untag`/`field`/`exact_keys` and
-the `record!` macro, which derives a strict record — exact keys, each once,
-an unknown one answered with the key it most likely meant. Around it:
+**`FOValue<X>` is the one value vocabulary every seam speaks: first-order by
+construction, over an extension slot `X` uninhabited by default (`NoExt`).**
+Externally tagged on the wire, with typed accessors (`field`, `as_str`,
+`as_int`, …) for a host reading one.
 
-- `SerialLambda` / `SerialThunk` for closures, `SerialEnvSnapshot` for an `Env`;
-  `SerialBinding` mirrors a scope entry — value *and* scheme — so a wire-hatched
-  engine child preserves the binding's scheme across the round-trip
+- `SerialValue = FOValue<SerialClosure>` fills the slot with what this wire
+  adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
+  `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
+  a builtin's name and applied arguments, re-linked against the receiver's own
+  table.
+- `SerialBinding` mirrors a scope entry, value *and* scheme, so a hatched child
+  keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-- An interning table, `InternCtx`, deduplicates shared scopes, so a captured
-  environment with shared frames cannot unfold into an O(2^N) tree. Interning
-  only *reserves* an id and queues the scope; `finish` — the table's sole
-  accessor — drains the queue, so encoder stack depth is bounded by data
-  nesting inside one scope, not by stream length
-  ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
-- `from_runtime` walks a `Value`/`Env` into its serial form against the intern
-  context; the inverse rebuilds runtime values from the snapshot.
+- `serial/datum.rs` — `Datum`, the one strict first-order codec every typed
+  protocol payload goes through (`encode`; a `decode` naming what arrived
+  ill-shaped), with `tag` / `untag` / `field` / `exact_keys` and the `record!`
+  macro, which derives a strict record: exact keys, each once, an unknown one
+  answered with the key it most likely meant.
 
-All three hand-written walks match their value type exhaustively, so a new
-`Value`/`SerialValue` variant fails the build at each walk rather than being
-silently treated as handle-free or dependency-free:
+**A leaf that is not data has three treatments, one per seam.** `Opaque::of`
+classifies it — a block, a function, a handle:
 
-- `from_runtime` — the serialisation walk;
-- `value_carries_handle` — the handle-sanitiser;
-- `collect_scope_deps` — the dependency collector.
+- `TryFrom<&Value> for FOValue` refuses it, naming the first such leaf and
+  whether it was nested (`NotData`);
+- `FOValue::scrubbed` makes the conversion total by writing every such leaf as
+  its `` `opaque [type: …] `` placeholder — the flat wire's treatment, taken by
+  `Mooring::surface`;
+- `scrub_handles` replaces only `Handle`s and keeps closures live, since this
+  wire interns them — the fork's treatment, applied to the session scope's
+  bindings alone. It is the one walk that is not exhaustive: it descends lists,
+  maps and variant payloads and passes every other value through unchanged, so
+  a handle in a closure's captured scope or a native's applied arguments
+  survives it, as does one in a handler arm, which the fork's context carries
+  unscrubbed.
 
-## The mirrored shell state — `core/src/subprocess.rs`
+## Scopes — `InternCtx` and `WireDecoder`
 
-`serial.rs` owns value and closure transport; this module owns the surrounding
-envelope — the wire mirror of the `env`/`context` fields that
-cross an evaluation boundary ([[map/core/shell-state|shell-state]]). No frame
-ever crosses: a stage's [[internals/evaluator-machine|machine]] starts over
-the empty stack, so what rides the wire is store, never continuation. Each
-`Wire*` type mirrors one subtree of the runtime tree and its conversions
-compose strictly (a parent's `from_X` calls its children's, never reaching
-past them):
+**Scopes cross as rows of a table, one per distinct session-tier root, by
+`imbl` `ptr_eq` identity** — so a captured environment with shared structure
+cannot unfold into an O(2^N) tree.
 
-- `WireShell { env, stack_limit, context: WireContext }` — the
-  top, a serialisable mirror of a shell's mobile state. `env`'s wire row is
-  only the bindings tier of one [[design/scoping|`Env`]] — the persistent map
-  of everything bound since the prelude — interned by the identity of its
-  root; the receiving side seats it under the receiver's own `natives` and
-  `prelude`, so the two constant tiers never cross the wire at all;
-- `WireContext` — the [`Context`] mirror (`env_overrides`, `dir`/`cwd`,
-  `grants`, `handlers`, `args`, `modules`); `hooks` is dropped outright and
-  the receiver starts with an empty table;
+- `InternCtx::intern_env` only *reserves* a row and queues the scope; `finish`,
+  the table's sole accessor, encodes the queue as a worklist, so encoder stack
+  depth is bounded by data nesting within one scope, never by the length of a
+  chain of closures ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
+  `finish` drops any binding whose value carries a handle
+  (`value_carries_handle`), so the name arrives unbound.
+- `WireDecoder::for_shell` rebuilds the rows in dependency order
+  (`collect_scope_deps`), refusing an out-of-range reference or a cycle, and
+  seats each under the *receiver's* natives and prelude: those two constant
+  tiers never cross.
+- `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
+  wire→runtime conversion of a scope.
+
+## The mirrored shell — `core/src/subprocess.rs`
+
+**`serial.rs` carries values and scopes; this module carries the envelope
+around them.** No frame crosses: a hatched engine's
+[[internals/evaluator-machine|machine]] starts over the empty stack, so what
+rides is store, never continuation. Each `Wire*` type mirrors one subtree of the
+runtime tree, and a parent's `from_runtime` calls only its children's:
+
+- `WireShell { env, stack_limit, context }` — `env` is the row of one
+  [[design/scoping|`Env`]]'s session tier;
+- `WireContext` mirrors `Context` — `env_overrides`, `dir`, `cwd`, `grants`,
+  `handlers`, `args`, `modules`; `hooks` stays behind and the receiver starts
+  with an empty table;
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
-  carrying each alias arm's scheme so a wire-hatched engine child does not strip it
+  each alias arm with its scheme
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
-`install_wire_shell` reinstates a received `WireShell` into a child `Shell`,
-splicing the wire's handler frames atop the receiver's own so the receiver's
-own builtin table survives, never having ridden the wire: a wire-hatched
-engine child installs the state onto the shell its own installer booted, so it
-cannot drop the host builtins (`bare_child_shell` is the tests' stand-in for
-that boot). All conversions share the `InternCtx` from `serial.rs`.
+`install_wire_shell` splices the wire's handler frames atop the receiver's own,
+so the builtin table the child's installer booted survives, never having ridden
+the wire (`bare_child_shell` is the tests' stand-in for that boot).
 
-`core/src/engine_seed.rs` carries `EngineSeed` — a forked shell reified
-for a wire-seat hatch (`scope_table`, `shell: WireShell`,
-`captured: SerialEnvSnapshot`, and the spawn's `grant: SpawnGrant` —
-`` `inherit ``, a base name, or a restriction record carried **unfrozen**, so
-its sigils resolve against the child's own cwd on the far side
-([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]])), the one
-type in that module, since a pipeline stage never crosses a wire
-([[decisions/260902_stages-are-threads|stages-are-threads]]). `pack_seed` builds one from a `Shell`, and
-`seed_from_env` takes it before the engine waits for `Attach` — striking the env
-var as it takes the fd, so no descendant inherits a number that has stopped being
-one — and after `Attach` selects an installer and boots the shell,
-`Engine::boot` hands it to `EngineSeed::apply`, which hydrates it through
-`WireDecoder::for_shell` plus `install_wire_shell`, then pushes the seed's
-grant as the child's one layer through `SpawnGrant::narrow_onto`. Taking and applying
-are split for one reason each: the take must not wait on the host, and the
-application needs the booted installer's shell. The scope it carries is never the
-parent's whole lexical scope: `Shell::fork_scrubbed` strips every
-handle-carrying binding (`Value::Handle` has no wire form, `serial.rs`'s
-`value_carries_handle`), and it is the one door both seats pass through, so an
-in-process identity fork and a wire hatch's `EngineSeed` snapshot the same
-serialisable fragment and
-`` exarch-agents `start `` means one thing regardless of seat
-([[design/agents|agents]]'s one-snapshot law).
+## The seed — `core/src/engine_seed.rs`, `core/src/spawn_grant.rs`
 
-`core/src/spawn_grant.rs` carries `SpawnGrant`, `SpawnGrant::layer`, and
-`SpawnGrant::narrow_onto` — the layer resolved against the shell's own cwd and
-home and pushed as a session frame, the one step an adopted identity fork
-(`IdentityTransport::adopt_parked`) and a hatched seed (`EngineSeed::apply`)
-share, so neither holds a narrowing decision of its own, both under the
-installer's `narrow`: `Inherit` is ⊤, `Base` reaches the host's
-`GrantNarrower` (core has no base-tag lexicon), and `Restrict` walks the record
-through `capability::decode_capability_map` against the child's cwd. A record
-rather than a `Capabilities` is exactly what lets the freeze happen there,
-keeping "every path already resolved" a construction invariant of the type the
-wire never carries ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
+**`EngineSeed` is a forked shell reified for a hatch: `scope_table`, `shell`,
+`captured`, and the spawn's `grant`.**
 
-## Framing codec — `core/src/subprocess_codec.rs`
+- `pack_seed` builds one from a shell that `Shell::fork_scrubbed` produced — the
+  fork both seats take, so an identity fork and a hatch snapshot the same
+  fragment and `` exarch-agents `start `` means one thing regardless of seat
+  ([[design/agents|agents]]'s one-snapshot law). That fork replaces each handle
+  in a session binding with its placeholder (`Env::scrub_handles`, through
+  `scrub_handles` above).
+- `seed_from_env` (in `hatch.rs`) takes the seed before the engine waits for
+  `Attach`, striking the fd's env var as it takes the fd; after `Attach`,
+  `Engine::boot` hands it to `EngineSeed::apply`, which hydrates through
+  `WireDecoder::for_shell` and `install_wire_shell`, then pushes the grant. The
+  take must not wait on the host; the application needs the booted installer's
+  shell.
+- `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
+  **unfrozen**: a `cwd:` sigil in a grant names the cwd of the shell it
+  governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
+  resolves it against that shell's cwd and home and pushes one session layer —
+  the step an adopted identity fork (`IdentityTransport::adopt_parked`) and a
+  hatched seed share. `Base` reaches the host's `GrantNarrower`, since core has
+  no base-tag lexicon; `Restrict` goes through
+  `capability::decode_capability_map`
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
-`write_frame` / `read_frame` are length-prefixed JSON frames (a `u32` length
-followed by the `serde_json` body). One codec carries the wire-seat hatch's
-one-shot `EngineSeed` frame and the engine protocol's front-end⇄engine
-`WireChannel` frames (`core/src/wire.rs`).
+## Framing — `core/src/subprocess_codec.rs`
 
-`fuse` is the frame fuse both doors judge a body by — `MAX_FRAME_LEN`, 256
-MiB, checked on the read side before the body is allocated and on the write
-side before anything reaches the wire. One enforcement point, so an oversized
-frame fails locally with a sentence instead of being written happily and then
-killing the peer mid-stream.
+**`write_frame` / `read_frame` are length-prefixed JSON frames, carrying both
+the hatch's one `EngineSeed` frame and the engine protocol's `WireChannel`
+frames (`core/src/wire.rs`).**
 
-Neither side caps depth: every frame encodes and decodes under
-`serde_stacker`, which grows the stack onto the heap, so a legal nest of any
-depth crosses and only the fuse bounds it.
-
-This layer is the mechanism behind the mobile/local split — `env` /
-`context` cross a re-exec boundary, `io` / `session` / `local`
-do not ([[map/core/shell-state|shell-state]]) — that a wire-hatched engine
-child relies on to boot from a snapshot of its parent's scope.
+- `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB
+  — before the reader allocates a body and before the writer sends one, so an
+  oversized frame fails locally with a sentence instead of killing the peer
+  mid-stream.
+- Neither side caps depth: both encode and decode under `serde_stacker`, which
+  grows the stack onto the heap, so a legal nest of any depth crosses and only
+  the fuse bounds it.
+- A body that fails to decode is dumped to an owner-only file, named in the
+  error.

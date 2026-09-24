@@ -1,5 +1,5 @@
 ---
-generated_at_commit: afc5d952
+generated_at_commit: 5803377b
 generated_at_date: 2026-09-24
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -43,7 +43,10 @@ everything `crate::types::*`.
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
   [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- `error.rs` — `Error`, `Status`, and the `BodyResult` split. `audit.rs` — the
+- `error.rs` — `Error` and `Status` (`Raised(i32) | Cancelled(CancelCause) |
+  Process(CommandFailure)`, one constructor per fact whichever door reports
+  it; `Status::code` is the one home of `128 + n` and the cause table).
+  `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
   one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
   the wire. `env.rs` — lexical `Env` and
@@ -108,7 +111,7 @@ corrupting the store.
   `root` that detached workers parent under (`Shell::join_session` *shares*
   it, for a second
   `Shell` the engine runs beside that session — an aside hook,
-  [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]), the
+  [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), the
   `anchor` a run entered through `Shell::run` nests its foreground frame
   under — minted once, from the session's own root, so the scope tree is the
   LIFO extent it claims to be — the `sources`
@@ -167,11 +170,12 @@ corrupting the store.
   in the scope chain as permanently-exempt baseline and starts the
   committed-run clock. Every persistent top-level scope write funnels
   through one fused chokepoint, `Shell::note_define` (`scope.rs`,
-  beside `bind_value`/`set_var`): it classifies the write by
-  `Env::at_session_scope()` and stamps the ledger only when true, so "write a
-  scope entry" and "stamp the ledger" can never be pulled apart at a call
-  site — the evaluator's four writers (`assign_pattern`'s `Name`/`...rest`
-  arms, `eval_letrec`'s two installs) all route here. Host verbs
+  beside `bind_value`/`set_var`), so "write a scope entry" and "stamp the
+  ledger" can never be pulled apart: `run_phrase_define`'s single per-name
+  callback into `pattern::bind_pattern_staged` calls it for every name a
+  `Define` phrase installs under `Mode::Session` — a plain `let`, a
+  destructuring pattern's `Name`/`...rest` arms, or a `LetRec` group's
+  mutually-recursive members alike — and never under `Mode::Local`. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
   call to them precedes arming. Idleness is *use-observation*, not
   re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
@@ -204,11 +208,12 @@ corrupting the store.
   `LocalState`'s `Drop`: the surviving processes are the one thing a teardown
   must leave alone.
 
-`io` / `session` / `local` are `pub(crate)`: the fields that encode run
-safety are not a public API. Hosts drive a session through the narrow accessors
-gathered in `host.rs`, which a host crate reaches while only `mobile` stays the
-public embedding seam. `Shell::binding_count` sits there too — the lexical
-scope's probe figure for a host's `/resources` fold
+Every `Shell` field — `env` and `context` included — is `pub(crate)`: the
+partition encodes run safety, capability attenuation, and wire framing, and
+is core's invariant to keep, not an API a host may reach past. Hosts drive a
+session through the intent verbs gathered in `host.rs`, plus the scope and
+context verbs. `Shell::binding_count` sits there too — the lexical scope's
+probe figure for a host's `/resources` fold
 ([[invariants/probe-convention|probe-convention]]): a count, never the
 values, and enumeration renews nothing.
 
@@ -396,10 +401,10 @@ default for a store that is not the session's:
   which rebuilds every session-tier binding through `serial::scrub_handles`,
   replacing each `Value::Handle` reached through a list, map, or variant
   payload with an `` `opaque `` placeholder — the binding's name and scheme
-  survive, and a handle inside a closure's captured scope or a native's
-  `applied` arguments is untouched, since neither shape is walked. Handles
-  have no wire form, so an in-process adoption and a wire hatch's seed
-  snapshot the same fragment ([[map/core/transport|transport]]). See
+  survive. Neither arm of the fork carries a live handle at top level, but the
+  scrub walks no closure, and never the fork's `context`: a handle inside a
+  closure's captured scope, a native's `applied` arguments or a handler arm
+  is untouched ([[map/core/transport|transport]]). See
   [[map/exarch/agent|agent]].
 
 Every genuine fork copies `session.builtins` (the dispatch table) and shares

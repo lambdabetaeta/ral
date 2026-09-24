@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
+generated_at_commit: 5803377b
+generated_at_date: 2026-09-24
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -519,8 +519,11 @@ earlier, before it forks a log or dials anything, but only `enrol` is
 authoritative. A name is also the handle `` exarch-agents `message ``/`` `cancel `` resolve by,
 through `Fleet::resolve` — and then, for `` `cancel `` and `` `read `` alone,
 the scope climb (`Agent::descendant`); a message needs no climb. The roster
-(`fleet::roster::listing`) reads `Fleet::live`, the same name map `resolve`
-reaches, so the set a model can see is exactly the set it can message. Every `Agent` carries a strong `parent`, so the tree
+(`fleet::roster::listing`) walks the same tree instead — `Agent::walk` from
+the reader's own root — never the name map, yet lands on the same set: every
+enrolled agent is at once named and placed, so what a model can see through
+`` `list `` is exactly what it can reach through `` `message ``/`` `cancel ``.
+Every `Agent` carries a strong `parent`, so the tree
 is the spawn tree directly: `Agent::cancel_tree` cancels an agent and its
 whole subtree, `Agent::cancel_descendants` abandons a returning agent's
 children, and `Agent::clear_subtree` reaps a subtree and forgets what it
@@ -713,16 +716,26 @@ engine-side, by `IdentityTransport::adopt_parked` or a hatched engine's
 A returning child sets `parent: Some(..)` — the strong tree edge that
 routes its result and drives the subtree cascade — and enrols itself in the
 fleet (`Fleet::enrol`), joining the shared `Arc<Fleet>` every node holds.
-It snapshots the **serialisable fragment** of the parent's lexical scope
-(prelude, agent library, every accumulated binding that has a wire form —
-`Shell::fork_scrubbed` drops `Value::Handle` bindings, and both spawn arms
-fork through it, so an identity fork and a wire hatch's `EngineSeed` carry
-the same scope, [[design/agents|agents]]), its dynamic context (cwd, env,
-grants, handlers),
-and the installed builtin table, and starts fresh in everything else — fresh
-control counters and a freshly-defaulted `SessionState`, so it holds **no
-terminal authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
-foreground agent and can never seize the controlling terminal the TUI owns).
+It snapshots the **serialisable fragment** of the parent's lexical scope —
+prelude, agent library, every accumulated binding — with its dynamic context
+(cwd, env, grants, handlers) and the installed builtin table, and starts fresh
+in everything else: fresh control counters and a freshly-defaulted
+`SessionState`, so it holds **no terminal authority** (`TerminalAccess::Denied`,
+no lease — a sub-agent is not the foreground agent and can never seize the
+controlling terminal the TUI owns).
+
+- **The fork.** The spawn builtin (`fork_then_enquire`,
+  `shell_eval/builtins/harness.rs`) forks through `Shell::fork_scrubbed`, the
+  one door both spawn arms take ([[design/agents|agents]]'s one snapshot law).
+  It replaces each `Value::Handle` in a session binding — through lists, maps
+  and variant payloads — with an `` `opaque `` placeholder, the name staying
+  bound (`Env::scrub_handles`, [[map/core/transport|transport]]). Closures stay
+  live, and the scrub does not enter them: a handle in a closure's captured
+  scope, a native's `applied` arguments or a handler arm survives it.
+- **The lease.** On the in-process (`Fork::Park`) arm the fork is dressed with
+  `bootstrap::arm_session_ledgers`, which seals every name visible at that
+  instant as baseline: inherited scratch is never pruned in the child
+  (`fork_child_inherited_scratch_is_baseline`).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. An
 agent with fuel left may spawn, and each fork hands the child one less unit of
 `fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own
