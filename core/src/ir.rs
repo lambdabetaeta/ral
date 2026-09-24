@@ -10,6 +10,7 @@
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
+use crate::types::Str;
 
 /// A [`crate::syntax::ast::Pattern`] as elaboration hands it to the rest of
 /// the IR — the same shape, under the IR's own name.
@@ -48,7 +49,7 @@ impl CommandName {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Val {
     Unit,
-    String(String),
+    String(Str),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -81,7 +82,7 @@ impl Val {
             Some(WordLiteral::Bool(b)) => Self::Bool(b),
             Some(WordLiteral::Int(n)) => Self::Int(n),
             Some(WordLiteral::Float(f)) => Self::Float(f),
-            None => Self::String(s.to_string()),
+            None => Self::String(s.into()),
         }
     }
 }

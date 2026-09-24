@@ -5,11 +5,14 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 /// An immutable string, shared on clone.
 ///
 /// `Arc<String>`, not `Arc<str>`: an owned `String` moves in without a copy,
 /// and, while the count is one, back out.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Str(Arc<String>);
 
 impl Str {

@@ -89,7 +89,7 @@ impl Elaborator {
             return Val::Variable(name.to_string());
         }
         if let Some(s) = &self.script {
-            return Val::String(s.clone());
+            return Val::String(s.clone().into());
         }
         self.error.get_or_insert_with(|| ParseError {
             message: "$SCRIPT: no script name here (the REPL, `-c`, and preloaded \
@@ -438,7 +438,7 @@ impl Elaborator {
             Ast::Word(Word::Plain(s) | Word::Slash(s)) => {
                 comp!(self, CompKind::Return(Val::from_word(s)))
             }
-            Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone()))),
+            Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone().into()))),
             Ast::Variable(s) => {
                 let v = if let Some((register, _)) = reserved_register(s) {
                     let observed = comp!(self, CompKind::Observe(register));
@@ -750,7 +750,7 @@ impl Elaborator {
                         .iter()
                         .map(|e| match e {
                             MapEntry::Entry { key, value } => ValMapEntry::Entry(
-                                Val::String(key.clone()),
+                                Val::String(key.clone().into()),
                                 Spanned::with_span(
                                     value.span,
                                     self.with_span(value.span, |this| {
