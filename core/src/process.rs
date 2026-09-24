@@ -20,8 +20,7 @@ pub(crate) mod wake;
 
 #[cfg(unix)]
 pub(crate) use outcome::Signal;
-pub(crate) use outcome::not_found_hint;
-pub(crate) use outcome::{CommandFailure, SpawnFailure, WaitOutcome};
+pub(crate) use outcome::{ChildEnd, CommandFailure, SpawnFailure, WaitOutcome};
 
 pub(crate) use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
@@ -36,9 +35,9 @@ pub use cancel::{
     forward_ambient, request_interrupt, request_root_cancel, watch_cancel,
 };
 
-#[cfg(unix)]
-pub(crate) use signal::grace_signal;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
+#[cfg(unix)]
+pub(crate) use signal::{gesture, grace_signal, teardown_signals};
 
 #[cfg(unix)]
 pub use spawn_lock::cloexec_socketpair;

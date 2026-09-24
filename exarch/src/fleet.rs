@@ -807,7 +807,7 @@ mod tests {
         trunk.clear_subtree();
         assert_eq!(
             ended(&engine),
-            Some(CancelCause::Terminate.exit_code()),
+            Some(ral_core::types::Status::Cancelled(CancelCause::Terminate).code()),
             "clear_subtree terminates the abandoned child's engine"
         );
 
@@ -817,7 +817,7 @@ mod tests {
         std::thread::sleep(ttl * 4);
         assert_eq!(
             ended(&engine),
-            Some(CancelCause::Terminate.exit_code()),
+            Some(ral_core::types::Status::Cancelled(CancelCause::Terminate).code()),
             "the lease's late fire finds a settled agent and never overwrites the cause"
         );
     }

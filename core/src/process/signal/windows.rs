@@ -13,7 +13,7 @@
 //! external's, while pipeline stages borrow one owned by `PipelineGroup`.
 //!
 //! [`install_handlers`] gives a bare `ral` the escalating disposition —
-//! Ctrl-Break, `TerminateJobObject`, `ExitProcess(130)`.  A frontend with its own
+//! Ctrl-Break, `TerminateJobObject`, `ExitProcess` with the interrupt's status.  A frontend with its own
 //! cancel ladder (exarch) calls [`relay_interrupt`] instead, which never ticks
 //! [`ESCALATION`] and never reaches a detached worker.
 
@@ -42,7 +42,14 @@ pub fn install_handlers() {
             // thread holds a lock can deadlock — the Unix handler reaches for
             // `_exit` on the same reasoning.
             _ => unsafe {
-                windows_sys::Win32::System::Threading::ExitProcess(130);
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "an interrupt's status is a small positive code"
+                )]
+                windows_sys::Win32::System::Threading::ExitProcess(
+                    crate::types::Status::Cancelled(crate::process::CancelCause::Interrupt).code()
+                        as u32,
+                );
             },
         }
     });
@@ -72,6 +79,7 @@ pub fn reset_child_signals() {}
 
 mod win_groups {
     use crate::process::ChildHandle;
+    use crate::process::outcome::KILL_EXIT_CODE;
     use crate::sync::LockExt as _;
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
@@ -385,7 +393,7 @@ mod win_groups {
         for (_, state) in groups.iter() {
             if !state.job.is_null() {
                 unsafe {
-                    TerminateJobObject(state.job, 1);
+                    TerminateJobObject(state.job, KILL_EXIT_CODE as u32);
                 }
             }
         }
@@ -538,15 +546,15 @@ mod win_groups {
         }
     }
 
-    /// `TerminateJobObject`: every member dies at once with exit code 1, there
-    /// being no signal number to pass through.  No-op when the group is gone.
+    /// `TerminateJobObject`: every member dies at once with ral's kill exit
+    /// code, there being no signal number to pass through.  No-op when the group is gone.
     pub(crate) fn kill_group(leader: i32) {
         let groups = GROUPS.lock_ignore_poison();
         if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader)
             && !state.job.is_null()
         {
             unsafe {
-                TerminateJobObject(state.job, 1);
+                TerminateJobObject(state.job, KILL_EXIT_CODE as u32);
             }
         }
     }

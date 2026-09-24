@@ -194,12 +194,11 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let Report::Ran { ending, .. } = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
-    // 130, not the 143 of a child torn down mid-run: the scope is cancelled
-    // before the run reads it, so `sleep` is never spawned and the eval unwinds
-    // at its first check point.
+    // The scope is cancelled before the run reads it, so `sleep` is never
+    // spawned and the eval unwinds at its first check point.
     assert_eq!(
         ending.status(),
-        130,
+        143,
         "a run born under a cancelled scope unwinds without spawning"
     );
 }

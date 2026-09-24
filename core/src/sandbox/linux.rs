@@ -1461,7 +1461,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let waited = running.wait();
         let elapsed = t0.elapsed();
-        let (outcome, sent) = (waited.outcome, waited.sent);
+        let (outcome, cause) = (waited.outcome, waited.cause);
         waited.settle();
         canceller.join().expect("canceller thread");
 
@@ -1470,7 +1470,7 @@ mod tests {
             "teardown must not fall back to the payload's own 30 s sleep: took {elapsed:?}"
         );
         assert_eq!(
-            sent,
+            cause,
             Some(CancelCause::Explicit),
             "the cancel must have reached this wait"
         );

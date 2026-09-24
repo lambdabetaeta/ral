@@ -1169,7 +1169,7 @@ pub(crate) mod tests {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
                     ending.status(),
-                    130,
+                    143,
                     "the aside's run unwinds with the session"
                 );
                 let result = ending.into_result();

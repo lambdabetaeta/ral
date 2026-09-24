@@ -96,9 +96,9 @@ pub(crate) fn spawn(
     Ok((child, leader, jail))
 }
 
-/// Render a spawn `io::Error` for command `name` as a [`Break`].  `NotFound`
-/// reuses the one wording `vet`'s pre-spawn existence probe emits, so the two
-/// paths never disagree about a missing command.
+/// Render a spawn `io::Error` for command `name` as a [`Break`], through the
+/// same `Error::spawn_failure` `vet`'s pre-spawn probe mints, so the two paths
+/// never disagree about a command that could not start.
 ///
 /// With a `confinement` — the envelope binary exec'd in `name`'s place — the
 /// failure is the envelope's, not `name`'s: `vet` resolved `name` before we got
@@ -110,7 +110,7 @@ pub(crate) fn spawn_error(
     name: &str,
     e: &std::io::Error,
 ) -> Break {
-    use crate::process::{CommandFailure, SpawnFailure};
+    use crate::process::SpawnFailure;
 
     if let Some(envelope) = confinement {
         return Break::Error(
@@ -122,19 +122,11 @@ pub(crate) fn spawn_error(
     }
 
     let failure = match e.kind() {
-        std::io::ErrorKind::NotFound => CommandFailure::Spawn(SpawnFailure::NotFound),
-        std::io::ErrorKind::PermissionDenied => {
-            CommandFailure::Spawn(SpawnFailure::PermissionDenied)
-        }
-        _ => CommandFailure::Spawn(SpawnFailure::Io(e.to_string())),
+        std::io::ErrorKind::NotFound => SpawnFailure::NotFound,
+        std::io::ErrorKind::PermissionDenied => SpawnFailure::PermissionDenied { found: None },
+        _ => SpawnFailure::Io(e.to_string()),
     };
-    Break::Error(Error {
-        message: failure.message(name),
-        status: crate::types::Status::Process(failure.clone()),
-        span: None,
-        hint: failure.default_hint(name),
-        command: None,
-    })
+    Break::Error(Error::spawn_failure(name, failure))
 }
 
 /// Wrap an I/O error from pipe creation or cloning as a [`Break`].

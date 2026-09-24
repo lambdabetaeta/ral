@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: afc5d952
+generated_at_date: 2026-09-24
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -15,8 +15,12 @@ everything `crate::types::*`.
 - `value.rs` — `Value` (the runtime [[design/cbpv|value]] category); beside it
   `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
   `FrameHandle`), `builtin.rs` (`BuiltinEntry` / `BuiltinTable`, kept separate
-  from the handler stack), and `handle.rs` (the concurrency substrate behind
-  `Value::Handle`: `HandleInner`, `CompletedHandle`, `SurfaceBuffer`).
+  from the handler stack — a row whose declared scheme settles at `F Unit`
+  has its answer coerced to `Unit` regardless of what the body returns,
+  `BuiltinEntry::settles_at_unit` reading the curry spine to decide and
+  debug-asserting the body agrees), and `handle.rs` (the concurrency
+  substrate behind `Value::Handle`: `HandleInner`, `CompletedHandle`,
+  `SurfaceBuffer`).
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
@@ -47,14 +51,19 @@ everything `crate::types::*`.
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  **The scheme is shared, not copied**: `imbl` stores entries inline in a
-  fixed-width node array, so an entry's own width is what a `bind` into a
-  shared environment allocates — one `Arc` behind the scheme that no machine
-  step reads takes a `Binding` from 360 bytes to 72. The wire form and
-  `binding_schemes` keep their own types and convert at their boundaries.
-- `coerce.rs` — the `sig` / `sig_hint` runtime-error constructors and the
-  `as_map` family of `Value` → `Map` coercions, sitting below both the builtin
-  and capability layers so each reaches them through `crate::types::*`.
+  **A shared write clones a node, not an entry**: `bindings` is a persistent
+  hash map, so a `bind` into an environment another holder still references
+  copies the touched node, and copying a node clones every `Binding` stored
+  inline in it. `Binding.scheme` sits behind an `Arc` so that clone is one
+  pointer regardless of the scheme's own size; `Value::String` and
+  `Value::Bytes` are not behind one, so a large string or byte buffer bound
+  anywhere in the touched node is still cloned in full on that write. The
+  wire form and `binding_schemes` keep their own types and convert at their
+  boundaries.
+- `coerce.rs` — the `sig` / `sig_hint` / `sig_at` runtime-error constructors
+  (the last positioned at a span the caller already holds) and the `as_map`
+  family of `Value` → `Map` coercions, sitting below both the builtin and
+  capability layers so each reaches them through `crate::types::*`.
 
 ## Capabilities
 
@@ -84,7 +93,7 @@ field name *is* the invariant — joined by `Shell`
 step's focus carries its own environment and there is no ambient `scope` for
 a bundle to snapshot — plus `Io`, `SessionState`, and `LocalState` below. The
 run door checkpoints and rolls back the `(env, context)` pair around every run
-(`Shell::enter`), so a panicking run reports as a failed run instead of
+(`Shell::run_under`), so a panicking run reports as a failed run instead of
 corrupting the store.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
   `Shell` carries (as the field `io`): stdin / stdout / stderr, the terminal
@@ -100,9 +109,9 @@ corrupting the store.
   it, for a second
   `Shell` the engine runs beside that session — an aside hook,
   [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]), the
-  `anchor` a *top-level* run nests its foreground frame under — re-minted
-  wherever the root is and never afterwards, so the scope tree is the LIFO
-  extent it claims to be — the `sources`
+  `anchor` a run entered through `Shell::run` nests its foreground frame
+  under — minted once, from the session's own root, so the scope tree is the
+  LIFO extent it claims to be — the `sources`
   registry rendered against after a run returns (append-only for the session,
   so a nested run's spans can never alias an outer run's `FileId`) and the
   `root_file` naming the current run's root source, the `exit_hints` table,
@@ -121,7 +130,7 @@ corrupting the store.
   one. Beside the entries it keeps the `ReapNotice` ledger the reap policies
   write — one compact record per entry removed by policy, atomic with the
   removal under the registry's one lock — pushed by the engine as
-  `` `notice `` surface events at each settled run's ready boundary
+  `` `notice `` surface events at each settled source run's ready boundary
   (`emit_ready_boundary_notices`; `take_worker_reap_notices` is
   crate-private, that push its one caller). Which entries belong to which
   dispatch is not the registry's question to answer — a `spawn` observes its
@@ -165,10 +174,12 @@ corrupting the store.
   arms, `eval_letrec`'s two installs) all route here. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
   call to them precedes arming. Idleness is *use-observation*, not
-  re-installation: `Shell::dispatch`'s source arm ticks the committed-run
-  clock, and a lease is renewed by reference — the compiled program's
-  `ir::referenced_names` at each successful compile ([[map/core/ir|ir]]), plus
-  the resolved name at an `Env`-arm command dispatch. The same chokepoint runs a second, orthogonal
+  re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
+  clock, and a lease is renewed by reference at both harvest seams — the
+  run's own compiled program, and a runtime-compiled `use` load
+  (`check_source` / `compile_toplevel` in `core/src/builtins/modules.rs`) —
+  each reading `ir::referenced_names` off what it just compiled
+  ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
   whose value's `Value::shallow_size` (a structural estimate — `String`/
   `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
@@ -271,7 +282,11 @@ The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 borrowed first-order `FOValue`
 ([[map/core/engine-protocol|engine-protocol]]); the `Mooring::surface`
 method takes a borrowed `Value`, encodes it once at that door, and forwards onto
-the installed sink — inert when none is present (a bare REPL). Run-scoped, not
+the installed sink — inert when none is present (a bare REPL).
+`Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
+already holds the wire form: `evaluator::audit::observe_stamped` reaches it
+with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
+the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
 liveness role and can never decide a run is over. A *detached* worker does not receive the live sink: its events
 buffer into a `SurfaceBuffer` and are delivered exactly once — replayed through
@@ -377,10 +392,15 @@ default for a store that is not the session's:
   `aside` (the REPL's buffer-change hooks).
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
   specialisation of `child_from`. `fork_scrubbed` is the door every sub-agent
-  fork actually passes through: `fork_session` plus a scope stripped of
-  `Value::Handle` bindings, which have no wire form, so an in-process adoption
-  and a wire hatch's seed snapshot the same fragment
-  ([[map/core/transport|transport]]). See [[map/exarch/agent|agent]].
+  fork actually passes through: `fork_session` plus `Env::scrub_handles`,
+  which rebuilds every session-tier binding through `serial::scrub_handles`,
+  replacing each `Value::Handle` reached through a list, map, or variant
+  payload with an `` `opaque `` placeholder — the binding's name and scheme
+  survive, and a handle inside a closure's captured scope or a native's
+  `applied` arguments is untouched, since neither shape is walked. Handles
+  have no wire form, so an in-process adoption and a wire hatch's seed
+  snapshot the same fragment ([[map/core/transport|transport]]). See
+  [[map/exarch/agent|agent]].
 
 Every genuine fork copies `session.builtins` (the dispatch table) and shares
 `session.guest_jail`, so dispatch reaches the child and a guest's workers,

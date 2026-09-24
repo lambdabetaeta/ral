@@ -791,7 +791,7 @@ fn escape_exit_code(esc: &Escape) -> i32 {
     *code
 }
 
-/// `poll`'s `` `err `` payload — the same `{cmd, status, message, site}`
+/// `poll`'s `` `err `` payload — the same `{cmd, status, reason, message, site}`
 /// record `try` hands its handler thunk.  An `Escape` carries no located
 /// message and names no command, so it has no site.
 fn break_record(e: &Break, shell: &Shell) -> Value {
@@ -801,7 +801,12 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
             let message = match esc {
                 Escape::Exit(_) => "block exited".to_string(),
             };
-            error_record("<runtime>", escape_exit_code(esc), &message, None)
+            error_record(
+                "<runtime>",
+                &crate::types::Status::Raised(escape_exit_code(esc)),
+                &message,
+                None,
+            )
         }
     }
 }
@@ -1010,7 +1015,7 @@ mod tests {
             !sibling.is_cancelled(),
             "cancelling one worker's scope must not cancel a sibling"
         );
-        assert_eq!(observed, 130);
+        assert_eq!(observed, 143);
     }
 
     /// A [`RootAbort`](crate::process::CancelCause::RootAbort) reaches the
@@ -1026,7 +1031,7 @@ mod tests {
             worker_scope.is_cancelled(),
             "a RootAbort on the durable root must cancel the worker's scope"
         );
-        assert_eq!(observed, 130);
+        assert_eq!(observed, 131);
     }
 
     /// A foreground cancel spares a detached worker: it parents under the

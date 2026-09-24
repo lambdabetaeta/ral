@@ -1764,10 +1764,35 @@ receives this record:
 [
   cmd: String,
   status: Int,
+  reason: Reason,
   message: String,
   site: `just [script: String, line: Int, col: Int] | `none,
 ]
 ```
+
+where
+
+```text
+Reason = `exited Int | `signaled Int | `cancelled Cause
+       | `not-found | `not-runnable | `raised
+Cause  = `interrupted | `cancelled | `timed-out | `terminated | `aborted
+       | `reader-gone
+```
+
+`reason` says why the failure happened, and `status` is its projection:
+
+| `reason` | Meaning | `status` |
+|---|---|---:|
+| `` `exited n `` | an external command exited with nonzero `n` | `n` |
+| `` `signaled s `` | an external command died of signal `s`, not by a cancellation (§8.10) | 128 + `s` |
+| `` `cancelled c `` | cancellation by cause `c` (§8.10) | the cause's status |
+| `` `not-found `` | no command of that name exists | 127 |
+| `` `not-runnable `` | the command exists but could not be started | 126 |
+| `` `raised `` | `fail`, or a runtime operation that could not complete | the raised status |
+
+Recovery branches on `reason`, not on a status number. `fail` ignores
+`reason`: `fail $error` re-raises `status` and `message`, and the new error's
+`reason` is `` `raised ``.
 
 `cmd` names the command whose dispatch failed — a builtin call included — and
 is `<runtime>` when the failure came from no command. The dispatch stamps its
@@ -1854,13 +1879,31 @@ and reaped before control returns.
 
 Cancellation causes form an escalation order and never downgrade:
 
-| Cause | Message | Status |
-|---|---|---:|
-| foreground interrupt | `interrupted` | 130 |
-| explicit cancellation | `cancelled` | 130 |
-| deadline | `timed out` | 130 |
-| session termination | `terminated` | 143 |
-| root abort | `aborted` | 130 |
+| Cause | `reason` | Message | Status |
+|---|---|---|---:|
+| foreground interrupt | `` `cancelled `interrupted `` | `interrupted` | 130 |
+| explicit cancellation | `` `cancelled `cancelled `` | `cancelled` | 143 |
+| deadline | `` `cancelled `timed-out `` | `timed out` | 124 |
+| session termination | `` `cancelled `terminated `` | `terminated` | 143 |
+| root abort | `` `cancelled `aborted `` | `aborted` | 131 |
+
+A cause a signal raises reports 128 plus that signal, as a POSIX shell does:
+an interrupt 128 + SIGINT, a root abort 128 + SIGQUIT, session termination
+128 + SIGTERM. An explicit cancellation reports 128 + SIGTERM, what `kill`
+delivers, and a deadline 124, as `timeout(1)` does. A pipeline stage
+cut short because its reader ended fails with `` `cancelled `reader-gone ``
+and status 141, the SIGPIPE status; a `try` inside that stage's body can
+observe it.
+
+A cancellation reports the same `reason`, message and status whether it lands
+before a command starts or while the command runs. An external command that
+dies of the signal ral sends first to tear it down, or of the final kill, is
+reported as the cause in force, also when a sandbox's envelope relays that
+death as `128 + n`. A death by a gesture's signal — SIGINT, SIGQUIT, SIGTERM
+or SIGHUP — is that gesture's cause whoever sent it, so Ctrl-C on a lone
+foreground command reads `` `cancelled `interrupted `` as it does on a
+pipeline. An exit is never read as a gesture: `exit 130` is the command's
+choice. Any other death, such as SIGSEGV, stays `` `signaled ``.
 
 A foreground interrupt affects the work that was running when the interrupt
 arrived, including nested runs, but not a detached worker and not a later
@@ -1879,7 +1922,9 @@ Other hosts translate their native gestures into the same structured causes.
 For example, an active exarch request treats Ctrl-C or Escape as a foreground
 interrupt, while an idle key may instead close its interface. Windows uses its
 console and process-group facilities rather than Unix signals, but
-preserves the observable cancellation messages and statuses where applicable.
+preserves the observable cancellation messages and statuses: ral terminates a
+process with one fixed exit code, and a process that exits with it while a
+cause is in force is reported as that cause.
 
 ## 9. Scoped execution and handlers
 
@@ -3068,7 +3113,8 @@ The report is not itself an observation. It has two fields:
 
 ```text
 [
-    outcome: <`ok A | `err [cmd: String, status: Int, message: String,
+    outcome: <`ok A | `err [cmd: String, status: Int, reason: Reason,
+                            message: String,
                             site: `just [script: String, line: Int,
                                          col: Int] | `none]>,
     trail:   [Observation],
@@ -3076,7 +3122,8 @@ The report is not itself an observation. It has two fields:
 ```
 
 `outcome` says how the body settled. `` `ok `` carries the body's value.
-`` `err `` carries exactly the error record `try` hands its handler (§8.6), so
+`` `err `` carries exactly the error record `try` hands its handler, `reason`
+included (§8.6), so
 one outcome vocabulary serves `try`, `poll` (§11.2), and `audit`: a reader who
 can read one can read all three. Its `message` is the runtime error's message
 alone — a hint is advice for a person, and `audit` returns data, so no hint is

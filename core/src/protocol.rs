@@ -546,10 +546,7 @@ fn render_raise(
     walled: bool,
 ) -> Ending {
     let status = FailureStatus::from(error.exit_code());
-    let command_exit = matches!(
-        error.status,
-        crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
-    );
+    let command_exit = error.status.exited().is_some();
     let rendered = crate::diagnostic::format_runtime_error_auto(
         shell.sources(),
         error,
@@ -646,7 +643,7 @@ mod ending_wire_round_trip_tests {
         round_trips(&ran(Ending::Walled {
             rendered: "error: timed out\n".into(),
             record: FOValue::Unit,
-            status: 143.into(),
+            status: 124.into(),
         }));
     }
 
@@ -1331,29 +1328,33 @@ mod identity_cancel_tests {
         race(ControlSender::interrupt);
     }
 
-    /// Dispatch `sleep 30` under a forwarder, `raise` once the run is
-    /// in flight, and return its status and whether the session then ended.
+    /// Dispatch a child under a forwarder, `raise` once the child is running,
+    /// and return the run's status and whether the session then ended.
+    #[cfg(unix)]
     fn forwarded(raise: fn()) -> (i32, Option<i32>) {
         let _serial = crate::process::cancel::REQUEST_SERIAL.lock();
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let marker = dir.path().join("running");
         let transport = Arc::new(crate::engine::testkit::boot(&crate::engine::testkit::BARE));
         let _signals = transport.control().forward_signals();
         let worker = {
             let transport = transport.clone();
-            std::thread::spawn(move || crate::engine::testkit::eval(&transport, "sleep 30"))
+            let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
+            std::thread::spawn(move || crate::engine::testkit::eval(&transport, &src))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while transport.scopes.current().is_none() {
+        while !marker.exists() {
             assert!(
                 Instant::now() < deadline,
-                "the dispatch never opened its scope"
+                "the child never touched its marker"
             );
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(10));
         }
         raise();
         let report = worker.join().expect("dispatch must not panic");
         crate::process::cancel::clear_root_request();
         let Report::Ran { ending, .. } = report else {
-            panic!("`sleep 30` must reach evaluation, got {report:?}");
+            panic!("the child must reach evaluation, got {report:?}");
         };
         let ended = reading::session_ended(&*transport).expect("the probe answers");
         (ending.status(), ended)
@@ -1361,6 +1362,7 @@ mod identity_cancel_tests {
 
     /// A SIGINT reaches an identity engine only as its host's
     /// `Control::Interrupt`: the run unwinds, the session lives on.
+    #[cfg(unix)]
     #[test]
     fn a_forwarded_interrupt_unwinds_the_run_in_flight() {
         assert_eq!(
@@ -1371,18 +1373,20 @@ mod identity_cancel_tests {
     }
 
     /// Ctrl-`\` arrives as `Control::Abort`, ending the session with its own
-    /// cause: `RootAbort`, reported 130 rather than a SIGTERM's 143.
+    /// cause: `RootAbort`, reported 131 rather than a SIGTERM's 143.
+    #[cfg(unix)]
     #[test]
     fn a_forwarded_root_abort_ends_the_session() {
         assert_eq!(
             forwarded(|| crate::process::request_root_cancel(
                 crate::process::CancelCause::RootAbort
             )),
-            (130, Some(130)),
+            (131, Some(131)),
         );
     }
 
     /// SIGTERM arrives as `Control::Terminate`.
+    #[cfg(unix)]
     #[test]
     fn a_forwarded_terminate_ends_the_session() {
         assert_eq!(

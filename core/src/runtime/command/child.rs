@@ -86,10 +86,9 @@ pub(crate) struct RunningChild {
     /// timeout, a signal the platform handler translated into a cause — can
     /// preempt a child that never exits on its own.
     cancel: crate::process::CancelScope,
-    /// What ral itself sent this child, `wait`'s cancel branch being the only
-    /// writer: the sole input to forgiveness and to whether the drainers are
-    /// joined.
-    sent: Option<CancelCause>,
+    /// The strongest cause in force when the child ended: the sole input to
+    /// attribution, forgiveness, and whether the drainers are joined.
+    cause: Option<CancelCause>,
 }
 
 /// A child observed dead, holding its outcome and its not-yet-joined drainers.
@@ -97,7 +96,7 @@ pub(crate) struct RunningChild {
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub(crate) outcome: crate::process::WaitOutcome,
-    pub(crate) sent: Option<CancelCause>,
+    pub(crate) cause: Option<CancelCause>,
     pumps: Pumps,
     /// Trace context carried from the `RunningChild` so `settle`'s pump-join
     /// timings attribute to the same command instance.
@@ -147,7 +146,7 @@ impl RunningChild {
             name,
             pid,
             cancel,
-            sent: None,
+            cause: None,
         }
     }
 
@@ -233,7 +232,11 @@ impl RunningChild {
         });
 
         let outcome = match self.events.recv().expect("tx outlives this recv") {
-            ChildEvent::Ended(o) => o,
+            ChildEvent::Ended(o) => {
+                // A gesture may kill the child before `watch_cancel` posts.
+                self.cause = self.cause.max(self.cancel.cause());
+                o
+            }
             ChildEvent::Cancelled(cause) => {
                 crate::dbg_trace!(
                     "wait",
@@ -241,7 +244,7 @@ impl RunningChild {
                     self.name,
                     pid
                 );
-                self.sent = Some(cause);
+                self.cause = Some(cause);
                 match self.terminate(&watch, cause) {
                     Some(o) => o,
                     None => loop {
@@ -279,7 +282,7 @@ impl RunningChild {
         let _ = watch.reap();
         WaitedChild {
             outcome,
-            sent: self.sent,
+            cause: self.cause,
             pumps: std::mem::take(&mut self.pumps),
             name: self.name.clone(),
             pid,
@@ -292,7 +295,7 @@ impl WaitedChild {
     /// Join the drainer threads — or, for a child ral killed because its
     /// reader was gone, detach them; see [`Pumps::settle`].
     pub(crate) fn settle(self) {
-        let detach = self.sent == Some(CancelCause::ReaderGone);
+        let detach = self.cause == Some(CancelCause::ReaderGone);
         crate::dbg_trace!(
             "wait",
             "drain-begin name={} pid={} elapsed={:?} detach={detach}",
@@ -347,9 +350,8 @@ mod tests {
     use super::*;
     use crate::process::*;
 
-    /// A wall that expires mid-command must be reported as the time limit it
-    /// was, not as the SIGTERM we happened to send — and reported without
-    /// disturbing the status, which stays the signal's 128 + 15.
+    /// A wall that expires mid-command is reported as the time limit it was,
+    /// not as the SIGTERM we happened to send.
     #[test]
     fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
         let mut cmd = std::process::Command::new("/bin/sleep");
@@ -375,21 +377,84 @@ mod tests {
         });
 
         let waited = running.wait();
-        let failure =
-            crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent, false)
-                .expect("a torn-down child is a failure");
+        let end = waited.outcome.classify(waited.cause, false);
         waited.settle();
         canceller.join().expect("canceller thread");
 
-        assert_eq!(
-            failure.to_user_exit_code(),
-            128 + libc::SIGTERM,
-            "the status must not shift"
+        assert_eq!(end, Some(ChildEnd::Cancelled(CancelCause::Deadline)));
+    }
+
+    /// Run `sh` under a scope struck with `cause` — before the dispatch when
+    /// `early`, else once the child has proved itself running — and return the
+    /// error the run raised.
+    fn struck(cause: CancelCause, early: bool) -> crate::types::Error {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let marker = dir.path().join("running");
+        let mut shell = crate::types::Shell::new(crate::io::TerminalState::default());
+        let scope = shell.run_cancel_handle();
+        if early {
+            scope.cancel(cause);
+        }
+        let canceller = (!early).then(|| {
+            let (scope, marker) = (scope.clone(), marker.clone());
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !marker.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the child never touched its marker"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                scope.cancel(cause);
+            })
+        });
+        let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
+        let report = shell.run_under(
+            &scope,
+            crate::run::RunRequest {
+                run: crate::engine::testkit::run(&src),
+                surface: None,
+                deferred: None,
+                desk: None,
+                fork: None,
+            },
         );
-        assert_eq!(
-            failure.message("sleep"),
-            "sleep: stopped because the call's time limit expired"
-        );
+        if let Some(canceller) = canceller {
+            canceller.join().expect("canceller thread");
+        }
+        match report {
+            crate::run::RunReport::Ran {
+                ending:
+                    crate::run::Ending::Raised { error, .. } | crate::run::Ending::Walled { error, .. },
+                ..
+            } => error,
+            _ => panic!("a struck run must raise"),
+        }
+    }
+
+    /// A run's failure is a function of its cause, never of where the cancel
+    /// landed: before the dispatch, a poll point reports it; during it, the
+    /// child's teardown does — and the two must agree.
+    #[test]
+    fn a_cancellation_reports_alike_before_and_during_a_command() {
+        for cause in [
+            CancelCause::Interrupt,
+            CancelCause::Explicit,
+            CancelCause::Deadline,
+            CancelCause::Terminate,
+            CancelCause::RootAbort,
+        ] {
+            let (before, during) = (struck(cause, true), struck(cause, false));
+            assert_eq!(before.exit_code(), during.exit_code(), "{cause:?}: code");
+            assert_eq!(
+                crate::evaluator::scope::reason_value(&before.status),
+                crate::evaluator::scope::reason_value(&during.status),
+                "{cause:?}: reason"
+            );
+            assert_eq!(before.message, during.message, "{cause:?}: message");
+            assert_eq!(before.hint, during.hint, "{cause:?}: hint");
+        }
     }
 
     /// An interrupt's SIGINT grace must not become a wait on the child's own

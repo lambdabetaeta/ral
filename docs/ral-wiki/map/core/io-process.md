@@ -76,12 +76,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 ## Process — `core/src/process/`
 
 - `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
-  `CommandFailure` the evaluator surfaces. A death ral itself caused is its
-  own `WaitOutcome` variant (`Cancelled`, carrying the `CancelCause` and the
-  signal we sent), so a torn-down child reports the cause — an expired time
-  limit, a `cancel`, an interrupt, a shutdown — while a signal from outside ral
-  still reports its number. `CommandFailure::from_outcome` takes `sent: Option<
-  CancelCause>`, the strongest cause anything sent the child, joined by `max`
+  `CommandFailure` the evaluator surfaces. `WaitOutcome::classify` yields a
+  `ChildEnd`: `Failed(CommandFailure)`, or `Cancelled(CancelCause)` for a death
+  by the cause's `teardown_signals` or by a gesture's signal, so a torn-down child reports the cause —
+  an expired time limit, a `cancel`, an interrupt, a shutdown — exactly as a
+  poll point does, while a signal from outside ral still reports its number
+  ([[internals/cancellation|cancellation]]). `classify` takes `cause: Option<
+  CancelCause>`, the strongest cause in force when the child ended, joined by `max`
   where two parties each ended it — a cancellation in force outranks the
   collector's reader-gone kill (raised only once the sentinel hears a dead
   write) by that order rather than by a special case. It is the sole input to

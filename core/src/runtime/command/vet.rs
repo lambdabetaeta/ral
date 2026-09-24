@@ -9,6 +9,7 @@
 
 use crate::ir::CommandName;
 use crate::path::PathSearch;
+use crate::process::SpawnFailure;
 use crate::types::{Break, Error, RefusedArg, Settled, Shell, Value};
 
 use super::identity::CommandIdentity;
@@ -74,17 +75,15 @@ fn check_existence(id: &CommandIdentity) -> Settled<()> {
         // The walk kept the file it stopped at, so the refusal can name it:
         // "permission denied" alone leaves the user guessing which of several
         // `PATH` directories shadowed the one they meant.
-        Some(PathSearch::FoundNotExecutable(found)) => Err(Break::Error(Error::new(
-            format!(
-                "{}: permission denied ({} is not executable)",
-                id.shown,
-                found.display()
-            ),
-            126,
+        Some(PathSearch::FoundNotExecutable(found)) => Err(Break::Error(Error::spawn_failure(
+            &id.shown,
+            SpawnFailure::PermissionDenied {
+                found: Some(found.clone()),
+            },
         ))),
-        Some(PathSearch::Missing) => Err(Break::Error(Error::new(
-            crate::process::not_found_hint(&id.shown),
-            127,
+        Some(PathSearch::Missing) => Err(Break::Error(Error::spawn_failure(
+            &id.shown,
+            SpawnFailure::NotFound,
         ))),
     }
 }

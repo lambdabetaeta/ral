@@ -3,25 +3,12 @@
 
 use super::cancel::CancelCause;
 
-/// The exit code the collector's `TerminateProcess` uses — ASCII "RALK" —
-/// the only signature a terminated Windows process carries.  A stage exiting
-/// with this exact code inside the kill window would be forgiven too; Unix
-/// has no such residue, a SIGKILL death being uncounterfeitable by an exit.
+/// The exit code ral's every Windows kill uses — ASCII "RALK" — the only
+/// signature a terminated Windows process carries.  A child exiting with this
+/// exact code while a cause was sent would be attributed too; Unix has no such
+/// residue, a signal death being uncounterfeitable by an exit.
 #[cfg(windows)]
-pub(crate) const STAGE_KILL_EXIT_CODE: i32 = 0x5241_4c4b;
-
-/// The escalation ladder ral's own teardown sends, and the whole of it:
-/// whatever `grace_signal` opens with, then SIGKILL to finish.  Every teardown
-/// sends exactly these, so a death by any other signal is the child's own
-/// however the wait left.
-#[cfg(unix)]
-const TEARDOWN_LADDER: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGKILL];
-
-/// One wording for "command not found", shared with `check_existence` in
-/// `runtime/command/vet.rs` so the pre-spawn probe and the spawn failure agree.
-pub(crate) fn not_found_hint(cmd: &str) -> String {
-    format!("{cmd}: command not found")
-}
+pub(crate) const KILL_EXIT_CODE: i32 = 0x5241_4c4b;
 
 /// An OS signal number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +21,6 @@ impl Signal {
         Self { number }
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) const fn number(self) -> i32 {
         self.number
     }
@@ -103,20 +89,6 @@ impl Signal {
         }
     }
 
-    /// A signal on ral's own [`TEARDOWN_LADDER`] — the only ones a cancelled
-    /// wait may claim as its doing.
-    pub(crate) fn is_teardown(self) -> bool {
-        #[cfg(unix)]
-        {
-            TEARDOWN_LADDER.contains(&self.number)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = self;
-            false
-        }
-    }
-
     pub(crate) fn is_sigsegv(self) -> bool {
         #[cfg(unix)]
         {
@@ -128,11 +100,6 @@ impl Signal {
             false
         }
     }
-
-    /// The shell convention for a signal death, 128 + N.
-    pub(crate) fn user_exit_code(self) -> i32 {
-        128 + self.number
-    }
 }
 
 /// What the OS reported when a process ended.  Never a stop: the reaper
@@ -141,18 +108,16 @@ impl Signal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WaitOutcome {
     Exited(i32),
-    /// A signal death nobody in ral asked for.
     #[cfg_attr(not(unix), allow(dead_code))]
     Signaled(Signal),
-    /// A signal death ral itself caused: a scope carried `cause`, and the
-    /// teardown in `RunningChild::wait` sent `signal`.  Its own variant so that
-    /// no reader can mistake our doing for a signal from outside, and so the
-    /// message can name the cause instead of the number.
-    Cancelled {
-        cause: CancelCause,
-        signal: Signal,
-    },
     NativeCode(i32),
+}
+
+/// How a child's end reads once ral's own teardown is accounted for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChildEnd {
+    Failed(CommandFailure),
+    Cancelled(CancelCause),
 }
 
 impl WaitOutcome {
@@ -178,56 +143,68 @@ impl WaitOutcome {
         }
     }
 
-    /// Read a signal death as ral's own teardown for `cause` — but only a death
-    /// by a signal ral sends, and only a signal death at all.  A child that
-    /// chose its own status inside the grace window keeps it; so does one the
-    /// kernel or a third party felled with something off the ladder, a segfault
-    /// or a broken pipe inside that same window.  A stop is job control's
-    /// business either way.
-    ///
-    /// An `enveloped` child's `Exited(128 + n)` reads the same way: bwrap
-    /// reports its payload's signal death as its own exit, whereas an
-    /// unenveloped `Exited(143)` is the child's own choice.
-    fn attribute_to(self, cause: CancelCause, enveloped: bool) -> Self {
-        let signal = match self {
-            Self::Signaled(signal) => signal,
-            Self::Exited(code) if enveloped => Signal::new(code - 128),
-            _ => return self,
-        };
-        if signal.is_teardown() {
-            Self::Cancelled { cause, signal }
-        } else {
-            self
-        }
-    }
-
-    #[cfg_attr(not(all(unix, test)), allow(dead_code))]
-    pub(crate) fn to_user_exit_code(self) -> i32 {
-        match self {
-            Self::Exited(code) | Self::NativeCode(code) => code,
-            Self::Signaled(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),
-        }
-    }
-
     pub(crate) fn is_success(self) -> bool {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// Whether this death reads as ral's own kill of a stage.  The attributed
-    /// form counts: which *reason* the kill had is `sent`'s to say, not this
-    /// predicate's — a cancellation in force outranks forgiveness, since
-    /// `Option<CancelCause>` orders a stronger cause above `ReaderGone`.
-    pub(crate) fn is_stage_kill(self) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(
-                self,
-                Self::Signaled(sig) | Self::Cancelled { signal: sig, .. } if sig.is_sigkill()
-            )
+    /// Whether this death is `cause`'s own teardown: a death by one of its
+    /// [`teardown_signals`](crate::process::teardown_signals).  An `enveloped`
+    /// `Exited(128 + n)` reads as a death by `n`, bwrap reporting its payload's
+    /// signal death as its own exit; an unenveloped one is the child's choice.
+    #[cfg(unix)]
+    fn is_teardown_of(self, cause: CancelCause, enveloped: bool) -> bool {
+        let signal = match self {
+            Self::Signaled(signal) => signal,
+            Self::Exited(code) if enveloped && code > 128 => Signal::new(code - 128),
+            _ => return false,
+        };
+        crate::process::teardown_signals(cause).any(|sent| sent == signal)
+    }
+
+    #[cfg(windows)]
+    fn is_teardown_of(self, _: CancelCause, _: bool) -> bool {
+        matches!(self, Self::Exited(KILL_EXIT_CODE))
+    }
+
+    /// The cause this death is by: `cause`'s own teardown, else the gesture
+    /// its signal stands for, whoever delivered it — the tty reaches a
+    /// foreground child ral never saw the keystroke for.  An exit is never a
+    /// gesture: `exit 130` is a choice.
+    fn attributed(self, cause: Option<CancelCause>, enveloped: bool) -> Option<CancelCause> {
+        cause
+            .filter(|&cause| self.is_teardown_of(cause, enveloped))
+            .or_else(|| self.gesture())
+    }
+
+    #[cfg(unix)]
+    fn gesture(self) -> Option<CancelCause> {
+        match self {
+            Self::Signaled(signal) => crate::process::gesture(signal),
+            _ => None,
         }
-        #[cfg(windows)]
-        {
-            matches!(self, Self::Exited(code) if code == STAGE_KILL_EXIT_CODE)
+    }
+
+    #[cfg(windows)]
+    fn gesture(self) -> Option<CancelCause> {
+        None
+    }
+
+    /// The end this outcome amounts to, or `None` for success, given the
+    /// strongest `cause` in force when the child ended.  A death by that
+    /// cause's teardown is the cause's — forgiven outright for `ReaderGone`,
+    /// the collector reclaiming a producer nobody read from — and anything
+    /// else stays as the OS reported it.
+    pub(crate) fn classify(self, cause: Option<CancelCause>, enveloped: bool) -> Option<ChildEnd> {
+        match self.attributed(cause, enveloped) {
+            Some(CancelCause::ReaderGone) => None,
+            Some(cause) => Some(ChildEnd::Cancelled(cause)),
+            None => match self {
+                Self::Exited(0) | Self::NativeCode(0) => None,
+                Self::Exited(code) | Self::NativeCode(code) => {
+                    Some(ChildEnd::Failed(CommandFailure::ExitCode(code)))
+                }
+                Self::Signaled(sig) => Some(ChildEnd::Failed(CommandFailure::Signal(sig))),
+            },
         }
     }
 }
@@ -236,7 +213,11 @@ impl WaitOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnFailure {
     NotFound,
-    PermissionDenied,
+    /// `found` is the file a `PATH` walk stopped at, when it differs from the
+    /// name the user typed.
+    PermissionDenied {
+        found: Option<std::path::PathBuf>,
+    },
     Io(String),
 }
 
@@ -245,62 +226,29 @@ pub enum SpawnFailure {
 pub enum CommandFailure {
     ExitCode(i32),
     Signal(Signal),
-    /// ral stopped the command itself, because a scope was cancelled for
-    /// `cause`; `signal` is what we sent.  Carries the same status as
-    /// [`Self::Signal`] would — only the words the user reads differ.
-    Cancelled {
-        cause: CancelCause,
-        signal: Signal,
-    },
     Spawn(SpawnFailure),
 }
 
 impl CommandFailure {
-    /// The failure an outcome amounts to, or `None` for success.  `sent` is
-    /// the strongest cause anything sent this child, joined by `max` where
-    /// two parties each ended it — a cancellation in force outranks
-    /// forgiveness by that order rather than by a special case. Forgiveness
-    /// reaches only the collector's own kill of a producer whose reader was
-    /// gone, and only a death that kill actually caused — never an exit
-    /// status, which killing a zombie cannot rewrite.
-    ///
-    /// Attribution is the same fact read the other way and so belongs here
-    /// too: a death by a signal on ral's own ladder, with a cause in `sent`,
-    /// is ral's doing whichever teardown sent it — and, for an `enveloped`
-    /// child, so is bwrap's `128 + n` exit for the payload's death by `n`.
-    pub(crate) fn from_outcome(
-        outcome: WaitOutcome,
-        sent: Option<CancelCause>,
-        enveloped: bool,
-    ) -> Option<Self> {
-        let outcome = sent.map_or(outcome, |cause| outcome.attribute_to(cause, enveloped));
-        if sent == Some(CancelCause::ReaderGone) && outcome.is_stage_kill() {
-            return None;
-        }
-        match outcome {
-            WaitOutcome::Exited(0) | WaitOutcome::NativeCode(0) => None,
-            WaitOutcome::Exited(code) | WaitOutcome::NativeCode(code) => Some(Self::ExitCode(code)),
-            WaitOutcome::Signaled(sig) => Some(Self::Signal(sig)),
-            WaitOutcome::Cancelled { cause, signal } => Some(Self::Cancelled { cause, signal }),
-        }
-    }
-
     pub fn message(&self, cmd: &str) -> String {
         match self {
             Self::ExitCode(code) => format!("{cmd}: exited with status {code}"),
             Self::Signal(sig) => format!("{cmd}: killed by signal {}", sig.display()),
-            Self::Cancelled { cause, .. } => {
-                format!("{cmd}: stopped because {}", cause.event())
+            Self::Spawn(SpawnFailure::NotFound) => format!("{cmd}: command not found"),
+            Self::Spawn(SpawnFailure::PermissionDenied { found: None }) => {
+                format!("{cmd}: permission denied")
             }
-            Self::Spawn(SpawnFailure::NotFound) => not_found_hint(cmd),
-            Self::Spawn(SpawnFailure::PermissionDenied) => format!("{cmd}: permission denied"),
+            Self::Spawn(SpawnFailure::PermissionDenied { found: Some(path) }) => format!(
+                "{cmd}: permission denied ({} is not executable)",
+                path.display()
+            ),
             Self::Spawn(SpawnFailure::Io(msg)) => format!("{cmd}: {msg}"),
         }
     }
 
     /// The follow-up line under the message.  `None` for a plain exit code, where
     /// `Error::from_command_failure` falls back to the user's exit-hints table.
-    pub(crate) fn default_hint(&self, cmd: &str) -> Option<String> {
+    pub(crate) fn default_hint(&self) -> Option<String> {
         match self {
             Self::ExitCode(_) | Self::Spawn(_) => None,
             Self::Signal(sig) if sig.is_sigkill() => Some(
@@ -311,22 +259,6 @@ impl CommandFailure {
                 Some("the process crashed with a segmentation fault".to_string())
             }
             Self::Signal(sig) => Some(format!("the process terminated from {}", sig.display())),
-            // The message already says why; the hint adds only how, and where
-            // the status the user reads back comes from.
-            Self::Cancelled { signal, .. } => Some(format!(
-                "ral stopped it with signal {}, so the status is that signal's and not an exit code {cmd} chose",
-                signal.display()
-            )),
-        }
-    }
-
-    /// The conventional numeric code — POSIX's 127 for not found, 126 for cannot-run.
-    pub(crate) fn to_user_exit_code(&self) -> i32 {
-        match self {
-            Self::ExitCode(code) => *code,
-            Self::Signal(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),
-            Self::Spawn(SpawnFailure::NotFound | SpawnFailure::Io(_)) => 127,
-            Self::Spawn(SpawnFailure::PermissionDenied) => 126,
         }
     }
 }
@@ -334,6 +266,23 @@ impl CommandFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Status;
+
+    /// What `sent` makes of a death it caused: its own cancellation, or, for
+    /// `ReaderGone`, the collector's forgiven kill.
+    fn attributed(cause: CancelCause) -> Option<ChildEnd> {
+        (cause != CancelCause::ReaderGone).then_some(ChildEnd::Cancelled(cause))
+    }
+
+    #[cfg(unix)]
+    fn signaled(n: i32) -> WaitOutcome {
+        WaitOutcome::Signaled(Signal::new(n))
+    }
+
+    #[cfg(unix)]
+    fn died_of(n: i32) -> ChildEnd {
+        ChildEnd::Failed(CommandFailure::Signal(Signal::new(n)))
+    }
 
     #[cfg(unix)]
     #[test]
@@ -342,112 +291,180 @@ mod tests {
         assert_eq!(Signal::new(libc::SIGTTOU).name(), Some("SIGTTOU"));
     }
 
+    /// Every status's number, from the one table that holds them.
     #[test]
-    fn ordinary_exit_and_signal_death_stay_distinct() {
-        assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), None, false),
-            Some(CommandFailure::ExitCode(137))
-        );
-        assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), None, false),
-            Some(CommandFailure::Signal(Signal::new(9)))
-        );
-    }
-
-    /// The words change with the cause; the status does not.  A cause-killed
-    /// child reports exactly what the same signal death reports today, so a
-    /// script reading `$status` cannot tell the two apart.
-    #[cfg(unix)]
-    #[test]
-    fn a_cancelled_child_names_its_cause_and_keeps_its_status() {
-        let term = Signal::new(libc::SIGTERM);
-        for (cause, event) in [
-            (CancelCause::Deadline, "the call's time limit expired"),
-            (CancelCause::Explicit, "the call was cancelled"),
-            (CancelCause::Interrupt, "the call was interrupted"),
-            (CancelCause::Terminate, "ral was asked to shut down"),
-            (CancelCause::RootAbort, "ral was aborted"),
+    fn every_status_has_its_code() {
+        for (status, code) in [
+            (Status::Raised(7), 7),
+            (Status::Process(CommandFailure::ExitCode(3)), 3),
+            (
+                Status::Process(CommandFailure::Signal(Signal::new(11))),
+                139,
+            ),
+            (
+                Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)),
+                127,
+            ),
+            (
+                Status::Process(CommandFailure::Spawn(SpawnFailure::PermissionDenied {
+                    found: None,
+                })),
+                126,
+            ),
+            (
+                Status::Process(CommandFailure::Spawn(SpawnFailure::Io("boom".into()))),
+                126,
+            ),
+            (Status::Cancelled(CancelCause::Interrupt), 130),
+            (Status::Cancelled(CancelCause::Explicit), 143),
+            (Status::Cancelled(CancelCause::Deadline), 124),
+            (Status::Cancelled(CancelCause::Terminate), 143),
+            (Status::Cancelled(CancelCause::RootAbort), 131),
+            (Status::Cancelled(CancelCause::ReaderGone), 141),
         ] {
-            let outcome = WaitOutcome::Signaled(term).attribute_to(cause, false);
-            assert_eq!(
-                outcome.to_user_exit_code(),
-                WaitOutcome::Signaled(term).to_user_exit_code()
-            );
-            let failure = CommandFailure::from_outcome(outcome, None, false).unwrap();
-            assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
-            assert_eq!(
-                failure.message("sleep"),
-                format!("sleep: stopped because {event}")
-            );
-            let hint = failure.default_hint("sleep").unwrap();
-            assert_eq!(
-                hint,
-                "ral stopped it with signal 15 (SIGTERM), \
-                 so the status is that signal's and not an exit code sleep chose"
-            );
-            assert!(
-                !hint.contains(event),
-                "the hint must add to the message, not repeat it: {hint}"
-            );
+            assert_eq!(status.code(), code, "{status:?}");
         }
     }
 
-    /// A signal off ral's teardown ladder is the child's own death, whatever was
-    /// in force when it landed: a segfault inside the grace window must keep the
-    /// segfault's words and the segfault's hint, not confess to our SIGTERM.
-    #[cfg(unix)]
     #[test]
-    fn a_signal_off_the_ladder_survives_the_cancel_branch() {
-        let segv = Signal::new(libc::SIGSEGV);
-        let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline, false);
-        assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, None, false).unwrap();
-        assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
+    fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            failure.default_hint("sh").as_deref(),
-            Some("the process crashed with a segmentation fault")
+            WaitOutcome::Exited(137).classify(None, false),
+            Some(ChildEnd::Failed(CommandFailure::ExitCode(137)))
+        );
+        assert_eq!(
+            WaitOutcome::Signaled(Signal::new(9)).classify(None, false),
+            Some(ChildEnd::Failed(CommandFailure::Signal(Signal::new(9))))
         );
     }
 
-    /// A signal nobody in ral sent stays a signal: only a teardown we performed
-    /// earns the cause wording, and only a signal death earns it at all.
+    /// A death by a cause's grace signal or by the SIGKILL that ends every
+    /// teardown is the cause's, and an enveloped `Exited(128 + n)` for the
+    /// same `n` reads alike.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_death_is_attributed_to_the_cause_sent() {
+        use libc::{SIGINT, SIGKILL, SIGTERM};
+        for (cause, expected) in [
+            (CancelCause::Interrupt, vec![SIGINT, SIGKILL]),
+            (CancelCause::Explicit, vec![SIGTERM, SIGKILL]),
+            (CancelCause::Deadline, vec![SIGTERM, SIGKILL]),
+            (CancelCause::Terminate, vec![SIGTERM, SIGKILL]),
+            (CancelCause::RootAbort, vec![SIGKILL]),
+            (CancelCause::ReaderGone, vec![SIGKILL]),
+        ] {
+            let actual: std::collections::BTreeSet<i32> = crate::process::teardown_signals(cause)
+                .map(Signal::number)
+                .collect();
+            assert_eq!(
+                actual,
+                expected.iter().copied().collect(),
+                "{cause:?}'s teardown signals"
+            );
+            for n in expected {
+                assert_eq!(
+                    signaled(n).classify(Some(cause), false),
+                    attributed(cause),
+                    "{cause:?}, signal {n}"
+                );
+            }
+            for signal in crate::process::teardown_signals(cause) {
+                let code = 128 + signal.number();
+                assert_eq!(
+                    WaitOutcome::Exited(code).classify(Some(cause), true),
+                    attributed(cause),
+                    "{cause:?}, enveloped exit {code}"
+                );
+            }
+        }
+    }
+
+    /// A signal neither the cause's teardown nor a gesture is the child's own
+    /// death, whatever was in force when it landed: a segfault in the grace
+    /// window keeps the segfault's words.
+    #[cfg(unix)]
+    #[test]
+    fn a_death_off_the_causes_teardown_stays_a_signal() {
+        for cause in CancelCause::ALL {
+            assert_eq!(
+                signaled(libc::SIGSEGV).classify(Some(cause), false),
+                Some(died_of(libc::SIGSEGV)),
+                "{cause:?}"
+            );
+            assert_eq!(
+                WaitOutcome::Exited(128 + libc::SIGSEGV).classify(Some(cause), true),
+                Some(ChildEnd::Failed(CommandFailure::ExitCode(
+                    128 + libc::SIGSEGV
+                ))),
+                "{cause:?}, enveloped"
+            );
+        }
+        assert_eq!(
+            WaitOutcome::Exited(128 + libc::SIGTERM).classify(Some(CancelCause::ReaderGone), true),
+            Some(ChildEnd::Failed(CommandFailure::ExitCode(
+                128 + libc::SIGTERM
+            )))
+        );
+    }
+
+    /// A gesture's signal is its cause whoever delivered it, ral or no cause
+    /// in force at all, and a cause whose teardown it is not yields to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_gesture_death_is_the_gestures_cause() {
+        for (n, cause) in [
+            (libc::SIGINT, CancelCause::Interrupt),
+            (libc::SIGQUIT, CancelCause::RootAbort),
+            (libc::SIGTERM, CancelCause::Terminate),
+            (libc::SIGHUP, CancelCause::Terminate),
+        ] {
+            assert_eq!(signaled(n).classify(None, false), attributed(cause), "{n}");
+        }
+        assert_eq!(
+            signaled(libc::SIGINT).classify(Some(CancelCause::Deadline), false),
+            attributed(CancelCause::Interrupt)
+        );
+        assert_eq!(
+            signaled(libc::SIGTERM).classify(Some(CancelCause::ReaderGone), false),
+            attributed(CancelCause::Terminate)
+        );
+    }
+
+    /// Only an envelope reports its payload's signal death as an exit; an
+    /// unenveloped `Exited(143)` is the child's own choice, cause or none.
+    #[cfg(unix)]
+    #[test]
+    fn a_propagated_exit_is_attributed_only_enveloped_and_with_a_cause() {
+        let code = 128 + libc::SIGTERM;
+        let own = Some(ChildEnd::Failed(CommandFailure::ExitCode(code)));
+        assert_eq!(
+            WaitOutcome::Exited(code).classify(Some(CancelCause::Explicit), true),
+            Some(ChildEnd::Cancelled(CancelCause::Explicit))
+        );
+        assert_eq!(WaitOutcome::Exited(code).classify(None, true), own);
+        assert_eq!(
+            WaitOutcome::Exited(code).classify(Some(CancelCause::Explicit), false),
+            own
+        );
+    }
+
+    /// A signal no cause sent and no gesture names stays a signal, and keeps its words.
     #[cfg(unix)]
     #[test]
     fn a_foreign_signal_is_still_reported_as_a_signal() {
-        let failure = CommandFailure::from_outcome(
-            WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
-            None,
-            false,
-        )
-        .unwrap();
-        assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
         assert_eq!(
-            WaitOutcome::Exited(3).attribute_to(CancelCause::Deadline, false),
-            WaitOutcome::Exited(3)
+            signaled(libc::SIGKILL).classify(None, false),
+            Some(died_of(libc::SIGKILL))
         );
-    }
-
-    /// The kill the collector itself sent is the one death forgiven: the
-    /// stage's reader was already reaped, so a SIGKILL is not a failure but
-    /// the collector reclaiming a producer nobody was reading from anymore.
-    #[cfg(unix)]
-    #[test]
-    fn a_stage_kill_is_forgiven() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
-        let sent = Some(CancelCause::ReaderGone);
-        assert_eq!(CommandFailure::from_outcome(outcome, sent, false), None);
-    }
-
-    /// The very same death, which nothing in ral caused, is an ordinary
-    /// SIGKILL failure: nothing about the signal itself carries forgiveness,
-    /// only the ending recording who ended the stage and why.
-    #[cfg(unix)]
-    #[test]
-    fn the_same_death_unsent_is_kept() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
         assert_eq!(
-            CommandFailure::from_outcome(outcome, None, false),
-            Some(CommandFailure::Signal(Signal::new(libc::SIGKILL)))
+            CommandFailure::Signal(Signal::new(libc::SIGKILL)).message("sh"),
+            "sh: killed by signal 9 (SIGKILL)"
+        );
+        assert_eq!(
+            CommandFailure::Signal(Signal::new(libc::SIGSEGV))
+                .default_hint()
+                .as_deref(),
+            Some("the process crashed with a segmentation fault")
         );
     }
 
@@ -457,14 +474,13 @@ mod tests {
     /// forgiveness.
     #[test]
     fn an_exit_status_is_kept_even_when_ral_ended_the_stage() {
-        assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Exited(3),
-                Some(CancelCause::ReaderGone),
-                false
-            ),
-            Some(CommandFailure::ExitCode(3))
-        );
+        for cause in CancelCause::ALL {
+            assert_eq!(
+                WaitOutcome::Exited(3).classify(Some(cause), false),
+                Some(ChildEnd::Failed(CommandFailure::ExitCode(3))),
+                "{cause:?}"
+            );
+        }
     }
 
     /// SIGPIPE carries no special case: with no interior edge left to deliver
@@ -473,45 +489,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_sigpipe_death_is_kept_under_every_ending() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
         for sent in [Some(CancelCause::ReaderGone), None] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome, sent, false),
-                Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
+                signaled(libc::SIGPIPE).classify(sent, false),
+                Some(died_of(libc::SIGPIPE))
             );
         }
-    }
-
-    /// A death on ral's ladder is attributed to the cause that was sent,
-    /// wherever the teardown ran — a pipeline stage's SIGTERM names the
-    /// cancellation, not the number.  Only SIGKILL is the reader-gone kill, so
-    /// a SIGTERM under `ReaderGone` is a cancellation and not forgiveness.
-    #[cfg(unix)]
-    #[test]
-    fn from_outcome_attributes_a_ladder_death_to_the_cause_sent() {
-        let term = Signal::new(libc::SIGTERM);
-        assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Signaled(term),
-                Some(CancelCause::Deadline),
-                false
-            ),
-            Some(CommandFailure::Cancelled {
-                cause: CancelCause::Deadline,
-                signal: term
-            })
-        );
-        assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Signaled(term),
-                Some(CancelCause::ReaderGone),
-                false
-            ),
-            Some(CommandFailure::Cancelled {
-                cause: CancelCause::ReaderGone,
-                signal: term
-            })
-        );
     }
 
     /// A cancellation in force outranks forgiveness: `Option<CancelCause>`
@@ -522,42 +505,27 @@ mod tests {
     fn a_stronger_ending_outranks_forgiveness() {
         let sent = Some(CancelCause::ReaderGone).max(Some(CancelCause::RootAbort));
         assert_eq!(sent, Some(CancelCause::RootAbort));
-        let outcome = WaitOutcome::Cancelled {
-            cause: CancelCause::RootAbort,
-            signal: Signal::new(libc::SIGKILL),
-        };
-        assert!(CommandFailure::from_outcome(outcome, sent, false).is_some());
+        assert_eq!(
+            signaled(libc::SIGKILL).classify(sent, false),
+            Some(ChildEnd::Cancelled(CancelCause::RootAbort))
+        );
     }
 
-    /// An enveloped `Exited(143)` with a teardown cause in `sent` is bwrap
-    /// reporting its SIGTERM'd payload and reads as `Cancelled`; unenveloped,
-    /// or with no cause sent, it is the child's own exit.
-    #[cfg(unix)]
+    /// Windows has one teardown signature, ral's kill exit code, and it is the
+    /// sent cause's whichever cause that was.
+    #[cfg(windows)]
     #[test]
-    fn a_propagated_exit_is_attributed_only_enveloped_and_with_a_cause() {
-        let code = 128 + libc::SIGTERM;
+    fn the_kill_exit_code_is_attributed_to_the_cause_sent() {
+        for cause in CancelCause::ALL {
+            assert_eq!(
+                WaitOutcome::Exited(KILL_EXIT_CODE).classify(Some(cause), false),
+                attributed(cause),
+                "{cause:?}"
+            );
+        }
         assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Exited(code),
-                Some(CancelCause::Explicit),
-                true
-            ),
-            Some(CommandFailure::Cancelled {
-                cause: CancelCause::Explicit,
-                signal: Signal::new(libc::SIGTERM)
-            })
-        );
-        assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(code), None, true),
-            Some(CommandFailure::ExitCode(code))
-        );
-        assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Exited(code),
-                Some(CancelCause::Explicit),
-                false
-            ),
-            Some(CommandFailure::ExitCode(code))
+            WaitOutcome::Exited(KILL_EXIT_CODE).classify(None, false),
+            Some(ChildEnd::Failed(CommandFailure::ExitCode(KILL_EXIT_CODE)))
         );
     }
 }

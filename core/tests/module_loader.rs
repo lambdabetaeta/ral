@@ -120,7 +120,7 @@ fn a_used_failure_keeps_its_status_and_is_tagged_once() {
         Err(Break::Error(e)) => e,
         other => panic!("expected the module's failure, got {other:?}"),
     };
-    assert_eq!(e.status, Status::Code(7), "the module's status survives");
+    assert_eq!(e.status, Status::Raised(7), "the module's status survives");
     assert_eq!(e.message, "use: boom");
 
     std::fs::remove_file(&inner).ok();

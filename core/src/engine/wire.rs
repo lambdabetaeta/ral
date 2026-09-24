@@ -636,7 +636,7 @@ mod wire_desk_tests {
         assert_eq!(err.message, crate::types::NO_DESK);
         assert_eq!(
             err.status,
-            crate::types::Status::Code(crate::types::NO_DESK_STATUS)
+            crate::types::Status::Raised(crate::types::NO_DESK_STATUS)
         );
     }
 

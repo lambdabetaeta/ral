@@ -3,9 +3,10 @@
 //! parsing and installing `within`'s options, and classifying a delimited
 //! body's result into the record `try` and `poll` hand their handler.
 
+use crate::process::{CommandFailure, SpawnFailure};
 use crate::types::{
     CallSite, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell,
-    Value, as_map, sig, site_value, validate_handler_arity,
+    Status, Value, as_map, sig, site_value, validate_handler_arity,
 };
 
 use std::collections::HashMap;
@@ -13,27 +14,50 @@ use std::path::PathBuf;
 
 /// A failed `try`/`guard`/`audit` body, flattened for the error record.
 pub(crate) struct Outcome {
-    pub status: i32,
+    pub status: Status,
     pub message: String,
     pub cmd: String,
     pub site: Option<CallSite>,
 }
 
-/// The `{cmd, status, message, site}` record `try` hands its handler and
-/// `poll` its `` `err `` payload.  Bytes are absent by design; `audit` is the
-/// forensic path.  Mirrors `typecheck::builtins::try_error_record`.
+/// The `{cmd, status, reason, message, site}` record `try` hands its handler
+/// and `poll` its `` `err `` payload; `status` is the projection of `reason`.
+/// Bytes are absent by design; `audit` is the forensic path.  Mirrors
+/// `typecheck::builtins::try_error_record`.
 pub(crate) fn error_record(
     cmd: &str,
-    status: i32,
+    status: &Status,
     message: &str,
     site: Option<&CallSite>,
 ) -> Value {
     Value::map(vec![
         ("cmd".into(), Value::String(cmd.to_string())),
-        ("status".into(), Value::Int(i64::from(status))),
+        ("status".into(), Value::Int(i64::from(status.code()))),
+        ("reason".into(), reason_value(status)),
         ("message".into(), Value::String(message.to_string())),
         ("site".into(), Value::from(site_value(site))),
     ])
+}
+
+/// Why a failure happened, as the tagged value `$err[reason]` reads; mirrors
+/// `typecheck::builtins::reason_ty`.
+pub(crate) fn reason_value(status: &Status) -> Value {
+    let tag = |label: &str, payload: Option<Value>| Value::Variant {
+        label: label.into(),
+        payload: payload.map(Box::new),
+    };
+    match status {
+        Status::Raised(_) => tag("raised", None),
+        Status::Process(CommandFailure::ExitCode(code)) => {
+            tag("exited", Some(Value::Int(i64::from(*code))))
+        }
+        Status::Process(CommandFailure::Signal(sig)) => {
+            tag("signaled", Some(Value::Int(i64::from(sig.number()))))
+        }
+        Status::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => tag("not-found", None),
+        Status::Process(CommandFailure::Spawn(_)) => tag("not-runnable", None),
+        Status::Cancelled(cause) => tag("cancelled", Some(tag(cause.label(), None))),
+    }
 }
 
 /// A failed body's position comes from the error's own span; one outside the
@@ -43,7 +67,7 @@ pub(crate) fn error_record(
 /// dispatch owns.
 pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
     Outcome {
-        status: e.exit_code(),
+        status: e.status.clone(),
         message: e.message.clone(),
         cmd: e.command.clone().unwrap_or_else(|| "<runtime>".into()),
         site: shell.site_of(e.span).or_else(|| shell.call_site()),
@@ -59,7 +83,7 @@ pub fn error_record_of(e: &Error, shell: &Shell) -> Value {
         cmd,
         site,
     } = classify(e, shell);
-    error_record(&cmd, status, &message, site.as_ref())
+    error_record(&cmd, &status, &message, site.as_ref())
 }
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.

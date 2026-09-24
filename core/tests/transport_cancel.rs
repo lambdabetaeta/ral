@@ -76,8 +76,8 @@ fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
     let Report::Ran { ending, trail, .. } = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
-    // `grace_signal` reserves SIGINT for `Interrupt`, so the child dies of
-    // signal 2 and the run reports the death it actually died of.
+    // The child dies of SIGINT, `Interrupt`'s own grace signal, so the run
+    // reports the interrupt.
     assert_eq!(
         ending.status(),
         130,

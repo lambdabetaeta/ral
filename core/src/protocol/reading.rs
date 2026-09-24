@@ -146,7 +146,7 @@ pub(crate) fn answer(shell: &Shell, req: &FOValue) -> Result<FOValue, String> {
             .durable_root()
             .as_scope()
             .cause()
-            .map(crate::process::CancelCause::exit_code)
+            .map(|cause| crate::types::Status::Cancelled(cause).code())
             .encode(),
         Class::CompletionNames => CompletionNames::of(shell).encode(),
         Class::Bindings => BindingRow::all(shell).encode(),
@@ -171,7 +171,10 @@ pub(crate) fn report(answer: Result<FOValue, String>) -> Report {
         Ok(value) => Ending::Settled { value, status: 0 },
         Err(rendered) => Ending::Raised {
             record: FOValue::try_from(&crate::evaluator::scope::error_record(
-                "<probe>", 1, &rendered, None,
+                "<probe>",
+                &crate::types::Status::Raised(1),
+                &rendered,
+                None,
             ))
             .expect("an error record is data"),
             rendered,

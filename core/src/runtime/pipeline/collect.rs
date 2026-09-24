@@ -6,9 +6,7 @@ use super::super::command;
 use super::stage::StageHandle;
 use crate::evaluator::audit::{command_fact, observe_stamped};
 use crate::ir::PipeYield;
-use crate::process::{
-    CancelCause, CancelWatch, CommandFailure, Pgid, WaitOutcome, Watch, watch_cancel,
-};
+use crate::process::{CancelCause, CancelWatch, Pgid, WaitOutcome, Watch, watch_cancel};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Settled, Shell,
     Value, epoch_us,
@@ -65,8 +63,9 @@ fn finish_external_settlement(
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
-    let err = CommandFailure::from_outcome(outcome, sent, enveloped)
-        .map(|f| Error::from_command_failure(name, f, shell));
+    let err = outcome
+        .classify(sent, enveloped)
+        .map(|end| Error::of_child(name, end, shell));
     let audit = synth_external_stage_audit(shell, name, args, err.as_ref());
     let settled = match err {
         Some(err) => Err(Break::Error(augment_stage_failure(err, shell, started))),
@@ -260,7 +259,7 @@ impl StageObservation {
     }
 
     /// Whether this stage's break is a `cause`-cancellation's own — the thread
-    /// analogue of `WaitOutcome::is_stage_kill`.
+    /// analogue of `WaitOutcome::classify`'s forgiveness.
     pub(super) fn ended_by(&self, cause: CancelCause) -> bool {
         matches!(&self.settled, Err(Break::Error(e)) if e.cancelled_by() == Some(cause))
     }
@@ -932,8 +931,8 @@ mod tests {
         );
     }
 
-    /// A stage this collector tore down names the cause it sent, not the
-    /// signal number that carried it.
+    /// A stage this collector tore down reports the cause it sent, not the
+    /// signal that carried it.
     #[cfg(unix)]
     #[test]
     fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
@@ -953,12 +952,43 @@ mod tests {
         );
 
         match state.fold(&mooring, &mut shell, PipeYield::Unit) {
-            Err(Break::Error(e)) => assert!(
-                e.message.contains("stopped because the call was cancelled"),
-                "expected the cause, not the signal number: {}",
-                e.message
+            Err(Break::Error(e)) => assert_eq!(
+                e.cancelled_by(),
+                Some(CancelCause::Explicit),
+                "expected the cause, not the signal: {e:?}"
             ),
             other => panic!("expected the teardown death to fold in as an error, got {other:?}"),
+        }
+    }
+
+    /// A `try` inside a stage body its reader cut sees why: the record reads
+    /// `` `cancelled `reader-gone `` at 141, which the handler re-raises as
+    /// its own failure for the run to report.
+    #[cfg(unix)]
+    #[test]
+    fn a_try_in_a_stage_its_reader_cut_sees_reader_gone() {
+        let src = "let spew = { |n| to-line y\n spew $n }\n\
+                   !{ try { spew 0 } { |err| fail [status: $err[status], message: !{str $err[reason]}] } } | head -n 1";
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let report = shell.run(crate::run::RunRequest {
+            run: crate::engine::testkit::run(src),
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+        });
+        match report {
+            crate::run::RunReport::Ran {
+                ending: crate::run::Ending::Raised { error, .. },
+                ..
+            } => {
+                assert_eq!(error.exit_code(), 141, "{error:?}");
+                assert!(
+                    error.message.contains("`cancelled `reader-gone"),
+                    "{error:?}"
+                );
+            }
+            _ => panic!("the handler's re-raise must end the run"),
         }
     }
 

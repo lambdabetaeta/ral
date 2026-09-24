@@ -61,13 +61,12 @@ fn render(
     let mut out = String::new();
     let exit = match ending {
         Ending::Settled { .. } => return (out, 0),
-        Ending::Walled { rendered, .. } => {
+        Ending::Walled {
+            rendered, status, ..
+        } => {
             out.push_str(rendered);
             out.push_str(&timeout_tip(timeout_secs));
-            // 124 names the wall, not the cancel's own exit status — the
-            // wire carries that status for other seats ($? in the REPL),
-            // but a timed-out tool call reports the timeout itself.
-            124
+            status.get()
         }
         Ending::Raised {
             rendered,
@@ -241,12 +240,19 @@ mod tests {
         assert_eq!(exit, 0);
     }
 
+    /// The status a walled run carries: its deadline cancellation's own.
+    fn deadline_status() -> ral_core::protocol::FailureStatus {
+        ral_core::types::Status::Cancelled(ral_core::process::CancelCause::Deadline)
+            .code()
+            .into()
+    }
+
     #[test]
     fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
         let ending = Ending::Walled {
             rendered: "error: sleep 30\n".into(),
             record: FOValue::Unit,
-            status: 143.into(),
+            status: deadline_status(),
         };
         let trail = vec![worker_birth(1, "sleep 20")];
         let fragment = ActFragment::from_acts(vec![committed_act("reply", None)]);
@@ -369,7 +375,7 @@ mod tests {
                 Ending::Walled {
                     rendered: "error: wall\n".into(),
                     record: FOValue::Unit,
-                    status: 143.into(),
+                    status: deadline_status(),
                 },
                 124,
             ),

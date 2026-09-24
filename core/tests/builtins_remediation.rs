@@ -236,7 +236,7 @@ fn fail_bare_forms_are_rejected() {
 fn fail_preserves_in_range_status() {
     assert_eq!(
         fail_status("fail [status: 7, message: 'in-range status']"),
-        Status::Code(7)
+        Status::Raised(7)
     );
 }
 

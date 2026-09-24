@@ -247,6 +247,7 @@ pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
 pub(super) fn try_error_record() -> Ty {
     closed_record(&[
         ("status", Ty::Int),
+        ("reason", reason_ty()),
         ("cmd", Ty::String),
         ("message", Ty::String),
         ("site", site_ty()),
@@ -257,6 +258,21 @@ pub(super) fn try_error_record() -> Ty {
 /// before-image is a fact, not a missing key.
 fn optional_ty(payload: Ty) -> Ty {
     closed_variant(&[("just", payload), ("none", Ty::Unit)])
+}
+
+/// Why a failure happened, mirrored at runtime by `reason_value` in
+/// `core/src/evaluator/scope.rs`.
+fn reason_ty() -> Ty {
+    let causes = crate::process::CancelCause::ALL.map(|c| (c.label(), Ty::Unit));
+    let cause = closed_variant(&causes);
+    closed_variant(&[
+        ("exited", Ty::Int),
+        ("signaled", Ty::Int),
+        ("cancelled", cause),
+        ("not-found", Ty::Unit),
+        ("not-runnable", Ty::Unit),
+        ("raised", Ty::Unit),
+    ])
 }
 
 /// A source position, mirrored at runtime by `site_value` in

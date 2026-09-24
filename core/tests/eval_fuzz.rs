@@ -621,6 +621,81 @@ fn try_error_record_carries_the_script() {
     );
 }
 
+/// The `reason` and `status` of the record `try` hands its handler when
+/// `body` fails, run by `eval`.
+fn caught(body: &str) -> (Value, Value) {
+    caught_by(body, eval)
+}
+
+fn caught_by(
+    body: &str,
+    run: impl FnOnce(&str) -> ral_core::types::Settled<Value>,
+) -> (Value, Value) {
+    let src = format!(
+        "try {{ {body}; fail [status: 99, message: 'the body did not fail'] }} {{ |err| return $err }}"
+    );
+    let Ok(Value::Map(record)) = run(&src) else {
+        panic!("a caught error is a record: {src:?}");
+    };
+    (
+        record.get("reason").unwrap().clone(),
+        record.get("status").unwrap().clone(),
+    )
+}
+
+fn tag(label: &str, payload: Option<Value>) -> Value {
+    Value::Variant {
+        label: label.into(),
+        payload: payload.map(Box::new),
+    }
+}
+
+#[test]
+fn try_reason_says_a_fail_was_raised() {
+    assert_eq!(
+        caught("fail [status: 3, message: 'x']"),
+        (tag("raised", None), Value::Int(3))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn try_reason_says_how_a_command_ended() {
+    assert_eq!(
+        caught("sh -c 'exit 3'"),
+        (tag("exited", Some(Value::Int(3))), Value::Int(3))
+    );
+    assert_eq!(
+        caught("/nonexistent/ral-no-such-command"),
+        (tag("not-found", None), Value::Int(127))
+    );
+    assert_eq!(
+        caught("ral-no-such-command"),
+        (tag("not-found", None), Value::Int(127))
+    );
+    assert_eq!(
+        caught("sh -c 'kill -SEGV $$'"),
+        (tag("signaled", Some(Value::Int(11))), Value::Int(139))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn try_reason_says_a_file_would_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("not-executable");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    assert_eq!(
+        caught(&script.display().to_string()),
+        (tag("not-runnable", None), Value::Int(126))
+    );
+    let path = format!("{}:/bin:/usr/bin", dir.path().display());
+    assert_eq!(
+        caught_by("not-executable", |src| eval_on_path(src, &path)),
+        (tag("not-runnable", None), Value::Int(126))
+    );
+}
+
 #[test]
 fn fail_propagates_without_try() {
     must_fail("fail [status: 1, message: 'deliberate failure']");

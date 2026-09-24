@@ -304,7 +304,7 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// The one sanctioned `WalkBuilder::build` site, backed by a clippy ban: an
 /// `ignore::Walk` runs to completion regardless of cancellation, so every caller
 /// must poll [`ral_core::process::check`] atop each iteration to surface a
-/// timeout or Esc as a status-130 `Break` before the next entry.
+/// timeout or Esc as a cancellation `Break` before the next entry.
 #[allow(
     clippy::disallowed_methods,
     reason = "[surface:grep-walk] The one sanctioned WalkBuilder::build site, rooting the grep site's directory walk; the search emits one `grep` surface for the whole walk and polls check() per entry for cancel."

@@ -110,11 +110,7 @@ fn anchor_error(e: impl std::fmt::Display) -> Break {
 /// The cause the shell's own handler for `signal` would apply.
 #[cfg(unix)]
 fn cancel_cause(signal: i32) -> CancelCause {
-    match signal {
-        libc::SIGINT => CancelCause::Interrupt,
-        libc::SIGQUIT => CancelCause::RootAbort,
-        _ => CancelCause::Terminate,
-    }
+    crate::process::gesture(crate::process::Signal::new(signal)).unwrap_or(CancelCause::Terminate)
 }
 
 /// The anchor's own death cancels the pipeline: nothing else in the group has

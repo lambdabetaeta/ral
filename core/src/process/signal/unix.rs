@@ -38,7 +38,7 @@ extern "C" fn handler(sig: libc::c_int) {
     let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
     if prev >= 2 {
         // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
-        unsafe { libc::_exit(128 + sig) };
+        unsafe { libc::_exit(forced_exit_code(sig)) };
     }
     // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
     // land on the durable root, so detached workers hear them too.
@@ -47,6 +47,14 @@ extern "C" fn handler(sig: libc::c_int) {
     } else {
         request_root_cancel(CancelCause::Terminate);
     }
+}
+
+/// The status a forced exit on `sig` reports: its gesture's cause's, or, for a
+/// signal no gesture names, the bare `128 + sig`.  Pure, so async-signal-safe.
+fn forced_exit_code(sig: libc::c_int) -> i32 {
+    gesture(Signal::new(sig)).map_or(128 + sig, |cause| {
+        crate::types::Status::Cancelled(cause).code()
+    })
 }
 
 /// The termination handler, for a caller installing it signal by signal.
@@ -335,6 +343,30 @@ pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
         }
         CancelCause::ReaderGone | CancelCause::RootAbort => None,
     }
+}
+
+/// The cause each gesture signal stands for, as the shell's own handler reads it.
+const GESTURES: [(i32, CancelCause); 4] = [
+    (libc::SIGINT, CancelCause::Interrupt),
+    (libc::SIGQUIT, CancelCause::RootAbort),
+    (libc::SIGTERM, CancelCause::Terminate),
+    (libc::SIGHUP, CancelCause::Terminate),
+];
+
+/// The cause a gesture signal stands for, whoever delivered it.  Pure, so
+/// async-signal-safe.
+pub(crate) fn gesture(signal: Signal) -> Option<CancelCause> {
+    GESTURES
+        .into_iter()
+        .find_map(|(number, cause)| (number == signal.number()).then_some(cause))
+}
+
+/// The signals ral's own teardown for `cause` sends: its grace signal, then
+/// the SIGKILL that ends every teardown.
+pub(crate) fn teardown_signals(cause: CancelCause) -> impl Iterator<Item = Signal> {
+    grace_signal(cause)
+        .into_iter()
+        .chain([Signal::new(libc::SIGKILL)])
 }
 
 /// Capture stdin's line-discipline state; `None` when stdin is not a tty.  The

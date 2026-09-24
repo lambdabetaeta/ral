@@ -254,8 +254,7 @@ therefore *detaches* its pumps rather than joining them
 owed to nobody, and the join would otherwise wait on the descendant.
 Forgiveness for an external reads the wait status too, which a thread's `Break`
 does not carry on its own: `sent == Some(ReaderGone)` and the death is the
-kill's own
-(`WaitOutcome::is_stage_kill`), as before. The stage's own external child (if
+kill's own — `WaitOutcome::classify`'s `ReaderGone` forgiveness, as before. The stage's own external child (if
 it has one) is torn down by pid inside that stage's own `RunningChild::wait`.
 A nested pipeline's stages are cancelled transitively the same way, each
 stage's own edge check or sentinel ending only that stage's own write. This
@@ -417,11 +416,11 @@ Because `grace_signal` is the one cause→signal table, and
 `RunningChild::terminate` reads it too, a reader-gone teardown kills outright
 at every nesting level: `!{ yes | cat } | head -1` ends the inner `yes`
 without a catchable `SIGTERM` ever being attributed to it. What the collector
-sent is read back in `fold`, through `CommandFailure::from_outcome(outcome,
-sent)`, so a pipeline external torn down under `Explicit` or `Deadline`
-reports the cause — "stopped because the call's time limit expired" — exactly
-as a standalone external does
-([[decisions/260905_one-delivery-path|one-delivery-path]]).
+sent is read back in `fold`, through `WaitOutcome::classify(sent, …)`, so a
+pipeline external torn down under `Explicit` or `Deadline` reports the cause —
+`timed out`, status 124 — exactly as a standalone external does
+([[decisions/260905_one-delivery-path|one-delivery-path]],
+[[internals/cancellation|cancellation]]).
 
 `CollectState::drop` is the other, and it covers every forced end that drops
 rather than observes: a launch that failed part-way, an unwind between launch

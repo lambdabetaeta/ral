@@ -150,7 +150,7 @@ pub(crate) fn run(
     );
 
     let waited: WaitedChild = running.wait();
-    let (outcome, sent) = (waited.outcome, waited.sent);
+    let (outcome, cause) = (waited.outcome, waited.cause);
 
     // Held rather than `?`-propagated: the drain below must still run for a
     // command that did run, even when its commit failed.
@@ -169,10 +169,10 @@ pub(crate) fn run(
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
-    match crate::process::CommandFailure::from_outcome(outcome, sent, confinement.is_some()) {
+    match outcome.classify(cause, confinement.is_some()) {
         None => Ok(Value::Unit),
-        Some(failure) => {
-            let err = Error::from_command_failure(&cmd_name, failure, shell);
+        Some(end) => {
+            let err = Error::of_child(&cmd_name, end, shell);
             // Only this child and its descendants may claim a kernel deny
             // line; `augment_failure` short-circuits when no sandbox ran.
             let mut pids = crate::sandbox::sample_descendants(child_pid);

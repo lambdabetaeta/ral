@@ -25,13 +25,13 @@ use super::reaper::{Watch, watch};
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::grace_signal;
-#[cfg(unix)]
 pub use unix::{
     ForegroundGuard, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
     reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after, term_handler,
     termios_snapshot,
 };
+#[cfg(unix)]
+pub(crate) use unix::{gesture, grace_signal, teardown_signals};
 
 #[cfg(windows)]
 mod windows;

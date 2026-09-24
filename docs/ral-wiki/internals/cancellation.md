@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d9abfb52
-verified_at_date: 2026-09-11
-anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
+verified_at_commit: afc5d952
+verified_at_date: 2026-09-23
+anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, teardown_signals, GESTURES, gesture, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
 
 # Cancellation
@@ -67,17 +67,15 @@ cancellation is a *join*:**
 
   | cause | value | meaning | who raises it |
   |---|---|---|---|
-  | `Interrupt` | 1 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
-  | `Explicit` | 2 | a targeted worker teardown | `cancel <handle>`, `race` loser |
-  | `Deadline` | 3 | a wall-clock / lifetime ceiling expired | `process::deadline` |
-  | `Terminate` | 4 | the process was asked to shut down | SIGTERM / SIGHUP |
-  | `RootAbort` | 5 | the session root is being reaped | Ctrl-`\` |
+  | `ReaderGone` | 1 | a pipeline stage's reader has ended | the pipeline collector |
+  | `Interrupt` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
+  | `Explicit` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser |
+  | `Deadline` | 4 | a wall-clock / lifetime ceiling expired | `process::deadline` |
+  | `Terminate` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
+  | `RootAbort` | 6 | the session root is being reaped | Ctrl-`\` |
 
-`check` maps the strongest cause to `CancelCause::message` and
-`CancelCause::exit_code` — the one vocabulary every poll point shares:
-`"interrupted"`, `"cancelled"`, `"timed out"`, `"aborted"` at status 130,
-`"terminated"` at status 143 (`128 + SIGTERM`, what a supervisor that
-SIGTERMed the process expects to read back).
+`check` maps the strongest cause to `Error::cancelled(cause)`, whose message
+is `CancelCause::message` — the one vocabulary every poll point shares.
 
 ### Two typed scopes name the one invariant
 
@@ -196,6 +194,67 @@ never reaches this channel at all, since the reaper answers it with
 a cause for teardown. A foreground external still gets its Ctrl-C from the
 kernel directly — it owns the terminal — but a SIGTERM delivered to *ral*
 now preempts even that wait through the root cause.
+
+## One status per fact
+
+**A run's failure is a function of its cause, never of where the cancel
+landed.** A cancel that lands before a spawn meets a poll point; one that
+lands after meets a torn-down child. Both doors mint the one constructor
+`Status::Cancelled(cause)`, so the two cannot disagree. `Status` is a
+two-level sum, each level with its own messages and hints:
+
+    Status         = Raised(i32) | Cancelled(CancelCause) | Process(CommandFailure)
+    CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
+
+`Status::code` is the sole home of `128 + n` and of the cause table:
+
+| status | code |
+|---|---:|
+| `Raised(n)`, `ExitCode(n)` | n |
+| `Signal(s)` | 128 + s |
+| spawn: not found | 127 |
+| spawn: any other | 126 |
+| `Cancelled(Interrupt)` | 130 (`128 + SIGINT`) |
+| `Cancelled(Explicit)` | 143 (`128 + SIGTERM`, what `kill` sends) |
+| `Cancelled(Deadline)` | 124 (as `timeout(1)`) |
+| `Cancelled(Terminate)` | 143 (`128 + SIGTERM`) |
+| `Cancelled(RootAbort)` | 131 (`128 + SIGQUIT`) |
+| `Cancelled(ReaderGone)` | 141 (`128 + SIGPIPE`) |
+
+The same facts reach ral code as the error record's `reason`
+(`evaluator/scope.rs`, `reason_value`), of which `status` is the projection.
+`reader-gone` is among them because a `try` inside a stage body can observe
+its own cut.
+
+### Attribution
+
+A child's death passes through `WaitOutcome::classify(cause, enveloped)`,
+which yields a transient `ChildEnd`: `Failed(CommandFailure)` or
+`Cancelled(CancelCause)`, and `Error::of_child` maps the second to
+`Error::cancelled` exactly as a poll point does. `cause` is the strongest in
+force when the death is observed, not only what ral sent. Attribution reads
+two things, in order:
+
+1. **The cause's own teardown.** A death whose signal — read off a signal
+   death, or off an enveloped `Exited(128 + n)` — lies in
+   `teardown_signals(cause)`, its `grace_signal` and SIGKILL, is the cause's.
+2. **The gesture.** Otherwise a signal death whose signal is a gesture's is
+   that gesture's cause, whoever delivered it. In the REPL a lone foreground
+   child is its own process group, so the tty's SIGINT reaches it and never
+   ral: without this, Ctrl-C would read `` `cancelled `interrupted `` on a
+   pipeline, whose anchor witnesses the signal, and `` `signaled 2 `` on a
+   single command. An exit is never a gesture — `exit 130` is a choice.
+
+Anything else stays what it is, so a SIGSEGV under any cause is `Signal`.
+
+The gesture signals come from one table in `process/signal/unix.rs`,
+`GESTURES`, read only through `gesture(signal)`: SIGINT → `Interrupt`,
+SIGQUIT → `RootAbort`, SIGTERM and SIGHUP → `Terminate`. Attribution, the
+pipeline group's `cancel_cause` (defaulting to `Terminate`) and the
+escalation ladder's forced exit status all go through it. Windows has no signals to read, so ral ends every process it
+tears down — `TerminateProcess` and `TerminateJobObject` alike — with one
+`KILL_EXIT_CODE`, and an `Exited(KILL_EXIT_CODE)` with a cause sent is
+attributed to it. A cancelled child carries no hint.
 
 ## The gestures, per host
 

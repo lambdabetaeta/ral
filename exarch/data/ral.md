@@ -206,12 +206,14 @@ A nullary tag still binds a value (`()`) — ignore it with `_`. An arm's body m
 
 A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`. Definitions that completed before the failure are still bound. Resume from the step that failed; do not replay the script from the top, which re-runs the writes and spawns that already happened.
 
-`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `site` (`` `just [script, line, col] `` or `` `none ``) — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
+`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `reason`, `cmd`, `message`, `site` (`` `just [script, line, col] `` or `` `none ``) — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
 
     let log =
-      try { sort in.txt 2>&1 | from-string } { |err| 
+      try { sort in.txt 2>&1 | from-string } { |err|
         "sort failed: exited $err[status], $err[message]"
       }
+
+`$err[reason]` says why it failed — `` `exited n ``, `` `signaled n ``, `` `cancelled `timed-out `` (or another cause), `` `not-found ``, `` `not-runnable ``, `` `raised `` — so branch on it rather than decoding `status`.
 
 The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is synthetic status text, not the failing command's stderr; wrap a failing call in `audit` when you need to see stdout.
 

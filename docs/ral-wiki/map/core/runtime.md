@@ -245,8 +245,8 @@ recursion is irreducible; the evaluator reaches it at
     `finish_external_settlement`) — is the one place that reads it back
     against what actually happened: a thread's forgiveness reads its own
     break alone (a `ReaderGone` break is only ever this collector's doing),
-    an external's reads `sent == Some(ReaderGone)` and
-    `outcome.is_stage_kill()` too. The verdicts join by `stronger`/`rank`, an
+    an external's is `WaitOutcome::classify`'s `ReaderGone` forgiveness, a
+    death by the collector's own kill with `sent == Some(ReaderGone)`. The verdicts join by `stronger`/`rank`, an
     escape outranking an error and ties going to the earlier stage;
     `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `while live() { recv; step; run }`, no interval and

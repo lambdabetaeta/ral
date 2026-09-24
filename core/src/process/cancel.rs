@@ -26,8 +26,7 @@ use crate::sync::LockExt as _;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CancelCause {
     /// A pipeline stage's reader stage has already been observed; the
-    /// mildest cause, and the one ending `CommandFailure::from_outcome`
-    /// forgives.
+    /// mildest cause, and the one ending `WaitOutcome::classify` forgives.
     ReaderGone = 1,
     /// Ctrl-C / Esc.
     Interrupt = 2,
@@ -49,6 +48,16 @@ pub enum CancelCause {
 pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CancelCause {
+    /// Every cause, mildest first.
+    pub const ALL: [Self; 6] = [
+        Self::ReaderGone,
+        Self::Interrupt,
+        Self::Explicit,
+        Self::Deadline,
+        Self::Terminate,
+        Self::RootAbort,
+    ];
+
     fn from_u8(flag: u8) -> Option<Self> {
         match flag {
             1 => Some(Self::ReaderGone),
@@ -78,30 +87,15 @@ impl CancelCause {
         }
     }
 
-    /// What had happened at the moment ral stopped a command, as a clause a
-    /// report can read "stopped because …" into.  Its grammar differs from
-    /// [`message`](Self::message)'s — a bare participle cannot be a clause — but
-    /// the vocabulary is one, and lives here so it cannot drift.
-    pub(crate) fn event(self) -> &'static str {
+    /// The tag `$err[reason]` names this cause by, under `` `cancelled ``.
+    pub fn label(self) -> &'static str {
         match self {
-            Self::ReaderGone => "its reader ended",
-            Self::Interrupt => "the call was interrupted",
-            Self::Explicit => "the call was cancelled",
-            Self::Deadline => "the call's time limit expired",
-            Self::Terminate => "ral was asked to shut down",
-            Self::RootAbort => "ral was aborted",
-        }
-    }
-
-    /// The status paired with [`message`](Self::message): 141 (`128 +
-    /// SIGPIPE`) for a stage whose reader ended, 130 (`128 + SIGINT`) for
-    /// every other interactive-shaped cancellation, 143 (`128 + SIGTERM`) for
-    /// a shutdown request — what a supervisor that sent `SIGTERM` reads back.
-    pub fn exit_code(self) -> i32 {
-        match self {
-            Self::ReaderGone => 141,
-            Self::Terminate => 143,
-            _ => 130,
+            Self::ReaderGone => "reader-gone",
+            Self::Interrupt => "interrupted",
+            Self::Explicit => "cancelled",
+            Self::Deadline => "timed-out",
+            Self::Terminate => "terminated",
+            Self::RootAbort => "aborted",
         }
     }
 }

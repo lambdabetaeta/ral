@@ -1,6 +1,6 @@
 //! The runtime error type.
 
-use crate::process::{CancelCause, CommandFailure};
+use crate::process::{CancelCause, ChildEnd, CommandFailure, SpawnFailure};
 use crate::source::Span;
 use std::fmt;
 
@@ -17,21 +17,48 @@ pub struct Error {
     pub(crate) command: Option<String>,
 }
 
-/// An error's exit status: a bare code, or the process failure behind one.
+/// An error's exit status: one constructor per fact, whichever door reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    Code(i32),
-    Process(CommandFailure),
-    /// ral's own cancellation, minted at a poll point; `Process(CommandFailure::Cancelled)`
-    /// is the same fact reported by a child ral tore down.
+    Raised(i32),
+    /// ral's own cancellation, whether a poll point or a child's teardown saw it.
     Cancelled(CancelCause),
+    Process(CommandFailure),
+}
+
+impl Status {
+    /// The numeric status: the only home of `128 + n` and of the cause table.
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::Raised(code) | Self::Process(CommandFailure::ExitCode(code)) => *code,
+            Self::Process(CommandFailure::Signal(sig)) => 128 + sig.number(),
+            Self::Process(CommandFailure::Spawn(SpawnFailure::NotFound)) => 127,
+            Self::Process(CommandFailure::Spawn(_)) => 126,
+            // A signal-born cause reports 128 + its signal; a deadline, timeout(1)'s 124.
+            Self::Cancelled(cause) => match cause {
+                CancelCause::ReaderGone => 141,
+                CancelCause::Interrupt => 130,
+                CancelCause::Explicit | CancelCause::Terminate => 143,
+                CancelCause::Deadline => 124,
+                CancelCause::RootAbort => 131,
+            },
+        }
+    }
+
+    /// The code an external command chose to exit with, if that is what this is.
+    pub fn exited(&self) -> Option<i32> {
+        match self {
+            Self::Process(CommandFailure::ExitCode(code)) => Some(*code),
+            _ => None,
+        }
+    }
 }
 
 impl Error {
     pub fn new(message: impl Into<String>, status: i32) -> Self {
         Self {
             message: message.into(),
-            status: Status::Code(status),
+            status: Status::Raised(status),
             span: None,
             hint: None,
             command: None,
@@ -51,14 +78,32 @@ impl Error {
         }
     }
 
-    /// The cancellation this error reports, from either door: minted here by
-    /// `Error::cancelled`, or reported by a child ral tore down.
     pub(crate) fn cancelled_by(&self) -> Option<CancelCause> {
         match self.status {
-            Status::Cancelled(cause) | Status::Process(CommandFailure::Cancelled { cause, .. }) => {
-                Some(cause)
-            }
+            Status::Cancelled(cause) => Some(cause),
             _ => None,
+        }
+    }
+
+    /// A child's end as the error `cmd` fails with; a cancelled one's is the
+    /// very error a poll point mints for the same cause.
+    pub(crate) fn of_child(cmd: &str, end: ChildEnd, shell: &crate::types::Shell) -> Self {
+        match end {
+            ChildEnd::Failed(failure) => Self::from_command_failure(cmd, failure, shell),
+            ChildEnd::Cancelled(cause) => Self::cancelled(cause),
+        }
+    }
+
+    /// A command that never became a process, whether the pre-spawn probe or
+    /// the spawn itself found out.
+    pub(crate) fn spawn_failure(cmd: &str, failure: SpawnFailure) -> Self {
+        let failure = CommandFailure::Spawn(failure);
+        Self {
+            message: failure.message(cmd),
+            status: Status::Process(failure),
+            span: None,
+            hint: None,
+            command: None,
         }
     }
 
@@ -68,7 +113,7 @@ impl Error {
         failure: CommandFailure,
         shell: &crate::types::Shell,
     ) -> Self {
-        let hint = failure.default_hint(cmd).or_else(|| match &failure {
+        let hint = failure.default_hint().or_else(|| match &failure {
             CommandFailure::ExitCode(code) => shell.session.exit_hints.lookup(cmd, *code),
             _ => None,
         });
@@ -99,19 +144,14 @@ impl Error {
 
     /// Numeric exit code for process exit and `$status`.
     pub fn exit_code(&self) -> i32 {
-        match &self.status {
-            Status::Code(code) => *code,
-            Status::Process(failure) => failure.to_user_exit_code(),
-            Status::Cancelled(cause) => cause.exit_code(),
-        }
+        self.status.code()
     }
 
     /// `None` for a process failure, whose message already names its status.
     pub(crate) fn status_code_for_display(&self) -> Option<i32> {
         match &self.status {
-            Status::Code(0) | Status::Process(_) => None,
-            Status::Code(code) => Some(*code),
-            Status::Cancelled(cause) => Some(cause.exit_code()),
+            Status::Raised(0) | Status::Process(_) => None,
+            status => Some(status.code()),
         }
     }
 }

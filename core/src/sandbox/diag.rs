@@ -102,7 +102,8 @@ pub(crate) fn augment_failure(
     pids: &HashSet<u32>,
     since: Instant,
 ) -> Error {
-    if shell.sandbox_projection().is_none() {
+    // A cancelled child reports exactly what a poll point would, hint and all.
+    if shell.sandbox_projection().is_none() || err.cancelled_by().is_some() {
         return err;
     }
     let Some(diagnostic) = collect_denial_hint(pids, since, err.exit_code()) else {

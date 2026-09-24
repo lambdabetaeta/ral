@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Threading::{
     WT_EXECUTEONLYONCE, WaitForSingleObject,
 };
 
-use crate::process::outcome::{STAGE_KILL_EXIT_CODE, WaitOutcome};
+use crate::process::outcome::{KILL_EXIT_CODE, WaitOutcome};
 use crate::sync::LockExt as _;
 
 struct CallbackCtx<E: Send + 'static> {
@@ -109,10 +109,10 @@ unsafe impl Sync for Watch {}
 
 impl Watch {
     /// No job control exists here, so the only sanctioned act is
-    /// termination, with ral's own stage-kill exit code — Unix has signals,
+    /// termination, with ral's own kill exit code — Unix has signals,
     /// Windows has this.
     pub(crate) fn kill(&self) {
-        unsafe { TerminateProcess(self.handle, STAGE_KILL_EXIT_CODE as u32) };
+        unsafe { TerminateProcess(self.handle, KILL_EXIT_CODE as u32) };
     }
 
     /// Block for the child's exit, unregister the callback, and discard the
