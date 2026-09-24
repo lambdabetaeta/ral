@@ -164,7 +164,7 @@ impl Drop for FlushGuard {
 /// arms the idle-observation chain ([`lease_fire`]); a [`LeaseClass::Durable`]
 /// one arms nothing — the absent chain *is* the durable policy.
 fn spawn_child<F>(
-    snap: Arc<Env>,
+    snap: Env,
     mooring: &Mooring,
     shell: &mut Shell,
     birth: Birth,
@@ -410,7 +410,7 @@ pub(crate) fn builtin_spawn(
 /// falls out of the thread's lifecycle with no boundary ceremony.
 fn spawn_buffered(
     body: Arc<crate::ir::Comp>,
-    captured: Arc<Env>,
+    captured: Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -460,7 +460,7 @@ pub(super) fn builtin_watch(
 /// is a no-op.
 fn spawn_labelled(
     body: Arc<crate::ir::Comp>,
-    captured: Arc<Env>,
+    captured: Env,
     label: std::string::String,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -961,7 +961,7 @@ mod tests {
         shell: &Shell,
         cancel_via: impl FnOnce(&crate::process::CancelScope),
     ) -> (i32, crate::process::CancelScope) {
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker_mooring =
@@ -1000,7 +1000,7 @@ mod tests {
             .spawn_thread(
                 sibling_mooring,
                 "test-sibling",
-                Arc::new(shell.env.clone()),
+                shell.env.clone(),
                 |_, _| (),
             )
             .expect("spawn_thread");
@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn foreground_cancel_spares_detached_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let m = Mooring::adrift();
         let worker_mooring = Mooring::for_worker(&m, &shell.session.root, Arc::new(()));
         let (_join, worker_scope) = shell
@@ -1124,7 +1124,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -1170,7 +1170,7 @@ mod tests {
     fn spawn_under_interactive_frame_arms_no_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<test>", |_, _child| {
             Ok(Value::Unit)
         })
@@ -1216,7 +1216,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
         let handle = spawn_child(
             snap,
@@ -1248,7 +1248,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.fork = Some(crate::types::Fork::Park(crate::types::Nursery::default()));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
         let handle = spawn_child(
             snap,
@@ -1282,7 +1282,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -1321,7 +1321,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(150, 400));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<immortal>", check_loop)
             .expect("spawn must succeed");
         let scope = handle.cancel.clone();
@@ -1351,7 +1351,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(100, 10_000));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<done>", |_, _child| {
             Ok(Value::Unit)
         })
@@ -1389,7 +1389,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<listed>", check_loop)
             .expect("spawn must succeed");
         let scope = handle.cancel;
@@ -1420,7 +1420,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 150));
 
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let durable = spawn_child(
             snap,
             &m,
@@ -1431,7 +1431,7 @@ mod tests {
         )
         .expect("durable spawn must succeed");
         let born = std::time::Instant::now();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let sibling = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<sibling>", check_loop)
             .expect("ordinary spawn must succeed");
 
@@ -1472,7 +1472,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(10_000, 20_000));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -1927,7 +1927,7 @@ mod tests {
             let batches = Arc::new(Mutex::new(Vec::new()));
             let mut m = Mooring::adrift();
             m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-            let snap = Arc::new(shell.env.clone());
+            let snap = shell.env.clone();
             // Hold the handle so the channel stays connected until the flush;
             // never observed, so no eliminator competes for the `joined` latch.
             let _handle = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<block>", work).unwrap();
@@ -1962,7 +1962,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let birth = Birth::Watch {
             label: "job".into(),
         };
@@ -2017,7 +2017,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
 
         let handle = spawn_child(
             snap,
@@ -2065,7 +2065,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         assert!(m.deferred.is_none(), "a bare REPL installs none");
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -2114,7 +2114,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -2165,7 +2165,7 @@ mod tests {
     fn spawn_child_registers_one_entry_with_matching_handle() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let handle = spawn_child(
             snap,
             &m,
@@ -2199,7 +2199,7 @@ mod tests {
         let m = Mooring::adrift();
 
         // `await` removes.
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let h1 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<a>", |_, _c| {
             Ok(Value::Unit)
         })
@@ -2208,7 +2208,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let h2 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<b>", |_, _c| {
             Ok(Value::Unit)
         })
@@ -2218,7 +2218,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
 
         // A settled `poll` removes.
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let h3 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<c>", |_, _c| {
             Ok(Value::Unit)
         })
@@ -2239,7 +2239,7 @@ mod tests {
         // Block the worker on its own channel so the sample is deterministically
         // `` `pending ``, with no timing guess.
         let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let h4 = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<d>", move |_, _c| {
             unblock_rx.recv().unwrap();
             Ok(Value::Unit)
@@ -2266,7 +2266,7 @@ mod tests {
     fn race_removes_winner_and_cancelled_losers() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let winner = spawn_child(snap, &m, &mut shell, Birth::Spawn, "<winner>", |_, _c| {
             Ok(Value::Unit)
         })
@@ -2275,7 +2275,7 @@ mod tests {
         // The losers block on their own channels, so the winner always settles
         // first and these two are cancelled.
         let (l1_tx, l1_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let loser1 = spawn_child(
             snap,
             &m,
@@ -2289,7 +2289,7 @@ mod tests {
         )
         .unwrap();
         let (l2_tx, l2_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let loser2 = spawn_child(
             snap,
             &m,
@@ -2330,7 +2330,7 @@ mod tests {
     fn nested_spawn_registers_into_the_owning_shells_registry() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.env.clone());
+        let snap = shell.env.clone();
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
         let _outer = spawn_child(
@@ -2341,7 +2341,7 @@ mod tests {
             "<outer>",
             move |mooring, child_shell| {
                 go_rx.recv().unwrap();
-                let child_snap = Arc::new(child_shell.env.clone());
+                let child_snap = child_shell.env.clone();
                 let _inner = spawn_child(
                     child_snap,
                     mooring,
@@ -2391,7 +2391,7 @@ mod tests {
         let m = Mooring::adrift();
         shell.arm_worker_retention(2);
         let handle = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2439,7 +2439,7 @@ mod tests {
         let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let _handle = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2476,7 +2476,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let handle = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2503,7 +2503,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let handle = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2541,7 +2541,7 @@ mod tests {
         let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let handle = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2585,7 +2585,7 @@ mod tests {
         for cmd in ["<one>", "<two>"] {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             let handle = spawn_child(
-                Arc::new(shell.env.clone()),
+                shell.env.clone(),
                 &m,
                 &mut shell,
                 Birth::Spawn,
@@ -2602,7 +2602,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 2);
 
         let refused = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2628,7 +2628,7 @@ mod tests {
 
         builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))], &shell).expect("cancel ok");
         spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2655,7 +2655,7 @@ mod tests {
         for (birth, cmd) in [(Birth::Service, "<service>"), (Birth::Spawn, "<block>")] {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             spawn_child(
-                Arc::new(shell.env.clone()),
+                shell.env.clone(),
                 &m,
                 &mut shell,
                 birth,
@@ -2670,7 +2670,7 @@ mod tests {
         }
 
         let refused = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2695,7 +2695,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.worker_cap = Some(1);
         let first = spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,
@@ -2707,7 +2707,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 1, "the settled entry lingers");
 
         spawn_child(
-            Arc::new(shell.env.clone()),
+            shell.env.clone(),
             &m,
             &mut shell,
             Birth::Spawn,

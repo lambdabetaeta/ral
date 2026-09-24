@@ -54,12 +54,12 @@ pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a Handle
     }
 }
 
-pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<(Arc<crate::ir::Comp>, Arc<Env>)> {
+pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<(Arc<crate::ir::Comp>, Env)> {
     match val {
         // A spawn body takes no parameters: `comp.arrow()` is `None` for a
         // block-shaped thunk.
         Value::Thunk(closure) if closure.comp.arrow().is_none() => {
-            Ok((Arc::clone(&closure.comp), Arc::new(closure.env.clone())))
+            Ok((Arc::clone(&closure.comp), closure.env.clone()))
         }
         other => Err(Break::Error(
             Error::new(

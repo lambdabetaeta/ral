@@ -149,7 +149,7 @@ pub(super) fn launch_thread_stage(
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
-        Arc::new(env.clone()),
+        env.clone(),
         move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);

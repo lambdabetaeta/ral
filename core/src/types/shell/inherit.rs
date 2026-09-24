@@ -10,7 +10,6 @@
 
 use super::{Mooring, Shell};
 use crate::types::Env;
-use std::sync::Arc;
 
 impl Shell {
     /// A defaulted [`Shell`] scoped to `captured`: no inherited grants, env
@@ -97,7 +96,7 @@ impl Shell {
         &self,
         mooring: Mooring,
         name: &str,
-        scopes: Arc<Env>,
+        scopes: Env,
         f: F,
     ) -> std::io::Result<(std::thread::JoinHandle<R>, crate::process::CancelScope)>
     where
@@ -189,7 +188,7 @@ mod tests {
     fn spawned_worker_inherits_the_stack_limit() {
         let mut parent = Shell::default();
         parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
-        let scopes = Arc::new(parent.env.clone());
+        let scopes = parent.env.clone();
         let (join, _cancel) = parent
             .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
                 child.session.stack_limit
@@ -208,7 +207,7 @@ mod tests {
         let mut parent = Shell::default();
         let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
         let span = crate::source::Span::new(file, 8, 11);
-        let scopes = Arc::new(parent.env.clone());
+        let scopes = parent.env.clone();
         let (join, _cancel) = parent
             .spawn_thread(Mooring::adrift(), "test-worker", scopes, move |_, child| {
                 crate::diagnostic::format_runtime_error_ariadne(
@@ -237,7 +236,7 @@ mod tests {
         let mut parent = Shell::default();
         parent.install_root_context("main.ral", "");
         let root_file = parent.session.root_file;
-        let scopes = Arc::new(parent.env.clone());
+        let scopes = parent.env.clone();
         let (join, _cancel) = parent
             .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
                 child.session.root_file
