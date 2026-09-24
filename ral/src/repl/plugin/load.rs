@@ -9,6 +9,7 @@
 //! plugin's whole namespace back, so a rejected load leaves the session
 //! untouched.  Unloading is the exact inverse.
 
+use ral_core::builtins::util::as_str;
 use ral_core::serial::datum::Datum as _;
 use ral_core::source::Span;
 use ral_core::typecheck::builtins::scheme;
@@ -34,7 +35,12 @@ fn position(shell: &Shell, name: &str) -> Option<usize> {
 fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
     // through it stands on its own defaults.
-    if let Err(Break::Error(e)) = load_plugin(&args[0].to_string(), &Map::new(), mooring, shell) {
+    if let Err(Break::Error(e)) = load_plugin(
+        as_str(&args[0], "load-plugin")?,
+        &Map::new(),
+        mooring,
+        shell,
+    ) {
         diagnostic::cmd_error("load-plugin", &e.message);
     }
     Ok(Value::Unit)
@@ -45,7 +51,7 @@ fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Va
     reason = "a static builtin body's signature"
 )]
 fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    if let Err(e) = unload_plugin(&args[0].to_string(), mooring, shell) {
+    if let Err(e) = unload_plugin(as_str(&args[0], "unload-plugin")?, mooring, shell) {
         diagnostic::cmd_error("unload-plugin", &e.message);
     }
     Ok(Value::Unit)

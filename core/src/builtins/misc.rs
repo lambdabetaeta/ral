@@ -104,7 +104,7 @@ pub fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &mut Shell) ->
 /// A builtin rather than fd plumbing — ral has no `1>&2` for a diagnostic to
 /// borrow the byte channel through, and a diagnostic never was a payload.
 pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let mut line = super::util::arg0_str(args);
+    let mut line = super::util::as_str(&args[0], "warn")?.to_owned();
     line.push('\n');
     shell.write_stderr(line.as_bytes())?;
     Ok(Value::Unit)

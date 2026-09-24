@@ -13,7 +13,7 @@ use crate::types::{Break, Settled, Shell, Value, sig};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::util::{admits_read, arg0_str, checked_read_path};
+use super::util::{admits_read, as_str, checked_read_path};
 
 /// Seconds since the epoch, or 0 when the field is unrecorded or pre-epoch.
 fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
@@ -30,7 +30,7 @@ fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
 }
 
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let rp = shell.resolve(&args[0].to_string());
+    let rp = shell.resolve(as_str(&args[0], "list-dir")?);
     let located = shell.locate(&rp, &FsOp::Read)?;
     let dir = located.real();
     let mut entries: Vec<(String, Value)> = Vec::new();
@@ -80,11 +80,11 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let raw = arg0_str(args);
+    let raw = as_str(&args[0], "glob")?;
     let home = shell.context.home();
-    let expanded = crate::path::sigil::expand_path_prefix(&raw, home.as_deref());
+    let expanded = crate::path::sigil::expand_path_prefix(raw, home.as_deref());
     let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
-    let pattern = checked_read_path(shell, &raw)?
+    let pattern = checked_read_path(shell, raw)?
         .as_path()
         .to_string_lossy()
         .into_owned();
@@ -161,8 +161,8 @@ fn dir_entry_value(entry: &Entry) -> (String, Value) {
 /// companion.  Stats the link itself, not its target; compose with
 /// `resolve-path` for the latter.
 pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let raw = args[0].to_string();
-    let rp = shell.resolve(&raw);
+    let raw = as_str(&args[0], "file-info")?;
+    let rp = shell.resolve(raw);
     let path = rp.as_path().to_path_buf();
     let missing = || sig(format!("file-info: {raw}: no such file or directory"));
     let located = shell
@@ -208,8 +208,8 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
 }
 
 pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let s = args[0].to_string();
-    let resolved = checked_read_path(shell, &s)?
+    let s = as_str(&args[0], "resolve-path")?;
+    let resolved = checked_read_path(shell, s)?
         .canonicalise_strict()
         .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
     Ok(Value::string(resolved.to_string_lossy()))
@@ -218,9 +218,9 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// Lexical sibling of `resolve-path`: same anchoring, no
 /// `canonicalise_strict`, so symlinks stand and the path need not exist —
 /// and no `check_fs_read`, since that gate guards a stat this never does.
-pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Value {
-    let resolved = shell.resolve(&args[0].to_string());
-    Value::string(resolved.as_path().to_string_lossy())
+pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
+    let resolved = shell.resolve(as_str(&args[0], "absolute-path")?);
+    Ok(Value::string(resolved.as_path().to_string_lossy()))
 }
 
 /// Shared predicate body.  `leaf` is the whole difference between the two
@@ -231,12 +231,13 @@ pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Value {
 /// directory that does not exist, so every predicate answers `false` there
 /// rather than raising.
 fn fs_probe(
+    name: &str,
     args: &[Value],
     shell: &mut Shell,
     leaf: Leaf,
     probe: impl FnOnce(Option<Stat>) -> bool,
 ) -> Settled<Value> {
-    let rp = shell.resolve(&args[0].to_string());
+    let rp = shell.resolve(as_str(&args[0], name)?);
     let stat = shell
         .locate_existing(&rp, &FsOp::Read, leaf)?
         .and_then(|located| located.stat().ok().flatten());
@@ -244,23 +245,23 @@ fn fs_probe(
 }
 
 pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, Leaf::AsNamed, |s| s.is_some())
+    fs_probe("exists", args, shell, Leaf::AsNamed, |s| s.is_some())
 }
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, Leaf::Resolve, |s| {
+    fs_probe("is-file", args, shell, Leaf::Resolve, |s| {
         s.is_some_and(|s| s.kind == Kind::File)
     })
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, Leaf::Resolve, |s| {
+    fs_probe("is-dir", args, shell, Leaf::Resolve, |s| {
         s.is_some_and(|s| s.kind == Kind::Dir)
     })
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, Leaf::AsNamed, |s| {
+    fs_probe("is-link", args, shell, Leaf::AsNamed, |s| {
         s.is_some_and(|s| s.kind == Kind::Symlink)
     })
 }
@@ -268,11 +269,11 @@ pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Valu
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // Exact on Windows, where `readonly` governs writes alone; on Unix an
     // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe(args, shell, Leaf::Resolve, |s| s.is_some())
+    fs_probe("is-readable", args, shell, Leaf::Resolve, |s| s.is_some())
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let rp = shell.resolve(&args[0].to_string());
+    let rp = shell.resolve(as_str(&args[0], "is-writable")?);
     let writable = shell
         .locate_existing(&rp, &FsOp::Read, Leaf::Resolve)?
         .is_some_and(|located| located.is_writable());

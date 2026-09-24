@@ -17,7 +17,7 @@ use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
 use crate::types::{Break, Env, Mooring, Settled, Shell, Value, sig};
 
-use super::util::arg0_str;
+use super::util::as_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
@@ -262,7 +262,7 @@ fn tag_loader_error(e: Break) -> Break {
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
 /// name read from `ran.env`.
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = arg0_str(args);
+    let path = as_str(&args[0], "use")?.to_owned();
     let resolved = resolve_relative_to_current_script(&path, shell);
     // `use` falls back to a RAL_PATH search for a bare name.
     let abs_path = shell

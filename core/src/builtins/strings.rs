@@ -4,7 +4,7 @@ use crate::types::{Settled, Value, as_list, sig, sig_hint};
 use std::borrow::Cow;
 
 use super::util::regex_err;
-use super::util::{arg0_str, f64_to_i64};
+use super::util::{as_str, f64_to_i64};
 
 /// Parse a `Value` as a `usize` index; junk errors rather than coercing to zero.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
@@ -42,32 +42,32 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
     Ok(Value::Int(n as i64))
 }
 
-pub(super) fn builtin_upper(args: &[Value]) -> Value {
-    Value::string(arg0_str(args).to_uppercase())
+pub(super) fn builtin_upper(args: &[Value]) -> Settled<Value> {
+    Ok(Value::string(as_str(&args[0], "upper")?.to_uppercase()))
 }
 
-pub(super) fn builtin_lower(args: &[Value]) -> Value {
-    Value::string(arg0_str(args).to_lowercase())
+pub(super) fn builtin_lower(args: &[Value]) -> Settled<Value> {
+    Ok(Value::string(as_str(&args[0], "lower")?.to_lowercase()))
 }
 
-pub(super) fn builtin_dedent(args: &[Value]) -> Value {
-    Value::string(dedent(&arg0_str(args)))
+pub(super) fn builtin_dedent(args: &[Value]) -> Settled<Value> {
+    Ok(Value::string(dedent(as_str(&args[0], "dedent")?)))
 }
 
 pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
-    let sep = args[0].to_string();
+    let sep = as_str(&args[0], "intercalate")?;
     let items = as_list(&args[1], "intercalate")?;
     Ok(Value::string(
         items
             .iter()
             .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
-            .join(&sep),
+            .join(sep),
     ))
 }
 
 pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
-    let s = args[0].to_string();
+    let s = as_str(&args[0], "slice")?;
     let start = as_index(&args[1], "slice start")?;
     let length = as_index(&args[2], "slice length")?;
     Ok(Value::string(
@@ -76,16 +76,16 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args);
+    let s = as_str(&args[0], "shell-split")?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
-    let parts = shlex::split(&s)
+    let parts = shlex::split(s)
         .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
     Ok(Value::list(parts.into_iter().map(Value::string).collect()))
 }
 
 pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args);
-    let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
+    let s = as_str(&args[0], "shell-quote")?;
+    let quoted = shlex::try_quote(s).map_err(|e| sig(format!("shell-quote: {e}")))?;
     Ok(Value::string(quoted))
 }
 
@@ -99,7 +99,7 @@ fn with_regex(
     args: &[Value],
     f: impl FnOnce(&regex::Regex, &[Value]) -> Settled<Value>,
 ) -> Settled<Value> {
-    let re = compile_regex(ctx, &args[0].to_string())?;
+    let re = compile_regex(ctx, as_str(&args[0], ctx)?)?;
     f(&re, args)
 }
 
@@ -107,14 +107,14 @@ fn with_regex(
 /// [`builtin_string_replace`]; [`builtin_replace_all`] is the every-match variant.
 pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace", args, |re, args| {
-        let input = args[2].to_string();
-        match re.find_iter(&input).count() {
+        let input = as_str(&args[2], "re-replace")?;
+        match re.find_iter(input).count() {
             0 => Err(sig(
                 "re-replace: pattern not found in input — is the file already updated, \
                  or did the pattern get whitespace-mangled?",
             )),
             1 => Ok(Value::string(
-                re.replace(&input, args[1].to_string().as_str()),
+                re.replace(input, as_str(&args[1], "re-replace")?),
             )),
             n => Err(sig(format!(
                 "re-replace: pattern matches {n} times — must match exactly once; \
@@ -156,18 +156,18 @@ pub fn occurrence_starts(input: &str, from: &str) -> Vec<usize> {
 /// If given fewer than three arguments, if `from` is empty, or if `from` does not
 /// occur in `s` exactly once.
 pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
-    let from = args[0].to_string();
-    let to = args[1].to_string();
-    let input = args[2].to_string();
+    let from = as_str(&args[0], "string-replace")?;
+    let to = as_str(&args[1], "string-replace")?;
+    let input = as_str(&args[2], "string-replace")?;
     if from.is_empty() {
         return Err(sig("string-replace: 'from' must be non-empty"));
     }
-    match occurrence_starts(&input, &from).len() {
+    match occurrence_starts(input, from).len() {
         0 => Err(sig(
             "string-replace: 'from' not found in input — did the pattern get \
              whitespace-mangled?",
         )),
-        1 => Ok(Value::string(input.replacen(&from, &to, 1))),
+        1 => Ok(Value::string(input.replacen(from, to, 1))),
         n => Err(sig(format!(
             "string-replace: 'from' matches {n} times — must match exactly once; \
              widen the pattern with surrounding context to disambiguate"
@@ -177,31 +177,31 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace-all", args, |re, args| {
-        let input = args[2].to_string();
+        let input = as_str(&args[2], "re-replace-all")?;
         Ok(Value::string(
-            re.replace_all(&input, args[1].to_string().as_str()),
+            re.replace_all(input, as_str(&args[1], "re-replace-all")?),
         ))
     })
 }
 
 pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
     with_regex("re-split", args, |re, args| {
-        let input = args[1].to_string();
-        Ok(Value::list(re.split(&input).map(Value::string).collect()))
+        let input = as_str(&args[1], "re-split")?;
+        Ok(Value::list(re.split(input).map(Value::string).collect()))
     })
 }
 
 pub(super) fn builtin_match(args: &[Value]) -> Settled<Value> {
     with_regex("re-match", args, |re, args| {
-        let matched = re.is_match(&args[1].to_string());
+        let matched = re.is_match(as_str(&args[1], "re-match")?);
         Ok(Value::Bool(matched))
     })
 }
 
 pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
     with_regex("re-find-match", args, |re, args| {
-        let input = args[1].to_string();
-        match re.find(&input) {
+        let input = as_str(&args[1], "re-find-match")?;
+        match re.find(input) {
             Some(m) => Ok(Value::string(m.as_str())),
             None => Err(sig(format!(
                 "re-find-match: no match for pattern '{}'",
@@ -213,9 +213,9 @@ pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_find_matches(args: &[Value]) -> Settled<Value> {
     with_regex("re-find-matches", args, |re, args| {
-        let input = args[1].to_string();
+        let input = as_str(&args[1], "re-find-matches")?;
         Ok(Value::list(
-            re.find_iter(&input)
+            re.find_iter(input)
                 .map(|m| Value::string(m.as_str()))
                 .collect(),
         ))

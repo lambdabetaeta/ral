@@ -6,7 +6,7 @@
 
 use crate::types::{Break, Error, Settled, Value, as_map_ref};
 
-use super::util::{order_cmp, values_equal};
+use super::util::{as_str, order_cmp, values_equal};
 
 pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
     let m = as_map_ref(&args[0], "keys")?;
@@ -17,7 +17,7 @@ pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_has(args: &[Value]) -> Settled<Value> {
     let m = as_map_ref(&args[0], "has")?;
-    let found = m.contains_key(&args[1].to_string());
+    let found = m.contains_key(as_str(&args[1], "has")?);
     Ok(Value::Bool(found))
 }
 

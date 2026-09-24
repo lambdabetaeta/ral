@@ -85,6 +85,22 @@ pub(crate) fn as_bytes<'v>(val: &'v Value, ctx: &str) -> Settled<&'v [u8]> {
     }
 }
 
+/// Borrow a `String` argument without copying it — the checker guarantees
+/// this for every caller today, so the `other` arm is a checker-bug
+/// backstop, not a reachable user error.
+///
+/// # Errors
+/// If `val` is not a `String`.
+pub fn as_str<'v>(val: &'v Value, ctx: &str) -> Settled<&'v str> {
+    match val {
+        Value::String(s) => Ok(s.as_str()),
+        other => Err(sig(format!(
+            "{ctx}: expected String, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Bytes written by number, one `Int` per byte — [`as_bytes`] is the other
 /// spelling, for a `Bytes` value already in hand.
 pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
@@ -243,12 +259,6 @@ pub(crate) fn order_cmp(
 ) -> Settled<Value> {
     let r = want(value_ordering(&args[0], &args[1], name)?);
     Ok(Value::Bool(r))
-}
-
-/// Render the first argument as a `String`; application already gated the
-/// count for every fixed-arity-1 caller.
-pub fn arg0_str(args: &[Value]) -> String {
-    args[0].to_string()
 }
 
 /// Resolve `path` against the `within [dir: …]` scoped cwd and capability-check

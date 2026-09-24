@@ -7,7 +7,7 @@ use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
-use ral_core::builtins::util::regex_err;
+use ral_core::builtins::util::{as_str, regex_err};
 use ral_core::capability::FsOp;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
@@ -239,7 +239,7 @@ fn view_range(
     shell: &mut Shell,
     tool: &str,
 ) -> Settled<(Vec<String>, std::ops::Range<usize>)> {
-    let path = args[0].to_string();
+    let path = as_str(&args[0], tool)?;
     let start = view_bound(&args[1], "start", tool)?;
     let end = view_bound(&args[2], "end", tool)?;
     if end <= start {
@@ -248,8 +248,8 @@ fn view_range(
         )));
     }
 
-    let body = read_text_file(shell, &path, tool)?;
-    surface_read(shell, mooring, &path);
+    let body = read_text_file(shell, path, tool)?;
+    surface_read(shell, mooring, path);
     let rows = rows_of(&body);
     let hi = (end - 1).min(rows.len());
     Ok((rows, start - 1..hi))
@@ -386,7 +386,7 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 /// `grep-files PATTERN` — [`search_tree`] over the cwd, emitting exactly one
 /// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let pattern = args[0].to_string();
+    let pattern = as_str(&args[0], "grep-files")?;
 
     mooring.surface_data(
         &Observation::instant(
@@ -394,13 +394,13 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             shell.principal(),
             Observed::Grep {
                 scope: ".".to_string(),
-                pattern: pattern.clone(),
+                pattern: pattern.to_string(),
             },
         )
         .to_surface(),
     );
 
-    let results = search_tree(mooring, shell, &pattern)?
+    let results = search_tree(mooring, shell, pattern)?
         .into_iter()
         .map(|hit| {
             #[allow(
@@ -460,7 +460,7 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// the redirect frame, which observes nothing. So `edit-hash` owns its surface
 /// entirely, and speaks it as one whole-file diff card ([`surface_edit`]).
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = args[0].to_string();
+    let path = as_str(&args[0], "edit-hash")?;
     let edits = match &args[1] {
         Value::List(items) => items,
         other => {
@@ -476,7 +476,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         ));
     }
 
-    let body = read_text_file(shell, &path, "edit-hash")?;
+    let body = read_text_file(shell, path, "edit-hash")?;
     let rows = rows_of(&body);
     let n = rows.len();
     let hashes = window_hashes(&rows);
@@ -550,8 +550,8 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         }
     }
     let final_text = out.join("\n");
-    shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_edit(mooring, &path, &body, &final_text);
+    shell.atomic_write(path, final_text.as_bytes())?;
+    surface_edit(mooring, path, &body, &final_text);
 
     let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
     line_nums.sort_unstable();
@@ -561,7 +561,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         .collect::<Vec<_>>()
         .join(", ");
     let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(&r.new));
-    note_edit(shell, &path, &lines, line_nums.len() > 1, any_escapes);
+    note_edit(shell, path, &lines, line_nums.len() > 1, any_escapes);
 
     Ok(Value::Unit)
 }
@@ -622,21 +622,21 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// doors as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
 /// one whole-file diff.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = args[0].to_string();
-    let from = args[1].to_string();
-    let to = args[2].to_string();
+    let path = as_str(&args[0], "edit-replace")?;
+    let from = as_str(&args[1], "edit-replace")?;
+    let to = as_str(&args[2], "edit-replace")?;
     if from.is_empty() {
         return Err(sig("edit-replace: FROM must be non-empty."));
     }
-    let body = read_text_file(shell, &path, "edit-replace")?;
-    let starts = ral_core::builtins::strings::occurrence_starts(&body, &from);
+    let body = read_text_file(shell, path, "edit-replace")?;
+    let starts = ral_core::builtins::strings::occurrence_starts(&body, from);
     let &[start] = starts.as_slice() else {
-        return Err(no_unique_match(&body, &from, &path, &starts));
+        return Err(no_unique_match(&body, from, path, &starts));
     };
 
-    let final_text = body.replacen(&from, &to, 1);
-    shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_edit(mooring, &path, &body, &final_text);
+    let final_text = body.replacen(from, to, 1);
+    shell.atomic_write(path, final_text.as_bytes())?;
+    surface_edit(mooring, path, &body, &final_text);
 
     let start_line = line_of(&body, start);
     // A FROM ending in a newline claims that terminator but no content on the
@@ -649,10 +649,10 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     };
     note_edit(
         shell,
-        &path,
+        path,
         &lines,
         start_line != end_line,
-        has_suspicious_escapes(&to),
+        has_suspicious_escapes(to),
     );
 
     Ok(Value::Unit)
@@ -862,10 +862,10 @@ const DEFAULT_LIMIT: usize = 50;
 
 /// `fff QUERY` — frecency-ranked fuzzy file-name search over the working tree.
 fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let query = args[0].to_string();
+    let query = as_str(&args[0], "fff")?;
     let cwd = checked_read_path(shell, ".")?;
     let idx = fff_index::index_for(&cwd).map_err(sig)?;
-    let paths = fff_index::search_paths(idx, &query, DEFAULT_LIMIT).map_err(sig)?;
+    let paths = fff_index::search_paths(idx, query, DEFAULT_LIMIT).map_err(sig)?;
     let allowed = paths
         .into_iter()
         .filter(|rel| readable(shell, rel))
@@ -902,15 +902,15 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
     reason = "installed as a `BuiltinBody::Static` fn pointer, whose signature fixes the `Settled` return; a skill that cannot be read answers with a message rather than raising."
 )]
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let name = args[0].to_string();
+    let name = as_str(&args[0], "skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
-    if !skill::valid_skill_name(&name) {
+    if !skill::valid_skill_name(name) {
         return Settled::Ok(Value::string(format!("skill not found: {name}")));
     }
     let cwd = shell.cwd();
     let config_dir = crate::bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     for root in skill::skill_roots(&cwd, &config_dir) {
-        let dir = root.join(&name);
+        let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
         let rp = shell.resolve(&sk_md.to_string_lossy());
         if shell.check_fs_read(&rp).is_ok() {

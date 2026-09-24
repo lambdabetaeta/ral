@@ -7,7 +7,7 @@
 //! as a `` `repl-editor `` enquiry, which the host answers only while an
 //! editor context is installed for the dispatch — inside a plugin handler.
 
-use ral_core::builtins::util::arg0_str;
+use ral_core::builtins::util::as_str;
 use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
 use ral_core::source::Span as ByteSpan;
@@ -150,14 +150,22 @@ pub fn builtin_ed_set_lbuffer(
 ) -> Settled<Value> {
     require_interactive("_ed-set-lbuffer", shell)?;
     shell.check_editor_write("set-lbuffer")?;
-    write(shell, mooring, EditorOp::SetLbuffer(args[0].to_string()))
+    write(
+        shell,
+        mooring,
+        EditorOp::SetLbuffer(as_str(&args[0], "_ed-set-lbuffer")?.to_owned()),
+    )
 }
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
 pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-insert", shell)?;
     shell.check_editor_write("insert")?;
-    write(shell, mooring, EditorOp::Insert(args[0].to_string()))
+    write(
+        shell,
+        mooring,
+        EditorOp::Insert(as_str(&args[0], "_ed-insert")?.to_owned()),
+    )
 }
 
 /// `_ed-push` — save buffer to stack, clear.
@@ -252,7 +260,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-history", shell)?;
     shell.check_editor_read("history")?;
-    let prefix = args[0].to_string();
+    let prefix = as_str(&args[0], "_ed-history")?;
     let limit = match &args[1] {
         Value::Int(n) => offset(*n),
         _ => return Err(sig("_ed-history: limit must be Int")),
@@ -261,7 +269,7 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let mut results: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in history {
-        if !entry.starts_with(&prefix) || !seen.insert(entry.clone()) {
+        if !entry.starts_with(prefix) || !seen.insert(entry.clone()) {
             continue;
         }
         results.push(Value::string(entry));
@@ -377,7 +385,11 @@ pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -
 pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-ghost", shell)?;
     shell.check_editor_write("ghost")?;
-    write(shell, mooring, EditorOp::Ghost(arg0_str(args)))
+    write(
+        shell,
+        mooring,
+        EditorOp::Ghost(as_str(&args[0], "_ed-ghost")?.to_owned()),
+    )
 }
 
 /// `_ed-hyperlink <uri> <text>` — wrap `text` in an OSC 8 hyperlink to
@@ -397,12 +409,12 @@ pub fn builtin_ed_hyperlink(
     shell: &mut Shell,
 ) -> Settled<Value> {
     require_interactive("_ed-hyperlink", shell)?;
-    let uri = args[0].to_string();
-    let text = args[1].to_string();
+    let uri = as_str(&args[0], "_ed-hyperlink")?;
+    let text = as_str(&args[1], "_ed-hyperlink")?;
     let rendered = if shell.terminal().ui_hyperlinks_ok() {
-        ral_core::ansi::osc8_link(&uri, &text)
+        ral_core::ansi::osc8_link(uri, text)
     } else {
-        text
+        text.to_owned()
     };
     Ok(Value::string(rendered))
 }
@@ -434,7 +446,8 @@ pub fn builtin_ed_clipboard(
 
     use base64::Engine;
     use std::io::Write;
-    let payload = base64::engine::general_purpose::STANDARD.encode(arg0_str(args).as_bytes());
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(as_str(&args[0], "_ed-clipboard")?.as_bytes());
     let sequence = ral_core::ansi::osc52_copy(&payload);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();

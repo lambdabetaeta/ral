@@ -16,7 +16,7 @@ use crate::types::{
 };
 use std::sync::Arc;
 
-use super::util::{arg0_str, as_byte_list, as_bytes, decode_utf8_strict};
+use super::util::{as_byte_list, as_bytes, decode_utf8_strict};
 
 fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -223,11 +223,11 @@ pub(super) fn builtin_ints_to_bytes(args: &[Value], shell: &mut Shell) -> Settle
 }
 
 pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    write_encoded(&arg0_str(args).into_bytes(), shell)
+    write_encoded(args[0].to_string().as_bytes(), shell)
 }
 
 pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let mut s = arg0_str(args);
+    let mut s = args[0].to_string();
     s.push('\n');
     write_encoded(s.as_bytes(), shell)
 }
