@@ -168,8 +168,9 @@ impl WaitOutcome {
 
     /// The cause this death is by: `cause`'s own teardown, else the gesture
     /// its signal stands for, whoever delivered it — the tty reaches a
-    /// foreground child ral never saw the keystroke for.  An exit is never a
-    /// gesture: `exit 130` is a choice.
+    /// foreground child ral never saw the keystroke for.  An exit code is a
+    /// choice (`exit 130`), never a gesture, save the one Windows gives a
+    /// Ctrl-C death.
     fn attributed(self, cause: Option<CancelCause>, enveloped: bool) -> Option<CancelCause> {
         cause
             .filter(|&cause| self.is_teardown_of(cause, enveloped))
@@ -186,7 +187,11 @@ impl WaitOutcome {
 
     #[cfg(windows)]
     fn gesture(self) -> Option<CancelCause> {
-        None
+        use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
+        match self {
+            Self::Exited(STATUS_CONTROL_C_EXIT) => Some(CancelCause::Interrupt),
+            _ => None,
+        }
     }
 
     /// The end this outcome amounts to, or `None` for success, given the
@@ -526,6 +531,17 @@ mod tests {
         assert_eq!(
             WaitOutcome::Exited(KILL_EXIT_CODE).classify(None, false),
             Some(ChildEnd::Failed(CommandFailure::ExitCode(KILL_EXIT_CODE)))
+        );
+    }
+
+    /// Windows' Ctrl-C death status is the gesture's, no cause sent.
+    #[cfg(windows)]
+    #[test]
+    fn the_ctrl_c_exit_status_is_an_interrupt() {
+        use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
+        assert_eq!(
+            WaitOutcome::Exited(STATUS_CONTROL_C_EXIT).classify(None, false),
+            attributed(CancelCause::Interrupt)
         );
     }
 }
