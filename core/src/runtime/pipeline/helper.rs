@@ -37,11 +37,16 @@ extern "C" fn report_signal(sig: libc::c_int) {
     }
 }
 
+/// Every console event is swallowed, Ctrl-Break included: the group's grace
+/// is for its stages, never the anchor holding the group open.
 #[cfg(windows)]
 fn serve_anchor() -> u8 {
-    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    extern "system" fn swallow(_: u32) -> windows_sys::core::BOOL {
+        windows_sys::Win32::Foundation::TRUE
+    }
+    // SAFETY: `swallow` has `PHANDLER_ROUTINE`'s signature; `TRUE` adds it.
     unsafe {
-        SetConsoleCtrlHandler(None, 1);
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(swallow), 1);
     }
     let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
     0

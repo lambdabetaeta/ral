@@ -1,7 +1,7 @@
 ---
 verified_at_commit: afc5d952
 verified_at_date: 2026-09-23
-anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, teardown_signals, GESTURES, gesture, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, process::check, RunningChild::wait, watch_cancel, escalation_pending]
+anchors: [ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, Status::code, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, process::check, RunningChild::wait, watch_cancel, Membership::owes, break_pipeline_group, escalation_pending]
 ---
 
 # Cancellation
@@ -37,6 +37,11 @@ signal; the third hit calls `libc::_exit(128 + sig)` — bypassing `atexit` so a
 wedged process always dies. Nothing else reads it for control flow: `clear()`
 resets it at acknowledgment boundaries (a fresh prompt, a run compile, a
 session reboot), and `escalation_pending()` exposes it for observability only.
+
+Windows' console handler has the same shape: the first two console events
+raise the interrupt, the third `ExitProcess`es with its status. Neither
+ladder signals a process: a child hears ral's teardown only from the scope
+that owns it, so nothing fans out around the tree.
 
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
 batch launcher binds SIGINT to `handler` (`batch.rs`, `install_handlers`); the
@@ -171,9 +176,9 @@ process-wide reaper ([[map/core/io-process|io-process]]) posts a child's exit
 straight onto `RunningChild::wait`'s own channel, and `watch_cancel` posts a
 cancel onto the same channel the instant the scope's cause is set — one
 blocking `recv`, no interval, no backoff. The teardown is *cause-directed*,
-and `grace_signal(cause)` (`process/signal/unix.rs`) is the one table that
-directs it — read by `RunningChild::terminate` and by the pipeline
-collector's `cancel_all` alike:
+and `grace_signal(cause)` (`process/signal/unix.rs`, and its Windows twin)
+is the one table that directs it — read by `RunningChild::terminate` and by
+the pipeline collector's `cancel_all` alike:
 
 - **`Interrupt`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
   group (or, ungrouped, pid-`Watch`) SIGKILL — a child that traps SIGINT
@@ -185,6 +190,19 @@ collector's `cancel_all` alike:
 - **`ReaderGone` / `RootAbort`** → `None`, an immediate kill with no grace. A
   reader-gone cut must not hand the verdict back to the producer's own
   disposition, and an abort has no grace to offer.
+- **On Windows** every graceful cause opens with Ctrl-Break, named by the
+  `STATUS_CONTROL_C_EXIT` it leaves, and only an owned console group takes it
+  (`break_pipeline_group`); a pid gets the kill alone, the Windows `Watch`
+  having no signal and an `Inherit` child having heard the console's own
+  Ctrl-C. The pipeline anchor swallows every console event, so a group's
+  grace never ends the process holding it open.
+
+A process group is its owner's to signal: a child leading its own
+(`Group::Owns`) is signalled and killed whole, while one that joined a
+pipeline's from inside a stage thread (`Group::Joins`) opens with a grace
+signal only for a cause `Membership::owes` — one stronger than the stage's
+scope holds — every cause the stage holds being one the pipeline's owner
+delivers to the whole group once.
 
 Every external wait goes through this one `recv`/`terminate` shape — the
 interactive REPL foreground included. ral does not suspend
@@ -192,8 +210,9 @@ interactive REPL foreground included. ral does not suspend
 never reaches this channel at all, since the reaper answers it with
 `SIGCONT` on its own before any subscriber sees one — a stop is never itself
 a cause for teardown. A foreground external still gets its Ctrl-C from the
-kernel directly — it owns the terminal — but a SIGTERM delivered to *ral*
-now preempts even that wait through the root cause.
+kernel directly — it holds the lent terminal — and the key is heard back by
+the loan when the terminal returns (§Attribution); a SIGTERM delivered to
+*ral* preempts even that wait through the root cause.
 
 ## One status per fact
 
@@ -232,29 +251,67 @@ A child's death passes through `WaitOutcome::classify(cause, enveloped)`,
 which yields a transient `ChildEnd`: `Failed(CommandFailure)` or
 `Cancelled(CancelCause)`, and `Error::of_child` maps the second to
 `Error::cancelled` exactly as a poll point does. `cause` is the strongest in
-force when the death is observed, not only what ral sent. Attribution reads
-two things, in order:
+force when the death is observed, not only what ral sent.
 
-1. **The cause's own teardown.** A death whose signal — read off a signal
-   death, or off an enveloped `Exited(128 + n)` — lies in
-   `teardown_signals(cause)`, its `grace_signal` and SIGKILL, is the cause's.
-2. **The gesture.** Otherwise a signal death whose signal is a gesture's is
-   that gesture's cause, whoever delivered it. In the REPL a lone foreground
-   child is its own process group, so the tty's SIGINT reaches it and never
-   ral: without this, Ctrl-C would read `` `cancelled `interrupted `` on a
-   pipeline, whose anchor witnesses the signal, and `` `signaled 2 `` on a
-   single command. An exit is never a gesture — `exit 130` is a choice.
+**A death is a cancellation iff it is by a signal of a cause in force.**
+`WaitOutcome::death(enveloped)` is the one reader of a death — a signal
+death's signal, or an enveloped `Exited(128 + n)`'s `n` — and the death is
+`cause`'s iff that signal lies in `signals_of(cause)`: the cause's
+`grace_signal`, its key `gesture_signal`, and the kill that ends every
+teardown — one function over the platform's three tables. With no cause in
+force, no death mints one: every signal death is the child's own `Signal`, a
+key's included, and an exit is never a signal — `exit 130` is a choice. A
+SIGSEGV under any cause stays `Signal`.
 
-Anything else stays what it is, so a SIGSEGV under any cause is `Signal`.
+| cause | `signals_of` (Unix) | `signals_of` (Windows) |
+|---|---|---|
+| `ReaderGone` | SIGKILL | `KILL_EXIT_CODE` |
+| `RootAbort` | SIGKILL, SIGQUIT | `KILL_EXIT_CODE` |
+| `Interrupt` | SIGINT, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
+| `Explicit`, `Deadline` | SIGTERM, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
+| `Terminate` | SIGTERM, SIGHUP, SIGKILL | `KILL_EXIT_CODE`, `STATUS_CONTROL_C_EXIT` |
 
-The gesture signals come from one table in `process/signal/unix.rs`,
-`GESTURES`, read only through `gesture(signal)`: SIGINT → `Interrupt`,
-SIGQUIT → `RootAbort`, SIGTERM and SIGHUP → `Terminate`. Attribution, the
-pipeline group's `cancel_cause` (defaulting to `Terminate`) and the
-escalation ladder's forced exit status all go through it. Windows has no signals to read, so ral ends every process it
-tears down — `TerminateProcess` and `TerminateJobObject` alike — with one
-`KILL_EXIT_CODE`, and an `Exited(KILL_EXIT_CODE)` with a cause sent is
-attributed to it. A cancelled child carries no hint.
+**Only a terminal ral lent can report a key pressed on it.** A key is what a
+terminal sends: the `GESTURES` table in `process/signal/unix.rs` — SIGINT →
+`Interrupt`, SIGQUIT → `RootAbort`, SIGHUP → `Terminate`; no terminal sends
+SIGTERM. Its reader `gesture` is private to the `TerminalLoan`, the one
+lending of the session's `TerminalLease` to a group, for a run. While it is
+lent the key reaches the tenant's group and never ral, so the loan hears it
+back from the tenant — `TerminalLoan::hear` — and when the terminal returns
+it strikes what it heard on the frame it was lent for, before the next poll:
+
+- a **lone command** is heard at `reclaim`, the instant it is dead, from its
+  own `death`; `command.rs` folds that cause into the one `classify` reads,
+  so Ctrl-C reads `` `cancelled `interrupted `` and the run is cancelled;
+- a **pipeline**'s loan is held by its collector: the anchor reports each
+  signal it swallowed raw as `Event::Heard(signal)`, a key tears the group
+  down with `delivered: true`, and once the anchor has ended the fold hears
+  out every queued report and settles each external stage under
+  `sent.max(pressed)`. The loan drops with the collector, striking the frame
+  whatever the verdict — the stages may all have trapped the key.
+
+A key ral's own frontend re-creates onto a lent group
+(`interrupt_foreground_child`) is heard like the kernel's: it is the user's.
+Without a loan — exarch, a capture, a stage thread, a worker's pipeline — a
+heard signal is inert, so `try` stays total over everything else a child can
+do, a child that kills itself with SIGINT included.
+
+Two shapes were rejected
+([[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]]):
+ral keeping its own pgid for lone children, which would make ral the ear of a
+program that reads Ctrl-C itself; and a seat enum recording where a child
+sits, a fact nobody holds.
+
+The escalation ladder's forced exit status is its handler's own cause's —
+130 for SIGINT, 143 for SIGTERM and SIGHUP. Windows has no signals to read,
+so ral ends every process it tears down — `TerminateProcess` and
+`TerminateJobObject` alike — with one `KILL_EXIT_CODE`; `death` there reads
+that and the console's `STATUS_CONTROL_C_EXIT` and nothing else. The latter
+is what Ctrl-C and Ctrl-Break both leave, so it is every graceful cause's —
+a `Deadline` teardown reads `timed out`, never an exit status — and with no
+such cause in force it is displayed as "ended by Ctrl-C". A console is never
+lent: the Windows `TerminalLoan` is uninhabited. A cancelled child carries no
+hint.
 
 ## The gestures, per host
 
@@ -264,10 +321,13 @@ The same two mechanisms are driven by different keys on different surfaces.
 |---|---|---|---|
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Interrupt` — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`, and sends `Control::Interrupt`, a no-op with nothing in flight; no signal |
-| **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
+| **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)`, forwarded as `Control::Abort` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
+| **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupt` / `RootAbort` / `Terminate` on the run's frame as the terminal returns: the job ends, `try` cannot recover it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)`, forwarded as `Control::Terminate` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; on the trunk, additionally `interrupt_foreground_child` |
+| **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and, as `Control::Interrupt`, its dispatch in flight; on the trunk, additionally `interrupt_foreground_child` (Unix) or `request_interrupt()` (Windows) |
+| **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to the trunk's `Agent::interrupt` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
 | **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `cancel::face` to the trunk's `Agent::interrupt` |
@@ -286,10 +346,11 @@ fixes the interactive dispositions:
   process ([[internals/pipeline-execution|pipeline-execution]],
   [[decisions/260905_one-delivery-path|one-delivery-path]]). A foreground
   pipeline's externals usually hear the kernel's own copy first, delivered by
-  the tty to the pgid that owns the terminal, and the anchor witnesses that so
-  teardown does not re-send it. Raised while idle, it strikes only the settled
-  run's dead scope, so the next run never sees it — and a detached worker,
-  off every run's chain, is spared outright.
+  the tty to the pgid the terminal is lent to; the anchor reports it and the
+  pipeline's loan hears it as the key, so teardown does not re-send it.
+  Raised while idle, it strikes only the settled run's dead scope, so the
+  next run never sees it — and a detached worker, off every run's chain, is
+  spared outright.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
@@ -352,8 +413,8 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   The trunk's tab additionally raises `raise_interrupt`, since nothing else
   delivers the foreground external child's SIGINT: it re-creates the SIGINT the
   kernel would have sent a foreground *external* child via
-  `interrupt_foreground_child` (Windows relays `CTRL_BREAK_EVENT` to the
-  foreground groups).
+  `interrupt_foreground_child`. On Windows it raises ral's interrupt alone:
+  a tool child hears Ctrl-Break only from its run's teardown.
 - A cancelled turn is a distinct TUI `Chrome::Cancelled`: the rail maps it
   to the error `╳` so the broken-off work is visible, while
   `Scrollback::last_is_error` matches only the fold's `Error`,

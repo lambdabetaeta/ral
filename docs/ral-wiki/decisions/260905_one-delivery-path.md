@@ -22,7 +22,9 @@ and a process cannot tell them apart, so it received the same interrupt twice.
 - **A signal the kernel already delivered is not re-sent.** The tty gives a
   foreground pgid its own copy; the anchor swallows that copy and reports it,
   and `Event::Witnessed(cause)` carries `delivered: true`, so teardown cancels
-  the thread stages and waits the grace but sends nothing.
+  the thread stages and waits the grace but sends nothing. (Later
+  `Event::Heard(signal)`, a key only to a terminal loan:
+  [[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]].)
 - **`grace_signal(cause)` is the one cause→signal table**, read by
   `RunningChild::terminate` and `cancel_all` alike: `Interrupt` → SIGINT,
   `Explicit`/`Deadline`/`Terminate` → SIGTERM, `ReaderGone`/`RootAbort` →
@@ -45,13 +47,23 @@ and a process cannot tell them apart, so it received the same interrupt twice.
 
 ## Consequences
 
-- One Ctrl-C is one SIGINT per external, measured at two before.
+- One Ctrl-C is one SIGINT per external, measured at two before. This left
+  one gap, closed later: an external inside a thread stage heard the owner's
+  group signal and its own waiter's by pid. Its waiter now holds a
+  `Group::Joins` membership and opens only with a cause the stage scope does
+  not hold, so it too hears one.
 - `!{ yes | cat } | head -1` exits 0. The nested pipeline's reader-gone
   teardown no longer sends a catchable SIGTERM, so `yes` is not laundered into
   `yes: killed by signal 15`.
 - A pipeline external under a deadline reports the deadline, not the signal.
 - A `spawn`ed worker's pipeline survives a Ctrl-C at the prompt: the cancel
   tree spares the detached worker, and nothing relays around it any more.
+  Windows kept two fan-outs past this decision — the console handler's
+  Ctrl-Break to every group and `TerminateJobObject` of every job, and
+  exarch's `relay_interrupt`, which spared only groups born detached — and
+  they fell to the same rule later: the console handler raises the interrupt
+  and nothing else, and a group hears Ctrl-Break only from the teardown of
+  the scope that owns it.
 - The anchor-witness race between the anchor's exec and its handler install is
   unchanged and benign: a signal in that window kills the anchor, whose own
   `Watch` reports `Event::Cancelled` and tears the pipeline down anyway.

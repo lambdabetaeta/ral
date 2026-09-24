@@ -19,9 +19,12 @@ re-derived from process state** — the foreground handoff is gated on a held
 `io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
 interactive / terminal / launch_role / capture_outer), and
 *`LaunchRole`* — the process-group role distinguishing the top-level
-orchestrator (`TopLevel`) from a stage's own children (`PipelineStage(Pgid)`,
-carrying the group an external spawned anywhere inside that stage must join —
-at the stage's own root or nested arbitrarily deep, thread or process alike).
+orchestrator (`TopLevel`) from a stage's own children
+(`PipelineStage(Membership)`, carrying the group an external spawned anywhere
+inside that stage must join — at the stage's own root or nested arbitrarily
+deep, thread or process alike — and the stage scope whose causes the group's
+owner delivers, so the member's own teardown opens only with a cause that
+scope does not hold).
 It decides pgid *placement* (a top-level standalone external may lead its own
 group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; anything
 inside a stage joins that stage's pgid) and says whether a child's reader is
@@ -78,7 +81,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
   `CommandFailure` the evaluator surfaces. `WaitOutcome::classify` yields a
   `ChildEnd`: `Failed(CommandFailure)`, or `Cancelled(CancelCause)` for a death
-  by the cause's `teardown_signals` or by a gesture's signal, so a torn-down child reports the cause —
+  by one of the cause's `signals_of` (grace, key, kill), read off the one
+  reader `WaitOutcome::death`; no death mints a cause, so a torn-down child reports the cause —
   an expired time limit, a `cancel`, an interrupt, a shutdown — exactly as a
   poll point does, while a signal from outside ral still reports its number
   ([[internals/cancellation|cancellation]]). `classify` takes `cause: Option<
@@ -114,7 +118,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   most once at session construction iff ral owned the foreground at startup
   (`None` on a backgrounded or tty-less launch, and always on platforms with no
   `tcsetpgrp`), then lent per run as `&TerminalLease` to the one chokepoint
-  that foregrounds — `ForegroundGuard::try_acquire`, which is *uninvocable*
+  that foregrounds — `TerminalLoan::try_acquire`, which is *uninvocable*
   without the borrow. The type lives at [[map/core/shell-state|shell-state]];
   the rationale at [[decisions/260619_terminal-lease|terminal-lease]].
 - `deadline.rs` — one lazily started, process-global daemon (`ral-deadline`)
@@ -174,9 +178,16 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
   Also `Pgid` /
   `PgidPolicy` / `ChildHandle` and the platform `spawn_with_pgid` family for
-  process-group placement. Unix `ForegroundGuard` takes the `&TerminalLease`,
+  process-group placement, and the two facts of who signals a group:
+  `Membership` (a joined pipeline group and its stage scope) and `Group`
+  (`Owns(Pgid)`, signalled and killed whole, or `Joins(Membership)`). Unix
+  `TerminalLoan` takes the `&TerminalLease` and the run's `ForegroundScope`,
   performs the `tcsetpgrp` handoff, snapshots and restores tty foreground /
-  termios, and blocks SIGTTOU for the parent-only restore window; unix
+  termios, blocks SIGTTOU for the parent-only restore window, hears the
+  tenant's key back (`hear`, `reclaim`; the private `gesture` reads
+  `GESTURES`) and strikes it on the frame on drop — uninhabited on Windows;
+  `signals_of`, one function over each platform's `grace_signal`,
+  `gesture_signal` and `KILL`; unix
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `interrupt_handler` is the interactive SIGINT disposition —
   a bare `request_interrupt()`, with no delivery of its own,
@@ -184,8 +195,9 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `quit_handler` is the Ctrl-`\` root abort. `grace_signal(cause)` is the one
   cause→signal table both teardowns read (`RunningChild::terminate` and the
   pipeline collector's `cancel_all`): `Interrupt` → SIGINT,
-  `Explicit`/`Deadline`/`Terminate` → SIGTERM, `ReaderGone`/`RootAbort` →
-  `None`, straight to the kill
+  `Explicit`/`Deadline`/`Terminate` → SIGTERM (on Windows all four →
+  Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`RootAbort`
+  → `None`, straight to the kill
   ([[decisions/260905_one-delivery-path|one-delivery-path]]).
   Platform handlers live in
   `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait goes
@@ -193,14 +205,16 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   by `kill(-pgid, …)`, never waited on
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
   the pid side). The Windows side
-  carries the console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
-  `TerminateJobObject`, then exit), `relay_interrupt` — `interrupt_handler`'s
-  Windows analogue, which foreground-cancels and fans a `CTRL_BREAK_EVENT` to
-  every live group, skipping a detached worker's — and
-  `break_pipeline_group`, the SIGTERM-grade cooperative break a job teardown
-  sends before escalating to `kill_pipeline_group`.
+  carries the console-control ladder in the Unix shape (two
+  `request_interrupt()`s, then `ExitProcess`), which signals no process, and
+  `break_pipeline_group`, the grace an owned group's teardown sends —
+  `RunningChild::terminate` for `Group::Owns`, the collector's
+  `Address::signal` for a group — before escalating to
+  `kill_pipeline_group`; a pid gets the kill alone.
 - `launch.rs` — the owned launch value and its platform interpreters, and the
-  two births: `spawn`, which hands back a child this process owns, and the
+  two births: `spawn`, which hands back a child this process owns and the
+  pgid of a group it leads — `NewLeader`, `NewSession`, or behind an envelope
+  the payload's own — never one it merely joined or inherited, and the
   `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
   no wait, and (below) no `JailCgroup`. Unix

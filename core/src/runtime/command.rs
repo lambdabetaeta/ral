@@ -9,6 +9,7 @@
 //! same way.
 
 use crate::evaluator::audit::{listening, observe};
+use crate::process::Group;
 use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
@@ -22,7 +23,7 @@ mod redirect;
 mod stdio;
 mod vet;
 
-pub(crate) use child::{ExternalPlumbing, Pumps, RunningChild};
+pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
@@ -114,7 +115,7 @@ pub(crate) fn run(
     // Anchor the denial-log window before the spawn, so a kernel deny the
     // child logs falls inside what `sandbox::augment_failure` reads back.
     let started = std::time::Instant::now();
-    let (child, wait_pgid, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
+    let (child, led, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
         Ok(pair) => pair,
         // `finish_command` builds the `Command{External}` observation from
         // whatever error reaches it, so a spawn failure needs no emission of
@@ -126,31 +127,26 @@ pub(crate) fn run(
     // Bound, not dropped: its `Drop` restores ral's pgid on every path out
     // of here, sparing the next REPL tty read an EIO from a background
     // pgroup.
-    let _fg_guard = fg.acquire(child_pid, shell, mooring);
+    let loan = fg.acquire(child_pid, shell, mooring);
 
-    // A tracked leader pgid is exactly what there is to release on Windows
-    // and to signal/kill as a whole; an `Inherit` child has no group at all,
-    // and a `Join` child borrowed a group it does not own — both read as
-    // `None`.
-    let owned_group =
-        wait_pgid.filter(|_| !matches!(fg.pgid_policy(), crate::process::PgidPolicy::Join(_)));
+    let group = landed_in(led, &shell.io.launch_role);
     // Nothing fallible may run between `spawn` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
     let running = RunningChild::assemble_with_owner(
         child,
         cmd_name.clone(),
-        ExternalPlumbing {
-            stdout_pump: stdout_plan,
-            stderr_pump,
-        },
-        owned_group,
+        Pumps::new(stdout_plan, stderr_pump),
+        group,
         mooring.cancel.as_scope().clone(),
         jail,
     );
 
     let waited: WaitedChild = running.wait();
-    let (outcome, cause) = (waited.outcome, waited.cause);
+    // The terminal returns the instant its tenant is dead, and what the
+    // tenant heard is struck on the frame before the next poll.
+    let pressed = loan.and_then(|loan| loan.reclaim(waited.outcome.death(false)));
+    let (outcome, cause) = (waited.outcome, waited.cause.max(pressed));
 
     // Held rather than `?`-propagated: the drain below must still run for a
     // command that did run, even when its commit failed.
@@ -181,6 +177,13 @@ pub(crate) fn run(
             Err(Break::Error(err))
         }
     }
+}
+
+/// Who signals a child spawned under `role`: the group it `led`, else the
+/// pipeline's it joined, else nobody but its own pid.
+fn landed_in(led: Option<crate::process::Pgid>, role: &crate::io::LaunchRole) -> Option<Group> {
+    led.map(Group::Owns)
+        .or_else(|| role.membership().cloned().map(Group::Joins))
 }
 
 /// Settle a `>` staged by [`stdio::wire_stdout_file`], if the call staged
@@ -304,4 +307,31 @@ fn trace_io_wiring(
     _fg: &ForegroundDecision,
     _shell: &Shell,
 ) {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::LaunchRole;
+    use crate::process::{CancelScope, Membership, Pgid};
+
+    fn pgid(raw: i32) -> Pgid {
+        Pgid::from_raw(raw).expect("positive")
+    }
+
+    /// An envelope inside a stage leads its payload's group, and is its
+    /// owner; a plain member joins; a top-level `Inherit` child has none.
+    #[test]
+    fn a_child_owns_what_it_leads_and_joins_what_it_only_entered() {
+        let stage = LaunchRole::PipelineStage(Membership::new(pgid(7), CancelScope::root()));
+        assert!(matches!(
+            landed_in(Some(pgid(9)), &stage),
+            Some(Group::Owns(g)) if g == pgid(9)
+        ));
+        assert!(matches!(
+            landed_in(None, &stage),
+            Some(Group::Joins(m)) if m.group() == pgid(7)
+        ));
+        assert!(landed_in(None, &LaunchRole::TopLevel).is_none());
+    }
 }

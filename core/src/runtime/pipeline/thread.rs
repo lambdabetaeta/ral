@@ -112,8 +112,7 @@ pub(super) fn launch_thread_stage(
         )
     })?;
     let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
-
-    let group = cx.group.leader_pgid();
+    let mooring = Mooring::for_stage_thread(cx.mooring);
 
     // A non-final stage's ambient is its own pipe; the final stage's is the
     // parent's, which `Io::ambient` requires never be a capture buffer.
@@ -136,11 +135,12 @@ pub(super) fn launch_thread_stage(
         stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
-        launch_role: crate::io::LaunchRole::PipelineStage(group),
+        launch_role: crate::io::LaunchRole::PipelineStage(
+            cx.group.membership(mooring.cancel.as_scope()),
+        ),
     };
 
     let policy = cx.shell.local.audit.active_policy();
-    let mooring = Mooring::for_stage_thread(cx.mooring);
     let env = cx.env.clone();
     let comp = Arc::clone(stage);
     let span = spec.span;
@@ -237,6 +237,7 @@ mod tests {
             shell: &mut shell,
             env: &env,
             group: &group,
+            holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let _handle = launch_thread_stage(
@@ -281,6 +282,7 @@ mod tests {
             shell: &mut shell,
             env: &env,
             group: &group,
+            holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = launch_thread_stage(
@@ -322,6 +324,7 @@ mod tests {
             shell: &mut shell,
             env: &env,
             group: &group,
+            holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = launch_thread_stage(

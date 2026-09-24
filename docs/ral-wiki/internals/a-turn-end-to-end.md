@@ -127,7 +127,8 @@ module's framed scaffold:
   remains a resume point regardless of completion, error, or `exit`
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
   read, `run_framed` polls `process::check(mooring)` once more so a sticky
-  cancellation cannot be absorbed by `try`; it then computes the transport
+  cancellation — a key a terminal loan heard back and struck on the frame
+  included — cannot be absorbed by `try`; it then computes the transport
   status and emits ready-boundary notices while the
   run frame and sinks are still installed. Only then does the IO guard drop.
 - Back in `run_built`, the wall is **disarmed before the cause is read**, so a

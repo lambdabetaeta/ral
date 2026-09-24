@@ -17,35 +17,49 @@
 use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-#[cfg(unix)]
-use super::outcome::Signal;
-use super::outcome::WaitOutcome;
+use super::cancel::{CancelCause, CancelScope};
+use super::outcome::{Signal, WaitOutcome};
 use super::reaper::{Watch, watch};
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+pub(crate) use unix::grace_signal;
+#[cfg(unix)]
+use unix::{KILL, gesture_signal};
+#[cfg(unix)]
 pub use unix::{
-    ForegroundGuard, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
+    TerminalLoan, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
     reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after, term_handler,
     termios_snapshot,
 };
-#[cfg(unix)]
-pub(crate) use unix::{gesture, grace_signal, teardown_signals};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{
-    ForegroundGuard, ReapStatus, break_pipeline_group, disown_pipeline_group, install_handlers,
-    relay_interrupt, reset_child_signals, try_reap_leader,
-};
+pub(crate) use windows::grace_signal;
+#[cfg(windows)]
+use windows::{KILL, gesture_signal};
 #[cfg(windows)]
 pub(crate) use windows::{
     PreparedGroup, apply_group_active_process_limit, close_prepared_group, is_known_group,
     prepare_group, prepared_job, register_prepared_group, release_win_group,
     set_active_process_limit, wait_leader_blocking,
 };
+#[cfg(windows)]
+pub use windows::{
+    ReapStatus, TerminalLoan, break_pipeline_group, disown_pipeline_group, install_handlers,
+    reset_child_signals, try_reap_leader,
+};
+
+/// Every signal a death by which is `cause`'s: its grace signal, its key, and
+/// the kill that ends every teardown.
+pub(crate) fn signals_of(cause: CancelCause) -> impl Iterator<Item = Signal> {
+    grace_signal(cause)
+        .into_iter()
+        .chain(gesture_signal(cause))
+        .chain([KILL])
+}
 
 // ── Child handle ───────────────────────────────────────────────────────────
 //
@@ -273,7 +287,7 @@ impl Pgid {
     /// and harmless on a group that has already left.
     pub(crate) fn kill(self) {
         #[cfg(unix)]
-        self.signal_group(Signal::new(libc::SIGKILL));
+        self.signal_group(KILL);
         #[cfg(windows)]
         windows::kill_pipeline_group(self);
     }
@@ -319,4 +333,114 @@ pub enum PgidPolicy {
     NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),
+}
+
+impl PgidPolicy {
+    /// Whether the child leads the group it lands in.
+    pub(crate) const fn leads(self) -> bool {
+        matches!(self, Self::NewLeader | Self::NewSession)
+    }
+}
+
+/// A pipeline group joined, and the stage scope whose every cause the
+/// group's owner delivers to the whole group.
+#[derive(Clone, Debug)]
+pub(crate) struct Membership {
+    group: Pgid,
+    stage: CancelScope,
+}
+
+impl Membership {
+    pub(crate) const fn new(group: Pgid, stage: CancelScope) -> Self {
+        Self { group, stage }
+    }
+
+    pub(crate) const fn group(&self) -> Pgid {
+        self.group
+    }
+
+    /// Only what struck beneath the stage is the member's own to open.
+    pub(crate) fn owes(&self, cause: CancelCause) -> bool {
+        self.stage.cause() < Some(cause)
+    }
+}
+
+/// The process group a child or pipeline landed in, and so who signals it.
+#[derive(Clone, Debug)]
+pub(crate) enum Group {
+    /// Its own: signalled and killed whole.
+    Owns(Pgid),
+    /// A pipeline's, whose owner delivers what the stage holds.
+    Joins(Membership),
+}
+
+impl Group {
+    pub(crate) const fn leader(&self) -> Pgid {
+        match self {
+            Self::Owns(g) => *g,
+            Self::Joins(m) => m.group,
+        }
+    }
+
+    /// Whether this holder's own teardown must open: always for an owner.
+    pub(crate) fn owes(&self, cause: CancelCause) -> bool {
+        match self {
+            Self::Owns(_) => true,
+            Self::Joins(m) => m.owes(cause),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn membership(stage: &CancelScope) -> Membership {
+        Membership::new(Pgid::from_raw(1).expect("1 is positive"), stage.clone())
+    }
+
+    #[test]
+    fn a_member_owes_only_what_its_stage_does_not_hold() {
+        let stage = CancelScope::root();
+        let member = membership(&stage);
+        assert!(
+            CancelCause::ALL.into_iter().all(|c| member.owes(c)),
+            "an unstruck stage leaves every cause to the member"
+        );
+
+        stage.cancel(CancelCause::Deadline);
+        for cause in [
+            CancelCause::ReaderGone,
+            CancelCause::Interrupt,
+            CancelCause::Explicit,
+            CancelCause::Deadline,
+        ] {
+            assert!(!member.owes(cause), "{cause:?} is the owner's to deliver");
+        }
+
+        let own = stage.child();
+        own.cancel(CancelCause::Terminate);
+        let cause = own.cause().expect("struck");
+        assert!(
+            member.owes(cause),
+            "a cause beyond the stage's is the member's"
+        );
+    }
+
+    #[test]
+    fn strike_order_does_not_change_what_a_member_owes() {
+        let stage = CancelScope::root();
+        let own = stage.child();
+        own.cancel(CancelCause::Terminate);
+        stage.cancel(CancelCause::Deadline);
+        let member = membership(&stage);
+        assert!(member.owes(CancelCause::Terminate));
+        assert!(!member.owes(CancelCause::Deadline));
+    }
+
+    #[test]
+    fn an_owner_owes_every_cause() {
+        let group = Group::Owns(Pgid::from_raw(1).expect("1 is positive"));
+        assert!(CancelCause::ALL.into_iter().all(|c| group.owes(c)));
+    }
 }

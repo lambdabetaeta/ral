@@ -3,10 +3,11 @@
 
 use super::cancel::CancelCause;
 
-/// The exit code ral's every Windows kill uses — ASCII "RALK" — the only
-/// signature a terminated Windows process carries.  A child exiting with this
-/// exact code while a cause was sent would be attributed too; Unix has no such
-/// residue, a signal death being uncounterfeitable by an exit.
+/// The exit code ral's every Windows kill uses — ASCII "RALK" — there being
+/// no signal a terminated Windows process could carry.  A child exiting with
+/// this exact code, or with Ctrl-Break's, while a cause was sent would be
+/// attributed too; Unix has no such residue, a signal death being
+/// uncounterfeitable by an exit.
 #[cfg(windows)]
 pub(crate) const KILL_EXIT_CODE: i32 = 0x5241_4c4b;
 
@@ -147,60 +148,45 @@ impl WaitOutcome {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// Whether this death is `cause`'s own teardown: a death by one of its
-    /// [`teardown_signals`](crate::process::teardown_signals).  An `enveloped`
-    /// `Exited(128 + n)` reads as a death by `n`, bwrap reporting its payload's
-    /// signal death as its own exit; an unenveloped one is the child's choice.
+    /// The signal this death was by: `Signaled(s)`, or `128 + n` behind an
+    /// envelope, bwrap reporting its payload's signal death as its own exit;
+    /// an unenveloped `Exited(128 + n)` is the child's choice.
     #[cfg(unix)]
-    fn is_teardown_of(self, cause: CancelCause, enveloped: bool) -> bool {
-        let signal = match self {
-            Self::Signaled(signal) => signal,
-            Self::Exited(code) if enveloped && code > 128 => Signal::new(code - 128),
-            _ => return false,
-        };
-        crate::process::teardown_signals(cause).any(|sent| sent == signal)
-    }
-
-    #[cfg(windows)]
-    fn is_teardown_of(self, _: CancelCause, _: bool) -> bool {
-        matches!(self, Self::Exited(KILL_EXIT_CODE))
-    }
-
-    /// The cause this death is by: `cause`'s own teardown, else the gesture
-    /// its signal stands for, whoever delivered it — the tty reaches a
-    /// foreground child ral never saw the keystroke for.  An exit code is a
-    /// choice (`exit 130`), never a gesture, save the one Windows gives a
-    /// Ctrl-C death.
-    fn attributed(self, cause: Option<CancelCause>, enveloped: bool) -> Option<CancelCause> {
-        cause
-            .filter(|&cause| self.is_teardown_of(cause, enveloped))
-            .or_else(|| self.gesture())
-    }
-
-    #[cfg(unix)]
-    fn gesture(self) -> Option<CancelCause> {
+    pub(crate) fn death(self, enveloped: bool) -> Option<Signal> {
         match self {
-            Self::Signaled(signal) => crate::process::gesture(signal),
+            Self::Signaled(signal) => Some(signal),
+            Self::Exited(code) if enveloped && code > 128 => Some(Signal::new(code - 128)),
             _ => None,
         }
     }
 
+    /// The exit status a console event or ral's kill leaves, and nothing
+    /// else: every other exit is the child's choice.
     #[cfg(windows)]
-    fn gesture(self) -> Option<CancelCause> {
+    pub(crate) fn death(self, _enveloped: bool) -> Option<Signal> {
         use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
         match self {
-            Self::Exited(STATUS_CONTROL_C_EXIT) => Some(CancelCause::Interrupt),
+            Self::Exited(code @ (KILL_EXIT_CODE | STATUS_CONTROL_C_EXIT)) => {
+                Some(Signal::new(code))
+            }
             _ => None,
         }
+    }
+
+    /// Whether this death is by one of `cause`'s
+    /// [`signals_of`](crate::process::signals_of).
+    fn is_death_by(self, cause: CancelCause, enveloped: bool) -> bool {
+        self.death(enveloped)
+            .is_some_and(|signal| crate::process::signals_of(cause).any(|of| of == signal))
     }
 
     /// The end this outcome amounts to, or `None` for success, given the
-    /// strongest `cause` in force when the child ended.  A death by that
-    /// cause's teardown is the cause's — forgiven outright for `ReaderGone`,
-    /// the collector reclaiming a producer nobody read from — and anything
-    /// else stays as the OS reported it.
+    /// strongest `cause` in force when the child ended.  A death by one of
+    /// that cause's signals is the cause's — forgiven outright for
+    /// `ReaderGone`, the collector reclaiming a producer nobody read from —
+    /// and anything else stays as the OS reported it: no death mints a cause.
     pub(crate) fn classify(self, cause: Option<CancelCause>, enveloped: bool) -> Option<ChildEnd> {
-        match self.attributed(cause, enveloped) {
+        match cause.filter(|&cause| self.is_death_by(cause, enveloped)) {
             Some(CancelCause::ReaderGone) => None,
             Some(cause) => Some(ChildEnd::Cancelled(cause)),
             None => match self {
@@ -237,6 +223,10 @@ pub enum CommandFailure {
 impl CommandFailure {
     pub fn message(&self, cmd: &str) -> String {
         match self {
+            #[cfg(windows)]
+            Self::ExitCode(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT) => {
+                format!("{cmd}: ended by Ctrl-C")
+            }
             Self::ExitCode(code) => format!("{cmd}: exited with status {code}"),
             Self::Signal(sig) => format!("{cmd}: killed by signal {}", sig.display()),
             Self::Spawn(SpawnFailure::NotFound) => format!("{cmd}: command not found"),
@@ -343,28 +333,28 @@ mod tests {
         );
     }
 
-    /// A death by a cause's grace signal or by the SIGKILL that ends every
-    /// teardown is the cause's, and an enveloped `Exited(128 + n)` for the
-    /// same `n` reads alike.
+    /// A death by any of a cause's signals — its grace signal, its key, the
+    /// SIGKILL that ends every teardown — is the cause's, and an enveloped
+    /// `Exited(128 + n)` for the same `n` reads alike.
     #[cfg(unix)]
     #[test]
-    fn a_teardown_death_is_attributed_to_the_cause_sent() {
-        use libc::{SIGINT, SIGKILL, SIGTERM};
+    fn a_death_by_a_causes_signal_is_the_causes() {
+        use libc::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM};
         for (cause, expected) in [
             (CancelCause::Interrupt, vec![SIGINT, SIGKILL]),
             (CancelCause::Explicit, vec![SIGTERM, SIGKILL]),
             (CancelCause::Deadline, vec![SIGTERM, SIGKILL]),
-            (CancelCause::Terminate, vec![SIGTERM, SIGKILL]),
-            (CancelCause::RootAbort, vec![SIGKILL]),
+            (CancelCause::Terminate, vec![SIGTERM, SIGHUP, SIGKILL]),
+            (CancelCause::RootAbort, vec![SIGKILL, SIGQUIT]),
             (CancelCause::ReaderGone, vec![SIGKILL]),
         ] {
-            let actual: std::collections::BTreeSet<i32> = crate::process::teardown_signals(cause)
+            let actual: std::collections::BTreeSet<i32> = crate::process::signals_of(cause)
                 .map(Signal::number)
                 .collect();
             assert_eq!(
                 actual,
                 expected.iter().copied().collect(),
-                "{cause:?}'s teardown signals"
+                "{cause:?}'s signals"
             );
             for n in expected {
                 assert_eq!(
@@ -372,19 +362,17 @@ mod tests {
                     attributed(cause),
                     "{cause:?}, signal {n}"
                 );
-            }
-            for signal in crate::process::teardown_signals(cause) {
-                let code = 128 + signal.number();
                 assert_eq!(
-                    WaitOutcome::Exited(code).classify(Some(cause), true),
+                    WaitOutcome::Exited(128 + n).classify(Some(cause), true),
                     attributed(cause),
-                    "{cause:?}, enveloped exit {code}"
+                    "{cause:?}, enveloped exit {}",
+                    128 + n
                 );
             }
         }
     }
 
-    /// A signal neither the cause's teardown nor a gesture is the child's own
+    /// A signal none of the cause's is the child's own
     /// death, whatever was in force when it landed: a segfault in the grace
     /// window keeps the segfault's words.
     #[cfg(unix)]
@@ -412,26 +400,26 @@ mod tests {
         );
     }
 
-    /// A gesture's signal is its cause whoever delivered it, ral or no cause
-    /// in force at all, and a cause whose teardown it is not yields to it.
+    /// No death mints a cause: with none in force every signal death is the
+    /// child's own, a key's included, and a cause is kept only for its own
+    /// signals.
     #[cfg(unix)]
     #[test]
-    fn a_gesture_death_is_the_gestures_cause() {
-        for (n, cause) in [
-            (libc::SIGINT, CancelCause::Interrupt),
-            (libc::SIGQUIT, CancelCause::RootAbort),
-            (libc::SIGTERM, CancelCause::Terminate),
-            (libc::SIGHUP, CancelCause::Terminate),
-        ] {
-            assert_eq!(signaled(n).classify(None, false), attributed(cause), "{n}");
+    fn a_death_is_a_cancellation_only_by_a_cause_in_force() {
+        for n in 1..=31 {
+            assert_eq!(signaled(n).classify(None, false), Some(died_of(n)), "{n}");
         }
         assert_eq!(
+            signaled(libc::SIGQUIT).classify(Some(CancelCause::RootAbort), false),
+            Some(ChildEnd::Cancelled(CancelCause::RootAbort))
+        );
+        assert_eq!(
             signaled(libc::SIGINT).classify(Some(CancelCause::Deadline), false),
-            attributed(CancelCause::Interrupt)
+            Some(died_of(libc::SIGINT))
         );
         assert_eq!(
             signaled(libc::SIGTERM).classify(Some(CancelCause::ReaderGone), false),
-            attributed(CancelCause::Terminate)
+            Some(died_of(libc::SIGTERM))
         );
     }
 
@@ -453,7 +441,7 @@ mod tests {
         );
     }
 
-    /// A signal no cause sent and no gesture names stays a signal, and keeps its words.
+    /// A signal no cause sent stays a signal, and keeps its words.
     #[cfg(unix)]
     #[test]
     fn a_foreign_signal_is_still_reported_as_a_signal() {
@@ -516,8 +504,8 @@ mod tests {
         );
     }
 
-    /// Windows has one teardown signature, ral's kill exit code, and it is the
-    /// sent cause's whichever cause that was.
+    /// ral's kill exit code ends every Windows teardown, so it is the sent
+    /// cause's whichever cause that was.
     #[cfg(windows)]
     #[test]
     fn the_kill_exit_code_is_attributed_to_the_cause_sent() {
@@ -534,14 +522,60 @@ mod tests {
         );
     }
 
-    /// Windows' Ctrl-C death status is the gesture's, no cause sent.
+    /// Windows' Ctrl-C death status is the interrupt's only while the
+    /// interrupt is in force; otherwise it is the child's exit, told as Ctrl-C.
     #[cfg(windows)]
     #[test]
-    fn the_ctrl_c_exit_status_is_an_interrupt() {
+    fn the_ctrl_c_exit_status_is_an_interrupt_only_in_force() {
         use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
+        let ctrl_c = WaitOutcome::Exited(STATUS_CONTROL_C_EXIT);
         assert_eq!(
-            WaitOutcome::Exited(STATUS_CONTROL_C_EXIT).classify(None, false),
+            ctrl_c.classify(Some(CancelCause::Interrupt), false),
             attributed(CancelCause::Interrupt)
         );
+        assert_eq!(
+            ctrl_c.classify(None, false),
+            Some(ChildEnd::Failed(CommandFailure::ExitCode(
+                STATUS_CONTROL_C_EXIT
+            )))
+        );
+        assert_eq!(
+            CommandFailure::ExitCode(STATUS_CONTROL_C_EXIT).message("ping"),
+            "ping: ended by Ctrl-C"
+        );
+    }
+
+    /// Ctrl-Break opens every graceful teardown, so the death it leaves is
+    /// each graceful cause's — a `Deadline` teardown reads as the time limit,
+    /// never as an exit status — and a kill-only cause's child's own.
+    #[cfg(windows)]
+    #[test]
+    fn a_ctrl_break_death_is_every_graceful_causes() {
+        use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
+        let ctrl_break = WaitOutcome::Exited(STATUS_CONTROL_C_EXIT);
+        assert_eq!(
+            ctrl_break.classify(Some(CancelCause::Deadline), false),
+            Some(ChildEnd::Cancelled(CancelCause::Deadline))
+        );
+        for cause in [
+            CancelCause::Interrupt,
+            CancelCause::Explicit,
+            CancelCause::Terminate,
+        ] {
+            assert_eq!(
+                ctrl_break.classify(Some(cause), false),
+                attributed(cause),
+                "{cause:?}"
+            );
+        }
+        for cause in [CancelCause::ReaderGone, CancelCause::RootAbort] {
+            assert_eq!(
+                ctrl_break.classify(Some(cause), false),
+                Some(ChildEnd::Failed(CommandFailure::ExitCode(
+                    STATUS_CONTROL_C_EXIT
+                ))),
+                "{cause:?}"
+            );
+        }
     }
 }

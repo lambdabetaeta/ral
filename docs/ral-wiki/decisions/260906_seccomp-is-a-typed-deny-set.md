@@ -62,8 +62,8 @@ unnamed.
 6. **Two verdicts, several programs.** A `seccompiler` filter has *one*
    `match_action`, so `Kill` and each distinct `Errno` compile to their own
    BPF program — three here (`Kill`; `Errno(EPERM)` for `unshare`/`clone`,
-   `setns`, `ioctl`; `Errno(ENOSYS)` for `clone3`). bwrap stacks them:
-   `--seccomp` on the first fd, `--add-seccomp-fd` on each further one — the
+   `setns`, `ioctl`; `Errno(ENOSYS)` for `clone3`). bwrap stacks them, one
+   `--add-seccomp-fd` each (it refuses that flag beside `--seccomp`) — the
    kernel applies every installed filter and takes the most severe result,
    so program order is immaterial. `Kill` stays `SECCOMP_RET_KILL_THREAD`,
    as before.

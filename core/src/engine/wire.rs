@@ -249,7 +249,7 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
     let reader_ch = WireChannel::from_stream(stream);
     #[allow(
         clippy::disallowed_methods,
-        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the durable root, tears the hatched children down and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no ForegroundGuard can exist to strand."
+        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the durable root, tears the hatched children down and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no TerminalLoan can exist to strand."
     )]
     std::process::exit(engine_session(reader_ch, installers, Patience::default()));
 }

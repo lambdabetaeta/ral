@@ -482,13 +482,13 @@ reach ral's third-signal `_exit`
 On Windows the same contract rides `SetConsoleCtrlHandler`: `install` registers
 exarch's routine after ral's, so it runs first in the last-registered-first
 chain, handles Ctrl-C/Ctrl-Break itself — `raise` plus ral's non-escalating
-`relay_interrupt`, which cancels the foreground scope and fans a Ctrl-Break to
-every live, non-detached pipeline group — and reports them handled, so ral's
+`request_interrupt`, which signals no process: a tool child hears Ctrl-Break
+only from its run's teardown — and reports them handled, so ral's
 escalating disposition never ticks for an exchange-cancel; window-close / logoff /
 shutdown pass through unhandled to that disposition, the analogue of
 SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
 `ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event
-and `deliver_interrupt` calls `relay_interrupt` in-process — never a
+and `deliver_interrupt` calls `request_interrupt` in-process — never a
 `GenerateConsoleCtrlEvent` re-injection, which would broadcast to the console
 group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying

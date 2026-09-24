@@ -14,7 +14,9 @@ use rustix::termios::{OptionalActions, Termios};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::Signal;
-use crate::process::cancel::{CancelCause, request_interrupt, request_root_cancel};
+use crate::process::cancel::{
+    CancelCause, ForegroundScope, request_interrupt, request_root_cancel,
+};
 
 // ── Termination handler ────────────────────────────────────────────────────
 
@@ -35,26 +37,26 @@ pub fn install_handlers() {
 }
 
 extern "C" fn handler(sig: libc::c_int) {
-    let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
-    if prev >= 2 {
+    let cause = handler_cause(sig);
+    if ESCALATION.fetch_add(1, Ordering::Relaxed) >= 2 {
         // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
-        unsafe { libc::_exit(forced_exit_code(sig)) };
+        unsafe { libc::_exit(crate::types::Status::Cancelled(cause).code()) };
     }
     // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
     // land on the durable root, so detached workers hear them too.
-    if sig == libc::SIGINT {
-        request_interrupt();
-    } else {
-        request_root_cancel(CancelCause::Terminate);
+    match cause {
+        CancelCause::Interrupt => request_interrupt(),
+        _ => request_root_cancel(cause),
     }
 }
 
-/// The status a forced exit on `sig` reports: its gesture's cause's, or, for a
-/// signal no gesture names, the bare `128 + sig`.  Pure, so async-signal-safe.
-fn forced_exit_code(sig: libc::c_int) -> i32 {
-    gesture(Signal::new(sig)).map_or(128 + sig, |cause| {
-        crate::types::Status::Cancelled(cause).code()
-    })
+/// The cause [`handler`] reads `sig` as.  Pure, so async-signal-safe.
+fn handler_cause(sig: libc::c_int) -> CancelCause {
+    if sig == libc::SIGINT {
+        CancelCause::Interrupt
+    } else {
+        CancelCause::Terminate
+    }
 }
 
 /// The termination handler, for a caller installing it signal by signal.
@@ -345,29 +347,31 @@ pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
     }
 }
 
-/// The cause each gesture signal stands for, as the shell's own handler reads it.
-const GESTURES: [(i32, CancelCause); 4] = [
+/// What a terminal sends when Ctrl-C or Ctrl-\ is pressed on it, or it hangs
+/// up, and the cause each stands for.  SIGTERM is no terminal's.
+const GESTURES: [(i32, CancelCause); 3] = [
     (libc::SIGINT, CancelCause::Interrupt),
     (libc::SIGQUIT, CancelCause::RootAbort),
-    (libc::SIGTERM, CancelCause::Terminate),
     (libc::SIGHUP, CancelCause::Terminate),
 ];
 
-/// The cause a gesture signal stands for, whoever delivered it.  Pure, so
-/// async-signal-safe.
-pub(crate) fn gesture(signal: Signal) -> Option<CancelCause> {
+/// The key `signal` is, read only by [`TerminalLoan::hear`]: nothing but a
+/// terminal ral lent can report one.
+fn gesture(signal: Signal) -> Option<CancelCause> {
     GESTURES
         .into_iter()
         .find_map(|(number, cause)| (number == signal.number()).then_some(cause))
 }
 
-/// The signals ral's own teardown for `cause` sends: its grace signal, then
-/// the SIGKILL that ends every teardown.
-pub(crate) fn teardown_signals(cause: CancelCause) -> impl Iterator<Item = Signal> {
-    grace_signal(cause)
+/// The key a terminal sends for `cause`, if any.
+pub(crate) fn gesture_signal(cause: CancelCause) -> Option<Signal> {
+    GESTURES
         .into_iter()
-        .chain([Signal::new(libc::SIGKILL)])
+        .find_map(|(number, key)| (key == cause).then_some(Signal::new(number)))
 }
+
+/// The signal that ends every teardown.
+pub(crate) const KILL: Signal = Signal::new(libc::SIGKILL);
 
 /// Capture stdin's line-discipline state; `None` when stdin is not a tty.  The
 /// restore is the caller's, the right `tcsetattr` flush mode being site-specific.
@@ -382,25 +386,38 @@ pub fn termios_snapshot() -> Option<Termios> {
 // the termios and we inherit whatever raw/cooked/ONLCR mode the child last
 // wrote — anything calling `cfmakeraw` — for the classic Unix staircase output.
 
-/// RAII guard that snapshots both on acquire and restores both on drop.
+/// One lending of the session's [`TerminalLease`] to a group, for a run: it
+/// snapshots both on acquire and restores both on drop.
 ///
 /// It cannot be constructed without borrowing a [`TerminalLease`]: holding one
 /// is the proof that ral owns the controlling terminal's foreground, and only a
 /// run whose terminal policy grants the handoff can obtain the borrow
 /// (`Shell::terminal_lease`).
 ///
+/// While lent, a key pressed on the terminal reaches the tenant, never ral;
+/// the loan hears it back from the tenant and, on return, strikes it on the
+/// run's frame.
+///
 /// [`TerminalLease`]: crate::process::TerminalLease
-pub struct ForegroundGuard {
+pub struct TerminalLoan {
     saved_pgid: Pid,
     saved_termios: Option<Termios>,
+    /// The run the terminal was lent for; struck with `pressed` on return.
+    frame: ForegroundScope,
+    pressed: Option<CancelCause>,
 }
 
-impl ForegroundGuard {
-    /// Hand the controlling tty to `target`, recording the prior pgid and
-    /// termios for the restore.  `None` when the pgid handoff itself fails, so
-    /// there is then nothing to restore; a failed termios snapshot is not fatal
-    /// and leaves only the pgid half to put back on drop.
-    pub(crate) fn try_acquire(target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
+impl TerminalLoan {
+    /// Hand the controlling tty to `target` for the run under `frame`,
+    /// recording the prior pgid and termios for the restore.  `None` when the
+    /// pgid handoff itself fails, so there is then nothing to restore; a
+    /// failed termios snapshot is not fatal and leaves only the pgid half to
+    /// put back on drop.
+    pub(crate) fn try_acquire(
+        target: i32,
+        _lease: &crate::process::TerminalLease,
+        frame: &ForegroundScope,
+    ) -> Option<Self> {
         if target <= 0 {
             return None;
         }
@@ -428,7 +445,42 @@ impl ForegroundGuard {
         Some(Self {
             saved_pgid: saved,
             saved_termios,
+            frame: frame.clone(),
+            pressed: None,
         })
+    }
+
+    /// A loan with no handoff, so the strike can be tested alone: restoring
+    /// the foreground as found is a no-op.
+    #[cfg(test)]
+    pub(crate) fn for_test(frame: &ForegroundScope) -> Self {
+        Self {
+            saved_pgid: rustix::termios::tcgetpgrp(rustix::stdio::stdin())
+                .unwrap_or_else(|_| rustix::process::getpgrp()),
+            saved_termios: None,
+            frame: frame.clone(),
+            pressed: None,
+        }
+    }
+
+    /// Read `signal`, reported by the tenant, as the key it hands back.
+    pub(crate) fn hear(&mut self, signal: Signal) -> Option<CancelCause> {
+        let key = gesture(signal);
+        self.pressed = self.pressed.max(key);
+        key
+    }
+
+    /// The strongest key heard so far.
+    pub(crate) fn pressed(&self) -> Option<CancelCause> {
+        self.pressed
+    }
+
+    /// Take the terminal back from a tenant whose death was by `last`.
+    pub(crate) fn reclaim(mut self, last: Option<Signal>) -> Option<CancelCause> {
+        if let Some(signal) = last {
+            self.hear(signal);
+        }
+        self.pressed
     }
 }
 
@@ -462,7 +514,18 @@ impl Drop for SigttouBlock {
     }
 }
 
-impl Drop for ForegroundGuard {
+impl Drop for TerminalLoan {
+    /// Restore the terminal, then strike what was heard on the run it was
+    /// lent for.
+    fn drop(&mut self) {
+        self.restore();
+        if let Some(cause) = self.pressed {
+            self.frame.cancel(cause);
+        }
+    }
+}
+
+impl TerminalLoan {
     /// Restore the foreground pgid and termios recorded at acquisition.
     ///
     /// Pgid first, since a missed restore leaves ral in a background pgroup
@@ -470,7 +533,7 @@ impl Drop for ForegroundGuard {
     /// child's last buffered output leaves under the child's own settings:
     /// `Now` would clobber those bytes' line discipline, and `Flush` would
     /// discard input typed during the child's final frame.
-    fn drop(&mut self) {
+    fn restore(&self) {
         let _sigttou = SigttouBlock::new();
         for _ in 0..3 {
             match rustix::termios::tcsetpgrp(rustix::stdio::stdin(), self.saved_pgid) {
@@ -580,6 +643,76 @@ mod tests {
                 "{cause:?} must open its teardown with {expected:?}"
             );
         }
+    }
+
+    // ── Keys ───────────────────────────────────────────────────────────────
+
+    /// A terminal sends SIGINT, SIGQUIT and SIGHUP, and nothing else is a key.
+    #[test]
+    fn only_a_terminals_signals_are_keys() {
+        for n in 1..=31 {
+            let expected = match n {
+                libc::SIGINT => Some(CancelCause::Interrupt),
+                libc::SIGQUIT => Some(CancelCause::RootAbort),
+                libc::SIGHUP => Some(CancelCause::Terminate),
+                _ => None,
+            };
+            assert_eq!(gesture(Signal::new(n)), expected, "signal {n}");
+        }
+    }
+
+    /// `gesture_signal` names each key's signal, and no other cause has one.
+    #[test]
+    fn gesture_signal_inverts_gesture() {
+        for cause in CancelCause::ALL {
+            match gesture_signal(cause) {
+                Some(signal) => assert_eq!(gesture(signal), Some(cause), "{cause:?}"),
+                None => assert!(
+                    GESTURES.iter().all(|&(_, key)| key != cause),
+                    "{cause:?} is some key's cause"
+                ),
+            }
+        }
+    }
+
+    /// The status a forced exit reports: the interrupt's for SIGINT, the
+    /// termination's for SIGTERM and SIGHUP.
+    #[test]
+    fn a_forced_exit_reports_the_handlers_cause() {
+        for (sig, code) in [
+            (libc::SIGINT, 130),
+            (libc::SIGTERM, 143),
+            (libc::SIGHUP, 143),
+        ] {
+            assert_eq!(
+                crate::types::Status::Cancelled(handler_cause(sig)).code(),
+                code,
+                "signal {sig}"
+            );
+        }
+    }
+
+    /// What a loan struck on its frame when it returned, after `heard`.
+    fn struck_after(heard: &[i32]) -> Option<CancelCause> {
+        let frame = crate::process::DurableRoot::new().worker();
+        let mut loan = TerminalLoan::for_test(&frame);
+        for &n in heard {
+            loan.hear(Signal::new(n));
+        }
+        drop(loan);
+        frame.cause()
+    }
+
+    /// A key heard is struck when the terminal returns; a signal no terminal
+    /// sends is not; a stronger key outranks a weaker one.
+    #[test]
+    fn a_returned_loan_strikes_the_key_it_heard() {
+        assert_eq!(struck_after(&[libc::SIGINT]), Some(CancelCause::Interrupt));
+        assert_eq!(struck_after(&[libc::SIGTERM]), None);
+        assert_eq!(
+            struck_after(&[libc::SIGINT, libc::SIGQUIT]),
+            Some(CancelCause::RootAbort)
+        );
     }
 
     // ── Signal translation ─────────────────────────────────────────────────

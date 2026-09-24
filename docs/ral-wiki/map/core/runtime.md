@@ -182,25 +182,28 @@ recursion is irreducible; the evaluator reaches it at
     and immune to termination signals — on every
     platform before any stage exists, and starts its witness in the same act:
     a report reader blocking to EOF on the anchor's stdout, posting
-    `Event::Witnessed(cause)` per swallowed signal, and the anchor's own
+    `Event::Heard(signal)` raw per swallowed signal, and the anchor's own
     `ChildHandle` handed to the reaper as a `Watch` whose posting closure maps
-    its exit to `Event::Cancelled`. Ownership is the anchor's presence, not a
-    flag: `owned_pgid()` is `Some(leader)` exactly when the anchor is, and only
-    that pgid may be signalled or killed; a joining group answers `None` and
-    claims no foreground on its own account, while `holds_terminal`
-    reports the handoff actually held rather than the plan it was launched
-    under; `PipelineGroup::joining` is that no-anchor, no-pgid shape a
-    nested pipeline inside a stage thread gets instead. The anchor's own rare
+    its every exit to `Event::Cancelled(Terminate)`. Ownership is the anchor's presence, not a
+    flag: `group()` is `Group::Owns(leader)` exactly when the anchor is, and
+    only that pgid may be signalled or killed; a joining group answers
+    `Group::Joins(membership)` and lends no terminal on its own account,
+    `lend` answering a `TerminalLoan` for an owning group only; `PipelineGroup::joining` is that no-anchor, no-pgid shape a
+    nested pipeline inside a stage thread gets instead, and
+    `PipelineGroup::membership` what a thread stage's `Io` carries: an
+    owner's leader paired with the stage's scope, or a joiner's own. The anchor's own rare
     stop is answered by the reaper like any other watched pid's, with no
     thread of the anchor's own involved. `AnchorProcess::finish` joins the
     report reader and drops the watch, whose `Drop` reaps. The group's verbs
-    are lifecycle only — `prepare`/`joining`, `owned_pgid`, `holds_terminal`,
-    `leader_pgid`, `claim_foreground`, `Drop`: signalling and killing belong to
-    the collector, which is what holds the live stages.
+    are lifecycle only — `prepare`/`joining`, `group`, `membership`,
+    `leader_pgid`, `lend`, `end_anchor` (which `PipeNode::join` calls between
+    `drive` and `fold`, so every report is on the channel), `Drop`: signalling
+    and killing belong to the collector, which is what holds the live stages.
     `CollectState::cancel_all(cause, delivered)` spells cancel, one
     grace signal per `Address` the collector enumerates — the pipeline's
-    group or pids, unless `delivered`, and every confined stage's envelope
-    group regardless — a bounded blocking `recv_timeout` grace, the
+    group or pids, unless `delivered` or, for a joining collector, unless the
+    cause is one its membership does not owe, and every confined stage's
+    envelope group regardless — a bounded blocking `recv_timeout` grace, the
     kill (`kill_live`, the same addresses), a further
     blocking drain, while `CollectState::drop` kills whenever it is dropped
     with a stage still unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
@@ -226,14 +229,20 @@ recursion is irreducible; the evaluator reaches it at
     producer feeds — the reaper (through a stage's own `Watch`), a stage
     thread's own report, the sentinel, the anchor's witness, a `watch_cancel`
     on the mooring's scope — carrying
-    `Event::{Ended, Returned, Wrote, Cancelled, Witnessed}`, with no
+    `Event::{Ended, Returned, Wrote, Cancelled, Heard}`, with no
     `Stopped`/`Continued` variant at all, which the pure fold `step` folds
     over, returning at most one `Effect` (`Option<Effect>`) for a
     thin interpreter (`CollectState::run`) to perform:
     `ArmEdge`, `KillStage`, `CancelAll { cause, delivered }`. Completion is not
     among them — the pipeline is finished exactly when no stage handle is left
-    (`live()`). `Witnessed` is what sets `delivered`: the kernel gave the whole
-    pgid that signal already, so teardown sends no second copy of it.
+    (`live()`). A `Heard` key sets `delivered` — the kernel gave the whole
+    pgid that signal already, so teardown sends no second copy of it — but
+    only through the collector's `loan: Option<TerminalLoan>`, the one ear for
+    a key: with no loan, or for a signal no terminal sends, it is inert.
+    `fold` opens by hearing out every queued report, settles each external
+    under `sent.max(pressed)`, and the loan drops with the collector,
+    returning the terminal and striking the run's frame; `holds_terminal`
+    reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
     The `Slot` a stage hands its own producers is minted by `PipeNode::launch`,
     which holds the sending half as a local and drops it on return — the
     collector keeps none. Attribution rides the handle:

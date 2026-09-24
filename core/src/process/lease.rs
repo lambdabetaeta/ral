@@ -9,7 +9,7 @@
 /// foreground and may hand it to a child.
 ///
 /// Held on `SessionState`; lent as `&TerminalLease` to
-/// [`ForegroundGuard::try_acquire`](crate::process::ForegroundGuard::try_acquire)
+/// [`TerminalLoan::try_acquire`](crate::process::TerminalLoan::try_acquire)
 /// only when the run's access permits
 /// ([`Shell::terminal_lease`](crate::types::Shell::terminal_lease)).
 #[derive(Debug, PartialEq, Eq)]

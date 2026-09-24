@@ -491,15 +491,11 @@ mod chokepoint_tests {
     #[test]
     fn use_module_internals_are_not_leased() {
         let mut shell = armed_shell(64);
-        let path = std::env::temp_dir().join(format!(
-            "ral_binding_lease_use_test_{}.ral",
-            std::process::id()
-        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("module.ral");
         std::fs::write(&path, "let use_internal = 99\n").expect("write temp module");
         let p = path.to_string_lossy().into_owned();
-        let result = top_level(&mut shell, &format!("let use_proj = use '{p}'"));
-        std::fs::remove_file(&path).ok();
-        result.expect("use");
+        top_level(&mut shell, &format!("let use_proj = use '{p}'")).expect("use");
         assert!(is_leased(&shell, "use_proj"));
         assert!(!is_leased(&shell, "use_internal"));
         assert!(!is_baseline(&shell, "use_internal"));
@@ -718,15 +714,11 @@ mod chokepoint_tests {
         let stale = last_used_of(&shell, "used_ref_x");
         assert!(stale < epoch(&shell), "must be stale before the use");
 
-        let path = std::env::temp_dir().join(format!(
-            "ral_binding_lease_use_test_{}.ral",
-            std::process::id()
-        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("module.ral");
         std::fs::write(&path, "let used_helper = $used_ref_x\n").expect("write temp module");
         let p = path.to_string_lossy().into_owned();
-        let result = top_level(&mut shell, &format!("use '{p}'"));
-        std::fs::remove_file(&path).ok();
-        result.expect("use");
+        top_level(&mut shell, &format!("use '{p}'")).expect("use");
 
         assert_eq!(
             last_used_of(&shell, "used_ref_x"),

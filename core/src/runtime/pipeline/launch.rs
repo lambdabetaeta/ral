@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// `f < file` on a function whose body is a pipeline drops the redirect.
 /// Unlike `command::stdio::wire_stdin`, a tty fd 0 is inherited only when this
 /// pgid will own the terminal; a backgrounded reader takes SIGTTIN.
-fn route_parent_stdin(group: &PipelineGroup, shell: &Shell) -> Settled<command::StdinRoute> {
+fn route_parent_stdin(holds_terminal: bool, shell: &Shell) -> Settled<command::StdinRoute> {
     // `Source::Empty` — an exarch tool run — denies byte input outright.
     if matches!(shell.io.stdin, Source::Empty) {
         return Ok(command::StdinRoute::Null);
@@ -30,7 +30,7 @@ fn route_parent_stdin(group: &PipelineGroup, shell: &Shell) -> Settled<command::
         None if !shell.io.terminal.startup_stdin_tty => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_non_tty_stdin())
         }
-        None if group.holds_terminal() => {
+        None if holds_terminal => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_pure_external_pipeline())
         }
         None => command::StdinRoute::Null,
@@ -85,7 +85,7 @@ fn dup_stdin_file() -> std::io::Result<std::fs::File> {
 pub(super) fn wire_stage_stdout(
     cmd: &mut crate::process::Launch,
     stdout: ByteOut,
-    group: &PipelineGroup,
+    holds_terminal: bool,
     shell: &Shell,
 ) -> Settled<Option<Sink>> {
     match stdout {
@@ -95,7 +95,7 @@ pub(super) fn wire_stage_stdout(
         }
         ByteOut::Parent => {
             // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY.
-            let inherit = shell.io.terminal.startup_stdout_tty && group.holds_terminal();
+            let inherit = shell.io.terminal.startup_stdout_tty && holds_terminal;
             let plan = shell
                 .io
                 .stdout
@@ -112,25 +112,22 @@ pub(super) fn wire_stage_stdio(
     cmd: &mut crate::process::Launch,
     stdin: ByteIn,
     stdout: ByteOut,
-    group: &PipelineGroup,
+    holds_terminal: bool,
     shell: &Shell,
-) -> Settled<command::ExternalPlumbing> {
+) -> Settled<command::Pumps<Sink>> {
     let inbound = match stdin {
         ByteIn::Upstream(r) => command::StdinRoute::Reader(SourceReader::pipe(r)),
-        ByteIn::Parent => route_parent_stdin(group, shell)?,
+        ByteIn::Parent => route_parent_stdin(holds_terminal, shell)?,
     };
     cmd.stdin(inbound.into_stdio());
-    let stdout_pump = wire_stage_stdout(cmd, stdout, group, shell)?;
+    let stdout_pump = wire_stage_stdout(cmd, stdout, holds_terminal, shell)?;
     let stderr_plan = shell
         .io
         .stderr
         .child_stderr()
         .map_err(super::route::pipe_error)?;
     cmd.stderr(stderr_plan.stdio);
-    Ok(command::ExternalPlumbing {
-        stdout_pump,
-        stderr_pump: stderr_plan.pump,
-    })
+    Ok(command::Pumps::new(stdout_pump, stderr_plan.pump))
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -140,6 +137,8 @@ pub(super) struct LaunchCx<'a> {
     /// closure env, distinct from `shell.env` inside a nested machine.
     pub(super) env: &'a Env,
     pub(super) group: &'a PipelineGroup,
+    /// Whether the group was lent the terminal, frozen before any stage exists.
+    pub(super) holds_terminal: bool,
 }
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`].
@@ -191,7 +190,7 @@ fn launch_external_stage_direct(
     // again rather than spawn into an expired wall.
     crate::process::check(cx.mooring)?;
 
-    let plumbing = wire_stage_stdio(&mut cmd, stdin, stdout, cx.group, cx.shell)?;
+    let pumps = wire_stage_stdio(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
 
     let confinement = cmd.confinement();
     let (mut child, leader, jail) = cmd
@@ -200,16 +199,15 @@ fn launch_external_stage_direct(
     if cx.shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits_in_pipeline(&child, cx.group.leader_pgid());
     }
-    let pumps = command::Pumps::spawn(plumbing, &mut child);
-    // Behind an envelope the payload leads a session of its own (§3.2), out
-    // of the pipeline group's reach, so its address is kept.
-    let envelope = confinement.and(leader);
+    let pumps = pumps.start(&mut child);
+    // A joining stage leads a group only behind an envelope, whose payload
+    // leads a session of its own (§3.2) out of the pipeline group's reach.
     Ok(ExternalStage {
         watch: slot.watch(child),
         name: rc.shown,
         args: rc.args,
         jail,
         pumps,
-        envelope,
+        envelope: leader,
     })
 }

@@ -1335,6 +1335,77 @@ fn a_cancelled_confined_pipeline_stage_gets_its_grace_signal() {
     );
 }
 
+/// An envelope spawned inside a stage thread leads its payload's group, so
+/// the stage's own waiter owns it: the one SIGINT reaches the payload, which
+/// neither the monitor's pid nor the pipeline's group can reach.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_struck_frame_signals_an_enveloped_stage_member_once() {
+    if !sandbox_functional() {
+        return;
+    }
+    let hits = fresh_tmp_path("ral_enveloped_member", "hits");
+    let ready = fresh_tmp_path("ral_enveloped_member", "ready");
+    let script_path = fresh_tmp_path("ral_enveloped_member", "ral");
+    let tmp = std::env::temp_dir();
+    std::fs::write(
+        &script_path,
+        format!(
+            "grant [fs: [read: ['{0}'], write: ['{0}']]] {{ !{{ sh -c 'trap \"echo x >> {1}\" INT TERM; : > {2}; while :; do sleep 0.05; done' }} | cat }}\n",
+            tmp.display(),
+            hits.display(),
+            ready.display(),
+        ),
+    )
+    .unwrap();
+
+    // A group of its own, so `kill(-pid)` strikes ral's frame and nothing else.
+    let mut cmd = ral_command();
+    cmd.arg(&script_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn ral");
+    let within = |secs, done: &mut dyn FnMut() -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while !done() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    };
+    let trapped = within(10, &mut || ready.exists());
+    unsafe {
+        libc::kill(-child.id().cast_signed(), libc::SIGINT);
+    }
+    let ended = within(10, &mut || child.try_wait().unwrap().is_some());
+    if !ended {
+        child.kill().ok();
+    }
+    child.wait().ok();
+
+    let heard = std::fs::read_to_string(&hits).unwrap_or_default();
+    for path in [&hits, &ready, &script_path] {
+        std::fs::remove_file(path).ok();
+    }
+    assert!(trapped, "the confined trapper never set its trap");
+    assert!(ended, "ral never exited after SIGINT");
+    assert_eq!(
+        heard.lines().count(),
+        1,
+        "the enveloped member must hear exactly one SIGINT"
+    );
+}
+
 #[test]
 fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
     if !sandbox_functional() {
@@ -1778,10 +1849,14 @@ impl PtySession {
         self.child.id().cast_signed()
     }
 
-    /// Ctrl-C: 0x03.
     fn send_ctrl_c(&mut self) -> std::io::Result<()> {
+        self.send_byte(CTRL_C)
+    }
+
+    /// One raw byte, as a key the line discipline may act on.
+    fn send_byte(&mut self, byte: u8) -> std::io::Result<()> {
         use std::io::Write;
-        self.input.write_all(&[0x03])
+        self.input.write_all(&[byte])
     }
 
     fn read_available(&mut self) {
@@ -1950,6 +2025,172 @@ fn ctrl_c_ends_an_all_ral_foreground_pipeline() {
     assert!(
         ended,
         "Ctrl-C did not end an all-ral foreground pipeline; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CTRL_C: u8 = 0x03;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CTRL_BACKSLASH: u8 = 0x1c;
+
+/// Type `line` at a pty REPL, press `key` once the terminal is lent, and wait
+/// for the prompt to come back.  The line's marker is `$[1234*2]`, computed
+/// because the tty echoes what was typed: `2468` in the output means the line
+/// ran on past the key.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn press_on_the_lent_terminal(line: &str, key: u8) -> (bool, PtySession) {
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session.send_line(line).expect("send failed");
+    session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("the command never took the terminal");
+    session.send_byte(key).expect("the key could not be sent");
+    let ended = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 2);
+    (ended, session)
+}
+
+/// The key pressed on a lent terminal is the run's, so `attempt` cannot
+/// swallow it and the line stops.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_the_key_stops_the_line(line: &str) {
+    let (ended, session) = press_on_the_lent_terminal(line, CTRL_C);
+    let out = session.finish();
+    assert!(ended, "the prompt never came back; stderr: {}", out.stderr);
+    assert!(
+        !out.stderr.contains("2468"),
+        "attempt swallowed the Ctrl-C and the line ran on; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_on_a_lent_command_stops_the_line_through_attempt() {
+    assert_the_key_stops_the_line("attempt { sleep 30 }; echo $[1234*2]");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_on_a_lent_pipeline_stops_the_line_through_attempt() {
+    assert_the_key_stops_the_line("attempt { sleep 30 | cat }; echo $[1234*2]");
+}
+
+/// The verdict is the earlier stage's `exit 3`, yet the frame is struck.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_stops_the_line_whatever_the_pipelines_verdict() {
+    assert_the_key_stops_the_line("attempt { sh -c #'exit 3'# | sleep 30 }; echo $[1234*2]");
+}
+
+/// Every stage traps the key and exits 0: only the pipeline's own ear, heard
+/// out after the anchor ends, knows it was pressed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_stops_the_line_though_every_stage_traps_it() {
+    assert_the_key_stops_the_line(
+        "attempt { sh -c #'trap \"exit 0\" INT; sleep 30'# | sh -c #'trap \"exit 0\" INT; cat'# }; echo $[1234*2]",
+    );
+}
+
+/// Ctrl-\ on a lent terminal aborts the job and the session lives on.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_backslash_on_a_lent_command_ends_the_job_not_the_shell() {
+    let (ended, mut session) =
+        press_on_the_lent_terminal("attempt { sleep 30 }; echo $[1234*2]", CTRL_BACKSLASH);
+    let stopped = !session.text().contains("2468");
+    session.send_line("echo $[2*3]").expect("send failed");
+    let lives = session.wait_until(Duration::from_secs(8), |t| {
+        t.lines().any(|line| line.trim() == "6")
+    });
+    let out = session.finish();
+    assert!(ended, "the prompt never came back; stderr: {}", out.stderr);
+    assert!(
+        stopped,
+        "attempt swallowed the Ctrl-\\ and the line ran on; stderr: {}",
+        out.stderr
+    );
+    assert!(
+        lives,
+        "the shell did not outlive Ctrl-\\; stderr: {}",
+        out.stderr
+    );
+}
+
+/// A command that catches the key and carries on has handled it: the line
+/// runs on.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_key_the_lent_command_handles_does_not_stop_the_line() {
+    let (_, mut session) = press_on_the_lent_terminal(
+        "sh -c #'trap \"echo caught$((6*7))\" INT; sleep 2; echo alive$((6*7))'#; echo $[1234*2]",
+        CTRL_C,
+    );
+    let ran_on = session.wait_until(Duration::from_secs(8), |t| {
+        t.contains("caught42") && t.contains("alive42") && t.contains("2468")
+    });
+    let out = session.finish();
+    assert!(
+        ran_on,
+        "a handled key must leave the line running; stderr: {}",
+        out.stderr
+    );
+}
+
+/// Ctrl-C while a capture shares ral's own group reaches that group alone: a
+/// worker spawned beforehand runs on to its end.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_during_a_foreground_capture_spares_a_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("worker-done");
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line(&format!(
+            "let h = spawn {{ sleep 2; touch #'{}'# }}; let x = !{{ sh -c #'echo held$((6*7)) >&2; sleep 5'# }}",
+            marker.display()
+        ))
+        .expect("send failed");
+    let held = session.wait_until(Duration::from_secs(8), |t| t.contains("held42"));
+    assert!(held, "the capture never ran; stderr: {}", session.text());
+    assert_eq!(
+        session.foreground_pgid(),
+        Some(session.pid()),
+        "a capture must not be lent the terminal"
+    );
+    session.send_ctrl_c().expect("ctrl-c failed");
+    let spared = session.poll_until(Duration::from_secs(5), |_| marker.exists());
+    let out = session.finish();
+    assert!(
+        spared,
+        "Ctrl-C reached the worker, which never finished; stderr: {}",
+        out.stderr
+    );
+}
+
+/// A worker's external leads a session of its own, with no controlling
+/// terminal to open.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_workers_external_cannot_open_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let reach = dir.path().join("reach");
+    let apart = dir.path().join("apart");
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line(&format!(
+            "spawn {{ sh -c #'true 3</dev/tty && touch \"{}\" || touch \"{}\"'# }}",
+            reach.display(),
+            apart.display()
+        ))
+        .expect("send failed");
+    let settled = session.poll_until(Duration::from_secs(8), |_| reach.exists() || apart.exists());
+    let out = session.finish();
+    assert!(settled, "the worker never ran; stderr: {}", out.stderr);
+    assert!(
+        apart.exists() && !reach.exists(),
+        "a worker's external opened the terminal; stderr: {}",
         out.stderr
     );
 }

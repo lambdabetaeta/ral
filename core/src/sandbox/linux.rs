@@ -434,8 +434,8 @@ impl<'p> DenyMask<'p> {
     }
 }
 
-/// Stack every compiled program: `--seccomp` on the first fd, `--add-seccomp-fd`
-/// on each further one — the kernel applies every installed filter and keeps
+/// Stack every compiled program, one `--add-seccomp-fd` each (bwrap refuses it
+/// beside `--seccomp`) — the kernel applies every installed filter and keeps
 /// the most severe result, so which program lands on which fd carries no
 /// meaning.  Each is parked in its own memfd, `CLOEXEC` cleared so it survives
 /// the exec into `bwrap`, which reads them and applies them to itself and
@@ -450,11 +450,7 @@ fn apply_seccomp(cmd: &mut Command, programs: &'static seccomp::Programs) {
             reason = "a handful of stacked programs, never near c_int::MAX"
         )]
         let fd = SECCOMP_FD_BASE + i as libc::c_int;
-        if i == 0 {
-            cmd.args(["--seccomp", &fd.to_string()]);
-        } else {
-            cmd.args(["--add-seccomp-fd", &fd.to_string()]);
-        }
+        cmd.args(["--add-seccomp-fd", &fd.to_string()]);
     }
     unsafe {
         cmd.pre_exec(move || {
@@ -1409,8 +1405,8 @@ mod tests {
     /// there being an envelope, not on which axis was attenuated.
     #[test]
     fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
-        use crate::process::{CancelCause, CancelScope, PgidPolicy};
-        use crate::runtime::command::{ExternalPlumbing, RunningChild};
+        use crate::process::{CancelCause, CancelScope, Group, PgidPolicy};
+        use crate::runtime::command::{Pumps, RunningChild};
         use crate::sandbox::LaunchTarget;
 
         let policy = unrestricted();
@@ -1444,11 +1440,8 @@ mod tests {
         let running = RunningChild::assemble_with_owner(
             child,
             "sh".to_string(),
-            ExternalPlumbing {
-                stdout_pump: None,
-                stderr_pump: None,
-            },
-            pgid,
+            Pumps::default(),
+            pgid.map(Group::Owns),
             scope.clone(),
             jail,
         );

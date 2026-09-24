@@ -70,6 +70,23 @@ fn a_more_specific_hint_survives() {
     );
 }
 
+/// A child killing itself with the terminal's key did not press it: no
+/// terminal was lent, so `attempt` recovers and the script carries on.
+#[cfg(unix)]
+#[test]
+fn a_self_inflicted_sigint_is_the_childs_own_failure() {
+    let out = run(
+        "ral_self_sigint",
+        "attempt { sh -c #'kill -INT $$'# }; echo $[1234*2]\n",
+    );
+    assert!(
+        out.stdout.contains("2468"),
+        "stdout: {}; stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+}
+
 #[test]
 fn attempt_runs_every_step_and_reports_on_each() {
     let out = run(

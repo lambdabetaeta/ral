@@ -33,24 +33,24 @@ pub use terminal::{
 /// ([`Reader`](crate::process::Reader)).  Being top-level is also one conjunct
 /// of the foreground gate in `runtime/command/foreground.rs`; holding the
 /// session's [`TerminalLease`](crate::process::TerminalLease) is another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum LaunchRole {
     /// A top-level eval or single-command exec.
     #[default]
     TopLevel,
     /// Joins the pipeline's pgid; never leads a group of its own.
-    PipelineStage(crate::process::Pgid),
+    PipelineStage(crate::process::Membership),
 }
 
 impl LaunchRole {
-    pub(crate) fn is_top_level(self) -> bool {
+    pub(crate) fn is_top_level(&self) -> bool {
         matches!(self, Self::TopLevel)
     }
 
-    pub(crate) fn stage_group(self) -> Option<crate::process::Pgid> {
+    pub(crate) fn membership(&self) -> Option<&crate::process::Membership> {
         match self {
             Self::TopLevel => None,
-            Self::PipelineStage(g) => Some(g),
+            Self::PipelineStage(m) => Some(m),
         }
     }
 }

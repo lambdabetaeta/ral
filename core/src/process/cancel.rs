@@ -44,7 +44,6 @@ pub enum CancelCause {
 /// How long ral's teardown waits between its cause signal and the kill that
 /// ends the argument.  Short — a cancelled call is already over budget — but
 /// enough for a test runner to print its summary and exit.
-#[cfg(unix)]
 pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CancelCause {

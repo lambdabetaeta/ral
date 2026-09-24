@@ -1811,7 +1811,9 @@ required — its `` `err `` outcome carries this same record (§13.3).
 A handler that succeeds recovers the failure and leaves status 0. `exit` and
 internal tail-call control bypass the handler. Cancellation may be observed
 as a recoverable error inside the body, but cancellation is sticky:
-recovering it cannot make the enclosing run complete successfully.
+recovering it cannot make the enclosing run complete successfully. That
+includes a cancellation a command's end reports: a key pressed on a terminal
+ral lent is struck on the run (§8.10).
 
 ### 8.7. Cleanup with `guard`
 
@@ -1899,15 +1901,31 @@ A cancellation reports the same `reason`, message and status whether it lands
 before a command starts or while the command runs. An external command that
 dies of the signal ral sends first to tear it down, or of the final kill, is
 reported as the cause in force, also when a sandbox's envelope relays that
-death as `128 + n`. A death by a gesture's signal — SIGINT, SIGQUIT, SIGTERM
-or SIGHUP — is that gesture's cause whoever sent it, so Ctrl-C on a lone
-foreground command reads `` `cancelled `interrupted `` as it does on a
-pipeline. An exit is never read as a gesture: `exit 130` is the command's
-choice. Any other death, such as SIGSEGV, stays `` `signaled ``.
+death as `128 + n`. An exit is never read as a signal: `exit 130` is the
+command's choice.
+
+Only a terminal ral lent can make a command's failure a cancellation.
+While a command or pipeline holds the terminal, Ctrl-C, Ctrl-\\ or a hangup
+comes back to ral when it takes the terminal back. A command that dies of
+the key reports that key's cancellation, and the run it belongs to is
+cancelled, so `try` cannot recover it. A pipeline hears the key itself,
+whatever its stages do with it. A command that catches the key and carries
+on, or exits, has handled it. A signal from anywhere else is the command's
+own failure (`` `signaled ``), and so is any other death, such as SIGSEGV.
+Ctrl-\\ on a lent terminal aborts the job it was lent to, and the session
+lives on. A command sharing ral's own process group, such as a capture, is
+signalled by the terminal and by ral at once, so its death may be read
+before ral's own interrupt lands and report the signal rather than the
+interrupt; the run stops regardless.
 
 A foreground interrupt affects the work that was running when the interrupt
 arrived, including nested runs, but not a detached worker and not a later
-prompt. Explicit cancellation targets its handle. Deadlines affect their run
+prompt. Nothing a detached worker starts sits where the terminal reaches it:
+on Unix its external commands lead sessions of their own and its pipelines a
+group the terminal never holds, and on Windows its processes lead console
+groups ral never sends a console event. A terminal gesture reaches a worker
+only as the session termination or root abort ral itself raises. Explicit
+cancellation targets its handle. Deadlines affect their run
 scope. Session termination and root abort reach the durable session root and
 therefore its detached workers as well as foreground work.
 
@@ -1922,9 +1940,10 @@ Other hosts translate their native gestures into the same structured causes.
 For example, an active exarch request treats Ctrl-C or Escape as a foreground
 interrupt, while an idle key may instead close its interface. Windows uses its
 console and process-group facilities rather than Unix signals, but
-preserves the observable cancellation messages and statuses: ral terminates a
-process with one fixed exit code, and a process that exits with it while a
-cause is in force is reported as that cause.
+preserves the observable cancellation messages and statuses: ral opens a
+teardown with Ctrl-Break and ends it with one fixed exit code, and a process
+that ends of either while a cause is in force is reported as that cause. A
+Ctrl-C exit reads as the interrupt only while the interrupt is in force.
 
 ## 9. Scoped execution and handlers
 

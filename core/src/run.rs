@@ -544,7 +544,7 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
         stderr: shell.io.stderr.clone(),
         interactive: shell.io.interactive,
         terminal: shell.io.terminal,
-        launch_role: shell.io.launch_role,
+        launch_role: shell.io.launch_role.clone(),
     };
     if let Some((stdout, stderr)) = capture {
         // The run's buffer is the whole of what the world sees of it, so it is

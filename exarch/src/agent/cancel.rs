@@ -11,9 +11,9 @@
 //! agent's death, and they never tick ral's escalation ladder.  Every focused
 //! tab routes through [`crate::agent::Agent::interrupt`], which cancels that
 //! agent's own token and, through `Control`, its dispatch in flight, never its
-//! durable root; the trunk additionally calls [`raise_interrupt`], the only
-//! path that re-creates the SIGINT a foreground external child would have
-//! received.
+//! durable root; the trunk additionally calls [`raise_interrupt`], which on
+//! Unix re-creates the SIGINT a foreground external child would have received
+//! and on Windows raises ral's interrupt alone.
 //!
 //! No engine faces the process's signals itself.  ral's handlers raise ambient
 //! causes, and [`face`] forwards them to the trunk as that agent's own
@@ -32,6 +32,9 @@
 //! `ENABLE_PROCESSED_INPUT` and both arrive as ordinary key events.  The
 //! registration earns its keep for Ctrl-Break, which raises a console event
 //! regardless, and for the termination events, which have no key-event twin.
+//! Neither path signals a process: a tool child, a console group of its own,
+//! hears Ctrl-Break only from the teardown of the run that owns it, so a
+//! detached worker's children are never reached.
 //! On both, [`crate::bootstrap::face_process_signals`] owns the install
 //! ceremony, once per process.
 
@@ -130,14 +133,17 @@ pub fn raise_interrupt() {
     ral_core::process::interrupt_foreground_child();
 }
 
+/// Raise ral's interrupt in-process, as its own console handler would.
+///
 /// Raw mode suppresses the console's automatic Ctrl-C handling, so Esc and
-/// Ctrl-C both surface as ordinary key events.  Call ral's non-escalating relay
-/// in-process: re-injecting with `GenerateConsoleCtrlEvent` would broadcast to
-/// the whole console group and re-enter `SetConsoleCtrlHandler`'s chain, ticking
-/// ral's escalation counter on every trunk interrupt.
+/// Ctrl-C both surface as ordinary key events.  Re-injecting with
+/// `GenerateConsoleCtrlEvent` would broadcast to the whole console group and
+/// re-enter `SetConsoleCtrlHandler`'s chain, ticking ral's escalation counter
+/// on every trunk interrupt.  A child hears it only through the teardown of
+/// the scope that owns it.
 #[cfg(windows)]
 pub fn raise_interrupt() {
-    ral_core::process::relay_interrupt();
+    ral_core::process::request_interrupt();
 }
 
 /// Whether a delivered Windows console-control event is an exchange-cancel
@@ -192,13 +198,13 @@ pub fn install() {
 ///
 /// Runs on a dedicated OS thread rather than in signal context, so plain atomics
 /// are all it needs.  A Ctrl-C/Ctrl-Break is handled here in full — the same
-/// non-escalating relay `raise_interrupt` calls for a raw-mode key event —
-/// and reported `TRUE`; every other event reports `FALSE`, deferring to ral's
-/// escalating disposition unchanged.
+/// non-escalating interrupt `raise_interrupt` raises for a raw-mode key event
+/// — and reported `TRUE`; every other event reports `FALSE`, deferring to
+/// ral's escalating disposition unchanged.
 #[cfg(windows)]
 extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
     if cancels_exchange(ctrl_type) {
-        ral_core::process::relay_interrupt();
+        ral_core::process::request_interrupt();
         return windows_sys::Win32::Foundation::TRUE;
     }
     windows_sys::Win32::Foundation::FALSE

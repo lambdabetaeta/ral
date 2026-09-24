@@ -10,8 +10,8 @@
 //! program has a legitimate use for, [`Verdict::Errno`] for a call a
 //! legitimate tool may attempt and should be told no in its own words — and a
 //! `seccompiler` filter has one `match_action`, so the rules compile to one
-//! BPF program per distinct verdict, stacked by bwrap (`--seccomp`, then
-//! `--add-seccomp-fd` per further program): the kernel evaluates every
+//! BPF program per distinct verdict, stacked by bwrap (one
+//! `--add-seccomp-fd` per program): the kernel evaluates every
 //! installed filter independently and takes the most severe result, so
 //! program order carries no meaning.
 //!
@@ -428,8 +428,8 @@ pub(crate) struct Programs {
 impl Programs {
     /// Every compiled program, in a fixed order — this order only numbers the
     /// fds `apply_seccomp` parks them at; the kernel evaluates every stacked
-    /// filter independently and keeps the most severe result, so which fd is
-    /// `--seccomp` and which are `--add-seccomp-fd` carries no meaning.
+    /// filter independently and keeps the most severe result, so which
+    /// program lands on which fd carries no meaning.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &[u8]> {
         self.verdicts
             .iter()

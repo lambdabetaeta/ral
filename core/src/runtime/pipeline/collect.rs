@@ -6,7 +6,9 @@ use super::super::command;
 use super::stage::StageHandle;
 use crate::evaluator::audit::{command_fact, observe_stamped};
 use crate::ir::PipeYield;
-use crate::process::{CancelCause, CancelWatch, Pgid, WaitOutcome, Watch, watch_cancel};
+use crate::process::{
+    CancelCause, CancelWatch, Group, Pgid, TerminalLoan, WaitOutcome, Watch, watch_cancel,
+};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Settled, Shell,
     Value, epoch_us,
@@ -89,7 +91,14 @@ pub(super) enum StageEnd {
 }
 
 impl StageEnd {
-    fn settle(self, shell: &Shell, started: Instant) -> StageObservation {
+    /// An external is settled under the cause sent to it or the key its
+    /// group was `pressed`, whichever is stronger.
+    fn settle(
+        self,
+        shell: &Shell,
+        started: Instant,
+        pressed: Option<CancelCause>,
+    ) -> StageObservation {
         match self {
             // A `ReaderGone` break is minted only by a write to a dead edge or
             // by a `ReaderGone` scope cancel, both this collector's own doing,
@@ -109,7 +118,8 @@ impl StageEnd {
                     jail.finish();
                 }
                 pumps.settle(sent == Some(CancelCause::ReaderGone));
-                finish_external_settlement(&name, args, outcome, sent, enveloped, shell, started)
+                let cause = sent.max(pressed);
+                finish_external_settlement(&name, args, outcome, cause, enveloped, shell, started)
             }
         }
     }
@@ -135,6 +145,14 @@ impl Address<'_> {
         }
     }
 
+    /// Only a console group takes Ctrl-Break: a pid gets the kill alone.
+    #[cfg(windows)]
+    fn signal(&self, _: crate::process::Signal) {
+        if let Self::Group(pgid) = self {
+            crate::process::break_pipeline_group(*pgid);
+        }
+    }
+
     fn kill(&self) {
         match self {
             Self::Group(pgid) => pgid.kill(),
@@ -155,10 +173,11 @@ pub(super) enum Event {
     /// A cause nothing in the group has been told about; teardown delivers it.
     Cancelled(CancelCause),
     /// A signal the anchor swallowed, the kernel having already delivered it to
-    /// every member: teardown sends no second copy.  Unix alone — the Windows
-    /// anchor has no group-wide delivery to hear.
+    /// every member: a key only if the terminal was lent, and then teardown
+    /// sends no second copy.  Unix alone — the Windows anchor has no
+    /// group-wide delivery to hear.
     #[cfg(unix)]
-    Witnessed(CancelCause),
+    Heard(crate::process::Signal),
 }
 
 /// A stage's address on the collector's channel.
@@ -283,9 +302,12 @@ pub(super) struct CollectState {
     observed: Vec<Option<StageEnd>>,
     /// Window start for the sandbox-denial reader.
     started: Instant,
-    /// The pgid a forced end of this collector kills; `None` for a joining
-    /// collector, whose owner's teardown does it.
-    owned_group: Option<Pgid>,
+    /// An owned pgid is signalled and killed whole; a joined one is its
+    /// owner's, so this collector addresses its own externals by pid.
+    group: Group,
+    /// The terminal lent to the group, if any: the one ear for a key, which
+    /// returns it and strikes what it heard when this collector drops.
+    loan: Option<TerminalLoan>,
     rx: Receiver<Event>,
     /// The mooring scope, posting [`Event::Cancelled`] the instant it is
     /// cancelled; dropping this disarms it.
@@ -296,7 +318,8 @@ impl CollectState {
     pub(super) fn new(
         rx: Receiver<Event>,
         tx: &Sender<Event>,
-        owned_group: Option<Pgid>,
+        group: Group,
+        loan: Option<TerminalLoan>,
         mooring: &Mooring,
         started: Instant,
     ) -> Self {
@@ -308,10 +331,38 @@ impl CollectState {
             stages: Vec::new(),
             observed: Vec::new(),
             started,
-            owned_group,
+            group,
+            loan,
             rx,
             _cancel: cancel,
         }
+    }
+
+    /// Whether the group holds the terminal — the loan actually made, never
+    /// the plan it was launched under.  Settled before any stage exists.
+    pub(super) fn holds_terminal(&self) -> bool {
+        self.loan.is_some()
+    }
+
+    /// The key `signal` is, if the terminal was lent; inert otherwise.
+    #[cfg(unix)]
+    fn hear(&mut self, signal: crate::process::Signal) -> Option<CancelCause> {
+        self.loan.as_mut().and_then(|loan| loan.hear(signal))
+    }
+
+    /// Hear every report still queued: once the anchor has ended, a key its
+    /// stages all survived or died of before `drive` read it is here.
+    #[cfg(unix)]
+    fn hear_out(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            if let Event::Heard(signal) = ev {
+                self.hear(signal);
+            }
+        }
+    }
+
+    fn pressed(&self) -> Option<CancelCause> {
+        self.loan.as_ref().and_then(TerminalLoan::pressed)
     }
 
     /// A `CollectState` for `step`'s own transition-table tests — no group, no
@@ -324,7 +375,12 @@ impl CollectState {
             stages: Vec::new(),
             observed: Vec::new(),
             started: Instant::now(),
-            owned_group: None,
+            // Never `Owns`: a forced end would `kill(-pgid)` a pgid nobody owns.
+            group: Group::Joins(crate::process::Membership::new(
+                Pgid::from_raw(1).expect("1 is positive"),
+                crate::process::CancelScope::root(),
+            )),
+            loan: None,
             rx,
             _cancel: cancel,
         };
@@ -413,10 +469,13 @@ impl CollectState {
     /// neither, its cancel and wake being all teardown owes it — and every
     /// envelope, whose payload leads a session of its own (§3.2) that no
     /// signal to the pipeline's group reaches.  `pipeline: false` leaves the
-    /// pipeline's own out, the kernel having already delivered to it.
+    /// pipeline's own out: the kernel, or a joined group's owner, delivers it.
     fn addresses(&self, pipeline: bool) -> impl Iterator<Item = Address<'_>> {
-        let group = self.owned_group.filter(|_| pipeline).map(Address::Group);
-        let pids = (pipeline && self.owned_group.is_none()).then(|| {
+        let (group, pids) = match &self.group {
+            Group::Owns(g) => (pipeline.then_some(Address::Group(*g)), false),
+            Group::Joins(_) => (None, pipeline),
+        };
+        let pids = pids.then(|| {
             self.stages
                 .iter()
                 .flatten()
@@ -444,26 +503,25 @@ impl CollectState {
     /// Cancel, grace-signal unless `delivered`, kill, drain.  Idempotent, a
     /// second cancel being free to race the first.  `delivered` speaks for
     /// the pipeline's group alone: the kernel's signal to the foreground
-    /// group never reached an envelope's session.
+    /// group never reached an envelope's session.  A joining collector grace-
+    /// signals only a cause its owner does not deliver.
     ///
     /// The kill precedes every pump join: a descendant that outlives its stage
     /// holds the pump's pipe, and no join on that pump returns while it does —
     /// so filing a stage's end never joins, and `fold` does, after.
     pub(super) fn cancel_all(&mut self, cause: CancelCause, delivered: bool) {
         // Explicit per stage rather than through the mooring: a cancel the
-        // anchor witnessed has no cancelled ancestor scope to propagate from.
+        // anchor heard has no cancelled ancestor scope to propagate from.
         for handle in self.stages.iter_mut().flatten() {
             handle.cancel(cause);
         }
-        #[cfg(unix)]
         if let Some(signal) = crate::process::grace_signal(cause) {
-            for address in self.addresses(!delivered) {
+            let pipeline = !delivered && self.group.owes(cause);
+            for address in self.addresses(pipeline) {
                 address.signal(signal);
             }
             self.drain(Some(Instant::now() + crate::process::TEARDOWN_GRACE));
         }
-        #[cfg(not(unix))]
-        let _ = delivered;
         self.kill_live();
         self.drain(None);
     }
@@ -472,13 +530,17 @@ impl CollectState {
     /// reaches an external's settlement, and why `last` is the final stage's
     /// value whenever that stage is `Ok` and unread otherwise.  The audit is
     /// broadcast before the verdict is ranked, so a failing stage still
-    /// contributes what it observed.
+    /// contributes what it observed.  The loan drops with `self`, returning
+    /// the terminal and striking the frame whatever the verdict.
     pub(super) fn fold(
         mut self,
         mooring: &Mooring,
         shell: &mut Shell,
         yields: PipeYield,
     ) -> Settled<Value> {
+        #[cfg(unix)]
+        self.hear_out();
+        let pressed = self.pressed();
         let observed = std::mem::take(&mut self.observed);
         let mut verdict: Option<Break> = None;
         let mut last = Value::Unit;
@@ -490,7 +552,7 @@ impl CollectState {
                     1,
                 )))
             });
-            let StageObservation { settled, audit } = end.settle(shell, self.started);
+            let StageObservation { settled, audit } = end.settle(shell, self.started, pressed);
             for observation in audit.into_observations() {
                 observe_stamped(shell, mooring, observation);
             }
@@ -530,7 +592,7 @@ pub(super) fn step(state: &mut CollectState, ev: Event) -> Option<Effect> {
             delivered: false,
         }),
         #[cfg(unix)]
-        Event::Witnessed(cause) => Some(Effect::CancelAll {
+        Event::Heard(signal) => state.hear(signal).map(|cause| Effect::CancelAll {
             cause,
             delivered: true,
         }),
@@ -613,7 +675,7 @@ mod tests {
     ) -> (PipelineGroup, CollectState, Sender<Event>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let group = PipelineGroup::prepare(shell, tx.clone()).expect("anchor spawns");
-        let collect = CollectState::new(rx, &tx, group.owned_pgid(), mooring, Instant::now());
+        let collect = CollectState::new(rx, &tx, group.group(), None, mooring, Instant::now());
         (group, collect, tx)
     }
 
@@ -766,7 +828,8 @@ mod tests {
         let owner =
             PipelineGroup::prepare(&shell, std::sync::mpsc::channel().0).expect("anchor spawns");
         let pgid = owner.leader_pgid();
-        let joining = PipelineGroup::joining(pgid);
+        let joining =
+            PipelineGroup::joining(owner.membership(&crate::process::CancelScope::root()));
 
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", "sleep 30"]);
@@ -776,7 +839,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut collect =
-            CollectState::new(rx, &tx, joining.owned_pgid(), &mooring, Instant::now());
+            CollectState::new(rx, &tx, joining.group(), None, &mooring, Instant::now());
         collect.push(StageHandle::for_test(
             Slot {
                 ix: 0,
@@ -916,19 +979,71 @@ mod tests {
         );
     }
 
-    /// A signal the anchor witnessed reached every member of the group by the
-    /// kernel's own hand, so teardown must not send a second copy of it.
+    /// A key the anchor heard reached every member of the group by the
+    /// kernel's own hand, so teardown must not send a second copy of it; a
+    /// signal no terminal sends is inert.
     #[cfg(unix)]
     #[test]
-    fn a_witnessed_signal_tears_down_without_resending_it() {
+    fn a_heard_key_tears_down_without_resending_it() {
+        let frame = crate::process::DurableRoot::new().worker();
         let mut state = state_with(1);
+        state.loan = Some(TerminalLoan::for_test(&frame));
+        let heard = |n| Event::Heard(crate::process::Signal::new(n));
+        assert_eq!(step(&mut state, heard(libc::SIGTERM)), None);
         assert_eq!(
-            step(&mut state, Event::Witnessed(CancelCause::Interrupt)),
+            step(&mut state, heard(libc::SIGINT)),
             Some(Effect::CancelAll {
                 cause: CancelCause::Interrupt,
                 delivered: true
             })
         );
+    }
+
+    /// With no terminal lent, nothing the anchor hears is a key.
+    #[cfg(unix)]
+    #[test]
+    fn with_no_loan_a_heard_signal_is_inert() {
+        let mut state = state_with(1);
+        assert_eq!(
+            step(
+                &mut state,
+                Event::Heard(crate::process::Signal::new(libc::SIGINT))
+            ),
+            None
+        );
+    }
+
+    /// A stage dead of SIGINT nobody sent is the key's cancellation only if
+    /// the key was pressed on the lent terminal, and its own signal otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
+        let shell = Shell::default();
+        let end = || StageEnd::External {
+            name: "sleep".to_string(),
+            args: Vec::new(),
+            outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
+            jail: None,
+            pumps: command::Pumps::default(),
+            sent: None,
+            enveloped: false,
+        };
+        let settled = |pressed| end().settle(&shell, Instant::now(), pressed).settled;
+        match settled(Some(CancelCause::Interrupt)) {
+            Err(Break::Error(e)) => assert_eq!(e.cancelled_by(), Some(CancelCause::Interrupt)),
+            other => panic!("expected the key's cancellation, got {other:?}"),
+        }
+        match settled(None) {
+            Err(Break::Error(e)) => assert!(
+                matches!(
+                    e.status,
+                    crate::types::Status::Process(crate::process::CommandFailure::Signal(s))
+                        if s == crate::process::Signal::new(libc::SIGINT)
+                ),
+                "{e:?}"
+            ),
+            other => panic!("expected the stage's own signal death, got {other:?}"),
+        }
     }
 
     /// A stage this collector tore down reports the cause it sent, not the

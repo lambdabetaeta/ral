@@ -8,7 +8,7 @@
 //! spawned *from inside* a stage still comes through here and joins the
 //! stage's group.
 
-use crate::process::{ForegroundGuard, Pgid, PgidPolicy};
+use crate::process::{Membership, Pgid, PgidPolicy, TerminalLoan};
 use crate::types::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external takes the controlling
@@ -51,7 +51,7 @@ impl ForegroundDecision {
         Self {
             want_fg,
             own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,
-            stage_group: shell.io.launch_role.stage_group(),
+            stage_group: shell.io.launch_role.membership().map(Membership::group),
         }
     }
 
@@ -91,10 +91,11 @@ impl ForegroundDecision {
         self.want_fg
     }
 
-    /// Hand the controlling terminal to the freshly-spawned child.
+    /// Lend the controlling terminal to the freshly-spawned child, for the run
+    /// under `mooring`.
     ///
     /// `None` when this decision declined foreground or the platform handoff
-    /// failed.  The [`ForegroundGuard`]'s `Drop` is what restores ral's pgid,
+    /// failed.  The [`TerminalLoan`]'s `Drop` is what restores ral's pgid,
     /// and it must be RAII: any early return between spawn and `child.wait()`
     /// would otherwise strand the shell in a background pgroup.
     pub(super) fn acquire(
@@ -102,7 +103,7 @@ impl ForegroundDecision {
         child_id: u32,
         shell: &Shell,
         mooring: &Mooring,
-    ) -> Option<ForegroundGuard> {
+    ) -> Option<TerminalLoan> {
         if !self.want_fg {
             return None;
         }
@@ -116,11 +117,11 @@ impl ForegroundDecision {
                 reason = "child_id is a live OS pid from Child::id(): positive and below i32::MAX, so the u32→pid_t reinterpretation never wraps"
             )]
             let pid = child_id as libc::pid_t;
-            ForegroundGuard::try_acquire(pid, lease)
+            TerminalLoan::try_acquire(pid, lease, &mooring.cancel)
         }
         #[cfg(windows)]
         {
-            ForegroundGuard::try_acquire(child_id.cast_signed(), lease)
+            TerminalLoan::try_acquire(child_id.cast_signed(), lease, &mooring.cancel)
         }
     }
 }

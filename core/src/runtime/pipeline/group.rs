@@ -4,24 +4,21 @@
 //! member outliving every stage, so the pgid stays joinable; a group joining
 //! an enclosing stage's pgid has no anchor.  The shell is not a member, so a
 //! signal the tty delivers to the group reaches it only as the anchor's
-//! [`Event::Witnessed`] — the kernel having already given that signal to every
-//! other member.
+//! [`Event::Heard`] — the kernel having already given that signal to every
+//! other member — which only the group's [`TerminalLoan`] reads as a key.
 
 use super::collect::Event;
 #[cfg(unix)]
 use crate::process::CancelCause;
-use crate::process::{Pgid, PgidPolicy};
+use crate::process::{CancelScope, Group, Membership, Pgid, PgidPolicy, TerminalLoan};
 use crate::types::{Break, Mooring, Settled, Shell};
 use std::sync::mpsc::Sender;
 
-/// Pgid lifecycle for one pipeline: the anchor and the foreground guard,
-/// released together on drop.
+/// Pgid lifecycle for one pipeline: the anchor, finished before the fold or on
+/// drop.
 pub(super) struct PipelineGroup {
-    leader: Pgid,
-    /// The terminal handoff *actually held*: `None` when `tcsetpgrp` failed,
-    /// or when this group never claimed it at all.
-    foreground: Option<crate::process::ForegroundGuard>,
-    /// `Some` exactly for an owning group; taken by `Drop`.
+    group: Group,
+    /// `Some` exactly for an owning group until [`Self::end_anchor`].
     anchor: Option<AnchorProcess>,
 }
 
@@ -31,46 +28,57 @@ impl PipelineGroup {
     pub(super) fn prepare(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
         let anchor = AnchorProcess::spawn(shell, tx)?;
         Ok(Self {
-            leader: anchor.pgid,
-            foreground: None,
+            group: Group::Owns(anchor.pgid),
             anchor: Some(anchor),
         })
     }
 
-    /// A pipeline launched inside a stage thread joins `group` rather than
-    /// owning one.
-    pub(super) fn joining(group: Pgid) -> Self {
+    /// A pipeline launched inside a stage thread joins the enclosing
+    /// pipeline's group rather than owning one.
+    pub(super) fn joining(membership: Membership) -> Self {
         Self {
-            leader: group,
-            foreground: None,
+            group: Group::Joins(membership),
             anchor: None,
         }
     }
 
-    /// The pgid this group may itself signal or kill; `None` for a joining
-    /// group, whose pgid is its owner's to address.
-    pub(super) fn owned_pgid(&self) -> Option<Pgid> {
-        self.anchor.as_ref().map(|_| self.leader)
+    /// What a stage running under `stage` joins: an owner's leader paired
+    /// with that scope, or a joiner's own membership, so a nested stage
+    /// answers to the outermost owner's stage scope.
+    pub(super) fn membership(&self, stage: &CancelScope) -> Membership {
+        match &self.group {
+            Group::Owns(leader) => Membership::new(*leader, stage.clone()),
+            Group::Joins(membership) => membership.clone(),
+        }
     }
 
-    /// Whether this group actually holds the controlling terminal — the guard
-    /// it acquired, never the plan it was launched under.  Settled before any
-    /// stage exists, so a stage's stdin or stdout may be routed against it.
-    pub(super) fn holds_terminal(&self) -> bool {
-        self.foreground.is_some()
+    pub(super) fn group(&self) -> Group {
+        self.group.clone()
     }
 
     pub(super) fn leader_pgid(&self) -> Pgid {
-        self.leader
+        self.group.leader()
     }
 
-    /// Called only when the pipeline's frozen `TerminalPlan` wants foreground.
-    pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
+    /// Lend the terminal to the group this pipeline owns, for the run under
+    /// `mooring`; a joined group is its owner's to lend.
+    pub(super) fn lend(&self, shell: &Shell, mooring: &Mooring) -> Option<TerminalLoan> {
+        let Group::Owns(leader) = &self.group else {
+            return None;
+        };
         // `resolve_terminal_plan` already gated the foreground plan on the
         // lease; re-borrowing it here is the proof `try_acquire` demands.
-        if let Some(lease) = shell.terminal_lease(mooring) {
-            self.foreground =
-                crate::process::ForegroundGuard::try_acquire(self.leader.as_raw(), lease);
+        TerminalLoan::try_acquire(
+            leader.as_raw(),
+            shell.terminal_lease(mooring)?,
+            &mooring.cancel,
+        )
+    }
+
+    /// Finish the anchor, after which every report it made is on the channel.
+    pub(super) fn end_anchor(&mut self) {
+        if let Some(anchor) = self.anchor.take() {
+            anchor.finish();
         }
     }
 }
@@ -79,12 +87,11 @@ impl Drop for PipelineGroup {
     /// The anchor last, after every stage handle has gone — `PipeNode`'s field
     /// order guarantees it.
     fn drop(&mut self) {
-        let Some(anchor) = self.anchor.take() else {
-            return;
-        };
-        anchor.finish();
+        self.end_anchor();
         #[cfg(windows)]
-        crate::process::release_win_group(self.leader.as_raw());
+        if let Group::Owns(leader) = &self.group {
+            crate::process::release_win_group(leader.as_raw());
+        }
     }
 }
 
@@ -107,20 +114,11 @@ fn anchor_error(e: impl std::fmt::Display) -> Break {
     Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
 }
 
-/// The cause the shell's own handler for `signal` would apply.
-#[cfg(unix)]
-fn cancel_cause(signal: i32) -> CancelCause {
-    crate::process::gesture(crate::process::Signal::new(signal)).unwrap_or(CancelCause::Terminate)
-}
-
 /// The anchor's own death cancels the pipeline: nothing else in the group has
 /// heard of it.
 #[cfg(unix)]
-fn anchor_death(outcome: crate::process::WaitOutcome) -> Event {
-    Event::Cancelled(match outcome {
-        crate::process::WaitOutcome::Signaled(sig) => cancel_cause(sig.number()),
-        _ => CancelCause::Terminate,
-    })
+fn anchor_death(_: crate::process::WaitOutcome) -> Event {
+    Event::Cancelled(CancelCause::Terminate)
 }
 
 impl AnchorProcess {
@@ -198,17 +196,16 @@ impl AnchorProcess {
         let _ = child.reap();
     }
 }
-
 /// One byte per swallowed signal — one the kernel already delivered to every
-/// other member, so the collector tears down without re-sending it.  EOF means
-/// the anchor died, which its own watch reports with the cause instead.
+/// other member — sent raw: only the loan knows whether it was a key.  EOF
+/// means the anchor exited, which its own watch reports instead.
 #[cfg(unix)]
 fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
     use std::io::Read;
     let mut byte = [0u8; 1];
     while report.read_exact(&mut byte).is_ok() {
-        let cause = cancel_cause(i32::from(byte[0]));
-        if tx.send(Event::Witnessed(cause)).is_err() {
+        let signal = crate::process::Signal::new(i32::from(byte[0]));
+        if tx.send(Event::Heard(signal)).is_err() {
             return;
         }
     }
@@ -227,18 +224,44 @@ mod tests {
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
         let group = prepared(&Shell::default());
-        assert!(group.owned_pgid().is_some());
+        assert!(matches!(group.group(), Group::Owns(_)));
         assert!(group.leader_pgid().as_raw() > 0);
     }
 
-    /// A default shell mints no terminal lease, so `claim_foreground` acquires
-    /// nothing even when called.
+    /// An owner pairs its leader with the scope it is given; a joiner hands
+    /// back its own membership whatever scope it is given.
     #[test]
-    fn a_group_that_never_acquired_the_terminal_does_not_claim_it() {
+    fn a_nested_stage_answers_to_the_outermost_owners_stage() {
+        let owner = prepared(&Shell::default());
+        let outer = CancelScope::root();
+        let membership = owner.membership(&outer);
+        assert_eq!(membership.group(), owner.leader_pgid());
+
+        let joiner = PipelineGroup::joining(membership);
+        let inner = CancelScope::root();
+        let nested = joiner.membership(&inner);
+        assert_eq!(nested.group(), owner.leader_pgid());
+        #[cfg(unix)]
+        {
+            outer.cancel(CancelCause::Interrupt);
+            assert!(
+                !nested.owes(CancelCause::Interrupt),
+                "a nested stage's membership must read the outer stage's scope"
+            );
+            inner.cancel(CancelCause::Deadline);
+            assert!(
+                nested.owes(CancelCause::Deadline),
+                "the inner scope must not stand in for the outer one"
+            );
+        }
+    }
+
+    /// A default shell mints no terminal lease, so `lend` lends nothing.
+    #[test]
+    fn a_group_without_a_lease_lends_nothing() {
         let shell = Shell::default();
-        let mut group = prepared(&shell);
-        group.claim_foreground(&shell, &Mooring::adrift());
-        assert!(!group.holds_terminal());
+        let group = prepared(&shell);
+        assert!(group.lend(&shell, &Mooring::adrift()).is_none());
     }
 
     #[cfg(windows)]
@@ -252,18 +275,18 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn witnessed_within_2s(rx: &std::sync::mpsc::Receiver<Event>) -> Option<CancelCause> {
+    fn heard_within_2s(rx: &std::sync::mpsc::Receiver<Event>) -> Option<i32> {
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Event::Witnessed(cause)) => Some(cause),
+            Ok(Event::Heard(signal)) => Some(signal.number()),
             Ok(_) | Err(_) => None,
         }
     }
 
-    /// A signal the group swallows comes back as `Witnessed`; two in a row
-    /// prove the anchor survived the first.
+    /// A signal the group swallows comes back raw as `Heard`, key or not; two
+    /// in a row prove the anchor survived the first.
     #[cfg(unix)]
     #[test]
-    fn a_signalled_anchor_reports_the_cause_and_lives_on() {
+    fn a_signalled_anchor_reports_the_signal_and_lives_on() {
         let shell = Shell::default();
         let (tx, rx) = std::sync::mpsc::channel();
         let group = PipelineGroup::prepare(&shell, tx).expect("anchor spawns");
@@ -274,16 +297,13 @@ mod tests {
         );
         // Past the window between the anchor's exec and its handler install.
         std::thread::sleep(std::time::Duration::from_millis(300));
-        for (signal, cause) in [
-            (libc::SIGINT, CancelCause::Interrupt),
-            (libc::SIGTERM, CancelCause::Terminate),
-        ] {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
             group
                 .leader_pgid()
                 .signal_group(crate::process::Signal::new(signal));
-            match witnessed_within_2s(&rx) {
-                Some(c) if c == cause => {}
-                Some(c) => panic!("signal {signal} witnessed as {c:?}"),
+            match heard_within_2s(&rx) {
+                Some(n) if n == signal => {}
+                Some(n) => panic!("signal {signal} heard as {n}"),
                 None => panic!("signal {signal} was never reported"),
             }
         }

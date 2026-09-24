@@ -302,8 +302,9 @@ impl Launch {
     }
 
     /// Lower to a `std::process::Command` and spawn it with the requested
-    /// process-group placement: child, leader pgid, and whatever jail cgroup
-    /// `apply_guest_jail` staged.
+    /// process-group placement: child, the pgid of a group it leads, and
+    /// whatever jail cgroup `apply_guest_jail` staged.  A child that joins or
+    /// inherits a group leads none, so `None`.
     ///
     /// An enveloped launch is placed `NewLeader` whatever was asked: the
     /// envelope process is nobody's to address, so the group returned is
@@ -333,7 +334,7 @@ impl Launch {
             .and_then(|ask| ask());
         Ok((
             crate::process::ChildHandle::from_std(child),
-            payload.or(leader),
+            payload.or_else(|| leader.filter(|_| pgid.leads())),
             self.jail.take(),
         ))
     }
@@ -469,8 +470,9 @@ impl Launch {
     }
 
     /// Lower through `CreateProcessW` and spawn with the requested
-    /// process-group placement.  The jail cgroup is always `None` — Linux
-    /// guests only — and stays in the tuple to keep callers uniform.
+    /// process-group placement, returning the pgid of a group the child
+    /// leads.  The jail cgroup is always `None` — Linux guests only — and
+    /// stays in the tuple to keep callers uniform.
     ///
     /// # Errors
     /// A `.bat`/`.cmd` program (refused), a NUL in any argument, path, or
@@ -484,7 +486,7 @@ impl Launch {
         Option<crate::process::Pgid>,
         Option<crate::process::jail::JailCgroup>,
     )> {
-        windows::spawn(self, pgid).map(|(child, pgid)| (child, pgid, None))
+        windows::spawn(self, pgid).map(|(child, led)| (child, led.filter(|_| pgid.leads()), None))
     }
 }
 

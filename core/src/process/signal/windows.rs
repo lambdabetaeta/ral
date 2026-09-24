@@ -12,15 +12,16 @@
 //! Releasing a group falls to the caller: `RunningChild` owns a standalone
 //! external's, while pipeline stages borrow one owned by `PipelineGroup`.
 //!
-//! [`install_handlers`] gives a bare `ral` the escalating disposition —
-//! Ctrl-Break, `TerminateJobObject`, `ExitProcess` with the interrupt's status.  A frontend with its own
-//! cancel ladder (exarch) calls [`relay_interrupt`] instead, which never ticks
-//! [`ESCALATION`] and never reaches a detached worker.
+//! [`install_handlers`] gives a bare `ral` the Unix ladder's shape: the first
+//! two console events interrupt the run in flight, the third `ExitProcess`es
+//! with the interrupt's status.  Nothing fans out: a group hears Ctrl-Break
+//! only from the teardown of the scope that owns it.
 
 use std::sync::atomic::Ordering;
 
 use super::{ESCALATION, Pgid, PgidPolicy};
-use crate::process::cancel::request_interrupt;
+use crate::process::cancel::{CancelCause, request_interrupt};
+use crate::process::outcome::Signal;
 use crate::sync::LockExt as _;
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -32,38 +33,23 @@ pub fn install_handlers() {
     // exarch registers later, Windows runs the newest handler first, and its
     // Ctrl-C arm claims the event before this one runs.
     let _ = ctrlc::set_handler(|| {
-        request_interrupt();
-        let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
-        match prev {
-            0 => win_groups::break_all(),
-            1 => win_groups::terminate_all(),
+        if ESCALATION.fetch_add(1, Ordering::Relaxed) >= 2 {
             // `ExitProcess`, not `std::process::exit`: the handler runs on a
             // worker thread, and running CRT atexit handlers there while the main
             // thread holds a lock can deadlock — the Unix handler reaches for
             // `_exit` on the same reasoning.
-            _ => unsafe {
+            unsafe {
                 #[allow(
                     clippy::cast_sign_loss,
                     reason = "an interrupt's status is a small positive code"
                 )]
                 windows_sys::Win32::System::Threading::ExitProcess(
-                    crate::types::Status::Cancelled(crate::process::CancelCause::Interrupt).code()
-                        as u32,
+                    crate::types::Status::Cancelled(CancelCause::Interrupt).code() as u32,
                 );
-            },
+            }
         }
+        request_interrupt();
     });
-}
-
-/// Raise an interrupt and fan `CTRL_BREAK_EVENT` out to every live,
-/// non-detached group — the Windows analogue of Unix's `interrupt_handler`.
-///
-/// A frontend with its own exchange-cancel ladder (exarch) calls this in-process
-/// rather than re-injecting a console event, which would re-enter the escalating
-/// disposition [`install_handlers`] registers.
-pub fn relay_interrupt() {
-    request_interrupt();
-    win_groups::break_foreground();
 }
 
 // ── Inherited dispositions / child-signal reset ────────────────────────────
@@ -115,10 +101,6 @@ mod win_groups {
         /// Latched once the job reported `ACTIVE_PROCESS_ZERO`, so a later reap
         /// answers from here instead of pumping a possibly closed port.
         pub(crate) all_done: bool,
-        /// Set for a `PgidPolicy::NewSession` group — a detached background
-        /// worker.  [`break_foreground`] skips these; the escalation ladder's
-        /// [`break_all`] / [`terminate_all`] deliberately do not.
-        pub(crate) detached: bool,
     }
 
     // SAFETY: `HANDLE` is a raw pointer, but never escapes the Mutex, and the
@@ -204,9 +186,6 @@ mod win_groups {
         NewLeader {
             job: HANDLE,
             completion_port: HANDLE,
-            /// Carried from the requesting `PgidPolicy` so [`register`] can tag
-            /// the resulting `GroupState` — see the field there.
-            detached: bool,
         },
         Join {
             leader: i32,
@@ -226,7 +205,6 @@ mod win_groups {
         match policy {
             super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
             super::PgidPolicy::NewLeader | super::PgidPolicy::NewSession => {
-                let detached = matches!(policy, super::PgidPolicy::NewSession);
                 let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
@@ -242,7 +220,6 @@ mod win_groups {
                 Ok(PreparedGroup::NewLeader {
                     job,
                     completion_port,
-                    detached,
                 })
             }
             super::PgidPolicy::Join(group) => {
@@ -290,7 +267,6 @@ mod win_groups {
                 PreparedGroup::NewLeader {
                     job,
                     completion_port,
-                    ..
                 } => {
                     if !completion_port.is_null() {
                         CloseHandle(completion_port);
@@ -326,7 +302,6 @@ mod win_groups {
             PreparedGroup::NewLeader {
                 job,
                 completion_port,
-                detached,
             } => {
                 let leader_pid = child_pid.cast_signed();
                 let leader_handle = duplicate_process_handle(child_handle);
@@ -339,7 +314,6 @@ mod win_groups {
                         member_handles: Vec::new(),
                         members: vec![child_pid],
                         all_done: false,
-                        detached,
                     },
                 ));
                 Some(leader_pid)
@@ -360,41 +334,6 @@ mod win_groups {
                     CloseHandle(job);
                 }
                 Some(leader)
-            }
-        }
-    }
-
-    pub(super) fn break_all() {
-        let groups = GROUPS.lock_ignore_poison();
-        for (_, state) in groups.iter() {
-            for &pid in &state.members {
-                unsafe {
-                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
-                }
-            }
-        }
-    }
-
-    /// [`break_all`] minus detached workers' groups, so an exchange-cancel
-    /// ([`super::relay_interrupt`]) can never reach one.
-    pub(super) fn break_foreground() {
-        let groups = GROUPS.lock_ignore_poison();
-        for (_, state) in groups.iter().filter(|(_, s)| !s.detached) {
-            for &pid in &state.members {
-                unsafe {
-                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
-                }
-            }
-        }
-    }
-
-    pub(super) fn terminate_all() {
-        let groups = GROUPS.lock_ignore_poison();
-        for (_, state) in groups.iter() {
-            if !state.job.is_null() {
-                unsafe {
-                    TerminateJobObject(state.job, KILL_EXIT_CODE as u32);
-                }
             }
         }
     }
@@ -533,8 +472,8 @@ mod win_groups {
         leader_exit_code(handle)
     }
 
-    /// [`break_all`] narrowed to one leader, for a caller tearing down just that
-    /// job.  No-op when the group is already gone.
+    /// `CTRL_BREAK_EVENT` to every member of one group.  No-op when the group
+    /// is already gone.
     pub(super) fn break_group(leader: i32) {
         let groups = GROUPS.lock_ignore_poison();
         if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) {
@@ -778,16 +717,53 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 
 // ── Foreground ownership ───────────────────────────────────────────────────
 
-/// Windows shares one console across every attached process, so there is nothing
-/// to acquire: console programs (fzf, less, vim) drive the Console API directly
-/// and need no handoff from ral.
-pub struct ForegroundGuard;
+/// A console is never lent, and the type is uninhabited to say so.
+///
+/// Windows shares one console across every attached process: console programs
+/// (fzf, less, vim) drive the Console API directly and need no handoff from ral.
+pub enum TerminalLoan {}
 
-impl ForegroundGuard {
+impl TerminalLoan {
     pub(crate) fn try_acquire(
         _target: i32,
         _lease: &crate::process::TerminalLease,
+        _frame: &crate::process::ForegroundScope,
     ) -> Option<Self> {
         None
     }
+
+    #[expect(
+        clippy::uninhabited_references,
+        reason = "no loan exists to be borrowed"
+    )]
+    pub(crate) fn pressed(&self) -> Option<CancelCause> {
+        match *self {}
+    }
+
+    pub(crate) fn reclaim(self, _: Option<Signal>) -> Option<CancelCause> {
+        match self {}
+    }
+}
+
+/// The death status a console event leaves, Ctrl-C's and Ctrl-Break's alike.
+const CONSOLE_EVENT: Signal = Signal::new(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT);
+
+/// The status ral's kill leaves.
+pub(crate) const KILL: Signal = Signal::new(crate::process::outcome::KILL_EXIT_CODE);
+
+/// Ctrl-Break, named by the death it leaves, opens every graceful teardown:
+/// an owned group is the only address that takes it.
+pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
+    match cause {
+        CancelCause::Interrupt
+        | CancelCause::Explicit
+        | CancelCause::Deadline
+        | CancelCause::Terminate => Some(CONSOLE_EVENT),
+        CancelCause::ReaderGone | CancelCause::RootAbort => None,
+    }
+}
+
+/// The death status a console's Ctrl-C leaves, standing for the interrupt.
+pub(crate) fn gesture_signal(cause: CancelCause) -> Option<Signal> {
+    (cause == CancelCause::Interrupt).then_some(CONSOLE_EVENT)
 }

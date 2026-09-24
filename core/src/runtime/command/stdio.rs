@@ -28,7 +28,7 @@ impl TtyInputPermit {
     }
 
     /// The pipeline's own pgid takes the foreground via
-    /// `PipelineGroup::claim_foreground`, so its members may read the tty.
+    /// `PipelineGroup::lend`, so its members may read the tty.
     pub(crate) fn for_pure_external_pipeline() -> Self {
         Self { _private: () }
     }
