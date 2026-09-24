@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: 2a2ea82b
+generated_at_date: 2026-09-24
 covers_paths: [core/src/prelude.ral]
 ---
 
@@ -21,7 +21,8 @@ environment ([[map/core/builtins|register]]).
 The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
 `enumerate`, `flat-map`, `zip`, `cross`, `nub`, `group-by`, `median-by`,
-`lines`, `words`, `indent`, `map-lines`, `defer`, `commands` (an `audit`
+`lines`, `words`, `from-words`, `indent`, `repeat`, `pad-left`, `pad-right`,
+`extension`, `max`, `min`, `maximum`, `minimum`, `map-lines`, `defer`, `commands` (an `audit`
 report's `` `command `` facts, in trail order), `succeeded` (an `audit`
 report's outcome as a `Bool`), the `stream-*`
 eliminators, …) layered over the directly-registered Rust builtins (`each`,

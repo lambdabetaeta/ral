@@ -7,17 +7,12 @@
 
 let [root] = $ARGS
 
-let ext-of = { |p|
-    let name = basename $p
-    if !{re-match '.\.' $name} { return !{re-replace '^.*\.' '' $name} } else { return '(none)' }
-}
-
 let nonblank = { |p|
     length !{filter { |l| return !{re-match '\S' $l} } !{from-lines-list $p}}
 }
 
 let files  = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}
-let by-ext = group-by $ext-of $files
+let by-ext = group-by { |p| option-or '(none)' !{extension $p} } $files
 
 let rows = map { |k|
     return [ext: $k, loc: !{sum !{map $nonblank $by-ext[$k]}}]

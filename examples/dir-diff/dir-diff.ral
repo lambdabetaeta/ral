@@ -10,7 +10,7 @@ let [a, b] = $ARGS
 let scan = { |root|
     within [dir: $root] {
         fold { |m p|
-            if !{is-file $p} { return [...$m, $p: !{words !{sha256sum $p | from-string}}[0]] } else { return $m }
+            if !{is-file $p} { return [...$m, $p: !{sha256sum $p | from-words}[0]] } else { return $m }
         } [:] !{glob '**/*'}
     }
 }

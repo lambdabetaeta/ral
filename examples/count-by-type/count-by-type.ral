@@ -8,10 +8,7 @@ let [root] = $ARGS
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 
-let buckets = group-by { |p|
-    let parts = re-split '\.' !{file-info $p}[name]
-    if $[!{length $parts} > 1] { return !{last $parts} } else { return '(none)' }
-} $files
+let buckets = group-by { |p| option-or '(none)' !{extension $p} } $files
 
 let rows = map { |k| return [ext: $k, n: !{length $buckets[$k]}] } !{keys $buckets}
 

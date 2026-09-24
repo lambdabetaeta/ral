@@ -10,10 +10,9 @@ let rows = map { |l|
     return [cat: $parts[0], n: !{int $parts[1]}]
 } !{from-lines-list $path}
 
-let max = fold { |m r| if $[$r[n] > $m] { $r[n] } else { $m } } 1 $rows
+let peak = maximum [1, ...!{map { |r| return $r[n] } $rows}]
 
 for $rows { |r|
-    let width = $[$r[n] * 40 / $max]
-    let bar = fold { |acc _| "$acc#" } '' !{range 0 $width}
+    let bar = repeat $[$r[n] * 40 / $peak] '#'
     echo "$r[cat]\t$bar $r[n]"
 }

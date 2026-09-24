@@ -16,7 +16,7 @@ let walk = { |dir|
 }
 
 let manifest = par { |p|
-    return [hash: !{words !{sha256sum -- $p | from-string}}[0], path: $p]
+    return [hash: !{sha256sum -- $p | from-words}[0], path: $p]
 } !{sort-list !{walk $root}} $workers
 
 for $manifest { |r| echo "$r[hash]  $r[path]" }

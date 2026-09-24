@@ -8,13 +8,11 @@ let [root] = $ARGS
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 
-let ext-of = { |p|
-    let name = basename $p
-    if !{re-match '.\.' $name} { return !{re-replace '^.*\.' '' $name} } else { return '' }
-}
-
 let totals = fold { |acc p|
-    let key   = !{ext-of $p}
+    let key   = case !{extension $p} [
+        `just: { |e| return ".$e" },
+        `none: { |_| return '(none)' }
+    ]
     let bytes = !{file-info $p}[size]
     let prev  = !{get $acc $key 0}
     return [...$acc, $key: $[$prev + $bytes]]
@@ -24,6 +22,5 @@ let rows = map { |k| return [ext: $k, size: $totals[$k]] } !{keys $totals}
 let sorted = reverse !{sort-list-by { |r| return $r[size] } $rows}
 
 for $sorted { |r|
-    let label = if !{equal $r[ext] ''} { return '(none)' } else { return ".$r[ext]" }
-    echo "$r[size]\t$label"
+    echo "$r[size]\t$r[ext]"
 }

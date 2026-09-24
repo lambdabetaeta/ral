@@ -5,11 +5,11 @@
 # `length` of a filtered list; no exit status ever enters the reckoning.
 
 let [old, new] = $ARGS
-let in-old = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $old}
-let in-new = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $new}
+let olds = from-lines-list $old
+let news = from-lines-list $new
 
-let added   = filter { |l| $[not !{has $in-old $l}] } !{from-lines-list $new}
-let removed = filter { |l| $[not !{has $in-new $l}] } !{from-lines-list $old}
+let added   = filter { |l| $[not !{contains $olds $l}] } $news
+let removed = filter { |l| $[not !{contains $news $l}] } $olds
 
 echo "added:   !{length $added}"
 echo "removed: !{length $removed}"

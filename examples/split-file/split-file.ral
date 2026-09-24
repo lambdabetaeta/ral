@@ -12,15 +12,10 @@ let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerat
 let count = length $chunks
 
 let digits = length !{str $[$count - 1]}
-let width = if $[$digits > 2] { return $digits } else { return 2 }
-let zeros = intercalate '' !{map { |_| return '0' } !{range 0 $width}}
-let suffix = { |i|
-    let s = "$zeros!{str $i}"
-    return !{slice $s $[!{length $s} - $width] $width}
-}
+let width = max 2 $digits
 
 for !{range 0 $count} { |i|
-    let part = "$input.part!{suffix $i}"
+    let part = "$input.part!{pad-left $width '0' !{str $i}}"
     let body = intercalate "\n" !{map { |e| return $e[item] } $chunks[!{str $i}]}
     to-string "$body\n" > $part
     echo $part

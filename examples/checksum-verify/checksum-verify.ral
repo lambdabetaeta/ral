@@ -17,7 +17,7 @@ let entries = map { |line|
 
 let checked = par { |[want: want, file: file]|
     let got = try {
-        return !{words !{sha256sum -- "$base/$file" | from-string}}[0]
+        return !{sha256sum -- "$base/$file" | from-words}[0]
     } { |_| return '' }
     return [file: $file, ok: !{equal $want $got}]
 } $entries $NPROC

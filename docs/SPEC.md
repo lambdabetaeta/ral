@@ -3534,7 +3534,8 @@ computation, though it records status 1 for shell-style status inspection.
 The prelude builds the familiar derived operations from these primitives:
 `for`, `reduce`, `reverse`, `last`, `take`, `drop`, `take-while`, `drop-while`,
 `first`, `option-or`, `elem`, `contains`, `nub`, `zip`, `flat-map`, `enumerate`,
-`concat`, `sum`, `cross`, `group-by`, `median`, and `median-by`.
+`concat`, `sum`, `max`, `min`, `maximum`, `minimum`, `cross`,
+`group-by`, `median`, and `median-by`.
 
 ### 14.3. Strings, numbers, and shell text
 
@@ -3553,7 +3554,8 @@ be re-lexed automatically.
 `floor`, `ceil`, and `trunc` accept a finite, in-range `Float` and return an
 `Int`; an `Int` is already integral and is rejected at the type level.
 
-The prelude adds `lines`, `words`, and `indent`. It also supplies `styled`,
+The prelude adds `lines`, `words`, `from-words`, `indent`, `repeat`,
+`pad-left`, and `pad-right`. It also supplies `styled`,
 ral's whole public ANSI surface: `styled style text` wraps `text` in the
 escape code named by `style` — `reset`, `bold`, `dim`, or one of `red green
 yellow blue magenta cyan` — and resets after; black, white, underline,
@@ -3593,7 +3595,9 @@ as though nothing were there. `is-file`, `is-dir`, `is-readable`, and
 `is-writable` instead resolve through the link, so a dangling link answers
 `false` to each of them.
 
-The prelude adds `file-empty`, `line-count`, and `from-lines-list`.
+The prelude adds `file-empty`, `line-count`, `from-lines-list`, and
+`extension`, the Option-valued extension of a path's last component: a
+dotfile such as `.bashrc` has none.
 `from-lines-list` refuses files larger than 10 MiB because it materialises the
 whole result. For bounded-memory processing, redirect the file into
 `fold-lines`, `map-lines`, `filter-lines`, or `each-line`.

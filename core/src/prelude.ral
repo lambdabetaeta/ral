@@ -121,9 +121,25 @@ let words = { |s|
     let parts = re-split '\s+' $s
     _trim-empties $parts
 }
+## Decode stdin as a list of words.
+let from-words = {
+    let s = !{from-string}
+    words $s
+}
+## `s` repeated `n` times; empty when `n <= 0`.
+let repeat = { |n s| intercalate '' !{map { |_| return $s } !{range 0 $n}} }
+## Pad `s` on the left with `c` to width `w`; never truncates.
+let pad-left = { |w c s| return "!{repeat $[$w - !{length $s}] $c}$s" }
+## Pad `s` on the right with `c` to width `w`; never truncates.
+let pad-right = { |w c s| return "$s!{repeat $[$w - !{length $s}] $c}" }
+## The extension of a path's last component, as an Option: `a.tar.gz` has
+## `` `just 'gz'``, while `Makefile` and the dotfile `.bashrc` have `` `none``.
+let extension = { |p|
+    if !{re-match '[^/]\.[^./]*$' $p} { return `just !{re-find-match '[^.]*$' $p} } else { return `none }
+}
 ## Prepend n spaces to every non-empty line.
 let indent = { |n s|
-    let spaces = fold { |acc _| "$acc " } '' !{range 1 $[$n + 1]}
+    let spaces = repeat $n ' '
     let lns = lines $s
     let indented = map { |l| if $[not !{equal $l ''}] { "$spaces$l" } else { $l } } $lns
     intercalate "\n" $indented
@@ -252,6 +268,19 @@ let id = { |x| return $x }
 
 ## Sum a list of numbers.
 let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
+
+## The larger of two numbers.
+let max = { |a b| if $[$a >= $b] { return $a } else { return $b } }
+## The smaller of two numbers.
+let min = { |a b| if $[$a <= $b] { return $a } else { return $b } }
+## The largest element of a non-empty list.
+let maximum = { |xs|
+    if !{is-empty $xs} { fail [status: 1, message: "maximum: the list is empty"] } else { reduce $max $xs }
+}
+## The smallest element of a non-empty list.
+let minimum = { |xs|
+    if !{is-empty $xs} { fail [status: 1, message: "minimum: the list is empty"] } else { reduce $min $xs }
+}
 
 ## Cartesian product of two lists, each pair combined by `f`.  Build a
 ## record in `f` to mix element types — lists are homogeneous — and to chain

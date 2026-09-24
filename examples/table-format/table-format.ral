@@ -8,17 +8,13 @@
 let [path, ...cols] = $ARGS
 
 let rows = from-csv < $path
-let widest = { |ns| fold { |m n| if $[$n > $m] { return $n } else { return $m } } 0 $ns }
-let spaces = { |n| intercalate '' !{map { |_| return ' ' } !{range 0 $n}} }
 
 let widths = map { |c|
-    widest [!{length $c}, ...!{map { |r| return !{length $r[$c]} } $rows}]
+    maximum [!{length $c}, ...!{map { |r| return !{length $r[$c]} } $rows}]
 } $cols
 
 let render = { |cells|
-    let padded = map { |i|
-        return "$cells[$i]!{spaces $[$widths[$i] - !{length $cells[$i]}]}"
-    } !{range 0 !{length $cols}}
+    let padded = map { |i| pad-right $widths[$i] ' ' $cells[$i] } !{range 0 !{length $cols}}
     echo !{re-replace-all ' +$' '' !{intercalate '  ' $padded}}
 }
 
