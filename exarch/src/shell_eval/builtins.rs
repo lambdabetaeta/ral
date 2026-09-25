@@ -419,9 +419,9 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 }
 
 /// A hash resolved against the file as read: the 0-based line it uniquely named.
-struct ResolvedEdit {
+struct ResolvedEdit<'a> {
     at: usize,
-    new: String,
+    new: &'a str,
 }
 
 /// Backslash letters that read as a C-style escape but are not one here:
@@ -495,7 +495,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             }
         };
         let want = match m.get("hash") {
-            Some(v) => v.to_string(),
+            Some(v) => as_str(v, "edit-hash")?,
             None => {
                 return Err(sig(
                     "edit-hash: each edit needs a `hash` field — the witness from view-hash/view-hash-around."
@@ -504,7 +504,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             }
         };
         let new = match m.get("line") {
-            Some(v) => v.to_string(),
+            Some(v) => as_str(v, "edit-hash")?,
             None => {
                 return Err(sig(
                     "edit-hash: each edit needs a `line` field — the replacement text.".to_string(),
@@ -546,7 +546,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         match resolved.iter().find(|r| r.at == i) {
             None => out.push(row.clone()),
             Some(r) if r.new.is_empty() => {}
-            Some(r) => out.extend(rows_of(&r.new)),
+            Some(r) => out.extend(rows_of(r.new)),
         }
     }
     let final_text = out.join("\n");
@@ -560,7 +560,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(&r.new));
+    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(r.new));
     note_edit(shell, path, &lines, line_nums.len() > 1, any_escapes);
 
     Ok(Value::Unit)
