@@ -1,0 +1,14 @@
+#!/usr/bin/env ral
+# Footgun: `git symbolic-ref … | sed 's@^origin/@@' || echo main` never
+# reaches `main`: without pipefail a pipeline's status is its last stage's,
+# sed exits 0 on empty input, and the script prints an empty branch name.
+# Here a pipeline fails whole on any failing stage, and `?` takes the first
+# arm that succeeds.
+
+let [repo] = $ARGS
+
+within [dir: $repo] {
+    git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's@^origin/@@'
+    ? git config --get init.defaultBranch
+    ? echo main
+}

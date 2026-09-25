@@ -1,0 +1,32 @@
+#!/usr/bin/env ral
+# Footgun: under `set -e` a gate stops at its first failing check, so each
+# rerun reveals one more problem; `check || rc=1` runs them all but forgets
+# which command failed and what it said, short of `2>&1` into a variable
+# that `local` then reports as a success.  `audit` settles every check as
+# data: its outcome, and each command's status and streams kept apart.
+
+let checks = [
+    [name: 'shell syntax', run: { for !{glob 'scripts/*.sh'} { |f| sh -n -- $f } }],
+    [name: 'json',         run: { for !{glob 'data/*.json'} { |f| jq empty -- $f } }],
+    [name: 'whitespace',   run: { git diff --check ; return () }],
+]
+
+let settled = map { |[name: name, run: run]| return [name: $name, report: !{audit { !$run }}] } $checks
+
+let failed = filter { |c| return $[not !{succeeded $c[report]}] } $settled
+
+for $settled { |c|
+    let mark = if !{succeeded $c[report]} { return 'ok  ' } else { return 'FAIL' }
+    echo "$mark  $c[name]"
+}
+
+for $failed { |c|
+    let culprits = filter { |k| return $[$k[origin] == 'external' && $k[status] != 0] } !{commands $c[report]}
+    for $culprits { |k|
+        let said = lines "!{bytes-to-string $k[stderr]}!{bytes-to-string $k[stdout]}"
+        let gist = if !{is-empty $said} { return '' } else { return " — $said[0]" }
+        echo "  $c[name]: `!{intercalate ' ' $k[argv]}` exited $k[status]$gist"
+    }
+}
+
+if $[not !{is-empty $failed}] { exit 1 }

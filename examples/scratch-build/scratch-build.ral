@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `trap 'rm -rf "$tmp"' EXIT` is one global slot, so a helper that
+# sets its own replaces its caller's, and when it fires at exit the helper's
+# `local` is gone: under `set -u` the trap aborts and neither directory is
+# removed.  `guard` is lexical: each cleanup belongs to its own block, nests,
+# and runs on failure and on `exit`.
+
+let [source-dir, archive] = $ARGS
+
+let with-scratch = { |body|
+    let dir = temp-dir
+    guard { $body $dir } { rm -rf $dir }
+}
+
+with-scratch { |stage|
+    cp -R $source-dir "$stage/tree"
+    with-scratch { |pack|
+        tar -C $stage -czf "$pack/tree.tar.gz" tree
+        mv "$pack/tree.tar.gz" $archive
+    }
+}
+
+echo "wrote $archive"
