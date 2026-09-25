@@ -140,6 +140,26 @@ fn read_lines_from_stdin() {
 }
 
 #[test]
+fn read_lines_decodes_invalid_utf8_lossily() {
+    let o = run_pipe_stdin(
+        "let lines = !{stream-to-list !{from-lines}}\necho $lines[0]\necho $lines[1]",
+        b"a\xffb\nc\n",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "a\u{fffd}b\nc\n");
+}
+
+#[test]
+fn fold_lines_refuses_invalid_utf8() {
+    let o = run_pipe_stdin(
+        "fold-lines { |acc _| return $[$acc + 1] } 0",
+        b"a\xffb\n",
+    );
+    assert_ne!(o.status, 0);
+    assert!(o.stderr.contains("fold-lines: input is not valid UTF-8"), "stderr: {}", o.stderr);
+}
+
+#[test]
 fn fold_lines_from_stdin() {
     let o = run_pipe_stdin(
         "let n = !{fold-lines { |acc _| return $[$acc + 1] } 0}\necho $n",

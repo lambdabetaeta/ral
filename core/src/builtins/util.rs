@@ -283,8 +283,8 @@ pub(crate) fn admits_read(shell: &mut Shell, path: &str) -> bool {
 /// The one stdin policy every reading builtin shares: an installed `Source`
 /// (pipeline pipe or `<` redirect) if there is one; else a refusal when startup
 /// stdin was a terminal, since these builtins want bytes and not a prompt; else
-/// the inherited fd 0.  The [`super::codecs`] decoders and
-/// [`for_each_stdin_line`] both drain through here.
+/// the inherited fd 0.  The [`super::codecs`] decoders and [`stdin_lines`]
+/// both drain through here.
 pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io::BufRead>> {
     // `Empty` is a deliberate no-input marker: immediate EOF, never the "no
     // input" error and never a fall-through to fd 0.
@@ -307,21 +307,28 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
     Ok(Box::new(std::io::stdin().lock()))
 }
 
-/// Iterate the shell's stdin line by line through [`stdin_reader`].
+/// The shell's stdin a line at a time through [`stdin_reader`], each stripped
+/// by [`crate::io::strip_trailing_newline`] and left undecoded: decoding is
+/// each caller's policy.
 ///
 /// # Errors
-/// Returns `Err` if stdin cannot be resolved, if a read fails, or if `f` does.
-pub(crate) fn for_each_stdin_line(
-    name: &str,
-    shell: &mut Shell,
-    mut f: impl FnMut(String, &mut Shell) -> Settled<()>,
-) -> Settled<()> {
-    use std::io::BufRead;
-    let reader = stdin_reader(name, shell)?;
-    for line in reader.lines() {
-        f(line.map_err(|e| sig(format!("{name}: {e}")))?, shell)?;
-    }
-    Ok(())
+/// Returns `Err` if stdin cannot be resolved; each item, if its read fails.
+pub(crate) fn stdin_lines(
+    name: &'static str,
+    shell: &Shell,
+) -> Settled<impl Iterator<Item = Settled<Vec<u8>>> + use<>> {
+    let mut reader = stdin_reader(name, shell)?;
+    Ok(std::iter::from_fn(move || {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                crate::io::strip_trailing_newline(&mut line);
+                Some(Ok(line))
+            }
+            Err(e) => Some(Err(sig(format!("{name}: {e}")))),
+        }
+    }))
 }
 
 /// Dig the cause line out of the regex crate's multi-line parse error.

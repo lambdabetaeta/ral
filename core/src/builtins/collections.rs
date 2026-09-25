@@ -178,15 +178,16 @@ pub(super) fn builtin_fold_lines(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let func = args[0].clone();
+    let func = &args[0];
     let mut acc = args[1].clone();
-    super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
-        // The accumulator moves into the application: the closure is `FnMut`,
-        // so it must leave something behind, but never a copy of the fold.
-        let carried = std::mem::replace(&mut acc, Value::Unit);
-        acc = apply(&func, vec![carried, Value::string(line)], mooring, shell)?;
-        Ok(())
-    })?;
+    for line in super::util::stdin_lines("fold-lines", shell)? {
+        let line = super::util::decode_utf8_strict(
+            line?,
+            "fold-lines: input is not valid UTF-8",
+            "from-lines decodes lossily",
+        )?;
+        acc = apply(func, vec![acc, Value::string(line)], mooring, shell)?;
+    }
     Ok(acc)
 }
 

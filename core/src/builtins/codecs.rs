@@ -31,13 +31,18 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
 /// cannot see ([`crate::ir::args::positional`] gives up on them).
-fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
-    if !args.is_empty() {
-        return Err(sig_hint(
-            format!("{name}: takes no arguments — it reads the byte channel"),
-            "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
-        ));
+fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
+    if args.is_empty() {
+        return Ok(());
     }
+    Err(sig_hint(
+        format!("{name}: takes no arguments — it reads the byte channel"),
+        "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
+    ))
+}
+
+fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
+    no_arguments(args, name)?;
     read_stdin_bytes(name, shell)
 }
 
@@ -97,17 +102,23 @@ fn stream_cons(head: String, tail: Value) -> Value {
 /// lossily so a line stream survives invalid bytes.  Only the shape is lazy:
 /// the channel is read to EOF and every node built before this returns, so a
 /// downstream `stream-take 3` still drains an unbounded source.
+///
+/// Decoded a line at a time, so the channel's text is never held whole beside
+/// its lines; no invalid sequence spans a `\n`, so per-line lossy decoding
+/// agrees with whole-text decoding.
 pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-lines", shell)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let mut s = Value::Variant {
+    no_arguments(args, "from-lines")?;
+    let lines = super::util::stdin_lines("from-lines", shell)?
+        .map(|line| {
+            Ok(String::from_utf8(line?)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        })
+        .collect::<Settled<Vec<_>>>()?;
+    let done = Value::Variant {
         label: DONE_LABEL.into(),
         payload: None,
     };
-    for line in text.lines().rev() {
-        s = stream_cons(line.to_owned(), s);
-    }
-    Ok(s)
+    Ok(lines.into_iter().rev().fold(done, |tail, line| stream_cons(line, tail)))
 }
 
 fn json_to_value(j: serde_json::Value) -> Settled<Value> {
