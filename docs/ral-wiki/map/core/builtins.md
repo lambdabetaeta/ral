@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4d859c3
-generated_at_date: 2026-09-16
+generated_at_commit: acc8c3af
+generated_at_date: 2026-09-25
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -46,13 +46,14 @@ scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must seed through `install_builtins` or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
-Three entries sit *outside* the macro, implemented in core but installed by a
+Four entries sit *outside* the macro, implemented in core but installed by a
 host. Two are a pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
 `scheme::watch` — a watched worker's lines leave as `` `watch [label, line] ``
 surfaces through the session's deferred sink (`Sink::Watch`), which outlives
-the run — so the ral hosts, which print them, install it while the agent host
-omits it ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
+the run — so only a host with a deferred sink installs it, and elsewhere
+`watch` is an unknown-name diagnostic rather than a runtime refusal
+([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
 `SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
 the agent host (exarch), whose lease frame reaps ordinary workers, installs
 the durable-birth verb while the ral hosts — which grant no lease, so every
@@ -63,13 +64,20 @@ base-frame manifest's second row — typed `List String -> F Any`, no arity to i
 arming the budget (`Shell::arm_detach`) are one act, so absence is an
 unknown-name diagnostic rather than a veto, while
 whether a given call may spend it is the live grant stack's question
-(`GrantStack::permits_detach`).
+(`GrantStack::permits_detach`). The fourth, `SURFACE_BUILTIN`, wraps
+`misc::builtin_surface` / `scheme::surface_op` under the bare name `surface`;
+exarch declares its own entry over the same body under `exarch-surface`, with
+its own doc, so no host's name enters core's vocabulary. `builtin_surface` is
+`pub` for exactly this — the one core body two hosts each name their own way.
 
 Bodies are grouped by concern, one submodule each:
 
-- `strings.rs` — string and regex primitives. `dedent` owns the raw-block
-  framing rule: blank lines around a multiline block fall away before the
-  common margin is stripped, while content-line whitespace is preserved;
+- `strings.rs` — string and regex primitives, including `lines` (`String ->
+  [String]`), the same split as `from-lines` run over a string's bytes rather
+  than the channel, sharing `util::read_lines`/`lossy_line_list`. `dedent`
+  owns the raw-block framing rule: blank lines around a multiline block fall
+  away before the common margin is stripped, while content-line whitespace is
+  preserved;
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
   rendered through the total `to-string` — `Value`'s `Display`, mapped over the
@@ -137,7 +145,11 @@ Bodies are grouped by concern, one submodule each:
   birth arms it — `service` registers `Durable` and arms nothing, so no
   reaper entry ever exists for it; the absent chain *is* the durable
   policy, whose only bounds are the handle's own `cancel`, the host's
-  `/clear`, and process exit.
+  `/clear`, and process exit. A birth's `cmd` — the name every eliminator's
+  error, the trail, and the workers listing use — comes from the birth
+  itself: a watch's label, a service's description, and for a plain `spawn`
+  or a prelude `defer` over it, `shell.call_site()` — `block at <script>,
+  line N`.
   The spawn door also enforces the frame's admission cap
   (`Mooring::worker_cap`): a birth of any class *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
@@ -181,13 +193,15 @@ Bodies are grouped by concern, one submodule each:
   runtime script load shares. `evaluate_source` is the shared parse +
   elaborate + evaluate core — `check_source` compiles against the live
   session, peeking the `FileId` its own registration will mint so the
-  module's spans carry its real identity, and `evaluate_checked` holds the
-  cycle stack and depth bound; `use` (`module_phrases`) is a
-  scope-projecting sibling of that door, running under the session
-  environment rather than the caller's own block-local scope. Module loads
-  carry no cache, so the guards keep re-evaluation terminating — see
+  module's spans carry its real identity, and `module_phrases` holds the
+  cycle stack and depth bound, the one door both `evaluate_checked` and
+  `use` run their phrases through; `use` is a scope-projecting caller of
+  that door, running under the session environment rather than the caller's
+  own block-local scope. Module loads carry no cache, so the guards keep
+  re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
-- `misc.rs` — including `surface`, which forwards a tagged variant to the host's
+- `misc.rs` — including `builtin_surface`, the body `SURFACE_BUILTIN` (above)
+  wraps: it forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
 - `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);
 - `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup. One
@@ -209,7 +223,12 @@ Bodies are grouped by concern, one submodule each:
   nested string is capped at all: the REPL cuts at a terminal row, exarch's
   `VALUE` section cuts nothing, since a payload's text is the identity a later
   `edit-hash` matches;
-- `util.rs` — shared helpers, JSON coercion.
+- `util.rs` — shared helpers, JSON coercion. `as_str` borrows a checked
+  `String` argument. `read_lines` is the one line reader
+  ([[design/codecs|codecs]]' line rule), generic over its byte source and
+  leaving each line undecoded, since decoding is each caller's policy;
+  `stdin_lines` runs it over `stdin_reader`, and `lossy_line_list` decodes
+  its lines into the `[String]` that `from-lines` and `lines` return.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the
 authority layer in `capability/decode.rs` (`decode_capability_map`), consumed by
