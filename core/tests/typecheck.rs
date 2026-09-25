@@ -2530,6 +2530,7 @@ fn encoder_without_its_value_is_an_arity_error() {
         "to-line",
         "to-lines",
         "to-json",
+        "to-jsonl",
         "to-csv",
     ] {
         let codes: Vec<_> = raw_errors(name).iter().map(|e| e.kind.code()).collect();
@@ -2561,6 +2562,7 @@ fn saturated_encoders_typecheck() {
     ok("echo !{to-line 1}");
     ok("echo !{to-lines ['a', 'b']}");
     ok("echo !{to-json [a: 1]}");
+    ok("echo !{to-jsonl [[a: 1]]}");
     ok("echo !{to-csv [[a: 1]]}");
 }
 

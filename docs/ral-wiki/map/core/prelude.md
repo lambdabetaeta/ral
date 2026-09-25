@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 89c28f03
+generated_at_commit: 27edb27f
 generated_at_date: 2026-09-25
 covers_paths: [core/src/prelude.ral]
 ---

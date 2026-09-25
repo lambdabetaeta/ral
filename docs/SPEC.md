@@ -1523,9 +1523,10 @@ An encoder takes its value as an ordinary argument and writes bytes:
 | `to-line` | any value | Its textual form followed by a newline. |
 | `to-lines` | a list of values | Each element's textual form followed by a newline. |
 | `to-json` | a JSON-representable value | UTF-8 JSON. `Bytes` become an array of integers; variants become tagged objects. |
+| `to-jsonl` | a list of JSON-representable values | Each element as `to-json` encodes it, followed by a newline. |
 | `to-csv` | records accepted by the CSV codec | UTF-8 CSV. |
 
-`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. To decode a value already held in memory, encode it into a byte pipe first:
+`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing. To decode a value already held in memory, encode it into a byte pipe first:
 
 ```ral
 to-string $json_text | from-json
@@ -1555,16 +1556,16 @@ One rule says where a line ends:
 | `"a\r"` | `["a\r"]` |
 | `"a\r\r\n"` | `["a\r"]` |
 
-Every line reader splits by this rule — `from-lines`, `fold-lines`, and the
-prelude's `map-lines`, `filter-lines`, `each-line`, and `line-count` — as does
-`lines` on a string. Capture (§7.2), `from-line`, and `ask` do not split: they
-remove at most one terminator from the end of what they read, so `"a\r\n\r\n"`
-becomes `"a\r\n"` and `"a\r"` stays `"a\r"`.
+Every line reader splits by this rule — `from-lines`, `from-jsonl`,
+`fold-lines`, and the prelude's `map-lines`, `filter-lines`, `each-line`, and
+`line-count` — as does `lines` on a string. Capture (§7.2), `from-line`, and
+`ask` do not split: they remove at most one terminator from the end of what
+they read, so `"a\r\n\r\n"` becomes `"a\r\n"` and `"a\r"` stays `"a\r"`.
 
-ral writes `LF` alone: `to-line`, `to-lines`, and `echo` never write `CRLF`.
-`to-lines` terminates every element, so `to-lines []` writes nothing,
-`to-lines [""]` writes one `LF`, and `from-lines` inverts `to-lines` on every
-list of strings in which no element contains `LF` or ends with `CR`.
+ral writes `LF` alone: `to-line`, `to-lines`, `to-jsonl`, and `echo` never
+write `CRLF`. `to-lines` terminates every element, so `to-lines []` writes
+nothing, `to-lines [""]` writes one `LF`, and `from-lines` inverts `to-lines`
+on every list of strings in which no element contains `LF` or ends with `CR`.
 
 
 ### 7.4. Redirects
@@ -3698,8 +3699,8 @@ no pipe or redirect is an error rather than an interactive prompt.
 
 `from-lines` and `from-jsonl` are decoders like the rest: they read to end of
 input and return a list, of the lines and of each non-blank line decoded as
-JSON respectively. The prelude's `to-jsonl` writes one compact JSON value per
-line.
+JSON respectively. `to-jsonl` writes each element of a list as `to-json`
+encodes it, one per line.
 
 ### 14.6. Failure, session control, and concurrency
 

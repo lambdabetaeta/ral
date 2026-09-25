@@ -67,7 +67,8 @@ An encoder takes one value and writes its encoded form to stdout.
 `to-bytes` (a `Bytes` value, passed through unchanged), `ints-to-bytes` (a list
 of `Int`, each 0 through 255 — ral has no byte literal, so this is how bytes are
 written by number), `to-string`, `to-lines` (each element followed by `\n`),
-`to-json`, `to-csv`, and `to-line` (the line writer that `echo` uses) all
+`to-json`, `to-jsonl` (each element as `to-json` writes it, then `\n`),
+`to-csv`, and `to-line` (the line writer that `echo` uses) all
 return `Unit`; the written bytes are the payload (`write_encoded` in
 `core/src/builtins/codecs.rs`). Each encoder names one operand type, so
 `to-bytes 3` and `to-bytes hello` are ordinary unification failures rather than
@@ -87,7 +88,8 @@ becomes an object; a list becomes an array; `Unit` becomes `null`. A
 variant `` `tag payload `` becomes `{"tag": "tag", "payload": …}`, and the
 `payload` key is absent for a niladic tag. A `Bytes` value serialises as an
 array of byte integers. A `Lambda`, a `Block`, or a `Handle` has no JSON image
-and is an error.
+and is an error; `to-jsonl` encodes every element before it writes, so its
+refusal names the element's index and leaves the channel empty.
 
 ## Decoders return values; a fold streams
 
@@ -124,15 +126,16 @@ reader.** The rule, with its table in `docs/SPEC.md` §7.3:
 One function measures a terminator (0, 1, or 2 bytes), and three kinds of
 caller share it:
 
-- *line readers* — `from-lines`, `fold-lines` and the prelude filters over it,
-  `line-count`, and `lines` — all split through one reader generic over its
-  byte source (`core/src/builtins/util.rs`): stdin for the decoders, the
-  string's bytes for `lines`, which so agrees by construction rather than by
-  test;
+- *line readers* — `from-lines`, `from-jsonl`, `fold-lines` and the prelude
+  filters over it, `line-count`, and `lines` — all split through one reader
+  generic over its byte source (`core/src/builtins/util.rs`): stdin for the
+  decoders, the string's bytes for `lines`, which so agrees by construction
+  rather than by test;
 - *one-terminator strippers* — capture, `from-line`, `ask` — remove at most one
   terminator from the end: `a\r\n\r\n` becomes `a\r\n`;
-- *writers* — `to-line`, `to-lines`, `echo` — emit `\n` only. Reading accepts
-  both endings the world writes; ral's own output has one spelling.
+- *writers* — `to-line`, `to-lines`, `to-jsonl`, `echo` — emit `\n` only.
+  Reading accepts both endings the world writes; ral's own output has one
+  spelling.
 
 `to-lines` terminates every element, as `to-line` and `to-jsonl` do, so
 `from-lines ∘ to-lines = id` on every list whose elements contain no `\n` and

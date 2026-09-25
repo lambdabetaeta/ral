@@ -251,6 +251,15 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
     write_encoded(text.as_bytes(), shell)
 }
 
+/// What `value_to_json` refuses, named by its type or, for a `Float`, its value.
+struct Unrepresentable(String);
+
+impl std::fmt::Display for Unrepresentable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} has no JSON representation", self.0)
+    }
+}
+
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
 /// than erasing it; Bytes become the integer array `ints-to-bytes` accepts
 /// back.
@@ -261,30 +270,27 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
 /// # Errors
 /// If `v` or anything nested within it is a non-finite `Float` or a
 /// computation value (`Lambda` / `Block` / `Handle`).
-pub(crate) fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
+fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
     Ok(match v {
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(n) => serde_json::json!(*n),
         Value::Float(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
-            .ok_or_else(|| sig(format!("to-json: {f} has no JSON representation")))?,
+            .ok_or_else(|| Unrepresentable(f.to_string()))?,
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::List(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Settled<_>>()?)
+            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Result<_, _>>()?)
         }
         Value::Map(pairs) => {
             let obj: serde_json::Map<String, serde_json::Value> = pairs
                 .iter()
                 .map(|(k, v)| Ok((k.clone(), value_to_json(v)?)))
-                .collect::<Settled<_>>()?;
+                .collect::<Result<_, _>>()?;
             serde_json::Value::Object(obj)
         }
         Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
-            return Err(sig(format!(
-                "to-json: {} has no JSON representation",
-                v.type_name()
-            )));
+            return Err(Unrepresentable(v.type_name().into()));
         }
         Value::Bytes(b) => {
             serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
@@ -301,7 +307,19 @@ pub(crate) fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let text = serde_json::to_string(&value_to_json(&args[0])?)
-        .map_err(|e| sig(format!("to-json: {e}")))?;
-    write_encoded(&text.into_bytes(), shell)
+    let json = value_to_json(&args[0]).map_err(|e| sig(format!("to-json: {e}")))?;
+    write_encoded(json.to_string().as_bytes(), shell)
+}
+
+/// JSON Lines: each element as `to-json` writes it, compact and so free of
+/// LF, then a `\n`.  Every element encodes before any byte is written.
+pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let mut text = String::new();
+    for (i, item) in as_list(&args[0], "to-jsonl")?.iter().enumerate() {
+        let json =
+            value_to_json(item).map_err(|e| sig(format!("to-jsonl: element at index {i}: {e}")))?;
+        text.push_str(&json.to_string());
+        text.push('\n');
+    }
+    write_encoded(text.as_bytes(), shell)
 }

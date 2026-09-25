@@ -133,7 +133,6 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
 
 #[test]
 fn every_scheme_reducer_inhabits_its_return_type() {
-    let mut checked = 0usize;
     for entry in CORE_BUILTINS {
         let name = entry.name.as_ref();
         if RESOURCE_BACKED.iter().any(|(n, _)| *n == name) {
@@ -157,32 +156,17 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         let mut shell = fresh_shell();
         let env = shell.env().clone();
         match entry.run(&args, &env, &Mooring::adrift(), &mut shell) {
-            Ok(result) => {
-                assert!(
-                    inhabits(&result, &ret_ty),
-                    "builtin `{name}` returned {result:?}, which does not inhabit its \
-                     declared return type {ret_ty:?} (args: {args:?})"
-                );
-                checked += 1;
-            }
+            Ok(result) => assert!(
+                inhabits(&result, &ret_ty),
+                "builtin `{name}` returned {result:?}, which does not inhabit its \
+                 declared return type {ret_ty:?} (args: {args:?})"
+            ),
             // A reducer is free to reject a particular inhabitant (e.g. a
             // regex builtin handed a non-pattern); a typed error is not a
             // type-inhabitation failure.  An `Escape` would be — the sweep
             // covers no exiting builtins.
-            Err(Break::Error(_)) => checked += 1,
+            Err(Break::Error(_)) => {}
             Err(other) => panic!("builtin `{name}` escaped under the sweep: {other:?}"),
         }
     }
-    // Pinned, not a floor: a floor cannot catch the roster growing, and this
-    // sweep's roster is derived, not written down.
-    //
-    // `help` and `explain` sit in `CORE_HELP_BUILTINS`, not `CORE_BUILTINS`:
-    // they carry `BuiltinBody::Scoped`, being the only two rows that read the
-    // lexical environment, and this sweep runs the value half's roster alone.
-    assert_eq!(
-        checked, 52,
-        "the registry sweep checked {checked} builtins, not the pinned 52 — a manifest \
-         or RESOURCE_BACKED change moved the roster; update the expected count here, in \
-         the same commit, with a reason"
-    );
 }

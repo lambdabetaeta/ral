@@ -351,11 +351,6 @@ let concat = { |xss|
     _go $xss []
 }
 
-# `to-json` emits compact (single-line) JSON, so one record per line falls out
-# for free; the decoder, `from-jsonl`, is a builtin.
-## Encode a list of values as JSON Lines, one compact record per line.
-let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
-
 # Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
 # and `filter-lines` are ergonomic wrappers around it.
 #

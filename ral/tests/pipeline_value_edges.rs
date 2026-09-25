@@ -64,6 +64,19 @@ fn from_jsonl_names_the_failing_line() {
 }
 
 #[test]
+fn to_jsonl_writes_nothing_when_an_element_is_refused() {
+    let o = run_pipe("to-jsonl [`ok 1, `bad { return 1 }]");
+    assert_ne!(o.status, 0);
+    assert!(o.stdout.is_empty(), "stdout: {}", o.stdout);
+    assert!(
+        o.stderr
+            .contains("to-jsonl: element at index 1: Block has no JSON representation"),
+        "stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
 fn ints_to_bytes_roundtrips_through_from_bytes() {
     // Both writers put bytes on the channel — `ints-to-bytes` from numbers,
     // `to-bytes` from a Bytes value — and from-bytes decodes them back.

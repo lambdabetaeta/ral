@@ -368,8 +368,8 @@ Codecs cross between bytes and values:
 | `from-csv` | a list of header-keyed records |
 | `from-bytes` | a `Bytes` value |
 
-The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-csv`, and
-`to-bytes` — each takes one value and writes its encoded bytes. `to-bytes` is
+The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-jsonl`,
+`to-csv`, and `to-bytes` — each takes one value and writes its encoded bytes. `to-bytes` is
 `from-bytes`'s inverse and takes a `Bytes` value; ral has no byte literal, so
 `ints-to-bytes` writes bytes given as numbers, and
 `ints-to-bytes [104, 105] | from-bytes` is how a `Bytes` value is minted.
