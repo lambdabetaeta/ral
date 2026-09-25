@@ -12,7 +12,7 @@ printf "cherry\napple\nbanana\n" | grep "apple"
 let fruits = ["cherry", "apple", "banana"]
 let show = {
     let ls = !{from-lines}
-    stream-each { |l| echo $l } $ls
+    each { |l| echo $l } $ls
 }
 to-lines !{sort-list $fruits} | !$show
 # Expected: apple banana cherry (sorted)
@@ -63,6 +63,13 @@ if $[not !{equal $s2 "foo\nbar"}] { fail [status: 1, message: "from-line strippe
 # from-line on bytes with no trailing newline is a no-op
 let s3 = printf "no-newline" | from-line
 if $[not !{equal $s3 "no-newline"}] { fail [status: 1, message: "from-line altered bytes with no trailing newline"] }
+
+# Capturing an external strips exactly one terminator, CRLF counting as one;
+# a lone CR is text
+let c1 = printf 'a\r\n\r\n'
+if $[not !{equal $c1 "a\r\n"}] { fail [status: 1, message: "capture did not strip exactly one CRLF"] }
+let c2 = printf 'a\r'
+if $[not !{equal $c2 "a\r"}] { fail [status: 1, message: "capture stripped a lone CR"] }
 
 # Here-string: `<< str` feeds the string to stdin; one newline at the
 # very front of the value is dropped so the body starts below the command

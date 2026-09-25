@@ -10,6 +10,6 @@ let [root] = $ARGS
 let files = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}
 
 for $files { |f|
-    let hits = filter { |e| return !{re-match 'TODO|FIXME' $e[item]} } !{enumerate !{from-lines-list $f}}
+    let hits = filter { |e| return !{re-match 'TODO|FIXME' $e[item]} } !{enumerate !{from-lines < $f}}
     for $hits { |e| echo "$f:$[$e[index] + 1]: $e[item]" }
 }

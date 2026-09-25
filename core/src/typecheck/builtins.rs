@@ -442,8 +442,8 @@ pub(crate) fn fs_file_info_ty() -> Ty {
 pub mod scheme {
     use super::{
         CompTy, PayloadRoute, PayloadVar, Row, Scheme, Ty, TyEnv, TyVar, Unifier, await_record,
-        error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize, lines_step_ty,
-        mk_scheme, poll_variant, pure, ret_bytes, thunk,
+        error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize, mk_scheme,
+        poll_variant, pure, ret_bytes, thunk,
     };
 
     // ── List operations ──────────────────────────────────────────────────
@@ -603,7 +603,7 @@ pub mod scheme {
 
     scheme!(str_to_str: [Ty::String] -> Ty::String);
 
-    scheme!(shell_split: [Ty::String] -> Ty::List(Box::new(Ty::String)));
+    scheme!(str_to_strs: [Ty::String] -> Ty::List(Box::new(Ty::String)));
 
     scheme!(re_match: [Ty::String, Ty::String] -> Ty::Bool);
 
@@ -861,22 +861,12 @@ pub mod scheme {
 
     scheme!(from_bytes: pure Ty::Bytes);
     scheme!(from_string: pure Ty::String);
+    scheme!(from_lines: pure Ty::List(Box::new(Ty::String)));
 
     /// `from-json`/`from-csv` :: ∀α. F α — decode whatever the channel holds.
     pub fn from_json(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_scheme(&[av], &[], &[], thunk(pure(Ty::Var(av))))
-    }
-
-    /// `from-lines` :: F (Step of lines).
-    ///
-    /// The recursion closes through a comp var, which [`mk_scheme`] cannot
-    /// quantify (its `comp_ty_bindings` is always empty), so this goes
-    /// through [`generalize`] instead, exactly as the templates it replaces
-    /// did.
-    pub(crate) fn from_lines(u: &mut Unifier) -> Scheme {
-        let step = lines_step_ty(u);
-        generalize(u, &TyEnv::new(), &thunk(pure(step)))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────
@@ -897,8 +887,8 @@ pub mod scheme {
     ///
     /// The block's own computation type is unconstrained here (only its
     /// arity is checked elsewhere), so the comp var it mints must be
-    /// quantified through [`generalize`], not [`mk_scheme`], for the same
-    /// reason as [`from_lines`].
+    /// quantified through [`generalize`]: [`mk_scheme`] cannot quantify one,
+    /// its `comp_ty_bindings` being always empty.
     pub(crate) fn alias(u: &mut Unifier) -> Scheme {
         let block = u.fresh_comp_ty();
         let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
@@ -984,40 +974,6 @@ pub(crate) fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) 
 pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     let mut u = Unifier::new();
     Some(fmt_scheme(&(table.get(name)?.type_rule)(&mut u)))
-}
-
-/// The value `from-lines` returns, standalone from an [`Inferencer`] context:
-/// a recursive Step stream of Strings, the recursion closing through a comp
-/// var, not a `TyVar`.
-///
-/// # Panics
-///
-/// Never: the self-referential unification it performs is between a fresh
-/// comp var and the type built from it, which cannot fail.
-pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
-    use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-    let tail_comp = u.fresh_comp_ty();
-    let payload = Ty::Record(Row::Extend(
-        Label::Field(HEAD_FIELD.into()),
-        Field::present(Ty::String),
-        Box::new(Row::Extend(
-            Label::Field(TAIL_FIELD.into()),
-            Field::present(Ty::Thunk(Box::new(tail_comp.clone()))),
-            Box::new(Row::Empty),
-        )),
-    ));
-    let step = Ty::Variant(Row::Extend(
-        Label::Case(MORE_LABEL.into()),
-        Field::present(payload),
-        Box::new(Row::Extend(
-            Label::Case(DONE_LABEL.into()),
-            Field::present(Ty::Unit),
-            Box::new(Row::Empty),
-        )),
-    ));
-    u.unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()))
-        .expect("fresh self-referential unify cannot fail");
-    step
 }
 
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule

@@ -36,7 +36,6 @@ pub mod sandbox;
 pub mod serial;
 pub mod source;
 pub mod spawn_grant;
-pub(crate) mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
 pub mod sync;

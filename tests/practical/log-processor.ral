@@ -9,8 +9,7 @@ for $levels { |level|
 }
 
 # Read log file into list of lines
-let lines_stream = cat "$logdir/app.log" | from-lines
-let lines = !{stream-to-list $lines_stream}
+let lines = cat "$logdir/app.log" | from-lines
 let nlines = length $lines
 echo "total lines: $nlines"
 

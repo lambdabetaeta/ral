@@ -145,7 +145,6 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     if n == 0 {
         return Err(Error::new("ask: EOF", 1));
     }
-    let len = crate::io::str_strip_one_terminator(&line).len();
-    line.truncate(len);
+    line.truncate(line.len() - crate::io::terminator_len(line.as_bytes()));
     Ok(Value::string(line))
 }

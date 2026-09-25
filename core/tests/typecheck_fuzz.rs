@@ -192,7 +192,7 @@ fn scenarios() -> Vec<Scenario> {
         ),
         // ─── Pipeline shape: a stage must be ready to run ────────────────
         s(
-            "let s = !{stream-cons 1 { !{stream-nil} }}\n$s | !{ |e| return $[$e + 1] }",
+            "let s = `more [head: 1, tail: { `done }]\n$s | !{ |e| return $[$e + 1] }",
             "stage-still-waiting-for-its-argument",
         ),
         // ─── Nested error in nested function body ────────────────────────

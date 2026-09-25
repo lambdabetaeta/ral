@@ -104,19 +104,22 @@ fn external_only_pipeline_runs() {
 /// bytes via `from-lines` and returns a value-typed result; the
 /// pipeline's last stage is a ral helper, so the final value is
 /// transported through the helper's `ChildEvalResponse` frame, not through
-/// stdout.
+/// stdout.  `cmd` ends its lines with CRLF, which `from-lines` strips whole.
 #[test]
 fn external_to_helper_pipeline_returns_value() {
     let out = run(
         "win_pipeline_ext_to_ral",
         r#"
-        let s = !{ cmd /c "echo a& echo b& echo c" | from-lines }
-        let lines = !{ stream-to-list $s }
-        echo !{length $lines}
+        let lines = !{ cmd /c "echo a& echo b& echo c" | from-lines }
+        echo !{to-json $lines}
         "#,
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.trim().ends_with('3'), "stdout={}", out.stdout);
+    assert!(
+        out.stdout.trim().ends_with(r#"["a","b","c"]"#),
+        "stdout={}",
+        out.stdout
+    );
 }
 
 /// ral helper → external byte pipeline.  The helper writes bytes to

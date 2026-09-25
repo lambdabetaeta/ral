@@ -5,5 +5,5 @@
 # so lines match unsorted and the first file's order is preserved.
 
 let [a, b] = $ARGS
-let bs = from-lines-list $b
-for !{from-lines-list $a} { |l| if !{contains $bs $l} { echo $l } }
+let bs = from-lines < $b
+for !{from-lines < $a} { |l| if !{contains $bs $l} { echo $l } }

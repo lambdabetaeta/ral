@@ -7,7 +7,7 @@
 let [pat, n, path] = $ARGS
 let radius = int $n
 
-let indexed = enumerate !{from-lines-list $path}
+let indexed = enumerate !{from-lines < $path}
 let hits = filter { |e| re-match $pat $e[item] } $indexed
 
 for $hits { |h|

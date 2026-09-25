@@ -306,7 +306,7 @@ fn live_binding_scheme_matches_baked_entry() {
         .iter()
         .map(|(n, s)| (n.as_str(), fmt_scheme(s)))
         .collect();
-    for name in ["lines", "reverse"] {
+    for name in ["words", "reverse"] {
         let live = scheme_of(&sh, name).unwrap_or_else(|| {
             panic!("prelude binding {name:?} must be bound on the live scope and carry a scheme")
         });

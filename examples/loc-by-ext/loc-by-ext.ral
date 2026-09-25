@@ -8,7 +8,7 @@
 let [root] = $ARGS
 
 let nonblank = { |p|
-    length !{filter { |l| return !{re-match '\S' $l} } !{from-lines-list $p}}
+    length !{filter { |l| return !{re-match '\S' $l} } !{from-lines < $p}}
 }
 
 let files  = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}

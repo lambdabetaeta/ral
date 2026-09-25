@@ -247,7 +247,7 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
     // an empty result rather than blocking on cat's read.
     let o = run_with_timeout(
         &[],
-        "let s = !{cat | from-lines}; let xs = !{stream-to-list $s}; echo done; echo !{length $xs}",
+        "let xs = !{cat | from-lines}; echo done; echo !{length $xs}",
         Duration::from_secs(5),
     )
     .expect("mixed-pipeline first external stage hung — likely inherited stdin");
@@ -257,11 +257,16 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
 
 #[test]
 fn deep_stream_returns_from_a_final_stage() {
-    // A stream is one closure per line, returned from the final stage's
-    // thread.  Two thousand lines must cross and then drop without
+    // A user-built lazy list is one closure per link, returned from the final
+    // stage's thread.  Two thousand links must cross and then drop without
     // exhausting either thread's stack.  (Regression: the encoder recursed
-    // per link, so the stage died once `from-lines` saw a few hundred lines.)
-    let o = run("let s = !{seq 1 2000 | from-lines}; echo done");
+    // per link, so the stage died a few hundred links in.)
+    let o = run(
+        "let chain = { |xs| if !{is-empty $xs} { `done } else { \
+             let [x, ...rest] = $xs; let tail = !{chain $rest}; \
+             `more [head: $x, tail: { $tail }] } }\n\
+         let s = !{seq 1 2000 | !{ chain !{from-lines} }}; echo done",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
 }
@@ -1086,29 +1091,27 @@ echo $n"#,
     assert_eq!(o.stdout.trim(), "3");
 }
 
-// ── Step decode + materialisation over byte pipelines ─────────────────────────
+// ── Line decode over byte pipelines ───────────────────────────────────────────
 
 #[test]
-fn internal_decode_to_step_then_list() {
-    // ext → from-lines (internal Step decode) → stream-to-list materialisation.
-    let o = run(r#"let s = !{/bin/echo -e "a
+fn internal_decode_to_a_list() {
+    // ext → from-lines (internal decode) → list.
+    let o = run(r#"let result = !{/bin/echo -e "a
 b
 c" | from-lines}
-let result = !{stream-to-list $s}
 echo !{length $result}"#);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
 }
 
 #[test]
-fn from_lines_step_materialisation_matches_roundtrip() {
-    // Materialising `from-lines` to a list should agree with a line count
-    // computed via `fold-lines` on the same byte-producing command.
+fn from_lines_agrees_with_fold_lines() {
+    // `from-lines`' list should agree with a line count computed via
+    // `fold-lines` on the same byte-producing command.
     //
     // Running inside the ral process's working directory (workspace root).
     let o = run(r#"
-let s_direct = find . -name "*.rs" -not -path "./target/*" | from-lines
-let direct = !{stream-to-list $s_direct}
+let direct = find . -name "*.rs" -not -path "./target/*" | from-lines
 let n = !{find . -name "*.rs" -not -path "./target/*" | fold-lines { |acc _| return $[$acc + 1] } 0}
 echo !{length $direct}
 echo $n
@@ -1118,7 +1121,7 @@ echo $n
     assert_eq!(lines.len(), 2, "expected two count lines, got: {lines:?}");
     assert_eq!(
         lines[0], lines[1],
-        "direct len {} != via_map len {}",
+        "from-lines length {} != fold-lines count {}",
         lines[0], lines[1]
     );
     let count: usize = lines[0].parse().expect("count");
@@ -1229,7 +1232,7 @@ fn grant_fs_capture_returns_output() {
         return;
     }
     let o = run(
-        "let xv = grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; stream-to-list $s }; echo $xv[0]",
+        "let xv = grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo captured | from-lines }; echo $xv[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "captured");
@@ -1271,9 +1274,8 @@ fn grant_fs_pipeline_stdin_forwarded() {
     if !sandbox_functional() {
         return;
     }
-    let o = run(
-        "let xv = /bin/echo piped | grant [fs: [read: ['/tmp']]] { let s = !{from-lines}; stream-to-list $s }; echo $xv[0]",
-    );
+    let o =
+        run("let xv = /bin/echo piped | grant [fs: [read: ['/tmp']]] { from-lines }; echo $xv[0]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "piped");
 }

@@ -917,7 +917,7 @@ mod tests {
     /// Encoding walks the chain as a queue, so a quarter-megabyte stack
     /// encodes fifty thousand links.  (Regression: `intern_env` and
     /// `from_runtime` recursed into each other once per link, and a helper
-    /// stage died on a few hundred lines of `from-lines`.)
+    /// stage died on a lazy list a few hundred closures long.)
     #[test]
     fn deep_stream_chain_encodes_on_a_small_stack() {
         std::thread::Builder::new()

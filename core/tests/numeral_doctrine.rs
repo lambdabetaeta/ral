@@ -170,8 +170,8 @@ fn the_reading_does_not_depend_on_the_position() {
     );
     assert_eq!(printed("to-line 1.50"), "1.5\n");
     assert_eq!(printed("to-string 3.0"), "3.0");
-    assert_eq!(printed("to-lines [3.0, 1.50, .5]"), "3.0\n1.5\n0.5");
-    assert_eq!(printed("to-lines [007, +5, -0]"), "7\n5\n0");
+    assert_eq!(printed("to-lines [3.0, 1.50, .5]"), "3.0\n1.5\n0.5\n");
+    assert_eq!(printed("to-lines [007, +5, -0]"), "7\n5\n0\n");
     assert_eq!(printed("to-json [rate: 3.0]"), "{\"rate\":3.0}");
     assert_eq!(printed("to-csv [[rate: 1.50]]"), "rate\n1.5\n");
 }

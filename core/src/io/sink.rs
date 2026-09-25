@@ -328,26 +328,17 @@ pub(crate) fn peek_buffer(buf: &ByteBuffer) -> Vec<u8> {
     buf.bytes.lock_ignore_poison().clone()
 }
 
-/// Drop one trailing line terminator, as POSIX `$()` does, so `let x = echo hi`
-/// binds `"hi"`.  `\r\n` counts as one: Windows tools emit CRLF, and a surviving
-/// `\r` would send the cursor to column 0 wherever the value is interpolated.  A
-/// lone `\r` is content and stays.  Safe on undecoded bytes — neither appears
-/// mid-codepoint.
-pub(crate) fn strip_trailing_newline(buf: &mut Vec<u8>) {
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-        if buf.last() == Some(&b'\r') {
-            buf.pop();
-        }
+/// Length of the line terminator ending `bytes`: 2 for `\r\n`, 1 for `\n`,
+/// else 0.  The one line rule, cut by every line reader and by capture,
+/// `from-line` and `ask`: CRLF is one terminator, since a surviving `\r` would
+/// send the cursor to column 0 wherever the text is interpolated, and a lone
+/// `\r` is text.  Safe on undecoded bytes — neither appears mid-codepoint.
+pub(crate) fn terminator_len(bytes: &[u8]) -> usize {
+    match bytes {
+        [.., b'\r', b'\n'] => 2,
+        [.., b'\n'] => 1,
+        _ => 0,
     }
-}
-
-/// String peer of [`strip_trailing_newline`], for `from-line` and `ask`.  The
-/// test below pins the two to one CRLF/LF/lone-CR rule so they cannot drift.
-pub(crate) fn str_strip_one_terminator(s: &str) -> &str {
-    s.strip_suffix("\r\n")
-        .or_else(|| s.strip_suffix('\n'))
-        .unwrap_or(s)
 }
 
 /// Append under `SINK_BUFFER_CAP`, emitting the truncation marker once at the
@@ -416,11 +407,11 @@ impl Write for Sink {
             } => {
                 pending.extend_from_slice(bytes);
                 while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                    let line = &pending[..pos];
+                    let line = &pending[..=pos];
                     surface_line(
                         deferred.as_deref(),
                         label,
-                        line.strip_suffix(b"\r").unwrap_or(line),
+                        &line[..line.len() - terminator_len(line)],
                     );
                     pending.drain(..=pos);
                 }
@@ -452,60 +443,32 @@ impl Write for Sink {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{Edge, Sink, str_strip_one_terminator, strip_trailing_newline};
+    use super::{Edge, Sink, terminator_len};
     use crate::process::Wake;
 
-    fn strip(input: &[u8]) -> Vec<u8> {
-        let mut buf = input.to_vec();
-        strip_trailing_newline(&mut buf);
-        buf
-    }
-
-    /// Pins the two implementations of the one terminator rule together.
     #[test]
-    fn str_peer_agrees_with_byte_version() {
-        for case in ["hi\n", "hi\r\n", "hi", "", "hi\r", "hi\n\n", "hi\r\n\r\n"] {
+    fn terminator_len_is_the_one_line_rule() {
+        let cases: [(&[u8], usize); 11] = [
+            (b"", 0),
+            (b"hi", 0),
+            (b"hi\n", 1),
+            (b"\n", 1),
+            (b"hi\r\n", 2),
+            (b"\r\n", 2),
+            (b"hi\r", 0),
+            (b"\r", 0),
+            (b"hi\r\r\n", 2),
+            (b"hi\n\n", 1),
+            (b"hi\r\n\r\n", 2),
+        ];
+        for (input, len) in cases {
             assert_eq!(
-                str_strip_one_terminator(case).as_bytes(),
-                strip(case.as_bytes()).as_slice(),
-                "disagreement on {case:?}",
+                terminator_len(input),
+                len,
+                "on b\"{}\"",
+                input.escape_ascii()
             );
         }
-    }
-
-    #[test]
-    fn strips_lf() {
-        assert_eq!(strip(b"hi\n"), b"hi");
-    }
-
-    #[test]
-    fn strips_crlf() {
-        assert_eq!(strip(b"hi\r\n"), b"hi");
-    }
-
-    #[test]
-    fn no_terminator_is_noop() {
-        assert_eq!(strip(b"hi"), b"hi");
-    }
-
-    #[test]
-    fn empty_is_noop() {
-        assert_eq!(strip(b""), b"");
-    }
-
-    #[test]
-    fn lone_cr_preserved() {
-        assert_eq!(strip(b"hi\r"), b"hi\r");
-    }
-
-    #[test]
-    fn strips_exactly_one_lf() {
-        assert_eq!(strip(b"hi\n\n"), b"hi\n");
-    }
-
-    #[test]
-    fn strips_exactly_one_crlf() {
-        assert_eq!(strip(b"hi\r\n\r\n"), b"hi\r\n");
     }
 
     #[test]

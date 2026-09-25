@@ -321,7 +321,7 @@ fn from_json_refuses_u64_beyond_i64() {
     expect_error("to-string '18446744073709551615' | from-json", "from-json");
 }
 
-// ── B11 — prelude `lines`/`words` strip leading/trailing empties ──────────
+// ── B11 — prelude `words` yields no empties ───────────────────────────────
 
 /// Run `source` expecting a `List` of `String`s; collect them.
 fn string_list(source: &str) -> Vec<String> {
@@ -344,17 +344,6 @@ fn words_strips_leading_and_trailing_empties() {
         string_list("return !{words ' hello world '}"),
         ["hello", "world"]
     );
-}
-
-#[test]
-fn lines_strips_trailing_empty() {
-    assert_eq!(string_list("return !{lines \"a\nb\n\"}"), ["a", "b"]);
-}
-
-#[test]
-fn lines_keeps_interior_blank() {
-    // Only the leading/trailing empties go; an interior blank line is real.
-    assert_eq!(string_list("return !{lines \"a\n\nb\"}"), ["a", "", "b"]);
 }
 
 // ── follow-up to the 260811 decode-captured panic ──────────────────────────

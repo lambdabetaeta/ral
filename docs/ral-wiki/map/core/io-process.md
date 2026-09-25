@@ -1,18 +1,17 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
-covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
+generated_at_commit: c56db236
+generated_at_date: 2026-09-25
+covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
-# Map: core / IO, process & stream
+# Map: core / IO & process
 
 The byte plumbing under the [[map/core/evaluator|evaluator]]'s pipelines and
 external commands: where a stage's bytes come from and go, the signals and
-process groups that govern a foreground child, the daemon that fires every
-scheduled action, and the labels the lazy Stream protocol shares with the type
-system. **Authority over the controlling terminal is carried as a value, not
-re-derived from process state** — the foreground handoff is gated on a held
-[[map/core/shell-state|TerminalLease]].
+process groups that govern a foreground child, and the daemon that fires every
+scheduled action. **Authority over the controlling terminal is carried as a
+value, not re-derived from process state** — the foreground handoff is gated on
+a held [[map/core/shell-state|TerminalLease]].
 
 ## IO — `core/src/io/`
 
@@ -301,11 +300,3 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 Spawning an external command is capability-gated; that gate lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that
 drives this plumbing in [[map/core/runtime|runtime]].
-
-## Stream — `core/src/stream.rs`
-
-Shared label vocabulary for the lazy Stream protocol: runtime variant labels
-`more` / `done` and the `head` / `tail` payload fields, with the type-row
-spellings (`` `more `` / `` `done ``) kept beside them so runtime and
-[[map/core/typecheck|typechecker]] recognition cannot drift. `docs/SPEC.md` §14.5
-covers Stream semantics.

@@ -126,121 +126,63 @@ fn case_arm_returning_a_bool_exits_zero() {
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
 }
 
-// ─── Stream (demand-driven streams, Stream) ────────────────────────────────────
+// ─── User-built lazy lists: recursive variants with thunked tails ─────────────
 
-#[test]
-fn stream_to_list_finite() {
-    let out = common::run(
-        "step_finite",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\necho !{stream-to-list $s}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "[1, 2, 3]");
+/// A lazy list whose tail is a thunk, so a producer runs only as far as
+/// demand reaches.  Its type is equi-recursive, closing through the thunk.
+const LAZY_LIST: &str = "\
+let cons = { |head tail| `more [head: $head, tail: $tail] }
+let take-lazy = { |n s|
+    if $[$n <= 0] { `done } else {
+        case $s [
+            `more: { |p| cons $p[head] { !{take-lazy $[$n - 1] !$p[tail]} } },
+            `done: { |_| `done }
+        ]
+    }
 }
-
-#[test]
-fn stream_take_from_finite_source() {
-    let out = common::run(
-        "step_take",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-cons 4 { !{stream-nil} } } } } } } }}\nlet t = !{stream-take 2 $s}\necho !{stream-to-list $t}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "[1, 2]");
+let to-list = { |s|
+    case $s [
+        `more: { |p|
+            let rest = !{to-list !$p[tail]}
+            [$p[head], ...$rest]
+        },
+        `done: { |_| [] }
+    ]
 }
+";
 
 #[test]
-fn stream_take_terminates_on_infinite_producer() {
-    // The canonical demand-driven test: a self-recursive `nats` produces
-    // 0, 1, 2, … indefinitely; `stream-take 5` cuts the chain short by
-    // never forcing the sixth tail thunk.  Phase C's equi-recursive
-    // comp types are what let `nats` typecheck; Stream's combinators
-    // make the laziness effective at runtime.
-    let out = common::run(
-        "step_lazy",
-        "let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nlet t = !{stream-take 5 !{nats 0}}\necho !{stream-to-list $t}\n",
-    );
+fn take_terminates_on_an_infinite_producer() {
+    // `nats` never ends; `take-lazy 5` never forces the sixth tail thunk.
+    let script = [
+        LAZY_LIST,
+        "let nats = { |n| cons $n { !{nats $[$n + 1]} } }\n\
+         echo !{to-list !{take-lazy 5 !{nats 0}}}\n",
+    ]
+    .concat();
+    let out = common::run("lazy_take", &script);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "[0, 1, 2, 3, 4]");
 }
 
 #[test]
-fn stream_fold_sums() {
-    let out = common::run(
-        "step_fold",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\necho !{stream-fold { |acc x| return $[$acc + $x] } 0 $s}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "6");
-}
-
-#[test]
-fn stream_map_doubles_each_element() {
-    let out = common::run(
-        "step_map",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\nlet m = !{stream-map { |x| return $[$x * 2] } $s}\necho !{stream-to-list $m}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "[2, 4, 6]");
-}
-
-// ─── Stream pipeline integration (Stream.3/4) ──────────────────────────────────
-
-#[test]
-fn stream_value_passed_to_stream_each_runs_per_element() {
-    // Stream elimination is ordinary application, not a value-pipeline edge.
-    let out = common::run(
-        "step_pipe_finite",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\nstream-each { |x| echo \"got $x\" } $s\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "got 1\ngot 2\ngot 3");
-}
-
-#[test]
-fn stream_each_terminates_on_infinite_producer_with_take() {
-    // Lazy producer + take + explicit eliminator.  `stream-each` is the
-    // driver; the producer suspends in unforced tail thunks past the
-    // take cut.
-    let out = common::run(
-        "step_pipe_lazy",
-        "let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nstream-each { |x| echo $x } !{stream-take 5 !{nats 0}}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "0\n1\n2\n3\n4");
-}
-
-#[test]
 fn polymorphic_recursive_scheme_instantiates_independently() {
-    // Two distinct streams (Int and String) compose with the same
-    // combinators.  Without per-instantiation fresh comp roots, the
-    // first call's element type would leak into the second's.  Phase
-    // C's Scheme.comp_ty_vars + comp_ty_bindings ensures each call
-    // mints a fresh union-find slot for the cyclic root and the free
-    // input root, so these unify independently.
-    let out = common::run(
-        "polymorphic_step",
-        "let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\n\
-         let chars = { |c| stream-cons $c { !{chars $c} } }\n\
-         let n3 = !{stream-take 3 !{nats 0}}\n\
-         echo !{stream-to-list $n3}\n\
-         let c3 = !{stream-take 3 !{chars 'x'}}\n\
-         echo !{stream-to-list $c3}\n",
-    );
+    // An Int producer and a String one share the combinators: each call mints
+    // fresh comp roots, so the first element type cannot leak into the second.
+    let script = [
+        LAZY_LIST,
+        "let nats = { |n| cons $n { !{nats $[$n + 1]} } }\n\
+         let chars = { |c| cons $c { !{chars $c} } }\n\
+         echo !{to-list !{take-lazy 3 !{nats 0}}}\n\
+         echo !{to-list !{take-lazy 3 !{chars 'x'}}}\n",
+    ]
+    .concat();
+    let out = common::run("lazy_polymorphic", &script);
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "[0, 1, 2]\n[x, x, x]");
 }
 
-#[test]
-fn stream_each_on_empty_stream_runs_body_zero_times() {
-    // `done short-circuits inside `stream-each`.  The body never sees an
-    // element.
-    let out = common::run(
-        "step_pipe_empty",
-        "stream-each { |_x| echo should-not-print } !{stream-nil}\necho after\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "after");
-}
+// ─── Variants at a pipeline edge ──────────────────────────────────────────────
 
 #[test]
 fn a_variant_piped_into_a_block_goes_nowhere() {
@@ -260,8 +202,8 @@ fn a_variant_piped_into_a_block_goes_nowhere() {
     );
 }
 
-/// The same, for a `done`-labelled variant: the stream vocabulary earns no
-/// special treatment at an edge, because no value reaches one.
+/// The same, for a `done`-labelled variant: no label earns special treatment
+/// at an edge, because no value reaches one.
 #[test]
 fn a_done_labelled_variant_piped_into_a_block_goes_nowhere() {
     let out = common::run(
@@ -274,16 +216,4 @@ fn a_done_labelled_variant_piped_into_a_block_goes_nowhere() {
         "a returned thunk must never run: {}",
         out.stdout
     );
-}
-
-#[test]
-fn from_lines_stream_consumed_by_stream_each() {
-    // `from-lines` is a decoder tail; consume its returned stream with an
-    // ordinary application.
-    let out = common::run(
-        "from_lines_inline_consumer",
-        "let lines = !{echo \"a\nb\nc\" | from-lines}\nstream-each { |line| echo \"L: $line\" } $lines\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "L: a\nL: b\nL: c");
 }

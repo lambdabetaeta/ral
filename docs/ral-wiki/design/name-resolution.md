@@ -39,8 +39,9 @@ under that spelling. From most reserved to most peripheral:
   exarch's command list — hides them, though `explain` still answers for one
   named exactly.
 - **Prelude functions** — ordinary ral bindings in scope before user code,
-  wrapping the layers below for convenience (`for` calls `each`, `lines` splits on
-  `\n`). They curry and shadow like any binding (`docs/SPEC.md` §14).
+  wrapping the layers below for convenience (`for` calls `each`, `map-lines`
+  folds with `fold-lines`). They curry and shadow like any binding
+  (`docs/SPEC.md` §14).
 - **Bundled coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, … : Rust, in-process, but
   *not* registry entries. The [[map/core/runtime|runtime command layer]]
   dispatches a bare invocation through `coreutils_invoke`, riding the same

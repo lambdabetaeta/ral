@@ -7,6 +7,6 @@
 
 let [path] = $ARGS
 
-let kept = filter { |l| re-match '^\s*[^#\s]' $l } !{from-lines-list $path}
+let kept = filter { |l| re-match '^\s*[^#\s]' $l } !{from-lines < $path}
 
 for $kept { |l| echo $l }

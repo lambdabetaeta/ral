@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
+generated_at_commit: c56db236
+generated_at_date: 2026-09-25
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -93,8 +93,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 
 - [[map/core/capabilities|capabilities]] — the dynamic capability stack and the OS process
   sandbox (`core/src/capability/`, `core/src/sandbox/`).
-- [[map/core/io-process|io-process]] — byte streams, signals, process groups, the Stream
-  protocol (`core/src/io/`, `core/src/process/`, `core/src/stream.rs`).
+- [[map/core/io-process|io-process]] — byte streams, signals, process groups
+  (`core/src/io/`, `core/src/process/`).
 - [[map/core/builtins|builtins]] — Rust-implemented commands and bundled coreutils/grep
   (`core/src/builtins/`).
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state

@@ -1492,7 +1492,7 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-bytes` | `Bytes` | Preserves every byte. |
 | `from-string` | `String` | Requires valid UTF-8. |
 | `from-line` | `String` | Requires valid UTF-8 and removes one final `LF` or `CRLF`. |
-| `from-lines` | `Stream String` | Splits lines and replaces invalid UTF-8 with the replacement character. It currently reads to end of input before returning the stream. |
+| `from-lines` | `[String]` | Splits by the line rule below and replaces invalid UTF-8 in each line with the replacement character. |
 | `from-json` | a ral value | Requires valid UTF-8 and JSON. JSON `null` becomes `Unit`. |
 | `from-csv` | a list of records | Uses the header row as record keys. Fields are strings; duplicate headers are rejected. |
 
@@ -1520,7 +1520,7 @@ An encoder takes its value as an ordinary argument and writes bytes:
 | `ints-to-bytes` | a list of integers from 0 through 255 | The bytes they number. |
 | `to-string` | any value | Its ral textual form. |
 | `to-line` | any value | Its textual form followed by a newline. |
-| `to-lines` | a list of values | Textual forms separated by newlines, with no final newline. |
+| `to-lines` | a list of values | Each element's textual form followed by a newline. |
 | `to-json` | a JSON-representable value | UTF-8 JSON. `Bytes` become an array of integers; variants become tagged objects. |
 | `to-csv` | records accepted by the CSV codec | UTF-8 CSV. |
 
@@ -1529,6 +1529,42 @@ An encoder takes its value as an ordinary argument and writes bytes:
 ```ral
 to-string $json_text | from-json
 ```
+#### Lines
+
+One rule says where a line ends:
+
+- A line terminator is `LF` or `CRLF`. The `CR` of a `CRLF` belongs to the
+  terminator, and only that one `CR` does.
+- A lone `CR` is ordinary text, never a terminator, whether mid-line or at the
+  end of input.
+- The final line need not be terminated.
+- Each line strips its own terminator, so mixed endings are fine.
+
+| Input, as a ral string | Lines |
+|---|---|
+| `""` | `[]` |
+| `"a"` | `["a"]` |
+| `"a\n"` | `["a"]` |
+| `"\n"` | `[""]` |
+| `"a\n\n"` | `["a", ""]` |
+| `"\n\na"` | `["", "", "a"]` |
+| `"a\r\nb\nc\r\n"` | `["a", "b", "c"]` |
+| `"a\r\n\r\nb"` | `["a", "", "b"]` |
+| `"a\rb\n"` | `["a\rb"]` |
+| `"a\r"` | `["a\r"]` |
+| `"a\r\r\n"` | `["a\r"]` |
+
+Every line reader splits by this rule — `from-lines`, `fold-lines`, and the
+prelude's `map-lines`, `filter-lines`, `each-line`, and `line-count` — as does
+`lines` on a string. Capture (§7.2), `from-line`, and `ask` do not split: they
+remove at most one terminator from the end of what they read, so `"a\r\n\r\n"`
+becomes `"a\r\n"` and `"a\r"` stays `"a\r"`.
+
+ral writes `LF` alone: `to-line`, `to-lines`, and `echo` never write `CRLF`.
+`to-lines` terminates every element, so `to-lines []` writes nothing,
+`to-lines [""]` writes one `LF`, and `from-lines` inverts `to-lines` on every
+list of strings in which no element contains `LF` or ends with `CR`.
+
 
 ### 7.4. Redirects
 
@@ -3573,8 +3609,9 @@ be re-lexed automatically.
 `floor`, `ceil`, and `trunc` accept a finite, in-range `Float` and return an
 `Int`; an `Int` is already integral and is rejected at the type level.
 
-The prelude adds `lines`, `words`, `from-words`, `indent`, `repeat`,
-`pad-left`, and `pad-right`. It also supplies `styled`,
+`lines` splits a string by the line rule of §7.3. The prelude adds `words`,
+`from-words`, `indent`, `repeat`, `pad-left`, and `pad-right`.
+It also supplies `styled`,
 ral's whole public ANSI surface: `styled style text` wraps `text` in the
 escape code named by `style` — `reset`, `bold`, `dim`, or one of `red green
 yellow blue magenta cyan` — and resets after; black, white, underline,
@@ -3614,18 +3651,18 @@ as though nothing were there. `is-file`, `is-dir`, `is-readable`, and
 `is-writable` instead resolve through the link, so a dangling link answers
 `false` to each of them.
 
-The prelude adds `file-empty`, `line-count`, `from-lines-list`, and
-`extension`, the Option-valued extension of a path's last component: a
-dotfile such as `.bashrc` has none.
-`from-lines-list` refuses files larger than 10 MiB because it materialises the
-whole result. For bounded-memory processing, redirect the file into
-`fold-lines`, `map-lines`, `filter-lines`, or `each-line`.
+The prelude adds `file-empty`, `line-count`, and `extension`, the
+Option-valued extension of a path's last component: a dotfile such as
+`.bashrc` has none. `line-count` counts a file's lines by the line rule of
+§7.3, in bounded memory. `from-lines < $path` reads a file's lines as a list;
+for bounded-memory processing, redirect the file into `fold-lines`,
+`map-lines`, `filter-lines`, or `each-line`.
 
 Filesystem mutations deliberately use command-shaped tools such as `cp`, `mv`,
 `rm`, `mkdir`, and `ln`. They are effects with byte-oriented command
 interfaces, not duplicate structured builtins.
 
-### 14.5. Bytes, text, and streams
+### 14.5. Bytes, text, and lines
 
 The codec families are the named boundary between values and bytes:
 
@@ -3642,9 +3679,9 @@ UTF-8, newline, JSON, CSV, and capture rules are specified with pipelines and
 input/output.
 
 `fold-lines` is the bounded-memory primitive for a byte pipe of UTF-8 lines. It
-removes each line terminator, calls `fn accumulator line`, and returns the final
-accumulator. It does not first build a list, though the accumulator and callback
-may of course retain data themselves.
+splits by the line rule of §7.3, calls `fn accumulator line`, and returns the
+final accumulator. It does not first build a list, though the accumulator and
+callback may of course retain data themselves.
 
 The prelude builds three bounded-memory filters on that primitive:
 
@@ -3659,14 +3696,9 @@ Use them with a byte pipe or redirect, for example
 `map-lines $clean < input.txt`. Calling a line reader with terminal stdin and
 no pipe or redirect is an error rather than an interactive prompt.
 
-The prelude also provides the value-stream constructors and consumers
-`stream-cons`, `stream-nil`, `stream-take`, `stream-drop`, `stream-map`,
-`stream-fold`, `stream-each`, and `stream-to-list`.
-
-`from-lines` and `from-jsonl` currently read their complete byte input before
-returning their stream value. Their later transformations may be lazy, but the
-initial read is not a bounded-memory operation. `to-jsonl` writes one compact
-JSON value per line.
+`from-lines` and the prelude's `from-jsonl` are decoders like the rest: they
+read to end of input and return a list, of the lines and of each line decoded
+as JSON respectively. `to-jsonl` writes one compact JSON value per line.
 
 ### 14.6. Failure, session control, and concurrency
 

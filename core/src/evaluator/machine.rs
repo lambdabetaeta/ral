@@ -655,7 +655,7 @@ impl Machine {
                     ));
                 };
                 let mut bytes = bytes.into_vec();
-                io::strip_trailing_newline(&mut bytes);
+                bytes.truncate(bytes.len() - io::terminator_len(&bytes));
                 Focus::Return(Terminal::Value(Value::string(
                     crate::builtins::util::decode_utf8_strict(
                         bytes,

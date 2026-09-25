@@ -5,8 +5,8 @@
 # `length` of a filtered list; no exit status ever enters the reckoning.
 
 let [old, new] = $ARGS
-let olds = from-lines-list $old
-let news = from-lines-list $new
+let olds = from-lines < $old
+let news = from-lines < $new
 
 let added   = filter { |l| $[not !{contains $olds $l}] } $news
 let removed = filter { |l| $[not !{contains $news $l}] } $olds

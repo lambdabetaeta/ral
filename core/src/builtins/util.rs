@@ -307,9 +307,27 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
     Ok(Box::new(std::io::stdin().lock()))
 }
 
-/// The shell's stdin a line at a time through [`stdin_reader`], each stripped
-/// by [`crate::io::strip_trailing_newline`] and left undecoded: decoding is
-/// each caller's policy.
+/// The one line reader: `reader` a line at a time, each stripped of its
+/// [`crate::io::terminator_len`] and left undecoded, since decoding is each
+/// caller's policy.  The final line need not be terminated.
+pub(crate) fn read_lines<R: std::io::BufRead>(
+    name: &'static str,
+    mut reader: R,
+) -> impl Iterator<Item = Settled<Vec<u8>>> {
+    std::iter::from_fn(move || {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                line.truncate(line.len() - crate::io::terminator_len(&line));
+                Some(Ok(line))
+            }
+            Err(e) => Some(Err(sig(format!("{name}: {e}")))),
+        }
+    })
+}
+
+/// [`read_lines`] over the shell's stdin, through [`stdin_reader`].
 ///
 /// # Errors
 /// Returns `Err` if stdin cannot be resolved; each item, if its read fails.
@@ -317,18 +335,24 @@ pub(crate) fn stdin_lines(
     name: &'static str,
     shell: &Shell,
 ) -> Settled<impl Iterator<Item = Settled<Vec<u8>>> + use<>> {
-    let mut reader = stdin_reader(name, shell)?;
-    Ok(std::iter::from_fn(move || {
-        let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) => None,
-            Ok(_) => {
-                crate::io::strip_trailing_newline(&mut line);
-                Some(Ok(line))
-            }
-            Err(e) => Some(Err(sig(format!("{name}: {e}")))),
-        }
-    }))
+    Ok(read_lines(name, stdin_reader(name, shell)?))
+}
+
+/// [`read_lines`]' lines as a list of Strings, each decoded lossily so a line
+/// survives invalid bytes.  Decoded per line, the text is never held whole;
+/// no invalid sequence spans a `\n`, so the result is the same.
+///
+/// # Errors
+/// The first failed read.
+pub(crate) fn lossy_line_list(lines: impl Iterator<Item = Settled<Vec<u8>>>) -> Settled<Value> {
+    let lines = lines
+        .map(|line| {
+            let line = String::from_utf8(line?)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            Ok(Value::string(line))
+        })
+        .collect::<Settled<Vec<_>>>()?;
+    Ok(Value::list(lines))
 }
 
 /// Dig the cause line out of the regex crate's multi-line parse error.

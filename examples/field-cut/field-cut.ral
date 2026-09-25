@@ -7,7 +7,7 @@
 let [path, delim, ...cols] = $ARGS
 let idxs = map { |c| return $[!{int $c} - 1] } $cols
 
-for !{from-lines-list $path} { |line|
+for !{from-lines < $path} { |line|
     let cells = re-split $delim $line
     echo !{intercalate $delim !{map { |i| return $cells[$i] } $idxs}}
 }

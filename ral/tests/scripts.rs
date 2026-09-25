@@ -25,8 +25,8 @@ const GOLDEN_SKIP: &[&str] = &[
 ];
 
 /// Scripts whose regex builtins need the `grep` Cargo feature; skipped without
-/// it. Note the prelude's `lines`/`words` are `re-split`-backed, so any script
-/// using them is gated too (e.g. `stdlib` via `lines`).
+/// it. The prelude's `words` is `re-find-matches`-backed, so a script using it
+/// is gated too.
 #[cfg_attr(feature = "grep", allow(dead_code))]
 const GREP_GATED: &[&str] = &[
     "split-regex",

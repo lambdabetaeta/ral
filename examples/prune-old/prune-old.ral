@@ -5,7 +5,7 @@
 # every matched path is one String, passed to `rm` intact.
 
 let [root, days] = $ARGS
-let cutoff = $[!{int !{date +%s | from-line}} - !{int $days} * 86400]
+let cutoff = $[!{int !{date +%s}} - !{int $days} * 86400]
 
 let old = filter { |f|
     let m = !{file-info $f}[mtime]

@@ -380,14 +380,14 @@ mod tests {
     /// worth pinning are how a wrapped doc joins and where one stops.
     #[test]
     fn multiline_doc_summary_joins_first_paragraph() {
-        let lines_doc = prelude_doc("lines").expect("lines has a doc comment");
+        let doc = prelude_doc("extension").expect("extension has a doc comment");
         assert!(
-            lines_doc.starts_with("Split a string into lines"),
-            "summary starts at the first line, got {lines_doc:?}"
+            doc.starts_with("The extension of a path's last component"),
+            "summary starts at the first line, got {doc:?}"
         );
         assert!(
-            lines_doc.contains("matching `from-lines` and external capture"),
-            "the wrapped sentence is joined in full, got {lines_doc:?}"
+            doc.contains("`a.tar.gz` has `` `just 'gz'``, while"),
+            "the wrapped sentence is joined in full, got {doc:?}"
         );
     }
 

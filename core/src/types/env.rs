@@ -371,8 +371,8 @@ where
 mod tests {
     use super::*;
 
-    /// (Regression: drop glue recursed once per link, and a sixty-thousand
-    /// line stream aborted the process at teardown.)
+    /// (Regression: drop glue recursed once per link, and a sixty-thousand-link
+    /// lazy list aborted the process at teardown.)
     #[test]
     fn deep_closure_chain_drops_on_a_small_stack() {
         std::thread::Builder::new()

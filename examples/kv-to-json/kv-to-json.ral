@@ -7,7 +7,7 @@
 
 let [path] = $ARGS
 
-let lines = if !{is-file $path} { return !{from-lines-list $path} } else {
+let lines = if !{is-file $path} { return !{from-lines < $path} } else {
     fail [status: 1, message: "kv-to-json: !{$path}: not a file"]
 }
 

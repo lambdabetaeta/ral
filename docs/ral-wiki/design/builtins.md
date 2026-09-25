@@ -97,9 +97,8 @@ Nullary and divergent are shapes a scheme writes, not a second rule:
 - **Byte-routed** — every encoder returns `Return(Bytes, Unit)`: those bytes
   belong to whoever consumes the command as a value.
 
-Two schemes close a computation variable, which a written quantifier list
-cannot bind, so they generalise against the empty environment instead:
-`from-lines`, whose stream type recurses through its own tail, and `alias`,
+One scheme closes a computation variable, which a written quantifier list
+cannot bind, so it generalises against the empty environment instead: `alias`,
 whose block argument is a thunk over an unconstrained computation
 ([[invariants/schemes-leave-closed|schemes-leave-closed]]).
 

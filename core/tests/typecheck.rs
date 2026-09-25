@@ -873,7 +873,7 @@ fn a_block_literal_stage_returns_a_thunk_and_a_forced_one_runs() {
 /// stdin belongs to the stage the binder shares that stdin with.
 #[test]
 fn bound_reader_before_the_last_statement_is_byte_input() {
-    ok("echo foo | within [env: [X: 'y']] { let s = !{from-lines}; stream-to-list $s }");
+    ok("echo foo | within [env: [X: 'y']] { let s = !{from-lines}; length $s }");
 }
 
 /// A stage that ignores stdin is not thereby an error: the bytes are unread,
@@ -1154,21 +1154,22 @@ fn recursive_stream_producer_typechecks() {
     // comp types let the cycle CompVar ⟶ Fun(Int, F (Variant {`more:
     // {head: Int, tail: Thunk(CompVar)} | `done | row})) close in the
     // union-find without tripping an occurs check.
-    ok("let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nreturn ()");
+    ok("let nats = { |n| `more [head: $n, tail: { !{nats $[$n + 1]} }] }\nreturn ()");
 }
 
 #[test]
 fn stream_combinator_taking_value_unifies() {
-    // A stream `map` written to take a `Stream` *value* (`case $s`, recursing
-    // through `!$p[tail]`) is the same equi-recursive type as `from-lines`'
-    // producer — but anchored at a ty-var rather than a comp-var.  Unifying
+    // A stream `map` written to take a stream *value* (`case $s`, recursing
+    // through `!$p[tail]`) is the same equi-recursive type as the producer
+    // `count` — but anchored at a ty-var rather than a comp-var.  Unifying
     // the two terminates via one-sided co-inductive obligations, which
     // unify the two anchorings without overflowing the typechecker's stack.
     ok(
-        "let smap = { |f s| case $s [`more: { |p| stream-cons !{$f $p[head]} { !{smap $f !$p[tail]} } }, `done: { |_| stream-nil }] }\n\
-         let s = !{ from-lines }\n\
+        "let smap = { |f s| case $s [`more: { |p| `more [head: !{$f $p[head]}, tail: { !{smap $f !$p[tail]} }] }, `done: { |_| `done }] }\n\
+         let count = { |n| if $[$n <= 0] { `done } else { `more [head: $n, tail: { !{count $[$n - 1]} }] } }\n\
+         let s = !{ count 3 }\n\
          let mapped = !{ smap { |x| return $x } $s }\n\
-         echo !{ stream-to-list $mapped }",
+         ()",
     );
 }
 
@@ -1199,7 +1200,7 @@ fn a_stream_piped_whole_is_accepted_and_simply_discarded() {
     // A stream is a value, and a non-final stage's value goes nowhere.  The
     // program is silent rather than wrong — the footgun admitted in
     // exchange for a stage rule that reads types, not spellings.
-    ok("let s = !{stream-cons 1 { !{stream-nil} }}\n\
+    ok("let s = `more [head: 1, tail: { `done }]\n\
          $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }");
 }
 

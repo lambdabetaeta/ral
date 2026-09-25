@@ -89,20 +89,20 @@ fn explain_prints_local_bindings_generalised_scheme() {
 #[test]
 fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
     let mut sh = shell();
-    run(&mut sh, "let [lines, rest] = [1, 2]").unwrap();
+    run(&mut sh, "let [words, rest] = [1, 2]").unwrap();
     assert!(
-        has_scheme(&sh, "lines"),
+        has_scheme(&sh, "words"),
         "a destructured pattern component generalises its own scheme"
     );
 
-    let (result, out) = run_capture(&mut sh, "explain lines");
+    let (result, out) = run_capture(&mut sh, "explain words");
     result.unwrap();
     assert!(
-        out.contains("lines: local"),
+        out.contains("words: local"),
         "the local must answer, got:\n{out}"
     );
     assert!(
-        !out.contains("Split a string into lines"),
+        !out.contains("Unicode-whitespace-delimited words"),
         "the shadowed prelude doc must not answer, got:\n{out}"
     );
     assert!(

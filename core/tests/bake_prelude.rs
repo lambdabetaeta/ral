@@ -55,7 +55,7 @@ fn bake_returns_top_level_let_bindings() {
         !schemes.is_empty(),
         "expected the prelude's top-level lets to be visible after baking, got an empty Vec"
     );
-    for expected in ["lines", "words", "reverse", "for"] {
+    for expected in ["words", "reverse", "for"] {
         assert!(
             names.contains(expected),
             "expected baked prelude schemes to include {expected:?}, got {names:?}"
@@ -84,14 +84,15 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 /// verdicts on interior nodes, not just each phrase's own root.  The
 /// elaborator never emits a `Capture` node, so one below a phrase's root is
 /// proof the checked pass descended and inserted it — were the bake to embed
-/// the bare elaborated toplevel, none would exist anywhere in the tree.
-///
-/// The streaming reducers (`map-lines` / `filter-lines` / `each-line`) wrap
-/// an `echo`-per-line body, whose byte-payload bind RHS the bake wraps in
-/// `Capture`.
+/// the bare elaborated toplevel, none would exist anywhere in the tree.  A
+/// focused fixture binds an external's bytes as an argument.
 #[test]
-fn baked_prelude_carries_interior_captures() {
-    let (annotated, _) = rebake();
+fn bake_inserts_an_interior_capture() {
+    let ast = ral_core::syntax::parser::parse("let count = { |p| int !{wc -l < $p} }")
+        .expect("fixture parse");
+    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+        .expect("elaborate");
+    let (annotated, _) = ral_core::bake_prelude(&top);
     let mut capture = false;
     walk_toplevel(&annotated, &mut |c| {
         if let CompKind::Capture(_) = &c.item {
@@ -100,14 +101,13 @@ fn baked_prelude_carries_interior_captures() {
     });
     assert!(
         capture,
-        "a prelude bind must carry a Capture node — the bake's checked pass inserts it"
+        "a bound external must carry a Capture node — the bake's checked pass inserts it"
     );
 }
 
-/// The other interior annotation: a `Pipeline`'s yield.  The core
-/// prelude has no `|` pipeline of its own (the hashed `view` lives in
-/// exarch's `agent.ral`), so a focused fixture stands in — the bake path is
-/// identical, and the probe no longer hinges on incidental prelude content.
+/// The other interior annotation: a `Pipeline`'s yield.  A focused fixture
+/// stands in — the bake path is identical, and the probe does not hinge on
+/// incidental prelude content.
 #[test]
 fn bake_annotates_a_pipelines_yield() {
     use ral_core::ir::PipeYield;

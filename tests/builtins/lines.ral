@@ -1,0 +1,67 @@
+# Test: the one line rule.  A line ends at `\n` or `\r\n` (one `\r` belongs
+# to the terminator), the last line need not end, and a lone `\r` is text.
+# Every check is an assertion: the golden comparison ignores `\r`.
+
+let assert_eq = { |name expected actual|
+    if $[not !{equal $expected $actual}] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+let tmpdir = temp-dir
+let f = "$tmpdir/lines.txt"
+
+# Line readers: `lines`, `from-lines` on a pipe and on a file, and
+# `line-count` (through `fold-lines`) all split alike.
+let table = [
+    [text: "",              want: []],
+    [text: "a",             want: [a]],
+    [text: "a\n",           want: [a]],
+    [text: "\n",            want: [""]],
+    [text: "a\n\n",         want: [a, ""]],
+    [text: "\n\na",         want: ["", "", a]],
+    [text: "a\r\nb\nc\r\n", want: [a, b, c]],
+    [text: "a\r\n\r\nb",    want: [a, "", b]],
+    [text: "a\rb\n",        want: ["a\rb"]],
+    [text: "a\r",           want: ["a\r"]],
+    [text: "a\r\r\n",       want: ["a\r"]],
+]
+for $table { |row|
+    let shown = to-json $row[text]
+    assert_eq "lines $shown" $row[want] !{lines $row[text]}
+    assert_eq "from-lines $shown" $row[want] !{to-string $row[text] | from-lines}
+    to-string $row[text] > $f
+    assert_eq "from-lines < file $shown" $row[want] !{from-lines < $f}
+    assert_eq "line-count $shown" !{length $row[want]} !{line-count $f}
+}
+
+# Writers terminate every line with `\n`, so `from-lines` reads back what
+# `to-lines` wrote.
+assert_eq 'to-lines []' "" !{to-lines [] | from-string}
+assert_eq 'to-lines [""]' "\n" !{to-lines [""] | from-string}
+assert_eq 'to-lines [a, b]' "a\nb\n" !{to-lines [a, b] | from-string}
+for [[], [""], [a, ""], [a, b]] { |xs|
+    assert_eq "round trip !{to-json $xs}" $xs !{to-lines $xs | from-lines}
+}
+
+# Capture and `from-line` strip exactly one terminator.
+let one = [
+    [text: "a",          want: "a"],
+    [text: "a\n",        want: "a"],
+    [text: "a\r\n",      want: "a"],
+    [text: "a\n\n",      want: "a\n"],
+    [text: "a\r\n\r\n",  want: "a\r\n"],
+    [text: "a\r",        want: "a\r"],
+    [text: "a\r\r\n",    want: "a\r"],
+]
+for $one { |row|
+    let shown = to-json $row[text]
+    let captured = to-string $row[text]
+    assert_eq "capture $shown" $row[want] $captured
+    assert_eq "from-line $shown" $row[want] !{to-string $row[text] | from-line}
+}
+
+rm -rf $tmpdir
+
+echo 'lines tests done'

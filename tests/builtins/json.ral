@@ -27,4 +27,9 @@ rm -rf $tmpdir
 let m2 = !{to-string '{"ok": true, "val": null}' | from-json}
 echo $m2[ok]
 
+# JSON Lines: `from-jsonl` reads back what `to-jsonl` wrote, as a list
+let records = !{to-jsonl [[a: 1], [a: 2]] | from-jsonl}
+echo !{length $records}
+echo $records[1][a]
+
 echo 'json tests done'

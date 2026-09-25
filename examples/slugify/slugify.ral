@@ -12,7 +12,7 @@ let slug = { |title|
     return !{re-replace-all '^-+|-+$' '' $dashed}
 }
 
-let titles = filter { |t| return $[!{length $t} > 0] } !{lines !{from-string < $path}}
+let titles = filter { |t| return $[!{length $t} > 0] } !{from-lines < $path}
 let slugs = map $slug $titles
 
 for $slugs { |s| echo $s }

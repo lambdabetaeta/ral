@@ -5,5 +5,5 @@
 # does not contain, in A's own order, no sorting required.
 
 let [a, b] = $ARGS
-let bs = from-lines-list $b
-for !{from-lines-list $a} { |l| if $[not !{contains $bs $l}] { echo $l } }
+let bs = from-lines < $b
+for !{from-lines < $a} { |l| if $[not !{contains $bs $l}] { echo $l } }

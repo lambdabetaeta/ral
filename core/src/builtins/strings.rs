@@ -4,7 +4,7 @@ use crate::types::{Settled, Value, as_list, sig, sig_hint};
 use std::borrow::Cow;
 
 use super::util::regex_err;
-use super::util::{as_str, f64_to_i64};
+use super::util::{as_str, f64_to_i64, lossy_line_list, read_lines};
 
 /// Parse a `Value` as a `usize` index; junk errors rather than coercing to zero.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
@@ -73,6 +73,12 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
     Ok(Value::string(
         s.chars().skip(start).take(length).collect::<String>(),
     ))
+}
+
+/// `from-lines` over the string's bytes rather than the channel.
+pub(super) fn builtin_lines(args: &[Value]) -> Settled<Value> {
+    let s = as_str(&args[0], "lines")?;
+    lossy_line_list(read_lines("lines", s.as_bytes()))
 }
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {

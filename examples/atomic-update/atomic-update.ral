@@ -12,7 +12,7 @@ let state = if !{is-file $path} {
     return [count: 0, history: []]
 }
 
-let stamp = !{date -u +%Y-%m-%dT%H:%M:%SZ | from-string}
+let stamp = date -u +%Y-%m-%dT%H:%M:%SZ
 
 let next = [
     ...$state,

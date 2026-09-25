@@ -7,7 +7,7 @@
 let [lpath, rpath, key] = $ARGS
 
 let parse = { |p|
-    let [hdr, ...rows] = !{from-lines-list $p}
+    let [hdr, ...rows] = from-lines < $p
     let header = re-split ',' $hdr
     map { |line|
         fold { |m c| let k = $c[0]; return [...$m, $k: $c[1]] } [:] !{zip $header !{re-split ',' $line}}

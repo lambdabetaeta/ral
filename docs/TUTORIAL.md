@@ -362,7 +362,7 @@ Codecs cross between bytes and values:
 |---|---|
 | `from-line` | one `String`, trailing newline removed |
 | `from-string` | one `String` |
-| `from-lines` | a lazy stream of strings |
+| `from-lines` | a list of strings, one per line |
 | `from-json` | a ral value decoded from JSON |
 | `from-csv` | a list of header-keyed records |
 | `from-bytes` | a `Bytes` value |
@@ -403,7 +403,7 @@ Values compose by application, not by `|`:
 File I/O is a redirect plus a codec:
 
     let body   = from-string < $path
-    let lines  = from-lines-list $path
+    let rows   = from-lines < $path
     let config = from-json < $path
 
     to-string $body > $path
@@ -425,14 +425,14 @@ line at a time, in bounded memory, so they belong in a pipeline:
 
     cat access.log | filter-lines { |line| re-match ' 500 ' $line } | wc -l
 
-`from-lines` decodes the pipe into a lazy stream instead, and a stream must be
-eliminated explicitly:
+`from-lines` instead reads to the end and returns a list, so it ends the
+pipeline like any other decoder:
 
     let commits = git log --oneline | from-lines
-    stream-each { |line| echo $line } $commits
+    take 5 $commits
 
-Use `stream-map`, `stream-fold`, and `stream-to-list` for the rest of the lazy
-work, and `from-lines-list $path` for a materialised list.
+Every line reader splits the same way: a line ends at `\n` or `\r\n`, and the
+last line need not end at all. `to-lines` ends every line with `\n`.
 
 ## 7  Scripts, scope, and modules
 

@@ -6,7 +6,7 @@
 # Here one `list-dir` yields `mtime` as an Int, and a bad directory raises.
 
 let [root] = $ARGS
-let now = int !{date +%s | from-line}
+let now = int !{date +%s}
 
 let files = filter { |e| equal $e[type] 'file' } !{list-dir $root}
 

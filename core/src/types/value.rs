@@ -370,7 +370,7 @@ pub(crate) fn block_over(env: &Env) -> Value {
 }
 
 /// A chain of `n` blocks over `foot`, each capturing the next in a one-binding
-/// env — the skeleton of a `from-lines` stream.  Fixture for the walks that
+/// env — the skeleton of a user-built lazy list.  Fixture for the walks that
 /// cross the captured-env seam once per link: the serial encoder, the fork's
 /// scrub, and `Env`'s drop.
 #[cfg(test)]

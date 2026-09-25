@@ -12,6 +12,6 @@ let matches = { |r|
     else { return false }
 }
 
-let records = stream-to-list !{from-jsonl < $path}
+let records = from-jsonl < $path
 
 to-jsonl !{filter $matches $records}

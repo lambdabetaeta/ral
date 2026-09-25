@@ -13,7 +13,7 @@ let entries = map { |line|
         want: !{re-find-match '^[0-9a-f]+' $line},
         file: !{re-replace '^[0-9a-f]+[ *]+' '' $line},
     ]
-} !{from-lines-list $manifest}
+} !{from-lines < $manifest}
 
 let checked = par { |[want: want, file: file]|
     let got = try {

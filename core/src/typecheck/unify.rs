@@ -1237,24 +1237,23 @@ fn guard_expansion<K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
 
     /// ``Variant{`more: {head: String, tail: Thunk(tail)}, `done: Unit}``.
     fn step(tail: CompTy) -> Ty {
         let payload = Ty::Record(Row::Extend(
-            Label::Field(HEAD_FIELD.into()),
+            Label::Field("head".into()),
             Field::present(Ty::String),
             Box::new(Row::Extend(
-                Label::Field(TAIL_FIELD.into()),
+                Label::Field("tail".into()),
                 Field::present(Ty::Thunk(Box::new(tail))),
                 Box::new(Row::Empty),
             )),
         ));
         Ty::Variant(Row::Extend(
-            Label::Case(MORE_LABEL.into()),
+            Label::Case("more".into()),
             Field::present(payload),
             Box::new(Row::Extend(
-                Label::Case(DONE_LABEL.into()),
+                Label::Case("done".into()),
                 Field::present(Ty::Unit),
                 Box::new(Row::Empty),
             )),

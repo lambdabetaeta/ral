@@ -10,7 +10,7 @@ the tools of this office image.
     if !{succeeds { pandoc --version > /dev/null }} { !$export } else { echo #'pandoc is not installed'# }
 
 `sheet` captures a command's stdout with `let`; `rows` forces an anonymous
-block over a pipeline and gives you a lazy stream of lines; the two
+block over a pipeline and gives you a list of lines; the two
 `attempt`s run in sequence and neither aborts the script if it fails;
 `export` names a block without running it; and the `if` reads a probe's
 true/false through `succeeds`, forcing `export` — `!$export` — only on the

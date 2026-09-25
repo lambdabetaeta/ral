@@ -8,15 +8,9 @@
 //! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
 //! redefine.
 
-use crate::ir::{CompKind, Val};
-use crate::source::Spanned;
-use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::{
-    Binding, Closure, Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint,
-};
-use std::sync::Arc;
+use crate::types::{Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 
-use super::util::{as_byte_list, as_bytes, decode_utf8_strict};
+use super::util::{as_byte_list, as_bytes, decode_utf8_strict, lossy_line_list};
 
 fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -66,59 +60,13 @@ pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Valu
 
 pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
     let mut text = input_text(args, "from-line", shell)?;
-    let len = crate::io::str_strip_one_terminator(&text).len();
-    text.truncate(len);
+    text.truncate(text.len() - crate::io::terminator_len(text.as_bytes()));
     Ok(Value::string(text))
 }
 
-fn stream_cons(head: String, tail: Value) -> Value {
-    let mut captured = Env::new();
-    captured.bind(
-        "__stream_tail".into(),
-        Binding {
-            value: tail,
-            scheme: None,
-        },
-    );
-    let body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
-        "__stream_tail".into(),
-    ))));
-    Value::Variant {
-        label: MORE_LABEL.into(),
-        payload: Some(Box::new(Value::map(vec![
-            (HEAD_FIELD.into(), Value::string(head)),
-            (
-                TAIL_FIELD.into(),
-                Value::Thunk(Closure {
-                    comp: body,
-                    env: captured,
-                }),
-            ),
-        ]))),
-    }
-}
-
-/// Decode the channel into a `` `more``/`` `done`` Stream of lines, decoding
-/// lossily so a line stream survives invalid bytes.  Only the shape is lazy:
-/// the channel is read to EOF and every node built before this returns, so a
-/// downstream `stream-take 3` still drains an unbounded source.
-///
-/// Decoded a line at a time, so the channel's text is never held whole beside
-/// its lines; no invalid sequence spans a `\n`, so per-line lossy decoding
-/// agrees with whole-text decoding.
 pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value> {
     no_arguments(args, "from-lines")?;
-    let lines = super::util::stdin_lines("from-lines", shell)?
-        .map(|line| {
-            Ok(String::from_utf8(line?)
-                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
-        })
-        .collect::<Settled<Vec<_>>>()?;
-    let done = Value::Variant {
-        label: DONE_LABEL.into(),
-        payload: None,
-    };
-    Ok(lines.into_iter().rev().fold(done, |tail, line| stream_cons(line, tail)))
+    lossy_line_list(super::util::stdin_lines("from-lines", shell)?)
 }
 
 fn json_to_value(j: serde_json::Value) -> Settled<Value> {
@@ -256,13 +204,12 @@ pub(super) fn builtin_echo(
 }
 
 pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let items = as_list(&args[0], "to-lines")?;
-    let joined = items
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_encoded(&joined.into_bytes(), shell)
+    let mut text = String::new();
+    for item in &as_list(&args[0], "to-lines")? {
+        text.push_str(&item.to_string());
+        text.push('\n');
+    }
+    write_encoded(text.as_bytes(), shell)
 }
 
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather

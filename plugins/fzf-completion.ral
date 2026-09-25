@@ -119,7 +119,7 @@ return { |options|
 
     # ── hosts (upstream __fzf_list_hosts, parsed in ral, no awk) ──
 
-    let _read-lines = { |p| try { return !{from-lines-list $p} } { |_| return [] } }
+    let _read-lines = { |p| try { return !{from-lines < $p} } { |_| return [] } }
 
     let _cfg-hosts = { |file|
         flat-map { |line|

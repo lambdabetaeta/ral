@@ -8,7 +8,7 @@
 let [pat, ...files] = $ARGS
 
 let counted = filter { |c| return $[$c[n] > 0] } !{map { |f|
-    return [file: $f, n: !{length !{filter { |l| re-match $pat $l } !{from-lines-list $f}}}]
+    return [file: $f, n: !{length !{filter { |l| re-match $pat $l } !{from-lines < $f}}}]
 } $files}
 
 for $counted { |c| echo "$c[file]:$c[n]" }

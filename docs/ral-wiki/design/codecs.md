@@ -53,7 +53,7 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
 - `from-csv` → a list of records keyed by the header row; every field is a
   `String`, because CSV is untyped — coerce with `int` / `float`; the reader
   handles quoted fields, embedded commas, and embedded newlines;
-- `from-lines` → a line stream (below).
+- `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
 **A decoder is the natural pipeline tail.** `cat data.json | from-json` returns
 a decoded value. Putting a stage *after* a decoder is legal and useless: the
@@ -64,7 +64,7 @@ behind. Bind the decoder's result and apply the next function to it instead —
 An encoder takes one value and writes its encoded form to stdout.
 `to-bytes` (a `Bytes` value, passed through unchanged), `ints-to-bytes` (a list
 of `Int`, each 0 through 255 — ral has no byte literal, so this is how bytes are
-written by number), `to-string`, `to-lines` (which joins a list with newlines),
+written by number), `to-string`, `to-lines` (each element followed by `\n`),
 `to-json`, `to-csv`, and `to-line` (the line writer that `echo` uses) all
 return `Unit`; the written bytes are the payload (`write_encoded` in
 `core/src/builtins/codecs.rs`). Each encoder names one operand type, so
@@ -87,16 +87,15 @@ variant `` `tag payload `` becomes `{"tag": "tag", "payload": …}`, and the
 array of byte integers. A `Lambda`, a `Block`, or a `Handle` has no JSON image
 and is an error.
 
-## Whole-buffer vs. streaming
+## Decoders return values; a fold streams
 
-The structured decoders (`from-string`, `from-line`, `from-json`) read all of
-stdin and then decode: they are whole-buffer. `from-lines` is also
-whole-buffer, despite its stream-shaped result. It yields a `Step` stream — a
-`more [head, tail]` / `done` open variant whose tail is a thunk
-([[invariants/optionality-via-variants|open variants]]) — but it builds the
-whole chain eagerly, from the stdin read to EOF. The interface is incremental;
-the memory profile matches the other decoders. One codec streams, and it is
-the way to process unbounded input without holding it:
+**A decoder reads to EOF and returns a value, and a value holds no reader.**
+Every decoder is whole-buffer, `from-lines` included. A lazy sequence of lines
+would be a value still owing reads: once it outlived its capture it would have
+to hold a live reader on a producer still running, past the boundary that ends
+that producer. So the one codec that streams is a fold, whose callback runs
+while the pipe is open, and it is the way to process unbounded input without
+holding it:
 
 - `fold-lines <fn> <init>` folds over stdin line by line, forwarding its
   callback's boundary behaviour:
@@ -108,6 +107,35 @@ the way to process unbounded input without holding it:
   is the caller's, read off the supplied thunk and handed back paired with the
   value type it came with; the inferencer needs no declaration
   (`scheme::fold_lines` in `core/src/typecheck/builtins.rs`).
+
+## One line rule
+
+**Every reader of lines agrees on where a line ends, because there is one
+reader.** The rule, with its table in `docs/SPEC.md` §7.3:
+
+- a *terminator* is `\n` or `\r\n`, and exactly one `\r` belongs to it:
+  `a\r\r\n` is the line `a\r`;
+- a lone `\r` is text, never a terminator, mid-line or at EOF;
+- the final line need not be terminated;
+- each line strips its own terminator, so mixed endings are fine.
+
+One function measures a terminator (0, 1, or 2 bytes), and three kinds of
+caller share it:
+
+- *line readers* — `from-lines`, `fold-lines` and the prelude filters over it,
+  `line-count`, and `lines` — all split through one reader generic over its
+  byte source (`core/src/builtins/util.rs`): stdin for the decoders, the
+  string's bytes for `lines`, which so agrees by construction rather than by
+  test;
+- *one-terminator strippers* — capture, `from-line`, `ask` — remove at most one
+  terminator from the end: `a\r\n\r\n` becomes `a\r\n`;
+- *writers* — `to-line`, `to-lines`, `echo` — emit `\n` only. Reading accepts
+  both endings the world writes; ral's own output has one spelling.
+
+`to-lines` terminates every element, as `to-line` and `to-jsonl` do, so
+`from-lines ∘ to-lines = id` on every list whose elements contain no `\n` and
+do not end in `\r` — such an `\r` would fuse with the written `\n` into one
+terminator.
 
 ## Strict values, lossy lines
 

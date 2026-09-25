@@ -10,7 +10,7 @@ the tools of a source tree.
     if !{succeeds { cargo check -q }} { echo #'clean'# } else { !$build }
 
 `branch` captures a command's stdout with `let`; `log` forces an anonymous
-block over a pipeline and gives you a lazy stream of lines; the two
+block over a pipeline and gives you a list of lines; the two
 `attempt`s run in sequence and neither aborts the script if it fails; `build`
 names a block without running it; and the `if` runs `cargo check` only to
 read its true/false through `succeeds`, forcing `build` — `!$build` — only

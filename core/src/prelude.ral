@@ -2,7 +2,7 @@
 
 # Strings — direct builtins: upper, lower, re-split, re-match,
 # re-replace, re-replace-all, string-replace, intercalate, slice,
-# re-find-match, re-find-matches, dedent, shell-quote, shell-split.
+# re-find-match, re-find-matches, dedent, shell-quote, shell-split, lines.
 # Regex builtins carry the `re-` prefix because the first argument is
 # a regex, not a literal substring; `string-replace` is the
 # literal-string counterpart that demands an exactly-once match.
@@ -10,9 +10,13 @@
 # files; ral's list-of-strings join is `intercalate` — interpose a
 # separator between every pair.)  Use `$name` to obtain a first-class
 # value (a synthesised thunk pinned to the primitive).
-#
-# `lines` and `words` are defined below under "List combinators", once
-# `drop-while` and `reverse` (which they use to drop edge empties) exist.
+## Split a string into its Unicode-whitespace-delimited words.
+let words = { |s| re-find-matches '\S+' $s }
+## Decode stdin as a list of words.
+let from-words = {
+    let s = !{from-string}
+    words $s
+}
 
 # Paths and value coercions — each is a directly registered builtin
 # (resolve-path, absolute-path, file-info, list-dir, temp-dir, temp-file,
@@ -101,30 +105,6 @@ let drop = { |n items|
         let [_, ...rest] = $items
         drop $[$n - 1] $rest
     }
-}
-## Drop empty strings from both ends of a list, keeping interior ones.
-let _trim-empties = { |items|
-    let front = drop-while $is-empty $items
-    let back = drop-while $is-empty !{reverse $front}
-    reverse $back
-}
-## Split a string into lines, with no spurious empty at the leading or
-## trailing edge (a trailing newline does not add a final ""), matching
-## `from-lines` and external capture.
-let lines = { |s|
-    let parts = re-split '\n' $s
-    _trim-empties $parts
-}
-## Split a string into Unicode-whitespace-delimited words; leading and
-## trailing whitespace contribute no empty elements.
-let words = { |s|
-    let parts = re-split '\s+' $s
-    _trim-empties $parts
-}
-## Decode stdin as a list of words.
-let from-words = {
-    let s = !{from-string}
-    words $s
 }
 ## `s` repeated `n` times; empty when `n <= 0`.
 let repeat = { |n s| intercalate '' !{map { |_| return $s } !{range 0 $n}} }
@@ -238,8 +218,8 @@ let succeeds = { |body| try { !$body; return true } { |_| return false } }
 # `core/src/builtins/predicates.rs`); they resolve their path
 # argument against the within-scoped cwd, which the bundled `test`
 # wrappers they replaced did not.
-## Count lines in a file.
-let line-count  = { |p| int !{wc -l < $p} }
+## Count a file's lines by `from-lines`' rule, in bounded memory.
+let line-count  = { |p| fold-lines { |n _| return $[$n + 1] } 0 < $p }
 ## true if a file has zero bytes or a directory has no entries.
 let file-empty  = { |p|
     if !{is-dir $p} {
@@ -371,117 +351,12 @@ let concat = { |xss|
     _go $xss []
 }
 
-# Stream — demand-driven streams as a recursive variant.
-#
-# A Stream A is the value of forcing a thunk that produces either
-# `` `more [head: A, tail: { Stream A }]`` or `` `done ``.  The tail
-# is itself a thunk so producers run only when downstream demand
-# reaches them (Haskell-style laziness expressed in CBPV value form).
-#
-# Every combinator takes a Stream *value* as its second argument and
-# `case`s on it directly.  The recursion still closes through the
-# `Thunk(F (Stream α))` in each node's tail, so the type stays
-# equi-recursive (ν lives at the computation level); the unifier
-# reconciles such a value-anchored stream with a comp-var-anchored
-# producer like `from-lines` co-inductively.  A stream value at a use
-# site needs no wrapping — pass it straight.
-
-## Construct a non-empty stream: head and a thunk producing the rest.
-let stream-cons = { |head tail| return `more [head: $head, tail: $tail] }
-## The empty stream.
-let stream-nil = { return `done }
-
-## Realise the entire stream into a list (eager).  Use `stream-take`
-## first for infinite producers.  Built on `stream-fold` — case-arm
-## tail calls are TCO'd, so the recursion stays flat regardless of
-## producer depth.
-let stream-to-list = { |s|
-    let reversed = !{stream-fold { |acc x| return [$x, ...$acc] } [] $s}
-    reverse $reversed
-}
-
-## Drop the first `n` elements of a stream, returning the rest as a
-## stream.  Tail-recursive in source so dropping deep into a long
-## producer does not blow the host stack the way a list-literal
-## recursion would.
-let stream-drop = { |n s|
-    if $[$n <= 0] { return $s } else {
-        case $s [
-            `more: { |p| stream-drop $[$n - 1] !$p[tail] },
-            `done: { |_| stream-nil }
-        ]
-    }
-}
-
-## Take at most `n` elements from the front of a stream.
-let stream-take = { |n s|
-    if $[$n <= 0] { stream-nil } else {
-        case $s [
-            `more: { |p| stream-cons $p[head] { !{stream-take $[$n - 1] !$p[tail]} } },
-            `done: { |_| stream-nil }
-        ]
-    }
-}
-
-## Map `f` over each element of the stream lazily.
-let stream-map = { |f s|
-    case $s [
-        `more: { |p| stream-cons !{$f $p[head]} { !{stream-map $f !$p[tail]} } },
-        `done: { |_| stream-nil }
-    ]
-}
-
-## Reduce the stream left-to-right with `f` from initial `z`.
-let stream-fold = { |f z s|
-    case $s [
-        `more: { |p| stream-fold $f !{$f $z $p[head]} !$p[tail] },
-        `done: { |_| return $z }
-    ]
-}
-
-## Apply `f` to each element for side effect; returns unit.
-let stream-each = { |f s|
-    case $s [
-        `more: { |p| $f $p[head]; stream-each $f !$p[tail] },
-        `done: { |_| return () }
-    ]
-}
-
-# File reading sugar — depend on `enumerate`, `take`, `drop`, and `map`
-# above, and on Stream helpers here.
-
-## Read a file as a materialised list of lines.
-## Refuses files larger than 10 MiB — `from-lines` reads the whole
-## channel eagerly too (it is not a bounded-memory alternative), so
-## this limit exists to fail predictably rather than silently.
-let from-lines-list = { |p|
-    let info = file-info $p
-    if $[$info[size] > 10485760] {
-        fail [status: 1, message: "from-lines-list: file too large to materialise eagerly ($info[size] bytes, ~$[$info[size] / 1048576] MiB); use `fold-lines`, `map-lines`, `filter-lines`, or `each-line` with `< PATH` to process lines in bounded memory"]
-    } else {
-        let s = !{from-lines < $p}
-        stream-to-list $s
-    }
-}
-
 # JSON Lines — one JSON value per line, over the serde-backed `from-json`
-# / `to-json` codecs.  `from-jsonl` binds the eagerly-read `from-lines`
-# result before applying `stream-map`, so the byte-producing decoder stays
-# at the head of the block and the value-producing stream transformation is
-# an ordinary application.  Each line is routed back onto the channel with
-# `to-string` before `from-json` reads it, since decoders are 0-arity.
-# `to-json` emits compact (single-line) JSON, so one record per line falls
-# out for free.  The result is a Stream value shaped for `stream-*`
-# consumption; only the decode step is lazy (`stream-map` decodes a line
-# only when demanded) — the underlying `from-lines` read is not, so
-# `from-jsonl` gives no bounded-memory guarantee over an unbounded or very
-# large source.
-## Decode JSON Lines from stdin into a Stream of values, decoded lazily
-## but read from an eagerly-materialised `from-lines` source.
-let from-jsonl = {
-    let lines = !{from-lines}
-    stream-map { |line| to-string $line | from-json } $lines
-}
+# / `to-json` codecs.  Each line goes back onto the channel with `to-string`
+# for `from-json`, since decoders are 0-arity; `to-json` emits compact
+# (single-line) JSON, so one record per line falls out for free.
+## Decode JSON Lines from stdin into a list of values.
+let from-jsonl = { map { |line| to-string $line | from-json } !{from-lines} }
 ## Encode a list of values as JSON Lines, one compact record per line.
 let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 

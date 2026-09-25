@@ -65,24 +65,17 @@ Blocks support recursive definitions.
 
 `ral` pipes carry bytes from the stdout of a script to the stdin of another (UNIX-style). The *last* stage in a pipeline may also return a `ral` value.
 
-Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON bytes into a `ral` value:
+Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a list of lines; `from-json` turns JSON bytes into a `ral` value:
 
-    let cfg   = curl -s https://api.example.com/cfg | from-json
-    let first = !{head -n1 notes.txt | from-line}
+    let cfg     = curl -s https://api.example.com/cfg | from-json
+    let first   = !{head -n1 notes.txt | from-line}
+    let commits = git log --oneline | from-lines
 
 There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
 
 Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
-`from-lines` yields a lazy stream, which no function iterates implicitly. A decoder ends the byte pipeline, so its resulting stream is a value: bind or force it, then pass it to a stream eliminator:
-
-    let stream  = !{cat access.log | from-lines}
-    let entries = stream-to-list $stream
-
-Do not write `cat access.log | from-lines | stream-to-list`: the second pipe expects bytes, but `from-lines` has already produced a ral value. For small finite output, prefer `lines`; `from-lines-list PATH` reads a file directly as a materialised list of lines:
-
-    let recent = lines !{tail -n5 access.log | from-string}
-    let src    = from-lines-list #'notes.txt'#
+A decoder ends the byte pipeline: its value never travels down a further `|`. Do not write `git log --oneline | from-lines | head -n5`, which hands `head` an empty pipe; bind the list, then `take 5 $commits`.
 
 ## Audit
 
@@ -291,7 +284,7 @@ Use `within` instead of `cd`. Paths in results are relative to the `within` dire
 Read with `from-X < PATH`, write with `to-X $v > PATH`:
 
     let body  = from-string < $file    # String
-    let rows  = from-lines-list $file  # [String]
+    let rows  = from-lines < $file     # [String]
     let cfg   = from-json < $file      # record
     to-string $report >  $file         # write (atomic)
     to-string $report >> $file         # append

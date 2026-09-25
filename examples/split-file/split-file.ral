@@ -8,7 +8,7 @@
 let [input, n] = $ARGS
 
 let per-chunk = int $n
-let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerate !{from-lines-list $input}}
+let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerate !{from-lines < $input}}
 let count = length $chunks
 
 let digits = length !{str $[$count - 1]}

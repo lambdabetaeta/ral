@@ -7,7 +7,7 @@
 
 let [list_file, out_dir] = $ARGS
 
-let urls = from-lines-list $list_file
+let urls = from-lines < $list_file
 
 mkdir -p $out_dir
 

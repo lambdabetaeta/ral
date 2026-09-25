@@ -7,7 +7,7 @@
 let [width, path] = $ARGS
 let w = int $width
 
-for !{from-lines-list $path} { |line|
+for !{from-lines < $path} { |line|
     let ws = words $line
     if !{is-empty $ws} { echo $line } else {
         let packed = fold { |acc word|

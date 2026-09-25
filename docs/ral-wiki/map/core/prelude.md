@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2a2ea82b
-generated_at_date: 2026-09-24
+generated_at_commit: c56db236
+generated_at_date: 2026-09-25
 covers_paths: [core/src/prelude.ral]
 ---
 
@@ -21,13 +21,12 @@ environment ([[map/core/builtins|register]]).
 The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
 `enumerate`, `flat-map`, `zip`, `cross`, `nub`, `group-by`, `median-by`,
-`lines`, `words`, `from-words`, `indent`, `repeat`, `pad-left`, `pad-right`,
+`words`, `from-words`, `indent`, `repeat`, `pad-left`, `pad-right`,
 `extension`, `max`, `min`, `maximum`, `minimum`, `map-lines`, `defer`, `commands` (an `audit`
 report's `` `command `` facts, in trail order), `succeeded` (an `audit`
-report's outcome as a `Bool`), the `stream-*`
-eliminators, …) layered over the directly-registered Rust builtins (`each`,
-`map`, `filter`, `fold`, …). These are ordinary [[design/cbpv|values]] of fixed
-arity ([[invariants/fixed-arity|fixed-arity]]).
+report's outcome as a `Bool`), …) layered over the directly-registered Rust
+builtins (`each`, `map`, `filter`, `fold`, …). These are ordinary
+[[design/cbpv|values]] of fixed arity ([[invariants/fixed-arity|fixed-arity]]).
 
 The branching and exception forms `if`, `case`, and `try` are *not* prelude
 bindings — they are IR primitives (`CompKind::If` / `Case` / `Try`, see

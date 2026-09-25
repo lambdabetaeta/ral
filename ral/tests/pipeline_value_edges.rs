@@ -132,7 +132,7 @@ fn ext_command_single_newline_stripped() {
 #[test]
 fn read_lines_from_stdin() {
     let o = run_pipe_stdin(
-        "let listing = !{from-lines}\nlet listing = !{stream-to-list $listing}\necho !{length $listing}",
+        "let listing = !{from-lines}\necho !{length $listing}",
         b"one\ntwo\nthree\n",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -142,7 +142,7 @@ fn read_lines_from_stdin() {
 #[test]
 fn read_lines_decodes_invalid_utf8_lossily() {
     let o = run_pipe_stdin(
-        "let lines = !{stream-to-list !{from-lines}}\necho $lines[0]\necho $lines[1]",
+        "let lines = !{from-lines}\necho $lines[0]\necho $lines[1]",
         b"a\xffb\nc\n",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -156,7 +156,11 @@ fn fold_lines_refuses_invalid_utf8() {
         b"a\xffb\n",
     );
     assert_ne!(o.status, 0);
-    assert!(o.stderr.contains("fold-lines: input is not valid UTF-8"), "stderr: {}", o.stderr);
+    assert!(
+        o.stderr.contains("fold-lines: input is not valid UTF-8"),
+        "stderr: {}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -172,8 +176,7 @@ fn fold_lines_from_stdin() {
 #[test]
 fn mixed_pipeline_internal_byte_stage_buffers_output_cleanly() {
     let script = r"
-let s = !{printf 'a\nb\n' | map-lines { |x| return $x } | from-lines}
-let lines = !{stream-to-list $s}
+let lines = !{printf 'a\nb\n' | map-lines { |x| return $x } | from-lines}
 echo !{length $lines}
 echo $lines[0]
 echo $lines[1]
@@ -772,7 +775,7 @@ fn outer_stdin_redirect_feeds_ral_helper_pipeline_first_stage() {
     let script = format!(
         "let f = {{\n\
          \x20   let count = {{\n\
-         \x20       let rows = !{{stream-to-list !{{from-lines}}}}\n\
+         \x20       let rows = !{{from-lines}}\n\
          \x20       echo !{{length $rows}}\n\
          \x20   }}\n\
          \x20   !$count | cat\n\
