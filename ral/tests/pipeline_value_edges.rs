@@ -50,6 +50,20 @@ fn read_json_from_non_utf8_pipeline_fails() {
 }
 
 #[test]
+fn from_jsonl_names_the_failing_line() {
+    // Each line parses alone: the line is the input's, the column the line's.
+    let o = run_pipe_stdin("from-jsonl", b"{\"a\": 1}\n\n{\"a\":\n");
+    assert_ne!(o.status, 0);
+    assert!(
+        o.stderr
+            .contains("from-jsonl: line 3, column 5: EOF while parsing a value")
+            && !o.stderr.contains("at line"),
+        "stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
 fn ints_to_bytes_roundtrips_through_from_bytes() {
     // Both writers put bytes on the channel — `ints-to-bytes` from numbers,
     // `to-bytes` from a Bytes value — and from-bytes decodes them back.
@@ -151,10 +165,7 @@ fn read_lines_decodes_invalid_utf8_lossily() {
 
 #[test]
 fn fold_lines_refuses_invalid_utf8() {
-    let o = run_pipe_stdin(
-        "fold-lines { |acc _| return $[$acc + 1] } 0",
-        b"a\xffb\n",
-    );
+    let o = run_pipe_stdin("fold-lines { |acc _| return $[$acc + 1] } 0", b"a\xffb\n");
     assert_ne!(o.status, 0);
     assert!(
         o.stderr.contains("fold-lines: input is not valid UTF-8"),

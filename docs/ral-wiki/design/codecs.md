@@ -50,6 +50,8 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
 - `from-string` → `String`, **strict** UTF-8;
 - `from-line` → `String`, strict, with one trailing `\n` / `\r\n` stripped;
 - `from-json` → a decoded value: strict UTF-8, then JSON;
+- `from-jsonl` → a list, one `from-json` value per non-blank line split by the
+  line rule; each line parses alone, so a failure names the input's line;
 - `from-csv` → a list of records keyed by the header row; every field is a
   `String`, because CSV is untyped — coerce with `int` / `float`; the reader
   handles quoted fields, embedded commas, and embedded newlines;

@@ -1494,6 +1494,7 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-line` | `String` | Requires valid UTF-8 and removes one final `LF` or `CRLF`. |
 | `from-lines` | `[String]` | Splits by the line rule below and replaces invalid UTF-8 in each line with the replacement character. |
 | `from-json` | a ral value | Requires valid UTF-8 and JSON. JSON `null` becomes `Unit`. |
+| `from-jsonl` | a list of ral values | Splits by the line rule below and decodes each line as `from-json` does. A blank line, holding only spaces, tabs, and carriage returns, holds no value. An error names its line. |
 | `from-csv` | a list of records | Uses the header row as record keys. Fields are strings; duplicate headers are rejected. |
 
 Decoders are nullary command forms. They read the preceding byte pipe, or standard input when there is no preceding stage.
@@ -3671,7 +3672,7 @@ to-json $record > data.json
 ```
 
 The core environment provides `from-bytes`, `from-string`, `from-line`,
-`from-lines`, `from-json`, and `from-csv`, with corresponding `to-` encoders,
+`from-lines`, `from-json`, `from-jsonl`, and `from-csv`, with corresponding `to-` encoders,
 and `ints-to-bytes` beside them for bytes given as numbers.
 Codecs do not silently reinterpret arbitrary values or output. Their exact
 UTF-8, newline, JSON, CSV, and capture rules are specified with pipelines and
@@ -3695,9 +3696,10 @@ Use them with a byte pipe or redirect, for example
 `map-lines $clean < input.txt`. Calling a line reader with terminal stdin and
 no pipe or redirect is an error rather than an interactive prompt.
 
-`from-lines` and the prelude's `from-jsonl` are decoders like the rest: they
-read to end of input and return a list, of the lines and of each line decoded
-as JSON respectively. `to-jsonl` writes one compact JSON value per line.
+`from-lines` and `from-jsonl` are decoders like the rest: they read to end of
+input and return a list, of the lines and of each non-blank line decoded as
+JSON respectively. The prelude's `to-jsonl` writes one compact JSON value per
+line.
 
 ### 14.6. Failure, session control, and concurrency
 

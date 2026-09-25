@@ -351,12 +351,8 @@ let concat = { |xss|
     _go $xss []
 }
 
-# JSON Lines — one JSON value per line, over the serde-backed `from-json`
-# / `to-json` codecs.  Each line goes back onto the channel with `to-string`
-# for `from-json`, since decoders are 0-arity; `to-json` emits compact
-# (single-line) JSON, so one record per line falls out for free.
-## Decode JSON Lines from stdin into a list of values.
-let from-jsonl = { map { |line| to-string $line | from-json } !{from-lines} }
+# `to-json` emits compact (single-line) JSON, so one record per line falls out
+# for free; the decoder, `from-jsonl`, is a builtin.
 ## Encode a list of values as JSON Lines, one compact record per line.
 let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 

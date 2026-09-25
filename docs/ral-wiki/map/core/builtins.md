@@ -1,5 +1,5 @@
 ---
-generated_at_commit: acc8c3af
+generated_at_commit: 89c28f03
 generated_at_date: 2026-09-25
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -86,7 +86,10 @@ Bodies are grouped by concern, one submodule each:
   `Value::Unit`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
   `to-lines`, and `to-json` are writers: each types `A → F[Bytes] Unit` at its
   own operand type, and its encoded bytes are its sole payload. `to-bytes` takes
-  `Bytes` and `ints-to-bytes` takes `[Int]` — two names, no union in the table;
+  `Bytes` and `ints-to-bytes` takes `[Int]` — two names, no union in the table.
+  `builtin_from_jsonl` reads through `util::stdin_lines` and parses each line
+  alone, so an error names the input's line, and `json_to_value`'s one
+  refusal, `OutOfRange`, is worded by each decoder in its own terms;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
   verbs

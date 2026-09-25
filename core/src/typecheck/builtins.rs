@@ -869,6 +869,13 @@ pub mod scheme {
         mk_scheme(&[av], &[], &[], thunk(pure(Ty::Var(av))))
     }
 
+    /// `from-jsonl` :: ∀α. F [α] — a list of whatever each line holds.
+    pub fn from_jsonl(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        let records = Ty::List(Box::new(Ty::Var(av)));
+        mk_scheme(&[av], &[], &[], thunk(pure(records)))
+    }
+
     // ── Range, paths, parsing ────────────────────────────────────────────
 
     scheme!(range: [Ty::Int, Ty::Int] -> Ty::List(Box::new(Ty::Int)));

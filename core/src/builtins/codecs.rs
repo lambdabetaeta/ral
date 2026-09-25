@@ -69,7 +69,17 @@ pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value
     lossy_line_list(super::util::stdin_lines("from-lines", shell)?)
 }
 
-fn json_to_value(j: serde_json::Value) -> Settled<Value> {
+/// The one JSON number ral refuses: a `u64` above `i64::MAX`, whose low bits
+/// `f64` would round away.
+struct OutOfRange(serde_json::Number);
+
+impl std::fmt::Display for OutOfRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "integer {} is outside the supported range", self.0)
+    }
+}
+
+fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
     Ok(match j {
         serde_json::Value::Null => Value::Unit,
         serde_json::Value::Bool(b) => Value::Bool(b),
@@ -80,32 +90,61 @@ fn json_to_value(j: serde_json::Value) -> Settled<Value> {
                 // `is_f64` just held.
                 Value::Float(n.as_f64().unwrap())
             } else {
-                // A `u64` above `i64::MAX`: `f64` would round away its low
-                // bits, so refuse rather than corrupt it.
-                return Err(sig(format!(
-                    "from-json: integer {n} is outside the supported range"
-                )));
+                return Err(OutOfRange(n));
             }
         }
         serde_json::Value::String(s) => Value::string(s),
         serde_json::Value::Array(arr) => Value::list(
             arr.into_iter()
                 .map(json_to_value)
-                .collect::<Settled<Vec<_>>>()?,
+                .collect::<Result<Vec<_>, _>>()?,
         ),
         serde_json::Value::Object(obj) => Value::Map(
             obj.into_iter()
                 .map(|(k, v)| Ok((k, json_to_value(v)?)))
-                .collect::<Settled<_>>()?,
+                .collect::<Result<_, _>>()?,
         ),
     })
 }
 
 pub(super) fn builtin_from_json(args: &[Value], shell: &Shell) -> Settled<Value> {
     let text = input_text(args, "from-json", shell)?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
-    json_to_value(json)
+    let json = serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
+    json_to_value(json).map_err(|e| sig(format!("from-json: {e}")))
+}
+
+/// JSON Lines: a JSON text on each line the one line rule splits, a blank line
+/// holding none.  Each line parses alone, so the line an error names is the
+/// input's and serde's own position is only a column.
+pub(super) fn builtin_from_jsonl(args: &[Value], shell: &Shell) -> Settled<Value> {
+    no_arguments(args, "from-jsonl")?;
+    let mut records = Vec::new();
+    for (index, line) in super::util::stdin_lines("from-jsonl", shell)?.enumerate() {
+        let line = line?;
+        // JSON's whitespace, less the LF no line holds.
+        if line.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r')) {
+            continue;
+        }
+        let n = index + 1;
+        let json = serde_json::from_slice(&line).map_err(|e| {
+            sig(format!(
+                "from-jsonl: line {n}, column {}: {}",
+                e.column(),
+                unpositioned(&e)
+            ))
+        })?;
+        records.push(json_to_value(json).map_err(|e| sig(format!("from-jsonl: line {n}: {e}")))?);
+    }
+    Ok(Value::list(records))
+}
+
+/// serde's message less the position it appends, for a caller stating the
+/// position in its own terms.
+fn unpositioned(e: &serde_json::Error) -> String {
+    let mut message = e.to_string();
+    let at = format!(" at line {} column {}", e.line(), e.column());
+    message.truncate(message.strip_suffix(&at).map_or(message.len(), str::len));
+    message
 }
 
 /// Decode CSV into a list of records keyed by the header row; fields stay

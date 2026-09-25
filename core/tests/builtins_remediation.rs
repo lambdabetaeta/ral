@@ -319,6 +319,10 @@ fn to_json_refuses_block() {
 #[test]
 fn from_json_refuses_u64_beyond_i64() {
     expect_error("to-string '18446744073709551615' | from-json", "from-json");
+    expect_error(
+        "to-string \"1\\n18446744073709551615\\n\" | from-jsonl",
+        "from-jsonl: line 2: integer 18446744073709551615 is outside the supported range",
+    );
 }
 
 // ── B11 — prelude `words` yields no empties ───────────────────────────────

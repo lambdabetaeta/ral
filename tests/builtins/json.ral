@@ -32,4 +32,8 @@ let records = !{to-jsonl [[a: 1], [a: 2]] | from-jsonl}
 echo !{length $records}
 echo $records[1][a]
 
+# A blank line holds no record, wherever it falls
+let spaced = !{to-string "\n{\"a\": 1}\n \t\n{\"a\": 2}\r\n\r\r\n" | from-jsonl}
+echo !{length $spaced}
+
 echo 'json tests done'

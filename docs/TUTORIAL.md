@@ -364,6 +364,7 @@ Codecs cross between bytes and values:
 | `from-string` | one `String` |
 | `from-lines` | a list of strings, one per line |
 | `from-json` | a ral value decoded from JSON |
+| `from-jsonl` | a list of values, one per line of JSON |
 | `from-csv` | a list of header-keyed records |
 | `from-bytes` | a `Bytes` value |
 
