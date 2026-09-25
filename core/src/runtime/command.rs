@@ -124,7 +124,7 @@ pub(crate) fn run(
     };
 
     let child_pid = child.id();
-    // Bound, not dropped: its `Drop` restores ral's pgid on every path out
+    // Held until `reclaim`: its `Drop` restores ral's pgid on every path out
     // of here, sparing the next REPL tty read an EIO from a background
     // pgroup.
     let loan = fg.acquire(child_pid, shell, mooring);

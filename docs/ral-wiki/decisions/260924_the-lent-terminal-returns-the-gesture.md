@@ -44,9 +44,15 @@ let a child defeat its caller's `try` by killing itself.
   documented way a program hands the key back.
 - A command that catches the key and carries on, or exits, has handled it;
   a pipeline hears the key whatever its stages do with it.
+- An external inside a stage body may report `` `signaled 2 `` for the key
+  its pipeline heard: its waiter reads its scope as the reaper posts its
+  death, racing the anchor's report to that scope. Same exit 130, and the
+  frame is struck either way; only a direct stage settles under `pressed`.
 - Deferred: a failing verdict still outranks the struck frame in what a
-  pipeline reports, and the anchor's own death still reads
-  `` `cancelled `terminated ``.
+  pipeline reports; the anchor's own death still reads
+  `` `cancelled `terminated ``, and a key landing before the anchor's handler
+  is installed is that death, not a key — the one Ctrl-C `try` can still
+  absorb.
 
 See [[internals/cancellation|cancellation]],
 [[internals/pipeline-execution|pipeline-execution]],

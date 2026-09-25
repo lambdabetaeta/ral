@@ -238,7 +238,10 @@ sits, with nothing to forward upward and nothing for a joining collector to do
 about a stop at all. A joining collector's own teardown therefore reaches its
 live externals by pid, one signal each, and only for a cause its membership
 owes: whatever the outer stage holds, the owner has already delivered to the
-whole group.
+whole group. That is every cause it can hear — its cancel arrives on the very
+scope its membership reads — so a joining collector signals nothing and waits
+out the owner's delivery; `owes` earns its keep in a member's own waiter,
+whose scope sits beneath the stage's and can be struck alone.
 
 **A thread stage cuts itself at its own next write; an external is heard by
 the sentinel and killed at the first byte after the discard.** Marking an
@@ -483,9 +486,10 @@ kill must reach the pgid it named, and it is the live anchor that keeps that
 pgid from being reused; the anchor is waited last precisely so nothing that
 could still need its pgid joinable is waiting on it first.
 On Windows the grace is Ctrl-Break to every member of an owned group
-(`break_pipeline_group`), which the anchor swallows; a pid gets no grace, the
-Job Object kill following alone, and `Drop` releases the group's `GROUPS`
-entry once the anchor is reaped.
+(`break_pipeline_group`: one event per pid on the job's member list, nested
+members included, each stage being its own console-group root), which the
+anchor swallows; a pid gets no grace, the Job Object kill following alone, and
+`Drop` releases the group's `GROUPS` entry once the anchor is reaped.
 
 **The terminal lease never moves for a stop.** A foreground pipeline that
 takes `SIGTSTP` does not become a parked job, and there is nothing for the

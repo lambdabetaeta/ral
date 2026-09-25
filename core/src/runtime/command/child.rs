@@ -226,7 +226,8 @@ impl RunningChild {
 
     /// Only an owned console group takes Ctrl-Break, from its owner: a member
     /// not owed the cause waits out the owner's grace, and a pid gets the kill
-    /// alone — an `Inherit` child already heard the console's own Ctrl-C.
+    /// alone — the Windows `Watch` has no signal, and an `Inherit` child sits
+    /// in ral's own console group, where no event reaches it alone.
     #[cfg(windows)]
     fn open_teardown(
         &self,

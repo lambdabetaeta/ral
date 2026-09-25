@@ -196,6 +196,7 @@ impl AnchorProcess {
         let _ = child.reap();
     }
 }
+
 /// One byte per swallowed signal — one the kernel already delivered to every
 /// other member — sent raw: only the loan knows whether it was a key.  EOF
 /// means the anchor exited, which its own watch reports instead.

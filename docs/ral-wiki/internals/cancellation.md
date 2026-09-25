@@ -37,6 +37,8 @@ signal; the third hit calls `libc::_exit(128 + sig)` — bypassing `atexit` so a
 wedged process always dies. Nothing else reads it for control flow: `clear()`
 resets it at acknowledgment boundaries (a fresh prompt, a run compile, a
 session reboot), and `escalation_pending()` exposes it for observability only.
+Being process-global and cleared by every run compile, it is nothing a test
+can assert on beside a test that runs source.
 
 Windows' console handler has the same shape: the first two console events
 raise the interrupt, the third `ExitProcess`es with its status. Neither
@@ -192,10 +194,13 @@ the pipeline collector's `cancel_all` alike:
   disposition, and an abort has no grace to offer.
 - **On Windows** every graceful cause opens with Ctrl-Break, named by the
   `STATUS_CONTROL_C_EXIT` it leaves, and only an owned console group takes it
-  (`break_pipeline_group`); a pid gets the kill alone, the Windows `Watch`
-  having no signal and an `Inherit` child having heard the console's own
-  Ctrl-C. The pipeline anchor swallows every console event, so a group's
-  grace never ends the process holding it open.
+  (`break_pipeline_group`: one `CTRL_BREAK_EVENT` per pid on the job's member
+  list — every stage is spawned `CREATE_NEW_PROCESS_GROUP`, so each is its
+  own console-group root, and a nested member is on the outermost owner's
+  list); a pid gets the kill alone — the Windows `Watch` has no signal, and
+  an `Inherit` child sits in ral's own console group, where no event reaches
+  it without reaching ral. The pipeline anchor swallows every console event,
+  so a group's grace never ends the process holding it open.
 
 A process group is its owner's to signal: a child leading its own
 (`Group::Owns`) is signalled and killed whole, while one that joined a
@@ -289,6 +294,16 @@ it strikes what it heard on the frame it was lent for, before the next poll:
   out every queued report and settles each external stage under
   `sent.max(pressed)`. The loan drops with the collector, striking the frame
   whatever the verdict — the stages may all have trapped the key.
+
+The frame the loan strikes is always the run's own: inside a run the only
+nested `ForegroundScope` is a stage thread's, and neither a stage's child
+nor a stage's pipeline is lent, so no `try` stands between the strike and
+the run's closing poll. What the loan cannot settle is an external inside a
+*stage body*: a `Joins` member whose waiter reads its scope as the reaper
+posts its death, racing the anchor's report through the collector to that
+scope. Lose the race and the stage reads `` `signaled 2 `` where a direct
+stage, settled under `pressed`, reads `` `cancelled `interrupted `` — the
+same exit 130, and the run stops either way.
 
 A key ral's own frontend re-creates onto a lent group
 (`interrupt_foreground_child`) is heard like the kernel's: it is the user's.
