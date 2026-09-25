@@ -83,21 +83,66 @@ impl SourceReader {
     }
 }
 
+impl Fd {
+    fn inner(&mut self) -> &mut dyn Read {
+        match self {
+            Self::Pipe(r) => r,
+            Self::File(f) => f,
+        }
+    }
+}
+
+/// Forwards the bulk reads too: `File`'s own preallocate from its length,
+/// where the default doubles the buffer and peaks at twice the payload.
 impl Read for Fd {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Pipe(r) => r.read(buf),
-            Self::File(f) => f.read(buf),
+        self.inner().read(buf)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.inner().read_to_end(buf)
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.inner().read_to_string(buf)
+    }
+}
+
+/// The fd read beside its wake.
+struct Woken<'a> {
+    fd: &'a mut Fd,
+    wake: &'a Wake,
+}
+
+impl Read for Woken<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        read_interruptible(self.fd, self.wake, buf)
+    }
+}
+
+impl SourceReader {
+    fn with<T>(&mut self, f: impl FnOnce(&mut dyn Read) -> T) -> T {
+        match &self.wake {
+            Some(wake) => f(&mut Woken {
+                fd: &mut self.fd,
+                wake,
+            }),
+            None => f(&mut self.fd),
         }
     }
 }
 
 impl Read for SourceReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match &self.wake {
-            Some(wake) => read_interruptible(&mut self.fd, wake, buf),
-            None => self.fd.read(buf),
-        }
+        self.with(|r| r.read(buf))
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.with(|r| r.read_to_end(buf))
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.with(|r| r.read_to_string(buf))
     }
 }
 
@@ -214,6 +259,19 @@ mod tests {
         assert_eq!(n, 0);
         joiner.join().expect("wake thread");
         drop(w);
+    }
+
+    #[test]
+    fn a_file_reads_to_end_into_an_exact_buffer() {
+        use std::io::{Seek, Write};
+        let mut f = tempfile::tempfile().expect("tempfile");
+        f.write_all(&vec![b'x'; 100_000]).expect("write");
+        f.rewind().expect("rewind");
+        let mut buf = Vec::new();
+        SourceReader::file(f)
+            .read_to_end(&mut buf)
+            .expect("read_to_end");
+        assert_eq!((buf.len(), buf.capacity()), (100_000, 100_000));
     }
 
     #[test]
