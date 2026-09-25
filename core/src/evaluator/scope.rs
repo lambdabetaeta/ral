@@ -5,8 +5,8 @@
 
 use crate::process::{CommandFailure, SpawnFailure};
 use crate::types::{
-    CallSite, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell,
-    Status, Value, as_map, sig, site_value, validate_handler_arity,
+    CallSite, Cwd, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled,
+    Shell, Status, Value, as_map, sig, site_value, validate_handler_arity,
 };
 
 use std::collections::HashMap;
@@ -146,30 +146,28 @@ impl WithinScope {
             shell.context.extend_env(overrides);
             saved
         });
-        let saved_dir = cwd.map_or(SavedDir::Unset, |path| {
-            SavedDir::Prior(shell.swap_cwd_override(path))
-        });
+        let saved_cwd = cwd.map(|dir| shell.enter_cwd(dir));
         let handlers =
             handlers.map(|(entries, catch_all)| shell.context.handlers.push(entries, catch_all));
         WithinUndo {
             saved_env,
-            saved_dir,
+            saved_cwd,
             handlers,
         }
     }
 }
 
-/// `env:` — a map of scalar overrides. `PWD`/`OLDPWD` are derived from the
-/// working directory, so setting them here would make the two disagree.
+/// `env:` — a map of scalar overrides. `PWD` is the working directory and
+/// `OLDPWD` names none, so neither can be set here.
 fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
     let overrides = as_map(v, "within env")?;
     for k in overrides.keys() {
-        if matches!(k.as_str(), "PWD" | "OLDPWD") {
-            return Err(sig(format!(
-                "within env: `{k}` is derived from the shell's working directory and cannot be \
-                 set here; use `cd` to change the directory"
-            )));
-        }
+        let why = match k.as_str() {
+            "PWD" => "is the shell's working directory; use `cd` or `within [dir: …]` to change it",
+            "OLDPWD" => "is never passed to commands: ral keeps no previous directory for `cd -`",
+            _ => continue,
+        };
+        return Err(sig(format!("within env: `{k}` {why}")));
     }
     overrides
         .into_iter()
@@ -250,31 +248,24 @@ fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
     Ok(v.clone())
 }
 
-/// A `within [dir: …]` override, distinguishing "this scope left `dir`
-/// alone" from "this scope installed `dir`, displacing `PathBuf` (or no
-/// prior override)".
-enum SavedDir {
-    Unset,
-    Prior(Option<PathBuf>),
-}
-
 /// The undo token `WithinScope::enter` returns: what to put back, and in
 /// what order, once `within`'s body has run.  Frames hold this, never a
 /// `Context` clone.
 pub(crate) struct WithinUndo {
     saved_env: Option<EnvVars>,
-    saved_dir: SavedDir,
+    /// The whole cell, so a `cd` in the body is undone with the entry.
+    saved_cwd: Option<Cwd>,
     handlers: Option<FrameHandle>,
 }
 
 impl WithinUndo {
-    /// Undo in the reverse of install order: handlers, then dir, then env.
+    /// Undo in the reverse of install order: handlers, then cwd, then env.
     pub(crate) fn apply(self, shell: &mut Shell) {
         if let Some(handle) = self.handlers {
             shell.context.handlers.remove_by_handle(handle);
         }
-        if let SavedDir::Prior(saved) = self.saved_dir {
-            shell.restore_cwd_override(saved);
+        if let Some(saved) = self.saved_cwd {
+            shell.restore_cwd(saved);
         }
         if let Some(saved) = self.saved_env {
             shell.context.env_overrides = saved;

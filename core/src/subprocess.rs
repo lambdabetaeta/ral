@@ -97,7 +97,6 @@ pub(crate) struct WireShell {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireContext {
     pub(crate) env_overrides: crate::types::EnvVars,
-    pub(crate) dir: Option<std::path::PathBuf>,
     pub(crate) grants: GrantStack,
     pub(crate) handlers: Vec<WireHandlerFrame>,
     pub(crate) args: Vec<String>,
@@ -143,15 +142,13 @@ impl WireContext {
         for frame in &h.handlers {
             handlers.push(WireHandlerFrame::from_runtime(frame, ctx)?);
         }
-        let (dir, cwd) = h.wire_cwd_parts();
         Ok(Self {
             env_overrides: h.env_overrides().clone(),
-            dir: dir.map(std::path::Path::to_path_buf),
             grants: h.grants.clone(),
             handlers,
             args: h.args.clone(),
             modules: h.modules.clone(),
-            cwd: cwd.clone(),
+            cwd: h.wire_cwd().clone(),
         })
     }
 
@@ -163,7 +160,6 @@ impl WireContext {
             .collect::<Result<_, _>>()?;
         Ok(Context::from_wire(
             self.env_overrides,
-            self.dir,
             self.grants,
             HandlerStack::from(handlers),
             self.args,

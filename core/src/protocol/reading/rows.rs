@@ -5,7 +5,7 @@ use crate::record;
 use crate::serial::FOValue;
 use crate::serial::datum::{Datum, tag, untag};
 use crate::sync::LockExt as _;
-use crate::types::{Chpwd, HandleState, LeaseClass, Shell, Value, WorkerEntry};
+use crate::types::{HandleState, LeaseClass, Shell, Value, WorkerEntry};
 
 /// One row of the worker table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,12 +268,6 @@ pub struct BindEffect {
 record!(BindEffect {
     name: "name",
     effectful: "effectful",
-});
-
-record!(Chpwd {
-    seq: "seq",
-    old: "old",
-    new: "new",
 });
 
 /// One directory entry.

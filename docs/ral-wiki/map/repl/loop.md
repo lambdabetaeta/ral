@@ -128,8 +128,10 @@ the live session** ([[internals/a-turn-end-to-end|a run, end to end]]).
 no wall, `RunIo::Inherit`, `RequestedTerminalAccess::Leased`,
 `RunStdin::Inherit` — and `ReplHost::dispatch` sends it. Around it the
 lifecycle hooks fire as dispatches of their own (`plugin::fire`): `pre-exec`
-with `{src}` before; after, `chpwd` with `{old, new}` if the `last-chpwd`
-reading moved past the `seq` seen before the line, then `post-exec` with
+with `{src}` before; after, `chpwd` with `{old, new}` if the `cwd` reading
+differs from the one taken before the line — the session is the working
+directory's outermost handler, so a `cd` a `within [dir:]` undid fires
+nothing — then `post-exec` with
 `{src, status}` — for every `pre-exec`, a static failure's status included.
 An `Err(Severed)` prints the cause and ends the session.
 

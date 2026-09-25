@@ -45,8 +45,8 @@ recursion is irreducible; the evaluator reaches it at
     `PathSearch` on the identity; `vet::check_existence` pattern-matches it and
     never probes the disk itself, so walk and verdict cannot disagree. Both that
     walk and `policy_names`' host-`PATH` baseline anchor through
-    `Context::search_cwd` — the `within [dir: …]` override, else the `cd`-mutated
-    cwd — so the grant gate judges the identity vet saw
+    `Context::search_cwd` — the shell's one cwd cell — so the grant gate judges
+    the identity vet saw
     ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument through `RefusedArg::of_value`

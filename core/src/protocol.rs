@@ -31,7 +31,7 @@ pub mod reading;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -2176,21 +2176,6 @@ mod probe_tests {
         assert_eq!(reading::session_ended(&transport), Ok(None));
         transport.control().terminate();
         assert_eq!(reading::session_ended(&transport), Ok(Some(143)));
-    }
-
-    /// `cd` leaves a record the probe reads without taking.
-    #[test]
-    fn last_chpwd_counts_directory_changes() {
-        let dir = tempfile::tempdir().expect("a tempdir");
-        let transport = at(dir.path());
-        assert_eq!(reading::last_chpwd(&transport), Ok(None));
-        assert!(matches!(
-            eval(&transport, "cd ..\ncd .."),
-            Report::Ran { .. }
-        ));
-        let first = reading::last_chpwd(&transport).expect("a reading");
-        assert_eq!(first.as_ref().map(|c| c.seq), Some(2));
-        assert_eq!(reading::last_chpwd(&transport).expect("a reading"), first);
     }
 
     #[test]

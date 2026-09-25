@@ -65,7 +65,7 @@ the kernel's `to _` with a settled rest: it drops the cleanup's value and
 resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
-`Within(WithinUndo)` restores env overrides, dir and handlers, `Grant` pops
+`Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
 close their trail scope. `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect`, `Unmask` and the `Env` of `Try`/`Guard` are boxed).

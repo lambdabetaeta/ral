@@ -224,7 +224,7 @@ is a missing one), the engine's answer, and the host's typed door —
 `reading::cwd(t) -> PathBuf`, `reading::workers(t) -> Vec<WorkerRow>`,
 `reading::spine(t, src)`, and one per class — so the two ends of a probe
 cannot disagree about what a class means. The classes span session state
-(`cwd`, `home`, `env-var`, `builtin-names`, `session-ended`, `last-chpwd`),
+(`cwd`, `home`, `env-var`, `builtin-names`, `session-ended`),
 the scope (`bindings`, `completion-names`, the binding counts), the engine's
 filesystem (`path-bytes`, `path-entries`) and static reads of source against
 the live session (`spine`, `bind-effects`). What a probe answers is *data*,

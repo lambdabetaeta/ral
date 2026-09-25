@@ -893,10 +893,9 @@ fn within_dir_nonexistent_is_error() {
     must_fail("within [dir: '/nonexistent_dir_xyz'] { echo bad }");
 }
 
-/// `PWD` / `OLDPWD` are derived from the shell's working directory and
-/// live on `context.cwd`, not in `env_overrides`.  Setting them through
-/// `within [env: …]` is rejected in every build profile, and the message
-/// points the user at `cd`.  Running under `--release` pins that the
+/// `PWD` is the shell's working directory and `OLDPWD` names none, so
+/// setting either through `within [env: …]` is rejected in every build
+/// profile, with a message about `cd`.  Running under `--release` pins that the
 /// rejection is a real returned error.
 #[test]
 fn within_env_rejects_pwd() {
@@ -913,6 +912,21 @@ fn within_env_rejects_pwd() {
             other => panic!("within env: [{key}: …] should error, got {other:?}"),
         }
     }
+}
+
+/// ral keeps no previous directory, so a child sees no `OLDPWD` even after
+/// a `cd`, nor the one ral itself inherited.
+#[cfg(unix)]
+#[test]
+fn cd_exports_no_oldpwd() {
+    let out = match eval_on_path("cd /; let out = !{/usr/bin/env}; $out", "") {
+        Ok(Value::String(s)) => s,
+        other => panic!("expected env to return a String, got {other:?}"),
+    };
+    assert!(
+        !out.lines().any(|l| l.starts_with("OLDPWD=")),
+        "child saw an OLDPWD:\n{out}"
+    );
 }
 
 /// External commands spawned inside `within [dir: X]` must run with `X`

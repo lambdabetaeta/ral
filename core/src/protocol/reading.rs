@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::{Ending, ProbeError, Report, Severed, Transport};
 use crate::serial::FOValue;
 use crate::serial::datum::{self, Datum};
-use crate::types::{Chpwd, Shell};
+use crate::types::Shell;
 
 mod fs;
 mod rows;
@@ -37,7 +37,6 @@ pub(crate) enum Class {
     Bindings,
     Spine,
     BindEffects,
-    LastChpwd,
     PathEntries,
     #[cfg(feature = "test-util")]
     WorkerCount,
@@ -60,7 +59,6 @@ const CLASSES: &[(&str, Class)] = &[
     ("bindings", Class::Bindings),
     ("spine", Class::Spine),
     ("bind-effects", Class::BindEffects),
-    ("last-chpwd", Class::LastChpwd),
     ("path-entries", Class::PathEntries),
     #[cfg(feature = "test-util")]
     ("worker-count", Class::WorkerCount),
@@ -152,7 +150,6 @@ pub(crate) fn answer(shell: &Shell, req: &FOValue) -> Result<FOValue, String> {
         Class::Bindings => BindingRow::all(shell).encode(),
         Class::Spine => source::spine(shell, arg).encode(),
         Class::BindEffects => source::bind_effects(shell, arg).encode(),
-        Class::LastChpwd => shell.local.repl.last_chpwd.clone().encode(),
         Class::PathEntries => fs::entries(&shell.cwd().join(arg)).encode(),
         #[cfg(feature = "test-util")]
         Class::WorkerCount => shell.worker_count().encode(),
@@ -342,14 +339,6 @@ pub fn spine(t: &dyn Transport, src: &str) -> Result<Spine, ProbeError> {
 /// As [`cwd`].
 pub fn bind_effects(t: &dyn Transport, src: &str) -> Result<Vec<BindEffect>, ProbeError> {
     read(t, Class::BindEffects, Some(src))
-}
-
-/// The session's latest `cd`, if it has made one.
-///
-/// # Errors
-/// As [`cwd`].
-pub fn last_chpwd(t: &dyn Transport) -> Result<Option<Chpwd>, ProbeError> {
-    read(t, Class::LastChpwd, None)
 }
 
 /// The entries of `dir` in the engine's own filesystem, resolved against its

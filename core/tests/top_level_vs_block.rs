@@ -26,6 +26,7 @@ use ral_core::protocol::{Program, Run};
 use ral_core::types::FsPolicy;
 use ral_core::types::{Capabilities, GrantStack, Settled, Shell};
 use ral_core::{Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
+use std::path::Path;
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
@@ -219,9 +220,8 @@ fn recovered_try_reports_a_clean_transport_status() {
 // ── (3) Top-level cwd ───────────────────────────────────────────────────
 
 /// `cd` in one top-level run is visible to subsequent runs: a later
-/// `cwd` reflects the directory set by the earlier `cd`.  This locks
-/// in that `context.cwd` lives in the mobile and rides the top-level
-/// install-mobile contract.
+/// `cwd` reflects the directory set by the earlier `cd`, the session
+/// being the cell's outermost handler.
 #[test]
 fn top_level_cd_persists_across_calls() {
     let mut shell = fresh_shell();
@@ -393,9 +393,8 @@ fn block_audit_does_not_leak_let_binding() {
 /// A `cd` inside a `grant`-scoped block PERSISTS after the call (S10), the
 /// same as a forced block or a lambda body: `grant`'s body runs on the
 /// machine's own stack, in place — `cwd` lives on `Shell`, outside the
-/// attenuated cap frame `Frame::Grant` pops.  We use `grant` (not
-/// `within [dir: ...]`) so the test isn't masked by `within`'s own
-/// dir-override mechanism.
+/// attenuated cap frame `Frame::Grant` pops.  `grant` handles no cell;
+/// `within [dir: …]` does, and restores it (section 6c).
 #[test]
 fn block_grant_cd_persists() {
     let mut shell = fresh_shell();
@@ -722,8 +721,7 @@ fn poll_on_a_cancelled_handle_errors() {
 }
 
 /// `cd` under an active fs projection persists into the next run, same
-/// as without one.  Validates that `context.cwd` rides the mobile through
-/// the (now always local) top-level dispatch under a projection.
+/// as without one.
 #[cfg(unix)]
 #[test]
 fn sandbox_parity_top_level_cd() {
@@ -779,6 +777,220 @@ fn forced_block_cd_persists() {
         after == tmp_disp || after == canon,
         "lambda `cd` must land in the temp dir: expected {tmp_disp:?} or {canon:?}, got {after:?}"
     );
+}
+
+// ── (6c) `within [dir:]` is the cwd cell's local-state handler ──────────
+
+/// `outer` for the session to stand in; `inner` and `inner/sub` for a
+/// `within` to enter and move through.
+struct Tree {
+    _root: tempfile::TempDir,
+    outer: String,
+    inner: String,
+    sub: String,
+}
+
+fn tree() -> Tree {
+    let root = tempfile::tempdir().unwrap();
+    let outer = root.path().join("outer");
+    let inner = root.path().join("inner");
+    let sub = inner.join("sub");
+    std::fs::create_dir(&outer).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    Tree {
+        outer: outer.display().to_string(),
+        inner: inner.display().to_string(),
+        sub: sub.display().to_string(),
+        _root: root,
+    }
+}
+
+fn string(v: Value) -> String {
+    match v {
+        Value::String(s) => s.into_string(),
+        other => panic!("expected a String, got {other:?}"),
+    }
+}
+
+/// Probe 1: an absolute `cd` inside `within [dir:]` moves the scope's cell,
+/// and the exit restores the session's.
+#[test]
+fn within_dir_cd_is_local() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    let inside = top_level(
+        &mut shell,
+        &format!(
+            "cd '{}'\nwithin [dir: '{}'] {{ cd '{}'; cwd }}",
+            t.outer, t.inner, t.sub
+        ),
+    )
+    .expect("within body");
+    assert_eq!(string(inside), t.sub, "the `cd` must move the scope's cell");
+    assert_eq!(
+        shell.cwd(),
+        Path::new(&t.outer),
+        "the exit must restore the cell"
+    );
+}
+
+/// Probe 2: `cd $CWD` sets the cell to what it reads — a no-op — so the
+/// exit still restores the directory the session stood in.
+#[test]
+fn within_dir_cd_to_cwd_is_local() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    let inside = top_level(
+        &mut shell,
+        &format!(
+            "cd '{}'\nwithin [dir: '{}'] {{ cd $CWD; cwd }}",
+            t.outer, t.inner
+        ),
+    )
+    .expect("within body");
+    assert_eq!(string(inside), t.inner);
+    assert_eq!(shell.cwd(), Path::new(&t.outer));
+}
+
+/// Probe 3: a relative `cd` resolves against the scope's cell and stays in it.
+#[test]
+fn within_dir_relative_cd_is_local() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    let inside = top_level(
+        &mut shell,
+        &format!(
+            "cd '{}'\nwithin [dir: '{}'] {{ cd sub; cwd }}",
+            t.outer, t.inner
+        ),
+    )
+    .expect("within body");
+    assert_eq!(string(inside), t.sub);
+    assert_eq!(shell.cwd(), Path::new(&t.outer));
+}
+
+/// The cell is restored on every exit: a failure caught outside the
+/// `within`, and an `exit` that ends the run.
+#[test]
+fn within_dir_restores_the_cell_on_failure_and_exit() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    top_level(&mut shell, &format!("cd '{}'", t.outer)).expect("cd");
+    top_level(
+        &mut shell,
+        &format!(
+            "try {{ within [dir: '{}'] {{ cd sub; fail [status: 3, message: 'boom'] }} }} {{ |_e| let _ignore = 0 }}",
+            t.inner
+        ),
+    )
+    .expect("try recovers the failure");
+    assert_eq!(
+        shell.cwd(),
+        Path::new(&t.outer),
+        "a failure must restore the cell"
+    );
+    let exited = top_level(
+        &mut shell,
+        &format!("within [dir: '{}'] {{ cd sub; exit 0 }}", t.inner),
+    );
+    assert!(matches!(exited, Err(Break::Escape(_))), "got {exited:?}");
+    assert_eq!(
+        shell.cwd(),
+        Path::new(&t.outer),
+        "an exit must restore the cell"
+    );
+}
+
+/// A child launched after a `cd` inside `within [dir:]` starts in the moved
+/// cell, and a redirect beside it resolves there too.
+#[cfg(unix)]
+#[test]
+fn within_dir_cd_reaches_a_child() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    top_level(
+        &mut shell,
+        &format!("within [dir: '{}'] {{ cd sub; ^pwd > here.txt }}", t.inner),
+    )
+    .expect("^pwd inside within");
+    let here = std::fs::read_to_string(Path::new(&t.sub).join("here.txt")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(here.trim()).unwrap(),
+        std::fs::canonicalize(&t.sub).unwrap(),
+    );
+}
+
+/// Nested handlers each restore their own cell: the inner one resolves its
+/// relative `dir` against the outer one's moved cell, its `cd` moves only its
+/// own, and its exit returns to the outer one's, not to the session's.
+#[test]
+fn nested_within_dir_restores_each_cell() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    let back = top_level(
+        &mut shell,
+        &format!(
+            "cd '{}'\n\
+             within [dir: '{}'] {{\n\
+                 cd sub\n\
+                 within [dir: '..'] {{ cd '{}'; echo deep > deep.txt }}\n\
+                 cwd\n\
+             }}",
+            t.outer, t.inner, t.outer
+        ),
+    )
+    .expect("nested within");
+    assert!(
+        Path::new(&t.outer).join("deep.txt").is_file(),
+        "the inner `cd` must move the inner scope's cell"
+    );
+    assert_eq!(
+        string(back),
+        t.sub,
+        "the inner exit restores the outer scope's cell"
+    );
+    assert_eq!(shell.cwd(), Path::new(&t.outer));
+}
+
+/// Entering `within [dir:]` is not a `cd`, so it needs no `shell.chdir`;
+/// a `cd` inside it still does.
+#[test]
+fn within_dir_entry_needs_no_chdir_authority() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    let inside = top_level(
+        &mut shell,
+        &format!(
+            "grant [shell: [chdir: false]] {{ within [dir: '{}'] {{ cwd }} }}",
+            t.inner
+        ),
+    )
+    .expect("entry needs no chdir");
+    assert_eq!(string(inside), t.inner);
+    match top_level(
+        &mut shell,
+        &format!(
+            "grant [shell: [chdir: false]] {{ within [dir: '{}'] {{ cd sub }} }}",
+            t.inner
+        ),
+    ) {
+        Err(Break::Error(e)) => assert!(e.message.contains("shell.chdir"), "got {:?}", e.message),
+        other => panic!("a `cd` under `chdir: false` must be denied, got {other:?}"),
+    }
+}
+
+/// A `within` without `dir` handles no cell: a `cd` inside it persists, as in
+/// any block.
+#[test]
+fn within_without_dir_leaves_cd_alone() {
+    let t = tree();
+    let mut shell = fresh_shell();
+    top_level(
+        &mut shell,
+        &format!("within [env: [RAL_CELL_PROBE: x]] {{ cd '{}' }}", t.inner),
+    )
+    .expect("within body");
+    assert_eq!(shell.cwd(), Path::new(&t.inner));
 }
 
 /// A command run inside a lambda body is recorded into the *enclosing*

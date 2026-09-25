@@ -58,8 +58,9 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
 }
 
 /// `$ENV`: the host process environment, overlaid with `within [env: …]`.
-/// The host's `PWD` / `OLDPWD` are stale the moment ral `cd`s — the live
-/// pair is `context.cwd` — so they are dropped at the source.
+/// The host's `PWD` is stale the moment ral `cd`s — the live one is
+/// `context.cwd` — and its `OLDPWD` names the launcher's history, so both are
+/// dropped at the source.
 fn env_map(shell: &Shell) -> Value {
     let host = std::env::vars().filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"));
     let overrides = shell

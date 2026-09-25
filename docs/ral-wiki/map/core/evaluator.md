@@ -103,6 +103,9 @@ Internals:
   from the runtime value
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
   The handler-stack mechanics live in [[internals/handler-dispatch|handler-dispatch]].
+  `WithinUndo` holds the whole cwd cell a `dir:` displaced, so a `cd` in the
+  body is undone on every exit
+  ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 - `pattern.rs` — matching: `bind_pattern`/`bind_pattern_staged` destructure a
   `Value` against a compiled `IrPattern` (wildcard, name, list with optional
   `...rest`, map by key) and fold the result straight

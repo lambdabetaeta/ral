@@ -16,14 +16,13 @@ use std::time::{Duration, Instant};
 
 /// The directory a `PATH` walk anchors its relative entries to.
 ///
-/// A newtype rather than an `Option<&Path>` because "here" is a
-/// *precedence* — the `within [dir: …]` override, else the `cd`-mutated cwd —
-/// and a loose option lets each call site re-derive it.  Two walks that
-/// answered the same question against two anchors is how a bare name in a
-/// `cd`'d directory once earned "permission denied" from a walk that had
+/// A newtype rather than an `Option<&Path>` because "here" is the shell's cwd
+/// cell, and a loose option lets each call site improvise another.  Two walks
+/// that answered the same question against two anchors is how a bare name in
+/// a `cd`'d directory once earned "permission denied" from a walk that had
 /// resolved nothing.  The constructors are therefore few and named for their
-/// provenance: `Context::search_cwd` and [`Resolver::search_cwd`] carry the
-/// precedence, [`SearchCwd::of`] serves a front end already holding it, and
+/// provenance: `Context::search_cwd` and [`Resolver::search_cwd`] read the
+/// cell, [`SearchCwd::of`] serves a front end already holding it, and
 /// [`SearchCwd::nowhere`] says outright that there is none.
 ///
 /// [`Resolver::search_cwd`]: super::Resolver::search_cwd
@@ -31,10 +30,9 @@ use std::time::{Duration, Instant};
 pub struct SearchCwd<'a>(Option<&'a Path>);
 
 impl<'a> SearchCwd<'a> {
-    /// For a caller already holding the shell's effective cwd — `Shell::cwd`,
-    /// which adds the process-cwd fallback, and the REPL's completion scan.
-    /// Core runtime code goes through `Context::search_cwd` instead, so the
-    /// override-vs-`cd` precedence cannot be re-chosen a third way.
+    /// For a caller already holding the shell's cwd — `Shell::cwd`, which
+    /// adds the process-cwd fallback, and the REPL's completion scan.  Core
+    /// runtime code goes through `Context::search_cwd` instead.
     #[must_use]
     pub fn of(cwd: &'a Path) -> Self {
         Self(Some(cwd))

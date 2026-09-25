@@ -27,6 +27,7 @@ Each dynamic frame nests by its own algebra:
 
 - **capability** frames by intersection — each layer narrows reachability ([[design/grant|grant]]);
 - **environment** overlays by shadowing — inner `KEY: VAL` overrides outer;
+- **directory** scopes as local state — each saves the one working-directory cell, sets it and restores it on exit, so a `cd` inside moves only the innermost scope's copy ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]);
 - **handler** frames by the deep self-masking discipline ([[design/effects-handlers|effects-handlers]]).
 
 A tail-recursive call inside a `within` or `grant` block stays under that scope
@@ -59,7 +60,8 @@ forked. A block and a lambda are told apart only by the body's shape
 (`Comp::arrow`), never by how force treats them: an unbracketed store write in
 either body — `cd`, `alias`, a hook registration — persists past the force: a
 plain block is not a boundary for the store. `within [dir:]` / `within
-[handlers:]` are the scoped forms
+[handlers:]` are the scoped forms, and `within [dir:]` undoes a `cd` made
+beneath it
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]],
 superseding
 [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]

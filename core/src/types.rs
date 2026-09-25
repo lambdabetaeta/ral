@@ -7,7 +7,7 @@ mod env;
 pub use env::{Binding, Env, EnvVars};
 pub(crate) use env::{BindingMap, NativeMap, PreludeMap};
 
-pub use shell::repl::{Chpwd, PluginEntry, ReplScratch};
+pub use shell::repl::{PluginEntry, ReplScratch};
 
 mod capability;
 pub use capability::{

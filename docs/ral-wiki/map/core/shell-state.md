@@ -341,8 +341,10 @@ Methods on `Shell` live by concern, one submodule each:
 - `checks.rs` — forwarders to the
   [[map/core/capabilities|`capability::check_*(&Context, …)`]] decisions,
   splitting the disjoint context/audit borrow for the audit-bearing checks;
-- `cwd.rs` (`Cwd`; `seed_cwd` lets an in-process front end whose working
-  directory is not the process cwd state it directly), `inherit.rs` (the
+- `cwd.rs` (`Cwd`, the one working-directory cell: `cd` sets it,
+  `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
+  `seed_cwd` lets an in-process front end whose working directory is not the
+  process cwd state it directly), `inherit.rs` (the
   flow matrix, below), `scrub.rs` (`Shell::fork_scrubbed` and its `Scrub`,
   the one snapshot law's whole mechanism, below), `modules.rs`, `detached.rs`
   (the `detach` budget), `hooks.rs` (the session-lived hook table of named
@@ -352,8 +354,7 @@ Methods on `Shell` live by concern, one submodule each:
   fault in a hook run is labelled by `HookName::fault_label`, and a hook run
   is no ready boundary), `repl.rs` (`ReplScratch`, the
   [[map/repl|REPL]]'s engine-side scratch: the typed registry of the plugins
-  its load door committed, and `last_chpwd`, the monotone record `cd` writes
-  and the `last-chpwd` reading answers).
+  its load door committed).
 
 ## The flow matrix
 
@@ -373,8 +374,9 @@ Block and lambda entry are uniform: an unbracketed store write in either
 body (`cd`, `alias`, a hook registration) persists to the caller, no snapshot
 standing between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);
-`within [dir:]`/`within [handlers:]` are the scoped forms for a caller that
-wants the old bracketing back.
+`within [dir:]` is the working directory's local-state handler, undoing a `cd`
+in its body, and `within [handlers:]` the scoped form for handlers
+([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 
 The owned-`Shell` modes *are* genuine runtime forks — a different store — and so
 copy state explicitly. Each starts from a freshly-defaulted `SessionState` and so

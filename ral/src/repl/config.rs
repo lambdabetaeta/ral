@@ -289,9 +289,9 @@ fn apply_rc_key(
                 ));
             };
             for (k, v) in m {
-                // PWD / OLDPWD are shell-cwd-derived: they live on
-                // context.cwd, and a copy in env_overrides would shadow
-                // the canonical pair and drift on the next `cd`.  An rc
+                // PWD lives on context.cwd, and a copy in env_overrides
+                // would shadow it and drift on the next `cd`; ral keeps no
+                // OLDPWD at all.  An rc
                 // that spreads a parent shell's environment carries them,
                 // so drop them here rather than feed them to set_env_var.
                 if matches!(k.as_str(), "PWD" | "OLDPWD") {

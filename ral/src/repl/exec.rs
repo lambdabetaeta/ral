@@ -2,8 +2,8 @@
 //!
 //! [`step`] runs a source line through the transport with the REPL host,
 //! drains to its [`Report`], and fires the lifecycle hooks around it —
-//! `pre-exec` before, a fresh `chpwd` then `post-exec` after, each a
-//! dispatch of its own.
+//! `pre-exec` before; after, `chpwd` if the line moved the session's
+//! directory, then `post-exec` — each a dispatch of its own.
 
 use ral_core::protocol::{Ending, Program, Report, Run, Transport, reading};
 use ral_core::serial::FOValue;
@@ -55,11 +55,6 @@ fn record(entries: Vec<(&str, FOValue)>) -> FOValue {
     }
 }
 
-/// The session's latest `cd`, if the engine will say.
-fn last_chpwd(t: &dyn Transport) -> Option<ral_core::types::Chpwd> {
-    reading::last_chpwd(t).ok().flatten()
-}
-
 /// An input line's run: the terminal leased, as a foreground command has it.
 pub(super) fn line_run(src: &str) -> Run {
     Run {
@@ -79,6 +74,10 @@ pub(super) fn line_run(src: &str) -> Run {
 /// Dispatch one trimmed non-empty input line, firing the lifecycle hooks
 /// around it: `post-exec` for every `pre-exec`, with the line's status, a
 /// static failure's included.
+///
+/// The session is the working directory's outermost handler, so `chpwd`
+/// compares its directory across the line: a `cd` that a `within [dir: …]`
+/// undid, or a `cd .`, fires nothing.
 pub(super) fn step(
     trimmed: &str,
     t: &dyn Transport,
@@ -87,7 +86,7 @@ pub(super) fn step(
 ) -> Step {
     let src = trimmed.to_string().encode();
     fire(t, host, "pre-exec", &record(vec![("src", src.clone())]));
-    let seen = last_chpwd(t).map(|c| c.seq);
+    let before = reading::cwd(t).ok();
 
     let (report, _) = host.dispatch(t, line_run(trimmed), None);
     let (status, step) = match report {
@@ -123,14 +122,15 @@ pub(super) fn step(
         }
     };
 
-    if let Some(ral_core::types::Chpwd { seq, old, new }) = last_chpwd(t)
-        && Some(seq) != seen
+    if let (Some(old), Ok(new)) = (before, reading::cwd(t))
+        && old != new
     {
+        let path = |p: std::path::PathBuf| p.to_string_lossy().into_owned().encode();
         fire(
             t,
             host,
             "chpwd",
-            &record(vec![("old", old.encode()), ("new", new.encode())]),
+            &record(vec![("old", path(old)), ("new", path(new))]),
         );
     }
     fire(
@@ -151,7 +151,7 @@ pub(super) fn step(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
 mod tests {
     use super::*;
     use crate::repl::plugin::PluginRuntime;
@@ -258,5 +258,34 @@ mod tests {
         let (t, host, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
         run("return ()", &t, &host);
         assert_eq!(*sink.lock().unwrap(), vec![Value::string("return ()")]);
+    }
+
+    /// `chpwd` observes the session's directory at the line boundary: a `cd`
+    /// that a `within [dir: …]` undoes fires nothing, and a plain one fires
+    /// once, with the line's `old` and `new`.
+    #[test]
+    fn chpwd_fires_only_when_the_line_moves_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::create_dir_all(root.join("d").join("x")).unwrap();
+        let (t, host, sink) = dressed("chpwd", "{ |ev| record $ev[old] $ev[new] }");
+        run(&format!("cd '{}'", root.display()), &t, &host);
+        sink.lock().unwrap().clear();
+
+        run(
+            &format!("within [dir: '{}'] {{ cd x }}", root.join("d").display()),
+            &t,
+            &host,
+        );
+        assert!(sink.lock().unwrap().is_empty(), "the session never moved");
+
+        run("cd d", &t, &host);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![
+                Value::string(root.display().to_string()),
+                Value::string(root.join("d").display().to_string()),
+            ]
+        );
     }
 }

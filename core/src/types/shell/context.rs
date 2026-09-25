@@ -2,14 +2,14 @@
 //! `$USER`, and the [`Resolver`] bound to the live home/cwd pair.
 //!
 //! [`Context`] is the `Shell::context` field that `Shell::inherit_from` and
-//! `Shell::spawn_thread` clone into a child.  `PWD` / `OLDPWD` stay out of
-//! `env_overrides`; the canonical pair lives on `context.cwd`.
+//! `Shell::spawn_thread` clone into a child.  `PWD` stays out of
+//! `env_overrides`; the canonical directory lives on `context.cwd`.
 
 use super::Context;
 use super::cwd::Cwd;
 use crate::path::{Resolver, SearchCwd};
 use crate::types::{EnvVars, GrantStack, HandlerStack, Modules};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 impl Context {
     /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
@@ -56,39 +56,30 @@ impl Context {
             .cloned()
     }
 
-    /// Effective cwd: the `within [dir: …]` override, else the `cd`-mutated
-    /// persistent cwd.  Sole home of that precedence, read by [`Self::resolver`]
-    /// and [`Shell::cwd`](super::Shell::cwd), which adds the process-cwd fallback.
-    pub(crate) fn cwd_chain(&self) -> Option<&Path> {
-        self.dir.as_deref().or(self.cwd.current.as_deref())
+    /// The cwd cell's directory, `None` while unseeded;
+    /// [`Shell::cwd`](super::Shell::cwd) adds the process-cwd fallback.
+    pub(crate) fn cwd(&self) -> Option<&Path> {
+        self.cwd.0.as_deref()
     }
 
-    /// The anchor a `PATH` walk made from this context runs against.
-    ///
-    /// The effective cwd is a precedence with exactly one home,
-    /// [`Self::cwd_chain`]; a walk that re-derives it from `self.dir` alone
-    /// anchors relative entries to nothing in a plain REPL and disagrees with
-    /// every other consumer of "here" — which is how a walk and its 126/127
-    /// probe once told different stories about the same name.
+    /// The anchor a `PATH` walk made from this context runs against: the
+    /// [`Self::cwd`] every other consumer of "here" reads.
     pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
-        self.cwd_chain()
-            .map_or_else(SearchCwd::nowhere, SearchCwd::of)
+        self.cwd().map_or_else(SearchCwd::nowhere, SearchCwd::of)
     }
 
-    /// A [`Resolver`] bound to this layer's home and effective cwd — grant-prefix
+    /// A [`Resolver`] bound to this layer's home and cwd — grant-prefix
     /// resolution, deny-path canonicalisation, and the fs gates all mint one here.
     pub(crate) fn resolver(&self) -> Resolver<'_> {
         Resolver {
             home: self.home(),
-            cwd: self.cwd_chain(),
+            cwd: self.cwd(),
         }
     }
 
-    /// The raw `(dir, cwd)` pair for the wire mirror, which must carry the
-    /// override and the `cd` slot separately; every cwd *consumer* reads
-    /// [`Self::cwd_chain`] instead.
-    pub(crate) fn wire_cwd_parts(&self) -> (Option<&Path>, &Cwd) {
-        (self.dir.as_deref(), &self.cwd)
+    /// The cwd cell, for the wire mirror.
+    pub(crate) fn wire_cwd(&self) -> &Cwd {
+        &self.cwd
     }
 
     /// Rebuild a context from its wire mirror's parts — `crate::subprocess`
@@ -96,7 +87,6 @@ impl Context {
     /// never ride the wire.
     pub(crate) fn from_wire(
         env_overrides: EnvVars,
-        dir: Option<PathBuf>,
         grants: GrantStack,
         handlers: HandlerStack,
         args: Vec<String>,
@@ -105,7 +95,6 @@ impl Context {
     ) -> Self {
         Self {
             env_overrides,
-            dir,
             grants,
             handlers,
             hooks: std::collections::HashMap::default(),

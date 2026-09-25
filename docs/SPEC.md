@@ -175,7 +175,8 @@ boundary for the shell's state.
 directory, environment, or command handlers for its body's whole extent, and
 `grant` temporarily reduces authority the same way. Code called inside either
 scope sees that scope, even if the code was defined elsewhere, and the change
-is undone when the scope returns.
+is undone when the scope ends — under `within [dir: …]`, together with any
+`cd` made inside it.
 
 ### 2.7. One complete example
 
@@ -2074,7 +2075,18 @@ within [dir: 'src'] {
 
 The scoped directory is used by ral path operations, relative executable lookup, redirects, module lookup, and external children. ral does not change the process-wide working directory; each child is launched in the effective logical directory. This avoids races between concurrent workers.
 
-`dir` is an override, not a `cd`. A `cd` performed beneath it may update the block’s underlying cwd state, but the `dir` override remains the effective directory until `within` exits. Because a `within` body is a block, that underlying cwd mutation is discarded when the block closes.
+The working directory is one piece of shell state: `cd` sets it, and `$CWD`, `cwd`, and every relative path read it. `dir` makes `within` a local handler for that state. `within` saves the working directory, sets it to `dir`, runs the body, and restores what it saved when the body returns, fails, or escapes. A `cd` inside the body therefore moves only the scope's directory:
+
+```ral
+cd /usr
+within [dir: /usr/share] {
+    cd man
+    echo $CWD        # prints "/usr/share/man"
+}
+echo $CWD            # prints "/usr"
+```
+
+Setting the directory on entry is not a `cd`, so `shell: [chdir: false]` does not refuse it; a `cd` in the body still needs `chdir`. A `within` without `dir` leaves the working directory alone, and a `cd` inside it persists.
 
 An empty path, a missing path, a non-directory, or a path denied by the active filesystem grant is an error before the body runs.
 
@@ -2090,7 +2102,7 @@ within [env: [PATH: 'tools:/usr/bin', DEBUG: true]] {
 
 An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `$ENV`, `$USER`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
 
-`PWD` and `OLDPWD` cannot be set through `within env`. They are derived from ral’s logical cwd; use `cd` or `within dir` instead. Lists, maps, blocks, handles, and other non-scalar environment values are rejected.
+`PWD` and `OLDPWD` cannot be set through `within env`. `PWD` is ral’s logical cwd, so use `cd` or `within dir` instead; ral keeps no previous directory, so there is no `OLDPWD`. Lists, maps, blocks, handles, and other non-scalar environment values are rejected.
 
 The previous environment overlay is restored exactly when the scope ends. A spawned worker receives a snapshot of the overlay in force at birth; later changes in either shell do not cross back.
 
@@ -2156,12 +2168,11 @@ Redirects apply to handler dispatch just as they do to other command calls. Byte
 
 ### 9.7. State flow and containment
 
-The body of `within` is a block. It runs with a fresh lexical frame and discards its mobile program state when it closes. Bindings, aliases, module registrations, handler changes, cwd changes, and similar mutations made inside do not escape.
+The body of `within` is a block. Its bindings stay local, and when the body ends `within` restores exactly what it scoped: the working directory under `dir`, which undoes any `cd` made inside (§9.2), the `env` overlay, and its handler frame. An alias or any other unbracketed shell-state write made inside persists, as in any block, and so does a `cd` under a `within` without `dir`.
 
 Boundary rules are deliberately specific:
 
-- A forced block returns only its value; cwd and bindings remain private.
-- An ordinary lambda call returns its value, and its logical cwd flows back to its caller, while its lexical locals remain private. Inside a surrounding `within dir`, that dynamic directory override still wins, and the enclosing block ultimately contains the cwd change.
+- A forced block and a function call keep their bindings private; a `cd` or other unbracketed shell-state write inside either persists to the caller. Inside a surrounding `within [dir:]`, a `cd` persists only until that `within` exits.
 - Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
 - Each stage of a pipeline runs as a subshell with a snapshot of the active lexical and dynamic context — a ral-written stage on its own thread over a cloned shell, an external command as a process. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
 - A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
@@ -2240,11 +2251,11 @@ within [env: [MODE: 'test', USER: 'builder']] {
 
 Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
 
-`PWD` and `OLDPWD` are deliberately absent from `$ENV`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD`, `OLDPWD`, and their actual process working directory from this logical state.
+`PWD` and `OLDPWD` are deliberately absent from `$ENV`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD` and their actual process working directory from this logical state, and no `OLDPWD`: ral keeps no previous directory.
 
-`cd path` changes the session’s logical working directory. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs. A `within [dir: path]` override lasts only for its body.
+`cd path` changes the session’s logical working directory. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
 
-A function call carries its `cd` result back to its caller. A forced block is a local computation boundary: its bindings and working-directory changes are discarded when it finishes; only its value remains.
+A `cd` inside a function call or a forced block changes the caller's working directory, as at top level; only the body's bindings stay local.
 
 ### 10.3. Importing a module with `use`
 
@@ -3896,7 +3907,7 @@ The recognized fields are:
 
 | Field | Meaning |
 |---|---|
-| `env: Record` | Set environment entries and bindings. `PWD` and `OLDPWD` are ignored because ral derives them from its logical working-directory state. |
+| `env: Record` | Set environment entries and bindings. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
 | `aliases: Record` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
@@ -4082,7 +4093,7 @@ The recognized hooks are:
 | `buffer-change` | `[old_buf: String, line: String, pos: Int, history: List<String>, keymap: String, state: Any]`; returns `Unit` | After the text or cursor changes. |
 | `pre-exec` | `[src: String]`; returns `Unit` | Before one complete prompt input is evaluated. |
 | `post-exec` | `[src: String, status: Int]`; returns `Unit` | After evaluation settles. |
-| `chpwd` | `[old: String, new: String]`; returns `Unit` | After the session working directory changes. |
+| `chpwd` | `[old: String, new: String]`; returns `Unit` | After an input line that leaves the session working directory changed. |
 | `prompt` | The current prompt `String`; returns a `String` | Before each prompt render. |
 
 The four `Unit` result contracts above are enforced. A non-`Unit` result is a
@@ -4310,7 +4321,7 @@ For tools that pass traditional shell flags blindly, ral accepts:
 
 ral seeds a stable dynamic environment at boot. Inherited values win; otherwise it supplies defaults for `PATH`, `SHELL`, `TERM`, and `LANG`. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
 
-`PWD` and `OLDPWD` are not exposed through `$ENV`. ral owns the current and previous directories as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD`, `OLDPWD`, and actual launch directory.
+`PWD` and `OLDPWD` are not exposed through `$ENV`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
 
 `RAL_PATH` is a platform-separated list used to find modules and plugins. `RAL_TIMING`, when present, prints batch phase timings to stderr.
 

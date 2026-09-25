@@ -43,7 +43,7 @@ wire-seat child's spawn machinery.** The why is
 
 ## `core/src/protocol.rs`
 
-- `PROTOCOL_VERSION` (currently 8) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 10) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -150,8 +150,7 @@ Every probe class, typed once for both ends.
 - `Class` / `CLASSES` — the label table: `binding-count`,
   `leased-binding-count`, `largest-binding-bytes`, `env-var`, `cwd`, `home`,
   `builtin-names`, `path-bytes`, `workers`, `session-ended`,
-  `completion-names`, `bindings`, `spine`, `bind-effects`, `last-chpwd`,
-  `path-entries`; `worker-count` and `grant-depth` exist only under
+  `completion-names`, `bindings`, `spine`, `bind-effects`, `path-entries`; `worker-count` and `grant-depth` exist only under
   `test-util`. `reads_string` is the payload rule: the classes that read a
   name, a path, or a source text take a string, the rest take none.
 - `answer` — the engine's answer against a `Shell`, refusing a non-variant,
@@ -161,7 +160,7 @@ Every probe class, typed once for both ends.
 - `read` and one typed door per class — `cwd`, `home`, `env_var`,
   `builtin_names`, `path_bytes`, `binding_count`, `leased_binding_count`,
   `largest_binding_bytes`, `workers`, `session_ended`, `completion_names`,
-  `bindings`, `spine`, `bind_effects`, `last_chpwd`, `path_entries` — each
+  `bindings`, `spine`, `bind_effects`, `path_entries` — each
   decoding through `Datum` and severing the transport `Faulted` on an answer
   outside its shape.
 - `reading/rows.rs` — the rows the answers come in, rendered engine-side:

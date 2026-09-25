@@ -134,7 +134,7 @@ pub(super) fn pipe_err(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
-/// Thread the shell's env overrides, logical cwd and `PWD`/`OLDPWD` into the
+/// Thread the shell's env overrides, logical cwd and `PWD` into the
 /// child; strip dynamic-loader overrides under an active grant.  `current_dir`
 /// is set unconditionally because `cd` moves shell state and leaves the process
 /// cwd alone, so an inherited `getcwd(3)` would be the wrong directory.
@@ -145,13 +145,9 @@ pub(crate) fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     let cwd = shell.cwd();
     cmd.current_dir(&cwd);
     cmd.env("PWD", &cwd);
-    if let Some(oldpwd) = shell.oldpwd() {
-        cmd.env("OLDPWD", oldpwd);
-    } else {
-        // An inherited `OLDPWD` names whichever shell launched ral, not this
-        // session, and would mislead a `cd -` inside the child.
-        cmd.env_remove("OLDPWD");
-    }
+    // ral keeps no previous directory; an inherited `OLDPWD` names the
+    // launcher's, and would mislead a `cd -` inside the child.
+    cmd.env_remove("OLDPWD");
     if shell.has_active_capabilities() {
         // A loader hook makes an admitted binary run someone else's code, so
         // the grant's judgment about which program may run would mean nothing.

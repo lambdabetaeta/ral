@@ -3,7 +3,6 @@
 use super::{Context, LocalState, SessionState, Shell};
 use crate::source::FileId;
 use crate::types::{Env, GrantStack};
-use std::path::PathBuf;
 
 impl Shell {
     /// Build a new interpreter state with the given terminal state.
@@ -57,8 +56,7 @@ impl Shell {
     /// Called once by every front end, so ral code — which reads these as
     /// `$ENV[KEY]` — sees one baseline whoever launched the process.  `SHLVL`
     /// is incremented rather than passed through, as in every other shell.
-    /// `PWD` / `OLDPWD` are not seeded here: they are `cwd.current` /
-    /// `cwd.previous`, which `apply_env` in
+    /// `PWD` is not seeded here: it is the cwd cell, which `apply_env` in
     /// `core/src/runtime/command/process.rs` threads into each child.
     #[allow(
         clippy::disallowed_methods,
@@ -86,14 +84,8 @@ impl Shell {
 
         // Only when unseeded: a front end whose working directory is not the
         // process cwd states it first through `Shell::seed_cwd`.
-        if self.context.cwd.current.is_none() {
-            self.context.cwd.current = crate::path::process_cwd();
-        }
-        if self.context.cwd.previous.is_none() {
-            // The launching shell already resolved it; adopt verbatim.
-            #[allow(clippy::disallowed_methods)]
-            let oldpwd = std::env::var_os("OLDPWD").map(PathBuf::from);
-            self.context.cwd.previous = oldpwd;
+        if self.context.cwd.0.is_none() {
+            self.context.cwd.0 = crate::path::process_cwd();
         }
 
         let context = &mut self.context;

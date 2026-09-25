@@ -361,11 +361,10 @@ mod tests {
         let caps = load("minimal", MINIMAL_RAL, &ctx);
 
         let mut shell = Shell::default();
+        shell.seed_cwd(work.to_path_buf());
         shell
-            .with_cwd(work.to_path_buf(), |sh| {
-                sh.with_capabilities(caps, |sh| {
-                    sh.check_exec_args("./configure", &["./configure", "/work/proj/configure"], &[])
-                })
+            .with_capabilities(caps, |sh| {
+                sh.check_exec_args("./configure", &["./configure", "/work/proj/configure"], &[])
             })
             .expect("./configure under cwd: must be admitted");
     }

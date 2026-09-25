@@ -210,7 +210,7 @@ any other shape is a load error.
 | `buffer-change` | `{Map → F Unit}` | after buffer or cursor changes |
 | `pre-exec` | `{Map → F Unit}` | after Enter, before execution |
 | `post-exec` | `{Map → F Unit}` | after execution completes |
-| `chpwd` | `{Map → F Unit}` | after `cd` or a builtin `chdir(2)` |
+| `chpwd` | `{Map → F Unit}` | after a line that moved the session's directory |
 | `prompt` | `{Str → F Str}` | before each prompt render |
 
 All handlers for an event run in plugin load order regardless of
@@ -224,7 +224,10 @@ state]`. Typical uses are highlighting and autosuggestion.
 **`pre-exec`** receives `[src: Str]`, the full command line as
 typed; **`post-exec`** receives `[src: Str, status: Int]`, adding
 the exit status. **`chpwd`** receives `[old: Str, new: Str]`, the
-old and new working directories.
+session's working directory before and after the line. It compares
+the two ends, not the `cd`s between them: `cd a; cd b` on one line
+fires once, while `cd .`, or a `cd` inside `within [dir: …]`, which
+restores the directory on exit, fires nothing.
 
 **`prompt`** is a transformer, not an event record. Each handler
 receives the current prompt string (starting from the shell's base)

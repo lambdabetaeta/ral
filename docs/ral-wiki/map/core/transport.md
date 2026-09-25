@@ -103,7 +103,7 @@ runtime tree, and a parent's `from_runtime` calls only its children's:
 
 - `WireShell { env, stack_limit, context }` — `env` is the row of one
   [[design/scoping|`Env`]]'s session tier;
-- `WireContext` mirrors `Context` — `env_overrides`, `dir`, `cwd`, `grants`,
+- `WireContext` mirrors `Context` — `env_overrides`, `cwd`, `grants`,
   `handlers`, `args`, `modules`; `hooks` stays behind and the receiver starts
   with an empty table;
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,

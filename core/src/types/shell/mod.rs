@@ -48,7 +48,6 @@ use crate::io::Io;
 use crate::process::{CancelCause, DurableRoot, ForegroundScope};
 use crate::source::{FileId, Source, SourceDb, Span};
 use std::io::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Default cap on the machine's stack (§2.1, §6.3 of the CEK plan): frames,
@@ -65,13 +64,14 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     // ── attenuable by within / grant ─────────────────────────────────────
-    /// Process env-var overrides set by `within [env: …]`.  `PWD` / `OLDPWD`
-    /// are excluded: those keys live on `cwd` below, and a copy here would
-    /// shadow the canonical pair and drift on the next `cd`.
+    /// Process env-var overrides set by `within [env: …]`.  `PWD` is
+    /// excluded, living on `cwd` below; `OLDPWD` too, as ral keeps no previous
+    /// directory.
     pub(crate) env_overrides: EnvVars,
-    /// Working directory override set by `within [dir: …]`, rolled back at
-    /// scope exit — distinct from [`Cwd::current`], the `cd`-mutated one.
-    dir: Option<PathBuf>,
+    /// The working-directory cell.  A fork copies it; a same-thread body
+    /// shares it, so a `cd` there persists unless a `within [dir: …]` around
+    /// it restores the cell.
+    cwd: Cwd,
     /// Capability restrictions, innermost last.
     pub(crate) grants: GrantStack,
     /// `within [handlers: …, handler: …]` effect-handler stack, innermost last.
@@ -86,10 +86,6 @@ pub struct Context {
     /// Invocation positionals (`$ARGS`, `$1`, …), from the command line or `source`.
     pub(crate) args: Vec<String>,
     pub(crate) modules: Modules,
-    /// Snapshotted, so a spawned thread sees the logical cwd as of its spawn
-    /// point; flowed back on same-thread thunk return, so a `cd` inside a
-    /// thunk persists.
-    cwd: Cwd,
 }
 
 // The `capability::check_*(&Context, …)` decisions fold the whole stack from

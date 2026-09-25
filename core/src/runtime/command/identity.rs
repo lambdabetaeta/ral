@@ -201,18 +201,14 @@ fn canonicalise(resolved: &str, ctx: &Context) -> Option<String> {
     Some(file.to_string_lossy().into_owned())
 }
 
-/// Lexically resolve a relative path against ral's effective cwd, folding
-/// `.` and `..`.  `None` when `s` is already absolute — the caller needs no
-/// second candidate then.
-///
-/// "Effective" is `Context::cwd_chain`, the same precedence the walk anchors
-/// to: a policy name absolutised against `self.dir` alone would name a
-/// different file than the one a `cd`'d shell is about to spawn.
+/// Lexically resolve a relative path against ral's cwd, folding `.` and
+/// `..`.  `None` when `s` is already absolute — the caller needs no second
+/// candidate then.
 fn absolutize(s: &str, ctx: &Context) -> Option<String> {
     if crate::path::is_absolute(s) {
         return None;
     }
-    let cwd = ctx.cwd_chain();
+    let cwd = ctx.cwd();
     Some(
         crate::path::resolve_path(cwd, s)
             .to_string_lossy()
@@ -251,10 +247,10 @@ mod tests {
     fn policy_names_surface_cwd_absolute_for_relative_path_head() {
         let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
-        let names = shell.with_cwd(dir.clone(), |shell| {
+        shell.seed_cwd(dir.clone());
+        let names =
             CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
-                .policy_names(&shell.context)
-        });
+                .policy_names(&shell.context);
         assert_eq!(
             names,
             vec![
@@ -519,11 +515,10 @@ mod tests {
         name
     }
 
-    /// A `./bin` on `PATH` must follow the shell, and in a plain REPL "the
-    /// shell's here" is `cwd.current` — `ctx.dir` is bound only inside
-    /// `within [dir: …]`, so a walk reading it alone anchors to nothing.
+    /// A `./bin` on `PATH` follows the shell's cwd, the one "here" every
+    /// other consumer reads.
     #[test]
-    fn walk_anchors_relative_path_entries_to_the_cd_cwd() {
+    fn walk_anchors_relative_path_entries_to_the_cwd() {
         crate::path::forget_located_commands();
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
@@ -536,50 +531,6 @@ mod tests {
 
         let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
-    }
-
-    /// The `within [dir: …]` override outranks the `cd`-mutated cwd, and the
-    /// walk must read the same precedence every other consumer of "here" does.
-    #[test]
-    fn dir_override_outranks_the_cd_cwd_for_the_walk() {
-        crate::path::forget_located_commands();
-        let overridden = tempfile::tempdir().unwrap();
-        let cd_to = tempfile::tempdir().unwrap();
-        let name = {
-            for root in [overridden.path(), cd_to.path()] {
-                std::fs::create_dir(root.join("bin")).unwrap();
-            }
-            plant(&cd_to.path().join("bin"), "zzboth");
-            plant(&overridden.path().join("bin"), "zzboth")
-        };
-
-        let mut shell = Shell::default();
-        shell.seed_cwd(cd_to.path().to_path_buf());
-        shell.context.set_env_var("PATH", "./bin");
-
-        let id = shell.with_cwd(overridden.path().to_path_buf(), |shell| {
-            CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context)
-        });
-        assert_eq!(
-            id.resolved,
-            overridden.path().join("bin").join(&name).to_string_lossy(),
-        );
-    }
-
-    /// The `absolutize` half of the same precedence: a relative `Path` head's
-    /// policy name is joined to the effective cwd, `cd`-mutated or not.
-    #[test]
-    fn policy_absolute_uses_the_cd_cwd() {
-        let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
-        let mut shell = Shell::default();
-        shell.seed_cwd(dir.clone());
-        let names =
-            CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
-                .policy_names(&shell.context);
-        assert!(
-            names.iter().any(|n| Path::new(n) == dir.join("configure")),
-            "got {names:?}",
-        );
     }
 
     #[test]
