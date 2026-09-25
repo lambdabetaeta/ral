@@ -8,13 +8,6 @@ license.workspace = true
 workspace = true
 
 [features]
-# The regex builtins (re-match / re-split / re-replace-all) always compile —
-# `regex` is a plain dependency, not gated.  `grep` here is the heavier
-# ripgrep-style content search (the `grep` crate + `walkdir`), on by default
-# but droppable with --no-default-features for a leaner build (e.g. the
-# guest initramfs via ral-daemon's `default-features = false`).
-default = ["grep"]
-
 # Cross-platform bundled coreutils tools.  Every uu_* listed here must
 # build on every platform we target (Linux, macOS, Windows).  Tools that
 # rely on Unix-only uucore modules (entries / process / signals / perms)
@@ -42,7 +35,6 @@ coreutils-unix-only = [
     "dep:uu_test", "dep:uu_tac",
 ]
 diffutils = ["dep:diffutils", "dep:same-file"]
-grep      = ["dep:grep", "dep:walkdir"]
 ripgrep   = ["dep:ral-ripgrep-core"]
 
 # Everything core's own test binaries need and no host may: the heavier
@@ -106,8 +98,6 @@ uu_printf    = { version = "0.10", optional = true }
 uu_sleep     = { version = "0.10", optional = true }
 diffutils    = { version = "0.5", optional = true }
 same-file    = { version = "1", optional = true }
-grep         = { version = "0.4", optional = true }
-walkdir      = { version = "2", optional = true }
 uu_base64    = { version = "0.10", optional = true }
 uu_hostname  = { version = "0.10", optional = true }
 uu_mktemp    = { version = "0.10", optional = true }

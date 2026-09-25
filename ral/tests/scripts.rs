@@ -24,19 +24,6 @@ const GOLDEN_SKIP: &[&str] = &[
                      // (`/bin/false` is 127 not-found on macOS, 1 on Linux)
 ];
 
-/// Scripts whose regex builtins need the `grep` Cargo feature; skipped without
-/// it. The prelude's `words` is `re-find-matches`-backed, so a script using it
-/// is gated too.
-#[cfg_attr(feature = "grep", allow(dead_code))]
-const GREP_GATED: &[&str] = &[
-    "split-regex",
-    "strings",
-    "log-processor",
-    "dual-input-strings",
-    "filesystem",
-    "stdlib",
-];
-
 /// Drop `\r` bytes so CRLF goldens (as git checks them out on Windows)
 /// compare equal to ral's LF-only output.
 fn strip_cr(bytes: &[u8]) -> Vec<u8> {
@@ -71,8 +58,7 @@ fn run_capture(path: &Path) -> std::process::Output {
 /// Smoke-test the whole `.ral` corpus, and golden-check stdout for the portable,
 /// deterministic subset. Every runnable script must exit 0; every goldened
 /// script must reproduce its sibling `<name>.out` byte for byte. `RAL_BLESS=1`
-/// (re)writes the goldens from current output instead of comparing — bless with
-/// `--features grep,ripgrep` so the regex-backed scripts are captured too.
+/// (re)writes the goldens from current output instead of comparing.
 #[test]
 fn scripts() {
     let bless = std::env::var_os("RAL_BLESS").is_some();
@@ -92,11 +78,6 @@ fn scripts() {
         let name = script.file_stem().unwrap().to_string_lossy();
 
         if RUN_SKIP.contains(&name.as_ref()) {
-            skipped += 1;
-            continue;
-        }
-        #[cfg(not(feature = "grep"))]
-        if GREP_GATED.contains(&name.as_ref()) {
             skipped += 1;
             continue;
         }
@@ -138,7 +119,7 @@ fn scripts() {
                 String::from_utf8_lossy(&output.stdout),
             )),
             Err(_) => failures.push(format!(
-                "{}: missing golden {} — run `RAL_BLESS=1 cargo test -p ral --features grep,ripgrep --test scripts`",
+                "{}: missing golden {} — run `RAL_BLESS=1 cargo test -p ral --test scripts`",
                 script.display(),
                 golden.display(),
             )),

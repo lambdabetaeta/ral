@@ -3500,11 +3500,10 @@ The repository's script harness discovers `tests/**/*.ral`, runs each runnable
 script through the real `ral` executable, and requires a zero exit status.
 For the portable deterministic subset, stdout is compared with a sibling
 `.out` file after ignoring carriage returns. `RAL_BLESS=1` rewrites those
-goldens; maintainers should bless with the `grep,ripgrep` feature set so the
-regex-gated scripts are included:
+goldens:
 
 ```text
-RAL_BLESS=1 cargo test -p ral --features grep,ripgrep --test scripts
+RAL_BLESS=1 cargo test -p ral --test scripts
 ```
 
 Those harness conventions test this implementation; they are not additional

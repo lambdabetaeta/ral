@@ -5866,7 +5866,6 @@ dependencies = [
  "diffutils",
  "fastrand",
  "glob",
- "grep",
  "ignore",
  "imbl",
  "landlock",
@@ -5942,7 +5941,6 @@ dependencies = [
  "uu_whoami",
  "uu_yes",
  "uucore",
- "walkdir",
  "windows-sys 0.61.2",
 ]
 

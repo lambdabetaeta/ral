@@ -23,7 +23,7 @@ ripgrep = ["ral-core/ripgrep"]
 test-util = ["ral-core/test-util"]
 
 [dependencies]
-ral-core   = { path = "../core", features = ["grep", "coreutils"] }
+ral-core   = { path = "../core", features = ["coreutils"] }
 blake3     = "1"
 genai      = "0.7.0-beta.20"
 reqwest    = { version = "0.13", features = ["json", "form"] }
@@ -82,7 +82,7 @@ fd-lock = "4"
 # upstream uu_* crates depend on uucore::{entries, process, signals}
 # which do not compile on Windows.
 [target.'cfg(unix)'.dependencies]
-ral-core = { path = "../core", features = ["grep", "coreutils", "coreutils-unix-only"] }
+ral-core = { path = "../core", features = ["coreutils", "coreutils-unix-only"] }
 rustix = { workspace = true, features = ["process", "stdio", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
