@@ -180,7 +180,8 @@ fn poll_exit(pid: u32) -> Option<WaitOutcome> {
 
 fn outcome_from_waitid(status: WaitIdStatus) -> WaitOutcome {
     if let Some(code) = status.exit_status() {
-        WaitOutcome::Exited(code)
+        // XNU's `waitid` reports all of `exit()`'s argument; `waitpid` keeps a byte.
+        WaitOutcome::Exited(code & 0xff)
     } else if let Some(sig) = status.terminating_signal() {
         WaitOutcome::Signaled(Signal::new(sig))
     } else {
@@ -373,5 +374,22 @@ mod tests {
         watch_b.reap().expect("reap b");
         let _ = a.kill();
         let _ = b.kill();
+    }
+
+    /// An exit code wider than a byte reads as `waitpid` reads it: bash
+    /// 3.2 exits a syntax error with 258, which is status 2.
+    #[test]
+    fn an_exit_code_is_a_byte() {
+        // Only `_exit` runs in the child, so forking a threaded process is sound.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork");
+        if pid == 0 {
+            unsafe { libc::_exit(258) };
+        }
+        let (tx, rx) = channel();
+        let watch = watch(pid.cast_unsigned(), tx, std::convert::identity);
+
+        assert_eq!(recv_timeout(&rx), WaitOutcome::Exited(2));
+        watch.reap().expect("reap");
     }
 }

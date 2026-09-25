@@ -149,7 +149,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   answered with `SIGCONT` on the spot so it never reaches a subscriber and
   is never re-reported on every wake, and an exit, observed with `WNOWAIT`
   and left as a zombie until `Watch::reap`, since the pid would otherwise be
-  free for reuse while its owner may still signal it. *Not reaping is the
+  free for reuse while its owner may still signal it. The exit code is masked
+  to a byte, as `waitpid` would report it: Darwin's `waitid` returns all of
+  `exit()`'s argument, so macOS bash 3.2's syntax-error 258 would otherwise
+  surface as 258 instead of 2. *Not reaping is the
   point*: holding the zombie is what closes pid reuse structurally, rather
   than by care. Windows watches the same shape (`reaper/windows.rs`) via
   `RegisterWaitForSingleObject`, where a stop cannot arise. Every subscriber
