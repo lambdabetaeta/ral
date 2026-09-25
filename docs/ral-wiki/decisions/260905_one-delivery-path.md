@@ -14,7 +14,9 @@ and a process cannot tell them apart, so it received the same interrupt twice.
 - **The relay is deleted.** `PipelineRelay`, `RELAY_PGIDS`,
   `relay_signal_to_groups`, and `relay_handler` are gone. The interactive
   SIGINT disposition is `interrupt_handler`, which calls
-  `request_foreground_cancel(Interrupt)` and nothing else.
+  `request_foreground_cancel(Interrupt)` and nothing else. (Later, `3e43ce37`:
+  it calls `request_interrupt`, forwarded as `Control::Interrupt` to the
+  dispatch in flight.)
 - **One send per process.** `CollectState::cancel_all(group, cause, delivered)`
   is ral's whole delivery: it cancels every live stage, then sends one grace
   signal — `kill(-pgid, sig)` and `SIGCONT` for a group it owns, per pid via
@@ -32,7 +34,11 @@ and a process cannot tell them apart, so it received the same interrupt twice.
 - **Attribution lives in `from_outcome`.** `CommandFailure::from_outcome(outcome,
   sent)` attributes the death to the cause `sent` names, so a pipeline external
   torn down under a deadline says so in the same words a standalone external
-  does; `attribute_to` is private to `outcome.rs`.
+  does; `attribute_to` is private to `outcome.rs`. (Later, `5803377b`: both
+  gave way to `WaitOutcome::classify(cause, enveloped)`, whose attributed
+  death is `ChildEnd::Cancelled(cause)`, minting the same `Error::cancelled`
+  as any poll point, so a cause's status no longer depends on whether it
+  landed before or after the spawn.)
 
 ## Rejected shapes
 

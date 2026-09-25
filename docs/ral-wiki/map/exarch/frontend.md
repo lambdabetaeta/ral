@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
+generated_at_commit: c51fae36
+generated_at_date: 2026-09-25
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -58,7 +58,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   by the TUI's own copy in `tui/tui_loop.rs`) so an exchange ends even while a
   background producer keeps the channel non-empty — never the channel's state
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
-- the channel itself (`bus/channel.rs`) is bounded and coalescing, not a bare `mpsc` pair
+- the channel itself (`bus/channel.rs`) is coalescing but unbounded in depth, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
   pushing `Token`/`Thinking` (concatenate) or `State` (replace) merges into the
   queue's tail entry when it is the same class and the same agent id; every
@@ -78,9 +78,8 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
 `record.rs` + `record/` is the one-seam-one-log module tree
 ([[internals/session-record|session-record]]): the sealed
 `Record { Protocol, Display, Forensic }` vocabulary and the disjoint
-`Transient`; `record/seam.rs` (`Emitter::emit`, the only publisher —
-append-then-publish under the log's own mutex, so channel order is log
-order); `record/log.rs` (the `record.jsonl` syscall site, with the attachable
+`Transient`; `record/seam.rs` (`Emitter::emit` above, the only publisher —
+its one lock is the log's own mutex, so channel order is log order); `record/log.rs` (the `record.jsonl` syscall site, with the attachable
 `FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
 `fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
 time); `record/commit.rs` (the worker-side
@@ -92,14 +91,16 @@ projection is built as, on call and memoised nowhere — see
 [[internals/session-record#The provider-facing context is a pure function of the structure|the context-as-projection section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
-A frontend is a `bus::Sink` (`fact`/`transient`), one trait for the whole
-seam: it is itself a fold over the one log, owning its own `Blocks` memo,
+A frontend has the `bus::Sink` shape (`fact`/`transient`): it is itself a
+fold over the one log, owning its own `Blocks` memo,
 stepping it per witnessed record (`Sink::fact(id, rec)`) and acting on the
 `Delta` that step reports — `Opened`, `Grew`, `Patched`, `Quiet`
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
 It is handed the record only to step that memo, and renders from
-`record::BlockKind` off it. `Headless` is that `Sink` for the pipe; the TUI's
-`App` owns one `Scrollback` per session, each a mirror with a memo of its own
+`record::BlockKind` off it. `Headless` implements `Sink` for the pipe; the
+TUI's `App` has the same `fact`/`transient` pair without the trait, its
+`ui_loop` draining on the render cadence rather than `Sink::drive`'s blocking
+one, and owns one `Scrollback` per session, each a mirror with a memo of its own
 stepped by `Scrollback::fact`. Resume hands the scrollback a replayed memo
 (`Scrollback::seed`) and builds its mirror block by block the way a live commit
 does — so the live path and resume are one construction.
@@ -163,7 +164,7 @@ scrollback's own fold and draws the delta) and a `Signal::Transient` to
 Two presentation surfaces, both folding the one `Signal` vocabulary through
 `fact`/`transient`:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,diff,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,row,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
  and the whole frame is redrawn each tick from each block's own memoised visual
@@ -177,10 +178,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  same wherever it appears, and only a foreign language falls to syntect and
  the `two-face` set. `$…$` and `$$…$$` are typeset rather than quoted: the
  LaTeX goes to `tui-math`, which lays it out on a character grid — fractions
- stacked over a vinculum, big operators carrying their limits — and one
- distinction decides where the grid goes. A one-row grid is notation and joins
- the sentence; a taller one owns its rows, so it renders only for display
- math, inset from the prose. A grid too wide for the wrap budget, or a formula
+ stacked over a vinculum, big operators carrying their limits. Inline `$…$`
+ joins the sentence only as a one-row grid, which is notation; a taller one
+ would break the paragraph, so its source stands in. Display `$$…$$` is always
+ a block of its own, inset from the prose, even at one row. A grid too wide for the wrap budget, or a formula
  the parser refuses, falls back to the LaTeX the model wrote, inked as the
  literal it is. `tui/group.rs` renders the `▸`
  part of a group — one burst of `ral` work as a single dialable object, its
@@ -235,7 +236,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  - **the marginal rail: one cell, three variables.** Shape → block *kind*, hue
    → the *producing agent*, value → *magnitude*. Hue is a per-*view* tint, not
    a per-block one: every block in a tab shares that tab's agent slot
-   (`Scrollback::agent`, threaded into `Block::lines` at render time), so the
+   (`Scrollback::agent`, threaded into `Block::fill` at render time), so the
    whole rail glows one hue, read on a tab-switch as "whose transcript is
    this". The human's prompt fence is the lone exception — a `❖` in neutral
    `PROMPT_INK` so it never reads as just another agent's mark.
@@ -316,7 +317,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  one thing this frame and another the next. Every field on the rule takes that
  same separator, the right-aligned usage block included, since the elastic
  space before it collapses on a narrow terminal; the state slot is padded to
- `STATE_SLOT_W`, so the separator after it stands in one column whatever the
+ `STATE_SLOT`, the longest label's width, so the separator after it stands in one column whatever the
  state. `Ready` waits on nothing, so it draws the bar's empty track and no
  clock: the track is the scale the filled cells are read against and stays put
  between turns, while the readout goes blank, nothing being timed. The width is
@@ -338,7 +339,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  agent, so a child that settles before the frontend drains its `Born` still
  gets a properly labelled tree row. `App`'s matrix navigation is modal, and
  its whole retained state is `Matrix` — the agent identity the cursor names,
- or nothing while the strip is a status display. `TAB` enters and leaves,
+ or nothing while the strip is a status display. `Tab` enters and leaves,
  `↑`/`↓` and Shift-Tab move the cursor, `Enter` attaches to its row *and*
  leaves navigation, so attach-and-type is one gesture, and `Esc` leaves the
  surface without cancelling the focused exchange; a cursor whose agent has
@@ -353,16 +354,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  agent's own exchange clock, computed per row per frame and never stored.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
- rows dim and keep their final step cells without a countdown. The conversing
- trunk is label-only in the matrix — no step cells, token readout, or size bar
+ rows dim and keep their final turn cells without a countdown. The conversing
+ trunk is label-only in the matrix — no turn cells, token readout, or size bar
  — so those columns describe workers only. An async agent on the
  session-lived bus streams its tab the same way, and `/clear` retires every
  live sub-tab through the same linger window
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
- Once `LINGER` elapses, `Tabs::tick` evicts the dead view into a `Tombstone`
- (`Scrollback::evict_to_tombstone`) — exactly agent id, final status, and log
- path, everything else (blocks, their render memos, streaming buffers, pins)
- dropped — but retired to `user.log` first, since the tombstone promises that
+ Once `LINGER` elapses, `Tabs::tick` tombstones the dead view
+ (`Scrollback::evict_to_tombstone`): its mirror (blocks and their render
+ memos), streaming buffers, and pins are dropped, while its agent, last state,
+ log, and the `BLOCKS_WINDOW`-bounded fold memo stay — the blocks retired to
+ `user.log` first, since the tombstone promises that
  log is readable; no reload-from-`user.log` machinery is built. Every live
  scrollback is bounded by exactly one window, the view fold's own:
  `BLOCKS_WINDOW` resident blocks (`record/view.rs`), oldest dropped as new ones
@@ -375,7 +377,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  moves one block, and the mirror moves that block
  ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
  `/clear` also cancels the in-flight exchange: `route_submit` raises
- `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
+ `cancel::raise_interrupt`, then on the root agent `interrupt` and
+ `cancel_descendants(Explicit)`, all *before* blanking
  the scrollback, so the streaming `select!` in `provider::complete` unwinds within
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
  Straggler tokens the worker already emitted into the bus before the
@@ -465,40 +468,41 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
 whole attend; the attend loop `reset`s it at each genuine exchange boundary. Esc /
 Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never a
-subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): on the trunk
-they route through `raise_interrupt`, which cancels the trunk's published token
-and asks ral to cancel the current exchange's foreground scope; on any other
-focused tab, the tab's own `Weak` upgrades (`Tabs::agent`) and `Agent::interrupt`
-unwinds that agent's exchange and eval root. Only the trunk `publish`es its token's flag into the
-lock-free process-global slot for the OS signal handler (a handler must not
-lock), so the provider's mid-stream cancel race observes the same cancellation.
-The TUI key table keeps UI control separate from cancellation: idle Ctrl-C/Ctrl-D
-quit, overlays close, and only active-exchange Ctrl-C/Esc drive ral's
-non-escalating foreground cancel. A single press stops the exchange /
+subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): the focused
+tab's own `Weak` upgrades (`Tabs::agent`) and `Agent::interrupt` unwinds that
+agent's exchange and eval root. The trunk alone also calls `raise_interrupt`,
+the process-wide half: on Unix it re-creates the SIGINT raw mode swallowed, for
+a foreground external child's own process group; its Windows form follows.
+The TUI key table keeps UI control separate from cancellation: a modal
+overlay's (`/model`, `/login`) Ctrl-C/Ctrl-D/Esc close it (`overlay_tick`), only
+`/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
+focused tab's non-escalating cancel (`key_action`). A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
 because the path never escalates the signal count, repeated presses cannot
 reach ral's third-signal `_exit`
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 On Windows the same contract rides `SetConsoleCtrlHandler`: `install` registers
 exarch's routine after ral's, so it runs first in the last-registered-first
-chain, handles Ctrl-C/Ctrl-Break itself — `raise` plus ral's non-escalating
+chain, handles Ctrl-C/Ctrl-Break itself — ral's non-escalating
 `request_interrupt`, which signals no process: a tool child hears Ctrl-Break
 only from its run's teardown — and reports them handled, so ral's
 escalating disposition never ticks for an exchange-cancel; window-close / logoff /
 shutdown pass through unhandled to that disposition, the analogue of
 SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
 `ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event
-and `deliver_interrupt` calls `request_interrupt` in-process — never a
+and `raise_interrupt` calls `request_interrupt` in-process — never a
 `GenerateConsoleCtrlEvent` re-injection, which would broadcast to the console
 group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying
 delivery path ([[decisions/260706_signals-are-causes|signals-are-causes]]).
-Exarch session shells are rebuilt only through `bootstrap::boot_shell`, which
-discards stale ral interrupts before library loading and returns with the
-cancel chain installed over ral's handlers. `/clear` therefore works after Esc
-and SIGINT after `/clear` still raises cancel. `prompt/host.rs` snapshots the machine (OS, date, cwd,
-user, git state) once at startup for the [[map/exarch/policy|system prompt]].
-        - `tui.rs` — thin façade (~60 lines): module declarations and re-exports
+`bootstrap::face_process_signals` runs once per entry point: it discards
+stale ral interrupts and installs the cancel chain over ral's handlers. Every
+session shell boots through `bootstrap::engine_boot_shell`, the one
+`EngineInstaller::boot`; `/clear` reboots the seat and then clears the
+escalation tick again (`agent/build.rs`), so `/clear` works after Esc and
+SIGINT after `/clear` still raises cancel. `prompt/host.rs` snapshots the machine (OS, date, cwd,
+user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
+        - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
@@ -512,8 +516,16 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; `opening` lays the wordmark over the width-matched card as the one rail-free `Chrome::Opening`, neither paying an inset of its own so both start in the column the rail margin already opens
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `window` and its boundary lines, `neighbour`, `strip`'s justified row projection, `step_cells`
+        - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `view` and its boundary lines, `neighbour`, `strip`'s justified row projection, `turn_cells`
         - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body` and its graded `diff_capped`, `patch_header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
+        - `tui/group.rs` — the `▸` part of a group: `Call`, one burst of `ral` work that its effects join, `aggregate_magnitude`, `body`
+        - `tui/line.rs` — line builders turning a typed `Card` into rows: `text`, `size_bar`, `thinking_header`, `user_prompt`, `act_row`, `wash`; no rail glyph, which `Block::seated` seats
+        - `tui/rail.rs` — the marginal rail: `RailKind` for shape, hue from `palette::AGENT_HUES`, `value_step`/`lighten` for lightness
+        - `tui/md.rs` — markdown to lines over `pulldown-cmark`: `render_md`, `render_thinking`, the `$…$`/`$$…$$` typesetting, `apply_context`
+        - `tui/highlight.rs` — ral source coloured by ral's own lexer: `highlight_ral`, `highlight_ral_spans`
+        - `tui/fidelity.rs` — coherent degradation: `Fidelity`, turn-level `context_floor` and per-block `echo_delta`
+        - `tui/select.rs` — drag-selection geometry in text-area columns: `highlight_range` for painting, `plain_slice` for copying
+        - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `PickAction`, `overlay_frame`, `centered`, `render_shadow`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that seats a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
