@@ -66,6 +66,8 @@ fn small_or_large(entries: Vec<(Name, Binding)>) -> Entries {
 #[derive(Debug, Clone)]
 pub struct Env(Entries);
 
+const _: () = assert!(std::mem::size_of::<Env>() <= 16, "Env must fit in 16 bytes");
+
 impl Env {
     /// The empty map — one static allocation, cloned.
     pub fn new() -> Self {
@@ -510,7 +512,7 @@ mod tests {
         );
     }
 
-    /// **T5** — the same sequence of binds, shadowing included, gives equal
+    /// The same sequence of binds, shadowing included, gives equal
     /// lookups, `names()` and `restrict` results whether `SMALL` is crossed or
     /// not.
     #[test]
@@ -552,7 +554,7 @@ mod tests {
         assert_eq!(small_names, large_names);
     }
 
-    /// **T6** — an environment whose names occ covers returns itself
+    /// An environment whose names occ covers returns itself
     /// (`ptr_eq`); one name more than occ lists gives a fresh `Small` of the
     /// hits; a name only Σ answers is never an entry.
     #[test]

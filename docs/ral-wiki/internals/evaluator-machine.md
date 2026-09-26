@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 74f7d546
+verified_at_commit: e1bace22
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -45,6 +45,19 @@ as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
 that equation as a rule (U-β): `Force(Val::Thunk(node))` puts `node.shape()`
 in focus under the current environment, closing nothing. Whether a thunk "is
 a lambda" is read off the body's shape by `Comp::arrow`, never stored.
+
+**A list, record or map literal is a value closure too.** `form(val, env,
+sig)` (`core/src/evaluator/val.rs`) is CBPV's one-step rule for every value:
+a constant is itself, a name is `lookup(name, env, sig)`, a variant forms its
+payload, `thunk M` is `Closure::new`, and a plain literal is `List::literal`
+or `Map::literal` — `⟨V, ρ|occ(V)⟩` — unless one of the names it *directly*
+mentions (through variant payloads and nested literals, never inside a
+thunk) is answered only by Σ: a `Literal`'s inspection reads ρ alone, with no
+Σ fallback, so that name could never be read back out, and `form` builds the
+literal eagerly instead, forming each element with `sig`. Inspecting a
+`Literal`'s element is the distributive law, one layer: a name is lent from
+ρ, a constant is built, and a nested literal or thunk closes over the *same*
+ρ — two refcount bumps, not a second restriction.
 
 **`step` is the tables.** `Machine::step` dispatches on the focus:
 `eval_rules` has one match arm per `CompKind` (the ξ-rules: `Return` closes
@@ -121,7 +134,7 @@ identity when nothing is dropped. Σ — the language natives and the frozen
 prelude — is `Signature` (`core/src/types/signature.rs`), one per shell,
 never part of any environment; `crate::types::lookup(name, env, sig)` reads
 ρ, then Σ's prelude, then Σ's natives, and every rule that resolves a name
-(`Val::Variable` in `close`, `Exec`'s bare-head lookup in
+(`Val::Variable` in `form`, `Exec`'s bare-head lookup in
 `command_call::resolve`) goes through it. The **store** is everything else
 on `Shell`: `sig`, sinks, the dynamic `Context` (grants, handlers, env
 overrides, cwd, args, modules, hooks), the trail, workers, leases. `Context`

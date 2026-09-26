@@ -6,7 +6,7 @@ use crate::diagnostic;
 use crate::ir::{Assembly, MapPart, MapParts, ValListElem};
 use crate::types::{Env, Error, List, Signature, Value};
 
-use super::val::{close, spread_type_err};
+use super::val::{form, spread_type_err};
 
 pub(crate) fn eval(assembly: &Assembly, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match assembly {
@@ -23,8 +23,8 @@ fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value,
     use ValListElem::{Single, Spread};
 
     if let [Single(sx), Spread(sxs)] = elems {
-        let x = close(&sx.item, env, sig)?;
-        let xs = close(&sxs.item, env, sig)?;
+        let x = form(&sx.item, env, sig)?;
+        let xs = form(&sxs.item, env, sig)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -33,8 +33,8 @@ fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value,
     }
 
     if let [Spread(sxs), Single(sx)] = elems {
-        let xs = close(&sxs.item, env, sig)?;
-        let x = close(&sx.item, env, sig)?;
+        let xs = form(&sxs.item, env, sig)?;
+        let x = form(&sx.item, env, sig)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -45,8 +45,8 @@ fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value,
     let mut items: List = List::new();
     for elem in elems {
         match elem {
-            Single(v) => items.push_back(close(&v.item, env, sig)?),
-            Spread(v) => match close(&v.item, env, sig)? {
+            Single(v) => items.push_back(form(&v.item, env, sig)?),
+            Spread(v) => match form(&v.item, env, sig)? {
                 Value::List(inner) => items.append(&inner),
                 val => return Err(spread_type_err(&val)),
             },
@@ -66,7 +66,7 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
         let (key, value) = match entry.part() {
             MapPart::Labelled(label, v) => (label.to_string(), v),
             MapPart::Computed(key_val, v) => {
-                let key_value = close(key_val, env, sig)?;
+                let key_value = form(key_val, env, sig)?;
                 let Value::String(key) = key_value else {
                     return Err(Error::new(
                         format!(
@@ -84,11 +84,11 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
         if !seen.insert(key.clone()) {
             diagnostic::shell_warning(&format!("duplicate key '{key}'"));
         }
-        pairs.push((key, close(&value.item, env, sig)?));
+        pairs.push((key, form(&value.item, env, sig)?));
     }
     for entry in entries {
         if let MapPart::Spread(v) = entry.part() {
-            match close(&v.item, env, sig)? {
+            match form(&v.item, env, sig)? {
                 Value::Map(inner) => {
                     for (k, v) in &inner {
                         if seen.insert(k.to_string()) {

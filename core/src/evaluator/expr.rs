@@ -2,7 +2,7 @@
 //! `machine::eval_rules` dispatches `CompKind::Binary`, `CompKind::Negate`,
 //! `CompKind::Not`, and `CompKind::Index` to.
 
-use super::val::close;
+use super::val::form;
 use crate::ir::Val;
 use crate::syntax::ast::{ArithOp, BinaryOp, BinaryOpKind, CompareOp, EqOp};
 use crate::types::{Break, Env, Error, Settled, Signature, Value};
@@ -79,7 +79,7 @@ pub(crate) fn index_value(val: &Value, key: &Value) -> Result<Value, Error> {
 
 /// Negation of a `Bool`, and only a `Bool`: nothing else is truthy here.
 pub(crate) fn eval_not(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
-    match close(val, env, sig)? {
+    match form(val, env, sig)? {
         Value::Bool(b) => Ok(Value::Bool(!b)),
         other => Err(Error::new(
             format!("not: expected Bool, got {} '{}'", other.type_name(), other),
@@ -91,7 +91,7 @@ pub(crate) fn eval_not(val: &Val, env: &Env, sig: &Signature) -> Result<Value, E
 
 /// `-v` on a number, `Int` overflow-checked as [`arithmetic`] is.
 pub(crate) fn eval_negate(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
-    match close(val, env, sig)? {
+    match form(val, env, sig)? {
         Value::Int(n) => n
             .checked_neg()
             .map(Value::Int)
@@ -109,8 +109,8 @@ pub(crate) fn eval_binary(
     env: &Env,
     sig: &Signature,
 ) -> Settled<Value> {
-    let l = close(lhs, env, sig).map_err(Break::from)?;
-    let r = close(rhs, env, sig).map_err(Break::from)?;
+    let l = form(lhs, env, sig).map_err(Break::from)?;
+    let r = form(rhs, env, sig).map_err(Break::from)?;
     binop(&l, op, &r)
 }
 

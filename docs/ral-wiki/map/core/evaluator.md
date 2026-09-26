@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5652477a
+generated_at_commit: e1bace22
 generated_at_date: 2026-09-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -146,11 +146,15 @@ Internals:
   directly by `machine.rs`'s `Frame::Redirect` and by `with_redirects` for a
   base-frame native's synchronous call, distinct from the external-command
   fd machinery in [[map/core/runtime|runtime]]'s `command/redirect.rs`.
-- `val.rs` holds the side-effect-free `Val` layer: `close` forms a plain
-  literal or a variant straight from its already-plain entries — no spread, no
-  computed key, so no data-sized work — and its `Thunk` arm builds
-  `⟨M, ρ|occ(M)⟩` through `Closure::new`, reading `occ` off the `ThunkNode`
-  rather than walking `M`. `expr.rs` holds the primitive
+- `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
+  CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
+  forms its payload, `thunk M` builds `⟨M, ρ|occ(M)⟩` through `Closure::new`
+  (reading `occ` off the `ThunkNode` rather than walking `M`), and a plain
+  list/record/map literal — no spread, no computed key — is `List::literal`
+  or `Map::literal`, the value closure `⟨V, ρ|occ(V)⟩`, unless one of the
+  names it directly mentions is answered only by Σ, in which case `form`
+  builds it eagerly instead so that name is never asked of a `Literal`'s
+  Σ-free inspection. `expr.rs` holds the primitive
   operators the elaborator's expression desugaring emits (`Negate` / `Not` /
   `Binary`) and value indexing (`Index`).
 - `assemble.rs` is the `CompKind::Assemble` rule: `eval_list` splices

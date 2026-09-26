@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(command_argv0s(&report), ["echo"]);
     }
 
-    /// **T8** — a session function's scheme is what a `within` vets its arm
+    /// A session function's scheme is what a `within` vets its arm
     /// against whether the `within` runs at top level or inside a block that
     /// captured only that one function: `handler_schemes` reads
     /// `env.binding_schemes(sig)` off the environment the `within` is

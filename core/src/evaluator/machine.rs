@@ -26,7 +26,7 @@ use super::assemble;
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
 use super::scope::{WithinScope, WithinUndo};
-use super::val::{close, interpolate_piece, spread_type_err};
+use super::val::{form, interpolate_piece, spread_type_err};
 use super::{expr, observe};
 
 // ── The stack ─────────────────────────────────────────────────────────
@@ -233,8 +233,8 @@ pub(crate) fn close_args(args: &Args, env: &Env, sig: &Signature) -> Result<Vec<
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
         match elem {
-            ValListElem::Single(v) => out.push(close(&v.item, env, sig)?),
-            ValListElem::Spread(v) => match close(&v.item, env, sig)? {
+            ValListElem::Single(v) => out.push(form(&v.item, env, sig)?),
+            ValListElem::Spread(v) => match form(&v.item, env, sig)? {
                 Value::List(list) => out.extend(list.iter().map(std::borrow::Cow::into_owned)),
                 other => return Err(spread_type_err(&other)),
             },
@@ -250,7 +250,7 @@ pub(crate) fn close_redirects(
 ) -> Result<Vec<Redirect<String>>, Error> {
     redirects
         .iter()
-        .map(|r| r.try_map(|v| close(v, env, sig).map(|v| v.to_string())))
+        .map(|r| r.try_map(|v| form(v, env, sig).map(|v| v.to_string())))
         .collect()
 }
 
@@ -481,7 +481,7 @@ impl Machine {
         shell: &mut Shell,
     ) -> Result<Focus, Break> {
         Ok(match &comp.item {
-            CompKind::Return(val) => Focus::Return(Terminal::Value(close(val, &env, &shell.sig)?)),
+            CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
 
             CompKind::Assemble(assembly) => {
                 Focus::Return(Terminal::Value(assemble::eval(assembly, &env, &shell.sig)?))
@@ -529,12 +529,12 @@ impl Machine {
                 env,
             },
 
-            CompKind::Force(val) => Self::force(close(val, &env, &shell.sig)?, mooring, shell),
+            CompKind::Force(val) => Self::force(form(val, &env, &shell.sig)?, mooring, shell),
 
             CompKind::Interpolation(parts) => {
                 let mut s = String::new();
                 for p in parts {
-                    s.push_str(&interpolate_piece(&close(p, &env, &shell.sig)?)?);
+                    s.push_str(&interpolate_piece(&form(p, &env, &shell.sig)?)?);
                 }
                 Focus::Return(Terminal::Value(Value::string(s)))
             }
@@ -550,9 +550,9 @@ impl Machine {
             }
 
             CompKind::Index { target, keys } => {
-                let mut v = close(target, &env, &shell.sig)?;
+                let mut v = form(target, &env, &shell.sig)?;
                 for key in keys {
-                    let k = close(&key.item, &env, &shell.sig)?;
+                    let k = form(&key.item, &env, &shell.sig)?;
                     v = expr::index_value(&v, &k)?;
                 }
                 Focus::Return(Terminal::Value(v))
@@ -577,7 +577,7 @@ impl Machine {
                 }
             }
 
-            CompKind::If { cond, then, else_ } => match close(&cond.item, &env, &shell.sig)? {
+            CompKind::If { cond, then, else_ } => match form(&cond.item, &env, &shell.sig)? {
                 Value::Bool(b) => Focus::Eval {
                     comp: Arc::clone(if b { then } else { else_ }),
                     env,
@@ -636,7 +636,7 @@ impl Machine {
             }
 
             CompKind::Decode(val) => {
-                let v = close(val, &env, &shell.sig)?;
+                let v = form(val, &env, &shell.sig)?;
                 // The bind's scope dies before the decode, not after it, so the
                 // capture's buffer is unshared and taken over, not copied.
                 drop(env);
@@ -680,19 +680,19 @@ impl Machine {
                 handlers,
                 body,
             } => {
-                let opts = close(opts, &env, &shell.sig)?;
+                let opts = form(opts, &env, &shell.sig)?;
                 let arms = handlers
                     .as_ref()
                     .map(|arms| {
                         arms.iter()
                             .map(|arm| {
-                                Ok((arm.name.clone(), close(&arm.value.item, &env, &shell.sig)?))
+                                Ok((arm.name.clone(), form(&arm.value.item, &env, &shell.sig)?))
                             })
                             .collect::<Settled<Vec<_>>>()
                     })
                     .transpose()?;
                 let scope = WithinScope::parse(&as_map(&opts, "within")?, arms, &env, shell)?;
-                let body = close(body, &env, &shell.sig)?;
+                let body = form(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let undo = scope.enter(shell);
                 self.push(Frame::Within(undo));
@@ -700,7 +700,7 @@ impl Machine {
             }
 
             CompKind::Grant { caps, body } => {
-                let c = close(caps, &env, &shell.sig)?;
+                let c = form(caps, &env, &shell.sig)?;
                 let home = shell.context.home();
                 let cwd = shell.cwd();
                 let ctx = FreezeCtx {
@@ -708,7 +708,7 @@ impl Machine {
                     cwd: &cwd,
                 };
                 let caps = crate::capability::decode_capability_map(&c, "grant", &ctx)?;
-                let body = close(body, &env, &shell.sig)?;
+                let body = form(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let at = shell.context.grants.len();
                 shell.context.grants.push(caps);
@@ -718,23 +718,23 @@ impl Machine {
             }
 
             CompKind::Try { body, handler } => {
-                let body = close(body, &env, &shell.sig)?;
-                let handler = close(handler, &env, &shell.sig)?;
+                let body = form(body, &env, &shell.sig)?;
+                let handler = form(handler, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 self.push(Frame::Try { handler });
                 Self::force(body, mooring, shell)
             }
 
             CompKind::Guard { body, cleanup } => {
-                let body = close(body, &env, &shell.sig)?;
-                let cleanup = close(cleanup, &env, &shell.sig)?;
+                let body = form(body, &env, &shell.sig)?;
+                let cleanup = form(cleanup, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 self.push(Frame::Guard { cleanup });
                 Self::force(body, mooring, shell)
             }
 
             CompKind::Audit { body } => {
-                let body = close(body, &env, &shell.sig)?;
+                let body = form(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let saved = shell.local.audit.capture_policy();
                 shell
@@ -754,7 +754,7 @@ impl Machine {
         env: &Env,
         shell: &mut Shell,
     ) -> Result<Focus, Break> {
-        let (label, payload) = match close(&scrutinee.item, env, &shell.sig)? {
+        let (label, payload) = match form(&scrutinee.item, env, &shell.sig)? {
             Value::Variant { label, payload } => (label, payload),
             other => {
                 return Err(Break::Error(Error::new(
@@ -1444,6 +1444,64 @@ mod tests {
         assert!(
             Arc::ptr_eq(solo_closure.comp(), &rec_solo),
             "a group of one's own member is the node already in focus"
+        );
+    }
+
+    /// A literal forms without building: it equals the built value
+    /// element-wise, and a record iterates in a built map's order. A literal
+    /// naming nothing captures the static empty environment.
+    #[test]
+    fn a_literal_forms_without_building() {
+        let mut shell = new_shell();
+        let out = run_source(
+            "let x = 1\nlet r = [b: [$x, 2], a: $x]\nreturn $r",
+            &mut shell,
+        )
+        .expect("a literal record must form");
+        let Value::Map(record) = &out else {
+            panic!("expected a record, got {out:?}")
+        };
+        assert!(
+            record.literal_env().is_some(),
+            "a literal forms as a value closure, not built data"
+        );
+
+        let expected = Value::map(vec![
+            (
+                "b".to_string(),
+                Value::list(vec![Value::Int(1), Value::Int(2)]),
+            ),
+            ("a".to_string(), Value::Int(1)),
+        ]);
+        assert_eq!(out, expected, "a literal reads the same as the built value");
+        assert_eq!(
+            record
+                .iter()
+                .map(|(k, _)| k.to_string())
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "a literal record iterates in a built map's order"
+        );
+
+        let Value::List(inner) = record.get("b").expect("a list field").into_owned() else {
+            panic!("expected a list")
+        };
+        assert!(
+            inner.literal_env().is_some(),
+            "a nested list literal also forms as a value closure"
+        );
+
+        let out = run_source("let l = [1, 2]\nreturn $l", &mut shell)
+            .expect("a literal naming nothing must still form");
+        let Value::List(list) = &out else {
+            panic!("expected a list, got {out:?}")
+        };
+        let env = list
+            .literal_env()
+            .expect("a literal naming nothing is still a literal");
+        assert!(
+            env.ptr_eq(&Env::new()),
+            "a literal naming nothing captures the static empty environment"
         );
     }
 

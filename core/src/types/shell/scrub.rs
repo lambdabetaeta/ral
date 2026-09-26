@@ -124,23 +124,35 @@ impl Scrub {
     fn rebuild(&self, v: &Value) -> Option<Value> {
         match v {
             Value::Handle(_) => Some(Value::from(opaque(v))),
-            Value::List(items) => patched(
-                items,
-                items
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, item)| self.rebuild(&item).map(|new| (i, new))),
-                List::set,
-            )
-            .map(Value::List),
-            Value::Map(entries) => patched(
-                entries,
-                entries.iter().filter_map(|(key, item)| {
-                    self.rebuild(&item).map(|new| (key.to_string(), new))
-                }),
-                Map::insert,
-            )
-            .map(Value::Map),
+            Value::List(items) => match items.literal_parts() {
+                Some((node, env)) => {
+                    let env = self.replacement(env)?;
+                    Some(Value::List(List::captured(Arc::clone(node), env)))
+                }
+                None => patched(
+                    items,
+                    items
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, item)| self.rebuild(&item).map(|new| (i, new))),
+                    List::set,
+                )
+                .map(Value::List),
+            },
+            Value::Map(entries) => match entries.literal_parts() {
+                Some((node, env)) => {
+                    let env = self.replacement(env)?;
+                    Some(Value::Map(Map::captured(Arc::clone(node), env)))
+                }
+                None => patched(
+                    entries,
+                    entries.iter().filter_map(|(key, item)| {
+                        self.rebuild(&item).map(|new| (key.to_string(), new))
+                    }),
+                    Map::insert,
+                )
+                .map(Value::Map),
+            },
             Value::Variant { label, payload } => {
                 let payload = self.rebuild(payload.as_deref()?)?;
                 Some(Value::Variant {
@@ -205,16 +217,22 @@ fn patched<C: Clone, K, V>(
 fn captured_scopes(v: &Value, out: &mut Vec<Env>) {
     match v {
         Value::Thunk(closure) => out.push(closure.env().clone()),
-        Value::List(items) => {
-            for item in items {
-                captured_scopes(&item, out);
+        Value::List(items) => match items.literal_parts() {
+            Some((_, env)) => out.push(env.clone()),
+            None => {
+                for item in items {
+                    captured_scopes(&item, out);
+                }
             }
-        }
-        Value::Map(entries) => {
-            for (_, item) in entries {
-                captured_scopes(&item, out);
+        },
+        Value::Map(entries) => match entries.literal_parts() {
+            Some((_, env)) => out.push(env.clone()),
+            None => {
+                for (_, item) in entries {
+                    captured_scopes(&item, out);
+                }
             }
-        }
+        },
         Value::Variant {
             payload: Some(p), ..
         } => captured_scopes(p, out),

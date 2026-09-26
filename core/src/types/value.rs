@@ -57,6 +57,11 @@ pub enum Value {
     Handle(Box<HandleInner>),
 }
 
+const _: () = assert!(
+    std::mem::size_of::<Value>() <= 32,
+    "Value must fit in 32 bytes"
+);
+
 impl Value {
     /// `Int` and whole `Float` only: a numeric-looking string is never
     /// silently parsed, since that is the `int` builtin's job.
@@ -406,6 +411,30 @@ pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
     v
 }
 
+/// A chain of `n` one-element list literals over `foot`, each capturing the
+/// next in a one-binding env — `acc = [$acc]`, run by a recursive function.
+/// The literal repr's captured `Env` must be cut by the same
+/// trampoline `Closure`'s drop uses, or a deep chain overflows the stack.
+#[cfg(test)]
+pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
+    let node = crate::ir::ListNode::new(Box::from([crate::source::Spanned::synthetic(
+        crate::ir::Val::Variable("acc".into()),
+    )]));
+    let mut v = foot;
+    for _ in 0..n {
+        let mut env = Env::new();
+        env.bind(
+            "acc".into(),
+            Binding {
+                value: v,
+                scheme: None,
+            },
+        );
+        v = Value::List(List::literal(&node, &env));
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +513,19 @@ mod tests {
             panic!("a string clones as a string");
         };
         assert_eq!(a.as_ptr(), b.as_ptr(), "a clone must not copy the bytes");
+    }
+
+    /// A 10⁵-deep `acc = [$acc]` chain drops on a 256 KiB thread:
+    /// the literal repr's captured `Env` is cut by `Env::dismantle`'s
+    /// trampoline, the same one `Closure`'s drop uses, even though the chain
+    /// never passes through a `Closure`.
+    #[test]
+    fn a_deep_literal_chain_drops_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| drop(deep_list_chain(100_000, Value::Unit)))
+            .expect("spawn")
+            .join()
+            .expect("a deep literal chain must drop without exhausting the stack");
     }
 }

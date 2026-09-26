@@ -16,6 +16,11 @@ pub struct Closure {
     env: Env,
 }
 
+const _: () = assert!(
+    std::mem::size_of::<Closure>() <= 24,
+    "Closure must fit in 24 bytes"
+);
+
 impl Closure {
     /// Restricts `env` to `occ`, the occ of the node that owns `comp` — a
     /// `ThunkNode`'s for `force`, a `GroupNode`'s for the `Rec` rule.

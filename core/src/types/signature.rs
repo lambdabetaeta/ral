@@ -60,7 +60,7 @@ impl Signature {
 }
 
 /// The one resolution rule: ρ, then Σ's prelude, then Σ's natives.
-/// `evaluator::val::close` and `command_call::resolve` are its callers.
+/// `evaluator::val::form` and `command_call::resolve` are its callers.
 pub(crate) fn lookup<'a>(name: &str, env: &'a Env, sig: &'a Signature) -> Option<&'a Value> {
     env.get(name).or_else(|| sig.get(name))
 }

@@ -46,6 +46,20 @@ spawned block shares nothing mutable.
   *computation closure*, transient and holding the whole environment `M` was
   reached in
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+- Every value is a closure over what it mentions, not a thunk alone: a list,
+  record or map literal is `⟨V, ρ|occ(V)⟩` too, formed by `form(val, env,
+  sig)` and read apart one layer at a time — `⟨[V₁…Vₙ], ρ⟩`'s *i*th element
+  is `⟨Vᵢ, ρ⟩` — a name lent from ρ, a constant built, a nested literal or
+  thunk closing over that same ρ rather than restricting again
+  ([[internals/evaluator-machine|evaluator-machine]]).
+- ρ is a finite map from names to values; Σ, the natives and the frozen
+  prelude, is a shell's own constant and is never part of any ρ — a name
+  resolves in ρ, then Σ. A `Literal` value closure's inspection reads ρ
+  alone, so a name only Σ answers is never one of its entries; `form` checks
+  that before choosing the closure over building the literal eagerly.
+- **The cost model:** value operations cost O(program text) — occ is
+  computed once, where a node is built, and inspecting a literal shares its
+  ρ rather than recomputing; only computations cost O(data).
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (commands are the effect half this splits off),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],
