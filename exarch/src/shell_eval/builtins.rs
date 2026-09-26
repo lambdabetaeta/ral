@@ -1387,9 +1387,8 @@ mod tests {
         let await_fn = shell
             .lookup_builtin("await")
             .expect("core must register `await`");
-        let env = shell.env().clone();
         let result = await_fn
-            .run(&[Value::Handle(handle)], &env, &m, &mut shell)
+            .run(&[Value::Handle(handle)], &m, &mut shell)
             .expect("await on the reacquired handle must succeed");
         let Value::Map(record) = result else {
             panic!("await must return a record");
@@ -1437,9 +1436,8 @@ mod tests {
         let await_fn = shell
             .lookup_builtin("await")
             .expect("core must register `await`");
-        let env = shell.env().clone();
         let result = await_fn
-            .run(&[Value::Handle(handle)], &env, &m, &mut shell)
+            .run(&[Value::Handle(handle)], &m, &mut shell)
             .expect("await on a retaken, already-settled handle must deliver the cached result");
         let Value::Map(record) = result else {
             panic!("await must return a record");

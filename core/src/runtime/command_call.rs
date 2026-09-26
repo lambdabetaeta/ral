@@ -112,13 +112,11 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
 ///
 /// The values arrive unrendered, unlike a ral arm's (`machine::apply_handler`):
 /// a native body renders what it writes and vets what it launches, and the
-/// exec boundary's refusal is a judgement on the value's shape.  `env` is the
-/// lexical environment at the call — the native sees it (§4).
+/// exec boundary's refusal is a judgement on the value's shape.
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
     redirects: &[Redirect<String>],
-    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -128,7 +126,7 @@ pub(crate) fn run_base_frame(
         redirects,
         mooring,
         shell,
-        |a, s, frame| entry.call_body(frame, a, env, mooring, s),
+        |a, s, frame| entry.call_body(frame, a, mooring, s),
     )
 }
 
@@ -152,14 +150,11 @@ fn run_host_thunk(
 
 /// Run an external command.  No `with_redirects` frame, unlike the host arms:
 /// the child's redirects are wired onto its own fds, and a `<file` stdin is
-/// parked in `shell.io.stdin` for the spawn to collect.  `env` is unused —
-/// an external command reads no lexical scope — but carried for the same
-/// shape as [`run_base_frame`], since the `Exec` rule reaches both arms alike.
+/// parked in `shell.io.stdin` for the spawn to collect.
 pub(crate) fn run_external(
     id: CommandIdentity,
     args: &[Value],
     redirects: &[Redirect<String>],
-    _env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {

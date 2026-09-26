@@ -123,14 +123,11 @@ fn run_phrase_run(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let closure = crate::types::Closure {
-        comp: Arc::clone(m),
-        env: env.clone(),
-    };
-    if !non_final {
-        return machine::evaluate(closure, mooring, shell);
+    let eval = |shell: &mut Shell| machine::evaluate(Arc::clone(m), env.clone(), mooring, shell);
+    if non_final {
+        return capture::with_ambient_stdout(shell, eval);
     }
-    capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))
+    eval(shell)
 }
 
 /// A `Phrase::Define`'s three fields, borrowed together — spreading them
@@ -167,12 +164,9 @@ fn run_phrase_define(
     if is_session {
         pattern::check_pattern_shadow(pattern, shell)?;
     }
-    let closure = crate::types::Closure {
-        comp: Arc::clone(comp),
-        env: env.clone(),
-    };
-    let v =
-        capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
+    let v = capture::with_ambient_stdout(shell, |shell| {
+        machine::evaluate(Arc::clone(comp), env.clone(), mooring, shell)
+    })?;
     *env = pattern::bind_pattern_staged(
         pattern,
         &v,
@@ -190,6 +184,27 @@ fn run_phrase_define(
         shell.env = env.clone();
     }
     Ok(Value::Unit)
+}
+
+/// `source` compiled against `shell`'s session and run as the session.
+#[cfg(test)]
+pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
+    let top = crate::compile_and_typecheck(
+        source,
+        shell.session_schemes(),
+        crate::source::FileId::DUMMY,
+        "<test>",
+        None,
+    )
+    .expect("compile");
+    run_phrases(
+        &top.phrases,
+        shell.env.clone(),
+        Mode::Session,
+        &Mooring::adrift(),
+        shell,
+    )
+    .outcome
 }
 
 #[cfg(test)]
@@ -272,15 +287,8 @@ mod tests {
 
     #[test]
     fn top_level_persists_let_on_error() {
-        let phrases = toplevel("let persist_top = 41\nexit 7");
         let mut shell = Shell::default();
-        let _ = run_phrases(
-            &phrases,
-            shell.env.clone(),
-            Mode::Session,
-            &Mooring::adrift(),
-            &mut shell,
-        );
+        let _ = run_source("let persist_top = 41\nexit 7", &mut shell);
         assert!(
             shell.env.get("persist_top").is_some(),
             "the run door must persist `let` bindings even on Exit"
@@ -305,12 +313,12 @@ mod tests {
             panic!("expected a thunked block, got {:?}", comp.item);
         };
         let mut shell = Shell::default();
-        let captured = shell.env.clone();
-        let closure = crate::types::Closure {
-            comp: body.clone(),
-            env: captured,
-        };
-        let _ = machine::evaluate(closure, &Mooring::adrift(), &mut shell);
+        let _ = machine::evaluate(
+            body.clone(),
+            shell.env.clone(),
+            &Mooring::adrift(),
+            &mut shell,
+        );
         assert!(
             shell.env.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"

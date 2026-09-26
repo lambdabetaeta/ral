@@ -16,9 +16,9 @@ use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::sync::LockExt as _;
 use crate::types::{
-    Break, CapReached, Closure, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink,
-    HandleInner, HandleState, LeaseClass, Mooring, Observed, ReapCause, Settled, Shell,
-    SurfaceBuffer, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
+    Break, CapReached, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink, HandleInner,
+    HandleState, LeaseClass, Mooring, Observed, ReapCause, Settled, Shell, SurfaceBuffer, Value,
+    WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::io::Write as _;
 use std::sync::mpsc::TryRecvError;
@@ -385,13 +385,7 @@ fn lease_fire(chain: &LeaseChain) {
 fn worker_body(
     body: Arc<crate::ir::Comp>,
 ) -> impl FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static {
-    move |mooring, child_env| {
-        let closure = Closure {
-            comp: body,
-            env: child_env.env.clone(),
-        };
-        machine::evaluate(closure, mooring, child_env)
-    }
+    move |mooring, child_env| machine::evaluate(body, child_env.env.clone(), mooring, child_env)
 }
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.

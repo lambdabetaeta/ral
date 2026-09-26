@@ -7,7 +7,7 @@ use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::CommandIdentity;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::{Binding, Env, HandlerLookup, Settled, Shell, Value};
+use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
 
@@ -157,7 +157,7 @@ fn fmt_line(
     )
 }
 
-pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let colors = Colors::current();
     let Colors {
         bold, dim, reset, ..
@@ -180,9 +180,9 @@ pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Se
     Ok(Value::Unit)
 }
 
-pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let out = match args.first() {
-        Some(arg) => explanation(&arg.to_string(), env, shell, Colors::current()),
+        Some(arg) => explanation(&arg.to_string(), shell, Colors::current()),
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     shell.write_stdout(out.as_bytes())?;
@@ -193,9 +193,9 @@ pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> S
 /// and no registry documents falls to a search of the whole index; everything
 /// else prints the one entry block, an em dash standing in for whichever of
 /// the doc and the type no registry holds.
-fn explanation(name: &str, env: &Env, shell: &Shell, colors: Colors) -> String {
-    let sites = locate_all(name, env, shell);
-    let (doc, ty) = documented(name, sites.first(), env, shell);
+fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
+    let sites = locate_all(name, shell);
+    let (doc, ty) = documented(name, sites.first(), shell);
     if sites.is_empty() && doc.is_none() && ty.is_none() {
         return search(name, shell, colors);
     }
@@ -222,24 +222,19 @@ fn explanation(name: &str, env: &Env, shell: &Shell, colors: Colors) -> String {
 ///
 /// Every other site sweeps the documented registries, since a frame stacked
 /// over a native — a handler, an alias — inherits the native's doc.
-fn documented(
-    name: &str,
-    site: Option<&Where>,
-    scope: &Env,
-    shell: &Shell,
-) -> (Option<String>, Option<String>) {
+fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
     let manifest = || builtin_type_hint(&shell.session.builtins, name);
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
     if matches!(site, Some(Where::Local)) {
-        return (library_doc(), scheme_of(scope.session_binding(name)));
+        return (library_doc(), scheme_of(shell.env.session_binding(name)));
     }
     shell
         .lookup_builtin(name)
         .map(|entry| (Some(entry.doc.to_owned()), manifest()))
         .or_else(|| {
             prelude_doc(name).map(|doc| {
-                let ty = scheme_of(scope.prelude_binding(name)).or_else(manifest);
+                let ty = scheme_of(shell.env.prelude_binding(name)).or_else(manifest);
                 (Some(doc.to_owned()), ty)
             })
         })
@@ -319,12 +314,12 @@ impl fmt::Display for Where {
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
 /// under `shadows:`.
-fn locate_all(name: &str, scope: &Env, shell: &Shell) -> Vec<Where> {
+fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
-    if scope.session_binding(name).is_some() {
+    if shell.env.session_binding(name).is_some() {
         sites.push(Where::Local);
     }
-    if scope.prelude_binding(name).is_some() {
+    if shell.env.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
     if shell.session.builtins.value(name).is_some() {
@@ -407,8 +402,7 @@ mod tests {
         let mut shell = Shell::default();
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
+        builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
             !out.contains("Library:"),
@@ -425,8 +419,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
+        builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -436,8 +429,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::string("frob")], &env, &mut shell)
-            .expect("a buffer sink cannot fail");
+        builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(
@@ -457,8 +449,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
+        builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -468,13 +459,37 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::string("frob")], &env, &mut shell)
-            .expect("a buffer sink cannot fail");
+        builtin_explain(&[Value::string("frob")], &mut shell).expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(
             explain_out.contains("frob the widget.") && explain_out.contains("load-bearing"),
             "explain must print the doc in full, got:\n{explain_out}"
         );
+    }
+
+    /// A block's own names are not the session's: `explain` answers only for
+    /// the latter, from inside a block as at the top.
+    #[test]
+    fn explain_reflects_on_the_session_not_the_callers_block() {
+        let mut shell = Shell::default();
+        shell.set_var("sess_name".into(), Value::Int(1));
+        for (source, expected) in [
+            ("!{ explain sess_name }", "sess_name: local"),
+            (
+                "let f = { |zqx_local| explain zqx_local }\nf 1",
+                "explain: zqx_local: not found",
+            ),
+        ] {
+            let (result, bytes, _) = crate::evaluator::with_capture(&mut shell, |shell| {
+                crate::evaluator::run_source(source, shell)
+            });
+            result.expect("explain must run");
+            let out = String::from_utf8(bytes).expect("explain output is UTF-8");
+            assert!(
+                out.contains(expected),
+                "`{source}` must print `{expected}`, got:\n{out}"
+            );
+        }
     }
 }

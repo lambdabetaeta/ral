@@ -21,7 +21,7 @@
 //! them unconditionally.
 
 use crate::types::{
-    AuditIo, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision, Env, Mooring,
+    AuditIo, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision, Mooring,
     Observation, Observed, Settled, Shell, Value, epoch_us,
 };
 use std::collections::BTreeMap;
@@ -191,12 +191,10 @@ where
 }
 
 /// Run a native body inside a fresh audit frame — the only way to reach
-/// [`BuiltinEntry::call_body`].  `env` is the lexical environment at the
-/// call: the `Apply` frame's, or the `Exec` rule's.
+/// [`BuiltinEntry::call_body`].
 pub(crate) fn run_native(
     entry: &BuiltinEntry,
     args: &[Value],
-    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -206,7 +204,7 @@ pub(crate) fn run_native(
         CommandOrigin::Builtin,
         mooring,
         shell,
-        |shell, frame| entry.call_body(frame, args, env, mooring, shell),
+        |shell, frame| entry.call_body(frame, args, mooring, shell),
     )
 }
 
@@ -216,14 +214,8 @@ impl BuiltinEntry {
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
-    pub fn run(
-        &self,
-        args: &[Value],
-        env: &Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Value> {
-        run_native(self, args, env, mooring, shell)
+    pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+        run_native(self, args, mooring, shell)
     }
 }
 

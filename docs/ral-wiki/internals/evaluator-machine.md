@@ -1,6 +1,6 @@
 ---
-verified_at_commit: e4d859c3
-verified_at_date: 2026-09-16
+verified_at_commit: b22f78fd
+verified_at_date: 2026-09-26
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
@@ -10,16 +10,17 @@ The evaluator is one abstract machine, `core/src/evaluator/machine.rs`. Its
 state is a **focus** and a **stack**: `Machine { focus: Focus, stack:
 Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
 `&Mooring`. Nothing else in the crate constructs a state or sees the stack;
-the module's two doors are `evaluate(closure, …)` — inject ⟨M, E⟩ over the
+the module's two doors are `evaluate(comp, env, …)` — inject ⟨M, E⟩ over the
 empty stack and step until it is empty — and `apply(f, args, …)`, the same
 from a closed value meeting arguments. Both return `Settled<Value>`.
 
-**What is in focus is a closure.** `Closure { comp: Arc<Comp>, env: Env }`
-pairs a [[map/core/ir|computation]] with the environment its free variables
-read. `Focus::Eval(closure)` is a computation to step; `Focus::Return(t)` is a
+**What is in focus is a computation closure.** `Focus::Eval { comp, env }`
+pairs a [[map/core/ir|computation]] with the whole environment it was reached
+in: transient — never stored, sent, or kept alive by a binding — and so a type
+apart from `Closure`, the thunk value's. `Focus::Return(t)` is a
 terminal meeting the frame above; `Focus::Halt(Break)` is a signal climbing
 the stack. A terminal has two shapes, `Terminal::Value(v)` and
-`Terminal::Lambda(closure)` — a λ is canonical at `A → C` and is never a
+`Terminal::Lambda { comp, env }` — a λ is canonical at `A → C` and is never a
 value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
 `Within`, `Grant`, `Try`) passes it through, a value-holed frame
@@ -30,10 +31,12 @@ bare-lambda error — unreachable for a checked program, since the checker
 reads it inline in `step_eval`, and the checker reaches it through a bind
 over `Capture` rather than nesting the two.
 
-**One thunk value.** `Value::Thunk(Closure)` is a computation closure held
-as data; `force` of it puts the closure in focus and pushes nothing, so
-`force(thunk M) = M` and a forced block's `cd` persists exactly as a
-lambda's does ([[design/scoping|scoping]]). Whether a thunk "is a lambda" is
+**One thunk value.** `Value::Thunk(Closure)` is a closure held as data;
+`force` of it puts its computation and environment in focus and pushes
+nothing, so `force(thunk M) = M` and a forced block's `cd` persists exactly
+as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
+that equation as a rule (U-β): `Force(Thunk M)` puts `M` in focus under the
+current environment, closing nothing. Whether a thunk "is a lambda" is
 read off the body's shape by `Comp::arrow`, never stored.
 
 **`step` is the tables.** `Machine::step` dispatches on the focus:
@@ -56,11 +59,11 @@ and `step_exec` are rules under the same discipline and return the same
 `Result`. (Before this shape, a bare `return` in the `Rec` arm bypassed the
 stamp and cancelling a recursive definition rendered without a caret.)
 
-**Frames hold environments, which is what makes extent structural.** `M to
+**`To` holds its environment, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M
 returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
-scopes over `N` and nothing else whatever M did. `Apply`, `Try` and `Guard`
-likewise carry the `Env` they resume under. `Cleanup` is
+scopes over `N` and nothing else whatever M did. It is the only frame with
+syntax to close over, so the only one carrying an `Env`. `Cleanup` is
 the kernel's `to _` with a settled rest: it drops the cleanup's value and
 resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
@@ -68,7 +71,7 @@ clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
 close their trail scope. `Frame` is at most 128 bytes (asserted at compile
-time; `Redirect`, `Unmask` and the `Env` of `Try`/`Guard` are boxed).
+time; `Redirect` and `Unmask` are boxed).
 
 `a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
 `_؟_`, `Core.Derived`), right-associated so the last arm stays in tail
@@ -116,8 +119,8 @@ stage thread (`runtime/pipeline/thread.rs`). A native that applies a user functi
 collection combinators, hook dispatch — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
 (set by `nested_machines_fit_a_worker_stack` against a 2 MiB thread) caps
-that nesting with a clean error. Natives that need the lexical environment
-(`help`, `explain`) receive it as a parameter.
+that nesting with a clean error. No native reads a lexical environment:
+`help` and `explain` reflect on the session.
 
 **Pipes are nodes between machines** ([[internals/pipeline-execution|pipeline
 execution]]). A multi-stage pipeline is a configuration: each stage is a

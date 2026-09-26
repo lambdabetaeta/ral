@@ -384,9 +384,12 @@ builtin_registry! {
     // they cross the same wait / signal / exit-code boundary as a system binary.
     // See `crate::uutils::is_uutils_tool`.
 
-    // `help` and `explain` are declared below as [`CORE_HELP_BUILTINS`],
-    // outside this macro: they are the only two rows that read the lexical
-    // environment, so they carry `BuiltinBody::Scoped` instead of `Static`.
+    Help { names: ["help"], ty: scheme::help,
+        doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
+        call: |args, _mooring, shell| help::builtin_help(args, shell), },
+    Explain { names: ["explain"], ty: scheme::explain,
+        doc: "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
+        call: |args, _mooring, shell| help::builtin_explain(args, shell), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], ty: scheme::pure_bool,
@@ -407,25 +410,6 @@ static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
 )];
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 
-/// `help` and `explain`: the only two rows that read the lexical environment
-/// at the call, so they carry [`BuiltinBody::Scoped`] rather than the value
-/// half's uniform `Static`.
-static CORE_HELP_BUILTINS_ARR: [BuiltinEntry; 2] = [
-    BuiltinEntry::new(
-        Cow::Borrowed("help"),
-        scheme::help,
-        "help  — print an overview of builtins, prelude, and library; see also `explain`.",
-        BuiltinBody::Scoped(|args, env, _mooring, shell| help::builtin_help(args, env, shell)),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("explain"),
-        scheme::explain,
-        "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
-        BuiltinBody::Scoped(|args, env, _mooring, shell| help::builtin_explain(args, env, shell)),
-    ),
-];
-pub(crate) static CORE_HELP_BUILTINS: &[BuiltinEntry] = &CORE_HELP_BUILTINS_ARR;
-
 /// A [`BuiltinTable`](crate::types::BuiltinTable) of core's manifest, every
 /// half, alone.
 ///
@@ -436,7 +420,6 @@ pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
     let mut table = crate::types::BuiltinTable::default();
     table.install_static(CORE_BUILTINS);
     table.install_static(CORE_BASE_FRAMES);
-    table.install_static(CORE_HELP_BUILTINS);
     table
 }
 
@@ -587,7 +570,7 @@ pub fn apply(
         // entries (`HookSig::Prompt` and the like) are the one caller that
         // takes this path; every other caller supplies at least one arg.
         Value::Thunk(_) | Value::Native { .. } if args.is_empty() => {
-            crate::evaluator::machine::force(val.clone(), &shell.env.clone(), mooring, shell)
+            crate::evaluator::machine::force(val.clone(), mooring, shell)
         }
         Value::Thunk(_) | Value::Native { .. } => {
             crate::evaluator::machine::apply(val.clone(), args, mooring, shell)

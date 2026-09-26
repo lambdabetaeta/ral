@@ -35,13 +35,17 @@ use super::{expr, observe};
 /// means: a value, or a λ awaiting its arguments.
 pub(crate) enum Terminal {
     Value(Value),
-    Lambda(Closure),
+    /// `λp. M` awaiting an argument, over the environment it was reached in.
+    Lambda {
+        comp: Arc<Comp>,
+        env: Env,
+    },
 }
 
 /// The machine's one register.
 pub(crate) enum Focus {
-    /// A computation closure to step.
-    Eval(Closure),
+    /// `⟨M, ρ⟩` to step: `ρ` is the whole environment `M` was reached in.
+    Eval { comp: Arc<Comp>, env: Env },
     /// A terminal meeting the frame above.
     Return(Terminal),
     /// A signal climbing the stack.
@@ -49,8 +53,9 @@ pub(crate) enum Focus {
 }
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
-/// into the IR and an `Env`, never cloned IR, never a `Context` clone. The
-/// two large ones, `Redirect` and `Unmask`, are boxed.
+/// into the IR, never cloned IR, never a `Context` clone, and an `Env` only
+/// with syntax to close over it: `To` alone. The two large ones, `Redirect`
+/// and `Unmask`, are boxed.
 enum Frame {
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
@@ -61,7 +66,6 @@ enum Frame {
     },
     Apply {
         args: Vec<Value>,
-        env: Env,
         span: Option<Span>,
     },
     Capture {
@@ -75,11 +79,9 @@ enum Frame {
     },
     Try {
         handler: Value,
-        env: Box<Env>,
     },
     Guard {
         cleanup: Value,
-        env: Box<Env>,
     },
     Cleanup {
         outcome: Settled<Value>,
@@ -155,7 +157,7 @@ fn bare_lambda_error() -> Error {
 fn as_value(t: Terminal) -> Result<Value, Break> {
     match t {
         Terminal::Value(v) => Ok(v),
-        Terminal::Lambda(_) => Err(Break::Error(bare_lambda_error())),
+        Terminal::Lambda { .. } => Err(Break::Error(bare_lambda_error())),
     }
 }
 
@@ -265,15 +267,9 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
 
 impl Machine {
     /// The initial state for `apply`: an empty stack, focus set by `apply_rule` (§2.4).
-    fn applying(
-        f: Value,
-        args: Vec<Value>,
-        env: &Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Self {
+    fn applying(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Self {
         let mut m = Self::default();
-        m.focus = m.apply_rule(f, args, env, None, mooring, shell);
+        m.focus = m.apply_rule(f, args, None, mooring, shell);
         m
     }
 
@@ -307,7 +303,7 @@ impl Machine {
     fn step(&mut self, mooring: &Mooring, shell: &mut Shell) {
         let focus = std::mem::replace(&mut self.focus, Self::default().focus);
         self.focus = match focus {
-            Focus::Eval(closure) => self.step_eval(closure, mooring, shell),
+            Focus::Eval { comp, env } => self.step_eval(&comp, env, mooring, shell),
             Focus::Return(t) => {
                 let frame = self.stack.pop().expect(
                     "Return with an empty stack: evaluate's loop must stop before calling step again",
@@ -328,14 +324,13 @@ impl Machine {
     /// `beta(⟨λp. M, E⟩, args)`: a λ meeting its arguments. `args` non-empty.
     fn beta(
         &mut self,
-        lam: Closure,
+        comp: &Comp,
+        env: Env,
         mut args: Vec<Value>,
-        frame_env: Env,
         span: Option<Span>,
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Focus {
-        let (comp, env) = lam.into_parts();
         let Some((param, body)) = comp.arrow() else {
             unreachable!("a Terminal::Lambda's closure is always arrow-shaped (S3 eta-expansion)")
         };
@@ -351,25 +346,19 @@ impl Machine {
             if let Err(b) = self.reserve(shell) {
                 return Focus::Halt(b);
             }
-            self.push(Frame::Apply {
-                args,
-                env: frame_env,
-                span,
-            });
+            self.push(Frame::Apply { args, span });
         }
-        Focus::Eval(Closure {
+        Focus::Eval {
             comp: Arc::clone(body),
             env: env2,
-        })
+        }
     }
 
-    /// `apply(f, args, &env)`: a closed value meeting arguments under the
-    /// lexical environment of the call. `args` non-empty.
+    /// `apply(f, args)`: a closed value meeting arguments. `args` non-empty.
     fn apply_rule(
         &mut self,
         f: Value,
         mut args: Vec<Value>,
-        env: &Env,
         span: Option<Span>,
         mooring: &Mooring,
         shell: &mut Shell,
@@ -380,12 +369,9 @@ impl Machine {
                 if let Err(b) = self.reserve(shell) {
                     return Focus::Halt(b);
                 }
-                self.push(Frame::Apply {
-                    args,
-                    env: env.clone(),
-                    span,
-                });
-                Focus::Eval(c)
+                self.push(Frame::Apply { args, span });
+                let (comp, env) = c.into_parts();
+                Focus::Eval { comp, env }
             }
             Value::Native { entry, applied } => {
                 let needed = entry.fixed_arity();
@@ -399,17 +385,13 @@ impl Machine {
                         applied: collected,
                     }));
                 }
-                match super::audit::run_native(&entry, &collected, env, mooring, shell) {
+                match super::audit::run_native(&entry, &collected, mooring, shell) {
                     Ok(v) => {
                         if !rest.is_empty() {
                             if let Err(b) = self.reserve(shell) {
                                 return Focus::Halt(b);
                             }
-                            self.push(Frame::Apply {
-                                args: rest,
-                                env: env.clone(),
-                                span,
-                            });
+                            self.push(Frame::Apply { args: rest, span });
                         }
                         Focus::Return(Terminal::Value(v))
                     }
@@ -431,11 +413,14 @@ impl Machine {
     }
 
     /// `force V` on a closed value: `force(thunk M) = M`, nothing pushed (S10).
-    fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Focus {
+    fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Focus {
         match v {
-            Value::Thunk(c) => Focus::Eval(c),
+            Value::Thunk(c) => {
+                let (comp, env) = c.into_parts();
+                Focus::Eval { comp, env }
+            }
             Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
-                match super::audit::run_native(&entry, &applied, env, mooring, shell) {
+                match super::audit::run_native(&entry, &applied, mooring, shell) {
                     Ok(v) => Focus::Return(Terminal::Value(v)),
                     Err(b) => Focus::Halt(b),
                 }
@@ -470,10 +455,15 @@ impl Machine {
 
     // ── §2.2: rules on a computation closure in focus ───────────────────
 
-    fn step_eval(&mut self, closure: Closure, mooring: &Mooring, shell: &mut Shell) -> Focus {
-        let (comp, env) = closure.into_parts();
+    fn step_eval(
+        &mut self,
+        comp: &Arc<Comp>,
+        env: Env,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Focus {
         let focus = self
-            .eval_rules(&comp, env, mooring, shell)
+            .eval_rules(comp, env, mooring, shell)
             .unwrap_or_else(Focus::Halt);
         stamp_focus(focus, comp.span)
     }
@@ -494,10 +484,10 @@ impl Machine {
             // Canonical at A → C, never a value: the frame on top decides.
             // Unreachable except under Apply/a C-holed frame for a checked
             // program (§3.5, S3).
-            CompKind::Lam { .. } => Focus::Return(Terminal::Lambda(Closure {
+            CompKind::Lam { .. } => Focus::Return(Terminal::Lambda {
                 comp: Arc::clone(comp),
                 env,
-            })),
+            }),
 
             CompKind::Rec { group, index } => {
                 crate::process::check(mooring)?;
@@ -514,15 +504,21 @@ impl Machine {
                         },
                     );
                 }
-                Focus::Eval(Closure {
+                Focus::Eval {
                     comp: Arc::clone(&group[*index].1),
                     env: env2,
-                })
+                }
             }
 
             CompKind::Observe(reg) => Focus::Return(Terminal::Value(observe::observe(reg, shell)?)),
 
-            CompKind::Force(val) => Self::force(close(val, &env)?, &env, mooring, shell),
+            // force(thunk M) = M: a literal block runs in place, closing nothing.
+            CompKind::Force(Val::Thunk(comp)) => Focus::Eval {
+                comp: Arc::clone(comp),
+                env,
+            },
+
+            CompKind::Force(val) => Self::force(close(val, &env)?, mooring, shell),
 
             CompKind::Interpolation(parts) => {
                 let mut s = String::new();
@@ -560,17 +556,17 @@ impl Machine {
                     env: env.clone(),
                     prev_stdout,
                 });
-                Focus::Eval(Closure {
+                Focus::Eval {
                     comp: Arc::clone(rhs),
                     env,
-                })
+                }
             }
 
             CompKind::If { cond, then, else_ } => match close(&cond.item, &env)? {
-                Value::Bool(b) => Focus::Eval(Closure {
+                Value::Bool(b) => Focus::Eval {
                     comp: Arc::clone(if b { then } else { else_ }),
                     env,
-                }),
+                },
                 other => {
                     return Err(Break::Error(Error::new(
                         format!("if: expected Bool, got {} '{}'", other.type_name(), other),
@@ -588,23 +584,22 @@ impl Machine {
                 self.reserve(shell)?;
                 self.push(Frame::Apply {
                     args: argv,
-                    env: env.clone(),
                     span: comp.span,
                 });
-                Focus::Eval(Closure {
+                Focus::Eval {
                     comp: Arc::clone(head),
                     env,
-                })
+                }
             }
 
             CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell)?,
 
             CompKind::Pipeline { stages, yields, .. } => {
                 if stages.len() == 1 {
-                    return Ok(Focus::Eval(Closure {
+                    return Ok(Focus::Eval {
                         comp: Arc::clone(&stages[0]),
                         env,
-                    }));
+                    });
                 }
                 let node = pipeline::PipeNode::launch(stages, *yields, &env, mooring, shell)?;
                 Focus::Return(Terminal::Value(node.join(mooring, shell)?))
@@ -619,10 +614,10 @@ impl Machine {
                     buf,
                     span: comp.span,
                 });
-                Focus::Eval(Closure {
+                Focus::Eval {
                     comp: Arc::clone(body),
                     env,
-                })
+                }
             }
 
             CompKind::Decode(val) => {
@@ -659,10 +654,10 @@ impl Machine {
             CompKind::Redirect { body, redirects } => {
                 let redirs = close_redirects(redirects, &env)?;
                 self.push_redirect(&redirs, mooring, shell)?;
-                Focus::Eval(Closure {
+                Focus::Eval {
                     comp: Arc::clone(body),
                     env,
-                })
+                }
             }
 
             CompKind::Within {
@@ -684,7 +679,7 @@ impl Machine {
                 self.reserve(shell)?;
                 let undo = scope.enter(shell);
                 self.push(Frame::Within(undo));
-                Self::force(body, &env, mooring, shell)
+                Self::force(body, mooring, shell)
             }
 
             CompKind::Grant { caps, body } => {
@@ -702,29 +697,23 @@ impl Machine {
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 self.push(Frame::Grant(at));
-                Self::force(body, &env, mooring, shell)
+                Self::force(body, mooring, shell)
             }
 
             CompKind::Try { body, handler } => {
                 let body = close(body, &env)?;
                 let handler = close(handler, &env)?;
                 self.reserve(shell)?;
-                self.push(Frame::Try {
-                    handler,
-                    env: Box::new(env.clone()),
-                });
-                Self::force(body, &env, mooring, shell)
+                self.push(Frame::Try { handler });
+                Self::force(body, mooring, shell)
             }
 
             CompKind::Guard { body, cleanup } => {
                 let body = close(body, &env)?;
                 let cleanup = close(cleanup, &env)?;
                 self.reserve(shell)?;
-                self.push(Frame::Guard {
-                    cleanup,
-                    env: Box::new(env.clone()),
-                });
-                Self::force(body, &env, mooring, shell)
+                self.push(Frame::Guard { cleanup });
+                Self::force(body, mooring, shell)
             }
 
             CompKind::Audit { body } => {
@@ -737,7 +726,7 @@ impl Machine {
                     .set_capture(super::audit::merge_capture(saved, CapturePolicy::Bytes));
                 let scope = shell.local.audit.open();
                 self.push(Frame::Audit { scope, saved });
-                Self::force(body, &env, mooring, shell)
+                Self::force(body, mooring, shell)
             }
         })
     }
@@ -776,10 +765,10 @@ impl Machine {
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
         let env2 = pattern::bind_pattern(&arm.pattern, &payload, &[], env.clone(), shell)?;
-        Ok(Focus::Eval(Closure {
+        Ok(Focus::Eval {
             comp: Arc::clone(arm.body.comp()),
             env: env2,
-        }))
+        })
     }
 
     fn step_exec(
@@ -799,9 +788,9 @@ impl Machine {
                 Resolution::Env(v) => {
                     self.push_redirect(&redirs, mooring, shell)?;
                     if argv.is_empty() {
-                        Self::force(v, env, mooring, shell)
+                        Self::force(v, mooring, shell)
                     } else {
-                        self.apply_rule(v, argv, env, span, mooring, shell)
+                        self.apply_rule(v, argv, span, mooring, shell)
                     }
                 }
                 Resolution::Handler { entry, depth } => {
@@ -810,13 +799,13 @@ impl Machine {
                     let frame = Box::new(shell.context.handlers.strip_matched(depth));
                     self.push(Frame::Unmask { frame });
                     let call_args = render_handler_args(&entry.name, entry.arity, &argv);
-                    self.apply_rule(entry.thunk.clone(), call_args, env, span, mooring, shell)
+                    self.apply_rule(entry.thunk.clone(), call_args, span, mooring, shell)
                 }
                 Resolution::Base(entry) => Focus::Return(Terminal::Value(
-                    command_call::run_base_frame(&entry, &argv, &redirs, env, mooring, shell)?,
+                    command_call::run_base_frame(&entry, &argv, &redirs, mooring, shell)?,
                 )),
                 Resolution::External(id) => Focus::Return(Terminal::Value(
-                    command_call::run_external(id, &argv, &redirs, env, mooring, shell)?,
+                    command_call::run_external(id, &argv, &redirs, mooring, shell)?,
                 )),
             },
         )
@@ -846,20 +835,20 @@ impl Machine {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
                 match pattern::bind_pattern(pattern, &v, &[], env, shell) {
-                    Ok(env2) => Focus::Eval(Closure {
+                    Ok(env2) => Focus::Eval {
                         comp: Arc::clone(rest),
                         env: env2,
-                    }),
+                    },
                     Err(b) => Focus::Halt(stamp(b, bind.span)),
                 }
             }
 
-            Frame::Apply { args, env, span } => match t {
-                Terminal::Lambda(c) => {
-                    stamp_focus(self.beta(c, args, env, span, mooring, shell), span)
+            Frame::Apply { args, span } => match t {
+                Terminal::Lambda { comp, env } => {
+                    stamp_focus(self.beta(&comp, env, args, span, mooring, shell), span)
                 }
                 Terminal::Value(v) => {
-                    stamp_focus(self.apply_rule(v, args, &env, span, mooring, shell), span)
+                    stamp_focus(self.apply_rule(v, args, span, mooring, shell), span)
                 }
             },
 
@@ -896,7 +885,7 @@ impl Machine {
 
             Frame::Try { .. } => Focus::Return(t),
 
-            Frame::Guard { cleanup, env } => {
+            Frame::Guard { cleanup } => {
                 let v = match as_value(t) {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(b),
@@ -905,7 +894,7 @@ impl Machine {
                     return Focus::Halt(b);
                 }
                 self.push(Frame::Cleanup { outcome: Ok(v) });
-                Self::force(cleanup, &env, mooring, shell)
+                Self::force(cleanup, mooring, shell)
             }
 
             Frame::Cleanup { outcome } => match outcome {
@@ -972,20 +961,20 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Try { handler, env } => match s {
+            Frame::Try { handler } => match s {
                 Break::Error(e) => {
                     let record = error_record_of(&e, shell);
-                    self.apply_rule(handler, vec![record], &env, None, mooring, shell)
+                    self.apply_rule(handler, vec![record], None, mooring, shell)
                 }
                 Break::Escape(esc) => Focus::Halt(Break::Escape(esc)),
             },
 
-            Frame::Guard { cleanup, env } => {
+            Frame::Guard { cleanup } => {
                 if let Err(b) = self.reserve(shell) {
                     return Focus::Halt(b);
                 }
                 self.push(Frame::Cleanup { outcome: Err(s) });
-                Self::force(cleanup, &env, mooring, shell)
+                Self::force(cleanup, mooring, shell)
             }
 
             Frame::Within(undo) => {
@@ -1050,9 +1039,9 @@ impl Frame {
 fn end_of_run(focus: Focus) -> Settled<Value> {
     match focus {
         Focus::Return(Terminal::Value(v)) => Ok(v),
-        Focus::Return(Terminal::Lambda(_)) => Err(Break::Error(bare_lambda_error())),
+        Focus::Return(Terminal::Lambda { .. }) => Err(Break::Error(bare_lambda_error())),
         Focus::Halt(s) => Err(s),
-        Focus::Eval(_) => {
+        Focus::Eval { .. } => {
             unreachable!(
                 "the loop only stops when the stack is empty and focus is a terminal or a halt"
             )
@@ -1102,8 +1091,17 @@ fn run(
 
 /// The initial state ⟨M, E⟩ over the empty stack, then step until the stack
 /// is empty.
-pub(crate) fn evaluate(closure: Closure, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    run(|m, _, _| m.focus = Focus::Eval(closure), mooring, shell)
+pub(crate) fn evaluate(
+    comp: Arc<Comp>,
+    env: Env,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    run(
+        |m, _, _| m.focus = Focus::Eval { comp, env },
+        mooring,
+        shell,
+    )
 }
 
 /// The same, from a closed value meeting arguments — `Machine::applying`
@@ -1115,10 +1113,7 @@ pub(crate) fn apply(
     shell: &mut Shell,
 ) -> Settled<Value> {
     run(
-        |m, mooring, shell| {
-            let env = shell.env.clone();
-            *m = Machine::applying(f, args, &env, mooring, shell);
-        },
+        |m, mooring, shell| *m = Machine::applying(f, args, mooring, shell),
         mooring,
         shell,
     )
@@ -1149,14 +1144,7 @@ pub(crate) fn apply_handler(
             let frame = Box::new(shell.context.handlers.strip_matched(depth));
             m.push(Frame::Unmask { frame });
             let call_args = render_handler_args(&entry.name, entry.arity, args);
-            m.focus = m.apply_rule(
-                entry.thunk.clone(),
-                call_args,
-                &shell.env.clone(),
-                None,
-                mooring,
-                shell,
-            );
+            m.focus = m.apply_rule(entry.thunk.clone(), call_args, None, mooring, shell);
         },
         mooring,
         shell,
@@ -1166,9 +1154,9 @@ pub(crate) fn apply_handler(
 /// `force v` on a value already in hand (a host door — the hook table's
 /// arity-0 entries — rather than a `CompKind::Force` node): `Machine::force`'s
 /// rule, run as its own machine.
-pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     run(
-        |m, mooring, shell| m.focus = Machine::force(v, env, mooring, shell),
+        |m, mooring, shell| m.focus = Machine::force(v, mooring, shell),
         mooring,
         shell,
     )
@@ -1179,7 +1167,7 @@ pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evaluator::with_capture;
+    use crate::evaluator::{run_source, with_capture};
     use crate::ir::{Phrase, Toplevel};
     use crate::source::{FileId, Spanned};
     use crate::types::Break;
@@ -1197,10 +1185,6 @@ mod tests {
     /// into the running `Env` with `pattern::bind_pattern`, a `Run` phrase's
     /// value is the previous one, mirroring `run_phrases`'s shape without
     /// its lease/PATH-shadow machinery, irrelevant to what these tests probe.
-    fn run(source: &str, shell: &mut Shell) -> Settled<Value> {
-        run_with(source, &Mooring::adrift(), shell)
-    }
-
     fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let top = toplevel(source);
         let mut env = shell.env.clone();
@@ -1208,25 +1192,11 @@ mod tests {
         for phrase in &top.phrases {
             match &phrase.item {
                 Phrase::Run(comp) => {
-                    value = evaluate(
-                        Closure {
-                            comp: comp.clone(),
-                            env: env.clone(),
-                        },
-                        mooring,
-                        shell,
-                    );
+                    value = evaluate(comp.clone(), env.clone(), mooring, shell);
                     value.as_ref().map_err(Clone::clone)?;
                 }
                 Phrase::Define { pattern, comp, .. } => {
-                    let v = evaluate(
-                        Closure {
-                            comp: comp.clone(),
-                            env: env.clone(),
-                        },
-                        mooring,
-                        shell,
-                    )?;
+                    let v = evaluate(comp.clone(), env.clone(), mooring, shell)?;
                     env = pattern::bind_pattern(pattern, &v, &[], env, shell)?;
                     value = Ok(Value::Unit);
                 }
@@ -1245,7 +1215,7 @@ mod tests {
     #[test]
     fn to_extent_is_the_rest_of_its_block() {
         let mut shell = new_shell();
-        let out = run(
+        let out = run_source(
             "if true { let inner = 1; return $inner }\nreturn $inner",
             &mut shell,
         );
@@ -1264,8 +1234,9 @@ mod tests {
     #[test]
     fn bind_rhs_writes_ambient_tail_writes_stdout() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) =
-            with_capture(&mut shell, |shell| run("echo rhs; echo tail", shell));
+        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+            run_with("echo rhs; echo tail", &Mooring::adrift(), shell)
+        });
         result.expect("both echoes must succeed");
         assert_eq!(bytes, b"rhs\ntail\n");
     }
@@ -1273,8 +1244,9 @@ mod tests {
     #[test]
     fn bind_rhs_writes_ambient_even_when_the_tail_halts() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) =
-            with_capture(&mut shell, |shell| run("echo rhs; exit 3", shell));
+        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+            run_with("echo rhs; exit 3", &Mooring::adrift(), shell)
+        });
         assert!(result.is_err(), "exit 3 must halt");
         assert_eq!(bytes, b"rhs\n");
     }
@@ -1284,10 +1256,10 @@ mod tests {
     #[test]
     fn chain_falls_through_on_error_and_propagates_escape() {
         let mut shell = new_shell();
-        run("false ? true", &mut shell).expect("second arm must run");
+        run_source("false ? true", &mut shell).expect("second arm must run");
 
         let mut shell = new_shell();
-        let out = run("exit 5 ? true", &mut shell);
+        let out = run_source("exit 5 ? true", &mut shell);
         match out {
             Err(Break::Escape(crate::types::Escape::Exit(5))) => {}
             other => panic!("expected Escape::Exit(5) to propagate past the chain, got {other:?}"),
@@ -1314,11 +1286,12 @@ mod tests {
             Val::Int(1),
         ))];
         let app = Spanned::with_span(Some(span), CompKind::App { head, args });
-        let closure = Closure {
-            comp: Arc::new(app),
-            env: shell.env.clone(),
-        };
-        let out = evaluate(closure, &Mooring::adrift(), &mut shell);
+        let out = evaluate(
+            Arc::new(app),
+            shell.env.clone(),
+            &Mooring::adrift(),
+            &mut shell,
+        );
         match out {
             Err(Break::Error(e)) => {
                 assert!(
@@ -1341,7 +1314,7 @@ mod tests {
     #[test]
     fn curried_call_over_a_thunked_partial_application() {
         let mut shell = new_shell();
-        let out = run(
+        let out = run_source(
             "let f = { |a b| return $[$a + $b] }\nlet g = f 1\ng 2",
             &mut shell,
         )
@@ -1354,7 +1327,7 @@ mod tests {
     #[test]
     fn apply_meets_a_closed_lambda_value() {
         let mut shell = new_shell();
-        let f = run("{ |a b| return $[$a + $b] }", &mut shell).expect("closure must close");
+        let f = run_source("{ |a b| return $[$a + $b] }", &mut shell).expect("closure must close");
         let mooring = Mooring::adrift();
         let out = apply(f, vec![Value::Int(1), Value::Int(2)], &mooring, &mut shell)
             .expect("apply must succeed");
@@ -1365,7 +1338,7 @@ mod tests {
     #[test]
     fn two_member_recursive_group() {
         let mut shell = new_shell();
-        let out = run(
+        let out = run_source(
             "let even = { |n| if $[$n == 0] { return true } else { odd $[$n - 1] } }\n\
              let odd = { |n| if $[$n == 0] { return false } else { even $[$n - 1] } }\n\
              even 10",
@@ -1388,7 +1361,7 @@ mod tests {
         // call's `To` frame alive while its own recursive call runs.
         shell.session.stack_limit = 4;
         let before = matches!(shell.io.stdout, Sink::Terminal);
-        let out = run(
+        let out = run_source(
             "let f = { |n| if $[$n <= 0] { return 0 } else { let prev = f $[$n - 1]; return $[$n + $prev] } }\nf 100",
             &mut shell,
         );
@@ -1458,7 +1431,7 @@ mod tests {
     fn nested_machines_fit_a_worker_stack() {
         let handle = std::thread::spawn(|| {
             let mut shell = new_shell();
-            let out = run(
+            let out = run_source(
                 "let f = { |n| if $[$n <= 0] { return 0 } else { \
                  let r = map $f [$[$n - 1]]; return $r[0] } }\n\
                  f 100000",

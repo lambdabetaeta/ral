@@ -5,20 +5,13 @@
 
 use super::Shell;
 use crate::types::{
-    Binding, Capabilities, Decision, Env, GrantStack, HandlerEntry, HandlerRole, Observation,
-    Observed, Settled, Value,
+    Binding, Capabilities, Decision, GrantStack, HandlerEntry, HandlerRole, Observation, Observed,
+    Settled, Value,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 impl Shell {
-    /// The session's whole lexical environment, for a host that must hand it
-    /// to a builtin reducer directly ([`crate::types::BuiltinEntry::run`])
-    /// rather than reading one name at a time.
-    pub fn env(&self) -> &Env {
-        &self.env
-    }
-
     /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
     /// gate into capability-checked code — `grant { … }` blocks and plugin
     /// hook / keybinding / alias dispatch all funnel through here.  The push

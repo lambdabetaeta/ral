@@ -56,12 +56,10 @@ pub(crate) fn detach(
                 );
             }
             Some(HandlerLookup::Base(entry)) => {
-                let env = shell.env.clone();
                 return crate::runtime::command_call::run_base_frame(
                     &entry,
                     argv,
                     &[],
-                    &env,
                     mooring,
                     shell,
                 );

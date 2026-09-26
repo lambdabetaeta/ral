@@ -11,7 +11,7 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::process::{CancelCause, CancelScope, Wake};
 use crate::source::Span;
-use crate::types::{Break, Closure, Error, Mooring, Settled};
+use crate::types::{Break, Error, Mooring, Settled};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -154,7 +154,7 @@ pub(super) fn launch_thread_stage(
             child.io = io;
             child.local.audit.install_active_policy(policy);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                machine::evaluate(Closure { comp, env }, mooring, child)
+                machine::evaluate(comp, env, mooring, child)
             }));
             let settled = match result {
                 Ok(settled) => settled,

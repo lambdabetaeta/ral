@@ -154,8 +154,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         };
 
         let mut shell = fresh_shell();
-        let env = shell.env().clone();
-        match entry.run(&args, &env, &Mooring::adrift(), &mut shell) {
+        match entry.run(&args, &Mooring::adrift(), &mut shell) {
             Ok(result) => assert!(
                 inhabits(&result, &ret_ty),
                 "builtin `{name}` returned {result:?}, which does not inhabit its \
