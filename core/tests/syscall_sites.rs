@@ -15,7 +15,7 @@
 //! It walks the production `src/` of every workspace crate (plus the
 //! `build.rs` files) — never the `tests/` trees, which carry blanket
 //! `#![allow(clippy::disallowed_methods)]` for test scaffolding, a separate
-//! category that is not a syscall site — and enforces three facts:
+//! category that is not a syscall site — and enforces four facts:
 //!
 //!   1. **Every tagged allow is well-formed.**  An allow whose `reason` begins
 //!      with a `[…]` tag must name a known `<kind>` (`surface`, `silent`, or
@@ -39,6 +39,10 @@
 //!      but is caught here, forcing it to be tagged and (via fact 2) reviewed.
 //!      It also catches platform-`cfg`-gated sites a single-target clippy run
 //!      on one OS would miss.
+//!   4. **A single-door token appears only at its door.**  Fact (3) exempts a
+//!      file that tags any allow, so for a token with exactly one legitimate
+//!      caller, [`SINGLE_DOORS`] names that file and no other production file
+//!      may contain the token at all.
 //!
 //! ## Updating the manifest when you add a legitimate new site
 //!
@@ -326,6 +330,10 @@ const BANNED_TOKENS: &[&str] = &[
     "reqwest::Client::new",
 ];
 
+/// A banned token restricted to exactly one production file: the token may
+/// appear in no production file but its door, tagged allow or not.
+const SINGLE_DOORS: &[(&str, &str)] = &[("os_pipe::pipe(", "core/src/process/spawn_lock.rs")];
+
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is `…/core` at compile time; the workspace root is
     // its parent.
@@ -533,6 +541,47 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
     assert!(
         failures.is_empty(),
         "syscall-site invariant violated ({} issue(s)):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn single_door_tokens_appear_only_at_their_door() {
+    let root = workspace_root();
+    let mut failures = Vec::new();
+    let mut doors_seen = BTreeSet::new();
+
+    for rel in production_files(&root) {
+        let rel_str = rel.to_string_lossy().to_string();
+        let text = std::fs::read_to_string(root.join(&rel))
+            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
+        let code = strip_line_comments(&text);
+
+        for (token, door) in SINGLE_DOORS {
+            if code.contains(token) {
+                if rel_str == *door {
+                    doors_seen.insert(token);
+                } else {
+                    failures.push(format!(
+                        "{rel_str}: calls `{token}`, whose one door is {door}\n    → route it through the door."
+                    ));
+                }
+            }
+        }
+    }
+
+    for (token, door) in SINGLE_DOORS {
+        if !doors_seen.contains(token) {
+            failures.push(format!(
+                "{door}: no longer contains `{token}` — update SINGLE_DOORS."
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "single-door invariant violated ({} issue(s)):\n{}",
         failures.len(),
         failures.join("\n")
     );

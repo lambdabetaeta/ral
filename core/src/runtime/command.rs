@@ -10,7 +10,7 @@
 
 use crate::evaluator::audit::{listening, observe};
 use crate::process::Group;
-use crate::syntax::ast::RedirectMode;
+use crate::syntax::ast::{Redirect, WriteMode};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 mod child;
@@ -29,8 +29,8 @@ pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
-    EvalRedirect, EvalRedirectV, PendingWrite, StdinRedirectGuard, atomic_write,
-    atomic_write_error, install_stdin_redirect, open_file, stderr_mode,
+    PendingWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
+    open_write, stderr_mode,
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{StdinRoute, TtyInputPermit, stdin_error};
@@ -48,7 +48,7 @@ use stdio::{inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
 pub(crate) fn run(
     id: &CommandIdentity,
     args: &[Value],
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -66,7 +66,7 @@ pub(crate) fn run(
     )?;
     crate::process::check(mooring)?;
 
-    let plan = classify_redirects(redirects)?;
+    let plan = classify_redirects(redirects);
     command.stdin(wire_stdin(shell)?.into_stdio());
     let (atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, mooring, shell)?;
     let inherit_tty = inherit_tty(&plan, shell);
@@ -191,7 +191,7 @@ fn landed_in(led: Option<crate::process::Pgid>, role: &crate::io::LaunchRole) ->
 /// write observation either way.
 fn settle_atomic_write(
     atomic_commit: Option<PendingWrite>,
-    stdout_file: Option<&(String, RedirectMode)>,
+    stdout_file: Option<&(String, WriteMode)>,
     succeeded: bool,
     shell: &mut Shell,
     mooring: &Mooring,

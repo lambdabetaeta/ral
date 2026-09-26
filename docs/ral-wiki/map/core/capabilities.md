@@ -146,9 +146,10 @@ fixed by one disk consultation at the freeze door. The duality is load-bearing,
 not redundant, and **neither form is the real one**:
 [[invariants/fs-judges-objects-exec-judges-names|fs authority is over objects
 and is judged on `resolved`; exec authority is over names and is judged on
-`surface`]]. So the type offers exactly two containment doors, one per
-authority — `covers` (below) and `NormalizedPrefix::covers_name`, the exec
-gate's — and no third: `lex::path_within` and its string twin are `pub(super)`,
+`surface`]]. So the type offers containment doors per authority — `covers`
+(below) for fs, and for the exec gate
+`NormalizedPrefix::grant_depth` on the surface and `veto_depth`, which widens a
+deny to the resolved form too — and no other: `lex::path_within` and its string twin are `pub(super)`,
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
 private to `resolved.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced

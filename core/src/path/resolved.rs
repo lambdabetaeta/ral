@@ -18,12 +18,13 @@
 //!
 //! A prefix's two forms are not a normal form and a spelling of it: each
 //! is the form one authority is judged on — fs over *objects*, on
-//! `resolved`; exec over *names*, on `surface`
+//! `resolved`; exec over *names*, on `surface`, which a deny widens to
+//! `resolved` as well
 //! (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`).
-//! Hence the two containment doors,
-//! [`covers`](super::prefix_set::covers) and
-//! [`NormalizedPrefix::covers_name`], and no third one: `surface` leaves
-//! the type only as a `String`, for rendering.
+//! Hence the containment doors, [`covers`](super::prefix_set::covers) for
+//! fs and [`NormalizedPrefix::grant_depth`] and
+//! [`NormalizedPrefix::veto_depth`] for exec, and no other: `surface`
+//! leaves the type only as a `String`, for rendering.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -224,7 +225,7 @@ impl NormalizedPrefix {
     /// The surface form as a `Path` — the author's spelling.
     ///
     /// Private, and staying so: the surface *is* the form exec authority is
-    /// judged on ([`covers_name`](Self::covers_name)), the resolved form the
+    /// judged on ([`grant_depth`](Self::grant_depth)), the resolved form the
     /// one fs authority is judged on ([`resolved_path`](Self::resolved_path)),
     /// so the choice of form belongs to the authority asking and is made here
     /// — never by a caller holding a `&Path`.  The `xdg:` freeze guard made
@@ -243,18 +244,23 @@ impl NormalizedPrefix {
         &self.surface
     }
 
-    /// True iff the absolute candidate `name` lies within this prefix as
-    /// *written* — the exec gate's containment question
-    /// (`capability::exec::longest_dir_match`), asked on the surface because
-    /// exec authority is over names: what command did the user name?  Its fs
-    /// counterpart, over objects, is [`covers`](super::prefix_set::covers) on
-    /// the resolved form.  A symlink is not laundered past this, because the
-    /// broadening happens on the *candidate* side: a deny dir is offered the
-    /// canonical spelling too (`runtime::command::identity`).
+    /// How deep this prefix, as an exec allow, covers any of the absolute
+    /// candidate `names` — on the surface alone, because exec authority is
+    /// over names: what command did the user name?  Its fs counterpart, over
+    /// objects, is [`covers`](super::prefix_set::covers) on the resolved form.
     ///
     /// `docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`.
-    pub(crate) fn covers_name(&self, name: &str) -> bool {
-        super::lex::path_within_str(name, &self.surface)
+    pub(crate) fn grant_depth(&self, names: &[&str]) -> Option<usize> {
+        depth_covering(&self.surface, names)
+    }
+
+    /// How deep this prefix, as an exec deny, covers any of the absolute
+    /// candidate `names`: on the surface and on the resolved form, the deeper
+    /// winning.  A veto may over-reach but never under-reach, so a deny dir
+    /// that is itself a symlink vetoes where it points, as a deny literal is
+    /// canonicalised and a deny is offered the canonical candidate.
+    pub(crate) fn veto_depth(&self, names: &[&str]) -> Option<usize> {
+        depth_covering(&self.surface, names).max(depth_covering(&self.resolved, names))
     }
 
     /// The symlink-followed form as a `Path`, for containment matching
@@ -277,23 +283,22 @@ impl NormalizedPrefix {
         self.namespace
     }
 
-    /// True iff the enforcement gate (`capability::exec::longest_dir_match`)
-    /// would treat `self` and `other` as one directory: mutual
-    /// [`covers_name`](Self::covers_name), plus a matching namespace.  On the
-    /// surface, therefore, because that gate is — deliberately, exec
-    /// authority being over names.
+    /// True iff the exec gate would let this deny decide everything the allow
+    /// `other` covers, so composition may drop the allow: `other`'s surface
+    /// and one of the forms [`veto_depth`](Self::veto_depth) matches contain
+    /// each other, in one namespace.
     ///
-    /// Not byte equality.  That containment rule folds macOS firmlink
-    /// aliases (`/tmp` ↔ `/private/tmp`) and, under Windows identity, case,
-    /// separator spelling and a `\\?\`-verbatim prefix, so two surfaces the
-    /// gate calls one directory can differ byte-for-byte — and two prefixes
-    /// frozen against different disk state can differ in `resolved`.  Any
-    /// set operation asking "does this clash with something the gate calls
-    /// the same dir" needs this, not the derived `Eq`/`Ord`.
-    pub(crate) fn same_gate_dir(&self, other: &Self) -> bool {
+    /// Not byte equality.  Containment folds macOS firmlink aliases (`/tmp` ↔
+    /// `/private/tmp`) and, under Windows identity, case, separator spelling
+    /// and a `\\?\`-verbatim prefix, and two prefixes frozen against
+    /// different disk state can differ in `resolved`, so the derived
+    /// `Eq`/`Ord` cannot answer this.
+    pub(crate) fn evicts(&self, other: &Self) -> bool {
+        use super::lex::path_within_str;
         self.namespace == other.namespace
-            && self.covers_name(&other.surface)
-            && other.covers_name(&self.surface)
+            && [&self.surface, &self.resolved].into_iter().any(|form| {
+                path_within_str(&other.surface, form) && path_within_str(form, &other.surface)
+            })
     }
 
     /// Consume into the owned surface `String`, for the wire and render
@@ -319,6 +324,16 @@ impl NormalizedPrefix {
             namespace,
         }
     }
+}
+
+/// The depth of `form` if it covers any absolute name in `names`.  Depth is
+/// [`identity_depth`](super::lex::identity_depth), counted in components of
+/// the alias-folded form, so a firmlink spelling cannot buy a rank.
+fn depth_covering(form: &str, names: &[&str]) -> Option<usize> {
+    names
+        .iter()
+        .any(|n| super::lex::is_absolute(n) && super::lex::path_within_str(n, form))
+        .then(|| super::lex::identity_depth(form, cfg!(windows)))
 }
 
 impl AsRef<str> for NormalizedPrefix {

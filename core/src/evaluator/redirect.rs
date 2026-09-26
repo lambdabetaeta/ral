@@ -6,8 +6,8 @@
 
 use super::audit::observe;
 use crate::io::Sink;
-use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
-use crate::syntax::ast::RedirectMode;
+use crate::runtime::command;
+use crate::syntax::ast::{Redirect, WriteMode};
 use crate::types::{Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 /// What the body's result means for the writes this frame staged.
@@ -23,7 +23,7 @@ pub(crate) enum WriteFate {
 /// outcome can be surfaced. `commit` is `Some` only for an atomic `>`.
 struct WriteIntent {
     path: String,
-    mode: RedirectMode,
+    mode: WriteMode,
     commit: Option<command::PendingWrite>,
 }
 
@@ -52,7 +52,7 @@ struct PriorSinks {
 /// open, so a failure still surfaces a `failed` write for that path.
 fn open_redirect_sink(
     path: &str,
-    mode: RedirectMode,
+    mode: WriteMode,
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Settled<Sink> {
@@ -61,13 +61,13 @@ fn open_redirect_sink(
         mode,
         commit: None,
     });
-    let (file, commit) = command::open_file(path, mode, shell)?;
+    let (file, commit) = command::open_write(path, mode, shell)?;
     intents.last_mut().expect("intent pushed above").commit = commit;
     Ok(Sink::File(std::sync::Arc::new(file)))
 }
 
 fn install_sink_redirects(
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Settled<PriorSinks> {
@@ -76,33 +76,23 @@ fn install_sink_redirects(
     let mut stdout_changed = false;
     let mut stderr_changed = false;
 
-    // The arms are ral's whole fd model; `Redirect::new` admits no other
-    // shape, so there is no fall-through to write.
-    #[allow(
-        clippy::match_same_arms,
-        reason = "two distinct reasons to install nothing: fd 0 is parked elsewhere, an identity dup names the stream it already is"
-    )]
-    for EvalRedirectV { fd, mode, target } in redirects {
-        match (*fd, target) {
-            // fd 0 is already parked on `shell.io.stdin`.
-            (0, EvalRedirect::File(_)) => {}
-            (1, EvalRedirect::File(path)) => {
+    for r in redirects {
+        match r {
+            // Already parked on `shell.io.stdin`.
+            Redirect::Stdin(_) => {}
+            Redirect::Stdout(mode, path) => {
                 stdout = open_redirect_sink(path, *mode, shell, intents)?;
                 stdout_changed = true;
             }
-            (2, EvalRedirect::File(path)) => {
+            Redirect::Stderr(mode, path) => {
                 let mode = command::stderr_mode(*mode);
                 stderr = open_redirect_sink(path, mode, shell, intents)?;
                 stderr_changed = true;
             }
-            (2, EvalRedirect::Fd(1)) => {
+            Redirect::StderrToStdout => {
                 stderr = stdout.clone();
                 stderr_changed = true;
             }
-            // `1>&1` / `2>&2`: naming the stream you already are. Rebinding
-            // would divert `ambient` under a capture, for no gain.
-            (1, EvalRedirect::Fd(1)) | (2, EvalRedirect::Fd(2)) => {}
-            _ => unreachable!("`Redirect::new` builds no other fd form"),
         }
     }
 
@@ -141,7 +131,7 @@ fn emit_writes_failed(shell: &mut Shell, mooring: &Mooring, intents: Vec<WriteIn
 
 impl RedirectState {
     pub(crate) fn enter(
-        redirects: &[EvalRedirectV],
+        redirects: &[Redirect<String>],
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
@@ -275,7 +265,7 @@ impl RedirectState {
 /// `install_stdin_redirect`, so the cached `startup_stdin_tty` is
 /// consulted only when stdin really is the inherited terminal.
 pub(crate) fn with_redirects<F>(
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     mooring: &Mooring,
     shell: &mut Shell,
     body: F,

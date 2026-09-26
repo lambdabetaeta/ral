@@ -4,7 +4,7 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > /tmp/out
 
-Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below. `&` is a metacharacter everywhere, glued or spaced — `echo hi&` is refused, not a word ending in `&` — so a `&` inside an argument must be quoted: `curl #'https://h/?a=1&b=2'#`.
+Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below. A `&` inside a word is an ordinary character, so `curl https://h/?a=1&b=2` needs no quotes. `\` is ordinary too, never an escape: `C:\Users\me` is one word.
 
 `ral` is essentially call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized, thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 

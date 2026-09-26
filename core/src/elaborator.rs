@@ -16,8 +16,7 @@
 
 use crate::ir::{
     Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV, IrPattern,
-    Phrase, PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry,
-    ValRecordEntry, ValRedirectTarget,
+    Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -25,7 +24,7 @@ use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
     self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, RecordEntry, Redirect,
-    RedirectTarget, ScopeAst, Stmt, Word,
+    ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
 use crate::syntax::parser::ParseError;
@@ -209,7 +208,7 @@ impl Elaborator {
         &self,
         name: CommandName,
         args: Args,
-        redirects: Vec<RedirectV>,
+        redirects: Vec<Redirect<Val>>,
         external_only: bool,
     ) -> Comp {
         let head = if external_only {
@@ -1010,7 +1009,7 @@ impl Elaborator {
     /// Shared by the two value-application heads, a bound bare name (`f x`) and
     /// an explicit value head (`$f x`, `{…} x`).  A zero-arg call is the head
     /// computation alone: `App` with an empty argument list is not a CBPV form.
-    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Vec<RedirectV>) -> Comp {
+    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Vec<Redirect<Val>>) -> Comp {
         let app = if arg_vals.is_empty() {
             head_comp
         } else {
@@ -1028,7 +1027,7 @@ impl Elaborator {
     /// Attach trailing `redirects` to `body` as a [`CompKind::Redirect`] frame.
     /// `Exec` fuses its redirects into the syscall instead, and pipelines and
     /// chains take none at the surface, so this covers every remaining body.
-    fn wrap_redirect(&self, body: Comp, redirects: Vec<RedirectV>) -> Comp {
+    fn wrap_redirect(&self, body: Comp, redirects: Vec<Redirect<Val>>) -> Comp {
         if redirects.is_empty() {
             return body;
         }
@@ -1041,26 +1040,16 @@ impl Elaborator {
         )
     }
 
-    /// Lower parser-side [`Redirect`]s to IR [`RedirectV`]s, hoisting effectful
-    /// targets into `binds` like any other value.
+    /// Lower each redirect's operand, hoisting an effectful one into `binds`
+    /// like any other value.
     fn lower_redirects(
         &mut self,
-        redirects: &[Redirect],
+        redirects: &[Redirect<Ast>],
         binds: &mut Vec<(IrPattern, Comp)>,
-    ) -> Vec<RedirectV> {
+    ) -> Vec<Redirect<Val>> {
         redirects
             .iter()
-            .map(|r| {
-                let target = match r.target() {
-                    RedirectTarget::File(a) => ValRedirectTarget::File(self.to_val(a, binds)),
-                    RedirectTarget::Fd(n) => ValRedirectTarget::Fd(*n),
-                };
-                RedirectV {
-                    fd: r.fd(),
-                    mode: r.mode(),
-                    target,
-                }
-            })
+            .map(|r| r.map(|a| self.to_val(a, binds)))
             .collect()
     }
 

@@ -10,12 +10,12 @@
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
-use crate::ir::{Args, CaseArm, Comp, CompKind, RedirectV, Val, ValListElem, ValRedirectTarget};
+use crate::ir::{Args, CaseArm, Comp, CompKind, Val, ValListElem};
 use crate::path::sigil::FreezeCtx;
-use crate::runtime::command::{EvalRedirect, EvalRedirectV};
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
+use crate::syntax::ast::Redirect;
 #[cfg(unix)]
 use crate::types::HandlerEntry;
 use crate::types::{
@@ -241,21 +241,12 @@ pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
 }
 
 pub(crate) fn close_redirects(
-    redirects: &[RedirectV],
+    redirects: &[Redirect<Val>],
     env: &Env,
-) -> Result<Vec<EvalRedirectV>, Error> {
+) -> Result<Vec<Redirect<String>>, Error> {
     redirects
         .iter()
-        .map(|r| {
-            Ok(EvalRedirectV {
-                fd: r.fd,
-                mode: r.mode,
-                target: match &r.target {
-                    ValRedirectTarget::File(v) => EvalRedirect::File(close(v, env)?.to_string()),
-                    ValRedirectTarget::Fd(n) => EvalRedirect::Fd(*n),
-                },
-            })
-        })
+        .map(|r| r.try_map(|v| close(v, env).map(|v| v.to_string())))
         .collect()
 }
 
@@ -464,7 +455,7 @@ impl Machine {
     /// the `Redirect` frame (§2.2, last paragraph before §2.3).
     fn push_redirect(
         &mut self,
-        redirs: &[EvalRedirectV],
+        redirs: &[Redirect<String>],
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Result<(), Break> {

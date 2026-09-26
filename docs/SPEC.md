@@ -2771,7 +2771,7 @@ A literal command accepts:
 
 The subcommand check examines only the first argument. A command with no first argument is denied by a subcommand policy.
 
-A key ending in `/` names every executable beneath that directory. Directory keys accept only `'allow'` or `'deny'`. The most specific matching directory wins; an equal allow and deny resolves to deny. A literal denial also vetoes the command by basename, so `bash: 'deny'` cannot be avoided by spelling `/bin/bash`.
+A key ending in `/` names every executable beneath that directory. Directory keys accept only `'allow'` or `'deny'`. An allowing directory covers commands named beneath it as written; a denying one also covers commands beneath the directory it resolves to, so denying a directory that is a symbolic link denies its target too. The most specific matching directory wins; an equal allow and deny resolves to deny. A literal denial also vetoes the command by basename, so `bash: 'deny'` cannot be avoided by spelling `/bin/bash`.
 
 Once an `exec` map is present, commands not admitted by that map are denied. Nested `exec` maps intersect, subcommand lists intersect, and every denial remains effective.
 

@@ -13,9 +13,10 @@ use crate::types::{
     Shell, Value,
 };
 
-use super::command::{self, CommandIdentity, EvalRedirectV};
+use super::command::{self, CommandIdentity};
 use crate::evaluator::audit;
 use crate::evaluator::redirect::with_redirects;
+use crate::syntax::ast::Redirect;
 
 // ── Resolution ─────────────────────────────────────────────────────────
 
@@ -116,7 +117,7 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -134,7 +135,7 @@ pub(crate) fn run_base_frame(
 fn run_host_thunk(
     name: &str,
     args: &[Value],
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     mooring: &Mooring,
     shell: &mut Shell,
     f: impl FnOnce(&[Value], &mut Shell, &audit::Frame) -> Settled<Value>,
@@ -157,7 +158,7 @@ fn run_host_thunk(
 pub(crate) fn run_external(
     id: CommandIdentity,
     args: &[Value],
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     _env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,

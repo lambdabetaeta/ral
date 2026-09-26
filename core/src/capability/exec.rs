@@ -5,7 +5,6 @@
 //! prefix.  Literal beats dir, deeper dir beats shallower, and a tie
 //! resolves to deny.
 
-use crate::path::{self, NormalizedPrefix};
 use crate::types::{ExecMap, ExecPolicy, GrantStack, Meet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -163,7 +162,7 @@ fn lookup_literal_on(
     Some(matches.fold(first, ExecPolicy::meet))
 }
 
-/// The default PATHEXT list [`path::which`] falls back to.  `.bat` and
+/// The default PATHEXT list [`path::which`](crate::path::which) falls back to.  `.bat` and
 /// `.cmd` belong here even though `process::launch` refuses to spawn
 /// them: that is a later gate on the image, not on the name.
 const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
@@ -209,48 +208,37 @@ fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
 }
 
 /// The deepest directory prefix covering any absolute candidate, and
-/// whether it allows.  "Deepest" by [`path::lex::identity_depth`] —
+/// whether it allows.  "Deepest" by [`identity_depth`](crate::path::lex::identity_depth) —
 /// components of the alias-folded form, not characters of the raw
 /// surface, so a firmlink spelling (`/tmp` vs `/private/tmp`) cannot
 /// buy a shallow directory rank.  An allow and a deny of equal depth do
 /// reach here — composition only strips a clash where
-/// [`same_gate_dir`](crate::path::resolved::NormalizedPrefix::same_gate_dir)
-/// holds — so the two loops break the tie in opposite directions: allow
-/// displaces `best` on strictly greater depth, deny on greater-or-equal.
-/// A gate's ambiguity must resolve to deny.
+/// [`evicts`](crate::path::resolved::NormalizedPrefix::evicts) holds — so
+/// the two loops break the tie in opposite directions: allow displaces
+/// `best` on strictly greater depth, deny on greater-or-equal.  A gate's
+/// ambiguity must resolve to deny.
 ///
-/// Each side reads the identity set its polarity earns, exactly as the
-/// literals above do: an allow dir admits, so it sees the narrow
-/// spellings alone; a deny dir vetoes, so it also sees the canonical
-/// path, and a symlink planted under an allowed dir cannot launder a
-/// binary out of a denied one.  Bare basenames in the broad set fall to
-/// the `is_absolute` filter — a directory covers no bare name.
-///
-/// [`covers_name`](NormalizedPrefix::covers_name) is the surface-form
-/// containment door, not an oversight: exec authority is over names
-/// (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`).
+/// Each side reads what its polarity earns, exactly as the literals above
+/// do: an allow dir admits, so it sees the narrow spellings alone and is
+/// matched as written; a deny dir vetoes, so it also sees the canonical
+/// path and is matched on its resolved form too.  A symlink planted under
+/// an allowed dir cannot launder a binary out of a denied one, nor a denied
+/// dir that is itself a symlink spare what it points at.  Bare basenames in
+/// the broad set fall to the `is_absolute` filter — a directory covers no
+/// bare name.
 fn longest_dir_match(exec: &ExecMap, names: ExecNames) -> Option<bool> {
     let mut best: Option<(usize, bool)> = None;
-    let mut consider =
-        |dir: &NormalizedPrefix, allow: bool, wins_tie: bool, candidates: &[&str]| {
-            let matches_any = candidates
-                .iter()
-                .any(|n| path::is_absolute(n) && dir.covers_name(n));
-            if !matches_any {
-                return;
-            }
-            let depth = path::lex::identity_depth(dir.as_str(), cfg!(windows));
-            match best {
-                Some((best_depth, _))
-                    if best_depth > depth || (best_depth == depth && !wins_tie) => {}
-                _ => best = Some((depth, allow)),
-            }
-        };
+    let mut consider = |depth: Option<usize>, allow: bool, wins_tie: bool| match (depth, best) {
+        (None, _) => {}
+        (Some(depth), Some((best_depth, _)))
+            if best_depth > depth || (best_depth == depth && !wins_tie) => {}
+        (Some(depth), _) => best = Some((depth, allow)),
+    };
     for dir in &exec.allow_dirs {
-        consider(dir, true, false, names.allow);
+        consider(dir.grant_depth(names.allow), true, false);
     }
     for dir in &exec.deny_dirs {
-        consider(dir, false, true, names.deny);
+        consider(dir.veto_depth(names.deny), false, true);
     }
     best.map(|(_, allow)| allow)
 }
@@ -258,6 +246,7 @@ fn longest_dir_match(exec: &ExecMap, names: ExecNames) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path;
 
     /// `which.rs`'s `%PATHEXT%` fallback and the grant-key strip list are
     /// twin copies of one fact; they may only drift together.
@@ -356,6 +345,68 @@ mod tests {
                     allow: &[candidate]
                 }
             ),
+            Some(false)
+        );
+    }
+
+    /// `p` as an absolute path on the host, which for Windows needs a drive.
+    fn host(p: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{}", p.replace('/', r"\"))
+        } else {
+            p.to_string()
+        }
+    }
+
+    /// The gate over one directory prefix `/l` frozen as resolving to `/x`,
+    /// asked of a candidate invoked by its real path.
+    fn linked_dir_verdict(allow: bool, extra_allow: Option<&str>, candidate: &str) -> Option<bool> {
+        let linked =
+            path::NormalizedPrefix::for_test(&host("/l"), &host("/x"), path::Namespace::Host);
+        let mut allow_dirs: BTreeSet<_> = extra_allow
+            .map(|d| path::NormalizedPrefix::from_surface(host(d)))
+            .into_iter()
+            .collect();
+        let mut deny_dirs = BTreeSet::new();
+        if allow {
+            allow_dirs.insert(linked);
+        } else {
+            deny_dirs.insert(linked);
+        }
+        let exec = ExecMap {
+            literals: BTreeMap::new(),
+            allow_dirs,
+            deny_dirs,
+        };
+        let candidate = host(candidate);
+        let names = [candidate.as_str()];
+        longest_dir_match(
+            &exec,
+            ExecNames {
+                deny: &names,
+                allow: &names,
+            },
+        )
+    }
+
+    /// A deny dir that is a symlink vetoes where it points, as a deny
+    /// literal does; an allow dir grants only as written.
+    #[test]
+    fn a_symlinked_deny_dir_vetoes_its_target_and_an_allow_dir_does_not_grant_it() {
+        assert_eq!(linked_dir_verdict(false, None, "/x/tool"), Some(false));
+        assert_eq!(linked_dir_verdict(true, None, "/x/tool"), None);
+    }
+
+    /// Matched through its target, a deny ranks at the target's depth, so a
+    /// deeper allow inside the target still wins.
+    #[test]
+    fn a_symlinked_deny_dir_ranks_at_its_target_depth() {
+        assert_eq!(
+            linked_dir_verdict(false, Some("/x/sub"), "/x/sub/tool"),
+            Some(true)
+        );
+        assert_eq!(
+            linked_dir_verdict(false, Some("/x"), "/x/tool"),
             Some(false)
         );
     }

@@ -14,8 +14,9 @@ sees raw bytes and bare words.
   `Bracket`, `Expr`) is the lexer's whole context: it decides whether a
   newline separates, whether `,` punctuates, and — inside `$[…]` only —
   whether `<` `>` `<=` `>=` `!=` `&&` `||` are operator words rather than a
-  redirect and refused punctuation. `&` outside `$[…]` is refused at the
-  lexer naming `spawn { … }`, `&&` naming `;`; a bare `$` is refused naming
+  redirect and refused punctuation. Outside `$[…]` a word starting with `&`
+  is refused naming `spawn { … }`, one starting `&&` naming `;`, while a `&`
+  inside a word is ordinary (`?a=1&b=2`); a bare `$` is refused naming
   the three things it can open. A splice inside `"…"` (`scan_splice`) is the
   token stream the same text has outside the string, so `"!$d"` and `!$d` are
   one form; it ends at its own closing delimiter, and only the undelimited

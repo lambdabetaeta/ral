@@ -668,7 +668,7 @@ impl Join for ShellPolicy {
     }
 }
 
-/// Both sets union, then a [`same_gate_dir`](NormalizedPrefix::same_gate_dir)
+/// Both sets union, then an [`evicts`](NormalizedPrefix::evicts)
 /// sweep drops any allow that clashes with a deny — even across alias
 /// spellings, or two sides that froze different disk state — so an overlay
 /// that re-grants a directory the base vetoed still loses it.
@@ -681,7 +681,7 @@ impl Join for ExecMap {
             .collect();
         let deny_dirs: BTreeSet<NormalizedPrefix> =
             self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
-        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.same_gate_dir(p)));
+        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.evicts(p)));
         Self {
             allow_dirs,
             deny_dirs,

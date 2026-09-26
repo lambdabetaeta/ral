@@ -16,8 +16,8 @@
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
     Ast, BinaryOp, BinaryOpKind, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry,
-    MapPatternEntry, Operand, Pattern, RecordEntry, Redirect, RedirectMode, RedirectTarget,
-    ScopeAst, ScopeKeyword, Stmt, Word, WordLiteral,
+    MapPatternEntry, Operand, Pattern, RecordEntry, Redirect, ScopeAst, ScopeKeyword, StdinSource,
+    Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -460,7 +460,7 @@ impl Parser {
         self.advance(); // consume the head name
         let mut operands = Vec::with_capacity(kw.arity());
         let mut handlers = None;
-        while !self.at_cmd_end() && !matches!(self.peek(), Token::Redirect { .. }) {
+        while !self.at_cmd_end() && !self.at_redirect() {
             if self.peek() == &Token::Spread {
                 return Err(self.error(format!(
                     "`{name}` takes its operands by position ({operands_desc}); \
@@ -644,10 +644,10 @@ impl Parser {
 
     /// Only a fixed-arity form can collect redirects at the end like this;
     /// `parse_command` interleaves them, since a command takes them anywhere.
-    fn collect_trailing_redirects(&mut self) -> Result<Vec<Redirect>, ParseError> {
+    fn collect_trailing_redirects(&mut self) -> Result<Vec<Redirect<Ast>>, ParseError> {
         let mut redirects = Vec::new();
-        while !self.at_cmd_end() && matches!(self.peek(), Token::Redirect { .. }) {
-            redirects.push(self.parse_redirect()?);
+        while !self.at_cmd_end() && self.at_redirect() {
+            redirects.extend(self.parse_redirect()?);
         }
         Ok(redirects)
     }
@@ -1115,28 +1115,21 @@ impl Parser {
         prev_span.end == next_span.start
     }
 
-    fn parse_redirect(&mut self) -> Result<Redirect, ParseError> {
+    /// `None` for an identity dup (`1>&1`, `2>&2`), which denotes no redirect.
+    fn parse_redirect(&mut self) -> Result<Option<Redirect<Ast>>, ParseError> {
+        let op_span = self.span();
         match self.peek().clone() {
-            Token::Redirect {
-                fd,
-                kind: mode,
-                target_fd,
-            } => {
-                let op_span = self.span();
+            Token::Dup { fd, to } => {
                 self.advance();
-                let (target, word_span) = if let Some(tfd) = target_fd {
-                    (RedirectTarget::Fd(tfd), op_span)
-                } else {
-                    let (word_span, word) = self.capture_span(Self::parse_word)?;
-                    (RedirectTarget::File(Box::new(word)), word_span)
-                };
+                Redirect::dup(fd, to).map_err(|m| Self::error_at(op_span, m))
+            }
+            Token::Redirect { fd, op } => {
+                self.advance();
+                let (word_span, word) = self.capture_span(Self::parse_word)?;
                 // The fd rule first: `1<< x` is a misplaced fd, not a heredoc.
                 let redirect =
-                    Redirect::new(fd, mode, target).map_err(|m| Self::error_at(op_span, m))?;
-                if mode == RedirectMode::HereString
-                    && let RedirectTarget::File(w) = redirect.target()
-                    && let Ast::Word(w) = w.as_ref()
-                {
+                    Redirect::word(fd, op, word).map_err(|m| Self::error_at(op_span, m))?;
+                if let Redirect::Stdin(StdinSource::Here(Ast::Word(w))) = &redirect {
                     let message = match w {
                         Word::Plain(_) => crate::syntax::NO_HEREDOCS,
                         Word::Slash(_) | Word::Tilde(_) => {
@@ -1146,10 +1139,14 @@ impl Parser {
                     };
                     return Err(Self::error_at(word_span, message));
                 }
-                Ok(redirect)
+                Ok(Some(redirect))
             }
             _ => Err(self.error("expected redirect")),
         }
+    }
+
+    fn at_redirect(&self) -> bool {
+        matches!(self.peek(), Token::Redirect { .. } | Token::Dup { .. })
     }
 
     /// arg = atom | '...' atom
@@ -1190,15 +1187,15 @@ impl Parser {
 
     /// command = head (arg | redir)*
     fn parse_command(&mut self) -> Result<Ast, ParseError> {
-        if matches!(self.peek(), Token::Redirect { .. }) {
+        if self.at_redirect() {
             return Err(self.error("redirect must follow a command"));
         }
         let head = self.parse_head()?;
         let mut args: Vec<Spanned<Ast>> = Vec::new();
         let mut redirects = Vec::new();
         while !self.at_cmd_end() {
-            if matches!(self.peek(), Token::Redirect { .. }) {
-                redirects.push(self.parse_redirect()?);
+            if self.at_redirect() {
+                redirects.extend(self.parse_redirect()?);
             } else {
                 let (arg_span, arg) = self.capture_span(Self::parse_arg)?;
                 args.push(Spanned::new(arg_span, arg));
@@ -1295,6 +1292,7 @@ impl Parser {
                 | Token::Colon
                 | Token::Spread
                 | Token::Redirect { .. }
+                | Token::Dup { .. }
         )
     }
 
@@ -1830,6 +1828,7 @@ enum CollectionItem {
 mod tests {
     use super::*;
     use crate::path::tilde::TildePath;
+    use crate::syntax::ast::WriteMode;
 
     fn plain(s: &str) -> Ast {
         Ast::Word(Word::Plain(s.into()))
@@ -1869,7 +1868,7 @@ mod tests {
         }
     }
 
-    fn app_redir(head: Head, args: Vec<Ast>, redirects: Vec<Redirect>) -> Ast {
+    fn app_redir(head: Head, args: Vec<Ast>, redirects: Vec<Redirect<Ast>>) -> Ast {
         Ast::Call {
             head,
             args: args.into_iter().map(Spanned::synthetic).collect(),
@@ -3269,12 +3268,11 @@ mod tests {
         let ast = unwrap_stmts(parse("cat << #'body'#").unwrap());
         match &ast[0] {
             Ast::Call { redirects, .. } => {
-                assert_eq!(redirects.len(), 1);
-                assert_eq!(redirects[0].fd(), 0);
-                assert_eq!(redirects[0].mode(), RedirectMode::HereString);
                 assert_eq!(
-                    redirects[0].target(),
-                    &RedirectTarget::File(Box::new(Ast::Literal("body".into())))
+                    redirects,
+                    &[Redirect::Stdin(StdinSource::Here(Ast::Literal(
+                        "body".into()
+                    )))]
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -3287,10 +3285,11 @@ mod tests {
         let ast = unwrap_stmts(parse("cat << $body").unwrap());
         match &ast[0] {
             Ast::Call { redirects, .. } => {
-                assert_eq!(redirects[0].mode(), RedirectMode::HereString);
                 assert_eq!(
-                    redirects[0].target(),
-                    &RedirectTarget::File(Box::new(Ast::Variable("body".into())))
+                    redirects,
+                    &[Redirect::Stdin(StdinSource::Here(Ast::Variable(
+                        "body".into()
+                    )))]
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -3318,13 +3317,36 @@ mod tests {
         assert!(err.message.contains("use `< path`"), "got: {}", err.message);
     }
 
+    /// The fd prefix is spelling: it picks a stream and is gone, and an
+    /// identity dup picks none.
+    #[test]
+    fn fd_prefixes_name_streams() {
+        let ast = unwrap_stmts(parse("cmd 1>&1 2>&2 2> e 2>&1 > o").unwrap());
+        let Ast::Call { redirects, .. } = &ast[0] else {
+            panic!("expected command, got {:?}", ast[0]);
+        };
+        assert!(matches!(
+            redirects[..],
+            [
+                Redirect::Stderr(WriteMode::Write, _),
+                Redirect::StderrToStdout,
+                Redirect::Stdout(WriteMode::Write, _),
+            ]
+        ));
+    }
+
     /// `<<` always feeds stdin: fd 0 may be spelled out, another standard
     /// stream errors here (an fd past 2 never leaves the lexer).
     #[test]
     fn herestring_fd_prefix() {
         let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
         match &ast[0] {
-            Ast::Call { redirects, .. } => assert_eq!(redirects[0].fd(), 0),
+            Ast::Call { redirects, .. } => {
+                assert!(matches!(
+                    redirects[..],
+                    [Redirect::Stdin(StdinSource::Here(_))]
+                ));
+            }
             other => panic!("expected command, got {other:?}"),
         }
         let err = parse("cat 2<< #'x'#").expect_err("fd 2 herestring must not parse");
@@ -3708,7 +3730,7 @@ mod tests {
 
     // ── Control operators (try / guard / within / grant / audit) ────────
 
-    fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Vec<Redirect>) {
+    fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Vec<Redirect<Ast>>) {
         let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
         match stripped.as_slice() {
             [Ast::Scope { op, redirects, .. }] => (op.clone(), redirects.clone()),

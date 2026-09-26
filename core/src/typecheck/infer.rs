@@ -15,7 +15,7 @@ use crate::ir::{
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode, ScopeAst};
+use crate::syntax::ast::{BinaryOp, BinaryOpKind, Redirect, ScopeAst, StdinSource};
 use crate::types::{BuiltinEntry, RefusedArg};
 use std::sync::Arc;
 
@@ -128,9 +128,9 @@ fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
         }
         _ => return None,
     };
-    redirects.iter().find_map(|r| match (r.fd, r.mode) {
-        (0, RedirectMode::Read) => Some(StdinFeed::File),
-        (0, RedirectMode::HereString) => Some(StdinFeed::HereString),
+    redirects.iter().find_map(|r| match r {
+        Redirect::Stdin(StdinSource::File(_)) => Some(StdinFeed::File),
+        Redirect::Stdin(StdinSource::Here(_)) => Some(StdinFeed::HereString),
         _ => None,
     })
 }

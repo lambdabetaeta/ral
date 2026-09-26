@@ -16,7 +16,7 @@ use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::serial::FOValue;
 use crate::serial::datum::untag;
-use crate::syntax::ast::RedirectMode;
+use crate::syntax::ast::WriteMode;
 use std::collections::BTreeMap;
 
 /// One fact observed at a door: a command settled, a write committed, a
@@ -53,7 +53,7 @@ pub enum Observed {
     },
     Write {
         path: String,
-        mode: RedirectMode,
+        mode: WriteMode,
         outcome: WriteOutcome,
         /// The whole content that landed, on an atomic commit small enough to
         /// carry it.  Never a prefix: a card reads a write as the change it
@@ -186,24 +186,19 @@ impl WriteOutcome {
     }
 }
 
-/// Write modes only: `Redirect::new` builds no stdin door on fd 1 or 2, so
-/// no read mode ever reaches a write observation.
-fn mode_str(mode: RedirectMode) -> &'static str {
+fn mode_str(mode: WriteMode) -> &'static str {
     match mode {
-        RedirectMode::Write => "write",
-        RedirectMode::Append => "append",
-        RedirectMode::StreamWrite => "stream",
-        RedirectMode::Read | RedirectMode::HereString => {
-            unreachable!("`Redirect::new` admits a read mode only on fd 0")
-        }
+        WriteMode::Write => "write",
+        WriteMode::Append => "append",
+        WriteMode::Stream => "stream",
     }
 }
 
-fn mode_parse(s: &str) -> Option<RedirectMode> {
+fn mode_parse(s: &str) -> Option<WriteMode> {
     Some(match s {
-        "write" => RedirectMode::Write,
-        "append" => RedirectMode::Append,
-        "stream" => RedirectMode::StreamWrite,
+        "write" => WriteMode::Write,
+        "append" => WriteMode::Append,
+        "stream" => WriteMode::Stream,
         _ => return None,
     })
 }
@@ -664,14 +659,14 @@ mod tests {
         });
         round_trips(Observed::Write {
             path: "out.txt".into(),
-            mode: RedirectMode::Append,
+            mode: WriteMode::Append,
             outcome: WriteOutcome::Committed,
             new_bytes: Some(b"new".to_vec()),
             old_bytes: Some(b"old".to_vec()),
         });
         round_trips(Observed::Write {
             path: "out.txt".into(),
-            mode: RedirectMode::StreamWrite,
+            mode: WriteMode::Stream,
             outcome: WriteOutcome::Aborted,
             new_bytes: None,
             old_bytes: None,
@@ -784,7 +779,7 @@ mod tests {
     fn an_absent_byte_field_projects_as_none() {
         let what = Observed::Write {
             path: "out.txt".into(),
-            mode: RedirectMode::Write,
+            mode: WriteMode::Write,
             outcome: WriteOutcome::Committed,
             new_bytes: Some(Vec::new()),
             old_bytes: None,
@@ -828,7 +823,7 @@ mod tests {
             },
             Observed::Write {
                 path: "out.txt".into(),
-                mode: RedirectMode::Write,
+                mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"new".to_vec()),
                 old_bytes: None,

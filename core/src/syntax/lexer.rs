@@ -17,7 +17,7 @@
 
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
-use crate::syntax::ast::{RedirectMode, Word};
+use crate::syntax::ast::{Word, WriteMode};
 use std::fmt;
 
 /// The identifier alphabet, `[a-zA-Z_][a-zA-Z0-9_-]*`, as the two
@@ -71,15 +71,14 @@ fn is_bare_char(ch: char) -> bool {
             | '('
             | ')'
             | ';'
-            | '&'
     )
 }
 
 /// The bare-word characters that are operators inside `$[…]`, where they end
-/// a word instead: `1+1` is a sum there and a word everywhere else.  `<` `>`
-/// `!` `&` `|` are not bare anywhere and take their own arms.
+/// a word instead: `1+1` is a sum there and a word everywhere else.  `&`
+/// takes its own arms, for `&&`; `<` `>` `!` `|` are not bare anywhere.
 fn is_operator_char(ch: char) -> bool {
-    matches!(ch, '+' | '-' | '*' | '/' | '%' | '=')
+    matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '&')
 }
 
 /// Parts of an interpolated (double-quoted) string.
@@ -120,12 +119,26 @@ pub enum Token {
     Newline,
     /// Separator run containing a `;` — never crossed by continuation.
     Semi,
+    /// A redirect operator that takes a word, with its fd prefix if written.
     Redirect {
         fd: Option<u32>,
-        kind: RedirectMode,
-        target_fd: Option<u32>,
+        op: RedirectOp,
+    },
+    /// `fd>&to`.
+    Dup {
+        fd: Option<u32>,
+        to: u32,
     },
     Eof,
+}
+
+/// The operator of a word-taking redirect, as spelled; the parser's
+/// [`Redirect::word`](crate::syntax::ast::Redirect::word) assigns its stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectOp {
+    Read,
+    HereString,
+    Write(WriteMode),
 }
 
 impl fmt::Display for Token {
@@ -163,7 +176,7 @@ impl fmt::Display for Token {
             Self::Bang => write!(f, "!"),
             Self::Newline => write!(f, "newline"),
             Self::Semi => write!(f, "';'"),
-            Self::Redirect { .. } => write!(f, "redirect"),
+            Self::Redirect { .. } | Self::Dup { .. } => write!(f, "redirect"),
             Self::Eof => write!(f, "end of input"),
         }
     }
@@ -1328,35 +1341,22 @@ impl Lexer {
         }
     }
 
-    fn finish_redirect(
-        &self,
-        fd: Option<u32>,
-        kind: RedirectMode,
-        target_fd: Option<u32>,
-        span: Span,
-    ) -> (Token, Span) {
-        (
-            Token::Redirect {
-                fd,
-                kind,
-                target_fd,
-            },
-            self.finish(span),
-        )
+    fn finish_redirect(&self, fd: Option<u32>, op: RedirectOp, span: Span) -> (Token, Span) {
+        (Token::Redirect { fd, op }, self.finish(span))
     }
 
     fn scan_redirect_gt(&mut self, fd: Option<u32>, span: Span) -> Result<(Token, Span), LexError> {
         self.bump();
         if self.peek() == Some('>') {
             self.bump();
-            return Ok(self.finish_redirect(fd, RedirectMode::Append, None, span));
+            return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Append), span));
         }
         // `>~` is the stream-write operator only when the `~` stands alone.
         // `>~/path` is a plain write to a tilde path, so a bare char after
         // the `~` leaves it to lex as its own `Tilde` word.
         if self.peek() == Some('~') && !self.peek_n(1).is_some_and(is_bare_char) {
             self.bump();
-            return Ok(self.finish_redirect(fd, RedirectMode::StreamWrite, None, span));
+            return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Stream), span));
         }
         if self.peek() == Some('&') {
             self.bump();
@@ -1377,9 +1377,9 @@ impl Lexer {
                      into its standard output?",
                 ));
             }
-            return Ok(self.finish_redirect(fd, RedirectMode::Write, Some(n), span));
+            return Ok((Token::Dup { fd, to: n }, self.finish(span)));
         }
-        Ok(self.finish_redirect(fd, RedirectMode::Write, None, span))
+        Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Write), span))
     }
 
     fn scan_redirect_lt(&mut self, fd: Option<u32>, span: Span) -> Result<(Token, Span), LexError> {
@@ -1406,9 +1406,9 @@ impl Lexer {
                     ),
                 ));
             }
-            return Ok(self.finish_redirect(fd, RedirectMode::HereString, None, span));
+            return Ok(self.finish_redirect(fd, RedirectOp::HereString, span));
         }
-        Ok(self.finish_redirect(fd, RedirectMode::Read, None, span))
+        Ok(self.finish_redirect(fd, RedirectOp::Read, span))
     }
 }
 
@@ -1721,8 +1721,7 @@ mod tests {
             toks[2],
             Token::Redirect {
                 fd: None,
-                kind: RedirectMode::Write,
-                target_fd: None
+                op: RedirectOp::Write(WriteMode::Write),
             }
         ));
     }
@@ -1734,8 +1733,7 @@ mod tests {
             toks[1],
             Token::Redirect {
                 fd: Some(2),
-                kind: RedirectMode::Write,
-                target_fd: None
+                op: RedirectOp::Write(WriteMode::Write),
             }
         ));
     }
@@ -1743,14 +1741,7 @@ mod tests {
     #[test]
     fn redirect_stderr_to_stdout() {
         let toks = tok_types("cmd 2>&1");
-        assert!(matches!(
-            toks[1],
-            Token::Redirect {
-                fd: Some(2),
-                kind: RedirectMode::Write,
-                target_fd: Some(1)
-            }
-        ));
+        assert!(matches!(toks[1], Token::Dup { fd: Some(2), to: 1 }));
     }
 
     /// If `>~` swallowed the `~` in `>~/path`, the redirect would target
@@ -1763,8 +1754,7 @@ mod tests {
                 toks[2],
                 Token::Redirect {
                     fd: None,
-                    kind: RedirectMode::Write,
-                    target_fd: None
+                    op: RedirectOp::Write(WriteMode::Write),
                 }
             ),
             "expected a plain Write redirect, got {:?}",
@@ -1782,8 +1772,7 @@ mod tests {
                 toks[2],
                 Token::Redirect {
                     fd: None,
-                    kind: RedirectMode::StreamWrite,
-                    target_fd: None
+                    op: RedirectOp::Write(WriteMode::Stream),
                 }
             ),
             "expected a StreamWrite redirect, got {:?}",
@@ -2100,12 +2089,12 @@ mod tests {
         assert!(inner.iter().any(|(t, _)| matches!(
             t,
             Token::Redirect {
-                kind: RedirectMode::Read,
+                op: RedirectOp::Read,
                 ..
             }
         )));
         assert!(lex_err("$[1 & 0]").contains("`&&`"));
-        // Glued: `&` is not a bare char, so `true&&false` is a conjunction
+        // Glued: `&` ends a word here, so `true&&false` is a conjunction
         // rather than one long command name.
         let Token::Expr(glued) = &tok_types("$[true&&false]")[0] else {
             panic!("expected Expr token");
@@ -2113,16 +2102,22 @@ mod tests {
         assert_eq!(glued.len(), 3, "expected `true`, `&&`, `false`: {glued:?}");
     }
 
-    /// Outside `$[…]` the shell meaning stands: `&` is refused by name, `&&`
-    /// too, and `>=` is a redirect to a word starting with `=`.
+    /// Outside `$[…]` the shell meaning stands: a word may not start with `&`
+    /// or `&&`, but carries either inside it, and `>=` is a redirect to a
+    /// word starting with `=`.
     #[test]
     fn shell_mode_keeps_shell_meanings() {
         assert!(lex_err("sleep 1 &").contains("spawn"));
         assert!(lex_err("a && b").contains("no `&&`"));
-        // Glued too: `&` never hides inside a word, so bash's backgrounding
-        // reflex earns the message rather than a word ending in `&`.
-        assert!(lex_err("sleep 1&").contains("spawn"));
-        assert!(lex_err("a&&b").contains("no `&&`"));
+        assert_eq!(
+            tok_types("curl h/?a=1&b=2 a&&b"),
+            vec![
+                plain("curl"),
+                slash("h/?a=1&b=2"),
+                plain("a&&b"),
+                Token::Eof
+            ]
+        );
         assert_eq!(
             tok_types("echo a >= b"),
             vec![
@@ -2130,8 +2125,7 @@ mod tests {
                 plain("a"),
                 Token::Redirect {
                     fd: None,
-                    kind: RedirectMode::Write,
-                    target_fd: None
+                    op: RedirectOp::Write(WriteMode::Write),
                 },
                 plain("="),
                 plain("b"),
@@ -2363,8 +2357,7 @@ mod tests {
                 t,
                 Token::Redirect {
                     fd: None,
-                    kind: RedirectMode::HereString,
-                    target_fd: None,
+                    op: RedirectOp::HereString,
                 }
             )),
             "got {tokens:?}"
@@ -2375,8 +2368,7 @@ mod tests {
                 t,
                 Token::Redirect {
                     fd: Some(0),
-                    kind: RedirectMode::HereString,
-                    target_fd: None,
+                    op: RedirectOp::HereString,
                 }
             )),
             "got {tokens:?}"

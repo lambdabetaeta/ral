@@ -127,7 +127,7 @@ mod tests {
         for s in [
             "a b", // space
             "a|b", "a$b", "a!b", "a~b", "a<b", "a>b", "a\"b", "a'b", "a`b", "a(b", "a)b", "a;b",
-            "a&b", "a^b", "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
+            "a^b", "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
         ] {
             assert!(!is_bare_word(s), "{s:?} should not be bare");
         }
@@ -280,7 +280,7 @@ mod tests {
             "...",     // a spread token
             ":",       // a bare Colon
             "?x",      // `?` is its own token
-            "&x",      // `&` is its own token
+            "&x",      // a leading `&` is refused
             // Numeral- and literal-shaped: lexing alone would leave these
             // bare, and they would come back as values rather than text.
             "007",
@@ -334,5 +334,12 @@ mod tests {
     #[test]
     fn bare_word_keeps_embedded_colon() {
         assert!(is_bare_word("host:5432"));
+    }
+
+    #[test]
+    fn bare_word_keeps_query_urls_and_windows_paths() {
+        assert!(is_bare_word("https://h/p?a=1&b=2"));
+        assert!(is_bare_word(r"C:\Users\me"));
+        assert!(is_bare_word(r"\\server\share"));
     }
 }

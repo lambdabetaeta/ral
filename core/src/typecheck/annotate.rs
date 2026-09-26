@@ -13,7 +13,7 @@ use super::env::InferCtx;
 use super::ty::GroundRoute;
 use crate::ir::{
     Args, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Phrase, PipeYield,
-    RedirectV, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, ValRedirectTarget,
+    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -298,7 +298,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
             redirects: e
                 .redirects
                 .iter()
-                .map(|r| annotate_redirect(r, ctx))
+                .map(|r| r.map(|v| annotate_val(v, ctx)))
                 .collect(),
         }),
         CompKind::Binary(op, lhs, rhs) => {
@@ -495,17 +495,6 @@ fn annotate_args(args: &crate::ir::Args, ctx: &mut InferCtx) -> crate::ir::Args 
     args.iter().map(|e| annotate_list_elem(e, ctx)).collect()
 }
 
-fn annotate_redirect(redirect: &RedirectV, ctx: &mut InferCtx) -> RedirectV {
-    RedirectV {
-        fd: redirect.fd,
-        mode: redirect.mode,
-        target: match &redirect.target {
-            ValRedirectTarget::File(v) => ValRedirectTarget::File(annotate_val(v, ctx)),
-            ValRedirectTarget::Fd(n) => ValRedirectTarget::Fd(*n),
-        },
-    }
-}
-
 fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     let item = match &comp.item {
         CompKind::Try { body, handler } => CompKind::Try {
@@ -546,7 +535,7 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
             body: Arc::new(annotate_demand(body, ctx, eta, demand)),
             redirects: redirects
                 .iter()
-                .map(|r| annotate_redirect(r, ctx))
+                .map(|r| r.map(|v| annotate_val(v, ctx)))
                 .collect(),
         },
         _ => unreachable!("annotate_scope called on a non-scope node"),

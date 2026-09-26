@@ -1,16 +1,9 @@
 //! ral's fd model, driven through the public run door.
 //!
-//! ral models `0<`, `<<`, `1>`, `2>` and `2>&1`; the identity dups `1>&1` and
-//! `2>&2` mean nothing, as in bash.  Every other fd form is refused at the
-//! parser, so no such redirect ever reaches the IR — which is what lets the
-//! write-observation and in-process redirect paths state the model as a fact
-//! rather than re-deriving it.  `Redirect::new` is the single place the rule
-//! lives; these tests read it from outside.
-//!
-//! `1< f` and other fd-prefixed reads are refused at the parser: standard
-//! input always feeds fd 0, so letting one through would file it as a
-//! *write* door still carrying the read mode, a shape that panics the
-//! interpreter the moment an audit trail or surface sink is listening.
+//! A redirect is one of stdin, stdout, stderr or `2>&1`; the identity dups
+//! `1>&1` and `2>&2` denote nothing.  The parser eliminates fd numbers into
+//! that sum and refuses any that names no stream, as `1< f` does; these tests
+//! read the rule from outside.
 
 mod common;
 

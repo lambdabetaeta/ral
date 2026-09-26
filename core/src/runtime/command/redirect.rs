@@ -8,33 +8,17 @@
 use crate::capability::FsOp;
 use crate::evaluator::audit::observe;
 use crate::path::{Located, walk::Kind};
-use crate::syntax::ast::RedirectMode;
+use crate::syntax::ast::{Redirect, StdinSource, WriteMode};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read as _;
 
-/// A redirect target resolved to a concrete path or fd.
-#[derive(Clone, Debug)]
-pub(crate) enum EvalRedirect {
-    File(String),
-    Fd(u32),
-}
-
-/// The runtime counterpart of the IR's [`crate::ir::RedirectV`], as
-/// `evaluator::redirect::eval_redirects` resolves it.
-#[derive(Clone, Debug)]
-pub(crate) struct EvalRedirectV {
-    pub(crate) fd: u32,
-    pub(crate) mode: RedirectMode,
-    pub(crate) target: EvalRedirect,
-}
-
 /// `>` on stderr streams instead: staging diagnostics for an atomic commit
 /// would withhold them until the frame settles.
-pub(crate) fn stderr_mode(mode: RedirectMode) -> RedirectMode {
+pub(crate) fn stderr_mode(mode: WriteMode) -> WriteMode {
     match mode {
-        RedirectMode::Write => RedirectMode::StreamWrite,
+        WriteMode::Write => WriteMode::Stream,
         other => other,
     }
 }
@@ -223,14 +207,14 @@ fn open_atomic(
     Ok((file, pending))
 }
 
-/// Open a redirect target.  `>` to a regular file returns a [`PendingWrite`]
-/// the caller must commit or abandon once the writer finishes; every other
-/// shape streams.
+/// Open a write redirect's target.  `>` to a regular file returns a
+/// [`PendingWrite`] the caller must commit or abandon once the writer
+/// finishes; every other shape streams.
 /// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
 /// redirect lands right even from a native, where the host cwd never moves.
-pub(crate) fn open_file(
+pub(crate) fn open_write(
     path: &str,
-    mode: RedirectMode,
+    mode: WriteMode,
     shell: &mut Shell,
 ) -> Settled<(File, Option<PendingWrite>)> {
     let rp = shell.resolve(path);
@@ -239,21 +223,11 @@ pub(crate) fn open_file(
     if rp.is_discard() {
         return stream(crate::path::walk::open_discard(&rp));
     }
-    let op = match mode {
-        RedirectMode::Read => FsOp::Read,
-        _ => FsOp::Write,
-    };
-    let target = shell.locate(&rp, &op)?;
+    let target = shell.locate(&rp, &FsOp::Write)?;
     match mode {
-        RedirectMode::Read => stream(target.read()),
-        RedirectMode::Append => stream(target.append()),
-        RedirectMode::StreamWrite => stream(target.truncate()),
-        // The payload is the redirect word itself; `install_stdin_redirect`
-        // routes it without touching the filesystem.
-        RedirectMode::HereString => {
-            unreachable!("here-string redirects never reach the file-open door")
-        }
-        RedirectMode::Write => {
+        WriteMode::Append => stream(target.append()),
+        WriteMode::Stream => stream(target.truncate()),
+        WriteMode::Write => {
             let existing = target.stat().map_err(|e| io_error(path, &e))?;
             // TTYs and named pipes stream: there is no inode to rename.
             match existing {
@@ -267,13 +241,24 @@ pub(crate) fn open_file(
     }
 }
 
+/// Open a `< path` target, against the scoped cwd as [`open_write`] does.
+fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
+    let rp = shell.resolve(path);
+    let opened = if rp.is_discard() {
+        crate::path::walk::open_discard(&rp)
+    } else {
+        shell.locate(&rp, &FsOp::Read)?.read()
+    };
+    opened.map_err(|e| io_error(path, &e))
+}
+
 /// The whole `>` recipe with no observation — the caller owns the surface.
 /// exarch's `edit-hash` and `edit-replace` write below the redirect frame and
 /// speak their own card, so they share this door rather than fork a weaker
 /// temp-file write that drops the symlink, mode and fsync steps.
 pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     use std::io::Write as _;
-    let (mut file, commit) = open_file(path, RedirectMode::Write, shell)?;
+    let (mut file, commit) = open_write(path, WriteMode::Write, shell)?;
     file.write_all(bytes).map_err(|e| io_error(path, &e))?;
     match commit {
         Some(commit) => commit.commit().map_err(|e| atomic_write_error(&e)),
@@ -287,10 +272,9 @@ pub(crate) fn atomic_write_error(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("atomic write: {e}"), 1))
 }
 
-/// Park the fd-0 redirect — `< file` or the here-string `<< str` — on
+/// Park the stdin redirect — `< file` or the here-string `<< str` — on
 /// `shell.io.stdin`, returning a [`StdinRedirectGuard`] that puts back
-/// whatever `Source` was there.  When several redirects name fd 0 the last
-/// wins, as in POSIX shells.
+/// whatever `Source` was there.  When several feed stdin, the last wins.
 ///
 /// `<< str` drops one leading newline, so a body may start on the line below
 /// the command, and pushes the payload through a pipe from a detached thread:
@@ -301,29 +285,25 @@ pub(crate) fn atomic_write_error(e: &std::io::Error) -> Break {
 /// `startup_stdin_tty` honest — consumers trust it only when `Source` is
 /// `Terminal`, which then really does mean the inherited fd 0.
 pub(crate) fn install_stdin_redirect(
-    redirects: &[EvalRedirectV],
+    redirects: &[Redirect<String>],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<StdinRedirectGuard> {
-    let Some((mode, word)) = redirects.iter().rev().find_map(|r| match r {
-        EvalRedirectV {
-            fd: 0,
-            mode: mode @ (RedirectMode::Read | RedirectMode::HereString),
-            target: EvalRedirect::File(w),
-        } => Some((mode, w)),
+    let Some(stdin) = redirects.iter().rev().find_map(|r| match r {
+        Redirect::Stdin(src) => Some(src),
         _ => None,
     }) else {
         return Ok(StdinRedirectGuard::Untouched);
     };
-    let source = match mode {
-        RedirectMode::Read => {
-            let (f, _) = open_file(word, RedirectMode::Read, shell)?;
+    let source = match stdin {
+        StdinSource::File(path) => {
+            let f = open_read(path, shell)?;
             // Door 1 — READ, recorded eagerly so it precedes the body or
             // exec it feeds, as in `cat < a`.
-            observe(shell, mooring, Observed::Read { path: word.clone() });
+            observe(shell, mooring, Observed::Read { path: path.clone() });
             crate::io::Source::Reader(crate::io::SourceReader::file(f))
         }
-        RedirectMode::HereString => {
+        StdinSource::Here(word) => {
             let body = word
                 .strip_prefix("\r\n")
                 .or_else(|| word.strip_prefix('\n'))
@@ -341,7 +321,6 @@ pub(crate) fn install_stdin_redirect(
                 .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
             crate::io::Source::Reader(crate::io::SourceReader::pipe(reader))
         }
-        _ => unreachable!("find_map above only yields Read or HereString"),
     };
     let prior = std::mem::replace(&mut shell.io.stdin, source);
     Ok(StdinRedirectGuard::Installed(prior))

@@ -4,12 +4,12 @@
 //! `pipeline::launch::wire_stage_stdio` and never come here.
 
 use crate::evaluator::audit::observe;
-use crate::syntax::ast::RedirectMode;
+use crate::syntax::ast::{Redirect, WriteMode};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, WriteOutcome};
 
 #[cfg(windows)]
 use super::process::pipe_err;
-use super::redirect::{EvalRedirect, EvalRedirectV, PendingWrite, open_file, stderr_mode};
+use super::redirect::{PendingWrite, open_write, stderr_mode};
 
 /// Capability witness that the parent's fd 0 is safe to inherit into a
 /// spawned child's stdin, mintable only through the issuers below.
@@ -65,14 +65,14 @@ impl StdinRoute {
 /// `shell.io.stdin` by `redirect::install_stdin_redirect`, so a native,
 /// external and pipeline stage all read through the same `Source`.
 pub(crate) struct RedirectPlan {
-    pub(crate) stdout_file: Option<(String, RedirectMode)>,
+    pub(crate) stdout_file: Option<(String, WriteMode)>,
     pub(crate) stderr_route: Option<StderrRoute>,
 }
 
 /// The fd-2 redirect left standing once every call-site redirect applies.
 #[derive(Clone, Debug)]
 pub(crate) enum StderrRoute {
-    File(String, RedirectMode),
+    File(String, WriteMode),
     Stdout,
 }
 
@@ -88,42 +88,24 @@ pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
         && matches!(shell.io.stdout, crate::io::Sink::Terminal)
 }
 
-/// Classify the call-site redirects into a stdout/stderr plan.  Every shape
-/// either lands a case below or becomes a named error; nothing is dropped in
-/// silence, matching `install_sink_redirects` on the in-process path.
-pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<RedirectPlan> {
+/// Classify the call-site redirects into a stdout/stderr plan.
+pub(crate) fn classify_redirects(redirects: &[Redirect<String>]) -> RedirectPlan {
     let mut plan = RedirectPlan {
         stdout_file: None,
         stderr_route: None,
     };
-    for EvalRedirectV { fd, mode, target } in redirects {
-        match target {
-            EvalRedirect::Fd(target_fd) => {
-                if *fd == 2 && *target_fd == 1 {
-                    plan.stderr_route = Some(StderrRoute::Stdout);
-                } else {
-                    return Err(unmodeled_redirect(*fd, &format!("&{target_fd}")));
-                }
+    for r in redirects {
+        match r {
+            // Already parked on `shell.io.stdin` by `install_stdin_redirect`.
+            Redirect::Stdin(_) => {}
+            Redirect::Stdout(mode, path) => plan.stdout_file = Some((path.clone(), *mode)),
+            Redirect::Stderr(mode, path) => {
+                plan.stderr_route = Some(StderrRoute::File(path.clone(), *mode));
             }
-            EvalRedirect::File(filename) => match fd {
-                // fd 0 (`< file`, `<< str`) is already parked on
-                // `shell.io.stdin` by `install_stdin_redirect`.
-                0 => {}
-                1 => plan.stdout_file = Some((filename.clone(), *mode)),
-                2 => plan.stderr_route = Some(StderrRoute::File(filename.clone(), *mode)),
-                other => return Err(unmodeled_redirect(*other, filename)),
-            },
+            Redirect::StderrToStdout => plan.stderr_route = Some(StderrRoute::Stdout),
         }
     }
-    Ok(plan)
-}
-
-/// An fd ≥ 3 file target, or a `fd>&fd` dup other than the modeled `2>&1`.
-fn unmodeled_redirect(fd: u32, target: &str) -> Break {
-    Break::Error(Error::new(
-        format!("redirect {fd}>{target} is not supported for external commands"),
-        1,
-    ))
+    plan
 }
 
 /// Choose the stdin route for a single-command external job.
@@ -174,7 +156,7 @@ pub(super) fn wire_stdout_file(
     let Some((path, mode)) = &plan.stdout_file else {
         return Ok((None, None));
     };
-    let (file, commit) = open_file(path, *mode, shell)?;
+    let (file, commit) = open_write(path, *mode, shell)?;
     // Guarded from here: every remaining step can fail, and a staged write
     // nobody downstream hears about must not outlive this call — `commit`'s
     // own `Drop` sees to that.
@@ -265,7 +247,7 @@ pub(super) fn wire_stderr(
         }
         Some(StderrRoute::File(path, mode)) => {
             let effective_mode = stderr_mode(*mode);
-            let (file, _) = open_file(path, effective_mode, shell)?;
+            let (file, _) = open_write(path, effective_mode, shell)?;
             command.stderr(crate::process::StdioSpec::from_file(file));
             // `stderr_mode` coerces `>` to streaming, so a stderr redirect is
             // never atomic and its write door closes at the open.

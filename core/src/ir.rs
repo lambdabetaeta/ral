@@ -9,7 +9,7 @@
 
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
+use crate::syntax::ast::{BinaryOp, Pattern, Redirect};
 use crate::types::Str;
 
 /// A [`crate::syntax::ast::Pattern`] as elaboration hands it to the rest of
@@ -169,21 +169,6 @@ pub(crate) mod args {
         }
         Some(out)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum ValRedirectTarget {
-    File(Val),
-    Fd(u32),
-}
-
-/// An I/O redirect.  Always owned by whatever it applies to — [`Exec`] or
-/// [`CompKind::Redirect`] — never a wrapper of its own.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RedirectV {
-    pub(crate) fd: u32,
-    pub(crate) mode: RedirectMode,
-    pub(crate) target: ValRedirectTarget,
 }
 
 // ── Phrases ─────────────────────────────────────────────────────────────
@@ -454,12 +439,9 @@ fn walk_command_word<'a>(word: &'a CommandWord, out: &mut Vec<&'a str>) {
     }
 }
 
-fn walk_redirects<'a>(redirects: &'a [RedirectV], out: &mut Vec<&'a str>) {
-    for redirect in redirects {
-        match &redirect.target {
-            ValRedirectTarget::File(v) => walk_val(v, out),
-            ValRedirectTarget::Fd(_) => {}
-        }
+fn walk_redirects<'a>(redirects: &'a [Redirect<Val>], out: &mut Vec<&'a str>) {
+    for v in redirects.iter().filter_map(Redirect::operand) {
+        walk_val(v, out);
     }
 }
 
@@ -584,7 +566,7 @@ pub enum CompKind {
     /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
     Redirect {
         body: Arc<Comp>,
-        redirects: Vec<RedirectV>,
+        redirects: Vec<Redirect<Val>>,
     },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
@@ -663,7 +645,7 @@ pub struct Exec {
     /// An argv: each element crosses rendered, whichever boundary it reaches —
     /// a handler arm, a base frame, or the syscall itself.
     pub(crate) args: Args,
-    pub(crate) redirects: Vec<RedirectV>,
+    pub(crate) redirects: Vec<Redirect<Val>>,
 }
 
 /// Dispatch shape of an [`Exec`] head — a variant rather than a flag on
@@ -704,7 +686,7 @@ pub enum Register {
 mod tests {
     use super::*;
     use crate::path::tilde::TildePath;
-    use crate::syntax::ast::{BinaryOp, RedirectMode};
+    use crate::syntax::ast::{BinaryOp, WriteMode};
     use crate::typecheck::Ty;
 
     #[test]
@@ -765,21 +747,16 @@ mod tests {
         let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
             head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
             args: vec![ValListElem::Single(svar("r_exec_arg"))],
-            redirects: vec![RedirectV {
-                fd: 1,
-                mode: RedirectMode::Write,
-                target: ValRedirectTarget::File(var("r_exec_redirect_target")),
-            }],
+            redirects: vec![Redirect::Stdout(
+                WriteMode::Write,
+                var("r_exec_redirect_target"),
+            )],
         }));
         let exec_external = Spanned::synthetic(CompKind::Exec(Exec {
             head: CommandWord::External(CommandName::Bare("r_exec_external_head".into())),
             args: vec![],
-            redirects: vec![RedirectV {
-                fd: 0,
-                mode: RedirectMode::Read,
-                // An `Fd` target contributes no reference to over-collect.
-                target: ValRedirectTarget::Fd(9),
-            }],
+            // A dup has no operand, so contributes no reference to over-collect.
+            redirects: vec![Redirect::StderrToStdout],
         }));
 
         let pipeline = Spanned::synthetic(CompKind::Pipeline {
@@ -858,11 +835,10 @@ mod tests {
         });
         let scope_redirect = Spanned::synthetic(CompKind::Redirect {
             body: ret("r_scope_redirect_body"),
-            redirects: vec![RedirectV {
-                fd: 2,
-                mode: RedirectMode::Append,
-                target: ValRedirectTarget::File(var("r_scope_redirect_target")),
-            }],
+            redirects: vec![Redirect::Stderr(
+                WriteMode::Append,
+                var("r_scope_redirect_target"),
+            )],
         });
         let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
             ValListElem::Single(Spanned::synthetic(Val::Unit)),

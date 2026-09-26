@@ -86,10 +86,10 @@ own `incomplete` verdict; `join_continuation` folds lines in with `'\n'`). A
 newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
 both parse. A `;` never continues anything.
 
-**Redirects are the three standard streams.** `parse_redirect` hands its fd,
-mode and target to `Redirect::new`, the AST type's only constructor, which
-admits exactly the forms ral has plumbing for and refuses the rest with a
-message — so no unmodelled fd shape exists anywhere downstream
+**Redirects are the three standard streams.** `parse_redirect` eliminates the
+lexer's `Redirect` and `Dup` tokens, fd numbers and all, into the sum
+`Redirect<Ast>` through `Redirect::word` and `Redirect::dup`, which refuse any
+fd that names no stream — so no fd number exists anywhere downstream
 ([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]).
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat

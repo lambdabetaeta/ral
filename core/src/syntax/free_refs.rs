@@ -5,7 +5,7 @@
 //! the strongly connected components of that graph become the `LetRec` knots.
 
 use crate::syntax::ast::{
-    Ast, Head, ListElem, MapEntry, RecordEntry, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
+    Ast, Head, ListElem, MapEntry, RecordEntry, Redirect, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
@@ -196,14 +196,14 @@ impl Head {
     }
 }
 
-impl Redirect {
+impl Redirect<Ast> {
     fn collect_free_refs(
         &self,
         candidates: &HashSet<String>,
         scopes: &mut Vec<HashSet<String>>,
         out: &mut HashSet<String>,
     ) {
-        if let RedirectTarget::File(ast) = self.target() {
+        if let Some(ast) = self.operand() {
             ast.collect_free_refs(candidates, scopes, out);
         }
     }

@@ -366,7 +366,7 @@ fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
 /// An allow and a deny sharing a surface but frozen against different disk
 /// state are distinct records to `NormalizedPrefix`'s derived `Eq`/`Ord`
 /// (three fields, where the gate weighs two), so eviction must key on
-/// `same_gate_dir`.  Checked through the gate as well as `allow_dirs` — the
+/// `evicts`.  Checked through the gate as well as `allow_dirs` — the
 /// leak is only real if the gate itself is fooled.
 #[test]
 fn exec_join_drops_allow_clashing_with_deny_on_divergent_resolved() {
@@ -403,8 +403,41 @@ fn exec_join_drops_allow_clashing_with_deny_on_divergent_resolved() {
     );
 }
 
+/// A deny dir that is a symlink vetoes where it points, so it evicts an
+/// allow written as that target.
+#[test]
+fn exec_join_drops_allow_naming_a_deny_dirs_target() {
+    use crate::capability::admits_for_test;
+    use crate::path::Namespace;
+
+    let (link, target, candidate) = if cfg!(windows) {
+        (r"C:\l", r"C:\x", r"C:\x\bin")
+    } else {
+        ("/l", "/x", "/x/bin")
+    };
+    let allow = crate::path::NormalizedPrefix::for_test(target, target, Namespace::Host);
+    let deny = crate::path::NormalizedPrefix::for_test(link, target, Namespace::Host);
+
+    let composed = exec_of(&allow).join(exec_deny_of(&deny));
+    assert!(
+        composed.allow_dirs.is_empty(),
+        "the deny must evict the allow on its target, got {:?}",
+        composed.allow_dirs
+    );
+    let mut grants = GrantStack::root();
+    grants.push(Capabilities {
+        exec: Some(composed),
+        ..Capabilities::root()
+    });
+    let candidate = [candidate];
+    assert!(
+        !admits_for_test(&grants, &candidate, &candidate),
+        "a binary under the deny's target must be denied"
+    );
+}
+
 /// The same clash without shared bytes: `/private/tmp/x` and `/tmp/x` name
-/// one macOS firmlink-aliased directory, so eviction keys on `same_gate_dir`
+/// one macOS firmlink-aliased directory, so eviction keys on `evicts`
 /// and not byte equality.  `capability/exec.rs` pins the gate half.
 #[cfg(target_os = "macos")]
 #[test]

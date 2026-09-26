@@ -1796,7 +1796,7 @@ return !{{length $hits}}"
     /// raises exactly one committed `Write` event.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::syntax::ast::WriteMode;
         use ral_core::types::WriteOutcome;
         let engine = fresh();
         // No fixture file: the write creates the target.
@@ -1823,7 +1823,7 @@ return !{{length $hits}}"
             obs[0],
             Observed::Write {
                 path,
-                mode: RedirectMode::Write,
+                mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"x".to_vec()),
                 // A fresh path's before-image is the empty one, known
@@ -1868,7 +1868,7 @@ return !{{length $hits}}"
     /// through as `old_bytes` alongside the committed `new_bytes`.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_old_and_new_bytes() {
-        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::syntax::ast::WriteMode;
         use ral_core::types::WriteOutcome;
         let engine = fresh();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
@@ -1900,7 +1900,7 @@ return !{{length $hits}}"
             obs[0],
             Observed::Write {
                 path,
-                mode: RedirectMode::Write,
+                mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
                 // Read before the rename: the diff's "before" side.

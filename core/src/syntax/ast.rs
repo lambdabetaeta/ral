@@ -9,6 +9,7 @@
 
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
+use crate::syntax::lexer::RedirectOp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -59,13 +60,13 @@ pub enum Ast {
     Call {
         head: Head,
         args: Vec<Spanned<Self>>,
-        redirects: Vec<Redirect>,
+        redirects: Vec<Redirect<Self>>,
     },
     /// `try`/`guard`/`within`/`grant`/`audit`, plus any trailing redirects.
     /// Operand shape is fixed per [`ScopeAst`] variant; the parser checks arity.
     Scope {
         op: ScopeAst,
-        redirects: Vec<Redirect>,
+        redirects: Vec<Redirect<Self>>,
     },
     /// `cmd1 | cmd2 | cmd3`
     Pipeline(Vec<Stmt>),
@@ -312,104 +313,113 @@ impl BinaryOp {
     }
 }
 
+/// How a write redirect opens its file: `>` replaces it atomically, `>>`
+/// appends, `>~` truncates and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RedirectMode {
+pub enum WriteMode {
     Write,
-    StreamWrite,
     Append,
-    Read,
-    /// `<< str` — feed a string to stdin. The target word is the payload
-    /// itself, not a path, and one leading newline is dropped at evaluation so
-    /// a multiline body may start on the line below the command.
-    HereString,
+    Stream,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum RedirectTarget {
-    /// A file path, or the payload for [`RedirectMode::HereString`].
-    File(Box<Ast>),
-    Fd(u32),
+/// What `<` or `<<` feeds standard input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StdinSource<T> {
+    /// `< path`.
+    File(T),
+    /// `<< str`: the payload itself.  One leading newline is dropped at
+    /// evaluation, so a multiline body may start on the line below.
+    Here(T),
 }
 
-/// An I/O redirect. It is a field of [`Ast::Call`] and [`Ast::Scope`] rather
-/// than an entry in their argument lists, so it can never pass for a value.
+/// An I/O redirect onto one of ral's three streams.
 ///
-/// The fields are private and [`Redirect::new`] is the only way to build one,
-/// so the fd forms ral has no plumbing for are unspellable rather than caught
-/// downstream: every `RedirectV` and `EvalRedirectV` is lowered from one of
-/// these.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Redirect {
-    fd: u32,
-    mode: RedirectMode,
-    target: RedirectTarget,
+/// Its operand `T` is the parsed word, then the elaborated value, then the
+/// evaluated string.  A field of [`Ast::Call`] and [`Ast::Scope`] rather than
+/// an argument, so it can never pass for a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Redirect<T> {
+    Stdin(StdinSource<T>),
+    Stdout(WriteMode, T),
+    Stderr(WriteMode, T),
+    /// `2>&1`.
+    StderrToStdout,
 }
 
-impl Redirect {
-    /// ral's whole fd model, in the one place a redirect can be built.
-    ///
-    /// ral models `0<`, `<<`, `1>`, `2>` and `2>&1`; the identity dups `1>&1`
-    /// and `2>&2` are accepted and mean nothing, as they do in bash.  Every
-    /// other fd form — `1<`, `0>`, `1>&2`, any fd ≥ 3 — is refused here,
-    /// because ral has no fd plumbing for it to mean anything with, and a
-    /// spelling whose bash meaning ral cannot honour is rejected rather than
-    /// silently reinterpreted.  (The lexer refuses `1>&2` and fd ≥ 3 first,
-    /// with advice this rule cannot give; the arms for them below are the
-    /// rule stated whole, not a second gate.)
-    pub(crate) fn new(
-        fd: Option<u32>,
-        mode: RedirectMode,
-        target: RedirectTarget,
-    ) -> Result<Self, String> {
-        use RedirectMode::{Append, HereString, Read, StreamWrite, Write};
-        use RedirectTarget::{Fd, File};
-
-        // Reads and here-strings feed fd 0; everything else writes fd 1.
-        let fd = fd.unwrap_or_else(|| u32::from(!matches!(mode, Read | HereString)));
-        let refusal = match (fd, mode, &target) {
-            (0, Read | HereString, File(_))
-            | (1 | 2, Write | StreamWrite | Append, File(_))
-            | (1 | 2, Write, Fd(1))
-            | (2, Write, Fd(2)) => None,
-
-            (_, HereString, _) => {
-                Some("`<<` always feeds stdin — drop the file-descriptor prefix".to_string())
+impl<T> Redirect<T> {
+    /// Eliminate a word-taking redirect token into the three streams.  ral
+    /// has no fd plumbing beyond them, so any other fd is refused rather
+    /// than reinterpreted.  (The lexer refuses fd ≥ 3 first, with advice
+    /// this rule cannot give; the last arm is the rule stated whole.)
+    pub(crate) fn word(fd: Option<u32>, op: RedirectOp, word: T) -> Result<Self, String> {
+        let fd = fd.unwrap_or(match op {
+            RedirectOp::Write(_) => 1,
+            RedirectOp::Read | RedirectOp::HereString => 0,
+        });
+        match (fd, op) {
+            (0, RedirectOp::Read) => Ok(Self::Stdin(StdinSource::File(word))),
+            (0, RedirectOp::HereString) => Ok(Self::Stdin(StdinSource::Here(word))),
+            (1, RedirectOp::Write(mode)) => Ok(Self::Stdout(mode, word)),
+            (2, RedirectOp::Write(mode)) => Ok(Self::Stderr(mode, word)),
+            (_, RedirectOp::HereString) => {
+                Err("`<<` always feeds stdin — drop the file-descriptor prefix".into())
             }
-            (_, Read, _) => Some(format!(
+            (_, RedirectOp::Read) => Err(format!(
                 "`<` always feeds standard input, so `{fd}<` reads nothing in ral — \
                  drop the `{fd}`, or did you mean `{fd}> file` to write there?"
             )),
-            (0, _, _) => Some(
-                "standard input cannot be written to — \
-                 did you mean `< file`, which reads one into it?"
-                    .to_string(),
-            ),
-            (_, _, Fd(n)) => Some(format!(
-                "ral has no fd plumbing beyond `2>&1`, so `{fd}>&{n}` has nothing to mean"
-            )),
-            _ => Some(format!(
+            (0, RedirectOp::Write(_)) => Err(STDIN_UNWRITABLE.into()),
+            (_, RedirectOp::Write(_)) => Err(format!(
                 "file descriptor {fd}: ral has only standard input (0), standard output (1) \
                  and standard error (2)"
             )),
-        };
-        match refusal {
-            None => Ok(Self { fd, mode, target }),
-            Some(message) => Err(message),
         }
     }
 
-    pub(crate) fn fd(&self) -> u32 {
-        self.fd
+    /// Eliminate `fd>&to`.  `2>&1` is the one dup ral models; the identity
+    /// dups `1>&1` and `2>&2` name the stream they already are, and denote
+    /// no redirect at all.
+    pub(crate) fn dup(fd: Option<u32>, to: u32) -> Result<Option<Self>, String> {
+        match (fd.unwrap_or(1), to) {
+            (2, 1) => Ok(Some(Self::StderrToStdout)),
+            (1, 1) | (2, 2) => Ok(None),
+            (0, _) => Err(STDIN_UNWRITABLE.into()),
+            (fd, to) => Err(format!(
+                "ral has no fd plumbing beyond `2>&1`, so `{fd}>&{to}` has nothing to mean"
+            )),
+        }
     }
 
-    pub(crate) fn mode(&self) -> RedirectMode {
-        self.mode
+    pub(crate) fn operand(&self) -> Option<&T> {
+        match self {
+            Self::Stdin(StdinSource::File(t) | StdinSource::Here(t))
+            | Self::Stdout(_, t)
+            | Self::Stderr(_, t) => Some(t),
+            Self::StderrToStdout => None,
+        }
     }
 
-    pub(crate) fn target(&self) -> &RedirectTarget {
-        &self.target
+    pub(crate) fn try_map<U, E>(
+        &self,
+        mut f: impl FnMut(&T) -> Result<U, E>,
+    ) -> Result<Redirect<U>, E> {
+        Ok(match self {
+            Self::Stdin(StdinSource::File(t)) => Redirect::Stdin(StdinSource::File(f(t)?)),
+            Self::Stdin(StdinSource::Here(t)) => Redirect::Stdin(StdinSource::Here(f(t)?)),
+            Self::Stdout(mode, t) => Redirect::Stdout(*mode, f(t)?),
+            Self::Stderr(mode, t) => Redirect::Stderr(*mode, f(t)?),
+            Self::StderrToStdout => Redirect::StderrToStdout,
+        })
+    }
+
+    pub(crate) fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> Redirect<U> {
+        let Ok(r) = self.try_map(|t| Ok::<_, std::convert::Infallible>(f(t)));
+        r
     }
 }
+
+const STDIN_UNWRITABLE: &str =
+    "standard input cannot be written to — did you mean `< file`, which reads one into it?";
 
 /// Operand shape of a control-operator scope form, one variant per surface
 /// keyword. Arity and construction are declared in [`ScopeAst::KEYWORDS`].

@@ -32,8 +32,8 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 /// forms a containment question is asked of is authority-specific
 /// (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`), so
 /// it is settled inside `path` — by [`super::prefix_set::covers`] for fs and
-/// [`NormalizedPrefix::covers_name`](super::resolved::NormalizedPrefix::covers_name)
-/// for exec — and never by a caller holding two bare paths.
+/// [`NormalizedPrefix::grant_depth`](super::resolved::NormalizedPrefix::grant_depth)
+/// and its deny-side twin for exec — and never by a caller holding two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);

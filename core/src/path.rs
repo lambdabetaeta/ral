@@ -1,11 +1,11 @@
 //! Path resolution for grant matching.
 //!
-//! Four stages, one sibling module each: sigil expansion of `~`/`xdg:` at
-//! the head (`sigil`), cwd-anchoring and `.`/`..` folding (`lex`),
-//! `realpath` with an ancestor-walk fallback (`canon`), and alias-aware
-//! containment (`lex::path_within`).  Where a name is about to be *written
-//! through*, a fifth (`walk`) locates the object itself, symlink-free, so
-//! the gate judges what the kernel will touch.
+//! Five stages: sigil expansion of `~`/`xdg:` at the head (`sigil`),
+//! cwd-anchoring and `.`/`..` folding (`lex`), `realpath` with an
+//! ancestor-walk fallback (`canon`), alias-aware containment
+//! (`lex::path_within`), and — only where a name is about to be *written
+//! through* — symlink-free location of the object itself (`walk`), so the
+//! gate judges what the kernel will touch.
 //!
 //! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
 //! [`NormalizedPrefix`] through the same folding kernel, so an access-side
@@ -15,7 +15,7 @@
 //! containment kernel does not leave this module: a prefix carries two
 //! forms, and *which* one an authority is judged on is that authority's
 //! rule, not a caller's — fs on the object (`prefix_set::covers`), exec on
-//! the name (`NormalizedPrefix::covers_name`).  See
+//! the name (`NormalizedPrefix::grant_depth`, `veto_depth`).  See
 //! `docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`.
 
 pub mod basedir;
