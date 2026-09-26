@@ -17,6 +17,7 @@ let benches = [
     [id: #'B5'#, file: "$repo_root/bench/B5.ral"],
     [id: #'B6'#, file: "$repo_root/bench/B6.ral"],
     [id: #'B7'#, file: "$repo_root/bench/B7.ral"],
+    [id: #'B8'#, file: "$repo_root/bench/B8.ral"],
 ]
 
 let run_one = { |b|

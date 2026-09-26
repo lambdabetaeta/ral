@@ -1,0 +1,4 @@
+# B8 — literal residency: 2×10⁴ records, each with a closed nested list and a thunk.
+
+let rows = map { |i| return [name: 'x', size: $i, tags: [a, b, c], run: { echo $i }] } !{range 1 20001}
+length $rows
