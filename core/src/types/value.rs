@@ -295,7 +295,7 @@ impl fmt::Display for Value {
 fn fmt_param(p: &crate::ir::IrPattern) -> String {
     match p {
         crate::ir::IrPattern::Wildcard => "_".into(),
-        crate::ir::IrPattern::Name(s) => s.clone(),
+        crate::ir::IrPattern::Name(s) => s.to_string(),
         crate::ir::IrPattern::List { elems, rest } => {
             let mut parts: Vec<String> = elems.iter().map(fmt_param).collect();
             if let Some(r) = rest {
@@ -309,7 +309,7 @@ fn fmt_param(p: &crate::ir::IrPattern) -> String {
                 .map(|entry| {
                     let label = entry.key.clone();
                     let v = fmt_param(&entry.pattern);
-                    if matches!(&entry.pattern, crate::ir::IrPattern::Name(n) if n == &label) {
+                    if matches!(&entry.pattern, crate::ir::IrPattern::Name(n) if n.as_ref() == label) {
                         label
                     } else {
                         format!("{label}: {v}")

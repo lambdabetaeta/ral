@@ -35,7 +35,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
         Val::Bool(b) => Ok(Value::Bool(*b)),
         Val::String(s) => Ok(Value::string(s.clone())),
         Val::Variable(name) => env.get(name).cloned().ok_or_else(|| {
-            let hint = match name.as_str() {
+            let hint = match name.as_ref() {
                 "STATUS" => {
                     "there is no status register: a failure raises an error \
                      record that carries its own status — catch it with `try` \
@@ -57,7 +57,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
         Val::Record(entries) | Val::Map(entries) => {
             let mut pairs = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                pairs.push((key.clone(), close(&value.item, env)?));
+                pairs.push((key.to_string(), close(&value.item, env)?));
             }
             Ok(Value::map(pairs))
         }
@@ -67,7 +67,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
                 None => None,
             };
             Ok(Value::Variant {
-                label: label.clone(),
+                label: label.to_string(),
                 payload,
             })
         }

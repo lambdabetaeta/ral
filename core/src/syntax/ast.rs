@@ -7,6 +7,7 @@
 //! its current position before lowering, so a form with no span of its own
 //! inherits the enclosing statement's.
 
+use crate::ir::Name;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::lexer::RedirectOp;
@@ -190,11 +191,11 @@ pub enum Head {
 pub enum Pattern {
     /// `_` — discard the value.
     Wildcard,
-    Name(String),
+    Name(Name),
     /// `[a, b, ...rest]`, where `rest` takes the tail as a new list.
     List {
         elems: Vec<Self>,
-        rest: Option<String>,
+        rest: Option<Name>,
     },
     /// `[key: pat, …]`
     Map(Vec<MapPatternEntry>),
@@ -607,7 +608,7 @@ impl Pattern {
         fn walk<'a>(pat: &'a Pattern, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
             match pat {
                 Pattern::Wildcard => None,
-                Pattern::Name(n) => (!seen.insert(n.as_str())).then_some(n.as_str()),
+                Pattern::Name(n) => (!seen.insert(n.as_ref())).then_some(n.as_ref()),
                 Pattern::List { elems, rest } => elems
                     .iter()
                     .find_map(|e| walk(e, seen))
@@ -622,14 +623,14 @@ impl Pattern {
         match self {
             Self::Wildcard => {}
             Self::Name(n) => {
-                set.insert(n.clone());
+                set.insert(n.to_string());
             }
             Self::List { elems, rest } => {
                 for e in elems {
                     e.collect_names(set);
                 }
                 if let Some(r) = rest {
-                    set.insert(r.clone());
+                    set.insert(r.to_string());
                 }
             }
             Self::Map(entries) => {
@@ -657,7 +658,7 @@ impl Ast {
     pub fn as_name_let(&self) -> Option<(&str, &Spanned<Box<Self>>)> {
         match self {
             Self::Let { pattern, value } => match &pattern.item {
-                Pattern::Name(name) => Some((name.as_str(), value)),
+                Pattern::Name(name) => Some((name.as_ref(), value)),
                 _ => None,
             },
             _ => None,

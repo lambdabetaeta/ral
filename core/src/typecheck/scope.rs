@@ -93,7 +93,7 @@ fn written_at(opts: &Val, label: &str) -> Option<Span> {
     };
     entries
         .iter()
-        .find(|(key, _)| key == label)
+        .find(|(key, _)| key.as_ref() == label)
         .and_then(|(_, value)| value.span)
 }
 

@@ -190,7 +190,7 @@ impl InternCtx {
             let mut entries = Vec::with_capacity(bindings.len());
             for (k, b) in &bindings {
                 entries.push((
-                    k.clone(),
+                    k.to_string(),
                     SerialBinding {
                         value: SerialValue::from_runtime(&b.value, &mut self)?,
                         scheme: b.scheme.as_deref().cloned(),
@@ -286,7 +286,7 @@ impl WireDecoder {
                 let mut entries = crate::types::BindingMap::default();
                 for (k, b) in &scope_table[id] {
                     entries.insert(
-                        k.clone(),
+                        k.as_str().into(),
                         Binding {
                             value: b.value.clone().into_runtime(&dec)?,
                             scheme: b.scheme.clone().map(Arc::new),
@@ -978,7 +978,7 @@ mod tests {
             &crate::boot::HostSurface::default(),
         );
         shell.env.bind(
-            "only_mine".to_string(),
+            "only_mine".into(),
             Binding {
                 value: Value::Int(1),
                 scheme: None,

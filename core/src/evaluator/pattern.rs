@@ -4,7 +4,7 @@
 //! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — leaves the
 //! environment it was given untouched.
 
-use crate::ir::IrPattern;
+use crate::ir::{IrPattern, Name};
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Env, Error, Settled, Shell, Value};
 use std::sync::Arc;
@@ -126,7 +126,7 @@ fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
     schemes: &[(String, Arc<Scheme>)],
-    staged: &mut Vec<(String, Binding)>,
+    staged: &mut Vec<(Name, Binding)>,
 ) -> Settled<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
@@ -223,11 +223,8 @@ mod tests {
 
     fn list_pat(elems: &[&str], rest: Option<&str>) -> IrPattern {
         IrPattern::List {
-            elems: elems
-                .iter()
-                .map(|n| IrPattern::Name(n.to_string()))
-                .collect(),
-            rest: rest.map(str::to_string),
+            elems: elems.iter().map(|n| IrPattern::Name((*n).into())).collect(),
+            rest: rest.map(Into::into),
         }
     }
 

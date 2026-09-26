@@ -5,6 +5,7 @@
 //!
 //! [`Context`]: super::shell::Context
 
+use crate::ir::Name;
 use crate::typecheck::Scheme;
 use crate::types::Value;
 use rustc_hash::FxBuildHasher;
@@ -27,7 +28,7 @@ pub struct Binding {
 pub(crate) type NativeMap = HashMap<String, Value, FxBuildHasher>;
 pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
 pub(crate) type BindingMap =
-    imbl::GenericHashMap<String, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
+    imbl::GenericHashMap<Name, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
 /// Shared empty tiers, so `Env::new` and `Env::with_natives` clone an `Arc`
 /// rather than allocate a fresh empty map.
@@ -130,7 +131,7 @@ impl Env {
 
     /// Every name bound since the prelude — what the binding lease adopts.
     pub(crate) fn session_names(&self) -> impl Iterator<Item = &str> {
-        self.bindings.keys().map(String::as_str)
+        self.bindings.keys().map(AsRef::as_ref)
     }
 
     /// `self` with its session tier narrowed to `names`, repeats welcome.  The
@@ -140,7 +141,11 @@ impl Env {
     pub(crate) fn restrict<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
         let bindings: BindingMap = names
             .into_iter()
-            .filter_map(|n| self.bindings.get(n).map(|b| (n.to_owned(), b.clone())))
+            .filter_map(|n| {
+                self.bindings
+                    .get_key_value(n)
+                    .map(|(k, b)| (k.clone(), b.clone()))
+            })
             .collect();
         if bindings.len() == self.bindings.len() {
             return self.clone();
@@ -155,7 +160,7 @@ impl Env {
     /// Bind `name` in the session tier, replacing any existing binding —
     /// persistent, so an environment a closure already captured is
     /// unaffected.
-    pub(crate) fn bind(&mut self, name: String, binding: Binding) {
+    pub(crate) fn bind(&mut self, name: Name, binding: Binding) {
         self.bindings.insert(name, binding);
     }
 
@@ -173,8 +178,8 @@ impl Env {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::with_capacity(self.bindings.len() + self.prelude.len());
         for (k, b) in &self.bindings {
-            seen.insert(k.as_str());
-            result.push((k.clone(), project(b)));
+            seen.insert(k.as_ref());
+            result.push((k.to_string(), project(b)));
         }
         for (k, b) in self.prelude.iter() {
             if !seen.contains(k.as_str()) {
@@ -204,7 +209,7 @@ impl Env {
     /// counted once.
     pub(crate) fn distinct_name_count(&self) -> usize {
         let mut seen = std::collections::HashSet::new();
-        seen.extend(self.bindings.keys().map(String::as_str));
+        seen.extend(self.bindings.keys().map(AsRef::as_ref));
         seen.extend(self.prelude.keys().map(String::as_str));
         seen.len()
     }
@@ -419,7 +424,7 @@ mod tests {
         assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
 
         env.bind(
-            "map".to_string(),
+            "map".into(),
             Binding {
                 value: Value::Int(3),
                 scheme: None,

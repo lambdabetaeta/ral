@@ -115,7 +115,7 @@ impl Shell {
     /// carry no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
         let scheme = self.value_scheme(&value);
-        self.env.bind(name, Binding { value, scheme });
+        self.env.bind(name.into(), Binding { value, scheme });
     }
 
     /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
@@ -126,7 +126,7 @@ impl Shell {
     /// `bindings:` and its untyped `env:` / `prompt:` keys.
     pub fn set_var(&mut self, name: String, value: Value) {
         self.env.bind(
-            name,
+            name.into(),
             Binding {
                 value,
                 scheme: None,

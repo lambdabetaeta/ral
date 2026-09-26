@@ -43,9 +43,9 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     let deny_refs: Vec<&str> = deny_names.iter().map(String::as_str).collect();
     shell.check_exec_call(&id.shown, &deny_refs, &policy_refs, &arg_strs)?;
     let image = match &id.name {
-        CommandName::Bare(b) if crate::uutils::is_uutils_tool(b) => {
-            ExecImage::BundledTool { tool: b.clone() }
-        }
+        CommandName::Bare(b) if crate::uutils::is_uutils_tool(b) => ExecImage::BundledTool {
+            tool: b.to_string(),
+        },
         _ => ExecImage::Host(id.resolved.clone()),
     };
     Ok(SpawnPlan {
@@ -166,7 +166,7 @@ mod tests {
             .context
             .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.into()), &shell.context);
         match check_existence(&id) {
             Err(Break::Error(e)) => {
                 assert_eq!(e.exit_code(), 127);
@@ -194,12 +194,12 @@ mod tests {
         let mut shell = Shell::default();
         shell.context.set_env_var("PATH", "./bin");
         shell.seed_cwd(tmp.path().to_path_buf());
-        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.as_str().into()), &shell.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
         check_existence(&id).expect("a resolved name must vet");
 
         shell.seed_cwd(elsewhere.path().to_path_buf());
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.into()), &shell.context);
         match check_existence(&id) {
             Err(Break::Error(e)) => assert_eq!(e.exit_code(), 127),
             other => panic!("expected 127, got {other:?}"),

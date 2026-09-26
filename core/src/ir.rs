@@ -21,10 +21,15 @@ pub(crate) type Param = IrPattern;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// An identifier the IR binds or mentions: a variable, a pattern name, a
+/// bare command head, a variant label. Shared, not copied — a bind, a
+/// capture and a label clone a pointer.
+pub type Name = Arc<str>;
+
 /// The head word of a command, in the shape the source wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CommandName {
-    Bare(String),
+    Bare(Name),
     /// Slash-bearing literal path: skips the lookup chain, exec'd as written.
     Path(String),
     /// Tilde-headed path, carried unexpanded until command resolution.
@@ -37,7 +42,8 @@ impl CommandName {
     /// which is command resolution's business rather than the checker's.
     pub(crate) fn written(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::Bare(name) | Self::Path(name) => std::borrow::Cow::Borrowed(name),
+            Self::Bare(name) => std::borrow::Cow::Borrowed(name),
+            Self::Path(name) => std::borrow::Cow::Borrowed(name),
             Self::TildePath(path) => std::borrow::Cow::Owned(path.to_literal()),
         }
     }
@@ -53,19 +59,19 @@ pub enum Val {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Variable(String),
+    Variable(Name),
     /// A suspended computation, eliminated by [`CompKind::Force`].
     Thunk(Arc<Comp>),
     /// A plain list literal: no spread, so every element is here already.
     List(Vec<Spanned<Self>>),
     /// `[key: val, …]`: static labels, no spread.
-    Record(Vec<(String, Spanned<Self>)>),
+    Record(Vec<(Name, Spanned<Self>)>),
     /// `[:, key: val, …]`: static labels, no spread.
-    Map(Vec<(String, Spanned<Self>)>),
+    Map(Vec<(Name, Spanned<Self>)>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
     Variant {
-        label: String,
+        label: Name,
         payload: Option<Box<Self>>,
     },
 }
@@ -398,7 +404,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
 fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
     match val {
         Val::Unit | Val::String(_) | Val::Int(_) | Val::Float(_) | Val::Bool(_) => {}
-        Val::Variable(name) => out.push(name),
+        Val::Variable(name) => out.push(name.as_ref()),
         Val::Thunk(comp) => walk_comp(comp, out),
         Val::List(elems) => {
             for elem in elems {
@@ -455,7 +461,7 @@ fn walk_args<'a>(args: &'a Args, out: &mut Vec<&'a str>) {
 /// safe direction as an untaken branch.
 fn walk_command_word<'a>(word: &'a CommandWord, out: &mut Vec<&'a str>) {
     if let CommandName::Bare(name) = word.name() {
-        out.push(name);
+        out.push(name.as_ref());
     }
 }
 
@@ -543,7 +549,7 @@ pub enum CompKind {
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
     Rec {
-        group: Arc<[(String, Arc<Comp>)]>,
+        group: Arc<[(Name, Arc<Comp>)]>,
         index: usize,
     },
     /// A read of the store, in computation position: what `$CWD` and `~/x` are.
@@ -726,7 +732,7 @@ mod tests {
     // ── referenced_names: exhaustive walker coverage ─────────────────────
 
     fn var(name: &str) -> Val {
-        Val::Variable(name.to_string())
+        Val::Variable(name.into())
     }
 
     fn svar(name: &str) -> Spanned<Val> {
@@ -809,8 +815,8 @@ mod tests {
             var("r_interp_a"),
             var("r_interp_b"),
         ]));
-        let rec_group: Arc<[(String, Arc<Comp>)]> =
-            Arc::from(vec![("rec_name_bound".to_string(), ret("r_rec_member"))]);
+        let rec_group: Arc<[(Name, Arc<Comp>)]> =
+            Arc::from(vec![("rec_name_bound".into(), ret("r_rec_member"))]);
         let rec = Spanned::synthetic(CompKind::Rec {
             group: rec_group,
             index: 0,
@@ -872,11 +878,11 @@ mod tests {
             svar("r_list_single"),
         ])));
         let val_record = Spanned::synthetic(CompKind::Return(Val::Record(vec![(
-            "lbl".to_string(),
+            "lbl".into(),
             svar("r_record_value"),
         )])));
         let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![(
-            "lbl".to_string(),
+            "lbl".into(),
             svar("r_map_value"),
         )])));
         let assemble_list = Spanned::synthetic(CompKind::Assemble(Assembly::List(vec![

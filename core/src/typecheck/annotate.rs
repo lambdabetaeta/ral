@@ -12,8 +12,8 @@
 use super::env::InferCtx;
 use super::ty::GroundRoute;
 use crate::ir::{
-    Args, Assembly, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Phrase,
-    PipeYield, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    Args, Assembly, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Name,
+    Phrase, PipeYield, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -94,7 +94,7 @@ fn byte_side_join(join: &Comp, ctx: &mut InferCtx, demand: Demand) -> bool {
 /// rebind or observe.
 fn captured_string(body: Comp, ctx: &mut InferCtx) -> CompKind {
     let span = body.span;
-    let name = ctx.fresh_name("decode");
+    let name: Name = ctx.fresh_name("decode").into();
     CompKind::Bind {
         comp: Arc::new(Spanned::with_span(span, CompKind::Capture(Arc::new(body)))),
         pattern: Arc::new(IrPattern::Name(name.clone())),
@@ -146,7 +146,7 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
         CompKind::App { head, args } => (head, args),
         other => (Arc::new(Spanned::with_span(span, other)), Vec::new()),
     };
-    let params: Vec<String> = (0..arity).map(|_| ctx.fresh_name("eta")).collect();
+    let params: Vec<Name> = (0..arity).map(|_| ctx.fresh_name("eta").into()).collect();
     for param in &params {
         args.push(ValListElem::Single(Spanned::synthetic(Val::Variable(
             param.clone(),
@@ -426,7 +426,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
         let captured = Spanned::synthetic(captured_string(forced, ctx));
         return Val::Thunk(Arc::new(captured));
     }
-    let param = "__capture_e".to_string();
+    let param: Name = "__capture_e".into();
     let app = Spanned::synthetic(CompKind::App {
         head: Arc::new(forced),
         args: vec![ValListElem::Single(Spanned::synthetic(Val::Variable(

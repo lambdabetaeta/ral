@@ -47,7 +47,7 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
         Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
         None => Resolution::External(CommandIdentity::resolve(
-            CommandName::Bare(name.to_string()),
+            CommandName::Bare(name.into()),
             &shell.context,
         )),
     }

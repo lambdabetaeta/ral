@@ -44,7 +44,7 @@ pub(crate) fn detach(
     } else if spelled.contains('/') {
         CommandName::Path(spelled)
     } else {
-        CommandName::Bare(spelled)
+        CommandName::Bare(spelled.into())
     };
     if let CommandName::Bare(bare) = &name {
         // Every pass of the stack: a catch-all intercepts as a per-name

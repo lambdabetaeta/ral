@@ -915,7 +915,7 @@ impl Parser {
             Token::Word(Word::Plain(name)) if lexer::is_ident(name) => {
                 let name = name.clone();
                 p.advance();
-                Ok(Pattern::Name(name))
+                Ok(Pattern::Name(name.into()))
             }
             _ => Err(p.error(
                 "expected a pattern: a name like `x`, `_` to ignore, \
@@ -968,7 +968,7 @@ impl Parser {
                     ));
                 }
                 p.advance();
-                rest = Some(name);
+                rest = Some(name.into());
                 return Ok(SepFlow::Stop);
             }
             elems.push(p.parse_pattern()?);

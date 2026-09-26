@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
-use crate::ir::{Args, CaseArm, Comp, CompKind, Val, ValListElem};
+use crate::ir::{Args, CaseArm, Comp, CompKind, Name, Val, ValListElem};
 use crate::path::sigil::FreezeCtx;
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
@@ -211,7 +211,7 @@ fn capture_overflowed() -> Error {
     .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
 }
 
-fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
+fn rec_node(group: &Arc<[(Name, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
     Arc::new(crate::source::Spanned::synthetic(CompKind::Rec {
         group: group.clone(),
         index,

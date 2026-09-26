@@ -1896,7 +1896,10 @@ fn fail_demands_an_error_record() {
 
     has_error("fail 1", "couldn't match");
     has_error(r#"fail "boom""#, "couldn't match");
-    has_error(r#"fail [message: "boom"]"#, "missing a field named 'status'");
+    has_error(
+        r#"fail [message: "boom"]"#,
+        "missing a field named 'status'",
+    );
     has_error("fail [status: 3]", "missing a field named 'message'");
     has_error(r#"fail [status: "one", message: "boom"]"#, "couldn't match");
 }
@@ -2040,10 +2043,7 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
             binds.push((name.clone(), coerced));
         }
     }
-    assert_eq!(
-        binds,
-        vec![("x".to_string(), true), ("y".to_string(), false)]
-    );
+    assert_eq!(binds, vec![("x".into(), true), ("y".into(), false)]);
 }
 
 /// Whether the `x` bind of `src` had its RHS captured — the whole observable
@@ -2070,7 +2070,7 @@ fn bind_x_is_captured(src: &str) -> bool {
     for phrase in &top.phrases {
         if let Phrase::Define { pattern, comp, .. } = &phrase.item
             && let IrPattern::Name(name) = pattern.as_ref()
-            && name == "x"
+            && name.as_ref() == "x"
         {
             found = Some(has_capture(comp));
         }
@@ -2080,7 +2080,7 @@ fn bind_x_is_captured(src: &str) -> bool {
             comp: rhs, pattern, ..
         } = &c.item
             && let IrPattern::Name(name) = pattern.as_ref()
-            && name == "x"
+            && name.as_ref() == "x"
         {
             found = Some(has_capture(rhs));
         }
@@ -2465,7 +2465,7 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
     let mut nested_named = false;
     walk_toplevel(&top, &mut |c| {
         if let CompKind::Bind { pattern, .. } = &c.item
-            && matches!(pattern.as_ref(), IrPattern::Name(n) if n == "inner")
+            && matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "inner")
         {
             nested_named = true;
         }
@@ -3208,7 +3208,7 @@ fn toplevel_nested_bind_never_generalises() {
             inner.item
         );
     };
-    assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "y"));
+    assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "y"));
     assert!(matches!(rest.item, CompKind::Return(Val::Variable(_))));
 }
 

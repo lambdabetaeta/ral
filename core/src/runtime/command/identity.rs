@@ -142,7 +142,7 @@ impl CommandIdentity {
 /// missing command.
 fn render(name: &CommandName, ctx: &Context) -> String {
     match name {
-        CommandName::Bare(name) => name.clone(),
+        CommandName::Bare(name) => name.to_string(),
         CommandName::Path(path) => path.clone(),
         CommandName::TildePath(path) => {
             let home = ctx.home();
@@ -529,7 +529,7 @@ mod tests {
         shell.seed_cwd(tmp.path().to_path_buf());
         shell.context.set_env_var("PATH", "./bin");
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.as_str().into()), &shell.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
     }
 
@@ -543,7 +543,7 @@ mod tests {
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.into()), &shell.context);
         let names = id.policy_names(&shell.context);
         assert_eq!(names, vec![id.resolved]);
     }

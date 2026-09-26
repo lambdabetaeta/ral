@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 117c514f
+generated_at_commit: 640fb150
 generated_at_date: 2026-09-26
 covers_paths: [core/src/ir.rs]
 ---
@@ -24,10 +24,15 @@ The two categories:
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
   maps, variants, thunks, variables. A value can never diverge or perform I/O,
   and forming one costs O(text), never O(data): `Val::List(Vec<Spanned<Val>>)`,
-  `Val::Record`, and `Val::Map` (each `Vec<(String, Spanned<Val>)>`, sorted by
+  `Val::Record`, and `Val::Map` (each `Vec<(Name, Spanned<Val>)>`, sorted by
   key, stably, at elaboration) hold only a **plain** literal — no spread, no
   computed key. `Val` itself stays unspanned; every position onto which the
   checker narrows while emitting a constraint carries `Spanned<Val>`.
+- `Name = Arc<str>` is every identifier the IR binds or mentions:
+  `Val::Variable`, a variant's label, the pattern's names (the syntax's own
+  `Pattern`, since `IrPattern = Pattern`), a `Rec` group's members,
+  `CommandName::Bare`, and `Env`'s keys. A bind, a capture and a label clone a
+  pointer.
 - `CompKind::Assemble(Assembly)` is the one rule that builds a collection some
   of whose parts are spread or keyed at run time: a primitive computation, not
   a value, since it costs O(data) and can fail. `Assembly::List(Vec<ValListElem>)`,

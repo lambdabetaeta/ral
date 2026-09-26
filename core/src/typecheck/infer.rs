@@ -10,7 +10,7 @@ use super::scheme::Scheme;
 use super::ty::{CompTy, Field, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
     ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, IrPattern,
-    Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    Name, Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -145,7 +145,7 @@ fn alias_statement_shape(part: &Comp) -> Result<Option<(&str, &Arc<Comp>)>, &'st
     let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
         return Ok(None);
     };
-    if head != "alias" {
+    if head.as_ref() != "alias" {
         return Ok(None);
     }
     if !exec.redirects.is_empty() {
@@ -167,7 +167,7 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
     let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
         return Ok(None);
     };
-    if head != "unalias" {
+    if head.as_ref() != "unalias" {
         return Ok(None);
     }
     if !exec.redirects.is_empty() {
@@ -212,13 +212,13 @@ pub(crate) fn infer_toplevel(
 fn collect_pattern_names<'a>(pat: &'a IrPattern, out: &mut Vec<&'a str>) {
     match pat {
         IrPattern::Wildcard => {}
-        IrPattern::Name(name) => out.push(name),
+        IrPattern::Name(name) => out.push(name.as_ref()),
         IrPattern::List { elems, rest } => {
             for elem in elems {
                 collect_pattern_names(elem, out);
             }
             if let Some(rest_name) = rest {
-                out.push(rest_name);
+                out.push(rest_name.as_ref());
             }
         }
         IrPattern::Map(entries) => {
@@ -290,7 +290,7 @@ impl Inferencer<'_> {
                     BindMode::Let => generalize(&mut self.ctx.unifier, self.env, ty),
                     BindMode::Param => Scheme::mono(ty.clone()),
                 };
-                self.env.bind(name.clone(), scheme);
+                self.env.bind(name.to_string(), scheme);
             }
             IrPattern::List { elems, rest } => {
                 let elem = self.ctx.unifier.fresh_ty();
@@ -305,7 +305,7 @@ impl Inferencer<'_> {
                         BindMode::Let => generalize(&mut self.ctx.unifier, self.env, &list_ty),
                         BindMode::Param => Scheme::mono(list_ty),
                     };
-                    self.env.bind(rest_name.clone(), scheme);
+                    self.env.bind(rest_name.to_string(), scheme);
                 }
             }
             IrPattern::Map(entries) => {
@@ -458,7 +458,7 @@ impl Inferencer<'_> {
         }
         let entry: BuiltinEntry = self.env.builtins.value(name)?;
         let got = crate::ir::args::positional(&exec.args).map_or(0, |p| p.len());
-        Some((name.clone(), entry.fixed_arity(), got))
+        Some((name.to_string(), entry.fixed_arity(), got))
     }
 
     /// A computation's own payload route, peering past `Fun` arrows; an
@@ -1315,7 +1315,7 @@ impl Inferencer<'_> {
     }
 
     /// A plain record literal: no spread, so one row, closed.
-    fn infer_record_val(&mut self, entries: &[(String, Spanned<Val>)], arm: Option<&str>) -> Ty {
+    fn infer_record_val(&mut self, entries: &[(Name, Spanned<Val>)], arm: Option<&str>) -> Ty {
         let mut fields: Vec<(String, Ty)> = Vec::new();
         for (key, value) in entries {
             self.infer_record_field(key, value, arm, &mut fields);
@@ -1373,12 +1373,12 @@ impl Inferencer<'_> {
 
     /// A plain map literal: `Map<elem>`, every key a static label — so the
     /// checker refuses a static duplicate exactly as a record's (T0022).
-    fn infer_map_val(&mut self, entries: &[(String, Spanned<Val>)]) -> Ty {
+    fn infer_map_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> Ty {
         let elem = self.ctx.unifier.fresh_ty();
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: Vec<Name> = Vec::new();
         for (key, value) in entries {
             let duplicate = self.with_span(value.span, |this| {
-                let duplicate = this.diagnose_if_duplicate(key, seen.iter().map(String::as_str));
+                let duplicate = this.diagnose_if_duplicate(key, seen.iter().map(AsRef::as_ref));
                 let value_ty = this.infer_val(&value.item);
                 this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                 duplicate
@@ -1487,8 +1487,9 @@ impl Inferencer<'_> {
             Val::Bool(_) => Ty::Bool,
             Val::Variable(name) => {
                 if ScopeAst::lookup_keyword(name).is_some() {
-                    self.ctx
-                        .diagnose(TypeErrorKind::ControlOperatorAsValue { name: name.clone() });
+                    self.ctx.diagnose(TypeErrorKind::ControlOperatorAsValue {
+                        name: name.to_string(),
+                    });
                     self.ctx.unifier.fresh_ty()
                 } else {
                     match self.env.lookup_binding(name).cloned() {
@@ -1505,13 +1506,13 @@ impl Inferencer<'_> {
                                 // wrote and what `explain` documents.
                                 None if self.env.builtins.get(name).is_some() => {
                                     self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
-                                        name: name.clone(),
+                                        name: name.to_string(),
                                     });
                                     self.ctx.unifier.fresh_ty()
                                 }
                                 None if self.env.lookup_handler(name).is_some() => {
                                     self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
-                                        name: name.clone(),
+                                        name: name.to_string(),
                                     });
                                     self.ctx.unifier.fresh_ty()
                                 }
@@ -1541,7 +1542,7 @@ impl Inferencer<'_> {
                 };
                 let rest = self.ctx.unifier.fresh_row();
                 Ty::Variant(Row::Extend(
-                    Label::Case(label.clone()),
+                    Label::Case(label.to_string()),
                     Field::present(payload_ty),
                     Box::new(rest),
                 ))
@@ -1828,7 +1829,7 @@ impl Inferencer<'_> {
     /// the `index`-th member's type — memoized in `ctx.rec_groups` per
     /// `Arc` identity, so a group is inferred once within a run however many
     /// of its members are projected.
-    fn infer_rec(&mut self, group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> CompTy {
+    fn infer_rec(&mut self, group: &Arc<[(Name, Arc<Comp>)]>, index: usize) -> CompTy {
         let key = Arc::as_ptr(group).cast::<()>();
         if let Some(betas) = self.ctx.rec_groups.get(&key) {
             return betas[index].clone();
@@ -1841,7 +1842,7 @@ impl Inferencer<'_> {
 
         for ((name, _), beta) in group.iter().zip(betas.iter()) {
             self.env.bind(
-                name.clone(),
+                name.to_string(),
                 Scheme::mono(Ty::Thunk(Box::new(beta.clone()))),
             );
         }

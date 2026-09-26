@@ -105,7 +105,7 @@ pub(super) fn bind_effects(shell: &Shell, src: &str) -> Vec<BindEffect> {
             ) || matches!(&comp.item, CompKind::Bind { rest, .. }
                 if matches!(rest.item, CompKind::Decode(_)));
             Some(BindEffect {
-                name: name.clone(),
+                name: name.to_string(),
                 effectful,
             })
         })

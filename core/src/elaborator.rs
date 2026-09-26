@@ -16,7 +16,7 @@
 
 use crate::ir::{
     Args, ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV,
-    IrPattern, Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry,
+    IrPattern, Name, Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry,
     ValRecordEntry,
 };
 use crate::prelude_manifest;
@@ -86,7 +86,7 @@ impl Elaborator {
     /// lexicality by construction.
     fn variable_val(&mut self, name: &str) -> Val {
         if name != "SCRIPT" {
-            return Val::Variable(name.to_string());
+            return Val::Variable(name.into());
         }
         if let Some(s) = &self.script {
             return Val::String(s.clone().into());
@@ -264,7 +264,7 @@ impl Elaborator {
     fn build_rec_group(
         &mut self,
         bindings: &[(String, Box<Ast>, Option<Span>)],
-    ) -> Arc<[(String, Arc<Comp>)]> {
+    ) -> Arc<[(Name, Arc<Comp>)]> {
         let scope = self.current_scope_mut();
         for (name, _, _) in bindings {
             scope.insert(name.clone());
@@ -286,7 +286,7 @@ impl Elaborator {
                     empty.is_empty(),
                     "lambda/block elaboration must not hoist into outer binds"
                 );
-                (name.clone(), arc)
+                (name.as_str().into(), arc)
             })
             .collect()
     }
@@ -341,7 +341,7 @@ impl Elaborator {
                 Spanned::with_span(
                     *span,
                     Phrase::Define {
-                        pattern: Arc::new(IrPattern::Name(name.clone())),
+                        pattern: Arc::new(IrPattern::Name(name.as_str().into())),
                         comp,
                         schemes: vec![],
                     },
@@ -384,7 +384,7 @@ impl Elaborator {
             if let Ast::Let { pattern, value } = &kind {
                 let (rhs, pattern_ir) = this.elab_let_parts(pattern, value);
                 let pattern_ir = match pattern_ir {
-                    IrPattern::Wildcard => IrPattern::Name(this.gensym()),
+                    IrPattern::Wildcard => IrPattern::Name(this.gensym().into()),
                     named => named,
                 };
                 this.bind_pattern(&pattern.item);
@@ -424,7 +424,7 @@ impl Elaborator {
                     *span,
                     NestedUnit::Bind {
                         rhs,
-                        pattern: IrPattern::Name(name.clone()),
+                        pattern: IrPattern::Name(name.as_str().into()),
                     },
                 )
             })
@@ -531,18 +531,22 @@ impl Elaborator {
                 let redirect_vals = self.lower_redirects(redirects, binds);
 
                 match head {
-                    Head::ExternalName(s) => {
-                        self.exec(CommandName::Bare(s.clone()), arg_vals, redirect_vals, true)
-                    }
+                    Head::ExternalName(s) => self.exec(
+                        CommandName::Bare(s.clone().into()),
+                        arg_vals,
+                        redirect_vals,
+                        true,
+                    ),
                     Head::Bare(s) if self.is_bound(s) => {
                         // The `Force` is what makes the `Force` rule run a
                         // bound block inside the redirect frame wrapped
                         // around it.
-                        let head_comp = comp!(self, CompKind::Force(Val::Variable(s.clone())));
+                        let head_comp =
+                            comp!(self, CompKind::Force(Val::Variable(s.clone().into())));
                         self.apply_head(head_comp, arg_vals, redirect_vals)
                     }
                     Head::Bare(s) => self.exec(
-                        CommandName::Bare(s.clone()),
+                        CommandName::Bare(s.clone().into()),
                         desugar_zero_arg_exit(s, arg_vals),
                         redirect_vals,
                         false,
@@ -814,7 +818,7 @@ impl Elaborator {
                 comp!(
                     self,
                     CompKind::Return(Val::Variant {
-                        label: label.clone(),
+                        label: label.as_str().into(),
                         payload: payload_val,
                     })
                 )
@@ -974,7 +978,7 @@ impl Elaborator {
                 };
                 CaseArm {
                     tag,
-                    pattern: IrPattern::Name(payload),
+                    pattern: IrPattern::Name(payload.into()),
                     body: ArmBody::Applied(Arc::new(this.elab_guarded(&call))),
                 }
             }
@@ -1026,7 +1030,7 @@ impl Elaborator {
         if let CompKind::Return(v) = comp.item {
             v
         } else {
-            let name = self.gensym();
+            let name: Name = self.gensym().into();
             binds.push((IrPattern::Name(name.clone()), comp));
             Val::Variable(name)
         }
@@ -1057,10 +1061,10 @@ impl Elaborator {
         &mut self,
         items: Vec<(&String, &Spanned<Ast>)>,
         binds: &mut Vec<(IrPattern, Comp)>,
-    ) -> Vec<(String, Spanned<Val>)> {
-        let mut fields: Vec<_> = items
+    ) -> Vec<(Name, Spanned<Val>)> {
+        let mut fields: Vec<(Name, _)> = items
             .into_iter()
-            .map(|(key, value)| (key.clone(), self.spanned_val(value, binds)))
+            .map(|(key, value)| (key.as_str().into(), self.spanned_val(value, binds)))
             .collect();
         fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         fields
@@ -1423,7 +1427,7 @@ mod tests {
         let CompKind::Return(Val::Variable(name)) = &head.item else {
             panic!("expected returned-variable head, got {:?}", head.item);
         };
-        assert_eq!(name, "map");
+        assert_eq!(name.as_ref(), "map");
         assert_eq!(
             arg_items(args),
             vec![
@@ -1486,7 +1490,7 @@ mod tests {
                 top.phrases[1].item
             );
         };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "g"));
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "g"));
         let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
             panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
         };
@@ -1626,7 +1630,7 @@ mod tests {
         let CompKind::Bind { pattern, rest, .. } = &seq.item else {
             panic!("expected a Bind, got {:?}", seq.item);
         };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "x"));
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "x"));
         let CompKind::Bind {
             pattern: inner_pattern,
             rest: inner_rest,
@@ -1671,7 +1675,7 @@ mod tests {
         let Phrase::Define { pattern, comp, .. } = &top.phrases[0].item else {
             panic!("expected a Define, got {:?}", top.phrases[0].item);
         };
-        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "f"));
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "f"));
         let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
             panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
         };
@@ -1687,7 +1691,7 @@ mod tests {
         let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
         let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         assert_eq!(top.phrases.len(), 2);
-        fn group_arc(phrase: &Phrase) -> Arc<[(String, Arc<Comp>)]> {
+        fn group_arc(phrase: &Phrase) -> Arc<[(Name, Arc<Comp>)]> {
             let Phrase::Define { comp, .. } = phrase else {
                 panic!("expected a Define, got {phrase:?}");
             };
@@ -1705,8 +1709,8 @@ mod tests {
             Arc::ptr_eq(&g1, &g2),
             "both binders must share one group Arc"
         );
-        assert_eq!(g1[0].0, "f");
-        assert_eq!(g1[1].0, "g");
+        assert_eq!(g1[0].0.as_ref(), "f");
+        assert_eq!(g1[1].0.as_ref(), "g");
     }
 
     #[test]
