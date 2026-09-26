@@ -26,6 +26,135 @@ use std::sync::Arc;
 /// capture and a label clone a pointer.
 pub type Name = Arc<str>;
 
+/// Every name a node mentions, bound or free: sorted, distinct. Built only by
+/// [`Node::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Occ(Arc<[Name]>);
+
+impl Occ {
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.0.binary_search_by(|n| n.as_ref().cmp(name)).is_ok()
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
+        self.0.iter()
+    }
+}
+
+/// What a node's shape mentions, bound or free — no wildcard arm anywhere in
+/// any `impl`, so a new variant is a compile error here rather than a
+/// silently missed name. Over-approximate: every name, bound or free, taken
+/// branch or not.
+///
+/// A nested [`Node`] contributes its own stored [`Occ`] rather than being
+/// walked again, so computing occ for a whole program is linear in its size.
+pub(crate) trait Mentions {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>);
+}
+
+/// IR that closes, with what it mentions computed once, where it is built.
+#[derive(Debug, Clone)]
+pub struct Node<S> {
+    shape: S,
+    occ: Occ,
+}
+
+impl<S> Node<S> {
+    pub(crate) fn new(shape: S) -> Arc<Self>
+    where
+        S: Mentions,
+    {
+        Arc::new(Self::build(shape))
+    }
+
+    fn build(shape: S) -> Self
+    where
+        S: Mentions,
+    {
+        let mut refs = Vec::new();
+        shape.mentions(&mut refs);
+        refs.sort_unstable();
+        refs.dedup();
+        let occ = Occ(refs.into_iter().cloned().collect());
+        Self { shape, occ }
+    }
+
+    pub fn shape(&self) -> &S {
+        &self.shape
+    }
+
+    pub(crate) fn occ(&self) -> &Occ {
+        &self.occ
+    }
+}
+
+impl<S: PartialEq> PartialEq for Node<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape
+    }
+}
+
+/// The wire carries the shape alone; decoding recomputes occ, so no occ is
+/// ever read off it.
+impl<S: Mentions> From<S> for Node<S> {
+    fn from(shape: S) -> Self {
+        Self::build(shape)
+    }
+}
+
+impl<S: Serialize> Serialize for Node<S> {
+    fn serialize<Ser: serde::Serializer>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error> {
+        self.shape.serialize(serializer)
+    }
+}
+
+impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        S::deserialize(deserializer).map(Self::from)
+    }
+}
+
+pub type ThunkNode = Node<Arc<Comp>>;
+pub type GroupNode = Node<Box<[(Name, Arc<Comp>)]>>;
+pub type ListNode = Node<Box<[Spanned<Val>]>>;
+/// Entries sorted by key, stably; equal keys are the checker's to refuse.
+pub type FieldsNode = Node<Box<[(Name, Spanned<Val>)]>>;
+
+impl Mentions for Arc<Comp> {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        self.as_ref().mentions(out);
+    }
+}
+
+impl Mentions for Box<[(Name, Arc<Comp>)]> {
+    // Every member's: the group is one unit.
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for (_name, member) in self {
+            member.mentions(out);
+        }
+    }
+}
+
+impl Mentions for Box<[Spanned<Val>]> {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for elem in self {
+            elem.item.mentions(out);
+        }
+    }
+}
+
+impl Mentions for Box<[(Name, Spanned<Val>)]> {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for (_key, value) in self {
+            value.item.mentions(out);
+        }
+    }
+}
+
 /// The head word of a command, in the shape the source wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CommandName {
@@ -60,14 +189,15 @@ pub enum Val {
     Float(f64),
     Bool(bool),
     Variable(Name),
-    /// A suspended computation, eliminated by [`CompKind::Force`].
-    Thunk(Arc<Comp>),
+    /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
+    /// ρ|occ(M)⟩`.
+    Thunk(Arc<ThunkNode>),
     /// A plain list literal: no spread, so every element is here already.
-    List(Vec<Spanned<Self>>),
+    List(Arc<ListNode>),
     /// `[key: val, …]`: static labels, no spread.
-    Record(Vec<(Name, Spanned<Self>)>),
+    Record(Arc<FieldsNode>),
     /// `[:, key: val, …]`: static labels, no spread.
-    Map(Vec<(Name, Spanned<Self>)>),
+    Map(Arc<FieldsNode>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
     Variant {
@@ -77,6 +207,26 @@ pub enum Val {
 }
 
 impl Val {
+    /// `thunk M`, from an already-built `M`.
+    pub(crate) fn thunk(comp: Arc<Comp>) -> Self {
+        Self::Thunk(Node::new(comp))
+    }
+
+    /// A plain list literal with no spread.
+    pub(crate) fn list(items: impl Into<Box<[Spanned<Self>]>>) -> Self {
+        Self::List(Node::new(items.into()))
+    }
+
+    /// `[key: val, …]`, entries already sorted by key.
+    pub(crate) fn record(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
+        Self::Record(Node::new(entries.into()))
+    }
+
+    /// `[:, key: val, …]`, entries already sorted by key.
+    pub(crate) fn map(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
+        Self::Map(Node::new(entries.into()))
+    }
+
     /// Classify a bare word into its most specific [`Val`] variant, by the
     /// shape rules of [`crate::syntax::ast::WordLiteral::classify`].
     ///
@@ -218,26 +368,15 @@ pub enum Phrase {
 
 impl Toplevel {
     /// Every name any phrase can reference — the phrase-level analogue of
-    /// [`referenced_names`], for the same lease ledger.
+    /// [`Mentions`], for the same lease ledger.
     pub(crate) fn referenced_names(&self) -> Vec<&str> {
         let mut out = Vec::new();
         for phrase in &self.phrases {
-            walk_phrase(&phrase.item, &mut out);
+            match &phrase.item {
+                Phrase::Define { comp, .. } | Phrase::Run(comp) => comp.mentions(&mut out),
+            }
         }
-        out
-    }
-}
-
-fn walk_phrase<'a>(phrase: &'a Phrase, out: &mut Vec<&'a str>) {
-    match phrase {
-        Phrase::Define {
-            pattern: _,
-            comp,
-            schemes: _,
-        } => {
-            walk_comp(comp, out);
-        }
-        Phrase::Run(comp) => walk_comp(comp, out),
+        out.into_iter().map(AsRef::as_ref).collect()
     }
 }
 
@@ -255,7 +394,7 @@ impl Comp {
     pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),
-            CompKind::Rec { group, index } => group[*index].1.arrow(),
+            CompKind::Rec { group, index } => group.shape()[*index].1.arrow(),
             _ => None,
         }
     }
@@ -286,188 +425,175 @@ pub(crate) fn is_single_command(top: &Toplevel) -> bool {
     matches!(c.item, CompKind::Exec(_))
 }
 
-/// Every name `comp` mentions, bound or free, with repeats: what a lease
-/// renews and what a closure over `comp` keeps.  No wildcard arm anywhere in
-/// the walk, so a new `CompKind` or `Val` variant is a compile error here
-/// rather than a silently missed name.  Over-approximate by design: a name in
-/// an untaken branch renews too, and a lease only ever lengthens.
-pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
-    let mut out = Vec::new();
-    walk_comp(comp, &mut out);
-    out
-}
-
-fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
-    match &comp.item {
-        CompKind::Lam { param: _, body } => {
-            walk_comp(body, out);
-        }
-        CompKind::Bind {
-            comp,
-            pattern: _,
-            rest,
-        } => {
-            walk_comp(comp, out);
-            walk_comp(rest, out);
-        }
-        CompKind::App { head, args } => {
-            walk_comp(head, out);
-            walk_args(args, out);
-        }
-        CompKind::Exec(exec) => {
-            walk_command_word(&exec.head, out);
-            walk_args(&exec.args, out);
-            walk_redirects(&exec.redirects, out);
-        }
-        CompKind::Pipeline {
-            stages,
-            stage_types: _,
-            yields: _,
-        } => {
-            for stage in stages {
-                walk_comp(stage, out);
+impl Mentions for Comp {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        match &self.item {
+            CompKind::Lam { param: _, body } | CompKind::Capture(body) => body.mentions(out),
+            CompKind::Bind {
+                comp,
+                pattern: _,
+                rest,
+            } => {
+                comp.mentions(out);
+                rest.mentions(out);
             }
-        }
-        CompKind::Binary(_op, a, b) => {
-            walk_val(a, out);
-            walk_val(b, out);
-        }
-        CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
-            walk_val(v, out);
-        }
-        CompKind::Assemble(assembly) => walk_assembly(assembly, out),
-        CompKind::Index { target, keys } => {
-            walk_val(target, out);
-            for key in keys {
-                walk_val(&key.item, out);
+            CompKind::App { head, args } => {
+                head.mentions(out);
+                args.mentions(out);
             }
-        }
-        CompKind::Interpolation(vals) => {
-            for v in vals {
-                walk_val(v, out);
+            CompKind::Exec(exec) => {
+                exec.head.mentions(out);
+                exec.args.mentions(out);
+                exec.redirects.mentions(out);
             }
-        }
-        // Over-approximate on purpose: every member's names renew, not just
-        // the one this projection picks — the group is one unit at runtime.
-        CompKind::Rec { group, index: _ } => {
-            for (_name, m) in group.iter() {
-                walk_comp(m, out);
+            CompKind::Pipeline {
+                stages,
+                stage_types: _,
+                yields: _,
+            } => {
+                for stage in stages {
+                    stage.mentions(out);
+                }
             }
-        }
-        // No `Register` variant carries a name reference: the five
-        // pseudo-variables are computed, and a `~`-path names no variable.
-        CompKind::Observe(_) => {}
-        CompKind::If { cond, then, else_ } => {
-            walk_val(&cond.item, out);
-            walk_comp(then, out);
-            walk_comp(else_, out);
-        }
-        CompKind::Case { scrutinee, arms } => {
-            walk_val(&scrutinee.item, out);
-            for arm in arms {
-                walk_comp(arm.body.comp(), out);
+            CompKind::Binary(_op, a, b) => {
+                a.mentions(out);
+                b.mentions(out);
             }
-        }
-        CompKind::Try { body, handler } => {
-            walk_val(body, out);
-            walk_val(handler, out);
-        }
-        CompKind::Guard { body, cleanup } => {
-            walk_val(body, out);
-            walk_val(cleanup, out);
-        }
-        CompKind::Within {
-            opts,
-            handlers,
-            body,
-        } => {
-            walk_val(opts, out);
-            for arm in handlers.iter().flatten() {
-                walk_val(&arm.value.item, out);
+            CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
+                v.mentions(out);
             }
-            walk_val(body, out);
+            CompKind::Assemble(assembly) => assembly.mentions(out),
+            CompKind::Index { target, keys } => {
+                target.mentions(out);
+                for key in keys {
+                    key.item.mentions(out);
+                }
+            }
+            CompKind::Interpolation(vals) => {
+                for v in vals {
+                    v.mentions(out);
+                }
+            }
+            // The group is a nested node: its own occ, not a walk.
+            CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
+            // No `Register` variant carries a name reference: the five
+            // pseudo-variables are computed, and a `~`-path names no variable.
+            CompKind::Observe(_) => {}
+            CompKind::If { cond, then, else_ } => {
+                cond.item.mentions(out);
+                then.mentions(out);
+                else_.mentions(out);
+            }
+            CompKind::Case { scrutinee, arms } => {
+                scrutinee.item.mentions(out);
+                for arm in arms {
+                    arm.body.comp().mentions(out);
+                }
+            }
+            CompKind::Try { body, handler } => {
+                body.mentions(out);
+                handler.mentions(out);
+            }
+            CompKind::Guard { body, cleanup } => {
+                body.mentions(out);
+                cleanup.mentions(out);
+            }
+            CompKind::Within {
+                opts,
+                handlers,
+                body,
+            } => {
+                opts.mentions(out);
+                for arm in handlers.iter().flatten() {
+                    arm.value.item.mentions(out);
+                }
+                body.mentions(out);
+            }
+            CompKind::Grant { caps, body } => {
+                caps.mentions(out);
+                body.mentions(out);
+            }
+            CompKind::Audit { body } => body.mentions(out),
+            CompKind::Redirect { body, redirects } => {
+                body.mentions(out);
+                redirects.mentions(out);
+            }
+            CompKind::Decode(val) => val.mentions(out),
         }
-        CompKind::Grant { caps, body } => {
-            walk_val(caps, out);
-            walk_val(body, out);
-        }
-        CompKind::Audit { body } => walk_val(body, out),
-        CompKind::Redirect { body, redirects } => {
-            walk_comp(body, out);
-            walk_redirects(redirects, out);
-        }
-        CompKind::Capture(body) => walk_comp(body, out),
-        CompKind::Decode(val) => walk_val(val, out),
     }
 }
 
-fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
-    match val {
-        Val::Unit | Val::String(_) | Val::Int(_) | Val::Float(_) | Val::Bool(_) => {}
-        Val::Variable(name) => out.push(name.as_ref()),
-        Val::Thunk(comp) => walk_comp(comp, out),
-        Val::List(elems) => {
-            for elem in elems {
-                walk_val(&elem.item, out);
-            }
-        }
-        Val::Record(entries) | Val::Map(entries) => {
-            for (_, value) in entries {
-                walk_val(&value.item, out);
-            }
-        }
-        Val::Variant { label: _, payload } => {
-            if let Some(p) = payload {
-                walk_val(p, out);
+impl Mentions for Val {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        match self {
+            Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
+            Self::Variable(name) => out.push(name),
+            Self::Thunk(node) => out.extend(node.occ().names()),
+            Self::List(node) => out.extend(node.occ().names()),
+            Self::Record(node) | Self::Map(node) => out.extend(node.occ().names()),
+            Self::Variant { label: _, payload } => {
+                if let Some(p) = payload {
+                    p.mentions(out);
+                }
             }
         }
     }
 }
 
-fn walk_map_part<'a>(part: MapPart<'a>, out: &mut Vec<&'a str>) {
-    match part {
-        MapPart::Labelled(_, value) | MapPart::Spread(value) => walk_val(&value.item, out),
-        MapPart::Computed(key, value) => {
-            walk_val(key, out);
-            walk_val(&value.item, out);
-        }
-    }
-}
-
-fn walk_assembly<'a>(assembly: &'a Assembly, out: &mut Vec<&'a str>) {
-    match assembly {
-        Assembly::List(elems) => walk_args(elems, out),
-        Assembly::Record(entries) => {
-            for entry in entries {
-                walk_map_part(entry.part(), out);
-            }
-        }
-        Assembly::Map(entries) => {
-            for entry in entries {
-                walk_map_part(entry.part(), out);
+impl<'a> MapPart<'a> {
+    fn mentions(self, out: &mut Vec<&'a Name>) {
+        match self {
+            Self::Labelled(_, value) | Self::Spread(value) => value.item.mentions(out),
+            Self::Computed(key, value) => {
+                key.mentions(out);
+                value.item.mentions(out);
             }
         }
     }
 }
 
-fn walk_args<'a>(args: &'a Args, out: &mut Vec<&'a str>) {
-    for elem in args {
-        walk_val(&elem.slot().item, out);
+impl Mentions for Assembly {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        match self {
+            Self::List(elems) => elems.mentions(out),
+            Self::Record(entries) => {
+                for entry in entries {
+                    entry.part().mentions(out);
+                }
+            }
+            Self::Map(entries) => {
+                for entry in entries {
+                    entry.part().mentions(out);
+                }
+            }
+        }
+    }
+}
+
+impl Mentions for Args {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for elem in self {
+            elem.slot().item.mentions(out);
+        }
     }
 }
 
 /// Both dispatch forms contribute their head name.  A `^name` head can
 /// never reach a binding, so collecting it over-approximates — the same
 /// safe direction as an untaken branch.
-fn walk_command_word<'a>(word: &'a CommandWord, out: &mut Vec<&'a str>) {
-    if let CommandName::Bare(name) = word.name() {
-        out.push(name.as_ref());
+impl Mentions for CommandWord {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        if let CommandName::Bare(name) = self.name() {
+            out.push(name);
+        }
     }
 }
 
-fn walk_redirects<'a>(redirects: &'a [Redirect<Val>], out: &mut Vec<&'a str>) {
-    for v in redirects.iter().filter_map(Redirect::operand) {
-        walk_val(v, out);
+impl Mentions for Vec<Redirect<Val>> {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for v in self.iter().filter_map(Redirect::operand) {
+            v.mentions(out);
+        }
     }
 }
 
@@ -548,10 +674,7 @@ pub enum CompKind {
     Interpolation(Vec<Val>),
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
-    Rec {
-        group: Arc<[(Name, Arc<Comp>)]>,
-        index: usize,
-    },
+    Rec { group: Arc<GroupNode>, index: usize },
     /// A read of the store, in computation position: what `$CWD` and `~/x` are.
     Observe(Register),
     /// `if V then M else N` with `V : Bool` and `M, N : C`; the chosen
@@ -711,6 +834,18 @@ pub enum Register {
     Tilde(TildePath),
 }
 
+/// An `Occ` naming exactly `names`, for tests elsewhere in the crate that
+/// need one without elaborating a program: a list node's occ *is* its
+/// sorted, distinct set of mentioned variables.
+#[cfg(test)]
+pub(crate) fn test_occ(names: &[&str]) -> Occ {
+    let elems: Box<[Spanned<Val>]> = names
+        .iter()
+        .map(|n| Spanned::synthetic(Val::Variable(Arc::from(*n))))
+        .collect();
+    ListNode::new(elems).occ().clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,8 +950,8 @@ mod tests {
             var("r_interp_a"),
             var("r_interp_b"),
         ]));
-        let rec_group: Arc<[(Name, Arc<Comp>)]> =
-            Arc::from(vec![("rec_name_bound".into(), ret("r_rec_member"))]);
+        let rec_group: Arc<GroupNode> =
+            Node::new(vec![("rec_name_bound".into(), ret("r_rec_member"))].into());
         let rec = Spanned::synthetic(CompKind::Rec {
             group: rec_group,
             index: 0,
@@ -869,7 +1004,7 @@ mod tests {
                 var("r_scope_redirect_target"),
             )],
         });
-        let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
+        let val_list = Spanned::synthetic(CompKind::Return(Val::list(vec![
             Spanned::synthetic(Val::Unit),
             Spanned::synthetic(Val::String("s".into())),
             Spanned::synthetic(Val::Int(1)),
@@ -877,11 +1012,11 @@ mod tests {
             Spanned::synthetic(Val::Bool(true)),
             svar("r_list_single"),
         ])));
-        let val_record = Spanned::synthetic(CompKind::Return(Val::Record(vec![(
+        let val_record = Spanned::synthetic(CompKind::Return(Val::record(vec![(
             "lbl".into(),
             svar("r_record_value"),
         )])));
-        let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![(
+        let val_map = Spanned::synthetic(CompKind::Return(Val::map(vec![(
             "lbl".into(),
             svar("r_map_value"),
         )])));
@@ -905,7 +1040,7 @@ mod tests {
             label: "lbl_empty".into(),
             payload: None,
         }));
-        let val_thunk = Spanned::synthetic(CompKind::Return(Val::Thunk(Arc::new(
+        let val_thunk = Spanned::synthetic(CompKind::Return(Val::thunk(Arc::new(
             Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
         ))));
         let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
@@ -950,8 +1085,14 @@ mod tests {
             Arc::new(decode),
         ];
 
-        let found: std::collections::HashSet<&str> =
-            nodes.iter().flat_map(|c| referenced_names(c)).collect();
+        let found: std::collections::HashSet<&str> = nodes
+            .iter()
+            .flat_map(|c| {
+                let mut out = Vec::new();
+                c.mentions(&mut out);
+                out.into_iter().map(AsRef::as_ref).collect::<Vec<_>>()
+            })
+            .collect();
 
         let expected = [
             "r_force",
@@ -1032,5 +1173,41 @@ mod tests {
                 "a bound (not referenced) name leaked into the harvest: {bound}"
             );
         }
+    }
+
+    /// A thunk mentioning `b`, `a`, `b` and nesting a thunk over `c`, `a` has
+    /// occ `[a, b, c]`: sorted, distinct, and read off the inner node rather
+    /// than by re-walking its body.
+    #[test]
+    fn occ_is_sorted_distinct_and_nested_nodes_are_not_walked() {
+        let inner = Val::thunk(Arc::new(Spanned::synthetic(CompKind::Binary(
+            BinaryOp::Add,
+            var("c"),
+            var("a"),
+        ))));
+        let outer = ThunkNode::new(Arc::new(Spanned::synthetic(CompKind::Interpolation(vec![
+            var("b"),
+            var("a"),
+            var("b"),
+            inner,
+        ]))));
+        let occ = outer.occ();
+        assert_eq!(occ.len(), 3, "sorted and distinct: a, b, c");
+        for name in ["a", "b", "c"] {
+            assert!(occ.contains(name), "occ missing {name}");
+        }
+    }
+
+    /// A list node serialises to its shape alone, and decodes with the same
+    /// occ it was built with.
+    #[test]
+    fn a_node_crosses_the_wire_as_its_shape() {
+        let node = ListNode::new(vec![svar("a"), svar("a"), svar("b")].into());
+        let wire = serde_json::to_string(&node).expect("serialize node");
+        let shape_wire = serde_json::to_string(node.shape()).expect("serialize shape");
+        assert_eq!(wire, shape_wire, "the wire carries the shape alone");
+
+        let decoded: Arc<ListNode> = serde_json::from_str(&wire).expect("deserialize node");
+        assert_eq!(decoded.occ(), node.occ());
     }
 }

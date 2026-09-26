@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 117c514f
+generated_at_commit: 5652477a
 generated_at_date: 2026-09-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -86,11 +86,17 @@ Internals:
   [[design/types|types]]). `CompKind::Bind` swaps `shell.io.stdout` to the
   ambient sink before its left computation runs (`Frame::To` carries the prior
   sink to restore), so a `Capture` node one level in only ever drains its own
-  tail's bytes. `CompKind::Rec { group, index }` unfolds the n-ary recursive
-  group: every member's name binds to the thunk of its own projection, a
-  `Closure::new` over the forced closure's environment: a recursive
-  reference forces its name, re-entering `Rec` and re-extending from that
-  environment; a group of one is Levy's `rec f. M`.
+  tail's bytes. `CompKind::Rec { group: Arc<GroupNode>, index }` unfolds the
+  n-ary recursive group: `group.occ()` — the union of every member's
+  mentions, computed once when the elaborator built the node — restricts ρ
+  once, and every sibling's thunk shares that restricted ρ; the member in
+  focus binds to `comp` itself, `Arc::clone`d rather
+  than rebuilt, and the rest bind to a fresh `Rec` node over the same
+  `group`. A recursive reference forces its name, re-entering `Rec` over the
+  forced closure's own already-restricted environment, so `restrict` answers
+  the identity again and every later unfold shares that one root; a group of
+  one is Levy's `rec f. M` and binds its own member to the node already in
+  focus, allocating nothing.
   `CompKind::Assemble` is the one rule that does O(data) work over what looks
   like value syntax — a list/record/map literal with a spread or a computed
   key, dispatching to `assemble.rs`; a plain literal stays a `Return` and
@@ -143,7 +149,8 @@ Internals:
 - `val.rs` holds the side-effect-free `Val` layer: `close` forms a plain
   literal or a variant straight from its already-plain entries — no spread, no
   computed key, so no data-sized work — and its `Thunk` arm builds
-  `⟨M, ρ|occ(M)⟩` through `Closure::new`. `expr.rs` holds the primitive
+  `⟨M, ρ|occ(M)⟩` through `Closure::new`, reading `occ` off the `ThunkNode`
+  rather than walking `M`. `expr.rs` holds the primitive
   operators the elaborator's expression desugaring emits (`Negate` / `Not` /
   `Binary`) and value indexing (`Index`).
 - `assemble.rs` is the `CompKind::Assemble` rule: `eval_list` splices

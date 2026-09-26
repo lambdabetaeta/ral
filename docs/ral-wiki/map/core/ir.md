@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 640fb150
+generated_at_commit: 5652477a
 generated_at_date: 2026-09-26
 covers_paths: [core/src/ir.rs]
 ---
@@ -23,11 +23,25 @@ The two categories:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
   maps, variants, thunks, variables. A value can never diverge or perform I/O,
-  and forming one costs O(text), never O(data): `Val::List(Vec<Spanned<Val>>)`,
-  `Val::Record`, and `Val::Map` (each `Vec<(Name, Spanned<Val>)>`, sorted by
-  key, stably, at elaboration) hold only a **plain** literal — no spread, no
-  computed key. `Val` itself stays unspanned; every position onto which the
-  checker narrows while emitting a constraint carries `Spanned<Val>`.
+  and forming one costs O(text), never O(data): `Val::Thunk(Arc<ThunkNode>)`,
+  `Val::List(Arc<ListNode>)`, `Val::Record`, and `Val::Map` (each
+  `Arc<FieldsNode>`, entries sorted by key, stably, at elaboration) hold only a
+  **plain** literal — no spread, no computed key. `Val` itself stays
+  unspanned; every position onto which the checker narrows while emitting a
+  constraint carries `Spanned<Val>`.
+- `Node<S> { shape: S, occ: Occ }` is IR that closes: a shape plus what it
+  mentions, computed once, where the node is built. `Node::new(shape)` walks
+  `shape` through `Mentions`, sorts and dedups the names into `Occ`, and hands
+  back the `Arc<Self>` every holder shares; `shape()` lends the shape back,
+  `occ()` (`pub(crate)`) the occ. `ThunkNode = Node<Arc<Comp>>`, `GroupNode =
+  Node<Box<[(Name, Arc<Comp>)]>>`, `ListNode = Node<Box<[Spanned<Val>]>>`,
+  `FieldsNode = Node<Box<[(Name, Spanned<Val>)]>>`. `PartialEq` compares
+  shapes; serde carries the shape alone (`Node::from`/`Into` the shape), so
+  decoding a node off the wire recomputes its occ rather than trusting one
+  that rode along — `Val`'s own tests (T4) check a node crosses as its shape.
+- `Occ(Arc<[Name]>)` is a node's mentioned names, sorted and distinct by
+  construction — built only inside `Node::new`. `len` and `contains` (binary
+  search) are its whole `pub(crate)` surface; a lookup by name never scans.
 - `Name = Arc<str>` is every identifier the IR binds or mentions:
   `Val::Variable`, a variant's label, the pattern's names (the syntax's own
   `Pattern`, since `IrPattern = Pattern`), a `Rec` group's members,
@@ -88,15 +102,19 @@ representable state.
   `decode` takes a value, so it reads a bound variable rather than nesting a
   `Comp`. Neither has surface syntax; [[map/core/typecheck|typecheck]]'s
   `annotate` pass composes them as `Capture(body) to x. Decode(x)` by demand
-  propagation, and `referenced_names`'s walk descends into the `Capture` and
+  propagation, and `Mentions`' walk descends into the `Capture` and
   the `Bind`. The reading is a node and not a command so that its meaning is
   fixed where the checker writes it
   ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
 
-- `CompKind::Rec { group, index }` is the `index`-th member of a recursive
-  group — `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, typed `Cᵢₙdₑₓ` — an n-ary generalisation of
-  Levy's `rec x. M`, which is a group of one.
+- `CompKind::Rec { group: Arc<GroupNode>, index }` is the `index`-th member of
+  a recursive group — `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, typed `Cᵢₙdₑₓ` — an n-ary
+  generalisation of Levy's `rec x. M`, which is a group of one. `group`'s occ
+  is the union of every member's mentions, computed once when the elaborator
+  builds the `GroupNode`; every `Rec` projection of one group shares that one
+  `Arc`, and `annotate` (`typecheck/annotate.rs`) preserves the sharing by
+  memoizing its rebuild per source `Arc`'s identity.
 
 The route types live in `core/src/typecheck/route.rs`, a private module of the
 checker, and no name from them is reachable from `ir`, `evaluator`, or
@@ -116,13 +134,19 @@ own name: a pattern binds names, never carries a computation, so there is no
 parser syntax for elaboration to strip out
 ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
 
-`referenced_names` (`pub(crate)`) collects every name a computation mentions,
-bound or free — variables and command heads — in one exhaustive,
-wildcard-free walk: the use-observation signal the
+`Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
+node shapes implement: `fn mentions(&self, out: &mut Vec<&Name>)`, one
+exhaustive, wildcard-free arm per variant. `Node::new` runs it once, over the
+shape it is building, to compute that node's own `Occ`; a nested node's
+`mentions` contributes its already-computed occ rather than being walked
+again, so occ for a whole program is linear in program text. `Toplevel::
+referenced_names` (`pub(crate)`) is the same walk, run over a phrase's `Comp`
+top to bottom: the use-observation signal the
 [[map/core/shell-state|binding-lease ledger]] renews on
-([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]), and the
-set a closure over it keeps (`Closure::new`,
-[[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]). What a
+closure keeps is no longer a walk of its own: `Closure::new` reads the occ
+already sitting on the node that owns its body
+([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to
 `CompKind`, `Val`, or `Pattern` invalidates every emitted blob (see

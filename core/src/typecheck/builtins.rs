@@ -994,7 +994,7 @@ pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     };
     matches!(
         positional.first(),
-        Some(crate::ir::Val::Record(entries)) if entries.iter().any(|(k, v)| {
+        Some(crate::ir::Val::Record(entries)) if entries.shape().iter().any(|(k, v)| {
             k.as_ref() == "status" && matches!(v.item, crate::ir::Val::Int(0))
         })
     )

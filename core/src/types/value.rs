@@ -361,14 +361,15 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
 /// itself.
 #[cfg(test)]
 pub(crate) fn block_over(env: &Env) -> Value {
-    use crate::ir::{CompKind, Val};
+    use crate::ir::{CompKind, ThunkNode, Val};
     use crate::source::Spanned;
     let names = env
         .session_names()
         .map(|n| Spanned::synthetic(Val::Variable(n.into())))
-        .collect();
-    let body = Spanned::synthetic(CompKind::Return(Val::List(names)));
-    Value::Thunk(Closure::new(Arc::new(body), env))
+        .collect::<Vec<_>>();
+    let body = Spanned::synthetic(CompKind::Return(Val::list(names)));
+    let node = ThunkNode::new(Arc::new(body));
+    Value::Thunk(Closure::new(Arc::clone(node.shape()), node.occ(), env))
 }
 
 /// The scope a block `v` captured.
@@ -389,6 +390,7 @@ pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
     let body = Arc::new(crate::source::Spanned::synthetic(
         crate::ir::CompKind::Return(crate::ir::Val::Variable("tail".into())),
     ));
+    let node = crate::ir::ThunkNode::new(Arc::clone(&body));
     let mut v = foot;
     for _ in 0..n {
         let mut env = Env::new();
@@ -399,7 +401,7 @@ pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
                 scheme: None,
             },
         );
-        v = Value::Thunk(Closure::new(Arc::clone(&body), &env));
+        v = Value::Thunk(Closure::new(Arc::clone(&body), node.occ(), &env));
     }
     v
 }

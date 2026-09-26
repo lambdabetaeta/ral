@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
-use crate::ir::{Args, CaseArm, Comp, CompKind, Name, Val, ValListElem};
+use crate::ir::{Args, CaseArm, Comp, CompKind, GroupNode, Val, ValListElem};
 use crate::path::sigil::FreezeCtx;
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
@@ -211,9 +211,9 @@ fn capture_overflowed() -> Error {
     .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
 }
 
-fn rec_node(group: &Arc<[(Name, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
+fn rec_node(group: &Arc<GroupNode>, index: usize) -> Arc<Comp> {
     Arc::new(crate::source::Spanned::synthetic(CompKind::Rec {
-        group: group.clone(),
+        group: Arc::clone(group),
         index,
     }))
 }
@@ -496,18 +496,26 @@ impl Machine {
 
             CompKind::Rec { group, index } => {
                 crate::process::check(mooring)?;
-                let mut env2 = env.clone();
-                for (j, (name, _)) in group.iter().enumerate() {
-                    env2.bind(
+                // ρ|occ(g), computed once: the identity after the first unfold.
+                let restricted = env.restrict(group.occ());
+                let mut env2 = restricted.clone();
+                env2.extend(group.shape().iter().enumerate().map(|(j, (name, _))| {
+                    // The focused member's thunk is `comp` itself, no allocation.
+                    let thunk_comp = if j == *index {
+                        Arc::clone(comp)
+                    } else {
+                        rec_node(group, j)
+                    };
+                    (
                         name.clone(),
                         Binding {
-                            value: Value::Thunk(Closure::new(rec_node(group, j), &env)),
+                            value: Value::Thunk(Closure::captured(thunk_comp, restricted.clone())),
                             scheme: None,
                         },
-                    );
-                }
+                    )
+                }));
                 Focus::Eval {
-                    comp: Arc::clone(&group[*index].1),
+                    comp: Arc::clone(&group.shape()[*index].1),
                     env: env2,
                 }
             }
@@ -515,8 +523,8 @@ impl Machine {
             CompKind::Observe(reg) => Focus::Return(Terminal::Value(observe::observe(reg, shell)?)),
 
             // force(thunk M) = M: a literal block runs in place, closing nothing.
-            CompKind::Force(Val::Thunk(comp)) => Focus::Eval {
-                comp: Arc::clone(comp),
+            CompKind::Force(Val::Thunk(node)) => Focus::Eval {
+                comp: Arc::clone(node.shape()),
                 env,
             },
 
@@ -1170,7 +1178,7 @@ pub(crate) fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<V
 mod tests {
     use super::*;
     use crate::evaluator::{run_source, with_capture};
-    use crate::ir::Phrase;
+    use crate::ir::{Name, Phrase};
     use crate::source::{FileId, Spanned};
     use crate::types::{Break, captured};
 
@@ -1348,6 +1356,90 @@ mod tests {
         assert!(
             matches!(out, Value::Bool(true)),
             "expected true, got {out:?}"
+        );
+    }
+
+    /// The `Rec` rule reuses ρ|occ(g): forcing a sibling from one unfold and
+    /// unfolding again from its own environment yields new siblings whose
+    /// environment is the same root, `ptr_eq`, as the one that forced them —
+    /// `restrict` recognises it need not rebuild. A group of one binds its
+    /// own member to the node already in focus, no allocation.
+    #[test]
+    fn a_recursive_call_reuses_its_node_and_its_environment() {
+        let mut shell = new_shell();
+        let mooring = Mooring::adrift();
+        shell.env.bind(
+            "k".into(),
+            Binding {
+                value: Value::Int(1),
+                scheme: None,
+            },
+        );
+
+        // `even`/`odd`, both closing over the session `k`: occ(g) = {k}.
+        let even_body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
+            "k".into(),
+        ))));
+        let odd_body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
+            "k".into(),
+        ))));
+        let group = GroupNode::new(Box::from([
+            (Name::from("even"), even_body),
+            (Name::from("odd"), odd_body),
+        ]));
+        let rec_even = Arc::new(Spanned::synthetic(CompKind::Rec {
+            group: Arc::clone(&group),
+            index: 0,
+        }));
+
+        let mut machine = Machine::default();
+        let Focus::Eval { env: env1, .. } = machine
+            .eval_rules(&rec_even, shell.env.clone(), &mooring, &mut shell)
+            .expect("first unfold")
+        else {
+            panic!("expected an Eval focus");
+        };
+        let Value::Thunk(odd1) = env1.get("odd").cloned().expect("odd bound") else {
+            panic!("odd must be a thunk");
+        };
+        let forced_env = odd1.env().clone();
+
+        let Focus::Eval { env: env2, .. } = machine
+            .eval_rules(odd1.comp(), forced_env.clone(), &mooring, &mut shell)
+            .expect("second unfold")
+        else {
+            panic!("expected an Eval focus");
+        };
+        let Value::Thunk(even2) = env2.get("even").cloned().expect("even bound") else {
+            panic!("even must be a thunk");
+        };
+        assert!(
+            even2
+                .env()
+                .bindings_root()
+                .ptr_eq(forced_env.bindings_root()),
+            "a later unfold's siblings hold the environment that forced it, unchanged"
+        );
+
+        // A group of one: its own member is the node already in focus.
+        let self_body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit)));
+        let solo = GroupNode::new(Box::from([(Name::from("f"), self_body)]));
+        let rec_solo = Arc::new(Spanned::synthetic(CompKind::Rec {
+            group: Arc::clone(&solo),
+            index: 0,
+        }));
+        let Focus::Eval { env: solo_env, .. } = machine
+            .eval_rules(&rec_solo, shell.env.clone(), &mooring, &mut shell)
+            .expect("solo unfold")
+        else {
+            panic!("expected an Eval focus");
+        };
+        let Value::Thunk(solo_closure) = solo_env.get("f").cloned().expect("f bound") else {
+            panic!("f must be a thunk");
+        };
+        assert!(
+            Arc::ptr_eq(solo_closure.comp(), &rec_solo),
+            "a group of one's own member is the node already in focus"
         );
     }
 

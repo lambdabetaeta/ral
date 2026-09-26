@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 117c514f
+verified_at_commit: 5652477a
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -34,15 +34,17 @@ reads it inline in `step_eval`, and the checker reaches it through a bind
 over `Capture` rather than nesting the two.
 
 **One thunk value.** `Value::Thunk(Closure)` is `⟨M, ρ|occ(M)⟩`, built only
-by `Closure::new`, which `restrict`s the environment to the names `M`
-mentions — the lease harvest's walk
+by `Closure::new`, which `restrict`s the environment to `occ`, read off the
+`ThunkNode` that owns `M` (`Val::Thunk(Arc<ThunkNode>)`) — occ(M) is
+computed once, by `Node::new`, where the node is built, not walked at every
+capture
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 `force` of it puts its computation and environment in focus and pushes
 nothing, so `force(thunk M) = M` and a forced block's `cd` persists exactly
 as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
-that equation as a rule (U-β): `Force(Thunk M)` puts `M` in focus under the
-current environment, closing nothing. Whether a thunk "is a lambda" is
-read off the body's shape by `Comp::arrow`, never stored.
+that equation as a rule (U-β): `Force(Val::Thunk(node))` puts `node.shape()`
+in focus under the current environment, closing nothing. Whether a thunk "is
+a lambda" is read off the body's shape by `Comp::arrow`, never stored.
 
 **`step` is the tables.** `Machine::step` dispatches on the focus:
 `eval_rules` has one match arm per `CompKind` (the ξ-rules: `Return` closes
@@ -96,14 +98,19 @@ default 100 000 frames, the `--recursion-limit` knob — and every pushing rule
 calls it *before* any effect (sink swap, redirect entry, grant push), so a
 refused push leaks nothing; `push` itself cannot fail.
 
-**Recursion is `rec`, n-ary.** `Rec { group, index }` binds every member's
-name to the thunk of its own projection and runs the chosen member; a
-recursive reference forces its name, which re-enters `Rec` and re-extends
-from the forced closure's environment. That environment is already scrubbed
-for the whole group, so every sibling's `Closure::new` is the identity and
-shares its root. Bodies are never rewritten; a group of one is Levy's
-`rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec` advance
-and β, so `let f = { !f }; !f` is interruptible.
+**Recursion is `rec`, n-ary.** `Rec { group: Arc<GroupNode>, index }` reads
+occ(g) off `group` — computed once, at the node's build, over every member's
+body — and restricts ρ to it: one `restrict` call, whose result every sibling's
+thunk shares in this unfold. The member in focus binds to `comp` itself,
+`Arc::clone`d, not rebuilt; every other member's thunk is a fresh `Rec` node
+over the same `group` (`rec_node`). The n bindings go into ρ|occ(g) with one
+`Env::extend`. A recursive reference forces its name, which re-enters `Rec`
+over the forced closure's own environment — already ρ|occ(g), so `restrict`
+answers the identity and every later unfold shares that one root. Bodies are
+never rewritten; a group of one is Levy's `rec f. M`, and binds its own
+member to the node already in focus, allocating nothing. Cancellation is
+polled here and at `Bind`, `App`, `Exec` advance and β, so `let f = { !f };
+!f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
 (`core/src/types/env.rs`) is three tiers — the language natives, the frozen

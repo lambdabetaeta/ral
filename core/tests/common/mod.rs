@@ -78,11 +78,11 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         CompKind::Case { arms, .. } => arms
             .iter()
             .for_each(|arm| sub(ral_core::test_access::case_arm_comp(arm))),
-        CompKind::Rec { group, .. } => group.iter().for_each(|(_, m)| sub(m)),
-        CompKind::Force(Val::Thunk(c))
-        | CompKind::Return(Val::Thunk(c))
-        | CompKind::Capture(c)
-        | CompKind::Redirect { body: c, .. } => walk_comp(c, visit),
+        CompKind::Rec { group, .. } => group.shape().iter().for_each(|(_, m)| sub(m)),
+        CompKind::Force(Val::Thunk(node)) | CompKind::Return(Val::Thunk(node)) => {
+            walk_comp(node.shape(), visit);
+        }
+        CompKind::Capture(c) | CompKind::Redirect { body: c, .. } => walk_comp(c, visit),
         CompKind::Try {
             body: a,
             handler: b,
@@ -113,7 +113,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
 }
 
 fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
-    if let ral_core::ir::Val::Thunk(c) = val {
-        walk_comp(c, visit);
+    if let ral_core::ir::Val::Thunk(node) = val {
+        walk_comp(node.shape(), visit);
     }
 }

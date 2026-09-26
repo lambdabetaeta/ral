@@ -530,10 +530,9 @@ impl FOValue<SerialClosure> {
                     None => None,
                 },
             },
-            Self::Ext(SerialClosure::Thunk(thunk)) => Value::Thunk(crate::types::Closure::new(
-                thunk.comp,
-                &thunk.env.into_runtime(dec)?,
-            )),
+            Self::Ext(SerialClosure::Thunk(thunk)) => Value::Thunk(
+                crate::types::Closure::captured(thunk.comp, thunk.env.into_runtime(dec)?),
+            ),
             Self::Ext(SerialClosure::Native(n)) => {
                 // The value half only: no `Value::Native` was ever built from
                 // a base frame, so a wire name that reaches one is not a
@@ -786,9 +785,9 @@ mod tests {
             CompKind::If { then, else_, .. } => {
                 find_lam_node(then).or_else(|| find_lam_node(else_))
             }
-            CompKind::Force(crate::ir::Val::Thunk(c))
-            | CompKind::Return(crate::ir::Val::Thunk(c))
-            | CompKind::Capture(c) => find_lam_node(c),
+            CompKind::Force(crate::ir::Val::Thunk(node))
+            | CompKind::Return(crate::ir::Val::Thunk(node)) => find_lam_node(node.shape()),
+            CompKind::Capture(c) => find_lam_node(c),
             _ => None,
         }
     }
@@ -812,9 +811,9 @@ mod tests {
                 sub(then);
                 sub(else_);
             }
-            CompKind::Force(crate::ir::Val::Thunk(c))
-            | CompKind::Return(crate::ir::Val::Thunk(c))
-            | CompKind::Capture(c) => walk_comp(c, visit),
+            CompKind::Force(crate::ir::Val::Thunk(node))
+            | CompKind::Return(crate::ir::Val::Thunk(node)) => walk_comp(node.shape(), visit),
+            CompKind::Capture(c) => walk_comp(c, visit),
             _ => {}
         }
     }

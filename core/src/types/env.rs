@@ -5,7 +5,7 @@
 //!
 //! [`Context`]: super::shell::Context
 
-use crate::ir::Name;
+use crate::ir::{Name, Occ};
 use crate::typecheck::Scheme;
 use crate::types::Value;
 use rustc_hash::FxBuildHasher;
@@ -134,22 +134,23 @@ impl Env {
         self.bindings.keys().map(AsRef::as_ref)
     }
 
-    /// `self` with its session tier narrowed to `names`, repeats welcome.  The
-    /// two constant tiers stay whole: a name they answer is not in the session
-    /// tier and is not copied.  Narrowing that drops nothing is the identity,
-    /// root included.
-    pub(crate) fn restrict<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
-        let bindings: BindingMap = names
-            .into_iter()
+    /// `self` with its session tier narrowed to `occ`.  The two constant
+    /// tiers stay whole: a name they answer is not in the session tier and is
+    /// not copied.  Tested identity first: if `occ` covers every session
+    /// name, `self` is returned unchanged, the same root — sound because an
+    /// [`Occ`] is distinct by construction.
+    pub(crate) fn restrict(&self, occ: &Occ) -> Self {
+        if occ.len() >= self.bindings.len() && self.bindings.keys().all(|name| occ.contains(name)) {
+            return self.clone();
+        }
+        let bindings: BindingMap = occ
+            .names()
             .filter_map(|n| {
                 self.bindings
                     .get_key_value(n)
                     .map(|(k, b)| (k.clone(), b.clone()))
             })
             .collect();
-        if bindings.len() == self.bindings.len() {
-            return self.clone();
-        }
         Self {
             natives: Arc::clone(&self.natives),
             prelude: Arc::clone(&self.prelude),
@@ -162,6 +163,14 @@ impl Env {
     /// unaffected.
     pub(crate) fn bind(&mut self, name: Name, binding: Binding) {
         self.bindings.insert(name, binding);
+    }
+
+    /// Bind every entry in one pass — a pattern's names, or a `Rec` group's
+    /// members.
+    pub(crate) fn extend(&mut self, entries: impl ExactSizeIterator<Item = (Name, Binding)>) {
+        for (name, binding) in entries {
+            self.bindings.insert(name, binding);
+        }
     }
 
     /// Remove `name` from the session tier, returning its value; a prelude
@@ -448,7 +457,7 @@ mod tests {
             env.bind(name.into(), binding(Value::Int(n)));
         }
 
-        let narrow = env.restrict(["a", "map", "zzz", "a"]);
+        let narrow = env.restrict(&crate::ir::test_occ(&["a", "map", "zzz", "a"]));
         assert!(narrow.session_binding("a").is_some());
         assert!(narrow.session_binding("b").is_none());
         assert_eq!(
@@ -459,14 +468,15 @@ mod tests {
         assert!(narrow.get("zzz").is_none());
         assert!(Arc::ptr_eq(&narrow.prelude_arc(), &env.prelude_arc()));
 
+        let empty = crate::ir::test_occ(&[]);
         assert!(
-            env.restrict([])
+            env.restrict(&empty)
                 .bindings_root()
-                .ptr_eq(env.restrict([]).bindings_root()),
+                .ptr_eq(env.restrict(&empty).bindings_root()),
             "every empty capture shares one root"
         );
         assert!(
-            env.restrict(["a", "b", "map", "a"])
+            env.restrict(&crate::ir::test_occ(&["a", "b", "map", "a"]))
                 .bindings_root()
                 .ptr_eq(env.bindings_root()),
             "narrowing that drops nothing is the identity, repeats or not"

@@ -9,8 +9,8 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, Field, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
-    ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, IrPattern,
-    Name, Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, GroupNode,
+    IrPattern, Name, Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -157,7 +157,7 @@ fn alias_statement_shape(part: &Comp) -> Result<Option<(&str, &Arc<Comp>)>, &'st
     let [Val::String(name), Val::Thunk(thunk)] = positional[..] else {
         return Err("alias: expected `alias name { body }`");
     };
-    Ok(Some((name.as_str(), thunk)))
+    Ok(Some((name.as_str(), thunk.shape())))
 }
 
 fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
@@ -621,7 +621,7 @@ impl Inferencer<'_> {
         for (body, body_ty, pos) in bodies {
             self.with_span(pos, |this| {
                 let inferred = this.without_command_head_reason(|this| {
-                    this.with_scope(|this| this.check_comp(&body, &body_ty))
+                    this.with_scope(|this| this.check_comp(body.shape(), &body_ty))
                 });
                 this.ctx
                     .unify_comp_ty(&inferred, &body_ty, Reason::Argument);
@@ -759,7 +759,7 @@ impl Inferencer<'_> {
     /// body.
     pub(super) fn handler_arm_scheme(&mut self, name: &str, arm: &Val) -> Scheme {
         match arm {
-            Val::Thunk(comp) => self.handler_comp_scheme(name, comp),
+            Val::Thunk(comp) => self.handler_comp_scheme(name, comp.shape()),
             value => {
                 let ty = self.infer_val(value);
                 let cty = self.ctx.unifier.fresh_comp_ty();
@@ -1255,7 +1255,7 @@ impl Inferencer<'_> {
     /// a bound arm cannot have, and the option row is what it gains instead.
     pub(super) fn infer_options_val(&mut self, opts: &Val) -> Ty {
         match opts {
-            Val::Record(entries) => self.infer_record_val(entries, Some("handler")),
+            Val::Record(entries) => self.infer_record_val(entries.shape(), Some("handler")),
             other => self.infer_val(other),
         }
     }
@@ -1303,7 +1303,7 @@ impl Inferencer<'_> {
             let duplicate = this.diagnose_if_duplicate(key, fields.iter().map(|(k, _)| k.as_str()));
             let ty = match (&value.item, arm) {
                 (Val::Thunk(comp), Some(arm)) if arm == key => {
-                    Ty::Thunk(Box::new(this.infer_catch_all(comp)))
+                    Ty::Thunk(Box::new(this.infer_catch_all(comp.shape())))
                 }
                 _ => this.infer_val(&value.item),
             };
@@ -1523,17 +1523,17 @@ impl Inferencer<'_> {
                 }
             }
             Val::Thunk(comp) => Ty::Thunk(Box::new(self.without_command_head_reason(|this| {
-                this.with_scope(|this| this.infer_comp(comp))
+                this.with_scope(|this| this.infer_comp(comp.shape()))
             }))),
             Val::List(elems) => {
                 let elem = self.ctx.unifier.fresh_ty();
-                for entry in elems {
+                for entry in elems.shape() {
                     self.infer_list_entry(entry, false, &elem);
                 }
                 Ty::List(Box::new(elem))
             }
-            Val::Record(entries) => self.infer_record_val(entries, None),
-            Val::Map(entries) => self.infer_map_val(entries),
+            Val::Record(entries) => self.infer_record_val(entries.shape(), None),
+            Val::Map(entries) => self.infer_map_val(entries.shape()),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.
                 let payload_ty = match payload {
@@ -1829,28 +1829,29 @@ impl Inferencer<'_> {
     /// the `index`-th member's type — memoized in `ctx.rec_groups` per
     /// `Arc` identity, so a group is inferred once within a run however many
     /// of its members are projected.
-    fn infer_rec(&mut self, group: &Arc<[(Name, Arc<Comp>)]>, index: usize) -> CompTy {
+    fn infer_rec(&mut self, group: &Arc<GroupNode>, index: usize) -> CompTy {
         let key = Arc::as_ptr(group).cast::<()>();
         if let Some(betas) = self.ctx.rec_groups.get(&key) {
             return betas[index].clone();
         }
+        let members = group.shape();
 
-        let betas: Vec<CompTy> = group
+        let betas: Vec<CompTy> = members
             .iter()
             .map(|_| self.ctx.unifier.fresh_comp_ty())
             .collect();
 
-        for ((name, _), beta) in group.iter().zip(betas.iter()) {
+        for ((name, _), beta) in members.iter().zip(betas.iter()) {
             self.env.bind(
                 name.to_string(),
                 Scheme::mono(Ty::Thunk(Box::new(beta.clone()))),
             );
         }
-        for ((_, member), beta) in group.iter().zip(betas.iter()) {
+        for ((_, member), beta) in members.iter().zip(betas.iter()) {
             let member_ty = self.infer_comp(member);
             self.ctx.unify_comp_ty(&member_ty, beta, Reason::LetRecSelf);
         }
-        for (name, _) in group.iter() {
+        for (name, _) in members {
             self.env.unbind(name);
         }
         self.ctx.rec_groups.insert(key, betas.clone());

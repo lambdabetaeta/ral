@@ -313,7 +313,7 @@ mod tests {
         };
         let mut shell = Shell::default();
         let _ = machine::evaluate(
-            body.clone(),
+            Arc::clone(body.shape()),
             shell.env.clone(),
             &Mooring::adrift(),
             &mut shell,

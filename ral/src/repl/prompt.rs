@@ -27,12 +27,9 @@ pub(crate) fn install_default_prompt(shell: &mut Shell) {
     if shell.has_hook(&name) {
         return;
     }
-    let block = Value::Thunk(Closure::new(
-        Arc::new(ral_core::source::Spanned::synthetic(
-            ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
-        )),
-        &ral_core::types::Env::default(),
-    ));
+    let block = Value::Thunk(Closure::closed(ral_core::source::Spanned::synthetic(
+        ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
+    )));
     let _ = shell.register_hook(
         name,
         block,

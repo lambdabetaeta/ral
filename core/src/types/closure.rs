@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use crate::ir::{Comp, referenced_names};
+use crate::ir::{Comp, Occ};
 
 use super::env::Env;
 
 /// A thunk value: `⟨M, ρ⟩` with `ρ` scrubbed of every name `M` does not
-/// mention.  The fields are private and `new` is the only constructor, so
-/// every thunk value is scrubbed.
+/// mention.  The fields are private, so every thunk value is scrubbed by one
+/// of the constructors below.
 #[derive(Debug, Clone)]
 pub struct Closure {
     comp: Arc<Comp>,
@@ -17,8 +17,26 @@ pub struct Closure {
 }
 
 impl Closure {
-    pub fn new(comp: Arc<Comp>, env: &Env) -> Self {
-        let env = env.restrict(referenced_names(&comp));
+    /// Restricts `env` to `occ`, the occ of the node that owns `comp` — a
+    /// `ThunkNode`'s for `force`, a `GroupNode`'s for the `Rec` rule.
+    pub(crate) fn new(comp: Arc<Comp>, occ: &Occ, env: &Env) -> Self {
+        Self {
+            comp,
+            env: env.restrict(occ),
+        }
+    }
+
+    /// A closure over a closed body: the one constructor for hosts building
+    /// a hook with no capture of its own.
+    pub fn closed(comp: Comp) -> Self {
+        Self {
+            comp: Arc::new(comp),
+            env: Env::new(),
+        }
+    }
+
+    /// Over an `env` already restricted to what `comp` mentions.
+    pub(crate) fn captured(comp: Arc<Comp>, env: Env) -> Self {
         Self { comp, env }
     }
 
@@ -69,11 +87,12 @@ mod tests {
         let comp = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
             "a".into(),
         ))));
-        let closure = Closure::new(comp, &env);
+        let node = crate::ir::ThunkNode::new(Arc::clone(&comp));
+        let closure = Closure::new(comp, node.occ(), &env);
         assert!(closure.env().session_binding("a").is_some());
         assert!(closure.env().session_binding("b").is_none());
 
-        let again = Closure::new(Arc::clone(closure.comp()), closure.env());
+        let again = Closure::new(Arc::clone(closure.comp()), node.occ(), closure.env());
         assert!(
             again
                 .env()

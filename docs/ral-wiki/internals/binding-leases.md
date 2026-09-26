@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2ded530f
+verified_at_commit: 5652477a
 verified_at_date: 2026-09-26
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -36,11 +36,15 @@ The ledger ticks once per committed source-door run — in exarch, exactly once
 per `ral` tool call. No wall clock anywhere: a quiet weekend ages nothing.
 
 Use is read off the program text, never off the running lookup path. When a
-run compiles, an exhaustive walk over its typed IR (`ir::referenced_names`)
-collects every variable occurrence and command-head name and renews those
-entries; the same harvest runs when `use` (or a host loader) compiles code
-mid-run. The same walk also defines a closure's capture: `Closure::new` keeps
-exactly the names it finds
+run compiles, `Toplevel::referenced_names` collects every variable occurrence
+and command-head name and renews those entries; the same harvest runs when
+`use` (or a host loader) compiles code mid-run. It is the same `Mentions`
+walk a node's own occ is built from ([[map/core/ir|ir]]): a nested `Thunk`,
+list, record, map, or `Rec` group contributes its own already-computed occ
+rather than being walked again, so the harvest, like occ itself, is linear in
+the program's size and a stored body's names are counted once, at the run
+that compiled it, not on every later call. `Closure::new` keeps exactly what
+that occ names
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Nothing renews at dispatch: a bare head can only resolve to a
 binding the elaborator already saw — prelude, session, and lexical names are
 all in its bound set, and nothing installs into a running environment behind

@@ -12,8 +12,8 @@
 use super::env::InferCtx;
 use super::ty::GroundRoute;
 use crate::ir::{
-    Args, Assembly, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Name,
-    Phrase, PipeYield, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    Args, Assembly, CaseArm, Comp, CompKind, DefineSchemes, Exec, GroupNode, HandlerArmV,
+    IrPattern, Name, Phrase, PipeYield, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -51,6 +51,31 @@ fn comp_key(comp: &Comp) -> usize {
 
 fn val_key(val: &Val) -> usize {
     std::ptr::from_ref::<Val>(val) as usize
+}
+
+/// Rebuild `group`, memoized by its source `Arc`'s identity: every `Rec`
+/// projection of one group is walked here once, so all of them keep sharing
+/// one rebuilt node, as the elaborator built them.
+fn annotate_rec_group(group: &Arc<GroupNode>, ctx: &mut InferCtx, eta: bool) -> Arc<GroupNode> {
+    let key = Arc::as_ptr(group).cast::<()>();
+    if let Some(rebuilt) = ctx.rec_group_rebuilds.get(&key) {
+        return Arc::clone(rebuilt);
+    }
+    let rebuilt = GroupNode::new(
+        group
+            .shape()
+            .iter()
+            .map(|(name, m)| {
+                (
+                    name.clone(),
+                    Arc::new(annotate_demand(m, ctx, eta, Demand::Discard)),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    ctx.rec_group_rebuilds.insert(key, Arc::clone(&rebuilt));
+    rebuilt
 }
 
 /// Does `key`'s recorded result ground `Bytes`? Absent or still-unresolved
@@ -164,7 +189,7 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
             )
         },
     );
-    Spanned::with_span(span, CompKind::Return(Val::Thunk(Arc::new(body))))
+    Spanned::with_span(span, CompKind::Return(Val::thunk(Arc::new(body))))
 }
 
 fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
@@ -191,8 +216,11 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
             return Spanned::with_span(comp.span, item);
         }
         CompKind::Force(Val::Thunk(inner)) => {
-            let item = CompKind::Force(Val::Thunk(Arc::new(annotate_demand(
-                inner, ctx, eta, demand,
+            let item = CompKind::Force(Val::thunk(Arc::new(annotate_demand(
+                inner.shape(),
+                ctx,
+                eta,
+                demand,
             ))));
             return Spanned::with_span(comp.span, item);
         }
@@ -315,17 +343,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
             CompKind::Interpolation(parts.iter().map(|v| annotate_val(v, ctx)).collect())
         }
         CompKind::Rec { group, index } => CompKind::Rec {
-            group: Arc::from(
-                group
-                    .iter()
-                    .map(|(name, m)| {
-                        (
-                            name.clone(),
-                            Arc::new(annotate_demand(m, ctx, eta, Demand::Discard)),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            group: annotate_rec_group(group, ctx, eta),
             index: *index,
         },
         CompKind::Observe(reg) => CompKind::Observe(reg.clone()),
@@ -388,10 +406,10 @@ fn annotate_scope_val(
     match walk {
         ArmWalk::Plain => annotate_val(val, ctx),
         ArmWalk::Descend | ArmWalk::Wrap => match val {
-            Val::Thunk(inner) if !handler => Val::Thunk(arm_body(inner, ctx, walk)),
-            Val::Thunk(inner) => match &inner.item {
-                CompKind::Lam { param, body } => Val::Thunk(Arc::new(Spanned::with_span(
-                    inner.span,
+            Val::Thunk(inner) if !handler => Val::thunk(arm_body(inner.shape(), ctx, walk)),
+            Val::Thunk(inner) => match &inner.shape().item {
+                CompKind::Lam { param, body } => Val::thunk(Arc::new(Spanned::with_span(
+                    inner.shape().span,
                     CompKind::Lam {
                         param: param.clone(),
                         body: arm_body(body, ctx, walk),
@@ -424,7 +442,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
     let forced = Spanned::synthetic(CompKind::Force(annotate_val(val, ctx)));
     if !handler {
         let captured = Spanned::synthetic(captured_string(forced, ctx));
-        return Val::Thunk(Arc::new(captured));
+        return Val::thunk(Arc::new(captured));
     }
     let param: Name = "__capture_e".into();
     let app = Spanned::synthetic(CompKind::App {
@@ -434,7 +452,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
         )))],
     });
     let captured = Spanned::synthetic(captured_string(app, ctx));
-    Val::Thunk(Arc::new(Spanned::synthetic(CompKind::Lam {
+    Val::thunk(Arc::new(Spanned::synthetic(CompKind::Lam {
         param: IrPattern::Name(param),
         body: Arc::new(captured),
     })))
@@ -442,19 +460,27 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
 
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
-        Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx))),
-        Val::List(elems) => Val::List(elems.iter().map(|v| annotate_spanned_val(v, ctx)).collect()),
-        Val::Record(entries) => Val::Record(
-            entries
+        Val::Thunk(comp) => Val::thunk(Arc::new(annotate(comp.shape(), ctx))),
+        Val::List(elems) => Val::list(
+            elems
+                .shape()
                 .iter()
-                .map(|(k, v)| (k.clone(), annotate_spanned_val(v, ctx)))
-                .collect(),
+                .map(|v| annotate_spanned_val(v, ctx))
+                .collect::<Vec<_>>(),
         ),
-        Val::Map(entries) => Val::Map(
+        Val::Record(entries) => Val::record(
             entries
+                .shape()
                 .iter()
                 .map(|(k, v)| (k.clone(), annotate_spanned_val(v, ctx)))
-                .collect(),
+                .collect::<Vec<_>>(),
+        ),
+        Val::Map(entries) => Val::map(
+            entries
+                .shape()
+                .iter()
+                .map(|(k, v)| (k.clone(), annotate_spanned_val(v, ctx)))
+                .collect::<Vec<_>>(),
         ),
         Val::Variant { label, payload } => Val::Variant {
             label: label.clone(),

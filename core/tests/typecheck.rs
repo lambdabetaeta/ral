@@ -3202,10 +3202,10 @@ fn toplevel_nested_bind_never_generalises() {
     let CompKind::Force(Val::Thunk(inner)) = &comp.item else {
         panic!("expected a forced thunk, got {:?}", comp.item);
     };
-    let CompKind::Bind { pattern, rest, .. } = &inner.item else {
+    let CompKind::Bind { pattern, rest, .. } = &inner.shape().item else {
         panic!(
             "expected the block body right-nested into a Bind, got {:?}",
-            inner.item
+            inner.shape().item
         );
     };
     assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n.as_ref() == "y"));
@@ -3318,6 +3318,7 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
         panic!("expected Return(Thunk(..)), got {:?}", comp.item);
     };
     let (param, lam_body) = body
+        .shape()
         .arrow()
         .expect("g's thunk body must be a syntactic Lam");
     assert!(matches!(param, IrPattern::Name(_)));

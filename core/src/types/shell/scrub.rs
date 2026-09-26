@@ -164,9 +164,9 @@ impl Scrub {
             Value::Thunk(closure) => {
                 let env = closure.env();
                 let bindings = self.replacement(env.bindings_root())?;
-                Some(Value::Thunk(Closure::new(
+                Some(Value::Thunk(Closure::captured(
                     Arc::clone(closure.comp()),
-                    &Env::from_parts(env.natives_arc(), env.prelude_arc(), bindings),
+                    Env::from_parts(env.natives_arc(), env.prelude_arc(), bindings),
                 )))
             }
             Value::Unit

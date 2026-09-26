@@ -45,16 +45,21 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
             };
             Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
         }),
-        Val::Thunk(comp) => Ok(Value::Thunk(Closure::new(Arc::clone(comp), env))),
-        Val::List(elems) => {
+        Val::Thunk(node) => Ok(Value::Thunk(Closure::new(
+            Arc::clone(node.shape()),
+            node.occ(),
+            env,
+        ))),
+        Val::List(node) => {
             let mut items: List = List::new();
-            for elem in elems {
+            for elem in node.shape() {
                 items.push_back(close(&elem.item, env)?);
             }
             Ok(Value::List(items))
         }
         // Distinct-keyed, so no key check on the way in.
-        Val::Record(entries) | Val::Map(entries) => {
+        Val::Record(node) | Val::Map(node) => {
+            let entries = node.shape();
             let mut pairs = Vec::with_capacity(entries.len());
             for (key, value) in entries {
                 pairs.push((key.to_string(), close(&value.item, env)?));

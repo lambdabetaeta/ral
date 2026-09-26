@@ -15,9 +15,9 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV,
-    IrPattern, Name, Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry,
-    ValRecordEntry,
+    Args, ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode,
+    HandlerArmV, IrPattern, Name, Phrase, PipeYield, Register, Toplevel, Val, ValListElem,
+    ValMapEntry, ValRecordEntry,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -261,19 +261,16 @@ impl Elaborator {
     /// than scanning ahead over earlier statements, keeps a preceding
     /// command use of the same name lowering to `Exec` instead of a
     /// dangling `Force(Variable)`.
-    fn build_rec_group(
-        &mut self,
-        bindings: &[(String, Box<Ast>, Option<Span>)],
-    ) -> Arc<[(Name, Arc<Comp>)]> {
+    fn build_rec_group(&mut self, bindings: &[(String, Box<Ast>, Option<Span>)]) -> Arc<GroupNode> {
         let scope = self.current_scope_mut();
         for (name, _, _) in bindings {
             scope.insert(name.clone());
         }
-        bindings
+        let members: Vec<(Name, Arc<Comp>)> = bindings
             .iter()
             .map(|(name, value, span)| {
                 let mut empty = Vec::new();
-                let CompKind::Return(Val::Thunk(arc)) = self
+                let CompKind::Return(Val::Thunk(node)) = self
                     .with_span(*span, |this| this.elab_expr(value, &mut empty))
                     .item
                 else {
@@ -286,9 +283,10 @@ impl Elaborator {
                     empty.is_empty(),
                     "lambda/block elaboration must not hoist into outer binds"
                 );
-                (name.as_str().into(), arc)
+                (name.as_str().into(), Arc::clone(node.shape()))
             })
-            .collect()
+            .collect();
+        GroupNode::new(members.into())
     }
 
     /// One top-level phrase (depth 0): a `let` becomes a `Define`,
@@ -330,13 +328,13 @@ impl Elaborator {
                 let rec = Spanned::with_span(
                     *span,
                     CompKind::Rec {
-                        group: group.clone(),
+                        group: Arc::clone(&group),
                         index,
                     },
                 );
                 let comp = Arc::new(Spanned::with_span(
                     *span,
-                    CompKind::Return(Val::Thunk(Arc::new(rec))),
+                    CompKind::Return(Val::thunk(Arc::new(rec))),
                 ));
                 Spanned::with_span(
                     *span,
@@ -415,11 +413,11 @@ impl Elaborator {
                 let rec = Spanned::with_span(
                     *span,
                     CompKind::Rec {
-                        group: group.clone(),
+                        group: Arc::clone(&group),
                         index,
                     },
                 );
-                let rhs = Spanned::with_span(*span, CompKind::Return(Val::Thunk(Arc::new(rec))));
+                let rhs = Spanned::with_span(*span, CompKind::Return(Val::thunk(Arc::new(rec))));
                 (
                     *span,
                     NestedUnit::Bind {
@@ -456,7 +454,7 @@ impl Elaborator {
 
             Ast::Block(body) => {
                 let body_comp = self.with_new_scope(|this| this.stmts_nested(body));
-                comp!(self, CompKind::Return(Val::Thunk(Arc::new(body_comp))))
+                comp!(self, CompKind::Return(Val::thunk(Arc::new(body_comp))))
             }
 
             Ast::Lambda { param, body } => {
@@ -465,15 +463,15 @@ impl Elaborator {
                 // thunk; reuse it rather than wrapping a thunk in a thunk.
                 let body_arc: Arc<Comp> = match &body_comp.item {
                     CompKind::Return(Val::Thunk(inner))
-                        if matches!(inner.as_ref().item, CompKind::Lam { .. }) =>
+                        if matches!(inner.shape().item, CompKind::Lam { .. }) =>
                     {
-                        Arc::clone(inner)
+                        Arc::clone(inner.shape())
                     }
                     _ => Arc::new(body_comp),
                 };
                 comp!(
                     self,
-                    CompKind::Return(Val::Thunk(Arc::new(comp!(
+                    CompKind::Return(Val::thunk(Arc::new(comp!(
                         self,
                         CompKind::Lam {
                             param: param_ir,
@@ -684,7 +682,7 @@ impl Elaborator {
                             .rev()
                             .fold(last, |handler_body, (span, arm)| {
                                 self.with_span(span, |this| {
-                                    let handler = Val::Thunk(Arc::new(comp!(
+                                    let handler = Val::thunk(Arc::new(comp!(
                                         this,
                                         CompKind::Lam {
                                             param: IrPattern::Wildcard,
@@ -694,7 +692,7 @@ impl Elaborator {
                                     comp!(
                                         this,
                                         CompKind::Try {
-                                            body: Val::Thunk(Arc::new(arm)),
+                                            body: Val::thunk(Arc::new(arm)),
                                             handler,
                                         }
                                     )
@@ -715,11 +713,11 @@ impl Elaborator {
                 match plain {
                     Some(items) => comp!(
                         self,
-                        CompKind::Return(Val::List(
+                        CompKind::Return(Val::list(
                             items
                                 .into_iter()
                                 .map(|a| self.spanned_val(a, binds))
-                                .collect(),
+                                .collect::<Vec<_>>(),
                         ))
                     ),
                     None => comp!(
@@ -752,7 +750,7 @@ impl Elaborator {
                 match plain {
                     Some(items) => {
                         let fields = self.sorted_fields(items, binds);
-                        comp!(self, CompKind::Return(Val::Record(fields)))
+                        comp!(self, CompKind::Return(Val::record(fields)))
                     }
                     None => comp!(
                         self,
@@ -785,7 +783,7 @@ impl Elaborator {
                 match plain {
                     Some(items) => {
                         let fields = self.sorted_fields(items, binds);
-                        comp!(self, CompKind::Return(Val::Map(fields)))
+                        comp!(self, CompKind::Return(Val::map(fields)))
                     }
                     None => comp!(
                         self,
@@ -1316,23 +1314,26 @@ mod tests {
 
     fn strip_val(val: &Val) -> Val {
         match val {
-            Val::List(elems) => Val::List(
+            Val::List(elems) => Val::list(
                 elems
+                    .shape()
                     .iter()
                     .map(|v| Spanned::synthetic(strip_val(&v.item)))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             ),
-            Val::Record(entries) => Val::Record(
+            Val::Record(entries) => Val::record(
                 entries
+                    .shape()
                     .iter()
                     .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             ),
-            Val::Map(entries) => Val::Map(
+            Val::Map(entries) => Val::map(
                 entries
+                    .shape()
                     .iter()
                     .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             ),
             other => other.clone(),
         }
@@ -1432,7 +1433,7 @@ mod tests {
             arg_items(args),
             vec![
                 ValListElem::Single(Spanned::synthetic(Val::Variable("upper".into()))),
-                ValListElem::Single(Spanned::synthetic(Val::List(vec![Spanned::synthetic(
+                ValListElem::Single(Spanned::synthetic(Val::list(vec![Spanned::synthetic(
                     Val::String("a".into())
                 )]))),
             ]
@@ -1495,9 +1496,9 @@ mod tests {
             panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
         };
         assert!(
-            matches!(rec.item, CompKind::Rec { index: 0, .. }),
+            matches!(rec.shape().item, CompKind::Rec { index: 0, .. }),
             "expected the self-recursive binding to emit a Rec{{index: 0}}, got {:?}",
-            rec.item
+            rec.shape().item
         );
     }
 
@@ -1514,10 +1515,10 @@ mod tests {
         let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
             panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
         };
-        let CompKind::Rec { group, index } = &rec.item else {
-            panic!("expected a Rec node, got {:?}", rec.item);
+        let CompKind::Rec { group, index } = &rec.shape().item else {
+            panic!("expected a Rec node, got {:?}", rec.shape().item);
         };
-        let (_, member) = &group[*index];
+        let (_, member) = &group.shape()[*index];
         let CompKind::Lam { body, .. } = &member.item else {
             panic!("expected a lambda RHS, got {:?}", member.item);
         };
@@ -1679,11 +1680,15 @@ mod tests {
         let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
             panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
         };
-        let CompKind::Rec { group, index } = &rec.item else {
-            panic!("expected a Rec node, got {:?}", rec.item);
+        let CompKind::Rec { group, index } = &rec.shape().item else {
+            panic!("expected a Rec node, got {:?}", rec.shape().item);
         };
         assert_eq!(*index, 0);
-        assert_eq!(group.len(), 1, "a self-recursive let is a group of one");
+        assert_eq!(
+            group.shape().len(),
+            1,
+            "a self-recursive let is a group of one"
+        );
     }
 
     #[test]
@@ -1691,17 +1696,17 @@ mod tests {
         let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
         let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         assert_eq!(top.phrases.len(), 2);
-        fn group_arc(phrase: &Phrase) -> Arc<[(Name, Arc<Comp>)]> {
+        fn group_arc(phrase: &Phrase) -> Arc<GroupNode> {
             let Phrase::Define { comp, .. } = phrase else {
                 panic!("expected a Define, got {phrase:?}");
             };
             let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
                 panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
             };
-            let CompKind::Rec { group, .. } = &rec.item else {
-                panic!("expected a Rec node, got {:?}", rec.item);
+            let CompKind::Rec { group, .. } = &rec.shape().item else {
+                panic!("expected a Rec node, got {:?}", rec.shape().item);
             };
-            group.clone()
+            Arc::clone(group)
         }
         let g1 = group_arc(&top.phrases[0].item);
         let g2 = group_arc(&top.phrases[1].item);
@@ -1709,8 +1714,8 @@ mod tests {
             Arc::ptr_eq(&g1, &g2),
             "both binders must share one group Arc"
         );
-        assert_eq!(g1[0].0.as_ref(), "f");
-        assert_eq!(g1[1].0.as_ref(), "g");
+        assert_eq!(g1.shape()[0].0.as_ref(), "f");
+        assert_eq!(g1.shape()[1].0.as_ref(), "g");
     }
 
     #[test]

@@ -167,6 +167,10 @@ pub struct InferCtx {
     /// and keyed by its identity — every projection of the same group reads
     /// the same betas rather than re-inferring the group.
     pub(crate) rec_groups: HashMap<*const (), Vec<CompTy>>,
+    /// `annotate`'s rebuilt `GroupNode` per source group's identity, so every
+    /// `Rec` projection of one group shares the one node the elaborator
+    /// built, rather than each rebuilding its own.
+    pub(crate) rec_group_rebuilds: HashMap<*const (), Arc<crate::ir::GroupNode>>,
     /// A `Bind`/`Define`/tail-`Run` RHS's curried arity, recorded whenever
     /// its inferred type resolved to `Fun` — keyed by the RHS node's own
     /// address, read back by `annotate`'s η-expansion.
@@ -196,6 +200,7 @@ impl InferCtx {
             val_results: HashMap::new(),
             route_constraints: Vec::new(),
             rec_groups: HashMap::new(),
+            rec_group_rebuilds: HashMap::new(),
             rhs_arrow_arity: HashMap::new(),
             synth_counter: 0,
         }
