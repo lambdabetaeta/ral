@@ -51,7 +51,7 @@ different one, and they should not be conflated.
   pushed-and-popped frame: `M to x. N` closes `N` over the environment the
   `To` frame carries, extended with `x`, and nothing else whatever `M` did
   along the way. ρ is one of two representations, chosen by size and
-  invisible to its readers: a sorted array below `SMALL` entries, a
+  invisible to its readers: a sorted array of at most `SMALL` (8) entries, a
   persistent hash map past it; cloning either is O(1) — the allocation is
   shared, not copied — so recursion clones; capture scrubs. A closure holds
   only the bindings its body mentions, `⟨M, ρ|occ(M)⟩`

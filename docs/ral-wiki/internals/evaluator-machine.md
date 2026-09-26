@@ -126,7 +126,7 @@ polled here and at `Bind`, `App`, `Exec` advance and β, so `let f = { !f };
 !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
-(`core/src/types/env.rs`) is ρ alone: a sorted array below `SMALL` bindings,
+(`core/src/types/env.rs`) is ρ alone: a sorted array of at most `SMALL` (8) bindings,
 a persistent hash map past it, chosen by size and invisible to its readers.
 `bind`/`extend` produce a fresh environment that disturbs none a closure
 captured; `clone` is O(1); `restrict` narrows it to a closure's names,

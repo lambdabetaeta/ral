@@ -29,9 +29,9 @@ pub struct Binding {
 type LargeMap =
     imbl::GenericHashMap<Name, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
-/// Below this many entries ρ is one flat array; past it, a persistent hash
-/// map.
-const SMALL: usize = 16;
+/// Up to this many entries ρ is one flat array; past it, a persistent hash
+/// map.  8 beat 16 and 32 on B6 and tied on B1 and B2.
+const SMALL: usize = 8;
 
 /// ρ's two representations, chosen by size and invisible to `Env`'s users.
 #[derive(Debug, Clone)]

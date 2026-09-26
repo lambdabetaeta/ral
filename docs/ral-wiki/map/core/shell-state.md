@@ -67,9 +67,9 @@ everything `crate::types::*`.
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
   **A shared write clones a node, and a node clones cheaply**: `Env`'s
-  private `Entries` is a sorted array below `SMALL` bindings, a persistent
+  private `Entries` is a sorted array of at most `SMALL` (8) bindings, a persistent
   hash map past it, so a `bind` into an environment another holder still
-  references copies only the touched node — the whole array below `SMALL`,
+  references copies only the touched node — the whole array up to `SMALL`,
   a path past it — and copying a node clones every `Binding` stored inline in
   it. Each such clone is cheap, whatever the binding holds: `Binding.scheme`
   sits behind an `Arc`, and the value copies no payload (above). An alias's
