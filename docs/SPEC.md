@@ -897,8 +897,8 @@ announce
 ```
 
 A block captures lexical bindings when the block is created. Its body runs in
-a fresh local scope. Bindings created by the body do not escape. Changes to
-the current directory and other block-local shell state also do not escape.
+a fresh local scope. Bindings created by the body do not escape. Shell state
+is not local: a `cd` or other unbracketed shell-state write persists (§2.6).
 The block's output, result, failure, and audit records remain observable.
 
 ```ral
@@ -971,8 +971,7 @@ ral reports a type error or a runtime error.
 A function call gets a fresh local binding scope. Its parameters and local
 `let` bindings do not escape. The function still acts in the caller's shell:
 for example, a successful `cd` in a function changes the caller's current
-directory. This differs from forcing a plain block, which discards its current
-directory change.
+directory, exactly as it does in a forced plain block.
 
 ### 5.5. `return`
 
@@ -1532,6 +1531,7 @@ An encoder takes its value as an ordinary argument and writes bytes:
 ```ral
 to-string $json_text | from-json
 ```
+
 #### Lines
 
 One rule says where a line ends:
@@ -1567,7 +1567,6 @@ ral writes `LF` alone: `to-line`, `to-lines`, `to-jsonl`, and `echo` never
 write `CRLF`. `to-lines` terminates every element, so `to-lines []` writes
 nothing, `to-lines [""]` writes one `LF`, and `from-lines` inverts `to-lines`
 on every list of strings in which no element contains `LF` or ends with `CR`.
-
 
 ### 7.4. Redirects
 
@@ -2320,7 +2319,7 @@ failing-command
 
 A later REPL run can still read `$ready`; statements after the failure never ran.
 
-Nested blocks remain local unless their contract explicitly returns an observation. This separation lets an interactive session accumulate deliberate top-level state without making every temporary block mutation permanent.
+A nested block's bindings stay local, but its shell-state writes, such as `cd` or `alias`, persist into the session like any other (§2.6). Use `within` for a temporary directory, environment, or handler change.
 
 Interactive sessions load their rc file unless `--norc` (or its
 `--noprofile` alias) is given. Login sessions additionally load the system and
@@ -2374,7 +2373,7 @@ promise the former and deliver the latter.
 The worker receives the lexical environment captured by its block. Values are
 immutable, so concurrent workers do not share mutable lexical bindings. Each
 worker has its own shell state: changes such as `cd`, environment overrides,
-or status changes in the worker do not mutate the spawning thread's mobile
+or status changes in the worker do not mutate the spawning thread's shell
 state. A nested `spawn` remains owned by the same session.
 
 A worker is not part of the foreground run. Interrupting or timing out the run
@@ -4205,7 +4204,7 @@ Direct invocations always parse ral syntax:
 ```text
 ral
 ral build.ral release --clean
-ral -c 'return 2 + 2'
+ral -c 'echo $[2 + 2]'
 ral -s < build.ral
 ```
 
