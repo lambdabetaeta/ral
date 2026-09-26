@@ -22,6 +22,7 @@ use crate::types::{
     Settled, Shell, TrailScope, Value, as_map, error_record_of, report_value,
 };
 
+use super::assemble;
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
 use super::scope::{WithinScope, WithinUndo};
@@ -480,6 +481,10 @@ impl Machine {
     ) -> Result<Focus, Break> {
         Ok(match &comp.item {
             CompKind::Return(val) => Focus::Return(Terminal::Value(close(val, &env)?)),
+
+            CompKind::Assemble(assembly) => {
+                Focus::Return(Terminal::Value(assemble::eval(assembly, &env)?))
+            }
 
             // Canonical at A → C, never a value: the frame on top decides.
             // Unreachable except under Apply/a C-holed frame for a checked

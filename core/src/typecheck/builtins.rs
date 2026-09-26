@@ -994,16 +994,9 @@ pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     };
     matches!(
         positional.first(),
-        Some(crate::ir::Val::Record(entries)) if entries.iter().any(|e| matches!(
-            e,
-            crate::ir::ValRecordEntry::Field(
-                k,
-                crate::source::Spanned {
-                    item: crate::ir::Val::Int(0),
-                    ..
-                },
-            ) if k == "status"
-        ))
+        Some(crate::ir::Val::Record(entries)) if entries.iter().any(|(k, v)| {
+            k == "status" && matches!(v.item, crate::ir::Val::Int(0))
+        })
     )
 }
 

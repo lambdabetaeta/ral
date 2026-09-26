@@ -1896,7 +1896,7 @@ fn fail_demands_an_error_record() {
 
     has_error("fail 1", "couldn't match");
     has_error(r#"fail "boom""#, "couldn't match");
-    has_error(r#"fail [message: "boom"]"#, "no field named 'status'");
+    has_error(r#"fail [message: "boom"]"#, "missing a field named 'status'");
     has_error("fail [status: 3]", "missing a field named 'message'");
     has_error(r#"fail [status: "one", message: "boom"]"#, "couldn't match");
 }

@@ -803,6 +803,16 @@ fn has_on_map() {
     assert_eq!(must_succeed("!{has [:, a: 1, b: 2] c}"), Value::Bool(false));
 }
 
+/// A computed duplicate key warns rather than being refused, and the later
+/// entry wins (SPEC §4.5).
+#[test]
+fn a_computed_duplicate_map_key_warns_and_the_last_wins() {
+    assert_eq!(
+        must_succeed("let k = 'a'\nlet j = 'a'\nlet m = [$k: 1, $j: 2]\nreturn $m[$k]"),
+        Value::Int(2)
+    );
+}
+
 // ── Scoped effects ───────────────────────────────────────────────────────
 
 #[test]

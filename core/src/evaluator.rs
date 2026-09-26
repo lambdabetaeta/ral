@@ -1,6 +1,7 @@
 //! CBPV evaluation: the machine (`machine::evaluate`), and the phrase-level
 //! verb (`run_phrases`) that threads a session or a `use` body over it.
 
+pub(crate) mod assemble;
 pub(crate) mod audit;
 pub(crate) mod capture;
 pub(crate) mod expr;

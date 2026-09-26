@@ -361,11 +361,11 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
 /// itself.
 #[cfg(test)]
 pub(crate) fn block_over(env: &Env) -> Value {
-    use crate::ir::{CompKind, Val, ValListElem};
+    use crate::ir::{CompKind, Val};
     use crate::source::Spanned;
     let names = env
         .session_names()
-        .map(|n| ValListElem::Single(Spanned::synthetic(Val::Variable(n.into()))))
+        .map(|n| Spanned::synthetic(Val::Variable(n.into())))
         .collect();
     let body = Spanned::synthetic(CompKind::Return(Val::List(names)));
     Value::Thunk(Closure::new(Arc::new(body), env))

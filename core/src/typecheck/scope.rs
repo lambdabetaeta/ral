@@ -26,7 +26,7 @@ use super::route::PayloadRoute;
 use super::scheme::Scheme;
 use super::ty::{CompTy, Field, Label, Row, Ty};
 use super::unify::Unifier;
-use crate::ir::{HandlerArmV, Val, ValRecordEntry};
+use crate::ir::{HandlerArmV, Val};
 use crate::source::{Span, WithSpan};
 
 /// What a scope rule knows before its computation type exists: the value the
@@ -91,10 +91,10 @@ fn written_at(opts: &Val, label: &str) -> Option<Span> {
     let Val::Record(entries) = opts else {
         return None;
     };
-    entries.iter().find_map(|entry| match entry {
-        ValRecordEntry::Field(key, value) if key == label => value.span,
-        ValRecordEntry::Field(..) | ValRecordEntry::Spread(_) => None,
-    })
+    entries
+        .iter()
+        .find(|(key, _)| key == label)
+        .and_then(|(_, value)| value.span)
 }
 
 impl Inferencer<'_> {

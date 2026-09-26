@@ -56,11 +56,12 @@ pub enum Val {
     Variable(String),
     /// A suspended computation, eliminated by [`CompKind::Force`].
     Thunk(Arc<Comp>),
-    List(Vec<ValListElem>),
-    /// `[key: val, …]` — every key a static label.
-    Record(Vec<ValRecordEntry>),
-    /// `[:, key: val, …]`, `[$k: val]` — the keys are data.
-    Map(Vec<ValMapEntry>),
+    /// A plain list literal: no spread, so every element is here already.
+    List(Vec<Spanned<Self>>),
+    /// `[key: val, …]`: static labels, no spread.
+    Record(Vec<(String, Spanned<Self>)>),
+    /// `[:, key: val, …]`: static labels, no spread.
+    Map(Vec<(String, Spanned<Self>)>),
     /// `` `label `` or `` `label payload ``; the label is stored without
     /// its leading backtick.
     Variant {
@@ -117,6 +118,16 @@ pub enum ValMapEntry {
     Entry(Val, Spanned<Val>),
     /// `...x`, merged into the surrounding map.
     Spread(Spanned<Val>),
+}
+
+/// A collection literal that a spread or a computed key keeps out of value
+/// syntax: building it costs O(data) and can fail, so it is
+/// [`CompKind::Assemble`], a primitive computation rather than a `Val`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Assembly {
+    List(Vec<ValListElem>),
+    Record(Vec<ValRecordEntry>),
+    Map(Vec<ValMapEntry>),
 }
 
 /// One entry of either literal as the shared runtime carrier reads it.
@@ -318,6 +329,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
         CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
             walk_val(v, out);
         }
+        CompKind::Assemble(assembly) => walk_assembly(assembly, out),
         CompKind::Index { target, keys } => {
             walk_val(target, out);
             for key in keys {
@@ -390,17 +402,12 @@ fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
         Val::Thunk(comp) => walk_comp(comp, out),
         Val::List(elems) => {
             for elem in elems {
-                walk_val(&elem.slot().item, out);
+                walk_val(&elem.item, out);
             }
         }
-        Val::Record(entries) => {
-            for entry in entries {
-                walk_map_part(entry.part(), out);
-            }
-        }
-        Val::Map(entries) => {
-            for entry in entries {
-                walk_map_part(entry.part(), out);
+        Val::Record(entries) | Val::Map(entries) => {
+            for (_, value) in entries {
+                walk_val(&value.item, out);
             }
         }
         Val::Variant { label: _, payload } => {
@@ -417,6 +424,22 @@ fn walk_map_part<'a>(part: MapPart<'a>, out: &mut Vec<&'a str>) {
         MapPart::Computed(key, value) => {
             walk_val(key, out);
             walk_val(&value.item, out);
+        }
+    }
+}
+
+fn walk_assembly<'a>(assembly: &'a Assembly, out: &mut Vec<&'a str>) {
+    match assembly {
+        Assembly::List(elems) => walk_args(elems, out),
+        Assembly::Record(entries) => {
+            for entry in entries {
+                walk_map_part(entry.part(), out);
+            }
+        }
+        Assembly::Map(entries) => {
+            for entry in entries {
+                walk_map_part(entry.part(), out);
+            }
         }
     }
 }
@@ -466,6 +489,9 @@ pub enum CompKind {
     Lam { param: Param, body: Arc<Comp> },
     /// return V — produce a value.
     Return(Val),
+    /// Build a list, record, or map some of whose parts are spread or keyed
+    /// at run time — the one rule that does O(data) work over value syntax.
+    Assemble(Assembly),
     /// M to x. N — run `comp`, bind its result, continue with `rest`.  `a; b`
     /// is `a to _. b`, on `Wildcard`.
     Bind {
@@ -838,21 +864,32 @@ mod tests {
             )],
         });
         let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
-            ValListElem::Single(Spanned::synthetic(Val::Unit)),
-            ValListElem::Single(Spanned::synthetic(Val::String("s".into()))),
-            ValListElem::Single(Spanned::synthetic(Val::Int(1))),
-            ValListElem::Single(Spanned::synthetic(Val::Float(1.0))),
-            ValListElem::Single(Spanned::synthetic(Val::Bool(true))),
-            ValListElem::Single(svar("r_list_single")),
-            ValListElem::Spread(svar("r_list_spread")),
+            Spanned::synthetic(Val::Unit),
+            Spanned::synthetic(Val::String("s".into())),
+            Spanned::synthetic(Val::Int(1)),
+            Spanned::synthetic(Val::Float(1.0)),
+            Spanned::synthetic(Val::Bool(true)),
+            svar("r_list_single"),
         ])));
-        let val_record = Spanned::synthetic(CompKind::Return(Val::Record(vec![
-            ValRecordEntry::Field("lbl".into(), svar("r_record_value")),
-            ValRecordEntry::Spread(svar("r_record_spread")),
+        let val_record = Spanned::synthetic(CompKind::Return(Val::Record(vec![(
+            "lbl".to_string(),
+            svar("r_record_value"),
+        )])));
+        let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![(
+            "lbl".to_string(),
+            svar("r_map_value"),
+        )])));
+        let assemble_list = Spanned::synthetic(CompKind::Assemble(Assembly::List(vec![
+            ValListElem::Single(svar("r_assemble_list_single")),
+            ValListElem::Spread(svar("r_assemble_list_spread")),
         ])));
-        let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![
-            ValMapEntry::Entry(var("r_map_key"), svar("r_map_value")),
-            ValMapEntry::Spread(svar("r_map_spread")),
+        let assemble_record = Spanned::synthetic(CompKind::Assemble(Assembly::Record(vec![
+            ValRecordEntry::Field("lbl".into(), svar("r_assemble_record_value")),
+            ValRecordEntry::Spread(svar("r_assemble_record_spread")),
+        ])));
+        let assemble_map = Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
+            ValMapEntry::Entry(var("r_assemble_map_key"), svar("r_assemble_map_value")),
+            ValMapEntry::Spread(svar("r_assemble_map_spread")),
         ])));
         let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
             label: "lbl".into(),
@@ -897,6 +934,9 @@ mod tests {
             Arc::new(val_list),
             Arc::new(val_record),
             Arc::new(val_map),
+            Arc::new(assemble_list),
+            Arc::new(assemble_record),
+            Arc::new(assemble_map),
             Arc::new(val_variant),
             Arc::new(val_variant_empty),
             Arc::new(val_thunk),
@@ -948,12 +988,15 @@ mod tests {
             "r_scope_redirect_body",
             "r_scope_redirect_target",
             "r_list_single",
-            "r_list_spread",
             "r_record_value",
-            "r_record_spread",
-            "r_map_key",
             "r_map_value",
-            "r_map_spread",
+            "r_assemble_list_single",
+            "r_assemble_list_spread",
+            "r_assemble_record_value",
+            "r_assemble_record_spread",
+            "r_assemble_map_key",
+            "r_assemble_map_value",
+            "r_assemble_map_spread",
             "r_variant_payload",
             "r_thunk_body",
             "r_capture_body",

@@ -642,7 +642,8 @@ let middle = [2, 3]
 return [1, ...$middle, 4]
 ```
 
-Spreading a value that is not a list is an error.
+Spreading a value that is not a list is an error. A literal's parts are
+evaluated left to right, and a failing spread fails where it is written.
 
 ### 4.5. Records and maps
 
@@ -699,7 +700,8 @@ unreadable. Defaults are therefore merged where both records are known;
 absence over an unknown record travels as a variant.
 
 Spreading a value that is not a record or map is an error. Spreading does not
-change the source value.
+change the source value. A literal's parts are evaluated left to right, and a
+failing spread fails where it is written.
 
 ### 4.6. Variants
 

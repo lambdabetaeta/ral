@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fffa63b2
+generated_at_commit: 117c514f
 generated_at_date: 2026-09-26
 covers_paths: [core/src/ir.rs]
 ---
@@ -22,16 +22,27 @@ ledger.
 The two categories:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
-  maps, variants, thunks, variables. A value can never diverge or perform I/O. `Val`
-  itself stays unspanned; every position onto which the checker narrows while
-  emitting a constraint carries `Spanned<Val>`. `Args` and list literals are the
-  same `ValListElem` slots. `Val::Record` and `Val::Map` carry their own entry
-  types — `ValRecordEntry::Field(String, …)` against `ValMapEntry::Entry(Val,
-  …)` — so a record cannot hold a key computed at run time and the
-  [[design/records-and-maps|record/map]] classification is settled by the
-  parser rather than re-derived. Both read as `MapPart`s where the one runtime
-  carrier is built. An entry carries its value's span, because the surface
-  captures no key span.
+  maps, variants, thunks, variables. A value can never diverge or perform I/O,
+  and forming one costs O(text), never O(data): `Val::List(Vec<Spanned<Val>>)`,
+  `Val::Record`, and `Val::Map` (each `Vec<(String, Spanned<Val>)>`, sorted by
+  key, stably, at elaboration) hold only a **plain** literal — no spread, no
+  computed key. `Val` itself stays unspanned; every position onto which the
+  checker narrows while emitting a constraint carries `Spanned<Val>`.
+- `CompKind::Assemble(Assembly)` is the one rule that builds a collection some
+  of whose parts are spread or keyed at run time: a primitive computation, not
+  a value, since it costs O(data) and can fail. `Assembly::List(Vec<ValListElem>)`,
+  `::Record(Vec<ValRecordEntry>)`, and `::Map(Vec<ValMapEntry>)` are the spread-
+  and computed-key-bearing element enums — `ValRecordEntry::Field(String, …)`
+  against `ValMapEntry::Entry(Val, …)`, so a record cannot hold a key computed
+  at run time and the [[design/records-and-maps|record/map]] classification is
+  settled by the parser rather than re-derived. These three enums live only in
+  `Assembly` and in `Args` (positional call arguments, which always admit a
+  spread); both read as `MapPart`s where the one runtime carrier is built. An
+  entry carries its value's span, because the surface captures no key span.
+  The elaborator's literal arms (`elaborator.rs`) emit `Return(Val::…)` for a
+  plain literal and `Assemble(…)` otherwise; `hoist` names a non-`Return` comp
+  reached in value position, so `[1, ...$xs]` becomes `Assemble(…) to t. …
+  t …` with no new plumbing.
 - `Comp` — effectful, sequenced computation. `Comp` wraps a `CompKind` plus an
   optional `Span` for error reporting (synthetic nodes carry `span: None`).
 

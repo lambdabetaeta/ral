@@ -12,8 +12,8 @@
 use super::env::InferCtx;
 use super::ty::GroundRoute;
 use crate::ir::{
-    Args, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Phrase, PipeYield,
-    Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    Args, Assembly, CaseArm, Comp, CompKind, DefineSchemes, Exec, HandlerArmV, IrPattern, Phrase,
+    PipeYield, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Spanned;
 use std::sync::Arc;
@@ -292,6 +292,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         },
         CompKind::Force(value) => CompKind::Force(annotate_val(value, ctx)),
         CompKind::Return(value) => CompKind::Return(annotate_val(value, ctx)),
+        CompKind::Assemble(assembly) => CompKind::Assemble(annotate_assembly(assembly, ctx)),
         CompKind::Exec(e) => CompKind::Exec(Exec {
             head: e.head.clone(),
             args: annotate_args(&e.args, ctx),
@@ -442,29 +443,17 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
         Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx))),
-        Val::List(elems) => Val::List(elems.iter().map(|e| annotate_list_elem(e, ctx)).collect()),
+        Val::List(elems) => Val::List(elems.iter().map(|v| annotate_spanned_val(v, ctx)).collect()),
         Val::Record(entries) => Val::Record(
             entries
                 .iter()
-                .map(|e| match e {
-                    ValRecordEntry::Field(label, v) => {
-                        ValRecordEntry::Field(label.clone(), annotate_spanned_val(v, ctx))
-                    }
-                    ValRecordEntry::Spread(v) => {
-                        ValRecordEntry::Spread(annotate_spanned_val(v, ctx))
-                    }
-                })
+                .map(|(k, v)| (k.clone(), annotate_spanned_val(v, ctx)))
                 .collect(),
         ),
         Val::Map(entries) => Val::Map(
             entries
                 .iter()
-                .map(|e| match e {
-                    ValMapEntry::Entry(k, v) => {
-                        ValMapEntry::Entry(annotate_val(k, ctx), annotate_spanned_val(v, ctx))
-                    }
-                    ValMapEntry::Spread(v) => ValMapEntry::Spread(annotate_spanned_val(v, ctx)),
-                })
+                .map(|(k, v)| (k.clone(), annotate_spanned_val(v, ctx)))
                 .collect(),
         ),
         Val::Variant { label, payload } => Val::Variant {
@@ -493,6 +482,36 @@ fn annotate_list_elem(elem: &ValListElem, ctx: &mut InferCtx) -> ValListElem {
 
 fn annotate_args(args: &crate::ir::Args, ctx: &mut InferCtx) -> crate::ir::Args {
     args.iter().map(|e| annotate_list_elem(e, ctx)).collect()
+}
+
+fn annotate_assembly(assembly: &Assembly, ctx: &mut InferCtx) -> Assembly {
+    match assembly {
+        Assembly::List(elems) => Assembly::List(annotate_args(elems, ctx)),
+        Assembly::Record(entries) => Assembly::Record(
+            entries
+                .iter()
+                .map(|e| match e {
+                    ValRecordEntry::Field(label, v) => {
+                        ValRecordEntry::Field(label.clone(), annotate_spanned_val(v, ctx))
+                    }
+                    ValRecordEntry::Spread(v) => {
+                        ValRecordEntry::Spread(annotate_spanned_val(v, ctx))
+                    }
+                })
+                .collect(),
+        ),
+        Assembly::Map(entries) => Assembly::Map(
+            entries
+                .iter()
+                .map(|e| match e {
+                    ValMapEntry::Entry(k, v) => {
+                        ValMapEntry::Entry(annotate_val(k, ctx), annotate_spanned_val(v, ctx))
+                    }
+                    ValMapEntry::Spread(v) => ValMapEntry::Spread(annotate_spanned_val(v, ctx)),
+                })
+                .collect(),
+        ),
+    }
 }
 
 fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {

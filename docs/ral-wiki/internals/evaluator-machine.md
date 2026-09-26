@@ -1,7 +1,7 @@
 ---
-verified_at_commit: fffa63b2
+verified_at_commit: 117c514f
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -51,6 +51,11 @@ closes its arguments then pushes `Apply` and evaluates the head, `Rec`
 unfolds the n-ary group, `Exec` classifies the head through the lexical
 environment, `Pipeline` launches and joins its node, the six handler forms
 close their operands, install, push their frame and force the body …);
+`Assemble` is the one rule that does O(data) work over what looks like value
+syntax: a list, record, or map literal with a spread or a computed key
+elaborates to it rather than to `Return`, and `evaluator/assemble.rs` builds
+the collection ([[map/core/evaluator|evaluator]]) — a plain literal, with
+none of those, stays a `Return` and closes for free;
 `step_return` and `step_halt` have one arm per `Frame` — the two columns of
 the frame table. No arm calls another arm; no arm loops.
 

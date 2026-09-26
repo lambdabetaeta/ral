@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fffa63b2
+generated_at_commit: 117c514f
 generated_at_date: 2026-09-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -91,6 +91,10 @@ Internals:
   `Closure::new` over the forced closure's environment: a recursive
   reference forces its name, re-entering `Rec` and re-extending from that
   environment; a group of one is Levy's `rec f. M`.
+  `CompKind::Assemble` is the one rule that does O(data) work over what looks
+  like value syntax — a list/record/map literal with a spread or a computed
+  key, dispatching to `assemble.rs`; a plain literal stays a `Return` and
+  closes for free.
   `CompKind::Exec` classifies the head through the lexical environment and
   dispatches into [[map/core/runtime|runtime]]'s `command_call`.
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
@@ -136,10 +140,20 @@ Internals:
   directly by `machine.rs`'s `Frame::Redirect` and by `with_redirects` for a
   base-frame native's synchronous call, distinct from the external-command
   fd machinery in [[map/core/runtime|runtime]]'s `command/redirect.rs`.
-- `val.rs` holds the side-effect-free `Val` layer (`close`, whose `Thunk`
-  arm builds `⟨M, ρ|occ(M)⟩` through `Closure::new`); `expr.rs` holds
-  the primitive operators the elaborator's expression desugaring emits
-  (`Negate` / `Not` / `Binary`) and value indexing (`Index`).
+- `val.rs` holds the side-effect-free `Val` layer: `close` forms a plain
+  literal or a variant straight from its already-plain entries — no spread, no
+  computed key, so no data-sized work — and its `Thunk` arm builds
+  `⟨M, ρ|occ(M)⟩` through `Closure::new`. `expr.rs` holds the primitive
+  operators the elaborator's expression desugaring emits (`Negate` / `Not` /
+  `Binary`) and value indexing (`Index`).
+- `assemble.rs` is the `CompKind::Assemble` rule: `eval_list` splices
+  `...spread` elements (cons/snoc-shaped fast paths reuse the spread's
+  persistent spine; explicit beats spread, first spread wins), `eval_map`
+  is shared by record and map assembly (`MapParts`/`MapPart` read either
+  entry enum uniformly) — explicit entries win over spreads, a computed key
+  must close to a `String`, and a duplicate discovered only here warns and
+  keeps the last (SPEC §4.5); a *static* duplicate is refused at check time
+  instead.
 - The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine

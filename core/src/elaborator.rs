@@ -15,8 +15,9 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV, IrPattern,
-    Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    Args, ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, HandlerArmV,
+    IrPattern, Phrase, PipeYield, Register, Toplevel, Val, ValListElem, ValMapEntry,
+    ValRecordEntry,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -699,81 +700,112 @@ impl Elaborator {
                 }
             }
 
-            Ast::List(elems) => comp!(
-                self,
-                CompKind::Return(Val::List(
-                    elems
-                        .iter()
-                        .map(|e| match e {
-                            ListElem::Single(a) => ValListElem::Single(Spanned::with_span(
-                                a.span,
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
-                            )),
-                            ListElem::Spread(a) => ValListElem::Spread(Spanned::with_span(
-                                a.span,
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
-                            )),
-                        })
-                        .collect(),
-                ))
-            ),
+            Ast::List(elems) => {
+                let plain: Option<Vec<&Spanned<Ast>>> = elems
+                    .iter()
+                    .map(|e| match e {
+                        ListElem::Single(a) => Some(a),
+                        ListElem::Spread(_) => None,
+                    })
+                    .collect();
+                match plain {
+                    Some(items) => comp!(
+                        self,
+                        CompKind::Return(Val::List(
+                            items
+                                .into_iter()
+                                .map(|a| self.spanned_val(a, binds))
+                                .collect(),
+                        ))
+                    ),
+                    None => comp!(
+                        self,
+                        CompKind::Assemble(Assembly::List(
+                            elems
+                                .iter()
+                                .map(|e| match e {
+                                    ListElem::Single(a) => {
+                                        ValListElem::Single(self.spanned_val(a, binds))
+                                    }
+                                    ListElem::Spread(a) => {
+                                        ValListElem::Spread(self.spanned_val(a, binds))
+                                    }
+                                })
+                                .collect(),
+                        ))
+                    ),
+                }
+            }
 
-            Ast::Record(entries) => comp!(
-                self,
-                CompKind::Return(Val::Record(
-                    entries
-                        .iter()
-                        .map(|e| match e {
-                            RecordEntry::Field { key, value } => ValRecordEntry::Field(
-                                key.clone(),
-                                Spanned::with_span(
-                                    value.span,
-                                    self.with_span(value.span, |this| {
-                                        this.to_val(&value.item, binds)
-                                    }),
-                                ),
-                            ),
-                            RecordEntry::Spread(a) => ValRecordEntry::Spread(Spanned::with_span(
-                                a.span,
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
-                            )),
-                        })
-                        .collect(),
-                ))
-            ),
+            Ast::Record(entries) => {
+                let plain: Option<Vec<(&String, &Spanned<Ast>)>> = entries
+                    .iter()
+                    .map(|e| match e {
+                        RecordEntry::Field { key, value } => Some((key, value)),
+                        RecordEntry::Spread(_) => None,
+                    })
+                    .collect();
+                match plain {
+                    Some(items) => {
+                        let fields = self.sorted_fields(items, binds);
+                        comp!(self, CompKind::Return(Val::Record(fields)))
+                    }
+                    None => comp!(
+                        self,
+                        CompKind::Assemble(Assembly::Record(
+                            entries
+                                .iter()
+                                .map(|e| match e {
+                                    RecordEntry::Field { key, value } => ValRecordEntry::Field(
+                                        key.clone(),
+                                        self.spanned_val(value, binds),
+                                    ),
+                                    RecordEntry::Spread(a) => {
+                                        ValRecordEntry::Spread(self.spanned_val(a, binds))
+                                    }
+                                })
+                                .collect(),
+                        ))
+                    ),
+                }
+            }
 
-            Ast::Map(entries) => comp!(
-                self,
-                CompKind::Return(Val::Map(
-                    entries
-                        .iter()
-                        .map(|e| match e {
-                            MapEntry::Entry { key, value } => ValMapEntry::Entry(
-                                Val::String(key.clone().into()),
-                                Spanned::with_span(
-                                    value.span,
-                                    self.with_span(value.span, |this| {
-                                        this.to_val(&value.item, binds)
-                                    }),
-                                ),
-                            ),
-                            MapEntry::Deref { name, value } => ValMapEntry::Entry(
-                                self.variable_val(name),
-                                Spanned::with_span(
-                                    value.span,
-                                    self.with_span(value.span, |this| {
-                                        this.to_val(&value.item, binds)
-                                    }),
-                                ),
-                            ),
-                            MapEntry::Spread(a) => ValMapEntry::Spread(Spanned::with_span(
-                                a.span,
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
-                            )),
-                        })
-                        .collect(),
-                ))
-            ),
+            Ast::Map(entries) => {
+                let plain: Option<Vec<(&String, &Spanned<Ast>)>> = entries
+                    .iter()
+                    .map(|e| match e {
+                        MapEntry::Entry { key, value } => Some((key, value)),
+                        MapEntry::Deref { .. } | MapEntry::Spread(_) => None,
+                    })
+                    .collect();
+                match plain {
+                    Some(items) => {
+                        let fields = self.sorted_fields(items, binds);
+                        comp!(self, CompKind::Return(Val::Map(fields)))
+                    }
+                    None => comp!(
+                        self,
+                        CompKind::Assemble(Assembly::Map(
+                            entries
+                                .iter()
+                                .map(|e| match e {
+                                    MapEntry::Entry { key, value } => ValMapEntry::Entry(
+                                        Val::String(key.clone().into()),
+                                        self.spanned_val(value, binds),
+                                    ),
+                                    MapEntry::Deref { name, value } => {
+                                        let key = self.variable_val(name);
+                                        ValMapEntry::Entry(key, self.spanned_val(value, binds))
+                                    }
+                                    MapEntry::Spread(a) => {
+                                        ValMapEntry::Spread(self.spanned_val(a, binds))
+                                    }
+                                })
+                                .collect(),
+                        ))
+                    ),
+                }
+            }
 
             Ast::Tag { label, payload } => {
                 let payload_val = payload
@@ -1004,6 +1036,34 @@ impl Elaborator {
     fn to_val(&mut self, ast: &Ast, binds: &mut Vec<(IrPattern, Comp)>) -> Val {
         let comp = self.elab_expr(ast, binds);
         self.hoist(comp, binds)
+    }
+
+    /// [`Self::to_val`], spanned at `ast`'s own range — every literal
+    /// element and entry value.
+    fn spanned_val(
+        &mut self,
+        ast: &Spanned<Ast>,
+        binds: &mut Vec<(IrPattern, Comp)>,
+    ) -> Spanned<Val> {
+        Spanned::with_span(
+            ast.span,
+            self.with_span(ast.span, |this| this.to_val(&ast.item, binds)),
+        )
+    }
+
+    /// A plain record or map literal's entries, elaborated in written order and
+    /// then sorted by key, stably.
+    fn sorted_fields(
+        &mut self,
+        items: Vec<(&String, &Spanned<Ast>)>,
+        binds: &mut Vec<(IrPattern, Comp)>,
+    ) -> Vec<(String, Spanned<Val>)> {
+        let mut fields: Vec<_> = items
+            .into_iter()
+            .map(|(key, value)| (key.clone(), self.spanned_val(value, binds)))
+            .collect();
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        fields
     }
 
     /// Shared by the two value-application heads, a bound bare name (`f x`) and
@@ -1252,31 +1312,22 @@ mod tests {
 
     fn strip_val(val: &Val) -> Val {
         match val {
-            Val::List(elems) => Val::List(elems.iter().map(strip_slot).collect()),
+            Val::List(elems) => Val::List(
+                elems
+                    .iter()
+                    .map(|v| Spanned::synthetic(strip_val(&v.item)))
+                    .collect(),
+            ),
             Val::Record(entries) => Val::Record(
                 entries
                     .iter()
-                    .map(|entry| match entry {
-                        ValRecordEntry::Field(k, v) => {
-                            ValRecordEntry::Field(k.clone(), Spanned::synthetic(strip_val(&v.item)))
-                        }
-                        ValRecordEntry::Spread(v) => {
-                            ValRecordEntry::Spread(Spanned::synthetic(strip_val(&v.item)))
-                        }
-                    })
+                    .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
                     .collect(),
             ),
             Val::Map(entries) => Val::Map(
                 entries
                     .iter()
-                    .map(|entry| match entry {
-                        ValMapEntry::Entry(k, v) => {
-                            ValMapEntry::Entry(strip_val(k), Spanned::synthetic(strip_val(&v.item)))
-                        }
-                        ValMapEntry::Spread(v) => {
-                            ValMapEntry::Spread(Spanned::synthetic(strip_val(&v.item)))
-                        }
-                    })
+                    .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
                     .collect(),
             ),
             other => other.clone(),
@@ -1377,8 +1428,8 @@ mod tests {
             arg_items(args),
             vec![
                 ValListElem::Single(Spanned::synthetic(Val::Variable("upper".into()))),
-                ValListElem::Single(Spanned::synthetic(Val::List(vec![ValListElem::Single(
-                    Spanned::synthetic(Val::String("a".into()))
+                ValListElem::Single(Spanned::synthetic(Val::List(vec![Spanned::synthetic(
+                    Val::String("a".into())
                 )]))),
             ]
         );
@@ -1686,6 +1737,41 @@ mod tests {
             err.message.contains("working directory"),
             "message did not name the reading: {}",
             err.message
+        );
+    }
+
+    /// A literal with no spread stays value syntax; one with a spread is a
+    /// computation, hoisted like any other under `to_val`.
+    #[test]
+    fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
+        let ast = parse("return [1, $x]").expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        assert!(
+            matches!(&comp.item, CompKind::Return(Val::List(_))),
+            "expected Return(Val::List(_)), got {:?}",
+            comp.item
+        );
+
+        let ast = parse("return [1, ...$xs]").expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        let CompKind::Bind {
+            comp: rhs, rest, ..
+        } = &comp.item
+        else {
+            panic!(
+                "expected a Bind over the hoisted assembly, got {:?}",
+                comp.item
+            );
+        };
+        assert!(
+            matches!(rhs.item, CompKind::Assemble(Assembly::List(_))),
+            "expected Assemble(List(_)), got {:?}",
+            rhs.item
+        );
+        assert!(
+            matches!(&rest.item, CompKind::Return(Val::Variable(_))),
+            "expected the rest to return the hoisted temporary, got {:?}",
+            rest.item
         );
     }
 }

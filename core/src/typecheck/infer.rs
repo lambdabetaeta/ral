@@ -9,8 +9,8 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, Field, GroundRoute, Label, PayloadRoute, Row, Ty};
 use crate::ir::{
-    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, IrPattern, Phrase,
-    Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
+    ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, IrPattern,
+    Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -1260,33 +1260,78 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A record literal.  `arm` names the one label whose written thunk is
-    /// inferred as a handler arm rather than a value — see
-    /// [`Self::infer_options_val`].
-    fn infer_record_val(&mut self, entries: &[ValRecordEntry], arm: Option<&str>) -> Ty {
+    /// Whether `key` repeats a label `existing` already yields — diagnosing
+    /// T0022 (`TypeErrorKind::DuplicateField`) if so.  Shared by a record's
+    /// fields and a map's static keys: SPEC §4.5 refuses either duplicate at
+    /// check time.
+    fn diagnose_if_duplicate<'a>(
+        &mut self,
+        key: &str,
+        existing: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        let duplicate = existing.into_iter().any(|seen| seen == key);
+        if duplicate {
+            self.ctx.diagnose(TypeErrorKind::DuplicateField {
+                label: key.to_string(),
+            });
+        }
+        duplicate
+    }
+
+    /// `fields`, folded into a row over `tail`, last-declared innermost —
+    /// shared by a plain record's closed row and a spread-bearing one's put
+    /// over its base's tail.
+    fn fields_row(fields: Vec<(String, Ty)>, tail: Row) -> Row {
+        fields.into_iter().rev().fold(tail, |rest, (key, ty)| {
+            Row::Extend(Label::Field(key), Field::present(ty), Box::new(rest))
+        })
+    }
+
+    /// One record field, folded into `fields` unless its label repeats
+    /// (diagnosed there and then dropped: one label, one slot). `arm` names
+    /// the one label whose written thunk is inferred as a handler arm rather
+    /// than a value — see [`Self::infer_options_val`]. Shared by a plain
+    /// record and one with a spread ([`Assembly::Record`]).
+    fn infer_record_field(
+        &mut self,
+        key: &str,
+        value: &Spanned<Val>,
+        arm: Option<&str>,
+        fields: &mut Vec<(String, Ty)>,
+    ) {
+        let (duplicate, ty) = self.with_span(value.span, |this| {
+            let duplicate = this.diagnose_if_duplicate(key, fields.iter().map(|(k, _)| k.as_str()));
+            let ty = match (&value.item, arm) {
+                (Val::Thunk(comp), Some(arm)) if arm == key => {
+                    Ty::Thunk(Box::new(this.infer_catch_all(comp)))
+                }
+                _ => this.infer_val(&value.item),
+            };
+            (duplicate, ty)
+        });
+        if !duplicate {
+            fields.push((key.to_string(), ty));
+        }
+    }
+
+    /// A plain record literal: no spread, so one row, closed.
+    fn infer_record_val(&mut self, entries: &[(String, Spanned<Val>)], arm: Option<&str>) -> Ty {
+        let mut fields: Vec<(String, Ty)> = Vec::new();
+        for (key, value) in entries {
+            self.infer_record_field(key, value, arm, &mut fields);
+        }
+        Ty::Record(Self::fields_row(fields, Row::Empty))
+    }
+
+    /// A record literal with a spread ([`Assembly::Record`]).  `arm` is
+    /// [`Self::infer_record_val`]'s.
+    fn infer_assembly_record(&mut self, entries: &[ValRecordEntry], arm: Option<&str>) -> Ty {
         let mut fields: Vec<(String, Ty)> = Vec::new();
         let mut bases: Vec<(Option<Span>, Ty)> = Vec::new();
         for entry in entries {
             match entry {
                 ValRecordEntry::Field(key, value) => {
-                    let duplicate = fields.iter().any(|(seen, _)| seen == key);
-                    let ty = self.with_span(value.span, |this| {
-                        if duplicate {
-                            this.ctx
-                                .diagnose(TypeErrorKind::DuplicateField { label: key.clone() });
-                        }
-                        match (&value.item, arm) {
-                            (Val::Thunk(comp), Some(arm)) if arm == key => {
-                                Ty::Thunk(Box::new(this.infer_catch_all(comp)))
-                            }
-                            _ => this.infer_val(&value.item),
-                        }
-                    });
-                    // A repeat is inferred for the errors inside it, then dropped:
-                    // one label, one slot, or the row carries it twice.
-                    if !duplicate {
-                        fields.push((key.clone(), ty));
-                    }
+                    self.infer_record_field(key, value, arm, &mut fields);
                 }
                 ValRecordEntry::Spread(value) => {
                     let base_ty = self.with_span(value.span, |this| this.infer_val(&value.item));
@@ -1323,25 +1368,56 @@ impl Inferencer<'_> {
                     .unify_ty(&base_ty, &Ty::Record(probe), Reason::RecordSpread);
             });
         }
-        let row = fields.into_iter().rev().fold(tail, |rest, (key, ty)| {
-            Row::Extend(Label::Field(key), Field::present(ty), Box::new(rest))
-        });
-        Ty::Record(row)
+        Ty::Record(Self::fields_row(fields, tail))
     }
 
-    /// A map literal: `Map<elem>`, one `elem` shared by every value and spread.
-    fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
+    /// A plain map literal: `Map<elem>`, every key a static label — so the
+    /// checker refuses a static duplicate exactly as a record's (T0022).
+    fn infer_map_val(&mut self, entries: &[(String, Spanned<Val>)]) -> Ty {
+        let elem = self.ctx.unifier.fresh_ty();
+        let mut seen: Vec<String> = Vec::new();
+        for (key, value) in entries {
+            let duplicate = self.with_span(value.span, |this| {
+                let duplicate = this.diagnose_if_duplicate(key, seen.iter().map(String::as_str));
+                let value_ty = this.infer_val(&value.item);
+                this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
+                duplicate
+            });
+            if !duplicate {
+                seen.push(key.clone());
+            }
+        }
+        Ty::Map(Box::new(elem))
+    }
+
+    /// A map literal with a computed key or a spread ([`Assembly::Map`]):
+    /// `Map<elem>`, one `elem` shared by every value and spread. A static
+    /// label (`key:`, as opposed to `$k:`) is checked for a duplicate exactly
+    /// as [`Self::infer_map_val`]'s are — SPEC §4.5 makes any *static*
+    /// duplicate an error; only a computed key is left to the runtime
+    /// warning.
+    fn infer_assembly_map(&mut self, entries: &[ValMapEntry]) -> Ty {
         // Keys must be `String`: the runtime's status-1 refusal, lifted here.
         let elem = self.ctx.unifier.fresh_ty();
+        let mut seen: Vec<String> = Vec::new();
         for entry in entries {
             match entry {
                 ValMapEntry::Entry(key, value) => {
                     let key_ty = self.infer_val(key);
                     self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
                     self.with_span(value.span, |this| {
+                        if let Val::String(label) = key {
+                            this.diagnose_if_duplicate(
+                                label.as_str(),
+                                seen.iter().map(String::as_str),
+                            );
+                        }
                         let value_ty = this.infer_val(&value.item);
                         this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     });
+                    if let Val::String(label) = key {
+                        seen.push(label.as_str().to_string());
+                    }
                 }
                 ValMapEntry::Spread(value) => {
                     self.with_span(value.span, |this| {
@@ -1356,6 +1432,50 @@ impl Inferencer<'_> {
             }
         }
         Ty::Map(Box::new(elem))
+    }
+
+    /// [`Assembly`], typed by its arm — the moved literal code, over a
+    /// computed key or a spread.
+    fn infer_assembly(&mut self, assembly: &Assembly) -> Ty {
+        match assembly {
+            Assembly::List(elems) => self.infer_assembly_list(elems),
+            Assembly::Record(entries) => self.infer_assembly_record(entries, None),
+            Assembly::Map(entries) => self.infer_assembly_map(entries),
+        }
+    }
+
+    /// One list element's contribution to `elem`, the list's shared element
+    /// type: a plain value unifies directly, a spread's own element type
+    /// does. Shared by a plain list and one with a spread
+    /// ([`Assembly::List`]).
+    fn infer_list_entry(&mut self, value: &Spanned<Val>, spread: bool, elem: &Ty) {
+        self.with_span(value.span, |this| {
+            let entry_ty = if spread {
+                let spread_ty = this.infer_val(&value.item);
+                let inner = this.ctx.unifier.fresh_ty();
+                this.ctx.unify_ty(
+                    &spread_ty,
+                    &Ty::List(Box::new(inner.clone())),
+                    Reason::ListSpread,
+                );
+                inner
+            } else {
+                this.infer_val(&value.item)
+            };
+            this.ctx.unify_ty(&entry_ty, elem, Reason::ListElem);
+        });
+    }
+
+    /// A list literal with a spread ([`Assembly::List`]).
+    fn infer_assembly_list(&mut self, elems: &[ValListElem]) -> Ty {
+        let elem = self.ctx.unifier.fresh_ty();
+        for entry in elems {
+            match entry {
+                ValListElem::Single(v) => self.infer_list_entry(v, false, &elem),
+                ValListElem::Spread(v) => self.infer_list_entry(v, true, &elem),
+            }
+        }
+        Ty::List(Box::new(elem))
     }
 
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
@@ -1407,22 +1527,7 @@ impl Inferencer<'_> {
             Val::List(elems) => {
                 let elem = self.ctx.unifier.fresh_ty();
                 for entry in elems {
-                    self.with_span(entry.slot().span, |this| {
-                        let entry_ty = match entry {
-                            ValListElem::Single(v) => this.infer_val(&v.item),
-                            ValListElem::Spread(v) => {
-                                let spread_ty = this.infer_val(&v.item);
-                                let inner = this.ctx.unifier.fresh_ty();
-                                this.ctx.unify_ty(
-                                    &spread_ty,
-                                    &Ty::List(Box::new(inner.clone())),
-                                    Reason::ListSpread,
-                                );
-                                inner
-                            }
-                        };
-                        this.ctx.unify_ty(&entry_ty, &elem, Reason::ListElem);
-                    });
+                    self.infer_list_entry(entry, false, &elem);
                 }
                 Ty::List(Box::new(elem))
             }
@@ -1758,6 +1863,7 @@ impl Inferencer<'_> {
 
         let cty = match &comp.item {
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
+            CompKind::Assemble(assembly) => CompTy::pure(self.infer_assembly(assembly)),
             CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
@@ -1971,5 +2077,35 @@ impl Inferencer<'_> {
                 .insert(std::ptr::from_ref::<Comp>(comp) as usize, route);
         }
         cty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::syntax::parser::parse;
+    use crate::{SessionSchemes, elaborator::elaborate, typecheck};
+
+    fn error_codes(src: &str) -> Vec<&'static str> {
+        let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
+        let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+            .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        typecheck(&comp, SessionSchemes::default(), None)
+            .err()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e.kind.code())
+            .collect()
+    }
+
+    /// A static duplicate key is T0022 in a record, a plain map, and a map
+    /// with a spread (`Assembly::Map`) alike.
+    #[test]
+    fn a_map_literal_refuses_a_static_duplicate_key() {
+        assert_eq!(error_codes("return [a: 1, a: 2]"), ["T0022"]);
+        assert_eq!(error_codes("return [:, a: 1, a: 2]"), ["T0022"]);
+        assert_eq!(
+            error_codes("let k = 'x'\nreturn [$k: 1, a: 1, a: 2]"),
+            ["T0022"]
+        );
     }
 }
