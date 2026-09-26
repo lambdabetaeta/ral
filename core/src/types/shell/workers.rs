@@ -483,7 +483,8 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     let reservation = registry.reserve(Some(2));
-                    std::thread::sleep(Duration::from_millis(20));
+                    // No reservation drops before every thread has tried.
+                    barrier.wait();
                     reservation.is_ok()
                 })
             })
