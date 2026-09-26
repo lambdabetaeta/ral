@@ -131,12 +131,12 @@ fn case_arm_returning_a_bool_exits_zero() {
 /// A lazy list whose tail is a thunk, so a producer runs only as far as
 /// demand reaches.  Its type is equi-recursive, closing through the thunk.
 const LAZY_LIST: &str = "\
-let cons = { |head tail| `more [head: $head, tail: $tail] }
+let cons = { |head tail| return `more [head: $head, tail: $tail] }
 let take-lazy = { |n s|
-    if $[$n <= 0] { `done } else {
+    if $[$n <= 0] { return `done } else {
         case $s [
             `more: { |p| cons $p[head] { !{take-lazy $[$n - 1] !$p[tail]} } },
-            `done: { |_| `done }
+            `done: { |_| return `done }
         ]
     }
 }
@@ -144,9 +144,9 @@ let to-list = { |s|
     case $s [
         `more: { |p|
             let rest = !{to-list !$p[tail]}
-            [$p[head], ...$rest]
+            return [$p[head], ...$rest]
         },
-        `done: { |_| [] }
+        `done: { |_| return [] }
     ]
 }
 ";

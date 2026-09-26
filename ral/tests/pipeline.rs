@@ -262,9 +262,9 @@ fn deep_stream_returns_from_a_final_stage() {
     // exhausting either thread's stack.  (Regression: the encoder recursed
     // per link, so the stage died a few hundred links in.)
     let o = run(
-        "let chain = { |xs| if !{is-empty $xs} { `done } else { \
+        "let chain = { |xs| if !{is-empty $xs} { return `done } else { \
              let [x, ...rest] = $xs; let tail = !{chain $rest}; \
-             `more [head: $x, tail: { $tail }] } }\n\
+             return `more [head: $x, tail: { return $tail }] } }\n\
          let s = !{seq 1 2000 | !{ chain !{from-lines} }}; echo done",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
