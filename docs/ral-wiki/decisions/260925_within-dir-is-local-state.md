@@ -69,5 +69,3 @@ the probes as tests in `core/tests/top_level_vs_block.rs` §(6c); the
 S1/S10: `within [dir:]` stays the scoped form, and is now a handler.
 [[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]'s anchor is the
 cell, with no precedence left to re-derive.
-
-Plan: `dev/docs/plans/260925_within-dir-is-local-state.md`.
