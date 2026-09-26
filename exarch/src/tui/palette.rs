@@ -66,8 +66,8 @@ pub(super) const AGENT_HUES: [Color; 6] = [
 
 /// The startup banner's wordmark and eagle — the only saturated ink in the app,
 /// so nothing in the session below competes with the splash.
-pub(super) const BANNER_PINK: Color = Color::Rgb(255, 20, 147);
-pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
+pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 210, 74);
+pub(super) const BANNER_CRIMSON: Color = Color::Rgb(224, 20, 60);
 
 // ── Layout constants ─────────────────────────────────────────────────────────
 

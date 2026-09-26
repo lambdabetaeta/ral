@@ -13,7 +13,7 @@ use super::fidelity::Fidelity;
 use super::line;
 use super::md;
 use super::palette::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, EFFECT_BG, QUEUED_PROMPT_BG, SLATE,
+    AGENT_HUES, BANNER_CRIMSON, BANNER_GOLD, CODE_BG, EFFECT_BG, QUEUED_PROMPT_BG, SLATE,
 };
 use super::rail::{self, RailKind};
 use super::status::{ctx_ramp, scroll_text, wait_bar};
@@ -34,9 +34,9 @@ pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![Line::default()];
     lines.extend(ART.lines().zip(EAGLE.lines()).map(|(a, e)| {
         Line::from(vec![
-            line::bold(a.to_string(), BANNER_PINK),
+            line::bold(a.to_string(), BANNER_GOLD),
             Span::raw("  "),
-            line::bold(e.to_string(), BANNER_GOLD),
+            line::bold(e.to_string(), BANNER_CRIMSON),
         ])
     }));
     let art_w = lines.iter().map(Line::width).max().unwrap_or_default();
