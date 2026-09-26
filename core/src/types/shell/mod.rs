@@ -50,8 +50,8 @@ use crate::source::{FileId, Source, SourceDb, Span};
 use std::io::Write as _;
 use std::sync::Arc;
 
-/// Default cap on the machine's stack (§2.1, §6.3 of the CEK plan): frames,
-/// not host stack frames, so it can sit far above what a host stack allows.
+/// Default cap on the machine's stack: frames, not host stack frames, so it
+/// can sit far above what a host stack allows.
 pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 
 /// The Send+Clone dynamic context every child computation carries — a thunk
@@ -127,10 +127,9 @@ pub struct SessionState {
     /// Shared by `Arc` across every fork and spawned worker, so concurrent
     /// spawns from sibling Shells mint distinct uids and cgroups off one counter.
     pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
-    /// The machine's stack cap (§2.1 of the CEK plan): `Machine::reserve`
-    /// refuses a push at `stack.len() >= stack_limit`.  Counts machine
-    /// frames, not host stack frames; `--recursion-limit`/rc's
-    /// `recursion_limit:` key set it.
+    /// The machine's stack cap: `Machine::reserve` refuses a push at
+    /// `stack.len() >= stack_limit`.  Counts machine frames, not host stack
+    /// frames; `--recursion-limit`/rc's `recursion_limit:` key set it.
     pub(crate) stack_limit: usize,
 }
 
@@ -165,10 +164,10 @@ pub struct LocalState {
     /// not cancel its parent's whole roster.  Read by the [`Drop`] below.
     pub(crate) workers_owned: bool,
     /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
-    /// host stack frame (§2.1 of the CEK plan): a native such as `map`
-    /// applying a user function. `machine::run` increments before its
-    /// `catch_unwind` and decrements right after, so a panic unwinding out
-    /// still leaves it lowered before the payload resumes.
+    /// host stack frame: a native such as `map` applying a user function.
+    /// `machine::run` increments before its `catch_unwind` and decrements right
+    /// after, so a panic unwinding out still leaves it lowered before the
+    /// payload resumes.
     pub(crate) machine_depth: usize,
 }
 
@@ -210,8 +209,8 @@ impl Drop for LocalState {
 /// ([`Shell::run`]) checkpoints and rolls back `env` and `context` around
 /// each run.
 pub struct Shell {
-    /// The session environment (§1.3 of the CEK plan): the machine's focus
-    /// environment between runs, extended by every `Define` that lands.
+    /// The session environment: the machine's focus environment between
+    /// runs, extended by every `Define` that lands.
     pub(crate) env: Env,
     pub(crate) context: Context,
     pub(crate) io: Io,
@@ -395,8 +394,8 @@ mod tests {
     use std::sync::Mutex;
 
     // The five pseudo-variable reads (`$CWD`, `$USER`, …) live and are
-    // tested at `evaluator::observe`, their one reader since S8 hoisted them
-    // out of lexical-scope lookup into the `Observe` computation form.
+    // tested at `evaluator::observe`, their one reader, hoisted out of
+    // lexical-scope lookup into the `Observe` computation form.
 
     /// A `Fork::Listen` run has no pen, and says so rather than reusing the
     /// absent-host sentence: the two are different situations.

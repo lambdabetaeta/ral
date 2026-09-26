@@ -1,9 +1,8 @@
-//! The machine: closures in focus, frames on a stack, one `step` (§2 of the
-//! CEK plan, `dev/docs/plans/260825_cek_machine.md`).
+//! The machine: closures in focus, frames on a stack, one `step`.
 //!
-//! [`Machine::eval_rules`] is §2.2, one match arm per row on `CompKind`;
-//! [`Machine::step_return`] and [`Machine::step_halt`] are §2.3's two
-//! columns, one match arm per row on [`Frame`]. `step` itself only
+//! [`Machine::eval_rules`] has one match arm per `CompKind`;
+//! [`Machine::step_return`] and [`Machine::step_halt`] are each frame's two
+//! rules, one match arm per [`Frame`]. `step` itself only
 //! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
 //! loops.
 
@@ -29,7 +28,7 @@ use super::scope::{WithinScope, WithinUndo};
 use super::val::{close, interpolate_piece, spread_type_err};
 use super::{expr, observe};
 
-// ── §1.4 / §2.3: the stack ─────────────────────────────────────────────
+// ── The stack ─────────────────────────────────────────────────────────
 
 /// What a computation closure settles to, before a frame decides what it
 /// means: a value, or a λ awaiting its arguments.
@@ -115,15 +114,16 @@ impl Default for Machine {
     }
 }
 
-/// Nested `machine::evaluate`/`machine::apply` re-entry cap (§2.1, §4): a
+/// Nested `machine::evaluate`/`machine::apply` re-entry cap: a
 /// native such as `map` applying a user function runs a machine over the
 /// *host* stack, so this bounds how deep those nest rather than the
 /// machine's own frame count. Calibrated by `nested_machines_fit_a_worker_stack`
-/// against a debug build's per-frame cost on a 2 MiB worker stack — 256 and
-/// 64 both overflowed before tripping the check; 24 leaves headroom.
+/// against a debug build's per-frame cost on a 2 MiB stack, a quarter of a
+/// worker's 8 MiB — 256 and 64 both overflowed before tripping the check; 24
+/// leaves headroom.
 pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
-// ── Small pure helpers, named in §2.2/§2.3 ─────────────────────────────
+// ── Small pure helpers ────────────────────────────────────────────────
 
 /// Stamp an unspanned error's span with `span`, the innermost node or frame
 /// that raised it — applied at each raising point instead of once at the end
@@ -266,7 +266,7 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
 }
 
 impl Machine {
-    /// The initial state for `apply`: an empty stack, focus set by `apply_rule` (§2.4).
+    /// The initial state for `apply`: an empty stack, focus set by `apply_rule`.
     fn applying(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Self {
         let mut m = Self::default();
         m.focus = m.apply_rule(f, args, None, mooring, shell);
@@ -299,7 +299,7 @@ impl Machine {
         self.stack.push(frame);
     }
 
-    /// One transition: §2.2 on `Eval`, §2.3 on `Return`/`Halt`.
+    /// One transition: `step_eval` on `Eval`, `step_return`/`step_halt` otherwise.
     fn step(&mut self, mooring: &Mooring, shell: &mut Shell) {
         let focus = std::mem::replace(&mut self.focus, Self::default().focus);
         self.focus = match focus {
@@ -319,7 +319,7 @@ impl Machine {
         };
     }
 
-    // ── §2.4: force, beta, apply ────────────────────────────────────────
+    // ── force, beta, apply ─────────────────────────────────────────────
 
     /// `beta(⟨λp. M, E⟩, args)`: a λ meeting its arguments. `args` non-empty.
     fn beta(
@@ -332,7 +332,7 @@ impl Machine {
         shell: &mut Shell,
     ) -> Focus {
         let Some((param, body)) = comp.arrow() else {
-            unreachable!("a Terminal::Lambda's closure is always arrow-shaped (S3 eta-expansion)")
+            unreachable!("a Terminal::Lambda's closure is always arrow-shaped (eta-expansion)")
         };
         let arg = args.remove(0);
         let env2 = match pattern::bind_pattern(param, &arg, &[], env, shell) {
@@ -412,7 +412,7 @@ impl Machine {
         }
     }
 
-    /// `force V` on a closed value: `force(thunk M) = M`, nothing pushed (S10).
+    /// `force V` on a closed value: `force(thunk M) = M`, nothing pushed.
     fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Focus {
         match v {
             Value::Thunk(c) => {
@@ -437,7 +437,7 @@ impl Machine {
     }
 
     /// `push_redirect(redirs)`: nothing when empty, else install and push
-    /// the `Redirect` frame (§2.2, last paragraph before §2.3).
+    /// the `Redirect` frame.
     fn push_redirect(
         &mut self,
         redirs: &[Redirect<String>],
@@ -453,7 +453,7 @@ impl Machine {
         Ok(())
     }
 
-    // ── §2.2: rules on a computation closure in focus ───────────────────
+    // ── Rules on a computation closure in focus ────────────────────────
 
     fn step_eval(
         &mut self,
@@ -483,7 +483,7 @@ impl Machine {
 
             // Canonical at A → C, never a value: the frame on top decides.
             // Unreachable except under Apply/a C-holed frame for a checked
-            // program (§3.5, S3).
+            // program.
             CompKind::Lam { .. } => Focus::Return(Terminal::Lambda {
                 comp: Arc::clone(comp),
                 env,
@@ -808,7 +808,7 @@ impl Machine {
         )
     }
 
-    // ── §2.3: frames, and their two rules each ──────────────────────────
+    // ── Frames, and their two rules each ───────────────────────────────
 
     fn step_return(
         &mut self,
@@ -1003,7 +1003,7 @@ impl Machine {
 
 impl Frame {
     /// The panic path: undo what a checkpoint cannot hold — fds, staging
-    /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
+    /// files, audit scopes. `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Audit`
     /// `audit.close(scope)` then `set_capture(saved)`, discarding the trail
     /// no one is left to read; `Within` applies its undo; `Grant` removes its layer.
@@ -1029,10 +1029,10 @@ impl Frame {
     }
 }
 
-// ── Boundaries (§2.1) ───────────────────────────────────────────────────
+// ── Boundaries ───────────────────────────────────────────────────────────
 
 /// `Return(Lambda(_))` at the end of a run: unreachable for a checked
-/// program (S3, §3.5), kept as a clean error rather than a panic.
+/// program, kept as a clean error rather than a panic.
 fn end_of_run(focus: Focus) -> Settled<Value> {
     match focus {
         Focus::Return(Terminal::Value(v)) => Ok(v),
@@ -1102,7 +1102,7 @@ pub(crate) fn evaluate(
 }
 
 /// The same, from a closed value meeting arguments — `Machine::applying`
-/// (§2.4) sets the first state.
+/// sets the first state.
 pub(crate) fn apply(
     f: Value,
     args: Vec<Value>,
@@ -1165,25 +1165,23 @@ pub(crate) fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<V
 mod tests {
     use super::*;
     use crate::evaluator::{run_source, with_capture};
-    use crate::ir::{Phrase, Toplevel};
+    use crate::ir::Phrase;
     use crate::source::{FileId, Spanned};
     use crate::types::{Break, captured};
-
-    fn toplevel(source: &str) -> Toplevel {
-        let ast = crate::syntax::parser::parse_with(source, FileId::DUMMY).expect("parse");
-        let top =
-            crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
-                .expect("elaborate");
-        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default(), None)
-            .expect("typecheck")
-    }
 
     /// Run every phrase of `source` through the machine: a `Define` binds
     /// into the running `Env` with `pattern::bind_pattern`, a `Run` phrase's
     /// value is the previous one, mirroring `run_phrases`'s shape without
     /// its lease/PATH-shadow machinery, irrelevant to what these tests probe.
     fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        let top = toplevel(source);
+        let top = crate::compile_and_typecheck(
+            source,
+            crate::typecheck::SessionSchemes::default(),
+            FileId::DUMMY,
+            "<test>",
+            None,
+        )
+        .expect("compile");
         let mut env = shell.env.clone();
         let mut value = Ok(Value::Unit);
         for phrase in &top.phrases {
@@ -1232,20 +1230,20 @@ mod tests {
     fn bind_rhs_writes_ambient_tail_writes_stdout() {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
-            run_with("echo rhs; echo tail", &Mooring::adrift(), shell)
+            run_source("!{ echo rhs; echo tail }", shell)
         });
         result.expect("both echoes must succeed");
-        assert_eq!(bytes, b"rhs\ntail\n");
+        assert_eq!(bytes, b"tail\n", "the RHS went to ambient");
     }
 
     #[test]
     fn bind_rhs_writes_ambient_even_when_the_tail_halts() {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
-            run_with("echo rhs; exit 3", &Mooring::adrift(), shell)
+            run_source("!{ echo rhs; exit 3 }", shell)
         });
         assert!(result.is_err(), "exit 3 must halt");
-        assert_eq!(bytes, b"rhs\n");
+        assert!(bytes.is_empty(), "the RHS went to ambient");
     }
 
     /// `a ? b ? c`: an `Error` arm falls through to the next; an `Escape`
@@ -1319,7 +1317,7 @@ mod tests {
         assert!(matches!(out, Value::Int(3)), "expected 3, got {out:?}");
     }
 
-    /// `apply` — the boundary §4 natives reach `machine::apply` through —
+    /// `apply` — the boundary natives reach `machine::apply` through —
     /// meeting a closed lambda value directly, with no `Comp` in sight.
     #[test]
     fn apply_meets_a_closed_lambda_value() {
@@ -1478,13 +1476,12 @@ mod tests {
         }
     }
 
-    /// §2.1/§4: a native (`map`) applying a function that itself calls `map`
+    /// A native (`map`) applying a function that itself calls `map`
     /// nests one host stack frame's worth of `machine::run` per level.  That
-    /// must fit the 2 MiB default stack a worker thread gets
-    /// (`Shell::spawn_thread`, `scope.rs:4-6`) up to `NESTED_MACHINE_LIMIT`,
-    /// and stop there with the depth-exceeded error rather than a raw
-    /// overflow — run on a fresh thread with no explicit stack size, so it
-    /// inherits the platform default rather than the test harness thread's.
+    /// must fit a worker's stack up to `NESTED_MACHINE_LIMIT`, and stop there
+    /// with the depth-exceeded error rather than a raw overflow — run on
+    /// `std::thread::spawn`'s 2 MiB default, well under the 8 MiB
+    /// `Shell::spawn_thread` gives a worker.
     #[test]
     fn nested_machines_fit_a_worker_stack() {
         let handle = std::thread::spawn(|| {

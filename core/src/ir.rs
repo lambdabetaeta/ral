@@ -189,7 +189,7 @@ pub enum Phrase {
     /// `let p = M` at the top level: run M, extend the session environment.
     /// `schemes` has one entry per name `pattern` binds, closed and
     /// generalised by the checker — a destructuring `let` carries one per
-    /// component, which today's single `Bind.scheme` could not.
+    /// component.
     Define {
         pattern: Arc<IrPattern>,
         comp: Arc<Comp>,
@@ -232,9 +232,9 @@ pub type Comp = Spanned<CompKind>;
 
 impl Comp {
     /// `Some` for a `Lam`, and for a `Rec` projection whose member is a
-    /// `Lam` (§1.1 of the CEK plan): the checker's η-expansion (S3)
-    /// guarantees the body of every function-typed thunk *is* a `Lam`, so
-    /// reading the shape here is reading the type.
+    /// `Lam`: the checker's η-expansion guarantees the body of every
+    /// function-typed thunk *is* a `Lam`, so reading the shape here is
+    /// reading the type.
     pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),

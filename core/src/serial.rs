@@ -80,7 +80,7 @@ pub enum NoExt {}
 /// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
 /// scopes.
 ///
-/// One wire shape for the one runtime thunk value (S10): `Comp::arrow`
+/// One wire shape for the one runtime thunk value: `Comp::arrow`
 /// on the decoded `comp` tells `Lambda` from `Block` back apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum SerialClosure {
@@ -969,7 +969,7 @@ mod tests {
     /// A pipeline-stage request built from a shell with the prelude
     /// installed carries no prelude binding in its table: the prelude is a
     /// constant tier every process rebuilds by running the same source, not
-    /// a row on the wire (§6.2).
+    /// a row on the wire.
     #[test]
     fn pipeline_stage_request_carries_no_prelude_binding() {
         let mut shell = crate::boot::boot_shell(

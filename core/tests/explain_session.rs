@@ -1,6 +1,6 @@
 //! `explain <name>` resolves one name to what documents it, the type it
-//! carries, and where the shell would find it.  A local binding shadows every
-//! other resolution at runtime, so it owns the name outright; below it,
+//! carries, and where the shell would find it.  A session binding shadows
+//! every other resolution at runtime, so it owns the name outright; below it,
 //! `explain` names the frame that would actually run, in bare-head order:
 //! prelude, then a native (the builtin manifest's value half), then the
 //! handler stack (alias before handler before a base frame), then `PATH`.
@@ -50,10 +50,6 @@ fn run_capture(shell: &mut Shell, src: &str) -> (Settled<Value>, String) {
     }
 }
 
-fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
-    run_capture(shell, src).0
-}
-
 /// Whether `name` carries a checker-harvested scheme on the live scope.
 fn has_scheme(sh: &Shell, name: &str) -> bool {
     sh.binding_schemes()
@@ -65,9 +61,11 @@ fn has_scheme(sh: &Shell, name: &str) -> bool {
 /// it: the identity function's *most general* type, off the binding rather
 /// than the builtin manifest.
 #[test]
-fn explain_prints_local_bindings_generalised_scheme() {
+fn explain_prints_a_session_bindings_generalised_scheme() {
     let mut sh = shell();
-    run(&mut sh, "let idf = { |x| return $x }").unwrap();
+    run_capture(&mut sh, "let idf = { |x| return $x }")
+        .0
+        .unwrap();
 
     let (result, out) = run_capture(&mut sh, "explain idf");
     result.unwrap();
@@ -76,20 +74,22 @@ fn explain_prints_local_bindings_generalised_scheme() {
         "explain must print the harvested scheme, got:\n{out}"
     );
     assert!(
-        out.contains("idf: local"),
-        "explain must report the name as local, got:\n{out}"
+        out.contains("idf: session"),
+        "explain must report the name as a session binding, got:\n{out}"
     );
 }
 
-/// A local owns the name it shadows even where its own scheme has nothing
-/// to do with the shadowed entry's — a destructured pattern component
-/// generalises its own scheme now (§3.5), so neither the shadowed doc nor
-/// the shadowed type may answer under it, which is what a registry sweep
-/// below the local would have them do.
+/// A session binding owns the name it shadows even where its own scheme has
+/// nothing to do with the shadowed entry's — a destructured pattern component
+/// generalises its own scheme, so neither the shadowed doc nor the shadowed
+/// type may answer under it, which is what a registry sweep below the
+/// binding would have them do.
 #[test]
-fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
+fn explain_session_binding_inherits_nothing_from_the_shadowed_entry() {
     let mut sh = shell();
-    run(&mut sh, "let [words, rest] = [1, 2]").unwrap();
+    run_capture(&mut sh, "let [words, rest] = [1, 2]")
+        .0
+        .unwrap();
     assert!(
         has_scheme(&sh, "words"),
         "a destructured pattern component generalises its own scheme"
@@ -98,8 +98,8 @@ fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
     let (result, out) = run_capture(&mut sh, "explain words");
     result.unwrap();
     assert!(
-        out.contains("words: local"),
-        "the local must answer, got:\n{out}"
+        out.contains("words: session"),
+        "the session binding must answer, got:\n{out}"
     );
     assert!(
         !out.contains("Unicode-whitespace-delimited words"),
@@ -111,7 +111,7 @@ fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
     );
     assert!(
         out.contains("shadows: prelude"),
-        "what the local shadows is still named, got:\n{out}"
+        "what the binding shadows is still named, got:\n{out}"
     );
 }
 
@@ -120,7 +120,9 @@ fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
 #[test]
 fn explain_names_an_alias_before_the_handler_arm() {
     let mut sh = shell();
-    run(&mut sh, "alias greet { |a| echo hi }").unwrap();
+    run_capture(&mut sh, "alias greet { |a| echo hi }")
+        .0
+        .unwrap();
 
     let (result, out) = run_capture(&mut sh, "explain greet");
     result.unwrap();

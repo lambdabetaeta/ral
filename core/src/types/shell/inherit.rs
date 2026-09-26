@@ -12,11 +12,11 @@ use super::{Mooring, Shell};
 use crate::types::Env;
 
 impl Shell {
-    /// A defaulted [`Shell`] scoped to `captured`: no inherited grants, env
-    /// vars, or call site.  The base every fork below builds on.
-    fn from_captured(captured: &Env) -> Self {
+    /// A defaulted [`Shell`] over `session`: no inherited grants, env vars,
+    /// or call site.  The base every fork below builds on.
+    fn from_session(session: &Env) -> Self {
         let mut shell = Self::new(crate::io::TerminalState::default());
-        shell.env = captured.clone();
+        shell.env = session.clone();
         shell
     }
 
@@ -28,8 +28,8 @@ impl Shell {
     /// along so the child resolves, renders, and describes as the parent does;
     /// the detach budget too, so a child that resolves `detach` spends the
     /// parent's births rather than a fresh allowance.
-    pub(crate) fn child_from(captured: &Env, parent: &Self) -> Self {
-        let mut child = Self::from_captured(captured);
+    pub(crate) fn child_from(session: &Env, parent: &Self) -> Self {
+        let mut child = Self::from_session(session);
         child.context = parent.context.clone();
         child.local.audit.call_site = parent.local.audit.call_site;
         // Rides with the call site: without the registry, the child's spans
@@ -119,7 +119,7 @@ impl Shell {
             .name(name.into())
             .stack_size(8 << 20)
             .spawn(move || {
-                let mut child = Self::from_captured(&env);
+                let mut child = Self::from_session(&env);
                 child.context = context;
                 child.session.stack_limit = stack_limit;
                 child.session.anchor = mooring.cancel.clone();

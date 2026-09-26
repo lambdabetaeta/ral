@@ -390,7 +390,7 @@ fn block_audit_does_not_leak_let_binding() {
 
 // ── (6) Block cwd persistence ────────────────────────────────────────────
 
-/// A `cd` inside a `grant`-scoped block PERSISTS after the call (S10), the
+/// A `cd` inside a `grant`-scoped block PERSISTS after the call, the
 /// same as a forced block or a lambda body: `grant`'s body runs on the
 /// machine's own stack, in place — `cwd` lives on `Shell`, outside the
 /// attenuated cap frame `Frame::Grant` pops.  `grant` handles no cell;
@@ -491,7 +491,7 @@ fn let_extent_is_the_rest_of_its_block() {
     }
 }
 
-/// `a; b`'s one routing rule (S11): a non-final step's bytes are effect and
+/// `a; b`'s one routing rule: a non-final step's bytes are effect and
 /// go to the visible stream, while the block's own value comes from its
 /// tail alone.  `!{ echo one; echo two }`'s value is the tail's decoded
 /// text ("two"); `echo one`'s bytes print regardless.
@@ -515,7 +515,7 @@ fn sequence_inside_a_forced_block_prints_the_non_final_step_and_binds_the_tail()
 }
 
 /// A top-level `let _ = M` still captures and drops `M`'s tail bytes — the
-/// one rule every `let` has (revision 3, §0.4 item 1) — so only the
+/// one rule every `let` has — so only the
 /// statement after it is seen.
 #[test]
 fn let_wildcard_discards_the_rhs_and_prints_only_what_follows() {
@@ -743,8 +743,8 @@ fn sandbox_parity_top_level_cd() {
     );
 }
 
-/// A `cd` inside a forced block or a lambda body PERSISTS after the call
-/// (S10): a block runs on the machine's own stack, in place, with no scope
+/// A `cd` inside a forced block or a lambda body PERSISTS after the call:
+/// a block runs on the machine's own stack, in place, with no scope
 /// frame of its own to discard — `cwd` is part of `Shell`, not the machine's
 /// threaded `Env`, so nothing rescopes it either way.  Checked against the
 /// same canonicalisation a plain top-level `cd` produces.

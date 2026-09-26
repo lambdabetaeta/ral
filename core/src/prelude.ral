@@ -379,7 +379,7 @@ let each-line = { |f|
 # ANSI styling — `styled` looks up its code and asks `_ansi-ok` when it
 # writes, so the wrap is a no-op wherever colour is unsupported; no prelude
 # constant closes over that fact, since a prelude binding can only be a
-# value or a thunk (§6.2) and "is stdout a colour terminal" is neither.
+# value or a thunk and "is stdout a colour terminal" is neither.
 ## Wrap `text` in an ANSI style code, resetting after: `style` is `reset`,
 ## `bold`, `dim`, or one of `red green yellow blue magenta cyan`. Plain text
 ## when colour is unsupported.

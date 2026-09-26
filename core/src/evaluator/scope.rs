@@ -302,10 +302,6 @@ mod tests {
         }
     }
 
-    fn run_source(shell: &mut Shell, src: &str) -> RunReport {
-        shell.run(capture_req(src))
-    }
-
     /// Every command observation's own `argv[0]`, in order, from an
     /// `audit { … }` report's flat `trail`.
     fn command_argv0s(report: &Value) -> Vec<String> {
@@ -339,10 +335,9 @@ mod tests {
     #[test]
     fn try_names_the_failing_command_without_a_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let cmd = match run_source(
-            &mut shell,
+        let cmd = match shell.run(capture_req(
             r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
-        ) {
+        )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("the handler must run"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
@@ -379,7 +374,7 @@ mod tests {
     fn a_panicking_audit_body_still_closes_the_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
-        match run_source(&mut shell, "audit { core-panic-now }") {
+        match shell.run(capture_req("audit { core-panic-now }")) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
@@ -402,10 +397,9 @@ mod tests {
         let before_cwd = shell.cwd();
         let tmp = std::env::temp_dir().display().to_string();
 
-        match run_source(
-            &mut shell,
-            &format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
-        ) {
+        match shell.run(capture_req(&format!(
+            "let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"
+        ))) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
@@ -427,10 +421,9 @@ mod tests {
     #[test]
     fn nested_delimiters_flat_merge() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match run_source(
-            &mut shell,
+        let report = match shell.run(capture_req(
             "audit { echo one; try { echo two } { |_e| return () }; echo three }",
-        ) {
+        )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
@@ -442,7 +435,7 @@ mod tests {
     #[test]
     fn audit_reports_ok_over_its_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match run_source(&mut shell, "audit { echo hi }") {
+        let report = match shell.run(capture_req("audit { echo hi }")) {
             RunReport::Ran { ending, .. } => ending
                 .into_result()
                 .expect("audit { echo hi } must succeed"),

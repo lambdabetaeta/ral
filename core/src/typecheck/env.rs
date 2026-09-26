@@ -165,11 +165,11 @@ pub struct InferCtx {
     pub(super) route_constraints: Vec<ArmResults>,
     /// A `Rec` group's member types, inferred once per `Arc` within a run
     /// and keyed by its identity — every projection of the same group reads
-    /// the same betas rather than re-inferring the group (§3.5).
+    /// the same betas rather than re-inferring the group.
     pub(crate) rec_groups: HashMap<*const (), Vec<CompTy>>,
     /// A `Bind`/`Define`/tail-`Run` RHS's curried arity, recorded whenever
     /// its inferred type resolved to `Fun` — keyed by the RHS node's own
-    /// address, read back by `annotate`'s η-expansion (S3).
+    /// address, read back by `annotate`'s η-expansion.
     pub(crate) rhs_arrow_arity: HashMap<usize, usize>,
     /// Fresh-name counter for compiler-synthesized binders (η-expansion's
     /// parameters, the decode coercion's bind).

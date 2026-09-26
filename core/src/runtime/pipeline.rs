@@ -41,8 +41,8 @@ impl PipeNode {
     /// position.
     ///
     /// `env` is the pipeline node's own lexical environment — the machine's
-    /// `E` in focus, not necessarily `shell.env` — and is what a stage
-    /// thread's closure captures.
+    /// `E` in focus, not necessarily `shell.env` — and is what each stage
+    /// thread evaluates its stage under.
     pub(crate) fn launch(
         stages: &[Arc<Comp>],
         yields: PipeYield,

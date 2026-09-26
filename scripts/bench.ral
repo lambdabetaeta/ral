@@ -1,8 +1,7 @@
 #!/usr/bin/env ral
 
 # bench.ral — build a release `ral` and time the CEK-machine benchmarks
-# (dev/docs/plans/260825_cek_machine.md §6.3) with hyperfine, printing a
-# median-ms ± stdev-ms table. Run via `just bench`.
+# with hyperfine, printing a median-ms ± stdev-ms table. Run via `just bench`.
 
 let here      = dirname $SCRIPT
 let repo_root = resolve-path "$here/.."

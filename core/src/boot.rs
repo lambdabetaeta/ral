@@ -81,7 +81,7 @@ impl BakedPrelude {
 }
 
 /// Reject a prelude phrase that is not a `Define` of `Return(V)` — a literal
-/// or a thunk — naming the bound name(s) (§6.2).
+/// or a thunk — naming the bound name(s).
 ///
 /// The wire ships the prelude tier by name alone, never by value: a
 /// re-exec'd engine child (`hatch`) re-derives it by running the same

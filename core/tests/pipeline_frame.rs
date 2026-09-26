@@ -1,8 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
-//! W3: a pipeline's failure reports through the frames above it exactly as
-//! any other rule's does (§5 of the CEK plan,
-//! `dev/docs/plans/260825_cek_machine.md`).
+//! A pipeline's failure reports through the frames above it exactly as
+//! any other rule's does.
 //!
 //! Drives the public run door, so the test is the session a user has: a
 //! failing pipeline stage's error must climb through the `Capture` frame

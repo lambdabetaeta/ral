@@ -283,7 +283,7 @@ fn chain_non_final_arm_failure_is_catchable() {
 /// through *every* remaining tail-bearing eliminator: the bare lambda body,
 /// the selected `if` branch, the final chain arm, the `case` selected arm, and
 /// a bind continuation.  Each must keep the machine's stack flat — no frame
-/// pushed per iteration, so `session.stack_limit` (S4's default, 100 000)
+/// pushed per iteration, so `session.stack_limit` (default 100 000)
 /// never enters into it at all; a frame pushed per iteration would either
 /// trip that cap or overflow the host stack, well short of the base case.
 ///

@@ -186,7 +186,7 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
 /// `TyEnv` at each `Define`, and binding/unbinding an `alias`/`unalias` `Run`
 /// phrase's handler scheme for the phrases after it, as `Bind` on `Wildcard`
 /// does for a nested discarded
-/// statement (§3.5).  Returns each `Define` phrase's generalised per-name
+/// statement.  Returns each `Define` phrase's generalised per-name
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
 /// `Phrase::Define`.  `contract`, when the caller's form imposes one, holds
@@ -342,7 +342,7 @@ impl Inferencer<'_> {
     /// RHS's *payload*, a byte payload through the `Capture` coercion as the
     /// bound `String`, a value payload directly.  An open route defaults to
     /// `Value`: nothing pinned it to `Bytes`, so there is nothing here to
-    /// capture.  Shared by `Bind` and `Phrase::Define` (§3.5).
+    /// capture.  Shared by `Bind` and `Phrase::Define`.
     fn rhs_bound_ty(&mut self, inner_ty: CompTy) -> Ty {
         if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
             Ty::Thunk(Box::new(inner_ty))
@@ -368,7 +368,7 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Record `rhs`'s curried arity for `annotate`'s η-expansion (S3), keyed
+    /// Record `rhs`'s curried arity for `annotate`'s η-expansion, keyed
     /// by `rhs`'s own address — absent means "not `Fun`-shaped".
     fn record_arrow_arity(&mut self, rhs: &Arc<Comp>, cty: &CompTy) {
         let arity = self.fun_arity(cty);
@@ -1138,10 +1138,10 @@ impl Inferencer<'_> {
         (schemes, tail)
     }
 
-    /// One phrase of §3.5.  `is_tail` marks the toplevel's own last phrase:
+    /// One phrase.  `is_tail` marks the toplevel's own last phrase:
     /// every `Run`'s value is held to the discarded shape, tail included —
     /// its bytes are never captured into its own report — but the tail's
-    /// arrow arity is additionally read, so S3's η-expansion can rebuild it
+    /// arrow arity is additionally read, so η-expansion can rebuild it
     /// if it resolved to `Fun`.  Only a `Run` has a value, so only a `Run`
     /// hands a `CompTy` back.
     fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> (DefineSchemes, Option<CompTy>) {
@@ -1199,7 +1199,7 @@ impl Inferencer<'_> {
                     self.infer_comp(comp)
                 };
                 if is_tail {
-                    // The run's value is reported (S3's η-expansion may
+                    // The run's value is reported (η-expansion may
                     // rebuild a Fun-typed tail into a thunked λ), but a
                     // byte-routed tail — an external command's own stdout —
                     // is still held to the discarded shape: nothing decodes
@@ -1717,7 +1717,7 @@ impl Inferencer<'_> {
         self.merge_branches(arm_ctys, &Reason::CaseArms)
     }
 
-    /// The `Rec` rule of §3.5: bind each name to a self-referential mono
+    /// The `Rec` rule: bind each name to a self-referential mono
     /// computation type, infer every member in that recursive environment,
     /// unify each against its own type, unbind the self-bindings, and answer
     /// the `index`-th member's type — memoized in `ctx.rec_groups` per

@@ -158,7 +158,7 @@ fn close_thunk_scheme(
     scheme
 }
 
-/// Type-check `top` (§3.5), seeding from the live session.
+/// Type-check `top`, seeding from the live session.
 ///
 /// Infer each phrase in order, extending `TyEnv` at each `Define`, then
 /// write back the verdict — each `Define`'s generalised per-name schemes

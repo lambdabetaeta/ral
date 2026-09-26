@@ -22,8 +22,7 @@ use std::sync::Arc;
 /// bindings it mentions. `{ |params| body }` and `{ body }` are told apart
 /// only by the closure's own comp shape —
 /// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and the machine's
-/// `force` rule read the shape rather than a separate variant (S10, the CEK
-/// plan §1.1).
+/// `force` rule read the shape rather than a separate variant.
 ///
 /// Cloning copies no payload — `Str`, `Bytes`, `List`, `Map` and a closure's
 /// scope are all shared — and `Env` and variable lookup rely on it.
@@ -176,7 +175,7 @@ impl Value {
     /// `String`/`Bytes`, and recursive through the *elements* of
     /// `List`/`Map`/`Variant`, so a large collection of small values is
     /// counted honestly. `Lambda`, `Block`, and `Handle` are never descended:
-    /// chasing a captured `Arc<Env>` or a handle's buffers is the retained-size
+    /// chasing a closure's captured `Env` or a handle's buffers is the retained-size
     /// walk this design refuses throughout, `pins_running_work` in
     /// `types/handle.rs` refusing it identically. A nudge, then, not an
     /// account — structure shared under `Arc` counts twice, captures not at all.

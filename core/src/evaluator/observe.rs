@@ -1,10 +1,8 @@
 //! `Observe(Register)` — a read of the shell's store, in computation
 //! position: what `$CWD`, `$ENV`, and a `~`-path are.
 //!
-//! The five pseudo-variables were once resolved by name off `Shell` (a
-//! stringly-typed `pseudo_var`/`lookup_value_name` pair, reached only after
-//! a lexical-scope miss); S8 hoisted every read of them into this typed
-//! `Register` form at elaboration time, so this is now their one reader —
+//! Elaboration hoists every read of the five pseudo-variables into this
+//! typed `Register` form, so this is their one reader —
 //! `Register`'s five variants are the total match, not a string dispatch.
 
 use crate::ir::Register;

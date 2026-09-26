@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2ded530f
+generated_at_commit: fffa63b2
 generated_at_date: 2026-09-26
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
@@ -18,8 +18,9 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `classify_command`, the single site that resolves a head
-  (env → handlers → external) and runs the chosen arm; the evaluator's
-  down-seam for a bare command. There is no builtin arm: a native table entry is
+  (env → handlers → external) and admits it, and the runners
+  (`run_base_frame`, `run_external`) the machine's `Exec` rule then calls for
+  the chosen arm; the evaluator's down-seam for a bare command. There is no builtin arm: a native table entry is
   an `Env` hit on a native value, and a base-frame row is a `Base` hit on the
   handler stack's base layer, run by `run_base_frame` with the argv slice
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
@@ -134,7 +135,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   A non-final stage's returned value is discarded, never serialised onto an
   edge; a `Thread` stage's final value rides home on its own
   `StageObservation`, no wire in between. A `Direct` stage is a process in the group; a `Thread`
-  stage is an OS thread over a cloned `Shell`, and only an external it spawns
+  stage is an OS thread whose `Shell` starts from the parent's session, and only an external it spawns
   — at any nesting depth — is a process. Ordinary application and bind do not
   enter this runtime.
   - A bundled (uutils) head routes `Direct` like any external, its

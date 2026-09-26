@@ -175,7 +175,7 @@ install:
 release *args:
     cargo run -p ral --quiet -- scripts/build-release.ral {{args}}
 
-# Build release and time the bench/*.ral benchmarks with hyperfine (dev/docs/plans/260825_cek_machine.md §6.3).
+# Build release and time the bench/*.ral benchmarks with hyperfine.
 bench:
     cargo run -p ral --quiet -- scripts/bench.ral
 

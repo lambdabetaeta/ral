@@ -1449,35 +1449,22 @@ mod tests {
         }
     }
 
-    /// [`run_source`], also returning the bytes the run wrote to its captured
-    /// stdout. Panics on a static failure — every source here is expected to
-    /// compile.
-    fn run_captured(shell: &mut Shell, src: &str) -> (Settled<Value>, Vec<u8>) {
+    /// Run `src` as one capturing top-level run on a shell the caller dressed,
+    /// under `worker_cap`, with the bytes it wrote to stdout. Panics on a static
+    /// failure — every source here is expected to compile.
+    fn run_captured(
+        shell: &mut Shell,
+        src: &str,
+        worker_cap: Option<usize>,
+    ) -> (Settled<Value>, Vec<u8>) {
         use crate::RunReport;
-        match shell.run(request(src, None)) {
+        match shell.run(request(src, worker_cap)) {
             RunReport::Ran {
                 ending, captured, ..
             } => (
                 ending.into_result(),
                 captured.map(|c| c.stdout).unwrap_or_default(),
             ),
-            RunReport::Static { .. } => {
-                panic!("well-formed source must run, not fail statically: {src:?}")
-            }
-        }
-    }
-
-    /// Run `src` as one capturing top-level run on a shell the caller dressed.
-    /// Panics on a static failure — every source here is expected to compile.
-    fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
-        run_captured(shell, src).0
-    }
-
-    /// [`run_source`], with a `worker_cap` the source runs under.
-    fn run_source_capped(shell: &mut Shell, src: &str, worker_cap: usize) -> Settled<Value> {
-        use crate::RunReport;
-        match shell.run(request(src, Some(worker_cap))) {
-            RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
             }
@@ -1521,7 +1508,8 @@ mod tests {
     #[test]
     fn audit_over_spawn_carries_the_birth_id_and_all() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = run_source(&mut shell, "audit { !{spawn { return 1 }} }")
+        let report = run_captured(&mut shell, "audit { !{spawn { return 1 }} }", None)
+            .0
             .expect("audit over a plain spawn must succeed");
         let birth = only_birth(trail_of(&report));
         assert_eq!(
@@ -1544,10 +1532,12 @@ mod tests {
             &crate::boot::BakedPrelude::bake_runtime(),
             &crate::boot::HostSurface::default(),
         );
-        let report = run_source(
+        let report = run_captured(
             &mut shell,
             "audit {\n  echo x\n  let h = defer { return 1 }\n}",
+            None,
         )
+        .0
         .expect("audit over a defer must succeed");
         let birth = only_birth(trail_of(&report));
         assert_eq!(
@@ -1562,7 +1552,8 @@ mod tests {
     #[test]
     fn cap_refused_spawn_observes_no_birth() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = run_source_capped(&mut shell, "audit { !{spawn { return 1 }} }", 0)
+        let report = run_captured(&mut shell, "audit { !{spawn { return 1 }} }", Some(0))
+            .0
             .expect("audit swallows the refusal as data, not an error");
         let outcome = expect_map(&report)
             .get("outcome")
@@ -1584,13 +1575,15 @@ mod tests {
     fn a_worker_explains_against_its_creators_session() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.set_var("sess_name".into(), Value::Int(1));
-        let (direct, printed) = run_captured(&mut shell, "!{ explain sess_name }");
+        let (direct, printed) = run_captured(&mut shell, "!{ explain sess_name }", None);
         direct.expect("explain must run");
-        assert!(String::from_utf8_lossy(&printed).contains("sess_name: local"));
-        let awaited = run_source(
+        assert!(String::from_utf8_lossy(&printed).contains("sess_name: session"));
+        let awaited = run_captured(
             &mut shell,
             "let h = !{spawn { explain sess_name }}\nawait $h",
+            None,
         )
+        .0
         .expect("the worker must run explain");
         assert_eq!(
             expect_map(&awaited).get("stdout"),
@@ -1609,7 +1602,9 @@ mod tests {
             "let sess_cfg = 7\nlet h = !{{spawn {{ use '{}' }}}}\nawait $h",
             module.display()
         );
-        let awaited = run_source(&mut shell, &src).expect("the worker must load the module");
+        let awaited = run_captured(&mut shell, &src, None)
+            .0
+            .expect("the worker must load the module");
         let value = expect_map(&awaited).get("value").expect("await's value");
         assert_eq!(expect_map(value).get("v"), Some(&Value::Int(7)));
     }
@@ -1625,7 +1620,8 @@ mod tests {
     #[test]
     fn service_rejects_an_empty_description() {
         let mut shell = service_test_shell();
-        let err = run_source(&mut shell, r#"service "   " { 1 }"#)
+        let err = run_captured(&mut shell, r#"service "   " { 1 }"#, None)
+            .0
             .expect_err("an empty description must be refused");
         assert_eq!(status(err), 1);
     }
@@ -1634,7 +1630,8 @@ mod tests {
     #[test]
     fn service_rejects_a_multiline_description() {
         let mut shell = service_test_shell();
-        let err = run_source(&mut shell, "service \"one\ntwo\" { 1 }")
+        let err = run_captured(&mut shell, "service \"one\ntwo\" { 1 }", None)
+            .0
             .expect_err("a multiline description must be refused");
         assert_eq!(status(err), 1);
     }
@@ -1643,10 +1640,11 @@ mod tests {
     #[test]
     fn service_description_lands_in_the_registry_entry() {
         let mut shell = service_test_shell();
-        let handle = match run_source(&mut shell, r#"service "  watch the thing  " { 1 }"#) {
-            Ok(Value::Handle(h)) => h,
-            other => panic!("service must return a Handle, got {other:?}"),
-        };
+        let handle =
+            match run_captured(&mut shell, r#"service "  watch the thing  " { 1 }"#, None).0 {
+                Ok(Value::Handle(h)) => h,
+                other => panic!("service must return a Handle, got {other:?}"),
+            };
         let entries = shell.workers();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].class, LeaseClass::Durable);
@@ -1670,7 +1668,8 @@ mod tests {
     #[test]
     fn detach_requires_a_description_and_a_command() {
         let mut shell = detach_test_shell(4);
-        let err = run_source(&mut shell, r#"detach "a server""#)
+        let err = run_captured(&mut shell, r#"detach "a server""#, None)
+            .0
             .expect_err("a description alone is not a detach");
         assert_eq!(status(err), 1);
     }
@@ -1680,10 +1679,12 @@ mod tests {
     #[test]
     fn detach_rejects_an_illegible_description() {
         let mut shell = detach_test_shell(4);
-        let empty = run_source(&mut shell, r#"detach "   " /bin/echo hi"#)
+        let empty = run_captured(&mut shell, r#"detach "   " /bin/echo hi"#, None)
+            .0
             .expect_err("an empty description must be refused");
         assert_eq!(status(empty), 1);
-        let multiline = run_source(&mut shell, "detach \"one\ntwo\" /bin/echo hi")
+        let multiline = run_captured(&mut shell, "detach \"one\ntwo\" /bin/echo hi", None)
+            .0
             .expect_err("a multiline description must be refused");
         assert_eq!(status(multiline), 1);
     }
@@ -1700,6 +1701,7 @@ mod tests {
         let (by_name, out) = run_captured(
             &mut shell,
             r#"within [handlers: [my-server: { |args| echo ...$args }]] { detach "a server" my-server up now }"#,
+            None,
         );
         assert_eq!(
             by_name.expect("a per-name handler runs in place of the birth"),
@@ -1714,6 +1716,7 @@ mod tests {
         let (catch_all, out) = run_captured(
             &mut shell,
             r#"within [handler: { |n _a| echo $n }] { detach "a server" my-server }"#,
+            None,
         );
         assert_eq!(
             catch_all.expect("a catch-all handler intercepts the head too"),
@@ -1730,7 +1733,8 @@ mod tests {
     #[test]
     fn detach_reaches_a_base_frame_instead_of_spawning_it() {
         let mut shell = detach_test_shell(0);
-        run_source(&mut shell, r#"detach "a server" echo hi"#)
+        run_captured(&mut shell, r#"detach "a server" echo hi"#, None)
+            .0
             .expect("a base frame's name runs the frame, not a birth");
     }
 
@@ -1739,10 +1743,12 @@ mod tests {
     #[test]
     fn detach_reports_an_unknown_command_as_127() {
         let mut shell = detach_test_shell(4);
-        let err = run_source(
+        let err = run_captured(
             &mut shell,
             r#"detach "a server" definitely-not-a-real-tool-xyz"#,
+            None,
         )
+        .0
         .expect_err("an unknown head must not be born");
         assert_eq!(status(err), 127);
     }
@@ -1752,7 +1758,8 @@ mod tests {
     #[test]
     fn detach_refuses_past_its_budget() {
         let mut shell = detach_test_shell(0);
-        let err = run_source(&mut shell, r#"detach "a server" /bin/echo hi"#)
+        let err = run_captured(&mut shell, r#"detach "a server" /bin/echo hi"#, None)
+            .0
             .expect_err("a spent budget must refuse");
         assert!(format!("{err:?}").contains("budget"));
     }
@@ -1763,7 +1770,8 @@ mod tests {
     #[test]
     fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
         let mut shell = detach_test_shell(4);
-        let born = run_source(&mut shell, r#"detach "the greeter" /bin/echo hello"#)
+        let born = run_captured(&mut shell, r#"detach "the greeter" /bin/echo hello"#, None)
+            .0
             .expect("the birth must succeed");
         let fields = expect_map(&born);
         assert_eq!(

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2ded530f
+verified_at_commit: fffa63b2
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -10,9 +10,11 @@ The evaluator is one abstract machine, `core/src/evaluator/machine.rs`. Its
 state is a **focus** and a **stack**: `Machine { focus: Focus, stack:
 Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
 `&Mooring`. Nothing else in the crate constructs a state or sees the stack;
-the module's two doors are `evaluate(comp, env, …)` — inject ⟨M, E⟩ over the
-empty stack and step until it is empty — and `apply(f, args, …)`, the same
-from a closed value meeting arguments. Both return `Settled<Value>`.
+the module's doors are `evaluate(comp, env, …)` — inject ⟨M, E⟩ over the
+empty stack and step until it is empty — `apply(f, args, …)`, the same
+from a closed value meeting arguments, its argument-free twin `force(v, …)`,
+and `apply_handler`, `detach`'s one-shot handler call. All return
+`Settled<Value>`.
 
 **What is in focus is a computation closure.** `Focus::Eval { comp, env }`
 pairs a [[map/core/ir|computation]] with the whole environment it was reached
@@ -26,7 +28,7 @@ value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Within`, `Grant`, `Try`) passes it through, a value-holed frame
 (`To`, `Capture`, `Guard`, `Cleanup`, `Audit`) halts with the
 bare-lambda error — unreachable for a checked program, since the checker
-η-expands every arrow-typed computation into a thunked λ (SPEC §17.8, S3).
+η-expands every arrow-typed computation into a thunked λ (SPEC §17.8).
 `Decode` has no frame: the kernel's `decode` takes a value, so it closes and
 reads it inline in `step_eval`, and the checker reaches it through a bind
 over `Capture` rather than nesting the two.
@@ -72,8 +74,9 @@ resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
-the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
-close their trail scope. `Frame` is at most 128 bytes (asserted at compile
+the capability stack, `Unmask` restores the masked handler, `Audit`
+closes its trail scope and restores the capture policy; `Try` holds only its
+handler. `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect` and `Unmask` are boxed).
 
 `a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
@@ -124,21 +127,26 @@ run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
 stage thread (`runtime/pipeline/thread.rs`). A native that applies a user function — the
 collection combinators, hook dispatch — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
-(set by `nested_machines_fit_a_worker_stack` against a 2 MiB thread) caps
+(calibrated by `nested_machines_fit_a_worker_stack` on a 2 MiB thread, a
+quarter of the 8 MiB `Shell::spawn_thread` gives a worker) caps
 that nesting with a clean error. No native reads a lexical environment:
 `help` and `explain` reflect on the session.
 
 **Pipes are nodes between machines** ([[internals/pipeline-execution|pipeline
-execution]]). A multi-stage pipeline is a configuration: each stage is a
-machine over the empty stack in its own process, and the parent's `Pipeline`
-rule holds a `PipeNode` — the process group, the running stages, the yield
-mode — which it `launch`es and `join`s (collect, then finish) in one step:
-no frame, because nothing runs beneath the node; the outcome climbs the
-parent's frames like any other rule's terminal. What crosses to a stage
-is `WireShell { env, stack_limit, context }`: the bindings tier
-of one environment, interned by the identity of its root, seated under the
-receiver's own natives and prelude — the two constant tiers never cross —
-and **no frame ever crosses**: a stage's stack is empty by construction.
+execution]]). A multi-stage pipeline is a configuration: an external stage is
+a process in the pipeline's group, and a ral-written stage is a thread
+(`launch_thread_stage` via `Shell::spawn_thread`) whose shell starts from the
+parent's session and runs `machine::evaluate(comp, env, …)` — the stage's
+subterm under the node's own environment — over the empty stack. The parent's
+`Pipeline` rule holds a `PipeNode` — the process group, the running stages,
+the yield mode — which it `launch`es and `join`s (collect, then finish) in one
+step: no frame, because nothing runs beneath the node; the outcome climbs the
+parent's frames like any other rule's terminal. **No frame ever crosses**: not
+to a stage, whose stack is empty by construction, nor to a hatched engine,
+which receives the engine seed's `WireShell { env, stack_limit, context }`
+(`core/src/engine_seed.rs`) — the bindings tier of one environment, interned
+by the identity of its root and seated under the receiver's own natives and
+prelude; the two constant tiers never cross.
 
 **Panics and cancellation.** `evaluate`/`apply` wrap the step loop in
 `catch_unwind`; on a panic every frame is `abandon`ed top-down — sinks

@@ -256,7 +256,7 @@ fn tag_loader_error(e: Break) -> Break {
     }
 }
 
-/// `use` stays a native (§10.4, S7): it returns a map and binds nothing, so it
+/// `use` stays a native (§10.4): it returns a map and binds nothing, so it
 /// needs only *an* environment to run the module's phrases under — the
 /// session environment, `Mode::Module`, never the caller's own block-local
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
@@ -281,7 +281,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         virtual_path: &abs_path,
         source_text: &source,
     };
-    // `Mode::Module` never writes `shell.env` (only `Session` does, §3.2),
+    // `Mode::Module` never writes `shell.env` (only `Session` does),
     // so the module's own top-level names die with `env` here — no save or
     // restore needed to keep them from leaking into the caller.
     let ran = module_phrases(load, env, Mode::Module, mooring, shell);

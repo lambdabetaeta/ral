@@ -360,8 +360,7 @@ impl Shell {
         }
     }
 
-    /// The active stack cap (§2.1, §6.3 of the CEK plan): frames, not host
-    /// stack frames.
+    /// The active stack cap: frames, not host stack frames.
     pub fn stack_limit(&self) -> usize {
         self.session.stack_limit
     }

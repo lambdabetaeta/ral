@@ -25,7 +25,7 @@ pub use capture::with_capture;
 const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
                                    `attempt` if its failure should not stop the rest";
 
-// ── Phrases (§3.2) ───────────────────────────────────────────────────────
+// ── Phrases ──────────────────────────────────────────────────────────────
 
 /// What one [`run_phrases`] run left behind.
 pub(crate) struct Ran {
@@ -114,7 +114,7 @@ pub(crate) fn run_phrases(
 }
 
 /// `Run(M)`: the last phrase's value is the run's value; a non-final one
-/// runs under the ambient sink exactly as a `Bind`'s RHS does (S11) — its
+/// runs under the ambient sink exactly as a `Bind`'s RHS does — its
 /// bytes are effect, not the run's value.
 fn run_phrase_run(
     m: &Arc<Comp>,
@@ -211,20 +211,18 @@ pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
 mod tests {
     use super::*;
 
-    /// Compile `source` through the real front end: real source text, never
-    /// hand-built IR.
-    fn toplevel(source: &str) -> Phrases {
-        let ast =
-            crate::syntax::parser::parse_with(source, crate::source::FileId::DUMMY).expect("parse");
-        let top =
-            crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
-                .expect("elaborate");
-        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default(), None)
-            .expect("typecheck")
-            .phrases
+    /// Real source text through the real front end, never hand-built IR.
+    fn toplevel(source: &str) -> Vec<Spanned<Phrase>> {
+        crate::compile_and_typecheck(
+            source,
+            crate::typecheck::SessionSchemes::default(),
+            crate::source::FileId::DUMMY,
+            "<test>",
+            None,
+        )
+        .expect("compile")
+        .phrases
     }
-
-    type Phrases = Vec<Spanned<Phrase>>;
 
     #[test]
     fn run_phrases_installs_defines_into_scope_and_reports_them() {

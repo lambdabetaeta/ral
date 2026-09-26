@@ -211,7 +211,7 @@ fn failed_statement_installs_no_scheme() {
 /// `let [a, b] = [1, 2]` then `$a + 1`: cross-run use of a pattern-bound
 /// name neither errors spuriously nor loses its scheme — each destructured
 /// component generalises from the component type the pattern reaches, one
-/// scheme per bound name (§3.5), just as a plain `let` binding does.
+/// scheme per bound name, just as a plain `let` binding does.
 #[test]
 fn pattern_binds_generalise_their_own_scheme() {
     let mut sh = shell();

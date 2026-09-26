@@ -215,10 +215,10 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
 
 /// The doc and type held by the registry that owns `name`.
 ///
-/// A local answers alone: it shadows every other resolution at runtime, so no
-/// registry below it may speak for it, and its doc can only be the library
-/// table's — that is the one registry naming the locals a sourced library
-/// installs.
+/// A session binding answers alone: it shadows every other resolution at
+/// runtime, so no registry below it may speak for it, and its doc can only be
+/// the library table's — that is the one registry naming the bindings a
+/// sourced library installs.
 ///
 /// Every other site sweeps the documented registries, since a frame stacked
 /// over a native — a handler, an alias — inherits the native's doc.
@@ -226,7 +226,7 @@ fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String
     let manifest = || builtin_type_hint(&shell.session.builtins, name);
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
-    if matches!(site, Some(Where::Local)) {
+    if matches!(site, Some(Where::Session)) {
         return (library_doc(), scheme_of(shell.env.session_binding(name)));
     }
     shell
@@ -277,7 +277,7 @@ fn matcher(pattern: &str) -> impl Fn(&str) -> bool {
 /// dispatch would exec.  Both halves of `explain` read this one answer: the
 /// source line prints it, the doc ladder asks that registry for a doc.
 enum Where {
-    Local,
+    Session,
     Prelude,
     Alias,
     Handler,
@@ -290,7 +290,7 @@ enum Where {
 impl fmt::Display for Where {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Local => f.write_str("local"),
+            Self::Session => f.write_str("session"),
             Self::Prelude => f.write_str("prelude"),
             Self::Alias => f.write_str("alias"),
             Self::Handler => f.write_str("handler"),
@@ -309,7 +309,7 @@ impl fmt::Display for Where {
 /// first is what runs, the rest are shadowed.  That tail is the whole answer
 /// `which` cannot give — a PATH binary this name will never reach.
 ///
-/// Bare-head order (`command_call::resolve`'s): local, prelude, the value
+/// Bare-head order (`command_call::resolve`'s): session, prelude, the value
 /// half of the manifest (a native — the env hit), then the handler stack, then
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
@@ -317,7 +317,7 @@ impl fmt::Display for Where {
 fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
     if shell.env.session_binding(name).is_some() {
-        sites.push(Where::Local);
+        sites.push(Where::Session);
     }
     if shell.env.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
@@ -475,7 +475,7 @@ mod tests {
         let mut shell = Shell::default();
         shell.set_var("sess_name".into(), Value::Int(1));
         for (source, expected) in [
-            ("!{ explain sess_name }", "sess_name: local"),
+            ("!{ explain sess_name }", "sess_name: session"),
             (
                 "let f = { |zqx_local| explain zqx_local }\nf 1",
                 "explain: zqx_local: not found",

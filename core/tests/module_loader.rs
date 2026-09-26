@@ -149,7 +149,7 @@ fn use_returns_a_map_and_does_not_leak() {
     std::fs::remove_file(&path).ok();
 }
 
-/// `use` runs the module under the *session* environment (S7), not the
+/// `use` runs the module under the *session* environment, not the
 /// caller's block scope: inside `{ let local = 1; use 'm' }`, a module
 /// reading `$local` fails with an undefined variable, while a session
 /// `Define` made before the block is visible to it either way.
@@ -335,7 +335,7 @@ fn used_module_runtime_error_points_into_module() {
 /// `use` runs the module under the session as extended by this run's
 /// earlier `Define`s — not under the caller's block-local `let`s — and
 /// returns exactly the names the module's own `Define`s bound, minus the
-/// `_`-prefixed ones (S7).
+/// `_`-prefixed ones.
 #[test]
 fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
     let path = write_module(

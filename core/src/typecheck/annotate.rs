@@ -113,7 +113,7 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx) -> Comp {
 
 /// `annotate_demand`, but for a position that reads its child's *value* —
 /// a `Bind`/`Define` RHS, or the toplevel's own tail `Run` — under
-/// `demand`, so that S3's η-expansion (`eta_expand_arrow`) can apply after
+/// `demand`, so that η-expansion (`eta_expand_arrow`) can apply after
 /// the ordinary rebuild, keyed by the *original* `rhs`'s address in
 /// `ctx.rhs_arrow_arity`.  `Bind` never generalises a scheme — that lives on
 /// `Phrase::Define` alone, one per bound name.
@@ -136,7 +136,7 @@ fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Com
     annotate_rhs(rhs, ctx, eta, Demand::Value)
 }
 
-/// S3: rebuild an arrow-typed RHS of curried arity `arity` as
+/// Rebuild an arrow-typed RHS of curried arity `arity` as
 /// `Return(Thunk(λx₁. … λxₙ. App { head, args }))`, flattening `rhs` into
 /// the `App`'s own head when it is itself an `App` — so every
 /// function-typed thunk's body is a syntactic `Lam` ([`Comp::arrow`]).
@@ -170,7 +170,7 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
 fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     match &comp.item {
         // A `Wildcard` RHS is a discarded statement, `Demand::Discard`, but
-        // still eta-expanded if it resolved to `Fun` (S3) — `annotate_rhs`
+        // still eta-expanded if it resolved to `Fun` — `annotate_rhs`
         // carries both.  Any other pattern's RHS is read at `Demand::Value`.
         // `Bind` never generalises a scheme, on either arm.
         CompKind::Bind {
@@ -544,7 +544,7 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
 }
 
 /// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
-/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS is read
+/// true`, so η-expansion applies throughout — a `Define`'s RHS is read
 /// at `Value` demand; every `Run`, tail included,
 /// is `Demand::Discard` — a `Run`'s bytes are never captured into its own
 /// reported value, only its arrow arity read for η-expansion.  `schemes`,

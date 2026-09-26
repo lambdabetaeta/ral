@@ -290,7 +290,7 @@ impl Elaborator {
             .collect()
     }
 
-    /// One top-level phrase (§3.4, depth 0): a `let` becomes a `Define`,
+    /// One top-level phrase (depth 0): a `let` becomes a `Define`,
     /// anything else a `Run`.  The `Define` pattern's names enter scope only
     /// after the RHS is elaborated, as `nested_single`'s `let` arm does.
     fn toplevel_phrase(&mut self, stmt: Stmt) -> Spanned<Phrase> {
@@ -351,7 +351,7 @@ impl Elaborator {
 
     /// Elaborate `stmts` at depth > 0 — every block or lambda body — right-
     /// nesting each statement into a `Bind` chain over what follows it, so
-    /// `{ a; b }` is `a to _. b` (S11).  The tail of the block is its last
+    /// `{ a; b }` is `a to _. b`.  The tail of the block is its last
     /// statement's own comp, not a `Bind` on it; a block ending in a `let`
     /// has tail `Return(Unit)`.
     fn stmts_nested(&mut self, stmts: &[Stmt]) -> Comp {
@@ -1148,7 +1148,7 @@ fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
     }
 }
 
-/// The five reserved pseudo-variables (S8): a store read, and the English
+/// The five reserved pseudo-variables: a store read, and the English
 /// name of what it reads, for the "not a name you can bind" diagnostic.
 fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
     Some(match name {
@@ -1187,7 +1187,7 @@ fn prelude_scope() -> Arc<HashSet<String>> {
         .clone()
 }
 
-/// Elaborate a top-level statement sequence into a [`Toplevel`] (§3.4).
+/// Elaborate a top-level statement sequence into a [`Toplevel`].
 ///
 /// Each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
 /// member sharing a `Rec` group, and everything else a `Run`.
@@ -1530,7 +1530,7 @@ mod tests {
         assert!(elaborate(&ast, HashSet::new(), "<stdin>").is_err());
     }
 
-    // ── W1b: phrases and right-nested binders ────────────────────────────
+    // ── phrases and right-nested binders ─────────────────────────────────
 
     #[test]
     fn nested_sequence_is_wildcard_bind() {

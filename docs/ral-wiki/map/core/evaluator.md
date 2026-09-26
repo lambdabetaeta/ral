@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2ded530f
+generated_at_commit: fffa63b2
 generated_at_date: 2026-09-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -10,7 +10,8 @@ covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 (`machine.rs`) — the full narrative is
 [[internals/evaluator-machine|the evaluator machine]]. **Evaluation is
 entered only through framed run doors; the machine's own verbs are
-crate-private.** Two reach outside the module:
+crate-private.** Four reach outside the module — `evaluate`, `apply`, its
+argument-free twin `force`, and `apply_handler`:
 
 - `machine::evaluate(comp, env, mooring, shell)` (`pub(crate)`) — inject the
   computation closure ⟨M, ρ⟩ over the empty stack and step until it is empty.
@@ -22,9 +23,9 @@ crate-private.** Two reach outside the module:
   `shell.env` as it lands, not as a post-run install
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
   [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
-  Hosts never call either directly: they enter through the framed
+  Hosts call none of the four directly: they enter through the framed
   `Shell::run` door and the run spine behind it, both in `core/src/run.rs`,
-  the sole way into evaluation — its `Run` (`core/src/transport.rs`) carries
+  the sole way into evaluation — its `Run` (`core/src/protocol.rs`) carries
   a `Program` of source text or a registered hook. The run door checkpoints
   and rolls back `(env, context)` around every run, so a
   panicking run reports as a failed run instead of corrupting the store.
@@ -38,7 +39,8 @@ crate-private.** Two reach outside the module:
   capped by `NESTED_MACHINE_LIMIT`), so an unframed reduction is
   unconstructable.
 
-The result surface is `Settled<Value>` carrying `Escape` / `BodyResult`.
+The result surface is `Settled<Value>`, whose `Break` is a catchable `Error`
+or an uncatchable `Escape`.
 A tail call binds its argument into the closure's environment and puts the body
 straight in focus,
 so it costs no frame and depth is simply `stack.len()`; `reserve` — checked
@@ -70,9 +72,9 @@ Internals:
   per `Frame` each — the two frame-table columns). `Focus::Eval` and
   `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
   from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
-  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` installs a
-  buffer through `evaluator::capture`'s `with_capture` and returns the
-  collected bytes exactly, as `Value::Bytes`, under `Frame::Capture`; the
+  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` swaps
+  `shell.io.stdout` for a fresh buffer and pushes `Frame::Capture`, which
+  returns the collected bytes exactly, as `Value::Bytes`; the
   checker binds that value to a fresh name and composes a `Decode` node over
   it, which — since
   the kernel's `decode` takes a value, not a computation — has no frame of
@@ -84,8 +86,7 @@ Internals:
   [[design/types|types]]). `CompKind::Bind` swaps `shell.io.stdout` to the
   ambient sink before its left computation runs (`Frame::To` carries the prior
   sink to restore), so a `Capture` node one level in only ever drains its own
-  tail's bytes — the literal continuation of what a separate `eval_seq` used
-  to flush. `CompKind::Rec { group, index }` unfolds the n-ary recursive
+  tail's bytes. `CompKind::Rec { group, index }` unfolds the n-ary recursive
   group: every member's name binds to the thunk of its own projection, a
   `Closure::new` over the forced closure's environment: a recursive
   reference forces its name, re-entering `Rec` and re-extending from that
@@ -95,7 +96,7 @@ Internals:
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
   ([[map/core/runtime|runtime]]). `step_case` selects the arm carrying the
   scrutinee's tag, binds the payload (`Unit` for a nullary tag) to that arm's
-  pattern in a fresh environment, and evaluates the arm's body there — a
+  pattern, extending the `case`'s environment, and evaluates the arm's body there — a
   branch, not a function applied to the payload, so its store effects outlive
   the `case` as an `if` body's do
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
@@ -103,7 +104,8 @@ Internals:
   coverage — and remains for a variant that arrives untyped.
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
   and the five [[design/control-operators|control operators]] (`WithinScope`,
-  `error_record`, the `try`/`guard` outcome classifier `Outcome`). The
+  `error_record`, and `classify`, which flattens a failed `try`/`guard`/`audit`
+  body into an `Outcome`). The
   `within` form installs command handlers: a per-name handler and every alias
   must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
   |name args| ... }`; the calling convention is fixed by the surface form and

@@ -500,7 +500,7 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 ///
 /// The prelude — a ral script baked into the binary — is evaluated once
 /// under `shell`'s own natives; every phrase is a `Define` of `Return(V)`
-/// (§6.2, `bake_prelude`), so the run is a fold of closing values, and the
+/// (`bake_prelude`), so the run is a fold of closing values, and the
 /// resulting session tier, frozen, is the one map every shell in this
 /// process starts from.
 ///

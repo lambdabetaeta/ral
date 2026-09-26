@@ -2453,7 +2453,7 @@ fn a_route_polymorphic_join_still_carries_wf2_to_its_byte_uses() {
 fn nested_binds_carry_no_scheme_while_spine_does() {
     // The spine `let g` generalises onto its `Phrase::Define`; a `let inner`
     // under the lambda body is a nested `Bind`, which has no scheme field
-    // to carry one in at all (§3.5).
+    // to carry one in at all.
     let top = annotated(r"let g = { |x| let inner = return $x; return $inner }; return ()");
     let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
         panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
@@ -3116,7 +3116,7 @@ fn duplicate_case_arm_is_refused() {
     );
 }
 
-// ─── Toplevel phrase typechecking (§3.5) ──────────────────────────────────
+// ─── Toplevel phrase typechecking ─────────────────────────────────────────
 
 fn toplevel(src: &str) -> Toplevel {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
@@ -3192,7 +3192,7 @@ fn toplevel_define_destructuring_generalises_each_name() {
 
 /// A nested `let` inside a `!{ … }` block right-nests into a `Bind` chain
 /// (`stmts_nested`), not a flat `Seq` — and, unlike the `Define` around it,
-/// `Bind` carries no scheme field at all: it never generalises (§3.5).
+/// `Bind` carries no scheme field at all: it never generalises.
 #[test]
 fn toplevel_nested_bind_never_generalises() {
     let top = toplevel_ok("let result = !{ let y = 1; return $y }");
@@ -3246,7 +3246,7 @@ fn toplevel_self_recursive_rec_monomorphic_within_body() {
 
 /// A two-member recursive group generalises each member on its own type:
 /// the n-ary `Rec` types each member independently, not through one shared
-/// `Map` shape (§0.3 item 1).
+/// `Map` shape.
 #[test]
 fn toplevel_rec_group_members_generalise_independently() {
     let top = toplevel_ok(
@@ -3300,8 +3300,8 @@ fn toplevel_alias_scheme_visible_until_unalias() {
     );
 }
 
-/// A partial application's RHS resolves to `Fun`, so `annotate` η-expands it
-/// (S3): `let g = f 1` becomes `Return(Thunk(Lam x. App { f, [1, x] }))`,
+/// A partial application's RHS resolves to `Fun`, so `annotate` η-expands it:
+/// `let g = f 1` becomes `Return(Thunk(Lam x. App { f, [1, x] }))`,
 /// whose body `Comp::arrow` reads as a `Lam`, and `g`'s scheme is
 /// generalised over the still-free second parameter.
 #[test]

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2ded530f
+generated_at_commit: fffa63b2
 generated_at_date: 2026-09-26
 covers_paths: [core/src/ir.rs]
 ---
@@ -22,7 +22,7 @@ ledger.
 The two categories:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
-  maps, thunks, variables. A value can never diverge or perform I/O. `Val`
+  maps, variants, thunks, variables. A value can never diverge or perform I/O. `Val`
   itself stays unspanned; every position onto which the checker narrows while
   emitting a constraint carries `Spanned<Val>`. `Args` and list literals are the
   same `ValListElem` slots. `Val::Record` and `Val::Map` carry their own entry
@@ -110,4 +110,4 @@ set a closure over it keeps (`Closure::new`,
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to
 `CompKind`, `Val`, or `Pattern` invalidates every emitted blob (see
-[[map/core|core]] and `core/src/lib.rs`). `docs/SPEC.md` gives the formal CBPV account.
+[[map/core|core]] and `core/src/boot.rs`). `docs/SPEC.md` gives the formal CBPV account.
