@@ -990,7 +990,7 @@ impl Unifier {
                     let new_r1 = Row::Extend(l2, f2, Box::new(Row::Var(rho)));
                     let new_r2 = Row::Extend(l1, f1, Box::new(Row::Var(rho)));
                     self.unify_row_inner(&r1, &new_r1, pairs, depth)?;
-                    return self.unify_row_inner(&r2, &new_r2, pairs, depth);
+                    return self.unify_row_inner(&new_r2, &r2, pairs, depth);
                 }
                 (Row::Var(_), _) | (_, Row::Var(_)) => {
                     unreachable!("Row::Var pairs are handled by the early-return blocks above")
@@ -1494,6 +1494,31 @@ mod tests {
             Some(&Ty::String),
             "tail absorbed the `b` field"
         );
+    }
+
+    /// Which record lacks the label must not depend on the order a literal
+    /// wrote its fields in: the Rémy rewrite keeps each side on its side.
+    #[test]
+    fn a_missing_field_is_reported_whatever_the_label_order() {
+        let closed = |fields: &[&str]| {
+            fields.iter().rev().fold(Row::Empty, |rest, l| {
+                Row::Extend(
+                    Label::Field((*l).into()),
+                    Field::present(Ty::Int),
+                    Box::new(rest),
+                )
+            })
+        };
+        let wanted = closed(&["p", "q", "r"]);
+        for written in [["p", "q"], ["q", "p"]] {
+            let err = Unifier::new()
+                .unify_row(&closed(&written), &wanted)
+                .expect_err("a record without `r` must not unify");
+            assert!(
+                matches!(&err, TypeErrorKind::RowExtraField { label, .. } if label == "r"),
+                "{written:?}: expected RowExtraField(r), got {err:?}"
+            );
+        }
     }
 
     /// `{x: Int | ρ} ≐ {y: Int | ρ}` has no solution; report, do not diverge.
