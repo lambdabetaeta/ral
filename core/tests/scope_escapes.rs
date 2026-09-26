@@ -344,8 +344,8 @@ fn deep_tail_recursion_keeps_the_stack_flat() {
 
 // ── (5) `spawn` must not destroy the parent's lent state ──
 //
-// `builtin_spawn` extracts `(body, captured)` and runs the body on a worker
-// thread that *clones* the parent's `Context` via `spawn_thread`, so the
+// `builtin_spawn` forces its thunk on a worker thread that *clones* the
+// parent's `Context` via `spawn_thread`, so the
 // parent's read-once local state — pipe stdin, audit trail, REPL scratch —
 // is never moved into a fork that dies with it.
 

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: d9abfb52
-verified_at_date: 2026-09-11
+verified_at_commit: d369a2c0
+verified_at_date: 2026-09-26
 anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::addresses, Address, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
@@ -18,7 +18,8 @@ spine below.
 A stage's own stack is empty by construction: **no stage runs in the parent, so
 none can be in tail position, and no frame ever crosses into a stage** — only
 ⟨comp, captured env⟩ rides along, the environment being the pipeline node's own
-lexical environment rather than `shell.env`. Ordinary application and bind
+lexical environment rather than `shell.env`; the stage thread's own `shell.env`
+is the parent's session. Ordinary application and bind
 compose values in the machine and do not enter this pipeline runtime.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**

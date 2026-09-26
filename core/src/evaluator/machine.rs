@@ -1151,9 +1151,9 @@ pub(crate) fn apply_handler(
     )
 }
 
-/// `force v` on a value already in hand (a host door — the hook table's
-/// arity-0 entries — rather than a `CompKind::Force` node): `Machine::force`'s
-/// rule, run as its own machine.
+/// `force v` on a value already in hand (a door — the hook table's arity-0
+/// entries, a worker's body — rather than a `CompKind::Force` node):
+/// `Machine::force`'s rule, run as its own machine.
 pub(crate) fn force(v: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     run(
         |m, mooring, shell| m.focus = Machine::force(v, mooring, shell),

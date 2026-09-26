@@ -84,8 +84,8 @@ impl Shell {
     }
 
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
-    /// with a cloned child shell built from `scopes`. `mooring` is minted by
-    /// the caller, since only it has the parent mooring to rebuild from.
+    /// with a child shell seeded from this shell's session. `mooring` is minted
+    /// by the caller, since only it has the parent mooring to rebuild from.
     ///
     /// Counters start fresh; `stack_limit` is inherited. The worker registry
     /// and detach budget are `Arc`-shared, not copied.
@@ -96,13 +96,13 @@ impl Shell {
         &self,
         mooring: Mooring,
         name: &str,
-        scopes: Env,
         f: F,
     ) -> std::io::Result<(std::thread::JoinHandle<R>, crate::process::CancelScope)>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
+        let env = self.env.clone();
         let context = self.context.clone();
         let stack_limit = self.session.stack_limit;
         let root = self.session.root.clone();
@@ -119,7 +119,7 @@ impl Shell {
             .name(name.into())
             .stack_size(8 << 20)
             .spawn(move || {
-                let mut child = Self::from_captured(&scopes);
+                let mut child = Self::from_captured(&env);
                 child.context = context;
                 child.session.stack_limit = stack_limit;
                 child.session.anchor = mooring.cancel.clone();
@@ -188,9 +188,8 @@ mod tests {
     fn spawned_worker_inherits_the_stack_limit() {
         let mut parent = Shell::default();
         parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
-        let scopes = parent.env.clone();
         let (join, _cancel) = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
+            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 child.session.stack_limit
             })
             .expect("spawn_thread");
@@ -207,9 +206,8 @@ mod tests {
         let mut parent = Shell::default();
         let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
         let span = crate::source::Span::new(file, 8, 11);
-        let scopes = parent.env.clone();
         let (join, _cancel) = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", scopes, move |_, child| {
+            .spawn_thread(Mooring::adrift(), "test-worker", move |_, child| {
                 crate::diagnostic::format_runtime_error_ariadne(
                     &child.session.sources,
                     Some(span),
@@ -236,9 +234,8 @@ mod tests {
         let mut parent = Shell::default();
         parent.install_root_context("main.ral", "");
         let root_file = parent.session.root_file;
-        let scopes = parent.env.clone();
         let (join, _cancel) = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
+            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
                 child.session.root_file
             })
             .expect("spawn_thread");

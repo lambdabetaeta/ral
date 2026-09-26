@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 912b3740
-generated_at_date: 2026-09-24
+generated_at_commit: d369a2c0
+generated_at_date: 2026-09-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -387,8 +387,9 @@ default for a store that is not the session's:
 - `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
   helper) *and* a ral-written pipeline stage
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
-  rides a re-exec'd child — on a fresh OS thread that owns its own IO; nothing
-  flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
+  rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
+  from the spawning shell's session; the body's capture rides in its closure,
+  and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
   calling thread (so the door can hand the caller the worker's scope) and moved
   into the thread, which is why it runs under a child of the durable root
   rather than the foreground scope, and a run timeout or Esc does not reach

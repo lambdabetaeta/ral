@@ -146,11 +146,9 @@ pub(super) fn launch_thread_stage(
     let span = spec.span;
 
     let settle = SettleOnDrop::new(slot);
-    let spawned = cx.shell.spawn_thread(
-        mooring,
-        "ral pipeline stage",
-        env.clone(),
-        move |mooring, child| {
+    let spawned = cx
+        .shell
+        .spawn_thread(mooring, "ral pipeline stage", move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -164,8 +162,7 @@ pub(super) fn launch_thread_stage(
                 settled,
                 audit: child.local.audit.take_fragment(),
             });
-        },
-    );
+        });
     let (join, cancel) = spawned.map_err(|e| {
         stage_error(
             format!("could not start a pipeline stage thread: {e}"),

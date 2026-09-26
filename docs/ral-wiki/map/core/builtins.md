@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b22f78fd
+generated_at_commit: d369a2c0
 generated_at_date: 2026-09-26
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -175,9 +175,9 @@ Bodies are grouped by concern, one submodule each:
   result is claimed, so the sweep only catches what nobody claimed.
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),
-  which inherits a snapshot of the parent's env; `worker_body` closes the
-  thunk's `Comp` over that snapshot as a `Closure` and hands it straight to
-  `machine::evaluate` ([[map/core/evaluator|evaluator]]), deliberately
+  seeded from the parent's session; `worker_body` hands the thunk, its capture
+  riding in its closure, straight to `machine::force`
+  ([[map/core/evaluator|evaluator]]), deliberately
   bypassing the `Toplevel`/`Phrase` boundary, because the worker's own
   `Shell` is the only one its bindings touch and they die with the thread. The
   worker carries the parent's grant stack, so a forced block *inside* the worker

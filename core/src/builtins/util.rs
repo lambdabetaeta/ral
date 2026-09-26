@@ -1,9 +1,8 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
 use crate::types::{
-    Break, Env, Error, HandleInner, Settled, Shell, Value, fmt_float, sig, sig_hint,
+    Break, Closure, Error, HandleInner, Settled, Shell, Value, fmt_float, sig, sig_hint,
 };
-use std::sync::Arc;
 
 /// `i64::MAX` is not itself an `f64` — it rounds up to exactly this, so the
 /// magnitude bound is strict.
@@ -54,13 +53,11 @@ pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a Handle
     }
 }
 
-pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<(Arc<crate::ir::Comp>, Env)> {
+pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<Closure> {
     match val {
         // A spawn body takes no parameters: `comp.arrow()` is `None` for a
         // block-shaped thunk.
-        Value::Thunk(closure) if closure.comp.arrow().is_none() => {
-            Ok((Arc::clone(&closure.comp), closure.env.clone()))
-        }
+        Value::Thunk(closure) if closure.comp.arrow().is_none() => Ok(closure.clone()),
         other => Err(Break::Error(
             Error::new(
                 format!("{cmd} expects a Block, got {} '{other}'", other.type_name()),
