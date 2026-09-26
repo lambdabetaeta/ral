@@ -1,5 +1,5 @@
 //! The one join this module still defers: an arm-result merge under the
-//! subsumption instance `Value Unit ⊑ Bytes` (plan §4.3). `if`, `?`, `case`,
+//! subsumption instance `Value Unit ⊑ Bytes`. `if`, `?`, `case`,
 //! and `try` all funnel their arms through [`InferCtx::join_arm_results`]
 //! rather than casing on the unifier's state at visit time: an emission that
 //! is already determined applies immediately — sound because a route only

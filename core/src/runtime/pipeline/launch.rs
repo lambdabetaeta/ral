@@ -201,7 +201,7 @@ fn launch_external_stage_direct(
     }
     let pumps = pumps.start(&mut child);
     // A joining stage leads a group only behind an envelope, whose payload
-    // leads a session of its own (§3.2) out of the pipeline group's reach.
+    // leads a session of its own out of the pipeline group's reach.
     Ok(ExternalStage {
         watch: slot.watch(child),
         name: rc.shown,

@@ -3438,8 +3438,8 @@ fn return_schema_checks_a_computed_return_value() {
     );
 }
 
-/// §7's misspelling: the bad key arrives through a spread, which a
-/// literal-only rule would wave through.
+/// The bad key arrives through a spread, which a literal-only rule would wave
+/// through.
 #[test]
 fn return_schema_catches_a_key_misspelled_behind_a_spread() {
     let errs = schema_errors("let extra = [nn: 1]\nreturn [...$extra, loose: 1]");

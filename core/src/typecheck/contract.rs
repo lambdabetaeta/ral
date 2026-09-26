@@ -16,13 +16,13 @@
 //! `every_declared_manifest_key_is_handled_by_parse`, and
 //! `every_declared_grant_key_is_handled_by_decode_capability_map`.
 //!
-//! §3's condition is why they are gathered here rather than left where they
-//! are used: a label may not be optional at two irreconcilable types within one
-//! check.  Two tables that disagree at one label would make the order two
-//! constraints arrive in decide the verdict, and order-independence is a
-//! theorem about the term rules plus this door — so the door is load-bearing,
-//! and must be re-established for every new site that introduces a variable
-//! flag.
+//! The one-optional-type condition is why they are gathered here rather than
+//! left where they are used: a label may not be optional at two irreconcilable
+//! types within one check.  Two tables that disagree at one label would make
+//! the order two constraints arrive in decide the verdict, and
+//! order-independence is a theorem about the term rules plus this door — so the
+//! door is load-bearing, and must be re-established for every new site that
+//! introduces a variable flag.
 //!
 //! An ordinary program cannot reach the condition — the put rule mints a
 //! variable flag over a *fresh* payload, and every other rule pins `Present` —
@@ -314,8 +314,8 @@ pub fn declared(form: Form) -> &'static Table {
     }
 }
 
-/// §3's condition over the declared set, computed once: within one check, a
-/// label may not be optional at two types that will not unify.
+/// The one-optional-type condition over the declared set, computed once: within
+/// one check, a label may not be optional at two types that will not unify.
 ///
 /// # Errors
 /// The clash, if this build's tables have one.
@@ -327,8 +327,8 @@ pub fn condition() -> Result<(), &'static Clash> {
     }
 }
 
-/// §3's condition over an arbitrary set of tables — the check [`condition`]
-/// runs, exposed so a host crate's own table can be held to it too.
+/// The one-optional-type condition over an arbitrary set of tables — the check
+/// [`condition`] runs, exposed so a host crate's own table can be held to it too.
 ///
 /// # Errors
 /// The first label two tables name at two types that will not unify.

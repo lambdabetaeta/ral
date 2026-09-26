@@ -807,7 +807,7 @@ fn has_on_map() {
 
 #[test]
 fn with_overrides_command() {
-    // within handlers replace commands at head-dispatch (SPEC §4.1)
+    // within handlers replace commands at head-dispatch (SPEC §9.5)
     must_succeed("within [handlers: [cat: { |args| echo mocked }]] { cat /nonexistent }");
 }
 
@@ -1835,7 +1835,7 @@ fn bundled_uutils_capture_completes_with_buffer_sink() {
     }
 }
 
-// ── §4.4 empty block returns Unit ───────────────────────────────────────
+// ── §5.3 empty block returns Unit ───────────────────────────────────────
 
 #[test]
 fn empty_block_returns_unit() {
@@ -1846,7 +1846,7 @@ fn empty_block_returns_unit() {
     assert_eq!(val, Value::Unit);
 }
 
-// ── §4.6 reject complex types as external command args ──────────────────
+// ── §6.6 reject complex types as external command args ──────────────────
 
 #[test]
 fn list_to_external_is_error() {
@@ -1863,7 +1863,7 @@ fn lambda_to_external_is_error() {
     must_fail("let f = { |x| return $x }\ncat $f");
 }
 
-// ── §10.1 try cmd for runtime errors ────────────────────────────────────
+// ── §8.6 try cmd for runtime errors ─────────────────────────────────────
 
 #[test]
 fn try_runtime_error_has_cmd_runtime() {
@@ -1877,14 +1877,14 @@ fn try_runtime_error_has_cmd_runtime() {
     assert_eq!(result, Value::string("<runtime>"));
 }
 
-// ── §4 rule 2: block with trailing args ─────────────────────────────────
+// ── §6.5 block with trailing args ───────────────────────────────────────
 
 #[test]
 fn block_with_trailing_args_is_error() {
     must_fail("let b = { echo hi }\n$b extra");
 }
 
-// ── §4.6 Currying / partial application ─────────────────────────────────
+// ── §6.5 Currying / partial application ─────────────────────────────────
 
 #[test]
 fn curry_map_partial() {
@@ -2084,10 +2084,10 @@ fn curry_three_partial() {
     );
 }
 
-// ── §4.4: empty block returns Unit ──────────────────────────────────────
+// ── §5.3 empty block returns Unit ───────────────────────────────────────
 // (already tested above as empty_block_returns_unit)
 
-// ── §13 Concurrency: spawn, await, background ───────────────────────────
+// ── §11 Concurrency: spawn, await, background ───────────────────────────
 
 #[test]
 fn await_cached() {
@@ -2281,7 +2281,7 @@ fn spawn_deep_recursion_in_thread() {
     );
 }
 
-// ── §10.2 guard ─────────────────────────────────────────────────────────
+// ── §8.7 guard ──────────────────────────────────────────────────────────
 
 #[test]
 fn guard_propagates_original_error() {
@@ -2588,11 +2588,11 @@ fn interpolation_renders_unit_as_its_literal() {
     );
 }
 
-// ── §8 module circular detection ────────────────────────────────────────
+// ── §10.4 module circular detection ─────────────────────────────────────
 
 // (circular `use` requires files; tested via script tests)
 
-// ── §11.4  audit: capability-check recording ─────────────────────────────
+// ── §13.3 audit: capability-check recording ──────────────────────────────
 //
 // `audit { … }` returns a report `[outcome: `ok v | `err rec, trail: [obs]]`,
 // each observation `[site, start, end, principal, what: `tag […]]`
@@ -2712,7 +2712,7 @@ fn a_denial_outside_a_trail_is_still_a_denial() {
     must_fail("grant [exec: ['/bin/true': 'allow']] { /bin/false }");
 }
 
-// ── §2.4 !{…} hoisting: left-to-right evaluation order ──────────────────
+// ── !{…} hoisting: left-to-right evaluation order ───────────────────────
 
 #[test]
 fn hoist_multiple_atoms_produce_correct_values() {
@@ -2730,8 +2730,8 @@ fn hoist_multiple_atoms_produce_correct_values() {
 #[cfg(unix)]
 #[test]
 fn hoist_left_to_right_observable_via_filesystem() {
-    // The spec (§2.4) says !{…} atoms in one command are hoisted and
-    // evaluated left-to-right, before the containing command runs.
+    // `!{…}` atoms in one command are hoisted and evaluated left-to-right,
+    // before the containing command runs.
     // Each !{…} here appends a distinct line to a temp file; after the
     // command we read the file and verify the order.
     let path = format!("/tmp/ral_hoist_test_{}.txt", std::process::id());
@@ -3138,7 +3138,7 @@ fn first_returns_just_match_when_found() {
 
 #[test]
 fn forward_reference_in_let_group() {
-    // §3.1: consecutive lets form an SCC-analysed group; forward references
+    // §5.7: consecutive lets form an SCC-analysed group; forward references
     // between them must resolve.  `flat-map` in the prelude references
     // `concat` defined later — a regression would show up as "unbound
     // variable" during elaboration.

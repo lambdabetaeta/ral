@@ -467,7 +467,7 @@ impl CollectState {
     /// Everything a teardown addresses: the pipeline's group when this
     /// collector owns it, else each external by pid — a thread stage has
     /// neither, its cancel and wake being all teardown owes it — and every
-    /// envelope, whose payload leads a session of its own (§3.2) that no
+    /// envelope, whose payload leads a session of its own that no
     /// signal to the pipeline's group reaches.  `pipeline: false` leaves the
     /// pipeline's own out: the kernel, or a joined group's owner, delivers it.
     fn addresses(&self, pipeline: bool) -> impl Iterator<Item = Address<'_>> {

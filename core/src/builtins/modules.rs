@@ -1,6 +1,6 @@
 //! `use` — load and evaluate a `.ral` module.
 //!
-//! `use` (§10.4) runs a file under the session environment — every `Define`
+//! `use` (§10.3) runs a file under the session environment — every `Define`
 //! of the current run already landed, none of the caller's own block-local
 //! names — and returns its bindings as a Map.  It is [`builtin_use`], below,
 //! which drives [`module_phrases`]'s own cycle-detection stack and depth
@@ -77,7 +77,7 @@ pub fn evaluate_source(
     evaluate_checked(mooring, shell, &top, source, virtual_path)
 }
 
-// ── Phrases (§10.4) ─────────────────────────────────────────────────────
+// ── Phrases (§10.3) ─────────────────────────────────────────────────────
 
 /// Elaborate and typecheck `source_text` into a [`Toplevel`], seeded from
 /// the live session's schemes.  The `FileId` is peeked, not minted, on the
@@ -256,7 +256,7 @@ fn tag_loader_error(e: Break) -> Break {
     }
 }
 
-/// `use` stays a native (§10.4): it returns a map and binds nothing, so it
+/// `use` stays a native (§10.3): it returns a map and binds nothing, so it
 /// needs only *an* environment to run the module's phrases under — the
 /// session environment, `Mode::Module`, never the caller's own block-local
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
