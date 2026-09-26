@@ -5,7 +5,9 @@
 
 mod env;
 pub use env::{Binding, Env, EnvVars};
-pub(crate) use env::{BindingMap, NativeMap, PreludeMap};
+
+pub(crate) mod signature;
+pub(crate) use signature::{PreludeMap, Signature, lookup};
 
 pub use shell::repl::{PluginEntry, ReplScratch};
 

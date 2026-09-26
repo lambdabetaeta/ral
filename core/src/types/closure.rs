@@ -89,15 +89,12 @@ mod tests {
         ))));
         let node = crate::ir::ThunkNode::new(Arc::clone(&comp));
         let closure = Closure::new(comp, node.occ(), &env);
-        assert!(closure.env().session_binding("a").is_some());
-        assert!(closure.env().session_binding("b").is_none());
+        assert!(closure.env().binding("a").is_some());
+        assert!(closure.env().binding("b").is_none());
 
         let again = Closure::new(Arc::clone(closure.comp()), node.occ(), closure.env());
         assert!(
-            again
-                .env()
-                .bindings_root()
-                .ptr_eq(closure.env().bindings_root()),
+            again.env().ptr_eq(closure.env()),
             "a scrubbed closure rescrubs to itself"
         );
     }

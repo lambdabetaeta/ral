@@ -4,27 +4,27 @@
 
 use crate::diagnostic;
 use crate::ir::{Assembly, MapPart, MapParts, ValListElem};
-use crate::types::{Env, Error, List, Value};
+use crate::types::{Env, Error, List, Signature, Value};
 
 use super::val::{close, spread_type_err};
 
-pub(crate) fn eval(assembly: &Assembly, env: &Env) -> Result<Value, Error> {
+pub(crate) fn eval(assembly: &Assembly, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match assembly {
-        Assembly::List(elems) => eval_list(elems, env),
-        Assembly::Record(entries) => eval_map(entries, env),
-        Assembly::Map(entries) => eval_map(entries, env),
+        Assembly::List(elems) => eval_list(elems, env, sig),
+        Assembly::Record(entries) => eval_map(entries, env, sig),
+        Assembly::Map(entries) => eval_map(entries, env, sig),
     }
 }
 
 /// Evaluates a list literal, splicing `...spread` elements inline. The
 /// cons and snoc shapes reuse the spread's persistent spine instead of
 /// rebuilding it, and still evaluate left to right.
-fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
+fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value, Error> {
     use ValListElem::{Single, Spread};
 
     if let [Single(sx), Spread(sxs)] = elems {
-        let x = close(&sx.item, env)?;
-        let xs = close(&sxs.item, env)?;
+        let x = close(&sx.item, env, sig)?;
+        let xs = close(&sxs.item, env, sig)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -33,8 +33,8 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     }
 
     if let [Spread(sxs), Single(sx)] = elems {
-        let xs = close(&sxs.item, env)?;
-        let x = close(&sx.item, env)?;
+        let xs = close(&sxs.item, env, sig)?;
+        let x = close(&sx.item, env, sig)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -45,8 +45,8 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     let mut items: List = List::new();
     for elem in elems {
         match elem {
-            Single(v) => items.push_back(close(&v.item, env)?),
-            Spread(v) => match close(&v.item, env)? {
+            Single(v) => items.push_back(close(&v.item, env, sig)?),
+            Spread(v) => match close(&v.item, env, sig)? {
                 Value::List(inner) => items.append(&inner),
                 val => return Err(spread_type_err(&val)),
             },
@@ -59,14 +59,14 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
 /// entries win over spreads: `seen` gates the spread pass, because
 /// `Value::map` collects into an ordered map where a later insert would
 /// otherwise overwrite the earlier.
-fn eval_map<E: MapParts>(entries: &[E], env: &Env) -> Result<Value, Error> {
+fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Value, Error> {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
     for entry in entries {
         let (key, value) = match entry.part() {
             MapPart::Labelled(label, v) => (label.to_string(), v),
             MapPart::Computed(key_val, v) => {
-                let key_value = close(key_val, env)?;
+                let key_value = close(key_val, env, sig)?;
                 let Value::String(key) = key_value else {
                     return Err(Error::new(
                         format!(
@@ -84,11 +84,11 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env) -> Result<Value, Error> {
         if !seen.insert(key.clone()) {
             diagnostic::shell_warning(&format!("duplicate key '{key}'"));
         }
-        pairs.push((key, close(&value.item, env)?));
+        pairs.push((key, close(&value.item, env, sig)?));
     }
     for entry in entries {
         if let MapPart::Spread(v) = entry.part() {
-            match close(&v.item, env)? {
+            match close(&v.item, env, sig)? {
                 Value::Map(inner) => {
                     for (k, v) in &inner {
                         if seen.insert(k.to_string()) {

@@ -105,7 +105,7 @@ impl BindingRow {
     pub(super) fn all(shell: &Shell) -> Vec<Self> {
         shell
             .env
-            .fold_union(|b| {
+            .fold_union(&shell.sig, |b| {
                 let handle = match &b.value {
                     Value::Handle(h) => Some(HandleRow {
                         state: *h.state.lock_ignore_poison(),
@@ -186,7 +186,7 @@ impl CompletionNames {
             bindings: sorted(
                 shell
                     .env
-                    .fold_union(|_| ())
+                    .fold_union(&shell.sig, |_| ())
                     .into_iter()
                     .map(|(n, ())| n)
                     .collect(),

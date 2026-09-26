@@ -19,7 +19,7 @@ use crate::syntax::ast::Redirect;
 use crate::types::HandlerEntry;
 use crate::types::{
     Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
-    Settled, Shell, TrailScope, Value, as_map, error_record_of, report_value,
+    Settled, Shell, Signature, TrailScope, Value, as_map, error_record_of, report_value,
 };
 
 use super::assemble;
@@ -229,12 +229,12 @@ fn stamp_call_site(span: Option<Span>, shell: &mut Shell) {
     }
 }
 
-pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
+pub(crate) fn close_args(args: &Args, env: &Env, sig: &Signature) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
         match elem {
-            ValListElem::Single(v) => out.push(close(&v.item, env)?),
-            ValListElem::Spread(v) => match close(&v.item, env)? {
+            ValListElem::Single(v) => out.push(close(&v.item, env, sig)?),
+            ValListElem::Spread(v) => match close(&v.item, env, sig)? {
                 Value::List(list) => out.extend(list.iter().map(std::borrow::Cow::into_owned)),
                 other => return Err(spread_type_err(&other)),
             },
@@ -246,10 +246,11 @@ pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
 pub(crate) fn close_redirects(
     redirects: &[Redirect<Val>],
     env: &Env,
+    sig: &Signature,
 ) -> Result<Vec<Redirect<String>>, Error> {
     redirects
         .iter()
-        .map(|r| r.try_map(|v| close(v, env).map(|v| v.to_string())))
+        .map(|r| r.try_map(|v| close(v, env, sig).map(|v| v.to_string())))
         .collect()
 }
 
@@ -480,10 +481,10 @@ impl Machine {
         shell: &mut Shell,
     ) -> Result<Focus, Break> {
         Ok(match &comp.item {
-            CompKind::Return(val) => Focus::Return(Terminal::Value(close(val, &env)?)),
+            CompKind::Return(val) => Focus::Return(Terminal::Value(close(val, &env, &shell.sig)?)),
 
             CompKind::Assemble(assembly) => {
-                Focus::Return(Terminal::Value(assemble::eval(assembly, &env)?))
+                Focus::Return(Terminal::Value(assemble::eval(assembly, &env, &shell.sig)?))
             }
 
             // Canonical at A → C, never a value: the frame on top decides.
@@ -528,26 +529,30 @@ impl Machine {
                 env,
             },
 
-            CompKind::Force(val) => Self::force(close(val, &env)?, mooring, shell),
+            CompKind::Force(val) => Self::force(close(val, &env, &shell.sig)?, mooring, shell),
 
             CompKind::Interpolation(parts) => {
                 let mut s = String::new();
                 for p in parts {
-                    s.push_str(&interpolate_piece(&close(p, &env)?)?);
+                    s.push_str(&interpolate_piece(&close(p, &env, &shell.sig)?)?);
                 }
                 Focus::Return(Terminal::Value(Value::string(s)))
             }
 
-            CompKind::Binary(op, lhs, rhs) => {
-                Focus::Return(Terminal::Value(expr::eval_binary(*op, lhs, rhs, &env)?))
+            CompKind::Binary(op, lhs, rhs) => Focus::Return(Terminal::Value(expr::eval_binary(
+                *op, lhs, rhs, &env, &shell.sig,
+            )?)),
+            CompKind::Negate(v) => {
+                Focus::Return(Terminal::Value(expr::eval_negate(v, &env, &shell.sig)?))
             }
-            CompKind::Negate(v) => Focus::Return(Terminal::Value(expr::eval_negate(v, &env)?)),
-            CompKind::Not(v) => Focus::Return(Terminal::Value(expr::eval_not(v, &env)?)),
+            CompKind::Not(v) => {
+                Focus::Return(Terminal::Value(expr::eval_not(v, &env, &shell.sig)?))
+            }
 
             CompKind::Index { target, keys } => {
-                let mut v = close(target, &env)?;
+                let mut v = close(target, &env, &shell.sig)?;
                 for key in keys {
-                    let k = close(&key.item, &env)?;
+                    let k = close(&key.item, &env, &shell.sig)?;
                     v = expr::index_value(&v, &k)?;
                 }
                 Focus::Return(Terminal::Value(v))
@@ -572,7 +577,7 @@ impl Machine {
                 }
             }
 
-            CompKind::If { cond, then, else_ } => match close(&cond.item, &env)? {
+            CompKind::If { cond, then, else_ } => match close(&cond.item, &env, &shell.sig)? {
                 Value::Bool(b) => Focus::Eval {
                     comp: Arc::clone(if b { then } else { else_ }),
                     env,
@@ -590,7 +595,7 @@ impl Machine {
             CompKind::App { head, args } => {
                 crate::process::check(mooring)?;
                 stamp_call_site(comp.span, shell);
-                let argv = close_args(args, &env)?;
+                let argv = close_args(args, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 self.push(Frame::Apply {
                     args: argv,
@@ -631,7 +636,7 @@ impl Machine {
             }
 
             CompKind::Decode(val) => {
-                let v = close(val, &env)?;
+                let v = close(val, &env, &shell.sig)?;
                 // The bind's scope dies before the decode, not after it, so the
                 // capture's buffer is unshared and taken over, not copied.
                 drop(env);
@@ -662,7 +667,7 @@ impl Machine {
             }
 
             CompKind::Redirect { body, redirects } => {
-                let redirs = close_redirects(redirects, &env)?;
+                let redirs = close_redirects(redirects, &env, &shell.sig)?;
                 self.push_redirect(&redirs, mooring, shell)?;
                 Focus::Eval {
                     comp: Arc::clone(body),
@@ -675,17 +680,19 @@ impl Machine {
                 handlers,
                 body,
             } => {
-                let opts = close(opts, &env)?;
+                let opts = close(opts, &env, &shell.sig)?;
                 let arms = handlers
                     .as_ref()
                     .map(|arms| {
                         arms.iter()
-                            .map(|arm| Ok((arm.name.clone(), close(&arm.value.item, &env)?)))
+                            .map(|arm| {
+                                Ok((arm.name.clone(), close(&arm.value.item, &env, &shell.sig)?))
+                            })
                             .collect::<Settled<Vec<_>>>()
                     })
                     .transpose()?;
                 let scope = WithinScope::parse(&as_map(&opts, "within")?, arms, &env, shell)?;
-                let body = close(body, &env)?;
+                let body = close(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let undo = scope.enter(shell);
                 self.push(Frame::Within(undo));
@@ -693,7 +700,7 @@ impl Machine {
             }
 
             CompKind::Grant { caps, body } => {
-                let c = close(caps, &env)?;
+                let c = close(caps, &env, &shell.sig)?;
                 let home = shell.context.home();
                 let cwd = shell.cwd();
                 let ctx = FreezeCtx {
@@ -701,7 +708,7 @@ impl Machine {
                     cwd: &cwd,
                 };
                 let caps = crate::capability::decode_capability_map(&c, "grant", &ctx)?;
-                let body = close(body, &env)?;
+                let body = close(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let at = shell.context.grants.len();
                 shell.context.grants.push(caps);
@@ -711,23 +718,23 @@ impl Machine {
             }
 
             CompKind::Try { body, handler } => {
-                let body = close(body, &env)?;
-                let handler = close(handler, &env)?;
+                let body = close(body, &env, &shell.sig)?;
+                let handler = close(handler, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 self.push(Frame::Try { handler });
                 Self::force(body, mooring, shell)
             }
 
             CompKind::Guard { body, cleanup } => {
-                let body = close(body, &env)?;
-                let cleanup = close(cleanup, &env)?;
+                let body = close(body, &env, &shell.sig)?;
+                let cleanup = close(cleanup, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 self.push(Frame::Guard { cleanup });
                 Self::force(body, mooring, shell)
             }
 
             CompKind::Audit { body } => {
-                let body = close(body, &env)?;
+                let body = close(body, &env, &shell.sig)?;
                 self.reserve(shell)?;
                 let saved = shell.local.audit.capture_policy();
                 shell
@@ -747,7 +754,7 @@ impl Machine {
         env: &Env,
         shell: &mut Shell,
     ) -> Result<Focus, Break> {
-        let (label, payload) = match close(&scrutinee.item, env)? {
+        let (label, payload) = match close(&scrutinee.item, env, &shell.sig)? {
             Value::Variant { label, payload } => (label, payload),
             other => {
                 return Err(Break::Error(Error::new(
@@ -790,8 +797,8 @@ impl Machine {
         shell: &mut Shell,
     ) -> Result<Focus, Break> {
         crate::process::check(mooring)?;
-        let argv = close_args(&exec.args, env)?;
-        let redirs = close_redirects(&exec.redirects, env)?;
+        let argv = close_args(&exec.args, env, &shell.sig)?;
+        let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
         stamp_call_site(span, shell);
         Ok(
             match command_call::classify_command(&exec.head, env, mooring, shell)? {
@@ -1414,10 +1421,7 @@ mod tests {
             panic!("even must be a thunk");
         };
         assert!(
-            even2
-                .env()
-                .bindings_root()
-                .ptr_eq(forced_env.bindings_root()),
+            even2.env().ptr_eq(&forced_env),
             "a later unfold's siblings hold the environment that forced it, unchanged"
         );
 
@@ -1454,11 +1458,7 @@ mod tests {
             out.is_err(),
             "`h` must not see a later `zqx-cmd`, got {out:?}"
         );
-        assert!(
-            captured(shell.env.get("h"))
-                .session_binding("zqx-cmd")
-                .is_none()
-        );
+        assert!(captured(shell.env.get("h")).binding("zqx-cmd").is_none());
     }
 
     #[test]
@@ -1469,11 +1469,7 @@ mod tests {
             &mut shell,
         )
         .expect("define");
-        let holds_big = |name| {
-            captured(shell.env.get(name))
-                .session_binding("big")
-                .is_some()
-        };
+        let holds_big = |name| captured(shell.env.get(name)).binding("big").is_some();
         assert!(!holds_big("f"), "`f` does not mention `big`");
         assert!(
             holds_big("g") && holds_big("h"),
@@ -1499,8 +1495,8 @@ mod tests {
         );
         for name in ["even", "odd"] {
             let env = captured(shell.env.get(name));
-            assert!(env.session_binding("k").is_some(), "`{name}` holds `k`");
-            assert!(env.session_binding("big").is_none(), "`{name}` lacks `big`");
+            assert!(env.binding("k").is_some(), "`{name}` holds `k`");
+            assert!(env.binding("big").is_none(), "`{name}` lacks `big`");
         }
     }
 

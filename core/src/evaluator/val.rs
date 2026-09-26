@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::ir::Val;
-use crate::types::{Closure, Env, Error, List, Value};
+use crate::types::{Closure, Env, Error, List, Signature, Value};
 
 /// Renders one interpolation piece for `machine::eval_rules`'s
 /// `CompKind::Interpolation` rule.
@@ -24,27 +24,29 @@ pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
     }
 }
 
-/// Closes a value term: `Variable` resolves through `env` alone, so a miss is
-/// an undefined variable; `Thunk(M)` closes to the thunk value
-/// `⟨M, env|occ(M)⟩`, through [`Closure::new`].
-pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
+/// Closes a value term: `Variable` resolves through ρ, then Σ
+/// ([`crate::types::lookup`]), so a miss is an undefined variable; `Thunk(M)`
+/// closes to the thunk value `⟨M, env|occ(M)⟩`, through [`Closure::new`].
+pub(crate) fn close(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match val {
         Val::Unit => Ok(Value::Unit),
         Val::Int(n) => Ok(Value::Int(*n)),
         Val::Float(f) => Ok(Value::Float(*f)),
         Val::Bool(b) => Ok(Value::Bool(*b)),
         Val::String(s) => Ok(Value::string(s.clone())),
-        Val::Variable(name) => env.get(name).cloned().ok_or_else(|| {
-            let hint = match name.as_ref() {
-                "STATUS" => {
-                    "there is no status register: a failure raises an error \
-                     record that carries its own status — catch it with `try` \
-                     and read `$err[status]` from the handler's argument"
-                }
-                _ => "check spelling, or ensure the variable is defined before this line",
-            };
-            Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
-        }),
+        Val::Variable(name) => crate::types::lookup(name, env, sig)
+            .cloned()
+            .ok_or_else(|| {
+                let hint = match name.as_ref() {
+                    "STATUS" => {
+                        "there is no status register: a failure raises an error \
+                         record that carries its own status — catch it with `try` \
+                         and read `$err[status]` from the handler's argument"
+                    }
+                    _ => "check spelling, or ensure the variable is defined before this line",
+                };
+                Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
+            }),
         Val::Thunk(node) => Ok(Value::Thunk(Closure::new(
             Arc::clone(node.shape()),
             node.occ(),
@@ -53,7 +55,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
         Val::List(node) => {
             let mut items: List = List::new();
             for elem in node.shape() {
-                items.push_back(close(&elem.item, env)?);
+                items.push_back(close(&elem.item, env, sig)?);
             }
             Ok(Value::List(items))
         }
@@ -62,13 +64,13 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
             let entries = node.shape();
             let mut pairs = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                pairs.push((key.to_string(), close(&value.item, env)?));
+                pairs.push((key.to_string(), close(&value.item, env, sig)?));
             }
             Ok(Value::map(pairs))
         }
         Val::Variant { label, payload } => {
             let payload = match payload {
-                Some(p) => Some(Box::new(close(p, env)?)),
+                Some(p) => Some(Box::new(close(p, env, sig)?)),
                 None => None,
             };
             Ok(Value::Variant {

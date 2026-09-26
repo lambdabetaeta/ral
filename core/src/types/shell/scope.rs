@@ -156,14 +156,14 @@ impl Shell {
     /// the pseudo-variable namespace [`Self::lookup_value_name`] also
     /// consults.  The read dual of [`Self::set_var`] / [`Self::bind_value`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
-        self.env.get(name)
+        crate::types::lookup(name, &self.env, &self.sig)
     }
 
     /// Every lexical binding across the whole scope chain, innermost
     /// shadowing outermost — what a host drives tab-completion and the
     /// worksheet from.
     pub fn bindings(&self) -> Vec<(String, Value)> {
-        self.env.all_bindings()
+        self.env.all_bindings(&self.sig)
     }
 
     /// The largest single lexical binding's shallow byte estimate — the
@@ -171,14 +171,14 @@ impl Shell {
     /// probe that cloned the scope to size it would be its own cautionary
     /// tale.
     pub(crate) fn largest_binding_shallow_size(&self) -> usize {
-        self.env.largest_shallow_size()
+        self.env.largest_shallow_size(&self.sig)
     }
 
     /// Every bound name with its installed scheme, innermost binding wins —
     /// the scope half of [`Self::session_schemes`], surfaced on its own for
     /// the worksheet's type column.
     pub fn binding_schemes(&self) -> Vec<(String, Option<Arc<crate::typecheck::Scheme>>)> {
-        self.env.binding_schemes()
+        self.env.binding_schemes(&self.sig)
     }
 
     /// The names of every installed handler entry — `within` arms and aliases
@@ -206,7 +206,7 @@ impl Shell {
     /// persistent handler frames.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
-            bindings: self.env.binding_schemes(),
+            bindings: self.env.binding_schemes(&self.sig),
             aliases: self.context.handlers.alias_schemes(),
             builtins: self.session.builtins.clone(),
         }

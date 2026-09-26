@@ -2,7 +2,8 @@
 
 use super::{Context, LocalState, SessionState, Shell};
 use crate::source::FileId;
-use crate::types::{Env, GrantStack};
+use crate::types::{Env, GrantStack, Signature};
+use std::sync::Arc;
 
 impl Shell {
     /// Build a new interpreter state with the given terminal state.
@@ -15,6 +16,7 @@ impl Shell {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
             env: Env::new(),
+            sig: Arc::new(Signature::default()),
             context: Context {
                 grants: GrantStack::root(),
                 ..Context::default()
@@ -41,10 +43,8 @@ impl Shell {
         };
         shell.install_builtins(crate::builtins::CORE_BUILTINS);
         shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
-        // Language-given names live in the base scope, ahead of the prelude.
-        shell
-            .env
-            .install_natives(crate::types::builtin::language_constants());
+        // Language-given names live in Σ, ahead of the prelude.
+        Arc::make_mut(&mut shell.sig).install_natives(crate::types::builtin::language_constants());
         shell
     }
 

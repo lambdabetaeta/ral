@@ -10,6 +10,7 @@
 
 use super::{Mooring, Shell};
 use crate::types::Env;
+use std::sync::Arc;
 
 impl Shell {
     /// A defaulted [`Shell`] over `session`: no inherited grants, env vars,
@@ -27,9 +28,11 @@ impl Shell {
     /// The builtin table, library docs, call site and source registry ride
     /// along so the child resolves, renders, and describes as the parent does;
     /// the detach budget too, so a child that resolves `detach` spends the
-    /// parent's births rather than a fresh allowance.
+    /// parent's births rather than a fresh allowance.  Σ rides too, by `Arc`
+    /// clone, since a child fork installs no builtins or prelude of its own.
     pub(crate) fn child_from(session: &Env, parent: &Self) -> Self {
         let mut child = Self::from_session(session);
+        child.sig = Arc::clone(&parent.sig);
         child.context = parent.context.clone();
         child.local.audit.call_site = parent.local.audit.call_site;
         // Rides with the call site: without the registry, the child's spans
@@ -103,6 +106,7 @@ impl Shell {
         R: Send + 'static,
     {
         let env = self.env.clone();
+        let sig = Arc::clone(&self.sig);
         let context = self.context.clone();
         let stack_limit = self.session.stack_limit;
         let root = self.session.root.clone();
@@ -120,6 +124,7 @@ impl Shell {
             .stack_size(8 << 20)
             .spawn(move || {
                 let mut child = Self::from_session(&env);
+                child.sig = sig;
                 child.context = context;
                 child.session.stack_limit = stack_limit;
                 child.session.anchor = mooring.cancel.clone();

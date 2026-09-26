@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c4fb2765
+generated_at_commit: 74f7d546
 generated_at_date: 2026-09-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -61,20 +61,25 @@ everything `crate::types::*`.
   fields private and `Closure::new` its one constructor, which `restrict`s
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-  `env.rs` — lexical `Env` and
+  `env.rs` — lexical `Env`, ρ alone, and
   `EnvVars` process-env overrides; a scope entry is
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  **A shared write clones a node, and a node clones cheaply**: `bindings` is
-  a persistent hash map, so a `bind` into an environment another holder still
-  references copies the touched node, and copying a node clones every
-  `Binding` stored inline in it. Each such clone is cheap, whatever the
-  binding holds: `Binding.scheme` sits behind an `Arc`, and the value copies
-  no payload (above). An alias's `HandlerEntry.scheme` is shared the same
-  way, so `binding_schemes` and `alias_schemes` hand the next run's check the
-  very `Arc`s the scope holds; only the wire form keeps its own type and
-  converts at its boundary.
+  **A shared write clones a node, and a node clones cheaply**: `Env`'s
+  private `Entries` is a sorted array below `SMALL` bindings, a persistent
+  hash map past it, so a `bind` into an environment another holder still
+  references copies only the touched node — the whole array below `SMALL`,
+  a path past it — and copying a node clones every `Binding` stored inline in
+  it. Each such clone is cheap, whatever the binding holds: `Binding.scheme`
+  sits behind an `Arc`, and the value copies no payload (above). An alias's
+  `HandlerEntry.scheme` is shared the same way, so `binding_schemes` and
+  `alias_schemes` hand the next run's check the very `Arc`s the scope holds;
+  only the wire form keeps its own type and converts at its boundary.
+  `signature.rs` — `Signature`, Σ: the natives and the frozen prelude, one
+  per `Shell`, `Arc`-shared into every fork. `crate::types::lookup(name, env,
+  sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
+  else in core spells the shadowing order out again.
 - `coerce.rs` — the `sig` / `sig_hint` / `sig_at` runtime-error constructors
   (the last positioned at a span the caller already holds) and the `as_map`
   family of `Value` → `Map` coercions, sitting below both the builtin and
@@ -103,13 +108,16 @@ intersection — `bool`, `ExecPolicy` — not as a whole-`Capabilities` operatio
 field name *is* the invariant — joined by `Shell`
 ([[decisions/260617_turn-local-state|turn-local-state]],
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
-`env` (the session environment, extended by every `Define` that lands) and
-`context` (dynamic context — `cd`, aliases, hooks) — two flat fields, since a
-step's focus carries its own environment and there is no ambient `scope` for
-a bundle to snapshot — plus `Io`, `SessionState`, and `LocalState` below. The
-run door checkpoints and rolls back the `(env, context)` pair around every run
-(`Shell::run_under`), so a panicking run reports as a failed run instead of
-corrupting the store.
+`env` (ρ, the session environment, extended by every `Define` that lands),
+`sig` (Σ — natives and the frozen prelude, `Arc<Signature>`, one per shell,
+never checkpointed since nothing but boot and the one prelude bake ever
+writes it) and `context` (dynamic context — `cd`, aliases, hooks) — three
+flat fields, since a step's focus carries its own environment and there is no
+ambient `scope` for a bundle to snapshot — plus `Io`, `SessionState`, and
+`LocalState` below. The run door checkpoints and rolls back the `(env,
+context)` pair around every run (`Shell::run_under`), so a panicking run
+reports as a failed run instead of corrupting the store; `sig` needs no
+checkpoint, since a run never writes it.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
   `Shell` carries (as the field `io`): stdin / stdout / stderr, the terminal
   snapshot, the launch role ([[map/core/io-process|io-process]]). These
@@ -220,7 +228,7 @@ corrupting the store.
   `LocalState`'s `Drop`: the surviving processes are the one thing a teardown
   must leave alone.
 
-Every `Shell` field — `env` and `context` included — is `pub(crate)`: the
+Every `Shell` field — `env`, `sig`, and `context` included — is `pub(crate)`: the
 partition encodes run safety, capability attenuation, and wire framing, and
 is core's invariant to keep, not an API a host may reach past. Hosts drive a
 session through the intent verbs gathered in `host.rs`, plus the scope and
@@ -405,8 +413,8 @@ default for a store that is not the session's:
   transitively and the pipeline's own surface/deferred rail carries over
   rather than a worker's fresh one.
 - `child_from` — an aside: an independent sibling that clones the parent's
-  `context`, source cursor, and builtin table without touching its IO /
-  audit / REPL scratch; no flow-back. `join_session` is its aside
+  `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
+  without touching its IO / audit / REPL scratch; no flow-back. `join_session` is its aside
   specialisation, sharing the parent's cancel root, so code there is
   interruptible while it runs and older interrupts stay out of its reach; the
   run door runs a hook there when its registered `DefaultPolicy` says

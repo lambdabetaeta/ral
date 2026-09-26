@@ -227,14 +227,14 @@ fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
     if matches!(site, Some(Where::Session)) {
-        return (library_doc(), scheme_of(shell.env.session_binding(name)));
+        return (library_doc(), scheme_of(shell.env.binding(name)));
     }
     shell
         .lookup_builtin(name)
         .map(|entry| (Some(entry.doc.to_owned()), manifest()))
         .or_else(|| {
             prelude_doc(name).map(|doc| {
-                let ty = scheme_of(shell.env.prelude_binding(name)).or_else(manifest);
+                let ty = scheme_of(shell.sig.prelude_binding(name)).or_else(manifest);
                 (Some(doc.to_owned()), ty)
             })
         })
@@ -316,10 +316,10 @@ impl fmt::Display for Where {
 /// under `shadows:`.
 fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
-    if shell.env.session_binding(name).is_some() {
+    if shell.env.binding(name).is_some() {
         sites.push(Where::Session);
     }
-    if shell.env.prelude_binding(name).is_some() {
+    if shell.sig.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
     if shell.session.builtins.value(name).is_some() {

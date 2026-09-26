@@ -63,7 +63,7 @@ fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch
     }
     Ok(StageLaunch::Direct {
         id,
-        args: machine::close_args(&e.args, env)?,
+        args: machine::close_args(&e.args, env, &shell.sig)?,
     })
 }
 

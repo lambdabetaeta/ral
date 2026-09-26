@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 5652477a
+verified_at_commit: 74f7d546
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -113,15 +113,21 @@ polled here and at `Bind`, `App`, `Exec` advance and β, so `let f = { !f };
 !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
-(`core/src/types/env.rs`) is three tiers — the language natives, the frozen
-prelude, and a persistent `imbl::HashMap` of everything bound since. `bind`
-is an insert that disturbs no environment a closure captured; `clone` is
-O(1); `restrict` narrows the bindings tier to a closure's names. The
-**store** is everything else on `Shell`: sinks, the dynamic
-`Context` (grants, handlers, env overrides, cwd, args, modules, hooks), the
-trail, workers, leases. `Context` is read in O(1) by capability checks and
-command dispatch and changed only by frames holding their own undo; it is
-never part of a closure ([[map/core/shell-state|shell-state]]).
+(`core/src/types/env.rs`) is ρ alone: a sorted array below `SMALL` bindings,
+a persistent hash map past it, chosen by size and invisible to its readers.
+`bind`/`extend` produce a fresh environment that disturbs none a closure
+captured; `clone` is O(1); `restrict` narrows it to a closure's names,
+identity when nothing is dropped. Σ — the language natives and the frozen
+prelude — is `Signature` (`core/src/types/signature.rs`), one per shell,
+never part of any environment; `crate::types::lookup(name, env, sig)` reads
+ρ, then Σ's prelude, then Σ's natives, and every rule that resolves a name
+(`Val::Variable` in `close`, `Exec`'s bare-head lookup in
+`command_call::resolve`) goes through it. The **store** is everything else
+on `Shell`: `sig`, sinks, the dynamic `Context` (grants, handlers, env
+overrides, cwd, args, modules, hooks), the trail, workers, leases. `Context`
+is read in O(1) by capability checks and command dispatch and changed only
+by frames holding their own undo; neither it nor Σ is ever part of a closure
+([[map/core/shell-state|shell-state]]).
 
 **The top level is a sequence of phrases** (`core/src/evaluator.rs`,
 `run_phrases`). A `Toplevel` is `Phrase::{Define, Run}`; each phrase
@@ -156,9 +162,9 @@ step: no frame, because nothing runs beneath the node; the outcome climbs the
 parent's frames like any other rule's terminal. **No frame ever crosses**: not
 to a stage, whose stack is empty by construction, nor to a hatched engine,
 which receives the engine seed's `WireShell { env, stack_limit, context }`
-(`core/src/engine_seed.rs`) — the bindings tier of one environment, interned
-by the identity of its root and seated under the receiver's own natives and
-prelude; the two constant tiers never cross.
+(`core/src/engine_seed.rs`) — one environment, ρ alone, interned by its
+allocation's identity; Σ never crosses, so the receiver answers a decoded
+closure's Σ names from its own.
 
 **Panics and cancellation.** `evaluate`/`apply` wrap the step loop in
 `catch_unwind`; on a panic every frame is `abandon`ed top-down — sinks

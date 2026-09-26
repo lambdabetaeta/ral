@@ -364,8 +364,8 @@ pub(crate) fn block_over(env: &Env) -> Value {
     use crate::ir::{CompKind, ThunkNode, Val};
     use crate::source::Spanned;
     let names = env
-        .session_names()
-        .map(|n| Spanned::synthetic(Val::Variable(n.into())))
+        .names()
+        .map(|n| Spanned::synthetic(Val::Variable(n.clone())))
         .collect::<Vec<_>>();
     let body = Spanned::synthetic(CompKind::Return(Val::list(names)));
     let node = ThunkNode::new(Arc::new(body));

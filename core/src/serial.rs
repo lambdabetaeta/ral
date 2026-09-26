@@ -4,16 +4,15 @@
 //! an extension slot uninhabited by default ([`NoExt`]).  [`SerialValue`]
 //! fills the slot with [`Closure`] so the re-exec'd engine child IPC
 //! (`engine_seed`, `subprocess`, `hatch`) can ship a captured environment
-//! as JSON.  `serial.rs` interns *environments*, not scopes: one row per
-//! distinct session-tier root, by [`imbl::GenericHashMap::ptr_eq`] identity
-//! ([`InternCtx`]), rebuilt topologically ([`WireDecoder::for_shell`]) and
-//! seated under the receiver's own natives and prelude — those two constant
-//! tiers never cross.  `into_runtime`, given a [`WireDecoder`], is the sole
-//! wire→runtime conversion.
+//! as JSON.  `serial.rs` interns *environments*, one row per distinct
+//! allocation, by [`Env::ptr_eq`] identity ([`InternCtx`]), rebuilt
+//! topologically ([`WireDecoder::for_shell`]).  Σ never crosses: a captured
+//! environment carries only ρ.  `into_runtime`, given a [`WireDecoder`], is
+//! the sole wire→runtime conversion.
 
 pub mod datum;
 
-use crate::ir::Comp;
+use crate::ir::{Comp, Name};
 use crate::types::{Binding, BuiltinTable, Env, Error, Shell, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -140,15 +139,15 @@ pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 pub(crate) struct InternCtx {
     scope_table: ScopeTable,
     /// Every root interned in this message so far, scanned linearly by
-    /// [`imbl::GenericHashMap::ptr_eq`]: roots number about the message's
-    /// closures, so interning is O(roots²), as a stream chain always made it.
-    roots: Vec<(crate::types::BindingMap, u32)>,
+    /// [`Env::ptr_eq`]: roots number about the message's closures, so
+    /// interning is O(roots²), as a stream chain always made it.
+    roots: Vec<(Env, u32)>,
     /// Rows with an id but no encoding yet.  A stream is a chain of closures —
     /// block → captured env → binding → block — so encoding an environment's
     /// bindings inside `intern_env` would recurse once per link and bound
     /// stream length by the stack.  Interning only *reserves*; [`Self::finish`]
     /// encodes from this queue, a worklist in place of that recursion.
-    pending: Vec<(u32, crate::types::BindingMap)>,
+    pending: Vec<(u32, Env)>,
 }
 
 impl InternCtx {
@@ -160,10 +159,11 @@ impl InternCtx {
         }
     }
 
-    /// Intern `bindings` — an [`Env`]'s session tier — by its persistent
-    /// root's identity, reserving a row for [`Self::finish`] to encode.
-    fn intern_env(&mut self, bindings: &crate::types::BindingMap) -> u32 {
-        if let Some(&(_, id)) = self.roots.iter().find(|(root, _)| root.ptr_eq(bindings)) {
+    /// Intern `env` by its persistent allocation's identity, reserving a row
+    /// for [`Self::finish`] to encode.  Σ never rides along: only `env`
+    /// itself, ρ, is interned.
+    fn intern_env(&mut self, env: &Env) -> u32 {
+        if let Some(&(_, id)) = self.roots.iter().find(|(root, _)| root.ptr_eq(env)) {
             return id;
         }
         #[allow(
@@ -171,9 +171,9 @@ impl InternCtx {
             reason = "serialised row id; a message's environments number far below 2^32"
         )]
         let id = self.scope_table.len() as u32;
-        self.roots.push((bindings.clone(), id));
+        self.roots.push((env.clone(), id));
         self.scope_table.push(Vec::new()); // reserve the row; `finish` fills it
-        self.pending.push((id, bindings.clone()));
+        self.pending.push((id, env.clone()));
         id
     }
 
@@ -188,7 +188,7 @@ impl InternCtx {
     pub(crate) fn finish(mut self) -> Result<ScopeTable, Error> {
         while let Some((id, bindings)) = self.pending.pop() {
             let mut entries = Vec::with_capacity(bindings.len());
-            for (k, b) in &bindings {
+            for (k, b) in bindings.iter() {
                 entries.push((
                     k.to_string(),
                     SerialBinding {
@@ -218,32 +218,24 @@ fn unresolved_scope_ref(id: u32) -> Error {
     )
 }
 
-/// One reconstructed session-tier map per scope table row (`None` until
-/// built).
-type EnvRows = Vec<Option<crate::types::BindingMap>>;
+/// One reconstructed environment per scope table row (`None` until built).
+type EnvRows = Vec<Option<Env>>;
 
-/// Decode capability for one wire envelope: the rebuilt environment rows
-/// and the tiers a captured value re-links against.
-///
-/// The rows sit beside the receiver's own natives and prelude tiers every
-/// row is seated under, and the [`BuiltinTable`] a captured
-/// [`Value::Native`] re-links its name against.
+/// Decode capability for one wire envelope: the rebuilt environment rows,
+/// and the [`BuiltinTable`] a captured [`Value::Native`] re-links its name
+/// against.  Σ never rides the wire, so no tier crosses here either.
 ///
 /// Constructible only from the [`Shell`] that will run the decoded values,
-/// so no call site can pick a manifest — or a prelude — of its own.
+/// so no call site can pick a manifest of its own.
 #[derive(Debug)]
 pub(crate) struct WireDecoder {
     rows: EnvRows,
     manifest: BuiltinTable,
-    natives: Arc<crate::types::NativeMap>,
-    prelude: Arc<crate::types::PreludeMap>,
 }
 
 impl WireDecoder {
-    /// Rebuild one session-tier map per row of `scope_table`, each once its
-    /// dependencies are built; every row is later seated under `shell`'s own
-    /// natives and prelude ([`SerialEnvSnapshot::into_runtime`]), never the
-    /// sender's — those two tiers never ride the wire.
+    /// Rebuild one environment per row of `scope_table`, each once its
+    /// dependencies are built.
     ///
     /// # Errors
     /// A row reference out of range or unresolved, a binding that fails to
@@ -253,8 +245,6 @@ impl WireDecoder {
         let mut dec = Self {
             rows: vec![None; n],
             manifest: shell.session.builtins.clone(),
-            natives: shell.env.natives_arc(),
-            prelude: shell.env.prelude_arc(),
         };
         let deps: Vec<HashSet<u32>> = scope_table
             .iter()
@@ -283,17 +273,19 @@ impl WireDecoder {
                 if !deps[id].iter().all(|&d| dec.rows[d as usize].is_some()) {
                     continue;
                 }
-                let mut entries = crate::types::BindingMap::default();
+                let mut pairs = Vec::with_capacity(scope_table[id].len());
                 for (k, b) in &scope_table[id] {
-                    entries.insert(
-                        k.as_str().into(),
+                    pairs.push((
+                        Name::from(k.as_str()),
                         Binding {
                             value: b.value.clone().into_runtime(&dec)?,
                             scheme: b.scheme.clone().map(Arc::new),
                         },
-                    );
+                    ));
                 }
-                dec.rows[id] = Some(entries);
+                let mut env = Env::new();
+                env.extend(pairs.into_iter());
+                dec.rows[id] = Some(env);
                 built += 1;
             }
             if built == before {
@@ -715,32 +707,24 @@ impl From<FOValue> for Value {
 }
 
 impl SerialEnvSnapshot {
-    /// Intern `env`'s session tier into `ctx`, recording its row id.
-    /// Infallible: interning reserves the id, and any encoding failure
-    /// surfaces at [`InternCtx::finish`].
+    /// Intern `env` into `ctx`, recording its row id.  Infallible: interning
+    /// reserves the id, and any encoding failure surfaces at
+    /// [`InternCtx::finish`].
     pub(crate) fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
         Self {
-            bindings: ctx.intern_env(env.bindings_root()),
+            bindings: ctx.intern_env(env),
         }
     }
 
-    /// Rebuild an [`Env`] from this snapshot's row, seated under `dec`'s
-    /// natives and prelude — the receiver's own, since neither tier rides
-    /// the wire.
+    /// Rebuild the [`Env`] this snapshot names, from `dec`'s row.
     ///
     /// # Errors
     /// The recorded row id is out of range or unresolved.
     pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Env, Error> {
-        let bindings = dec
-            .rows
+        dec.rows
             .get(self.bindings as usize)
             .and_then(std::clone::Clone::clone)
-            .ok_or_else(|| unresolved_scope_ref(self.bindings))?;
-        Ok(Env::from_parts(
-            Arc::clone(&dec.natives),
-            Arc::clone(&dec.prelude),
-            bindings,
-        ))
+            .ok_or_else(|| unresolved_scope_ref(self.bindings))
     }
 }
 

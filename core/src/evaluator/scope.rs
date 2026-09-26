@@ -210,7 +210,7 @@ fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<PathBuf> {
 /// environment, the aliases already in scope, and the session's builtins.
 fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes {
     crate::typecheck::SessionSchemes {
-        bindings: env.binding_schemes(),
+        bindings: env.binding_schemes(&shell.sig),
         aliases: shell.context.handlers.alias_schemes(),
         builtins: shell.session.builtins.clone(),
     }
@@ -450,5 +450,22 @@ mod tests {
             other => panic!("a returning body must report `ok, got {other:?}"),
         }
         assert_eq!(command_argv0s(&report), ["echo"]);
+    }
+
+    /// **T8** — a session function's scheme is what a `within` vets its arm
+    /// against whether the `within` runs at top level or inside a block that
+    /// captured only that one function: `handler_schemes` reads
+    /// `env.binding_schemes(sig)` off the environment the `within` is
+    /// actually running under, so `h`'s scheme must show through `blk`'s own
+    /// (narrow) capture exactly as it would off the session `Env` directly.
+    #[test]
+    fn within_vets_an_arm_against_a_captured_scheme() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let src = "let h = { |n| return $[$n + 1] }\n\
+                   let blk = { within [handlers: [g: { |args| h 1; echo hi }]] { g } }\n\
+                   !$blk";
+        let out = crate::evaluator::run_source(src, &mut shell)
+            .expect("a captured block's within must vet its arm exactly as it would at top level");
+        assert_eq!(out, Value::Unit);
     }
 }

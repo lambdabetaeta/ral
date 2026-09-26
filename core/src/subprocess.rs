@@ -200,8 +200,8 @@ pub(crate) fn install_wire_shell(
 /// A fresh shell wearing the host's builtin surface and `prelude`'s baked
 /// tier: `Shell::new` carries core's manifest alone, so the child-shell hook
 /// reinstalls the rest — and seats the prelude — before any [`WireDecoder`]
-/// is built against it, since a decoder seats every hydrated environment
-/// under this shell's own prelude.
+/// is built against it, since a native value crossing the wire re-links
+/// against this shell's own manifest.
 ///
 /// Test-only scaffolding: production hydration goes through
 /// [`crate::boot::boot_shell`], which takes its `HostSurface` directly.

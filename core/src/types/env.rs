@@ -8,9 +8,9 @@
 use crate::ir::{Name, Occ};
 use crate::typecheck::Scheme;
 use crate::types::Value;
+use crate::types::signature::Signature;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 /// One scope entry: value and scheme are installed together, so the two
@@ -23,231 +23,251 @@ pub struct Binding {
     pub(crate) scheme: Option<Arc<Scheme>>,
 }
 
-/// Every key hashed below is a program identifier, never attacker-controlled
-/// input, so the three tiers use a fast non-cryptographic hasher.
-pub(crate) type NativeMap = HashMap<String, Value, FxBuildHasher>;
-pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
-pub(crate) type BindingMap =
+/// Past [`SMALL`] entries, ρ is a persistent hash map; every key here is a
+/// program identifier, never attacker-controlled input, so it uses a fast
+/// non-cryptographic hasher.
+type LargeMap =
     imbl::GenericHashMap<Name, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
-/// Shared empty tiers, so `Env::new` and `Env::with_natives` clone an `Arc`
-/// rather than allocate a fresh empty map.
-static EMPTY_NATIVES: LazyLock<Arc<NativeMap>> = LazyLock::new(|| Arc::new(NativeMap::default()));
-static EMPTY_PRELUDE: LazyLock<Arc<PreludeMap>> = LazyLock::new(|| Arc::new(PreludeMap::default()));
+/// Below this many entries ρ is one flat array; past it, a persistent hash
+/// map.
+const SMALL: usize = 16;
 
-/// Lexical environment: three tiers, checked in order.
-///
-/// `natives` are language constants — seeded once at boot
-/// ([`Self::install_natives`]), never written after. `prelude` is the baked
-/// prelude's bindings, one map per process, shared by every shell that boots
-/// from it. `bindings` is everything bound since: a persistent map, so
-/// `bind` is O(log₃₂ n) and cloning the whole environment is O(1). A thunk
-/// value keeps only its [`Self::restrict`] to the names it mentions.
+/// ρ's two representations, chosen by size and invisible to `Env`'s users.
 #[derive(Debug, Clone)]
-pub struct Env {
-    natives: Arc<NativeMap>,
-    prelude: Arc<PreludeMap>,
-    bindings: BindingMap,
+enum Entries {
+    /// Sorted by name, distinct, one allocation.
+    Small(Arc<[(Name, Binding)]>),
+    Large(Arc<LargeMap>),
 }
 
+/// One static empty `Small`, so a value capturing nothing allocates nothing.
+static EMPTY: LazyLock<Arc<[(Name, Binding)]>> = LazyLock::new(|| Arc::from(Vec::new()));
+
+/// `entries` as `Entries`, sharing the one static [`EMPTY`] when there are
+/// none — every path that could otherwise build a fresh empty `Small`
+/// (`extend`, `unset`, `restrict`) goes through here instead.
+fn small_or_large(entries: Vec<(Name, Binding)>) -> Entries {
+    if entries.is_empty() {
+        Entries::Small(Arc::clone(&EMPTY))
+    } else if entries.len() > SMALL {
+        Entries::Large(Arc::new(entries.into_iter().collect()))
+    } else {
+        Entries::Small(entries.into())
+    }
+}
+
+/// ρ: a persistent map from names to bindings, read alone.
+///
+/// No Σ fallback — [`crate::types::signature::lookup`] is the resolution rule
+/// that adds Σ. `restrict` is where a thunk value's capture is scrubbed to
+/// what it mentions; `bind`/`extend` are the write side, each producing a
+/// fresh environment so one a closure already captured is untouched.
+#[derive(Debug, Clone)]
+pub struct Env(Entries);
+
 impl Env {
-    /// The empty three-tier map: no natives, no prelude, nothing bound.
+    /// The empty map — one static allocation, cloned.
     pub fn new() -> Self {
-        Self {
-            natives: Arc::clone(&EMPTY_NATIVES),
-            prelude: Arc::clone(&EMPTY_PRELUDE),
-            bindings: BindingMap::default(),
+        Self(Entries::Small(Arc::clone(&EMPTY)))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match &self.0 {
+            Entries::Small(a) => a.len(),
+            Entries::Large(m) => m.len(),
         }
     }
 
-    /// `natives` alone, no prelude — what a prelude bake itself runs under.
-    pub(crate) fn with_natives(natives: Arc<NativeMap>) -> Self {
-        Self {
-            natives,
-            prelude: Arc::clone(&EMPTY_PRELUDE),
-            bindings: BindingMap::default(),
-        }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
-    /// Seat a shell: `natives` and the baked `prelude`, nothing bound yet.
-    pub(crate) fn with_prelude(natives: Arc<NativeMap>, prelude: Arc<PreludeMap>) -> Self {
-        Self {
-            natives,
-            prelude,
-            bindings: BindingMap::default(),
-        }
-    }
-
-    /// Rebuild an `Env` from its three tiers — `crate::serial`'s receiving
-    /// side, which decodes only `bindings` and seats it under the receiver's
-    /// own `natives`/`prelude`, and the fork's scrub, which replaces only
-    /// `bindings`.
-    pub(crate) fn from_parts(
-        natives: Arc<NativeMap>,
-        prelude: Arc<PreludeMap>,
-        bindings: BindingMap,
-    ) -> Self {
-        Self {
-            natives,
-            prelude,
-            bindings,
-        }
-    }
-
-    /// Seed the base native scope — a value manifest row's `Value`, or a
-    /// language-given constant.  Called only at boot, beside builtin-table
-    /// installation.
-    pub(crate) fn install_natives(&mut self, entries: impl IntoIterator<Item = (String, Value)>) {
-        let map = Arc::make_mut(&mut self.natives);
-        map.extend(entries);
-    }
-
-    /// Look up `name`: `bindings`, then `prelude`, then `natives`.
+    /// Look up `name`: ρ alone, no Σ fallback.
     pub fn get(&self, name: &str) -> Option<&Value> {
-        if let Some(b) = self.get_binding(name) {
-            return Some(&b.value);
-        }
-        self.natives.get(name)
+        self.binding(name).map(|b| &b.value)
     }
 
-    /// The whole [`Binding`] for `name`: `bindings`, then `prelude`.  Natives
-    /// carry no [`Binding`] — no scheme, no source location — so a native-only
-    /// hit answers [`None`] here even though [`Self::get`] resolves it.
-    pub(crate) fn get_binding(&self, name: &str) -> Option<&Binding> {
-        self.bindings.get(name).or_else(|| self.prelude.get(name))
-    }
-
-    /// The prelude [`Binding`] for `name`; it carries the checker's harvested
-    /// scheme, so a prelude function's type needs no separate registry.
-    pub(crate) fn prelude_binding(&self, name: &str) -> Option<&Binding> {
-        self.prelude.get(name)
-    }
-
-    /// The session [`Binding`] for `name` — everything bound since the
-    /// prelude, skipping it.  What `help`'s local-site lookups want.
-    pub(crate) fn session_binding(&self, name: &str) -> Option<&Binding> {
-        self.bindings.get(name)
-    }
-
-    /// Every name bound since the prelude — what the binding lease adopts.
-    pub(crate) fn session_names(&self) -> impl Iterator<Item = &str> {
-        self.bindings.keys().map(AsRef::as_ref)
-    }
-
-    /// `self` with its session tier narrowed to `occ`.  The two constant
-    /// tiers stay whole: a name they answer is not in the session tier and is
-    /// not copied.  Tested identity first: if `occ` covers every session
-    /// name, `self` is returned unchanged, the same root — sound because an
-    /// [`Occ`] is distinct by construction.
-    pub(crate) fn restrict(&self, occ: &Occ) -> Self {
-        if occ.len() >= self.bindings.len() && self.bindings.keys().all(|name| occ.contains(name)) {
-            return self.clone();
-        }
-        let bindings: BindingMap = occ
-            .names()
-            .filter_map(|n| {
-                self.bindings
-                    .get_key_value(n)
-                    .map(|(k, b)| (k.clone(), b.clone()))
-            })
-            .collect();
-        Self {
-            natives: Arc::clone(&self.natives),
-            prelude: Arc::clone(&self.prelude),
-            bindings,
+    /// The whole [`Binding`] for `name`, ρ alone.
+    pub(crate) fn binding(&self, name: &str) -> Option<&Binding> {
+        match &self.0 {
+            Entries::Small(a) => a
+                .binary_search_by(|(n, _)| n.as_ref().cmp(name))
+                .ok()
+                .map(|i| &a[i].1),
+            Entries::Large(m) => m.get(name),
         }
     }
 
-    /// Bind `name` in the session tier, replacing any existing binding —
-    /// persistent, so an environment a closure already captured is
-    /// unaffected.
+    /// Bind `name` in ρ, replacing any existing binding — persistent, so an
+    /// environment a closure already captured is unaffected. The hot path,
+    /// every `let`: a `Small` below the cap builds its one fresh array
+    /// directly from the unaffected slices either side of the insertion
+    /// point, writing a `TrustedLen` iterator in place with no intermediate
+    /// `Vec`.
     pub(crate) fn bind(&mut self, name: Name, binding: Binding) {
-        self.bindings.insert(name, binding);
+        if let Entries::Small(a) = &self.0 {
+            let (i, j) = match a.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
+                Ok(i) => (i, i + 1),
+                Err(i) => (i, i),
+            };
+            if a.len() - (j - i) < SMALL {
+                self.0 = Entries::Small(
+                    a[..i]
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once((name, binding)))
+                        .chain(a[j..].iter().cloned())
+                        .collect(),
+                );
+                return;
+            }
+        }
+        self.extend(std::iter::once((name, binding)));
     }
 
     /// Bind every entry in one pass — a pattern's names, or a `Rec` group's
-    /// members.
+    /// members — a later entry shadowing an earlier one, in this call or
+    /// already in `self`. `bind` is the one-entry fast path; this is the
+    /// general merge, past `SMALL` a unique `Large` updated in place.
     pub(crate) fn extend(&mut self, entries: impl ExactSizeIterator<Item = (Name, Binding)>) {
-        for (name, binding) in entries {
-            self.bindings.insert(name, binding);
+        if entries.len() == 0 {
+            return;
+        }
+        match &mut self.0 {
+            Entries::Small(a) => {
+                let mut merged: Vec<(Name, Binding)> = Vec::with_capacity(a.len() + entries.len());
+                merged.extend(a.iter().cloned());
+                for (name, binding) in entries {
+                    match merged.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
+                        Ok(i) => merged[i] = (name, binding),
+                        Err(i) => merged.insert(i, (name, binding)),
+                    }
+                }
+                self.0 = small_or_large(merged);
+            }
+            Entries::Large(m) => {
+                let m = Arc::make_mut(m);
+                for (name, binding) in entries {
+                    m.insert(name, binding);
+                }
+            }
         }
     }
 
-    /// Remove `name` from the session tier, returning its value; a prelude
-    /// name of the same spelling reappears beneath.
+    /// Remove `name` from ρ, returning its value.
     pub(crate) fn unset(&mut self, name: &str) -> Option<Value> {
-        self.bindings
-            .remove(name)
-            .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
+        match &mut self.0 {
+            Entries::Small(a) => {
+                let i = a.binary_search_by(|(n, _)| n.as_ref().cmp(name)).ok()?;
+                let mut kept: Vec<(Name, Binding)> = a.iter().cloned().collect();
+                let (_, binding) = kept.remove(i);
+                self.0 = small_or_large(kept);
+                Some(binding.value)
+            }
+            Entries::Large(m) => {
+                let map = Arc::make_mut(m);
+                let binding = map.remove(name)?;
+                Some(binding.value)
+            }
+        }
     }
 
-    /// Walk `bindings` then `prelude`, projecting each binding on first sight
-    /// of its name.  The single home of the shadowing rule.
-    pub(crate) fn fold_union<T>(&self, project: impl Fn(&Binding) -> T) -> Vec<(String, T)> {
+    /// `self` narrowed to `occ`. Tested identity first: if `occ` covers every
+    /// name `self` binds, `self` is returned unchanged, the same allocation —
+    /// sound because an [`Occ`] is distinct by construction. Otherwise built
+    /// by walking `occ`, not `self`: a `Small` of the hits, or a `Large` past
+    /// [`SMALL`].
+    pub(crate) fn restrict(&self, occ: &Occ) -> Self {
+        if occ.len() >= self.len() && self.names().all(|name| occ.contains(name)) {
+            return self.clone();
+        }
+        let hits: Vec<(Name, Binding)> = occ
+            .names()
+            .filter_map(|n| self.binding(n).map(|b| (n.clone(), b.clone())))
+            .collect();
+        // `occ` is sorted and distinct, so `hits` stays sorted: `Small`'s invariant holds with no further sort.
+        Self(small_or_large(hits))
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
+        match &self.0 {
+            Entries::Small(a) => EnvNames::Small(a.iter()),
+            Entries::Large(m) => EnvNames::Large(m.keys()),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Name, &Binding)> {
+        match &self.0 {
+            Entries::Small(a) => EnvIter::Small(a.iter()),
+            Entries::Large(m) => EnvIter::Large(m.iter()),
+        }
+    }
+
+    /// The wire's and the fork scrub's interning key: two environments share
+    /// this identity exactly when they are the same allocation — the same
+    /// `Small` array or the same `Large` map.
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Entries::Small(a), Entries::Small(b)) => Arc::ptr_eq(a, b),
+            (Entries::Large(a), Entries::Large(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// Walk ρ, then Σ's prelude, projecting each binding on first sight of
+    /// its name.  The single home of the shadowing rule.
+    pub(crate) fn fold_union<T>(
+        &self,
+        sig: &Signature,
+        project: impl Fn(&Binding) -> T,
+    ) -> Vec<(String, T)> {
         let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::with_capacity(self.bindings.len() + self.prelude.len());
-        for (k, b) in &self.bindings {
+        let mut result = Vec::with_capacity(self.len());
+        for (k, b) in self.iter() {
             seen.insert(k.as_ref());
             result.push((k.to_string(), project(b)));
         }
-        for (k, b) in self.prelude.iter() {
-            if !seen.contains(k.as_str()) {
-                result.push((k.clone(), project(b)));
+        for name in sig.prelude_names() {
+            if !seen.contains(name)
+                && let Some(b) = sig.prelude_binding(name)
+            {
+                result.push((name.to_string(), project(b)));
             }
         }
         result
     }
 
-    /// Largest binding's shallow byte estimate, session wins, no value cloned.
-    pub(crate) fn largest_shallow_size(&self) -> usize {
-        let session = self.bindings.values().map(|b| b.value.shallow_size());
-        let shadowed_prelude = self
-            .prelude
-            .iter()
-            .filter(|(k, _)| !self.bindings.contains_key(k.as_str()))
-            .map(|(_, b)| b.value.shallow_size());
+    /// Largest binding's shallow byte estimate, ρ then Σ's prelude, no value
+    /// cloned.
+    pub(crate) fn largest_shallow_size(&self, sig: &Signature) -> usize {
+        let session = self.iter().map(|(_, b)| b.value.shallow_size());
+        let shadowed_prelude = sig
+            .prelude_names()
+            .filter(|name| self.binding(name).is_none())
+            .filter_map(|name| sig.prelude_binding(name))
+            .map(|b| b.value.shallow_size());
         session.chain(shadowed_prelude).max().unwrap_or(0)
     }
 
-    /// Every binding across prelude and session, session wins.
-    pub(crate) fn all_bindings(&self) -> Vec<(String, Value)> {
-        self.fold_union(|b| b.value.clone())
+    /// Every binding across ρ and Σ's prelude, ρ wins.
+    pub(crate) fn all_bindings(&self, sig: &Signature) -> Vec<(String, Value)> {
+        self.fold_union(sig, |b| b.value.clone())
     }
 
-    /// Distinct bound names across prelude and session, a shadowed name
-    /// counted once.
-    pub(crate) fn distinct_name_count(&self) -> usize {
-        let mut seen = std::collections::HashSet::new();
-        seen.extend(self.bindings.keys().map(AsRef::as_ref));
-        seen.extend(self.prelude.keys().map(String::as_str));
+    /// Distinct bound names across ρ and Σ's prelude, a shadowed name counted
+    /// once.
+    pub(crate) fn distinct_name_count(&self, sig: &Signature) -> usize {
+        let mut seen: std::collections::HashSet<&str> = self.names().map(AsRef::as_ref).collect();
+        seen.extend(sig.prelude_names());
         seen.len()
     }
 
-    /// Every bound name with its scheme, session wins.  Seeds the next run's
-    /// check: a name without a scheme is checked as a bare name.
-    pub fn binding_schemes(&self) -> Vec<(String, Option<Arc<Scheme>>)> {
-        self.fold_union(|b| b.scheme.clone())
-    }
-
-    /// The session tier's persistent map root — `crate::serial` interns
-    /// environments by this root's identity, as the fork's scrub memoises
-    /// them, and both need the map itself, not its contents, to compare by
-    /// [`imbl::GenericHashMap::ptr_eq`].
-    pub(crate) fn bindings_root(&self) -> &BindingMap {
-        &self.bindings
-    }
-
-    /// This environment's native tier, for a decoder seating a hydrated
-    /// environment under the receiver's own — natives never ride the wire.
-    pub(crate) fn natives_arc(&self) -> Arc<NativeMap> {
-        Arc::clone(&self.natives)
-    }
-
-    /// This environment's prelude tier, for a decoder seating a hydrated
-    /// environment under the receiver's own — the prelude never rides the
-    /// wire either.
-    pub(crate) fn prelude_arc(&self) -> Arc<PreludeMap> {
-        Arc::clone(&self.prelude)
+    /// Every bound name with its scheme, ρ then Σ's prelude, ρ wins.  Seeds
+    /// the next run's check: a name without a scheme is checked as a bare
+    /// name.
+    pub(crate) fn binding_schemes(&self, sig: &Signature) -> Vec<(String, Option<Arc<Scheme>>)> {
+        self.fold_union(sig, |b| b.scheme.clone())
     }
 }
 
@@ -257,11 +277,41 @@ impl Default for Env {
     }
 }
 
+enum EnvIter<'a> {
+    Small(std::slice::Iter<'a, (Name, Binding)>),
+    Large(imbl::hashmap::Iter<'a, Name, Binding, imbl::shared_ptr::DefaultSharedPtr>),
+}
+
+impl<'a> Iterator for EnvIter<'a> {
+    type Item = (&'a Name, &'a Binding);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(it) => it.next().map(|(n, b)| (n, b)),
+            Self::Large(it) => it.next(),
+        }
+    }
+}
+
+enum EnvNames<'a> {
+    Small(std::slice::Iter<'a, (Name, Binding)>),
+    Large(imbl::hashmap::Keys<'a, Name, Binding, imbl::shared_ptr::DefaultSharedPtr>),
+}
+
+impl<'a> Iterator for EnvNames<'a> {
+    type Item = &'a Name;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(it) => it.next().map(|(n, _)| n),
+            Self::Large(it) => it.next(),
+        }
+    }
+}
+
 thread_local! {
     /// `Some` while a dismantling [`Env::dismantle`] is looping on this
-    /// thread.  A closure dying inside that loop pushes its bindings here
+    /// thread.  A closure dying inside that loop pushes its entries here
     /// instead of letting drop glue recurse into them.
-    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<BindingMap>>> =
+    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<Entries>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -273,31 +323,31 @@ impl Env {
     /// trampoline rather than a hand-rolled walk: glue still does all
     /// traversal — a shared spine stays one refcount decrement, nothing is
     /// cloned to be destroyed — but a closure dying *inside* another's
-    /// dismantling hands its bindings to that dismantler's queue and returns,
+    /// dismantling hands its entries to that dismantler's queue and returns,
     /// keeping the stack between any two links constant.
     pub(crate) fn dismantle(&mut self) {
-        if self.bindings.is_empty() {
+        if self.is_empty() {
             return;
         }
-        let bindings = std::mem::take(&mut self.bindings);
-        // Hand the map to a dismantler above us, or become one.  If the queue
-        // is already torn down (a closure dying during thread-local
-        // destruction), the unrun closure drops `bindings` — glue alone, the
+        let entries = std::mem::replace(&mut self.0, Entries::Small(Arc::clone(&EMPTY)));
+        // Hand the entries to a dismantler above us, or become one.  If the
+        // queue is already torn down (a closure dying during thread-local
+        // destruction), the unrun closure drops `entries` — glue alone, the
         // honest fallback.
-        let Ok(bindings) = DISMANTLE_QUEUE.try_with(|slot| {
+        let Ok(entries) = DISMANTLE_QUEUE.try_with(|slot| {
             let mut q = slot.borrow_mut();
             if let Some(queue) = q.as_mut() {
-                queue.push(bindings);
+                queue.push(entries);
                 None
             } else {
                 *q = Some(Vec::new());
-                Some(bindings)
+                Some(entries)
             }
         }) else {
             return;
         };
         // Enqueued: the dismantler above owns it now.
-        let Some(bindings) = bindings else { return };
+        let Some(entries) = entries else { return };
         /// Disarms the queue even on unwind; leftovers then elect fresh
         /// leaders of their own.
         struct Disarm;
@@ -307,9 +357,9 @@ impl Env {
             }
         }
         let _disarm = Disarm;
-        let mut next = Some(bindings);
-        while let Some(b) = next {
-            drop(b);
+        let mut next = Some(entries);
+        while let Some(e) = next {
+            drop(e);
             next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(Vec::pop));
         }
     }
@@ -403,6 +453,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::signature::Signature;
+
+    fn binding(value: Value) -> Binding {
+        Binding {
+            value,
+            scheme: None,
+        }
+    }
+
+    fn env_of<const N: usize>(pairs: [(&str, i64); N]) -> Env {
+        let mut env = Env::new();
+        for (name, n) in pairs {
+            env.bind(name.into(), binding(Value::Int(n)));
+        }
+        env
+    }
 
     /// (Regression: drop glue recursed once per link, and a sixty-thousand-link
     /// lazy list aborted the process at teardown.)
@@ -418,68 +484,102 @@ mod tests {
 
     /// A name a `let` shadows over a prelude binding of the same spelling
     /// round-trips as the user's value, and `unset` reveals the prelude's
-    /// underneath — from a flat map with no scope to pop.
+    /// underneath through `lookup`.
     #[test]
     fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
-        let mut prelude = PreludeMap::default();
-        prelude.insert(
-            "map".to_string(),
-            Binding {
-                value: Value::string("prelude-map"),
-                scheme: None,
-            },
+        let mut sig = Signature::default();
+        sig.install_prelude(Arc::new(
+            std::iter::once(("map".to_string(), binding(Value::string("prelude-map")))).collect(),
+        ));
+        let mut env = Env::new();
+        assert_eq!(
+            crate::types::signature::lookup("map", &env, &sig),
+            Some(&Value::string("prelude-map"))
         );
-        let mut env = Env::with_prelude(Arc::new(NativeMap::default()), Arc::new(prelude));
-        assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
 
-        env.bind(
-            "map".into(),
-            Binding {
-                value: Value::Int(3),
-                scheme: None,
-            },
+        env.bind("map".into(), binding(Value::Int(3)));
+        assert_eq!(
+            crate::types::signature::lookup("map", &env, &sig),
+            Some(&Value::Int(3))
         );
-        assert_eq!(env.get("map"), Some(&Value::Int(3)));
 
         env.unset("map");
-        assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
+        assert_eq!(
+            crate::types::signature::lookup("map", &env, &sig),
+            Some(&Value::string("prelude-map"))
+        );
     }
 
+    /// **T5** — the same sequence of binds, shadowing included, gives equal
+    /// lookups, `names()` and `restrict` results whether `SMALL` is crossed or
+    /// not.
     #[test]
-    fn restrict_keeps_the_named_session_bindings_and_shares_the_tiers() {
-        let binding = |value| Binding {
-            value,
-            scheme: None,
-        };
-        let prelude = PreludeMap::from_iter([("map".to_string(), binding(Value::string("p")))]);
-        let mut env = Env::with_prelude(Arc::new(NativeMap::default()), Arc::new(prelude));
-        for (name, n) in [("a", 0), ("b", 1), ("map", 2)] {
-            env.bind(name.into(), binding(Value::Int(n)));
+    fn small_and_large_agree() {
+        let small = env_of([("a", 0), ("b", 1), ("c", 2)]);
+        let mut large = small.clone();
+        // Push `large` past `SMALL`, then shadow `a` again on both sides.
+        for i in 0..(SMALL + 4) {
+            let n = i64::try_from(i).expect("small test index");
+            large.bind(format!("pad{i}").into(), binding(Value::Int(100 + n)));
         }
+        let mut small = small;
+        small.bind("a".into(), binding(Value::Int(9)));
+        large.bind("a".into(), binding(Value::Int(9)));
 
-        let narrow = env.restrict(&crate::ir::test_occ(&["a", "map", "zzz", "a"]));
-        assert!(narrow.session_binding("a").is_some());
-        assert!(narrow.session_binding("b").is_none());
-        assert_eq!(
-            narrow.get("map"),
-            Some(&Value::Int(2)),
-            "a session binding shadowing the prelude is kept"
+        assert!(matches!(small.0, Entries::Small(_)));
+        assert!(matches!(large.0, Entries::Large(_)));
+        assert_eq!(small.get("a"), Some(&Value::Int(9)));
+        assert_eq!(large.get("a"), Some(&Value::Int(9)));
+        assert_eq!(small.get("b"), large.get("b"));
+        assert_eq!(small.get("zzz"), None);
+        assert_eq!(large.get("zzz"), None);
+
+        let occ = crate::ir::test_occ(&["a", "b"]);
+        let (mut small_names, mut large_names): (Vec<_>, Vec<_>) = (
+            small
+                .restrict(&occ)
+                .names()
+                .map(ToString::to_string)
+                .collect(),
+            large
+                .restrict(&occ)
+                .names()
+                .map(ToString::to_string)
+                .collect(),
         );
-        assert!(narrow.get("zzz").is_none());
-        assert!(Arc::ptr_eq(&narrow.prelude_arc(), &env.prelude_arc()));
+        small_names.sort();
+        large_names.sort();
+        assert_eq!(small_names, large_names);
+    }
+
+    /// **T6** — an environment whose names occ covers returns itself
+    /// (`ptr_eq`); one name more than occ lists gives a fresh `Small` of the
+    /// hits; a name only Σ answers is never an entry.
+    #[test]
+    fn restrict_is_the_identity_when_it_drops_nothing() {
+        let mut sig = Signature::default();
+        sig.install_prelude(Arc::new(
+            std::iter::once(("map".to_string(), binding(Value::string("p")))).collect(),
+        ));
+        let env = env_of([("a", 0), ("b", 1)]);
+
+        let covering = crate::ir::test_occ(&["a", "b", "zzz"]);
+        assert!(env.restrict(&covering).ptr_eq(&env));
+
+        let narrower = crate::ir::test_occ(&["a"]);
+        let narrowed = env.restrict(&narrower);
+        assert!(!narrowed.ptr_eq(&env));
+        assert!(narrowed.binding("a").is_some());
+        assert!(narrowed.binding("b").is_none());
 
         let empty = crate::ir::test_occ(&[]);
         assert!(
-            env.restrict(&empty)
-                .bindings_root()
-                .ptr_eq(env.restrict(&empty).bindings_root()),
+            env.restrict(&empty).ptr_eq(&env.restrict(&empty)),
             "every empty capture shares one root"
         );
         assert!(
-            env.restrict(&crate::ir::test_occ(&["a", "b", "map", "a"]))
-                .bindings_root()
-                .ptr_eq(env.bindings_root()),
-            "narrowing that drops nothing is the identity, repeats or not"
+            !narrowed.names().any(|n| n.as_ref() == "map"),
+            "a name only Σ answers is never an entry"
         );
     }
 }

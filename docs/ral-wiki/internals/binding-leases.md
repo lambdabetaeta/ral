@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 5652477a
+verified_at_commit: 74f7d546
 verified_at_date: 2026-09-26
 anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
@@ -19,12 +19,17 @@ decision record; this page is how it runs.
 
 ## What is leased, and what never is
 
-Only names the model itself binds at the session's top level. Everything
-visible when exarch arms the ledger — prelude, agent library, rc and host
-seeds, and on a fork the entire inherited parent scope — is sealed as
-baseline, permanently exempt (`Shell::arm_binding_lease`, armed by
-`bootstrap::arm_session_ledgers` in the engine's own boot recipe and on each
-fork before it is parked, so `/clear`'s rebooted engine re-seals for free).
+Only names the model itself binds at the session's top level — residency is
+by ρ, and a name only Σ answers (a native, a prelude function) is never a ρ
+entry at all, so it is not a candidate to prune rather than merely exempt
+from it. Everything else visible when exarch arms the ledger — agent
+library, rc and host seeds, and on a fork the entire inherited parent scope —
+is sealed as baseline, permanently exempt (`Shell::arm_binding_lease`, armed
+by `bootstrap::arm_session_ledgers` in the engine's own boot recipe and on
+each fork before it is parked, so `/clear`'s rebooted engine re-seals for
+free). Its baseline read, `Env::all_bindings`, still folds in Σ's prelude
+beside ρ, so a prelude name that has not been shadowed is sealed as a
+harmless redundancy over a name the ledger could never reach.
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
 are invisible to the ledger, since its one chokepoint, `note_define`, is
 reached from `run_phrases`'s `Define` arm alone, under `Mode::Session`: they

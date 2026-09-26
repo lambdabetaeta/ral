@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fffa63b2
+generated_at_commit: 74f7d546
 generated_at_date: 2026-09-26
 covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
@@ -75,27 +75,31 @@ classifies it — a block, a function, a handle:
 
 ## Scopes — `InternCtx` and `WireDecoder`
 
-**Scopes cross as rows of a table, one per distinct session-tier root, by
-`imbl` `ptr_eq` identity** — so a captured environment with shared structure
+**Environments cross as rows of a table, one per distinct allocation, by
+`Env::ptr_eq` identity** — so a captured environment with shared structure
 cannot unfold into an O(2^N) tree. A closure keeps only the bindings it
 mentions, so rows are per closure and small: every empty capture is one row,
 a `Rec` group's siblings share one, and the linear root scan makes interning
 O(roots²). A value two closures mention is written in both rows
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+Σ never crosses: a row is ρ alone, and the receiving shell's own natives and
+prelude answer for a decoded closure exactly as `crate::types::lookup` reads
+them for any other, through the receiver's `Signature`.
 
-- `InternCtx::intern_env` only *reserves* a row and queues the scope; `finish`,
-  the table's sole accessor, encodes the queue as a worklist, so encoder stack
-  depth is bounded by data nesting within one scope, never by the length of a
-  chain of closures ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
-  `finish` encodes every binding: every path onto this wire is a scrubbed
-  fork, so a handle reaching `SerialValue::from_runtime` is a fault in ral,
-  and its error says so.
+- `InternCtx::intern_env` only *reserves* a row and queues the environment;
+  `finish`, the table's sole accessor, encodes the queue as a worklist, so
+  encoder stack depth is bounded by data nesting within one environment,
+  never by the length of a chain of closures
+  ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]). `finish`
+  encodes every binding: every path onto this wire is a scrubbed fork, so a
+  handle reaching `SerialValue::from_runtime` is a fault in ral, and its
+  error says so.
 - `WireDecoder::for_shell` rebuilds the rows in dependency order
-  (`collect_scope_deps`), refusing an out-of-range reference or a cycle, and
-  seats each under the *receiver's* natives and prelude: those two constant
-  tiers never cross.
+  (`collect_scope_deps`), refusing an out-of-range reference or a cycle. It
+  carries the receiver's builtin manifest, for a decoded `Native` to re-link
+  its name against — nothing else, since neither Σ tier rides the wire.
 - `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
-  wire→runtime conversion of a scope.
+  wire→runtime conversion of an environment.
 
 ## The mirrored shell — `core/src/subprocess.rs`
 
@@ -106,7 +110,7 @@ rides is store, never continuation. Each `Wire*` type mirrors one subtree of the
 runtime tree, and a parent's `from_runtime` calls only its children's:
 
 - `WireShell { env, stack_limit, context }` — `env` is the row of one
-  [[design/scoping|`Env`]]'s session tier;
+  [[design/scoping|`Env`]], ρ alone;
 - `WireContext` mirrors `Context` — `env_overrides`, `cwd`, `grants`,
   `handlers`, `args`, `modules`; `hooks` stays behind and the receiver starts
   with an empty table;

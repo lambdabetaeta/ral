@@ -40,7 +40,7 @@ pub(crate) enum Resolution {
 /// resolves through.  No admission check and no audit — those belong to
 /// [`classify_command`].
 pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
-    if let Some(value) = env.get(name) {
+    if let Some(value) = crate::types::lookup(name, env, &shell.sig) {
         return Resolution::Env(value.clone());
     }
     match shell.lookup_handler(name) {

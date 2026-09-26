@@ -495,30 +495,22 @@ static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 
-/// Run the prelude once per process and seat its bindings as `shell`'s
+/// Run the prelude once per process and seat its bindings as `shell`'s Σ's
 /// prelude tier.
 ///
 /// The prelude — a ral script baked into the binary — is evaluated once
-/// under `shell`'s own natives; every phrase is a `Define` of `Return(V)`
+/// under a Σ of natives alone; every phrase is a `Define` of `Return(V)`
 /// (`bake_prelude`), so the run is a fold of closing values, and the
-/// resulting session tier, frozen, is the one map every shell in this
-/// process starts from.
-///
-/// # Panics
-///
-/// Panics if `env.session_names()` names a binding `session_binding` cannot
-/// find, which would mean the two disagree about the session tier's keys.
+/// resulting map, frozen, is the one every shell in this process starts
+/// from.
 pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
     static PRELUDE: OnceLock<Arc<crate::types::PreludeMap>> = OnceLock::new();
 
-    let natives = shell.env.natives_arc();
     let prelude = PRELUDE.get_or_init(|| {
         let mut prelude_shell = Shell::new(crate::io::TerminalState::default());
-        let env = crate::types::Env::with_natives(prelude_shell.env.natives_arc());
-
         let ran = crate::evaluator::run_phrases(
             &prelude_top.phrases,
-            env,
+            crate::types::Env::new(),
             crate::evaluator::Mode::Prelude,
             &Mooring::adrift(),
             &mut prelude_shell,
@@ -532,20 +524,13 @@ pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
         }
         Arc::new(
             ran.env
-                .session_names()
-                .map(|name| {
-                    let binding = ran
-                        .env
-                        .session_binding(name)
-                        .expect("every name session_names lists has a session binding")
-                        .clone();
-                    (name.to_string(), binding)
-                })
+                .iter()
+                .map(|(name, binding)| (name.to_string(), binding.clone()))
                 .collect(),
         )
     });
 
-    shell.env = crate::types::Env::with_prelude(natives, Arc::clone(prelude));
+    Arc::make_mut(&mut shell.sig).install_prelude(Arc::clone(prelude));
 }
 
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};

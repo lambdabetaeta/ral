@@ -38,22 +38,30 @@ across every tail landing.
 The lexical scoping above is one mechanism; *crossing a shell boundary* is a
 different one, and they should not be conflated.
 
-- **Lexical scope within a shell** is the `Env` type (`core/src/types/env.rs`):
-  three tiers checked in order — natives, the frozen prelude, and a persistent
-  `imbl` map of everything bound since. `bind` is an insert into the session
-  tier that disturbs no environment a closure already captured, so extent is
-  structural rather than a pushed-and-popped frame: `M to x. N` closes `N` over
-  the environment the `To` frame carries, extended with `x`, and nothing else
-  whatever `M` did along the way. Cloning an `Env` is O(1) — the persistent
-  map's root is shared, not copied — so recursion clones; capture scrubs. A
-  closure holds only the session bindings its body mentions, `⟨M, ρ|occ(M)⟩`
+- **Lexical scope within a shell** splits ρ from Σ. `Env`
+  (`core/src/types/env.rs`) is ρ alone: a finite map from names to bindings,
+  read with no fallback. `Signature` (`core/src/types/signature.rs`) is Σ —
+  the natives and the frozen prelude, constants of the running shell, one per
+  shell, `Arc`-shared into every fork. `crate::types::lookup(name, env, sig)`
+  is the one resolution rule: ρ, then Σ's prelude, then Σ's natives. A
+  binding that shadows a Σ name is an entry of ρ and wins; a name only Σ
+  answers is never an entry, so `Env::restrict` never copies it.
+  `Env::bind`/`extend` produce a fresh ρ that disturbs no environment a
+  closure already captured, so extent is structural rather than a
+  pushed-and-popped frame: `M to x. N` closes `N` over the environment the
+  `To` frame carries, extended with `x`, and nothing else whatever `M` did
+  along the way. ρ is one of two representations, chosen by size and
+  invisible to its readers: a sorted array below `SMALL` entries, a
+  persistent hash map past it; cloning either is O(1) — the allocation is
+  shared, not copied — so recursion clones; capture scrubs. A closure holds
+  only the bindings its body mentions, `⟨M, ρ|occ(M)⟩`
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 - **Fork inheritance** is [[map/core/shell-state|the flow matrix]] in
   `inherit.rs`: a genuine runtime fork (a `spawn` worker, a pipeline stage,
   a REPL aside, a sub-agent session) clones the parent's *session* `Env`
-  whole into the new shell, alongside the rest of the parent→child manifest
-  (builtin table, dynamic context, cancel root); a worker's body brings its
-  own capture in its closure.
+  whole into the new shell, and its Σ by `Arc` clone, alongside the rest of
+  the parent→child manifest (builtin table, dynamic context, cancel root); a
+  worker's body brings its own capture in its closure.
 
 A same-thread β-step bridges the two: applying a thunk puts its closure's
 `Env` in focus directly — `force(thunk M) = M` pushes nothing — while the

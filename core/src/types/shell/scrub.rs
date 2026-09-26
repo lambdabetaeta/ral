@@ -1,16 +1,16 @@
 //! The fork's scrub: the one snapshot law's whole mechanism.
 //!
-//! It walks scopes, not values — each session map a fork reaches, once, by
-//! root identity, dependencies first, on an explicit stack: a stream is a
-//! chain of closures, so recursing through one would bound it by the host
-//! stack.  Captured scopes form a DAG, so there is no cycle to guard; but a
+//! It walks environments, not values — each ρ a fork reaches, once, by root
+//! identity, dependencies first, on an explicit stack: a stream is a chain of
+//! closures, so recursing through one would bound it by the host stack.
+//! Captured environments form a DAG, so there is no cycle to guard; but a
 //! shared root must be remembered, or a chain of definitions is walked once
-//! per path to it, exponentially.  Only session tiers are walked: the prelude
-//! is baked, and the natives seeded, before any handle exists.
+//! per path to it, exponentially.  Σ is never walked: the prelude is baked,
+//! and the natives seeded, before any handle exists.
 
 use super::Shell;
 use crate::serial::opaque;
-use crate::types::{Binding, BindingMap, Closure, Env, List, Map, Value};
+use crate::types::{Binding, Closure, Env, List, Map, Value};
 use std::sync::Arc;
 
 impl Shell {
@@ -22,12 +22,12 @@ impl Shell {
     /// resolve every name to the same value or the same absence.  A handle
     /// becomes its `` `opaque `` placeholder; hooks, the installing host's
     /// lifecycle entry points, stay with that host.  A shell reaching no handle
-    /// forks as itself: the fork shares its session map.
+    /// forks as itself: the fork shares its environment.
     pub fn fork_scrubbed(&self) -> Self {
         let mut fork = self.fork_session();
         let mut scrub = Scrub::default();
-        if let Some(bindings) = scrub.scope(fork.env.bindings_root()) {
-            fork.env = Env::from_parts(fork.env.natives_arc(), fork.env.prelude_arc(), bindings);
+        if let Some(env) = scrub.scope(&fork.env) {
+            fork.env = env;
         }
         for v in fork.context.handlers.values_mut() {
             if let Some(scrubbed) = scrub.value(v) {
@@ -39,16 +39,17 @@ impl Shell {
     }
 }
 
-/// Every scope visited, with its replacement — `None` when it reaches no
-/// handle — found by `ptr_eq` scan, as `InternCtx` finds its roots.
+/// Every environment visited, with its replacement — `None` when it reaches
+/// no handle — found by `ptr_eq` scan, as `InternCtx` finds its roots.  Σ is
+/// never walked: it is baked and seeded before any handle exists.
 #[derive(Default)]
 struct Scrub {
-    memo: Vec<(BindingMap, Option<BindingMap>)>,
+    memo: Vec<(Env, Option<Env>)>,
 }
 
 impl Scrub {
     /// `root`'s replacement, `None` if it reaches no handle.
-    fn scope(&mut self, root: &BindingMap) -> Option<BindingMap> {
+    fn scope(&mut self, root: &Env) -> Option<Env> {
         self.settle(vec![root.clone()]);
         self.replacement(root)
     }
@@ -61,9 +62,9 @@ impl Scrub {
         self.rebuild(v)
     }
 
-    /// Memoise every scope reachable from `roots`, each after every scope it
-    /// captures.
-    fn settle(&mut self, roots: Vec<BindingMap>) {
+    /// Memoise every environment reachable from `roots`, each after every
+    /// environment it captures.
+    fn settle(&mut self, roots: Vec<Env>) {
         let mut stack: Vec<Visit> = roots.into_iter().map(Visit::Open).collect();
         while let Some(visit) = stack.pop() {
             match visit {
@@ -72,7 +73,7 @@ impl Scrub {
                         continue;
                     }
                     let mut captured = Vec::new();
-                    for binding in scope.values() {
+                    for (_, binding) in scope.iter() {
                         captured_scopes(&binding.value, &mut captured);
                     }
                     captured.retain(|s| self.seen(s).is_none());
@@ -90,9 +91,7 @@ impl Scrub {
                                 (name.clone(), Binding { value, scheme })
                             })
                         }),
-                        |map: &mut BindingMap, name, binding| {
-                            map.insert(name, binding);
-                        },
+                        Env::bind,
                     );
                     self.memo.push((scope, rebuilt));
                 }
@@ -100,7 +99,7 @@ impl Scrub {
         }
     }
 
-    fn seen(&self, scope: &BindingMap) -> Option<&Option<BindingMap>> {
+    fn seen(&self, scope: &Env) -> Option<&Option<Env>> {
         self.memo
             .iter()
             .find(|(root, _)| root.ptr_eq(scope))
@@ -111,7 +110,7 @@ impl Scrub {
     ///
     /// # Panics
     /// If `scope` is unsettled: a traversal bug.
-    fn replacement(&self, scope: &BindingMap) -> Option<BindingMap> {
+    fn replacement(&self, scope: &Env) -> Option<Env> {
         self.seen(scope)
             .expect("a captured scope is settled before any value holding it is rebuilt")
             .clone()
@@ -162,11 +161,10 @@ impl Scrub {
                 applied,
             }),
             Value::Thunk(closure) => {
-                let env = closure.env();
-                let bindings = self.replacement(env.bindings_root())?;
+                let env = self.replacement(closure.env())?;
                 Some(Value::Thunk(Closure::captured(
                     Arc::clone(closure.comp()),
-                    Env::from_parts(env.natives_arc(), env.prelude_arc(), bindings),
+                    env,
                 )))
             }
             Value::Unit
@@ -182,8 +180,8 @@ impl Scrub {
 /// A scope on the walk's stack: to open, pushing every scope it captures, or
 /// to close, once they are settled.
 enum Visit {
-    Open(BindingMap),
-    Close(BindingMap),
+    Open(Env),
+    Close(Env),
 }
 
 /// `container` with each change put into a copy, or `None` if there is none:
@@ -202,11 +200,11 @@ fn patched<C: Clone, K, V>(
     Some(copy)
 }
 
-/// Push the session map of every closure `v` holds, through data and a
+/// Push the environment of every closure `v` holds, through data and a
 /// native's applied arguments, never entering a closure.
-fn captured_scopes(v: &Value, out: &mut Vec<BindingMap>) {
+fn captured_scopes(v: &Value, out: &mut Vec<Env>) {
     match v {
-        Value::Thunk(closure) => out.push(closure.env().bindings_root().clone()),
+        Value::Thunk(closure) => out.push(closure.env().clone()),
         Value::List(items) => {
             for item in items {
                 captured_scopes(&item, out);
@@ -259,7 +257,7 @@ mod tests {
 
         let fork = parent.fork_scrubbed();
         assert!(
-            fork.env.bindings_root().ptr_eq(parent.env.bindings_root()),
+            fork.env.ptr_eq(&parent.env),
             "a scope reaching no handle must fork as itself"
         );
     }
@@ -293,7 +291,7 @@ mod tests {
         for name in blocks {
             let (ours, theirs) = (captured(parent.env.get(name)), captured(fork.env.get(name)));
             assert!(
-                !theirs.bindings_root().ptr_eq(ours.bindings_root()),
+                !theirs.ptr_eq(ours),
                 "`{name}`'s captured scope must be rebuilt"
             );
             assert!(
@@ -315,7 +313,7 @@ mod tests {
 
         let fork = parent.fork_scrubbed();
         assert!(
-            fork.env.bindings_root().ptr_eq(parent.env.bindings_root()),
+            fork.env.ptr_eq(&parent.env),
             "a handle-free chain of definitions must fork as itself"
         );
     }

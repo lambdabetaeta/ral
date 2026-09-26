@@ -178,7 +178,7 @@ impl Shell {
     /// what `crate::protocol::reading` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
     pub(crate) fn binding_count(&self) -> usize {
-        self.env.distinct_name_count()
+        self.env.distinct_name_count(&self.sig)
     }
 
     /// Names the binding-lease ledger tracks — non-baseline only, so a
@@ -292,7 +292,11 @@ impl Shell {
     /// seed vars — becomes permanently exempt from expiry.  A re-arm discards
     /// the prior ledger and reseals; a host that never arms sees no expiry.
     pub fn arm_binding_lease(&mut self, lease: BindingLease) {
-        let baseline = self.env.all_bindings().into_iter().map(|(name, _)| name);
+        let baseline = self
+            .env
+            .all_bindings(&self.sig)
+            .into_iter()
+            .map(|(name, _)| name);
         self.local.bindings.arm(lease, baseline);
     }
 
@@ -338,7 +342,7 @@ impl Shell {
                 }
             }
         }
-        let session_names: Vec<String> = self.env.session_names().map(str::to_string).collect();
+        let session_names: Vec<String> = self.env.names().map(ToString::to_string).collect();
         for name in session_names {
             self.local.bindings.adopt(&name);
         }
@@ -432,7 +436,7 @@ fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
         .filter(|entry| entry.convention == Convention::Argv)
         .cloned()
         .collect();
-    shell.env.install_natives(natives);
+    Arc::make_mut(&mut shell.sig).install_natives(natives);
     shell.context.handlers.install_base(&base);
 }
 

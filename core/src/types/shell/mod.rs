@@ -212,6 +212,9 @@ pub struct Shell {
     /// The session environment: the machine's focus environment between
     /// runs, extended by every `Define` that lands.
     pub(crate) env: Env,
+    /// Σ: natives and the frozen prelude, one per shell, `Arc`-shared into
+    /// every fork and spawned worker.
+    pub(crate) sig: Arc<crate::types::Signature>,
     pub(crate) context: Context,
     pub(crate) io: Io,
     pub(crate) session: SessionState,
