@@ -415,7 +415,7 @@ fn grant_fs_read_allows_file_info_inside_set() {
     let out = must_succeed(&script);
     match out {
         Value::Map(m) => assert_eq!(
-            m.get("name"),
+            m.get("name").as_deref(),
             Some(&Value::string("seen.txt")),
             "granted file-info must stat the file and report its name"
         ),

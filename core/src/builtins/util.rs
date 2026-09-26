@@ -104,7 +104,7 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     let items = crate::types::as_list(val, ctx)?;
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
-        match item {
+        match item.as_ref() {
             Value::Int(n) => match u8::try_from(*n) {
                 Ok(b) => out.push(b),
                 Err(_) => {
@@ -166,7 +166,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
             if xs.len() == ys.len() {
-                all_equal(xs.iter().zip(ys.iter()).map(|(a, b)| values_equal(a, b)))?
+                all_equal(xs.iter().zip(ys.iter()).map(|(a, b)| values_equal(&a, &b)))?
             } else {
                 false
             }
@@ -177,7 +177,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
                 all_equal(
                     xs.iter()
                         .zip(ys.iter())
-                        .map(|((kx, vx), (ky, vy))| Ok(kx == ky && values_equal(vx, vy)?)),
+                        .map(|((kx, vx), (ky, vy))| Ok(kx == ky && values_equal(&vx, &vy)?)),
                 )?
             } else {
                 false
@@ -373,13 +373,16 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
         Value::Int(n) => serde_json::json!(*n),
         Value::Float(f) => serde_json::json!(*f),
         Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::List(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json_lossy_bytes).collect())
-        }
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|v| value_to_json_lossy_bytes(&v))
+                .collect(),
+        ),
         Value::Map(pairs) => serde_json::Value::Object(
             pairs
                 .iter()
-                .map(|(k, v)| (k.clone(), value_to_json_lossy_bytes(v)))
+                .map(|(k, v)| (k.to_string(), value_to_json_lossy_bytes(&v)))
                 .collect(),
         ),
         Value::Thunk(c) => match c.comp().arrow() {
@@ -395,7 +398,7 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
         Value::Bytes(b) => serde_json::Value::String(String::from_utf8_lossy(b).into_owned()),
         Value::Variant { label, payload } => {
             let mut obj = serde_json::Map::new();
-            obj.insert("tag".into(), serde_json::Value::String(label.clone()));
+            obj.insert("tag".into(), serde_json::Value::String(label.to_string()));
             if let Some(p) = payload {
                 obj.insert("payload".into(), value_to_json_lossy_bytes(p));
             }

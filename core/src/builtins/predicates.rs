@@ -10,9 +10,7 @@ use super::util::{as_str, order_cmp, values_equal};
 
 pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
     let m = as_map_ref(&args[0], "keys")?;
-    Ok(Value::list(
-        m.keys().map(|k| Value::string(k.clone())).collect(),
-    ))
+    Ok(Value::list(m.keys().map(Value::string).collect()))
 }
 
 pub(super) fn builtin_has(args: &[Value]) -> Settled<Value> {

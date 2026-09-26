@@ -29,7 +29,7 @@ pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let items = as_list(&args[1], "each")?;
     for item in &items {
         crate::process::check(mooring)?;
-        apply(func, vec![item.clone()], mooring, shell)?;
+        apply(func, vec![item.into_owned()], mooring, shell)?;
     }
     Ok(Value::Unit)
 }
@@ -40,7 +40,7 @@ pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         crate::process::check(mooring)?;
-        out.push(apply(func, vec![item.clone()], mooring, shell)?);
+        out.push(apply(func, vec![item.into_owned()], mooring, shell)?);
     }
     Ok(Value::list(out))
 }
@@ -55,7 +55,7 @@ pub(super) fn builtin_filter(
     let mut results = Vec::new();
     for item in &items {
         crate::process::check(mooring)?;
-        let result = apply(func, vec![item.clone()], mooring, shell)?;
+        let result = apply(func, vec![item.as_ref().clone()], mooring, shell)?;
         let keep = match &result {
             Value::Bool(b) => *b,
             _ => {
@@ -67,7 +67,7 @@ pub(super) fn builtin_filter(
             }
         };
         if keep {
-            results.push(item.clone());
+            results.push(item.into_owned());
         }
     }
     Ok(Value::list(results))
@@ -93,7 +93,10 @@ fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
 pub(super) fn builtin_sort(args: &[Value]) -> Settled<Value> {
     let items = as_list(&args[0], "sort-list")?;
     ordered_sort(
-        items.into_iter().map(|v| (v.clone(), v)).collect(),
+        items
+            .iter()
+            .map(|v| (v.as_ref().clone(), v.into_owned()))
+            .collect(),
         "sort-list",
     )
 }
@@ -106,9 +109,10 @@ pub(super) fn builtin_sort_by(
     let func = &args[0];
     let items = as_list(&args[1], "sort-list-by")?;
     let keyed: Vec<(Value, Value)> = items
-        .into_iter()
+        .iter()
         .map(|item| {
             crate::process::check(mooring)?;
+            let item = item.into_owned();
             let key = apply(func, vec![item.clone()], mooring, shell)?;
             Ok((key, item))
         })
@@ -167,7 +171,7 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let items = as_list(&args[2], "fold")?;
     for item in &items {
         crate::process::check(mooring)?;
-        acc = apply(func, vec![acc, item.clone()], mooring, shell)?;
+        acc = apply(func, vec![acc, item.into_owned()], mooring, shell)?;
     }
     Ok(acc)
 }

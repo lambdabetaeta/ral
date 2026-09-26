@@ -313,7 +313,7 @@ pub(crate) fn language_constants() -> [(String, Value); 2] {
 pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
     Value::Native {
         entry: Arc::new(entry.clone()),
-        applied: Vec::new(),
+        applied: Box::new([]),
     }
 }
 

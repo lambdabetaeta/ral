@@ -4,126 +4,117 @@
 //! rather than copying elements: that is what lets `eval_list` cons onto a
 //! spread and `...rest` patterns bind a tail for free, both in `evaluator/`.
 //! The newtype keeps `imbl` from leaking past `types/`.
+//!
+//! `Repr` is behind an `Arc`, mutated by `Arc::make_mut`: cheap to clone,
+//! copy-on-write when a unique owner mutates.
 
 use super::value::Value;
 use imbl::shared_ptr::DefaultSharedPtr;
+use std::borrow::Cow;
+use std::sync::Arc;
 
-/// A persistent list of `Value`s: cheap to clone, copy-on-write on mutation.
+/// A persistent list of `Value`s.
 #[derive(Debug, Clone, Default)]
-pub struct List(imbl::Vector<Value>);
+pub struct List(Repr);
+
+#[derive(Debug, Clone, Default)]
+struct Repr(Arc<imbl::Vector<Value>>);
 
 impl List {
     pub fn new() -> Self {
-        Self(imbl::Vector::new())
+        Self::default()
+    }
+
+    fn built(&self) -> &imbl::Vector<Value> {
+        &self.0.0
+    }
+
+    /// Copy-on-write.
+    fn built_mut(&mut self) -> &mut imbl::Vector<Value> {
+        Arc::make_mut(&mut self.0.0)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.built().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.built().is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<Cow<'_, Value>> {
+        self.built().get(index).map(Cow::Borrowed)
     }
 
     pub fn iter(&self) -> Iter<'_> {
-        Iter(self.0.iter())
-    }
-
-    pub fn get(&self, index: usize) -> Option<&Value> {
-        self.0.get(index)
+        Iter(self.built().iter())
     }
 
     pub(crate) fn push_back(&mut self, v: Value) {
-        self.0.push_back(v);
+        self.built_mut().push_back(v);
     }
 
     pub(crate) fn push_front(&mut self, v: Value) {
-        self.0.push_front(v);
+        self.built_mut().push_front(v);
     }
 
     pub(crate) fn set(&mut self, index: usize, v: Value) {
-        self.0.set(index, v);
+        self.built_mut().set(index, v);
     }
 
-    pub(crate) fn append(&mut self, other: Self) {
-        self.0.append(other.0);
+    pub(crate) fn append(&mut self, other: &Self) {
+        self.built_mut().append(other.built().clone());
     }
 
     /// `self` keeps `[0, index)`; the returned list takes `[index, len)`.
     pub(crate) fn split_off(&mut self, index: usize) -> Self {
-        Self(self.0.split_off(index))
+        Self(Repr(Arc::new(self.built_mut().split_off(index))))
     }
 }
 
 impl PartialEq for List {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.iter().eq(other.iter())
     }
 }
 
 impl FromIterator<Value> for List {
     fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-/// Owning iterator over a [`List`], newtyped so imbl's pointer-kind generic
-/// stays off the public signature.
-pub struct IntoIter(imbl::vector::ConsumingIter<Value, DefaultSharedPtr>);
-
-impl Iterator for IntoIter {
-    type Item = Value;
-    fn next(&mut self) -> Option<Value> {
-        self.0.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
-pub struct Iter<'a>(imbl::vector::Iter<'a, Value, DefaultSharedPtr>);
-
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Value;
-    fn next(&mut self) -> Option<&'a Value> {
-        self.0.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
-impl IntoIterator for List {
-    type Item = Value;
-    type IntoIter = IntoIter;
-    fn into_iter(self) -> IntoIter {
-        IntoIter(self.0.into_iter())
-    }
-}
-
-impl<'a> IntoIterator for &'a List {
-    type Item = &'a Value;
-    type IntoIter = Iter<'a>;
-    fn into_iter(self) -> Iter<'a> {
-        Iter(self.0.iter())
-    }
-}
-
-impl std::ops::Index<usize> for List {
-    type Output = Value;
-    fn index(&self, i: usize) -> &Value {
-        &self.0[i]
-    }
-}
-
-impl Extend<Value> for List {
-    fn extend<I: IntoIterator<Item = Value>>(&mut self, iter: I) {
-        self.0.extend(iter);
+        Self(Repr(Arc::new(iter.into_iter().collect())))
     }
 }
 
 impl From<Vec<Value>> for List {
     fn from(v: Vec<Value>) -> Self {
-        Self(v.into())
+        v.into_iter().collect()
+    }
+}
+
+/// Lending iterator over a [`List`].
+pub struct Iter<'a>(imbl::vector::Iter<'a, Value, DefaultSharedPtr>);
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = Cow<'a, Value>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Cow::Borrowed)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for Iter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back().map(Cow::Borrowed)
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {}
+
+impl<'a> IntoIterator for &'a List {
+    type Item = Cow<'a, Value>;
+    type IntoIter = Iter<'a>;
+    fn into_iter(self) -> Iter<'a> {
+        self.iter()
     }
 }

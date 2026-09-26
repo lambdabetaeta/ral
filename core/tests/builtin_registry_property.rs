@@ -87,8 +87,8 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
 /// return is polymorphic — any value inhabits it.
 fn inhabits(value: &Value, ty: &Ty) -> bool {
     match (ty, value) {
-        (Ty::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(v, elem)),
-        (Ty::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(v, val)),
+        (Ty::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
+        (Ty::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
         (Ty::Var(_), _)
         | (Ty::Unit, Value::Unit)
         | (Ty::Bool, Value::Bool(_))

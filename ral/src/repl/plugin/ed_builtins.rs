@@ -124,13 +124,13 @@ pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell)
 /// `_ed-set`'s request: row-polymorphic, so unknown fields are ignored.
 fn set_op(arg: &Value) -> Settled<EditorOp> {
     let map = as_map(arg, "_ed-set")?;
-    let cursor = match map.get("cursor") {
+    let cursor = match map.get("cursor").as_deref() {
         Some(Value::Int(n)) => Some(offset(*n)),
         Some(_) => return Err(sig("_ed-set: cursor must be Int")),
         None => None,
     };
     Ok(EditorOp::Set {
-        text: map.get("text").map(std::string::ToString::to_string),
+        text: map.get("text").map(|v| v.to_string()),
         cursor,
     })
 }
@@ -464,7 +464,7 @@ pub fn builtin_ed_highlight(
     shell.check_editor_write("highlight")?;
     let spans = as_list(&args[0], "_ed-highlight")?
         .iter()
-        .map(highlight_req)
+        .map(|v| highlight_req(&v))
         .collect::<Settled<_>>()?;
     write(shell, mooring, EditorOp::Highlight(spans))
 }
@@ -482,9 +482,9 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
         style: String::new(),
     };
     for (k, v) in &m {
-        match k.as_str() {
-            "start" => span.start = int_field(v, "start")?,
-            "end" => span.end = int_field(v, "end")?,
+        match k {
+            "start" => span.start = int_field(&v, "start")?,
+            "end" => span.end = int_field(&v, "end")?,
             "style" => span.style = v.to_string(),
             _ => {}
         }

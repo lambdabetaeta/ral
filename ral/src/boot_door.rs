@@ -69,7 +69,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
             hook(),
             Value::Native {
                 entry: entry.into(),
-                applied: Vec::new(),
+                applied: Box::new([]),
             },
             HookSig::Hook {
                 kind: "boot".into(),

@@ -188,14 +188,17 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     let rows = as_list(&args[0], "to-csv")?;
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let headers: Vec<String> = as_map_ref(first, "to-csv")?.keys().cloned().collect();
+        let headers: Vec<String> = as_map_ref(first.as_ref(), "to-csv")?
+            .keys()
+            .map(str::to_string)
+            .collect();
         wtr.write_record(&headers)
             .map_err(|e| sig(format!("to-csv: {e}")))?;
         for row in &rows {
-            let map = as_map_ref(row, "to-csv")?;
+            let map = as_map_ref(row.as_ref(), "to-csv")?;
             let fields: Vec<String> = headers
                 .iter()
-                .map(|h| map.get(h).map_or_else(String::new, Value::to_string))
+                .map(|h| map.get(h).map_or_else(String::new, |v| v.to_string()))
                 .collect();
             wtr.write_record(&fields)
                 .map_err(|e| sig(format!("to-csv: {e}")))?;
@@ -279,13 +282,16 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
             .map(serde_json::Value::Number)
             .ok_or_else(|| Unrepresentable(f.to_string()))?,
         Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::List(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Result<_, _>>()?)
-        }
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|v| value_to_json(v.as_ref()))
+                .collect::<Result<_, _>>()?,
+        ),
         Value::Map(pairs) => {
             let obj: serde_json::Map<String, serde_json::Value> = pairs
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), value_to_json(v)?)))
+                .map(|(k, v)| Ok((k.to_string(), value_to_json(v.as_ref())?)))
                 .collect::<Result<_, _>>()?;
             serde_json::Value::Object(obj)
         }
@@ -297,7 +303,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
         }
         Value::Variant { label, payload } => {
             let mut obj = serde_json::Map::new();
-            obj.insert("tag".into(), serde_json::Value::String(label.clone()));
+            obj.insert("tag".into(), serde_json::Value::String(label.to_string()));
             if let Some(p) = payload {
                 obj.insert("payload".into(), value_to_json(p)?);
             }
@@ -316,8 +322,8 @@ pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Valu
 pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut text = String::new();
     for (i, item) in as_list(&args[0], "to-jsonl")?.iter().enumerate() {
-        let json =
-            value_to_json(item).map_err(|e| sig(format!("to-jsonl: element at index {i}: {e}")))?;
+        let json = value_to_json(item.as_ref())
+            .map_err(|e| sig(format!("to-jsonl: element at index {i}: {e}")))?;
         text.push_str(&json.to_string());
         text.push('\n');
     }

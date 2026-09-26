@@ -333,7 +333,7 @@ fn string_list(source: &str) -> Vec<String> {
     match eval(&mut shell, source) {
         Ok(Value::List(items)) => items
             .iter()
-            .map(|v| match v {
+            .map(|v| match v.as_ref() {
                 Value::String(s) => s.to_string(),
                 other => panic!("{source:?}: expected String element, got {other:?}"),
             })

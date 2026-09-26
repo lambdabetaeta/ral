@@ -39,7 +39,7 @@ fn decode_fs(
     let entries = as_map_ref(value, err_prefix).map_err(PolicyError::from)?;
     let mut fp = FsPolicy::default();
     for (sub, paths) in entries {
-        let items = match paths {
+        let items = match paths.as_ref() {
             Value::List(items) => items,
             other => {
                 return Err(PolicyError::new(format!(
@@ -50,7 +50,7 @@ fn decode_fs(
         };
         let raw = string_list(items, &format!("'{sub}' entries"), err_prefix)?;
         let frozen = freeze_prefix_list(raw, ctx, err_prefix)?;
-        match sub.as_str() {
+        match sub {
             "read" => fp.read_prefixes = frozen,
             "write" => fp.write_prefixes = frozen,
             "deny" => fp.deny_paths = frozen,
@@ -68,7 +68,7 @@ fn decode_fs(
 fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>, PolicyError> {
     items
         .iter()
-        .map(|item| match item {
+        .map(|item| match item.as_ref() {
             Value::String(s) => Ok(s.to_string()),
             other => Err(PolicyError::new(format!(
                 "{err_prefix}: {what} must be strings — expected a string, got {}",
@@ -136,10 +136,10 @@ fn decode_bool(value: &Value, err_prefix: &str) -> Result<bool, PolicyError> {
 fn decode_editor(value: &Value, err_prefix: &str) -> Result<EditorPolicy, PolicyError> {
     let mut cap = EditorPolicy::default();
     for (k, v) in as_map_ref(value, err_prefix).map_err(PolicyError::from)? {
-        match k.as_str() {
-            "read" => cap.read = decode_bool(v, err_prefix)?,
-            "write" => cap.write = decode_bool(v, err_prefix)?,
-            "tui" => cap.tui = decode_bool(v, err_prefix)?,
+        match k {
+            "read" => cap.read = decode_bool(&v, err_prefix)?,
+            "write" => cap.write = decode_bool(&v, err_prefix)?,
+            "tui" => cap.tui = decode_bool(&v, err_prefix)?,
             _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
         }
     }
@@ -150,8 +150,8 @@ fn decode_editor(value: &Value, err_prefix: &str) -> Result<EditorPolicy, Policy
 fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyError> {
     let mut cap = ShellPolicy::default();
     for (k, v) in as_map_ref(value, err_prefix).map_err(PolicyError::from)? {
-        match k.as_str() {
-            "chdir" => cap.chdir = decode_bool(v, err_prefix)?,
+        match k {
+            "chdir" => cap.chdir = decode_bool(&v, err_prefix)?,
             _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),
         }
     }
@@ -183,16 +183,16 @@ pub fn decode_capability_map(
     let entries = as_map_ref(value, err_prefix).map_err(PolicyError::from)?;
     let mut caps = Capabilities::default();
     for (k, v) in entries {
-        match k.as_str() {
+        match k {
             "exec" => {
-                let raw = decode_exec_grant(v, &format!("{err_prefix} exec"))?;
+                let raw = decode_exec_grant(&v, &format!("{err_prefix} exec"))?;
                 caps.exec = Some(freeze_exec_map(raw, ctx, &format!("{err_prefix} exec"))?);
             }
-            "fs" => caps.fs = Some(decode_fs(v, &format!("{err_prefix} fs"), ctx)?),
-            "net" => caps.net = Some(decode_bool(v, &format!("{err_prefix} net"))?),
-            "detach" => caps.detach = Some(decode_bool(v, &format!("{err_prefix} detach"))?),
-            "editor" => caps.editor = Some(decode_editor(v, &format!("{err_prefix} editor"))?),
-            "shell" => caps.shell = Some(decode_shell(v, &format!("{err_prefix} shell"))?),
+            "fs" => caps.fs = Some(decode_fs(&v, &format!("{err_prefix} fs"), ctx)?),
+            "net" => caps.net = Some(decode_bool(&v, &format!("{err_prefix} net"))?),
+            "detach" => caps.detach = Some(decode_bool(&v, &format!("{err_prefix} detach"))?),
+            "editor" => caps.editor = Some(decode_editor(&v, &format!("{err_prefix} editor"))?),
+            "shell" => caps.shell = Some(decode_shell(&v, &format!("{err_prefix} shell"))?),
             other => {
                 let table = declared(ContractForm::Grant);
                 return Err(PolicyError::new(format!(
@@ -354,7 +354,9 @@ fn system_dirs() -> Vec<NormalizedPrefix> {
 fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, PolicyError> {
     let entries = as_map(value, err_prefix).map_err(PolicyError::from)?;
     let mut out = RawExecMap::default();
-    for (cmd, policy_val) in entries {
+    for (cmd, policy_val) in &entries {
+        let cmd = cmd.to_string();
+        let policy_val = policy_val.into_owned();
         if let Some(dir) = cmd.strip_suffix('/') {
             let is_deny = match policy_val {
                 Value::String(s) if s.as_str() == "allow" => false,

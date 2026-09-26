@@ -74,11 +74,11 @@ fn command_facts(observations: &[Value]) -> Vec<Map> {
     observations
         .iter()
         .filter_map(|v| match v {
-            Value::Map(m) => match m.get("what") {
+            Value::Map(m) => match m.get("what").as_deref() {
                 Some(Value::Variant {
                     label,
                     payload: Some(fact),
-                }) if label == "command" => match fact.as_ref() {
+                }) if label.as_ref() == "command" => match fact.as_ref() {
                     Value::Map(fact) => Some(fact.clone()),
                     _ => None,
                 },
@@ -95,15 +95,19 @@ fn trail_of(report: &Value) -> Vec<Value> {
     let Value::Map(report) = report else {
         panic!("audit returns a record, got {report:?}");
     };
-    match report.get("trail") {
-        Some(Value::List(items)) => items.iter().cloned().collect(),
+    match report.get("trail").as_deref() {
+        Some(Value::List(items)) => items.iter().map(std::borrow::Cow::into_owned).collect(),
         other => panic!("audit's report carries a trail list, got {other:?}"),
     }
 }
 
 /// The three fields a reader of a command fact judges it by.
-fn shape(fact: &Map) -> (Option<&Value>, Option<&Value>, Option<&Value>) {
-    (fact.get("argv"), fact.get("origin"), fact.get("status"))
+fn shape(fact: &Map) -> (Option<Value>, Option<Value>, Option<Value>) {
+    (
+        fact.get("argv").map(std::borrow::Cow::into_owned),
+        fact.get("origin").map(std::borrow::Cow::into_owned),
+        fact.get("status").map(std::borrow::Cow::into_owned),
+    )
 }
 
 /// The same external, alone and as the head of a pipeline: the head's fact

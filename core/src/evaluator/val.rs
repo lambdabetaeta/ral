@@ -67,7 +67,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
                 None => None,
             };
             Ok(Value::Variant {
-                label: label.to_string(),
+                label: label.clone(),
                 payload,
             })
         }

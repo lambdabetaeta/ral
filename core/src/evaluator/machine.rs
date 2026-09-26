@@ -235,7 +235,7 @@ pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
         match elem {
             ValListElem::Single(v) => out.push(close(&v.item, env)?),
             ValListElem::Spread(v) => match close(&v.item, env)? {
-                Value::List(list) => out.extend(list),
+                Value::List(list) => out.extend(list.iter().map(std::borrow::Cow::into_owned)),
                 other => return Err(spread_type_err(&other)),
             },
         }
@@ -377,13 +377,13 @@ impl Machine {
             Value::Native { entry, applied } => {
                 let needed = entry.fixed_arity();
                 let take = needed.saturating_sub(applied.len()).min(args.len());
-                let mut collected = applied;
+                let mut collected = applied.into_vec();
                 let rest = args.split_off(take);
                 collected.extend(args);
                 if collected.len() < needed {
                     return Focus::Return(Terminal::Value(Value::Native {
                         entry,
-                        applied: collected,
+                        applied: collected.into(),
                     }));
                 }
                 match super::audit::run_native(&entry, &collected, mooring, shell) {
@@ -752,7 +752,7 @@ impl Machine {
                 )));
             }
         };
-        let Some(arm) = arms.iter().find(|arm| arm.tag.item == label) else {
+        let Some(arm) = arms.iter().find(|arm| arm.tag.item == *label) else {
             let handled: Vec<String> = arms
                 .iter()
                 .map(|a| format!("{}{}", crate::syntax::tag::TAG_PREFIX, a.tag.item))

@@ -119,7 +119,7 @@ mod tests {
             "nat".to_string(),
             Value::Native {
                 entry: Arc::new(has),
-                applied: vec![idle_handle()],
+                applied: Box::new([idle_handle()]),
             },
         );
         let catch_all = block_over(&parent.env);
@@ -174,7 +174,7 @@ mod tests {
             wire_child.env.get("absent"),
             "both arms must agree on the same absence"
         );
-        let opaque = |v: Option<&Value>| matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG);
+        let opaque = |v: Option<&Value>| matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::serial::OPAQUE_TAG);
         for (arm, child) in [
             ("an identity fork", &identity_child),
             ("a wire seed", &wire_child),

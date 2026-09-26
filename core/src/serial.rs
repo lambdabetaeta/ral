@@ -458,17 +458,17 @@ impl FOValue<SerialClosure> {
             Value::List(items) => Self::List {
                 items: items
                     .iter()
-                    .map(|v| Self::from_runtime(v, ctx))
+                    .map(|v| Self::from_runtime(&v, ctx))
                     .collect::<Result<_, _>>()?,
             },
             Value::Map(items) => Self::Map {
                 entries: items
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), Self::from_runtime(v, ctx)?)))
+                    .map(|(k, v)| Ok((k.to_string(), Self::from_runtime(&v, ctx)?)))
                     .collect::<Result<_, Error>>()?,
             },
             Value::Variant { label, payload } => Self::Variant {
-                label: label.clone(),
+                label: label.to_string(),
                 payload: match payload {
                     Some(p) => Some(Box::new(Self::from_runtime(p, ctx)?)),
                     None => None,
@@ -524,7 +524,7 @@ impl FOValue<SerialClosure> {
                     .collect::<Result<_, Error>>()?,
             ),
             Self::Variant { label, payload } => Value::Variant {
-                label,
+                label: label.into(),
                 payload: match payload {
                     Some(p) => Some(Box::new((*p).into_runtime(dec)?)),
                     None => None,
@@ -618,16 +618,16 @@ impl TryFrom<&Value> for FOValue {
             },
             Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
             Value::List(items) => Self::List {
-                items: items.iter().map(inner).collect::<Result<_, _>>()?,
+                items: items.iter().map(|v| inner(&v)).collect::<Result<_, _>>()?,
             },
             Value::Map(items) => Self::Map {
                 entries: items
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), inner(v)?)))
+                    .map(|(k, v)| Ok((k.to_string(), inner(&v)?)))
                     .collect::<Result<_, NotData>>()?,
             },
             Value::Variant { label, payload } => Self::Variant {
-                label: label.clone(),
+                label: label.to_string(),
                 payload: payload.as_deref().map(inner).transpose()?.map(Box::new),
             },
             Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
@@ -671,16 +671,16 @@ impl FOValue {
             },
             Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
             Value::List(items) => Self::List {
-                items: items.iter().map(Self::scrubbed).collect(),
+                items: items.iter().map(|v| Self::scrubbed(&v)).collect(),
             },
             Value::Map(items) => Self::Map {
                 entries: items
                     .iter()
-                    .map(|(k, v)| (k.clone(), Self::scrubbed(v)))
+                    .map(|(k, v)| (k.to_string(), Self::scrubbed(&v)))
                     .collect(),
             },
             Value::Variant { label, payload } => Self::Variant {
-                label: label.clone(),
+                label: label.to_string(),
                 payload: payload.as_deref().map(|p| Box::new(Self::scrubbed(p))),
             },
             Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => opaque(v),
@@ -707,7 +707,7 @@ impl From<FOValue> for Value {
                     .collect(),
             ),
             FOValue::Variant { label, payload } => Self::Variant {
-                label,
+                label: label.into(),
                 payload: payload.map(|p| Box::new(Self::from(*p))),
             },
             FOValue::Ext(x) => match x {},

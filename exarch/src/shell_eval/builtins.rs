@@ -419,9 +419,9 @@ fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 }
 
 /// A hash resolved against the file as read: the 0-based line it uniquely named.
-struct ResolvedEdit<'a> {
+struct ResolvedEdit {
     at: usize,
-    new: &'a str,
+    new: String,
 }
 
 /// Backslash letters that read as a C-style escape but are not one here:
@@ -485,6 +485,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     // fails here, before anything is written.
     let mut resolved = Vec::with_capacity(edits.len());
     for e in edits {
+        let e = e.into_owned();
         let m = match e {
             Value::Map(m) => m,
             other => {
@@ -494,8 +495,8 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
                 )));
             }
         };
-        let want = match m.get("hash") {
-            Some(v) => as_str(v, "edit-hash")?,
+        let want = match m.get("hash").map(std::borrow::Cow::into_owned) {
+            Some(v) => as_str(&v, "edit-hash")?.to_string(),
             None => {
                 return Err(sig(
                     "edit-hash: each edit needs a `hash` field — the witness from view-hash/view-hash-around."
@@ -503,8 +504,8 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
                 ));
             }
         };
-        let new = match m.get("line") {
-            Some(v) => as_str(v, "edit-hash")?,
+        let new = match m.get("line").map(std::borrow::Cow::into_owned) {
+            Some(v) => as_str(&v, "edit-hash")?.to_string(),
             None => {
                 return Err(sig(
                     "edit-hash: each edit needs a `line` field — the replacement text.".to_string(),
@@ -546,7 +547,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         match resolved.iter().find(|r| r.at == i) {
             None => out.push(row.clone()),
             Some(r) if r.new.is_empty() => {}
-            Some(r) => out.extend(rows_of(r.new)),
+            Some(r) => out.extend(rows_of(&r.new)),
         }
     }
     let final_text = out.join("\n");
@@ -560,7 +561,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(r.new));
+    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(&r.new));
     note_edit(shell, path, &lines, line_nums.len() > 1, any_escapes);
 
     Ok(Value::Unit)
@@ -1393,7 +1394,7 @@ mod tests {
         let Value::Map(record) = result else {
             panic!("await must return a record");
         };
-        assert_eq!(record.get("value"), Some(&Value::Int(42)));
+        assert_eq!(record.get("value").as_deref(), Some(&Value::Int(42)));
     }
 
     /// A settled service nothing has claimed still lingers, a durable birth
@@ -1442,7 +1443,7 @@ mod tests {
         let Value::Map(record) = result else {
             panic!("await must return a record");
         };
-        assert_eq!(record.get("value"), Some(&Value::Int(42)));
+        assert_eq!(record.get("value").as_deref(), Some(&Value::Int(42)));
     }
 
     #[test]

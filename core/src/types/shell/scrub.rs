@@ -130,15 +130,15 @@ impl Scrub {
                 items
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, item)| self.rebuild(item).map(|new| (i, new))),
+                    .filter_map(|(i, item)| self.rebuild(&item).map(|new| (i, new))),
                 List::set,
             )
             .map(Value::List),
             Value::Map(entries) => patched(
                 entries,
-                entries
-                    .iter()
-                    .filter_map(|(key, item)| self.rebuild(item).map(|new| (key.clone(), new))),
+                entries.iter().filter_map(|(key, item)| {
+                    self.rebuild(&item).map(|new| (key.to_string(), new))
+                }),
                 Map::insert,
             )
             .map(Value::Map),
@@ -155,7 +155,7 @@ impl Scrub {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, arg)| self.rebuild(arg).map(|new| (i, new))),
-                |args: &mut Vec<Value>, i, new| args[i] = new,
+                |args: &mut Box<[Value]>, i, new| args[i] = new,
             )
             .map(|applied| Value::Native {
                 entry: Arc::clone(entry),
@@ -209,12 +209,12 @@ fn captured_scopes(v: &Value, out: &mut Vec<BindingMap>) {
         Value::Thunk(closure) => out.push(closure.env().bindings_root().clone()),
         Value::List(items) => {
             for item in items {
-                captured_scopes(item, out);
+                captured_scopes(&item, out);
             }
         }
         Value::Map(entries) => {
             for (_, item) in entries {
-                captured_scopes(item, out);
+                captured_scopes(&item, out);
             }
         }
         Value::Variant {
@@ -242,7 +242,7 @@ mod tests {
     use crate::types::{block_over, captured, idle_handle};
 
     fn is_placeholder(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG)
+        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::serial::OPAQUE_TAG)
     }
 
     #[test]

@@ -476,8 +476,8 @@ fn trail_of(report: &Value) -> Vec<Value> {
     let Value::Map(m) = report else {
         panic!("audit {{ … }} must return a record; got {report:?}")
     };
-    match m.get("trail") {
-        Some(Value::List(trail)) => trail.iter().cloned().collect(),
+    match m.get("trail").as_deref() {
+        Some(Value::List(trail)) => trail.iter().map(std::borrow::Cow::into_owned).collect(),
         other => panic!("an audit report must have a list `trail` field; got {other:?}"),
     }
 }
@@ -488,20 +488,21 @@ fn is_command(observation: &Value, name: &str) -> bool {
     let Value::Map(m) = observation else {
         return false;
     };
+    let what = m.get("what");
     let Some(Value::Variant {
         label,
         payload: Some(fact),
-    }) = m.get("what")
+    }) = what.as_deref()
     else {
         return false;
     };
-    if label != "command" {
+    if label.as_ref() != "command" {
         return false;
     }
     match fact.as_ref() {
         Value::Map(fact) => matches!(
-            fact.get("argv"),
-            Some(Value::List(argv)) if matches!(argv.get(0), Some(Value::String(s)) if s == name)
+            fact.get("argv").as_deref(),
+            Some(Value::List(argv)) if matches!(argv.get(0).as_deref(), Some(Value::String(s)) if s == name)
         ),
         _ => false,
     }

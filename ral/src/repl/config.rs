@@ -168,7 +168,7 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 /// touched yet — and everything left, already shape-checked or (`startup`)
 /// unconditional, cannot fail behind them.
 pub(crate) fn apply_rc_config(
-    pairs: Map,
+    pairs: &Map,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<(RcSettings, Option<Value>), String> {
@@ -176,7 +176,7 @@ pub(crate) fn apply_rc_config(
     if let Some(key) = pairs.keys().find(|k| table.holds(k).is_none()) {
         return Err(refuse(table.unknown_key(key)));
     }
-    if let Some(err) = pairs.iter().find_map(|(k, v)| rc_value_shape_error(k, v)) {
+    if let Some(err) = pairs.iter().find_map(|(k, v)| rc_value_shape_error(k, &v)) {
         return Err(refuse(err.message));
     }
 
@@ -186,7 +186,7 @@ pub(crate) fn apply_rc_config(
         if let Some(val) = pairs.get(key) {
             apply_rc_key(
                 key,
-                val.clone(),
+                val.into_owned(),
                 mooring,
                 shell,
                 &mut settings,
@@ -196,12 +196,19 @@ pub(crate) fn apply_rc_config(
         }
     }
     for (key, val) in pairs {
-        if matches!(key.as_str(), "prompt" | "aliases" | "theme") {
+        if matches!(key, "prompt" | "aliases" | "theme") {
             continue;
         }
         // Every other key was shape-checked above, so this cannot fail.
-        apply_rc_key(&key, val, mooring, shell, &mut settings, &mut startup)
-            .map_err(|err| refuse(err.message))?;
+        apply_rc_key(
+            key,
+            val.into_owned(),
+            mooring,
+            shell,
+            &mut settings,
+            &mut startup,
+        )
+        .map_err(|err| refuse(err.message))?;
     }
     Ok((settings, startup))
 }
@@ -288,17 +295,18 @@ fn apply_rc_key(
                     1,
                 ));
             };
-            for (k, v) in m {
+            for (k, v) in &m {
                 // PWD lives on context.cwd, and a copy in env_overrides
                 // would shadow it and drift on the next `cd`; ral keeps no
                 // OLDPWD at all.  An rc
                 // that spreads a parent shell's environment carries them,
                 // so drop them here rather than feed them to set_env_var.
-                if matches!(k.as_str(), "PWD" | "OLDPWD") {
+                if matches!(k, "PWD" | "OLDPWD") {
                     continue;
                 }
-                shell.set_env_var(k.clone(), v.to_string());
-                shell.set_var(k, v);
+                let v = v.into_owned();
+                shell.set_env_var(k.to_string(), v.to_string());
+                shell.set_var(k.to_string(), v);
             }
             Ok(())
         }
@@ -324,7 +332,9 @@ fn apply_rc_key(
             // A function installs as an argv-handler alias; any other
             // value falls through to a plain scope binding so the key
             // still lands somewhere usable.
-            m.into_iter().try_for_each(|(name, value)| {
+            m.iter().try_for_each(|(name, value)| {
+                let name = name.to_string();
+                let value = value.into_owned();
                 if matches!(value, Value::Thunk(_)) {
                     let alias = name.clone();
                     shell.install_alias(name, value).map_err(|err| match err {
@@ -349,8 +359,8 @@ fn apply_rc_key(
             // Every value installs as a lexical scope binding,
             // functions included; a function is typed by the checker
             // so it is applyable by function application at the prompt.
-            for (name, value) in m {
-                shell.bind_value(name, value);
+            for (name, value) in &m {
+                shell.bind_value(name.to_string(), value.into_owned());
             }
             Ok(())
         }
@@ -437,8 +447,8 @@ fn apply_rc_key(
                     1,
                 ));
             };
-            for (name, options) in entries {
-                if let Err(err) = load_rc_plugin(&name, options, mooring, shell) {
+            for (name, options) in &entries {
+                if let Err(err) = load_rc_plugin(name, options.into_owned(), mooring, shell) {
                     eprint!(
                         "{}",
                         ral_core::diagnostic::format_runtime_error_auto(
@@ -562,7 +572,7 @@ mod tests {
     fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings) {
         let mut shell = prelude_shell();
         let pairs = rc_map(&mut shell, rc_src);
-        let (settings, _) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell)
+        let (settings, _) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell)
             .expect("test rc must satisfy the keyset");
         (shell, settings)
     }
@@ -589,7 +599,7 @@ mod tests {
                 "_apply-rc  — test door applying one rc map.",
                 BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
                     let pairs = pairs.lock().unwrap().take().expect("applied once");
-                    apply_rc_config(pairs, mooring, shell)
+                    apply_rc_config(&pairs, mooring, shell)
                         .expect("test rc must satisfy the keyset");
                     Ok(Value::Unit)
                 })),
@@ -737,7 +747,7 @@ mod tests {
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let (settings, _) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell)
+        let (settings, _) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell)
             .expect("test rc must satisfy the keyset");
         (shell, settings)
     }
@@ -751,7 +761,7 @@ mod tests {
         let Value::Map(pairs) = config else {
             panic!("test rc config must be a map; got {}", config.type_name());
         };
-        let Err(err) = apply_rc_config(pairs, &Mooring::adrift(), &mut shell) else {
+        let Err(err) = apply_rc_config(&pairs, &Mooring::adrift(), &mut shell) else {
             panic!("test rc must fail its contract");
         };
         (shell, err)

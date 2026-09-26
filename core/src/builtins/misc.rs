@@ -45,7 +45,7 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
         ));
     };
     let lookup = |k: &str| m.get(k);
-    let Some(status) = lookup("status").and_then(Value::as_int) else {
+    let Some(status) = lookup("status").as_deref().and_then(Value::as_int) else {
         return Break::Error(Error::new(
             "fail: error record missing or non-integer 'status' field",
             1,
@@ -55,7 +55,7 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
         Ok(code) => code,
         Err(b) => return b,
     };
-    let message = match lookup("message") {
+    let message = match lookup("message").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         _ => {
             return Break::Error(Error::new(

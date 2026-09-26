@@ -627,7 +627,11 @@ mod tests {
         let crate::types::Value::Map(m) = state.to_value() else {
             panic!("expected map");
         };
-        let get = |k: &str| m.iter().find(|(kk, _)| *kk == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            m.iter()
+                .find(|(kk, _)| *kk == k)
+                .map(|(_, v)| v.into_owned())
+        };
         let expect_bool = |k: &str, b: bool| {
             assert_eq!(get(k), Some(crate::types::Value::Bool(b)), "key {k}");
         };

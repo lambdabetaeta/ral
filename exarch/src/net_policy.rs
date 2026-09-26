@@ -146,7 +146,7 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
         ));
     };
     for key in map.keys() {
-        match key.as_str() {
+        match key {
             "hosts" | "search" => {}
             "read" | "write" => {
                 return Err(format!(
@@ -173,7 +173,8 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
             }
         }
     }
-    let raw_hosts = match map.get("hosts") {
+    let hosts_field = map.get("hosts");
+    let raw_hosts = match hosts_field.as_deref() {
         Some(Value::List(items)) => items,
         Some(other) => {
             return Err(format!(
@@ -185,20 +186,21 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
     };
     let mut hosts = std::collections::HashSet::with_capacity(raw_hosts.len());
     for v in raw_hosts {
+        let v = v.into_owned();
         let Value::String(raw) = v else {
             return Err(format!(
                 "network policy {display}: 'hosts' entries must be strings, got {}",
                 v.type_name()
             ));
         };
-        let host = Host::parse(raw).map_err(|e| format!("network policy {display}: {e}"))?;
+        let host = Host::parse(&raw).map_err(|e| format!("network policy {display}: {e}"))?;
         if !hosts.insert(host) {
             return Err(format!(
                 "network policy {display}: '{raw}' is named twice in 'hosts' after lowercasing"
             ));
         }
     }
-    let search = match map.get("search") {
+    let search = match map.get("search").as_deref() {
         Some(Value::Bool(b)) => *b,
         Some(other) => {
             return Err(format!(

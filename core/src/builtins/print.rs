@@ -67,13 +67,13 @@ fn full(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) 
         }
         Value::List(items) if !items.is_empty() => {
             let parts = budgeted(items.len(), items.iter(), budget, |v| {
-                child(v, indent, params, budget)
+                child(&v, indent, params, budget)
             });
             bracketed(&parts, indent, params)
         }
         Value::Map(pairs) if !pairs.is_empty() => {
             let parts = budgeted(pairs.len(), pairs.iter(), budget, |(k, v)| {
-                format!("{k}: {}", child(v, indent, params, budget))
+                format!("{k}: {}", child(&v, indent, params, budget))
             });
             bracketed(&parts, indent, params)
         }

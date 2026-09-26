@@ -47,7 +47,7 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
         match elem {
             Single(v) => items.push_back(close(&v.item, env)?),
             Spread(v) => match close(&v.item, env)? {
-                Value::List(inner) => items.append(inner),
+                Value::List(inner) => items.append(&inner),
                 val => return Err(spread_type_err(&val)),
             },
         }
@@ -90,9 +90,9 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env) -> Result<Value, Error> {
         if let MapPart::Spread(v) = entry.part() {
             match close(&v.item, env)? {
                 Value::Map(inner) => {
-                    for (k, v) in inner {
-                        if seen.insert(k.clone()) {
-                            pairs.push((k, v));
+                    for (k, v) in &inner {
+                        if seen.insert(k.to_string()) {
+                            pairs.push((k.to_string(), v.into_owned()));
                         }
                     }
                 }

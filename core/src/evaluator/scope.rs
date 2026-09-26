@@ -114,11 +114,11 @@ impl WithinScope {
         let entries = parse_handlers(arms.unwrap_or_default(), env, shell)?;
 
         for (k, v) in opts {
-            match k.as_str() {
-                "env" => env_overrides = Some(parse_env(v)?),
-                "dir" => cwd = Some(parse_dir(v, shell)?),
+            match k {
+                "env" => env_overrides = Some(parse_env(&v)?),
+                "dir" => cwd = Some(parse_dir(&v, shell)?),
                 "handler" => {
-                    catch_all = Some(parse_catch_all(v, env, shell)?);
+                    catch_all = Some(parse_catch_all(&v, env, shell)?);
                     saw_handlers = true;
                 }
                 _ => return Err(sig(format!("within: unknown key '{k}'"))),
@@ -162,7 +162,7 @@ impl WithinScope {
 fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
     let overrides = as_map(v, "within env")?;
     for k in overrides.keys() {
-        let why = match k.as_str() {
+        let why = match k {
             "PWD" => "is the shell's working directory; use `cd` or `within [dir: …]` to change it",
             "OLDPWD" => "is never passed to commands: ral keeps no previous directory for `cd -`",
             _ => continue,
@@ -170,9 +170,10 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
         return Err(sig(format!("within env: `{k}` {why}")));
     }
     overrides
-        .into_iter()
+        .iter()
         .map(|(name, value)| {
-            let text = match value {
+            let name = name.to_string();
+            let text = match value.into_owned() {
                 Value::String(s) => s.into_string(),
                 Value::Int(n) => n.to_string(),
                 Value::Float(n) => crate::types::fmt_float(n),
@@ -306,19 +307,21 @@ mod tests {
     /// `audit { … }` report's flat `trail`.
     fn command_argv0s(report: &Value) -> Vec<String> {
         let map = as_map(report, "test").expect("audit returns a map");
-        let Some(Value::List(trail)) = map.get("trail") else {
+        let trail_field = map.get("trail");
+        let Some(Value::List(trail)) = trail_field.as_deref() else {
             panic!("an audit report must have a list `trail` field");
         };
         trail
             .iter()
             .filter_map(|obs| {
-                let obs = as_map(obs, "test").ok()?;
-                let Value::Variant { label, payload } = obs.get("what")? else {
+                let obs = as_map(&obs, "test").ok()?;
+                let what = obs.get("what")?;
+                let Value::Variant { label, payload } = what.as_ref() else {
                     return None;
                 };
                 let fact = as_map(payload.as_deref()?, "test").ok()?;
-                match (label.as_str(), fact.get("argv")) {
-                    ("command", Some(Value::List(argv))) => match argv.iter().next() {
+                match (label.as_ref(), fact.get("argv").as_deref()) {
+                    ("command", Some(Value::List(argv))) => match argv.iter().next().as_deref() {
                         Some(Value::String(s)) => Some(s.to_string()),
                         _ => None,
                     },
@@ -442,8 +445,8 @@ mod tests {
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
         let map = as_map(&report, "test").expect("audit returns a map");
-        match map.get("outcome") {
-            Some(Value::Variant { label, .. }) => assert_eq!(label, "ok"),
+        match map.get("outcome").as_deref() {
+            Some(Value::Variant { label, .. }) => assert_eq!(label.as_ref(), "ok"),
             other => panic!("a returning body must report `ok, got {other:?}"),
         }
         assert_eq!(command_argv0s(&report), ["echo"]);

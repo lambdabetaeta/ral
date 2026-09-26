@@ -70,7 +70,7 @@ fn write_module(name: &str, contents: &str) -> std::path::PathBuf {
 /// Pull the `answer` field out of a module Map.
 fn answer_of(m: &Value) -> i64 {
     match m {
-        Value::Map(rec) => match rec.get("answer") {
+        Value::Map(rec) => match rec.get("answer").as_deref() {
             Some(Value::Int(n)) => *n,
             other => panic!("expected Int `answer`, got {other:?}"),
         },
@@ -139,8 +139,8 @@ fn use_returns_a_map_and_does_not_leak() {
     let m = top_level(&mut shell, &format!("use '{p}'")).expect("use");
     match m {
         Value::Map(rec) => {
-            assert_eq!(rec.get("x"), Some(&Value::Int(7)));
-            assert_eq!(rec.get("y"), Some(&Value::Int(8)));
+            assert_eq!(rec.get("x").as_deref(), Some(&Value::Int(7)));
+            assert_eq!(rec.get("y").as_deref(), Some(&Value::Int(8)));
         }
         other => panic!("expected Map, got {other:?}"),
     }
@@ -184,7 +184,7 @@ fn use_sees_the_session_but_not_a_blocks_local_let() {
     )
     .expect("a session Define made before the block reaches the module either way");
     match m {
-        Value::Map(rec) => assert_eq!(rec.get("reads_outer"), Some(&Value::Int(41))),
+        Value::Map(rec) => assert_eq!(rec.get("reads_outer").as_deref(), Some(&Value::Int(41))),
         other => panic!("expected Map, got {other:?}"),
     }
 
@@ -349,8 +349,8 @@ fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
         .expect("use must see the session extended by this run's earlier Define");
     match m {
         Value::Map(rec) => {
-            assert_eq!(rec.get("visible"), Some(&Value::Int(1)));
-            assert_eq!(rec.get("reads_earlier"), Some(&Value::Int(42)));
+            assert_eq!(rec.get("visible").as_deref(), Some(&Value::Int(1)));
+            assert_eq!(rec.get("reads_earlier").as_deref(), Some(&Value::Int(42)));
             assert!(
                 rec.get("_private").is_none(),
                 "a `_`-prefixed name must not appear in the returned map"

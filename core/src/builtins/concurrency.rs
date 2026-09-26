@@ -734,7 +734,10 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
     if args.is_empty() {
         return Err(sig("race requires 1 argument (list of handles)"));
     }
-    let values = as_list(&args[0], "race")?;
+    let values: Vec<Value> = as_list(&args[0], "race")?
+        .iter()
+        .map(std::borrow::Cow::into_owned)
+        .collect();
     let mut handles: Vec<&HandleInner> = Vec::new();
     for v in &values {
         handles.push(expect_handle(v, "race")?);
@@ -864,7 +867,7 @@ mod tests {
             Value::Variant {
                 label: l,
                 payload: Some(p),
-            } if l == label => p,
+            } if l.as_ref() == label => p,
             other => panic!("expected `{label} with payload, got {other:?}"),
         }
     }
@@ -914,11 +917,18 @@ mod tests {
 
         let settled = expect_variant(&poll1, "settled");
         let fields = expect_map(settled);
-        assert_eq!(fields.get("stdout"), Some(&Value::bytes(b"out".to_vec())));
-        assert_eq!(fields.get("stderr"), Some(&Value::bytes(b"err".to_vec())));
-        let err = expect_variant(fields.get("outcome").expect("outcome field"), "err");
+        assert_eq!(
+            fields.get("stdout").as_deref(),
+            Some(&Value::bytes(b"out".to_vec()))
+        );
+        assert_eq!(
+            fields.get("stderr").as_deref(),
+            Some(&Value::bytes(b"err".to_vec()))
+        );
+        let outcome = fields.get("outcome");
+        let err = expect_variant(outcome.as_deref().expect("outcome field"), "err");
         let err_fields = expect_map(err);
-        assert_eq!(err_fields.get("status"), Some(&Value::Int(1)));
+        assert_eq!(err_fields.get("status").as_deref(), Some(&Value::Int(1)));
 
         let poll2 = builtin_poll(&args, &shell).expect("repeat poll must not re-raise");
         assert_eq!(poll1, poll2);
@@ -1472,22 +1482,31 @@ mod tests {
     }
 
     /// The observations an `audit { }` report collected.
-    fn trail_of(report: &Value) -> &crate::types::List {
-        match expect_map(report).get("trail") {
+    fn trail_of(report: &Value) -> crate::types::List {
+        match expect_map(report)
+            .get("trail")
+            .map(std::borrow::Cow::into_owned)
+        {
             Some(Value::List(trail)) => trail,
             other => panic!("expected a trail List, got {other:?}"),
         }
     }
 
     /// The `` `worker `` facts of a trail — a birth is read by its tag.
-    fn births(trail: &crate::types::List) -> Vec<&Map> {
+    fn births(trail: &crate::types::List) -> Vec<Map> {
         trail
             .iter()
-            .filter_map(|o| match expect_map(o).get("what") {
-                Some(Value::Variant {
-                    label,
-                    payload: Some(fact),
-                }) if label == "worker" => Some(expect_map(fact)),
+            .filter_map(|o| match o.into_owned() {
+                Value::Map(o) => match o.get("what").map(std::borrow::Cow::into_owned) {
+                    Some(Value::Variant {
+                        label,
+                        payload: Some(fact),
+                    }) if label.as_ref() == "worker" => match *fact {
+                        Value::Map(fact) => Some(fact),
+                        _ => None,
+                    },
+                    _ => None,
+                },
                 _ => None,
             })
             .collect()
@@ -1496,8 +1515,8 @@ mod tests {
     /// The one `` `worker `` fact of an `audit { }` report's trail, panicking
     /// if there is not exactly one.
     fn only_birth(trail: &crate::types::List) -> Map {
-        match births(trail).as_slice() {
-            [birth] => (*birth).clone(),
+        match births(trail).as_mut_slice() {
+            [birth] => std::mem::take(birth),
             other => panic!("expected exactly one worker birth, got {other:?}"),
         }
     }
@@ -1511,14 +1530,17 @@ mod tests {
         let report = run_captured(&mut shell, "audit { !{spawn { return 1 }} }", None)
             .0
             .expect("audit over a plain spawn must succeed");
-        let birth = only_birth(trail_of(&report));
+        let birth = only_birth(&trail_of(&report));
         assert_eq!(
-            birth.get("cmd"),
+            birth.get("cmd").as_deref(),
             Some(&Value::string("block at <test>, line 1"))
         );
-        assert_eq!(birth.get("class"), Some(&Value::string("worker")));
+        assert_eq!(
+            birth.get("class").as_deref(),
+            Some(&Value::string("worker"))
+        );
         assert!(
-            matches!(birth.get("id"), Some(Value::Int(_))),
+            matches!(birth.get("id").as_deref(), Some(Value::Int(_))),
             "the birth carries the minted worker id: {birth:?}"
         );
     }
@@ -1539,9 +1561,9 @@ mod tests {
         )
         .0
         .expect("audit over a defer must succeed");
-        let birth = only_birth(trail_of(&report));
+        let birth = only_birth(&trail_of(&report));
         assert_eq!(
-            birth.get("cmd"),
+            birth.get("cmd").as_deref(),
             Some(&Value::string("block at <test>, line 3"))
         );
     }
@@ -1555,17 +1577,20 @@ mod tests {
         let report = run_captured(&mut shell, "audit { !{spawn { return 1 }} }", Some(0))
             .0
             .expect("audit swallows the refusal as data, not an error");
-        let outcome = expect_map(&report)
-            .get("outcome")
+        let outcome_field = expect_map(&report).get("outcome");
+        let outcome = outcome_field
+            .as_deref()
             .expect("a report carries its outcome");
         assert_eq!(
-            expect_map(expect_variant(outcome, "err")).get("status"),
+            expect_map(expect_variant(outcome, "err"))
+                .get("status")
+                .as_deref(),
             Some(&Value::Int(1)),
             "the refused spawn's exit code"
         );
         let trail = trail_of(&report);
         assert!(
-            births(trail).is_empty(),
+            births(&trail).is_empty(),
             "a spawn refused at the cap must observe no birth: {trail:?}"
         );
     }
@@ -1586,7 +1611,7 @@ mod tests {
         .0
         .expect("the worker must run explain");
         assert_eq!(
-            expect_map(&awaited).get("stdout"),
+            expect_map(&awaited).get("stdout").as_deref(),
             Some(&Value::bytes(printed))
         );
     }
@@ -1606,7 +1631,7 @@ mod tests {
             .0
             .expect("the worker must load the module");
         let value = expect_map(&awaited).get("value").expect("await's value");
-        assert_eq!(expect_map(value).get("v"), Some(&Value::Int(7)));
+        assert_eq!(expect_map(&value).get("v").as_deref(), Some(&Value::Int(7)));
     }
 
     fn service_test_shell() -> Shell {
@@ -1779,8 +1804,11 @@ mod tests {
             2,
             "the receipt is a pid and a desc, and nothing else: {fields:?}"
         );
-        assert_eq!(fields.get("desc"), Some(&Value::string("the greeter")));
-        assert!(matches!(fields.get("pid"), Some(Value::Int(p)) if *p > 0));
+        assert_eq!(
+            fields.get("desc").as_deref(),
+            Some(&Value::string("the greeter"))
+        );
+        assert!(matches!(fields.get("pid").as_deref(), Some(Value::Int(p)) if *p > 0));
     }
 
     /// A detached worker's `surface` events replay through the *awaiting* run
@@ -2159,7 +2187,7 @@ mod tests {
         let h3 = spawn_child(&m, &mut shell, Birth::Spawn, "<c>", |_, _c| Ok(Value::Unit)).unwrap();
         loop {
             let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &shell).unwrap();
-            if matches!(&polled, Value::Variant { label, .. } if label == "settled") {
+            if matches!(&polled, Value::Variant { label, .. } if label.as_ref() == "settled") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -2181,7 +2209,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 1);
         let pending = builtin_poll(&[Value::Handle(Box::new(h4.clone()))], &shell).unwrap();
         assert!(
-            matches!(&pending, Value::Variant { label, .. } if label == "pending"),
+            matches!(&pending, Value::Variant { label, .. } if label.as_ref() == "pending"),
             "the worker is blocked, so poll must observe it pending: got {pending:?}"
         );
         assert_eq!(

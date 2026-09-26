@@ -616,7 +616,7 @@ mod tests {
         let Value::Map(m) = &value else {
             panic!("an observation projects as a record")
         };
-        assert_eq!(m.get("site"), Some(&Value::from(optional(None))));
+        assert_eq!(m.get("site").as_deref(), Some(&Value::from(optional(None))));
         assert_eq!(Observation::from_wire(&obs.to_wire()), Some(obs));
     }
 
@@ -625,17 +625,18 @@ mod tests {
         let Value::Map(m) = v else {
             panic!("an observation projects as a record")
         };
+        let what = m.get("what");
         let Some(Value::Variant {
             label,
             payload: Some(fact),
-        }) = m.get("what")
+        }) = what.as_deref()
         else {
             panic!("`what` is a tagged fact")
         };
         let Value::Map(fact) = fact.as_ref() else {
             panic!("a fact projects as a record")
         };
-        (label.clone(), fact.clone())
+        (label.to_string(), fact.clone())
     }
 
     #[test]
@@ -766,7 +767,7 @@ mod tests {
         let value = obs.to_value();
         let (tag, fact) = fact_of(&value);
         assert_eq!(tag, "read");
-        assert_eq!(fact.get("path"), Some(&Value::string("in.txt")));
+        assert_eq!(fact.get("path").as_deref(), Some(&Value::string("in.txt")));
         let Value::Map(m) = &value else {
             panic!("an observation projects as a record")
         };
@@ -787,7 +788,7 @@ mod tests {
         let obs = Observation::instant(Some(site()), None, what.clone());
         let (_, fact) = fact_of(&obs.to_value());
         assert_eq!(
-            fact.get("new_bytes"),
+            fact.get("new_bytes").as_deref(),
             Some(&Value::Variant {
                 label: "just".into(),
                 payload: Some(Box::new(Value::bytes(Vec::new()))),
@@ -795,7 +796,7 @@ mod tests {
             "an empty new side is known, and known-empty"
         );
         assert_eq!(
-            fact.get("old_bytes"),
+            fact.get("old_bytes").as_deref(),
             Some(&Value::Variant {
                 label: "none".into(),
                 payload: None,
@@ -853,10 +854,13 @@ mod tests {
         );
         let (tag, fact) = fact_of(&obs.to_value());
         assert_eq!(tag, "check");
-        assert_eq!(fact.get("decision"), Some(&Value::string("denied")));
+        assert_eq!(
+            fact.get("decision").as_deref(),
+            Some(&Value::string("denied"))
+        );
         assert!(!fact.contains_key("status"));
         assert_eq!(
-            fact.get("fields"),
+            fact.get("fields").as_deref(),
             Some(&Value::map(vec![("name".into(), Value::string("curl"))]))
         );
     }

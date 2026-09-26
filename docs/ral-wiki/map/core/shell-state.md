@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2ded530f
+generated_at_commit: c4fb2765
 generated_at_date: 2026-09-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -34,8 +34,11 @@ everything `crate::types::*`.
   Rendering an argv inside the shell is total (`Value::render_argv`); this is the
   one gate, declared once so the static refusal and the pre-spawn one cannot
   disagree ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
-- `list.rs` / `map.rs` — `List` and `Map`, opaque newtypes over persistent
-  `imbl::Vector` / `imbl::OrdMap`; `string.rs` / `bytes.rs` — `Str` and
+- `list.rs` / `map.rs` — `List` and `Map`, opaque over a private `Repr`
+  wrapping `Arc<imbl::Vector<Value>>` / `Arc<imbl::OrdMap<String, Value>>`;
+  `get`/`iter` lend a `Cow<'_, Value>` rather than `&Value`, so a caller
+  never knows whether an element is shared or freshly formed; the
+  `pub(crate)` mutators go through `Arc::make_mut`. `string.rs` / `bytes.rs` — `Str` and
   `Bytes`, newtypes over `Arc<String>` / `Arc<Vec<u8>>`, so an owned buffer
   moves in without a copy. `Value::string` / `Value::bytes` are their one
   construction door, as `Value::list` is a list's. **Cloning a `Value` copies

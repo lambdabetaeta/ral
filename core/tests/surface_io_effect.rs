@@ -74,15 +74,15 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
 /// events, asserting exactly one fired.  Core reports every dispatch it makes,
 /// so a door test names the kind it is about rather than counting the whole
 /// stream.
-fn single_observation<'a>(events: &'a [Value], kind: &str) -> &'a ral_core::types::Map {
-    let facts: Vec<&ral_core::types::Map> = events
+fn single_observation(events: &[Value], kind: &str) -> ral_core::types::Map {
+    let facts: Vec<ral_core::types::Map> = events
         .iter()
         .filter_map(|v| match v {
-            Value::Map(m) => match m.get("what") {
+            Value::Map(m) => match m.get("what").map(std::borrow::Cow::into_owned) {
                 Some(Value::Variant {
                     label,
                     payload: Some(fact),
-                }) if label == kind => match fact.as_ref() {
+                }) if label.as_ref() == kind => match *fact {
                     Value::Map(fact) => Some(fact),
                     _ => None,
                 },
@@ -96,7 +96,7 @@ fn single_observation<'a>(events: &'a [Value], kind: &str) -> &'a ral_core::type
         1,
         "exactly one {kind} observation must fire, got {events:?}"
     );
-    facts[0]
+    facts.into_iter().next().expect("checked above")
 }
 
 fn s(v: &str) -> Value {
@@ -127,8 +127,12 @@ fn stdin_redirect_emits_read_observation() {
     result.expect("stdin redirect read should succeed");
 
     let m = single_observation(&events, "read");
-    assert_eq!(m.get("path"), Some(&s(&path)));
-    assert_eq!(m.get("outcome"), None, "read has no outcome field");
+    assert_eq!(m.get("path").as_deref(), Some(&s(&path)));
+    assert_eq!(
+        m.get("outcome").as_deref(),
+        None,
+        "read has no outcome field"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -146,9 +150,9 @@ fn write_redirect_emits_committed_observation() {
     result.expect("write redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("path"), Some(&s(&path)));
-    assert_eq!(m.get("mode"), Some(&s("write")));
-    assert_eq!(m.get("outcome"), Some(&s("committed")));
+    assert_eq!(m.get("path").as_deref(), Some(&s(&path)));
+    assert_eq!(m.get("mode").as_deref(), Some(&s("write")));
+    assert_eq!(m.get("outcome").as_deref(), Some(&s("committed")));
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -164,8 +168,8 @@ fn append_redirect_emits_append_mode() {
     result.expect("append redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("mode"), Some(&s("append")));
-    assert_eq!(m.get("outcome"), Some(&s("committed")));
+    assert_eq!(m.get("mode").as_deref(), Some(&s("append")));
+    assert_eq!(m.get("outcome").as_deref(), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -180,8 +184,8 @@ fn stream_redirect_emits_stream_mode() {
     result.expect("stream redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("mode"), Some(&s("stream")));
-    assert_eq!(m.get("outcome"), Some(&s("committed")));
+    assert_eq!(m.get("mode").as_deref(), Some(&s("stream")));
+    assert_eq!(m.get("outcome").as_deref(), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -204,9 +208,9 @@ fn write_with_failing_body_emits_aborted() {
     assert!(result.is_err(), "the failing body must surface its error");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("path"), Some(&s(&path)));
-    assert_eq!(m.get("mode"), Some(&s("write")));
-    assert_eq!(m.get("outcome"), Some(&s("aborted")));
+    assert_eq!(m.get("path").as_deref(), Some(&s(&path)));
+    assert_eq!(m.get("mode").as_deref(), Some(&s("write")));
+    assert_eq!(m.get("outcome").as_deref(), Some(&s("aborted")));
     assert!(
         !target.exists(),
         "an aborted atomic write must not create the target"
@@ -228,9 +232,9 @@ fn write_with_failing_open_emits_failed() {
     assert!(result.is_err(), "a failed open must surface its error");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("path"), Some(&s(&path)));
-    assert_eq!(m.get("mode"), Some(&s("write")));
-    assert_eq!(m.get("outcome"), Some(&s("failed")));
+    assert_eq!(m.get("path").as_deref(), Some(&s(&path)));
+    assert_eq!(m.get("mode").as_deref(), Some(&s("write")));
+    assert_eq!(m.get("outcome").as_deref(), Some(&s("failed")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -250,9 +254,12 @@ fn external_success_emits_command_observation() {
     result.expect("/usr/bin/true should succeed");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/true")])));
-    assert_eq!(m.get("origin"), Some(&s("external")));
-    assert_eq!(m.get("status"), Some(&Value::Int(0)));
+    assert_eq!(
+        m.get("argv").as_deref(),
+        Some(&Value::list(vec![s("/usr/bin/true")]))
+    );
+    assert_eq!(m.get("origin").as_deref(), Some(&s("external")));
+    assert_eq!(m.get("status").as_deref(), Some(&Value::Int(0)));
 }
 
 /// A failing external command (`/usr/bin/false`) emits one command
@@ -265,9 +272,12 @@ fn external_failure_emits_command_observation() {
     assert!(result.is_err(), "/usr/bin/false exits nonzero");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/false")])));
-    assert_eq!(m.get("origin"), Some(&s("external")));
-    assert_eq!(m.get("status"), Some(&Value::Int(1)));
+    assert_eq!(
+        m.get("argv").as_deref(),
+        Some(&Value::list(vec![s("/usr/bin/false")]))
+    );
+    assert_eq!(m.get("origin").as_deref(), Some(&s("external")));
+    assert_eq!(m.get("status").as_deref(), Some(&Value::Int(1)));
 }
 
 /// An external command carrying an argument places the program first in
@@ -281,11 +291,11 @@ fn external_argv_lists_program_then_args() {
 
     let m = single_observation(&events, "command");
     assert_eq!(
-        m.get("argv"),
+        m.get("argv").as_deref(),
         Some(&Value::list(vec![s("/bin/echo"), s("hi")]))
     );
-    assert_eq!(m.get("origin"), Some(&s("external")));
-    assert_eq!(m.get("status"), Some(&Value::Int(0)));
+    assert_eq!(m.get("origin").as_deref(), Some(&s("external")));
+    assert_eq!(m.get("status").as_deref(), Some(&Value::Int(0)));
 }
 
 /// A bundled (uutils) command run inline emits exactly one command
@@ -302,7 +312,10 @@ fn inline_bundled_emits_single_command_observation() {
     result.expect("bundled printf should succeed");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("argv"), Some(&Value::list(vec![s("printf"), s("")])));
-    assert_eq!(m.get("origin"), Some(&s("external")));
-    assert_eq!(m.get("status"), Some(&Value::Int(0)));
+    assert_eq!(
+        m.get("argv").as_deref(),
+        Some(&Value::list(vec![s("printf"), s("")]))
+    );
+    assert_eq!(m.get("origin").as_deref(), Some(&s("external")));
+    assert_eq!(m.get("status").as_deref(), Some(&Value::Int(0)));
 }

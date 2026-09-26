@@ -38,7 +38,7 @@ pub enum Value {
     Map(Map),
     /// `label` is stored without its leading backtick; `Display` puts it back.
     Variant {
-        label: std::string::String,
+        label: crate::ir::Name,
         payload: Option<Box<Self>>,
     },
     Thunk(Closure),
@@ -48,7 +48,7 @@ pub enum Value {
     /// over-application is an arity error, mirroring a `Lambda`.
     Native {
         entry: Arc<BuiltinEntry>,
-        applied: Vec<Self>,
+        applied: Box<[Self]>,
     },
     /// A computation spawned onto a worker thread, not a subprocess.
     /// Boxed: `HandleInner`'s eight `Arc` fields would otherwise be the
@@ -189,7 +189,7 @@ impl Value {
             Self::Int(_) | Self::Float(_) => 8,
             Self::String(s) => s.len(),
             Self::Bytes(b) => b.len(),
-            Self::List(items) => items.iter().map(Self::shallow_size).sum(),
+            Self::List(items) => items.iter().map(|v| v.shallow_size()).sum(),
             Self::Map(pairs) => pairs.iter().map(|(k, v)| k.len() + v.shallow_size()).sum(),
             Self::Variant { label, payload } => {
                 label.len() + payload.as_deref().map_or(0, Self::shallow_size)
@@ -261,7 +261,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{v}")?;
+                    write!(f, "{}", v.as_ref())?;
                 }
                 write!(f, "]")
             }
@@ -274,7 +274,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{k}: {v}")?;
+                    write!(f, "{k}: {}", v.as_ref())?;
                 }
                 write!(f, "]")
             }

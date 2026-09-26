@@ -60,7 +60,7 @@ pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
     Ok(Value::string(
         items
             .iter()
-            .map(std::string::ToString::to_string)
+            .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(sep),
     ))

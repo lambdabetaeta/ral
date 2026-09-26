@@ -635,8 +635,8 @@ fn caught_by(
         panic!("a caught error is a record: {src:?}");
     };
     (
-        record.get("reason").unwrap().clone(),
-        record.get("status").unwrap().clone(),
+        record.get("reason").unwrap().into_owned(),
+        record.get("status").unwrap().into_owned(),
     )
 }
 
@@ -1115,7 +1115,7 @@ fn glob_relative_pattern_returns_relative_paths() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
+    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
     assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1139,7 +1139,7 @@ fn glob_excludes_dotfiles_from_wildcard_matches() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = star.iter().map(std::string::ToString::to_string).collect();
+    let names: Vec<String> = star.iter().map(|v| v.to_string()).collect();
     assert_eq!(names, vec!["a.txt".to_string()]);
 
     let script_literal = format!("within [dir: '{}'] {{ glob '.hidden.txt' }}", dir.display());
@@ -1147,7 +1147,7 @@ fn glob_excludes_dotfiles_from_wildcard_matches() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = lit.iter().map(std::string::ToString::to_string).collect();
+    let names: Vec<String> = lit.iter().map(|v| v.to_string()).collect();
     assert_eq!(names, vec![".hidden.txt".to_string()]);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1168,7 +1168,7 @@ fn glob_absolute_pattern_returns_absolute_paths() {
         other => panic!("glob list: unexpected {other:?}"),
     };
     let expected = dir.join("a.txt").display().to_string();
-    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
+    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
     assert_eq!(names, vec![expected]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1201,7 +1201,7 @@ fn glob_expands_tilde_in_pattern() {
         Ok(Value::List(xs)) => xs,
         other => panic!("glob with ~ pattern: unexpected {other:?}"),
     };
-    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
+    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
     assert!(
         names.iter().any(|n| n.ends_with("/a.txt")),
         "expected /a.txt in {names:?}"
@@ -1940,7 +1940,10 @@ fn nullary_native_forced_via_dollar_reads_the_redirected_channel() {
     let path_str = path.display().to_string();
     let result = must_succeed(&format!("!$from-json < '{path_str}'"));
     match result {
-        Value::Map(m) => assert_eq!(m.get("y").cloned(), Some(Value::Int(7))),
+        Value::Map(m) => assert_eq!(
+            m.get("y").map(std::borrow::Cow::into_owned),
+            Some(Value::Int(7))
+        ),
         other => panic!("expected a Map, got {other:?}"),
     }
 }
@@ -2037,9 +2040,9 @@ fn list_position_deref_gives_thunk() {
     match v {
         Value::List(items) => {
             assert!(
-                matches!(items[0], Value::Thunk(_)),
+                matches!(items.get(0).as_deref(), Some(Value::Thunk(_))),
                 "expected thunk, got {:?}",
-                items[0]
+                items.get(0)
             );
         }
         other => panic!("expected list, got {other:?}"),
@@ -2051,9 +2054,9 @@ fn map_position_bare_name_stays_literal() {
     let v = must_succeed("let upper = { |x| return $x }\nreturn [label: upper, fn: $upper]");
     match v {
         Value::Map(m) => {
-            assert_eq!(m.get("label"), Some(&Value::string("upper")));
+            assert_eq!(m.get("label").as_deref(), Some(&Value::string("upper")));
             assert!(
-                matches!(m.get("fn"), Some(Value::Thunk(_))),
+                matches!(m.get("fn").as_deref(), Some(Value::Thunk(_))),
                 "expected thunk under 'fn', got {:?}",
                 m.get("fn")
             );
@@ -2186,9 +2189,9 @@ fn par_many_items() {
     let result = must_succeed(&script);
     if let Value::List(vals) = result {
         assert_eq!(vals.len(), 50);
-        assert_eq!(vals[0], Value::Int(0));
-        assert_eq!(vals[7], Value::Int(49));
-        assert_eq!(vals[49], Value::Int(2401));
+        assert_eq!(vals.get(0).as_deref(), Some(&Value::Int(0)));
+        assert_eq!(vals.get(7).as_deref(), Some(&Value::Int(49)));
+        assert_eq!(vals.get(49).as_deref(), Some(&Value::Int(2401)));
     } else {
         panic!("expected List, got {result:?}");
     }
@@ -2327,9 +2330,10 @@ fn entries_returns_pairs() {
     let result = must_succeed("!{entries [:, x: hello]}");
     if let Value::List(items) = result {
         assert_eq!(items.len(), 1);
-        if let Value::List(pair) = &items[0] {
-            assert_eq!(pair[0], Value::string("x"));
-            assert_eq!(pair[1], Value::string("hello"));
+        let first = items.get(0).expect("one item");
+        if let Value::List(pair) = first.as_ref() {
+            assert_eq!(pair.get(0).as_deref(), Some(&Value::string("x")));
+            assert_eq!(pair.get(1).as_deref(), Some(&Value::string("hello")));
         } else {
             panic!("expected pair list");
         }
@@ -2610,7 +2614,7 @@ fn interpolation_renders_unit_as_its_literal() {
 
 fn map_field(v: &Value, key: &str) -> Value {
     match v {
-        Value::Map(m) => m.get(key).cloned().unwrap_or(Value::Unit),
+        Value::Map(m) => m.get(key).map_or(Value::Unit, std::borrow::Cow::into_owned),
         _ => Value::Unit,
     }
 }
@@ -2618,7 +2622,7 @@ fn map_field(v: &Value, key: &str) -> Value {
 /// The observations one report collected, in order.
 fn trail_of(v: &Value) -> Vec<Value> {
     match map_field(v, "trail") {
-        Value::List(obs) => obs.into_iter().collect(),
+        Value::List(obs) => obs.iter().map(std::borrow::Cow::into_owned).collect(),
         _ => vec![],
     }
 }
@@ -2627,7 +2631,7 @@ fn trail_of(v: &Value) -> Vec<Value> {
 /// `Unit` for any other kind, so a reader never mistakes one for another.
 fn fact_field(v: &Value, tag: &str, key: &str) -> Value {
     match map_field(v, "what") {
-        Value::Variant { label, payload } if label == tag => {
+        Value::Variant { label, payload } if label.as_ref() == tag => {
             payload.map_or(Value::Unit, |p| map_field(&p, key))
         }
         _ => Value::Unit,
@@ -2643,7 +2647,7 @@ fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
 /// write, a read, a capability check).
 fn command_argv0(v: &Value) -> Option<String> {
     match fact_field(v, "command", "argv") {
-        Value::List(argv) => argv.into_iter().next().and_then(|a| match a {
+        Value::List(argv) => argv.iter().next().and_then(|a| match a.into_owned() {
             Value::String(s) => Some(s.into_string()),
             _ => None,
         }),
@@ -2688,7 +2692,7 @@ fn an_allowed_capability_check_is_never_recorded() {
 fn a_denial_is_recorded_without_the_grant_asking() {
     let report = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/false } }");
     assert!(
-        matches!(map_field(&report, "outcome"), Value::Variant { label, .. } if label == "err"),
+        matches!(map_field(&report, "outcome"), Value::Variant { label, .. } if label.as_ref() == "err"),
         "a refused command fails its body: {report:?}"
     );
     let children = trail_of(&report);

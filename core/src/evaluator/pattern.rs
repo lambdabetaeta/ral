@@ -177,7 +177,10 @@ fn stage_pattern(
                 .into());
             }
             for (i, pat) in elems.iter().enumerate() {
-                stage_pattern(pat, &items[i], schemes, staged)?;
+                let item = items
+                    .get(i)
+                    .expect("checked above: elems.len() <= items.len()");
+                stage_pattern(pat, &item, schemes, staged)?;
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
@@ -204,12 +207,12 @@ fn stage_pattern(
             for entry in entries {
                 let key_label = &entry.key;
                 let Some(val) = m.get(key_label) else {
-                    let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
+                    let ks: Vec<&str> = m.keys().collect();
                     return Err(Error::new(format!("key '{key_label}' not found"), 1)
                         .with_hint(format!("available: {}", ks.join(", ")))
                         .into());
                 };
-                stage_pattern(&entry.pattern, val, schemes, staged)?;
+                stage_pattern(&entry.pattern, &val, schemes, staged)?;
             }
             Ok(())
         }

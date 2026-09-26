@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) fn pins_running_work(v: &Value) -> bool {
     match v {
         Value::Handle(h) => h.is_running(),
-        Value::List(items) => items.iter().any(pins_running_work),
-        Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(v)),
+        Value::List(items) => items.iter().any(|v| pins_running_work(&v)),
+        Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(&v)),
         Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),
         // `applied` is collected argument data, walked like a list's elements.
         Value::Native { applied, .. } => applied.iter().any(pins_running_work),

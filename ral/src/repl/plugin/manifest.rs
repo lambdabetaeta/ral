@@ -159,7 +159,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
             None => return Err(load_err(format!("manifest: {}", table.unknown_key(key)))),
         }
     }
-    let name = match map.get("name") {
+    let name = match map.get("name").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         Some(other) => {
             return Err(load_err(format!(
@@ -169,7 +169,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
         }
         None => return Err(load_err("manifest missing required 'name' field")),
     };
-    let aliases = match map.get("aliases") {
+    let aliases = match map.get("aliases").as_deref() {
         Some(Value::Map(m)) => parse_aliases(m)?,
         Some(other) => {
             return Err(load_err(format!(
@@ -179,7 +179,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
         }
         None => Vec::new(),
     };
-    let hooks = match map.get("hooks") {
+    let hooks = match map.get("hooks").as_deref() {
         Some(Value::Map(m)) => parse_hooks(m)?,
         Some(other) => {
             return Err(load_err(format!(
@@ -189,8 +189,8 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
         }
         None => Vec::new(),
     };
-    let (keybindings, keybinding_handlers) = match map.get("keybindings") {
-        Some(Value::List(l)) => parse_keybindings(l.iter().cloned())?,
+    let (keybindings, keybinding_handlers) = match map.get("keybindings").as_deref() {
+        Some(Value::List(l)) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
         Some(other) => {
             return Err(load_err(format!(
                 "manifest 'keybindings': expected List, got {}",
@@ -215,19 +215,19 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
 fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
     let mut out = Vec::new();
     for (event, value) in entries {
-        if !KNOWN_HOOKS.contains(&event.as_str()) {
+        if !KNOWN_HOOKS.contains(&event) {
             return Err(load_err(format!(
                 "unknown hook event '{event}'. Valid events: {}",
                 KNOWN_HOOKS.join(", ")
             )));
         }
-        if !matches!(value, Value::Thunk(_)) {
+        if !matches!(value.as_ref(), Value::Thunk(_)) {
             return Err(load_err(format!(
                 "hook '{event}': expected a block, got {}",
                 value.type_name()
             )));
         }
-        out.push((event.clone(), value.clone()));
+        out.push((event.to_string(), value.into_owned()));
     }
     Ok(out)
 }
@@ -247,7 +247,7 @@ where
                 entry.type_name()
             )));
         };
-        let key = match map.get("key") {
+        let key = match map.get("key").as_deref() {
             Some(Value::String(s)) => s.to_string(),
             Some(other) => {
                 return Err(load_err(format!(
@@ -257,7 +257,7 @@ where
             }
             None => return Err(load_err("keybinding entry missing 'key' field")),
         };
-        let handler = match map.get("handler") {
+        let handler = match map.get("handler").as_deref() {
             Some(h @ Value::Thunk(_)) => h.clone(),
             Some(other) => {
                 return Err(load_err(format!(
@@ -267,7 +267,7 @@ where
             }
             None => return Err(load_err("keybinding entry missing 'handler' field")),
         };
-        let guard = match map.get("guard") {
+        let guard = match map.get("guard").as_deref() {
             Some(Value::String(g)) => Some(g.to_string()),
             Some(other) => {
                 return Err(load_err(format!(
@@ -288,13 +288,13 @@ where
 fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
     let mut out = Vec::with_capacity(entries.len());
     for (name, value) in entries {
-        if !matches!(value, Value::Thunk(_)) {
+        if !matches!(value.as_ref(), Value::Thunk(_)) {
             return Err(load_err(format!(
                 "alias '{name}': expected a block, got {}",
                 value.type_name()
             )));
         }
-        out.push((name.clone(), value.clone()));
+        out.push((name.to_string(), value.into_owned()));
     }
     Ok(out)
 }

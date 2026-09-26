@@ -57,8 +57,8 @@ impl OutputTheme {
     pub(crate) fn from_map(pairs: &Map) -> Result<Self, String> {
         let mut theme = Self::default();
         for (k, v) in pairs {
-            match k.as_str() {
-                "value_prefix" => match v {
+            match k {
+                "value_prefix" => match v.as_ref() {
                     Value::String(s) => theme.value_prefix = s.to_string(),
                     other => {
                         return Err(format!(
@@ -67,11 +67,11 @@ impl OutputTheme {
                         ));
                     }
                 },
-                "value_color" => match v {
+                "value_color" => match v.as_ref() {
                     Value::String(s) if s.eq_ignore_ascii_case("none") => {
                         theme.value_color = None;
                     }
-                    Value::String(s) => match named_color(s) {
+                    Value::String(s) => match named_color(s.as_str()) {
                         Some(color) => theme.value_color = Some(color),
                         None => {
                             return Err(format!(

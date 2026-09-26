@@ -7,116 +7,111 @@
 //! order-independent for free.
 
 use super::value::Value;
+use imbl::shared_ptr::DefaultSharedPtr;
+use std::borrow::Cow;
+use std::sync::Arc;
 
 /// A persistent string-keyed map of `Value`s.  Cheap to clone, O(log n) to look
 /// up, sorted by key on iteration.
 #[derive(Debug, Clone, Default)]
-pub struct Map(imbl::OrdMap<String, Value>);
+pub struct Map(Repr);
+
+#[derive(Debug, Clone, Default)]
+struct Repr(Arc<imbl::OrdMap<String, Value>>);
 
 impl Map {
     pub fn new() -> Self {
-        Self(imbl::OrdMap::new())
+        Self::default()
+    }
+
+    fn built(&self) -> &imbl::OrdMap<String, Value> {
+        &self.0.0
+    }
+
+    fn built_mut(&mut self) -> &mut imbl::OrdMap<String, Value> {
+        Arc::make_mut(&mut self.0.0)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.built().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.built().is_empty()
     }
 
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        self.0.get(key)
+    pub fn get(&self, key: &str) -> Option<Cow<'_, Value>> {
+        self.built().get(key).map(Cow::Borrowed)
     }
 
     pub(crate) fn contains_key(&self, key: &str) -> bool {
-        self.0.contains_key(key)
+        self.built().contains_key(key)
     }
 
     pub(crate) fn insert(&mut self, key: String, v: Value) {
-        self.0.insert(key, v);
+        self.built_mut().insert(key, v);
     }
 
     pub fn iter(&self) -> Iter<'_> {
-        Iter(self.0.iter())
+        Iter(self.built().iter())
     }
 
     pub fn keys(&self) -> Keys<'_> {
-        Keys(self.0.keys())
+        Keys(self.built().keys())
     }
 }
 
 impl PartialEq for Map {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.len() == other.len() && self.iter().eq(other.iter())
     }
 }
 
 impl FromIterator<(String, Value)> for Map {
     fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
+        Self(Repr(Arc::new(iter.into_iter().collect())))
     }
 }
 
 impl From<Vec<(String, Value)>> for Map {
     fn from(v: Vec<(String, Value)>) -> Self {
-        Self(v.into_iter().collect())
+        v.into_iter().collect()
     }
 }
 
-use imbl::shared_ptr::DefaultSharedPtr;
-
-/// Owning iterator over a [`Map`].  A newtype, like its borrowing siblings
-/// below, so imbl's pointer-kind generic stays out of the public signatures.
-pub struct IntoIter(imbl::ordmap::ConsumingIter<String, Value, DefaultSharedPtr>);
-
-impl Iterator for IntoIter {
-    type Item = (String, Value);
-    fn next(&mut self) -> Option<(String, Value)> {
-        self.0.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
+/// Lending iterator over a [`Map`]'s entries, sorted by key.
 pub struct Iter<'a>(imbl::ordmap::Iter<'a, String, Value, DefaultSharedPtr>);
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (&'a String, &'a Value);
-    fn next(&mut self) -> Option<(&'a String, &'a Value)> {
-        self.0.next()
+    type Item = (&'a str, Cow<'a, Value>);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(k, v)| (k.as_str(), Cow::Borrowed(v)))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.0.size_hint()
     }
 }
+
+impl ExactSizeIterator for Iter<'_> {}
 
 pub struct Keys<'a>(imbl::ordmap::Keys<'a, String, Value, DefaultSharedPtr>);
 
 impl<'a> Iterator for Keys<'a> {
-    type Item = &'a String;
-    fn next(&mut self) -> Option<&'a String> {
-        self.0.next()
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> {
+        self.0.next().map(String::as_str)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.0.size_hint()
     }
 }
 
-impl IntoIterator for Map {
-    type Item = (String, Value);
-    type IntoIter = IntoIter;
-    fn into_iter(self) -> IntoIter {
-        IntoIter(self.0.into_iter())
-    }
-}
+impl ExactSizeIterator for Keys<'_> {}
 
 impl<'a> IntoIterator for &'a Map {
-    type Item = (&'a String, &'a Value);
+    type Item = (&'a str, Cow<'a, Value>);
     type IntoIter = Iter<'a>;
     fn into_iter(self) -> Iter<'a> {
-        Iter(self.0.iter())
+        self.iter()
     }
 }

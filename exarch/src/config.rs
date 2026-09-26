@@ -224,7 +224,7 @@ fn decode(value: Value, display: &str, label: &str) -> Result<Vec<Service>, Stri
     };
     let mut services = Vec::with_capacity(map.len());
     for (name, decl) in &map {
-        services.push(decode_one(name, decl, display, label)?);
+        services.push(decode_one(name, &decl, display, label)?);
     }
     Ok(services)
 }
@@ -238,17 +238,17 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
         ));
     };
     for key in fields.keys() {
-        if !matches!(key.as_str(), "endpoint" | "key" | "protocol") {
+        if !matches!(key, "endpoint" | "key" | "protocol") {
             return Err(format!(
                 "{where_}: unknown key '{key}' — expected endpoint, key, protocol"
             ));
         }
     }
-    let endpoint = string_field(fields.get("endpoint"), "endpoint", &where_)?;
+    let endpoint = string_field(fields.get("endpoint").as_deref(), "endpoint", &where_)?;
     // Omitting `key` declares a no-auth local endpoint (Ollama et al.), which
     // `provider::credential` resolves to an inert placeholder bearer.
-    let key_env = optional_string_field(fields.get("key"), "key", &where_)?;
-    let protocol = string_field(fields.get("protocol"), "protocol", &where_)?;
+    let key_env = optional_string_field(fields.get("key").as_deref(), "key", &where_)?;
+    let protocol = string_field(fields.get("protocol").as_deref(), "protocol", &where_)?;
 
     let name = ServiceName::declared(name).map_err(|e| format!("{label} {display}: {e}"))?;
     if built_in(&name).is_some() {

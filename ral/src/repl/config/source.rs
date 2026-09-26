@@ -81,7 +81,7 @@ fn source_profile(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<()
 /// keeps the settings the map applied.
 fn source_rc(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, Stop> {
     let pairs = rc_config(path, mooring, shell)?;
-    let (mut settings, startup) = apply_rc_config(pairs, mooring, shell)
+    let (mut settings, startup) = apply_rc_config(&pairs, mooring, shell)
         .map_err(|msg| Stop::Failed(format!("{path}: {msg}")))?;
     if let Some(block) = startup {
         match shell.register_hook(

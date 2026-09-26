@@ -27,20 +27,23 @@ pub(crate) fn index_value(val: &Value, key: &Value) -> Result<Value, Error> {
                     )
                     .with_hint("list indices are zero-based integers")
                 })?;
-            items.get(idx).cloned().ok_or_else(|| {
-                Error::new(
-                    format!(
-                        "index {idx} out of bounds for list of length {}",
-                        items.len()
-                    ),
-                    1,
-                )
-                .with_hint(if items.is_empty() {
-                    "the list is empty".to_string()
-                } else {
-                    format!("valid indices: 0..{}", items.len() - 1)
+            items
+                .get(idx)
+                .map(std::borrow::Cow::into_owned)
+                .ok_or_else(|| {
+                    Error::new(
+                        format!(
+                            "index {idx} out of bounds for list of length {}",
+                            items.len()
+                        ),
+                        1,
+                    )
+                    .with_hint(if items.is_empty() {
+                        "the list is empty".to_string()
+                    } else {
+                        format!("valid indices: 0..{}", items.len() - 1)
+                    })
                 })
-            })
         }
         Value::Map(m) => {
             let key_str = match key {
@@ -53,15 +56,17 @@ pub(crate) fn index_value(val: &Value, key: &Value) -> Result<Value, Error> {
                     .with_hint("use str to convert"));
                 }
             };
-            m.get(key_str).cloned().ok_or_else(|| {
-                let ks: Vec<&str> = m.keys().map(String::as_str).collect();
-                let hint = if ks.is_empty() {
-                    "the map is empty".to_string()
-                } else {
-                    format!("available: {}", ks.join(", "))
-                };
-                Error::new(format!("key '{key_str}' not found"), 1).with_hint(hint)
-            })
+            m.get(key_str)
+                .map(std::borrow::Cow::into_owned)
+                .ok_or_else(|| {
+                    let ks: Vec<&str> = m.keys().collect();
+                    let hint = if ks.is_empty() {
+                        "the map is empty".to_string()
+                    } else {
+                        format!("available: {}", ks.join(", "))
+                    };
+                    Error::new(format!("key '{key_str}' not found"), 1).with_hint(hint)
+                })
         }
         _ => Err(
             Error::new(format!("cannot index into {}", val.type_name()), 1)

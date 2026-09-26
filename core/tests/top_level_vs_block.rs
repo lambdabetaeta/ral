@@ -1004,9 +1004,9 @@ fn function_body_records_into_enclosing_audit() {
     let cmds = command_facts(&tree);
     let saw_echo = cmds.iter().any(|c| match c {
         Value::Map(m) => matches!(
-            m.get("argv"),
+            m.get("argv").as_deref(),
             Some(Value::List(argv))
-                if matches!(argv.get(0), Some(Value::String(s)) if s == "echo")
+                if matches!(argv.get(0).as_deref(), Some(Value::String(s)) if s == "echo")
         ),
         _ => false,
     });
@@ -1023,14 +1023,15 @@ fn command_facts(report: &Value) -> Vec<Value> {
     let Value::Map(m) = report else {
         panic!("audit {{ … }} must return a record; got {report:?}")
     };
-    let Some(Value::List(trail)) = m.get("trail") else {
+    let trail_field = m.get("trail");
+    let Some(Value::List(trail)) = trail_field.as_deref() else {
         panic!("an audit report must have a list `trail` field; got {m:?}")
     };
     trail
         .iter()
-        .filter_map(|o| match o {
-            Value::Map(o) => match o.get("what") {
-                Some(Value::Variant { label, payload }) if label == "command" => {
+        .filter_map(|o| match o.as_ref() {
+            Value::Map(o) => match o.get("what").as_deref() {
+                Some(Value::Variant { label, payload }) if label.as_ref() == "command" => {
                     payload.as_deref().cloned()
                 }
                 _ => None,
@@ -1048,12 +1049,12 @@ fn only_command_child(tree: &Value) -> (Vec<Value>, Value) {
         panic!("expected exactly one command observation; got {cmds:?}")
     };
     (
-        match fact.get("argv") {
-            Some(Value::List(a)) => a.iter().cloned().collect(),
+        match fact.get("argv").as_deref() {
+            Some(Value::List(a)) => a.iter().map(std::borrow::Cow::into_owned).collect(),
             other => panic!("command observation must have a List `argv`; got {other:?}"),
         },
         fact.get("status")
-            .cloned()
+            .map(std::borrow::Cow::into_owned)
             .expect("command observation must have `status`"),
     )
 }
