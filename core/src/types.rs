@@ -18,7 +18,7 @@ pub use capability::{
 mod value;
 pub use value::{Value, fmt_float, fmt_lambda, fmt_native};
 #[cfg(test)]
-pub(crate) use value::{block_over, deep_block_chain};
+pub(crate) use value::{block_over, captured, deep_block_chain};
 
 mod closure;
 pub use closure::Closure;

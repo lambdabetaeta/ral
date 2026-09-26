@@ -140,8 +140,8 @@ pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 pub(crate) struct InternCtx {
     scope_table: ScopeTable,
     /// Every root interned in this message so far, scanned linearly by
-    /// [`imbl::GenericHashMap::ptr_eq`] — a message holds a handful, so the scan
-    /// costs nothing a hash lookup would save.
+    /// [`imbl::GenericHashMap::ptr_eq`]: roots number about the message's
+    /// closures, so interning is O(roots²), as a stream chain always made it.
     roots: Vec<(crate::types::BindingMap, u32)>,
     /// Rows with an id but no encoding yet.  A stream is a chain of closures —
     /// block → captured env → binding → block — so encoding an environment's
@@ -168,7 +168,7 @@ impl InternCtx {
         }
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "serialised row id; the table holds a handful of environments, far below 2^32"
+            reason = "serialised row id; a message's environments number far below 2^32"
         )]
         let id = self.scope_table.len() as u32;
         self.roots.push((bindings.clone(), id));
@@ -475,8 +475,8 @@ impl FOValue<SerialClosure> {
                 },
             },
             Value::Thunk(closure) => Self::Ext(SerialClosure::Thunk(SerialThunk {
-                comp: Arc::clone(&closure.comp),
-                env: SerialEnvSnapshot::from_runtime(&closure.env, ctx),
+                comp: Arc::clone(closure.comp()),
+                env: SerialEnvSnapshot::from_runtime(closure.env(), ctx),
             })),
             Value::Native { entry, applied } => Self::Ext(SerialClosure::Native(SerialNative {
                 name: entry.name.as_ref().to_string(),
@@ -530,10 +530,10 @@ impl FOValue<SerialClosure> {
                     None => None,
                 },
             },
-            Self::Ext(SerialClosure::Thunk(thunk)) => Value::Thunk(crate::types::Closure {
-                comp: thunk.comp,
-                env: thunk.env.into_runtime(dec)?,
-            }),
+            Self::Ext(SerialClosure::Thunk(thunk)) => Value::Thunk(crate::types::Closure::new(
+                thunk.comp,
+                &thunk.env.into_runtime(dec)?,
+            )),
             Self::Ext(SerialClosure::Native(n)) => {
                 // The value half only: no `Value::Native` was ever built from
                 // a base frame, so a wire name that reaches one is not a
@@ -569,7 +569,7 @@ impl Opaque {
     #[must_use]
     pub fn of(v: &Value) -> Option<Self> {
         match v {
-            Value::Thunk(c) if c.comp.arrow().is_none() => Some(Self::Block),
+            Value::Thunk(c) if c.comp().arrow().is_none() => Some(Self::Block),
             Value::Thunk(_) | Value::Native { .. } => Some(Self::Function),
             Value::Handle(_) => Some(Self::Handle),
             _ => None,
@@ -948,7 +948,7 @@ mod tests {
         let mut cur = &back;
         while let Value::Thunk(closure) = cur {
             depth += 1;
-            cur = closure.env.get("tail").expect("each link binds the next");
+            cur = closure.env().get("tail").expect("each link binds the next");
         }
         assert_eq!(depth, 500, "every link survives the round-trip");
     }

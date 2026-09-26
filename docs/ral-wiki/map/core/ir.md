@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fb9107b8
-generated_at_date: 2026-09-17
+generated_at_commit: 2ded530f
+generated_at_date: 2026-09-26
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -12,7 +12,9 @@ to the [[map/core/evaluator|evaluator]].
 
 A whole program is a `Toplevel { phrases: Vec<Spanned<Phrase>> }`: each
 `Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
-pattern binds) or `Run` (anything else) — runs in order, extending the
+pattern binds,
+[[decisions/260603_session-scheme-continuity|session-scheme-continuity]]) or
+`Run` (anything else) — runs in order, extending the
 session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
@@ -32,9 +34,6 @@ The two categories:
   captures no key span.
 - `Comp` — effectful, sequenced computation. `Comp` wraps a `CompKind` plus an
   optional `Span` for error reporting (synthetic nodes carry `span: None`).
-  `CompKind::Bind` carries `scheme: Option<Box<Scheme>>` — the checker's verdict,
-  written onto each top-level name-bind by the annotation pass and `None` until
-  it runs ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 The checker's verdict rides on the IR too, as **ground** annotations written by
 `annotate`. Because the inference pass is unconditional — every evaluated IR is
@@ -101,10 +100,13 @@ own name: a pattern binds names, never carries a computation, so there is no
 parser syntax for elaboration to strip out
 ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
 
-`referenced_names` (`pub(crate)`) collects a compiled program's variable and
-command-head names in one exhaustive, wildcard-free walk — the use-observation
-signal the [[map/core/shell-state|binding-lease ledger]] renews on
-([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
+`referenced_names` (`pub(crate)`) collects every name a computation mentions,
+bound or free — variables and command heads — in one exhaustive,
+wildcard-free walk: the use-observation signal the
+[[map/core/shell-state|binding-lease ledger]] renews on
+([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]), and the
+set a closure over it keeps (`Closure::new`,
+[[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to
 `CompKind`, `Val`, or `Pattern` invalidates every emitted blob (see

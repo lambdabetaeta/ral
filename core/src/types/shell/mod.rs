@@ -366,9 +366,9 @@ impl Shell {
         value: &crate::types::Value,
     ) -> Option<Arc<crate::typecheck::Scheme>> {
         let (param, body) = match value {
-            crate::types::Value::Thunk(closure) => match closure.comp.arrow() {
+            crate::types::Value::Thunk(closure) => match closure.comp().arrow() {
                 Some((param, body)) => (Some(param), body),
-                None => (None, &closure.comp),
+                None => (None, closure.comp()),
             },
             _ => return None,
         };

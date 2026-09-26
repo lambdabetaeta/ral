@@ -75,7 +75,7 @@ impl HandlerEntry {
         let Value::Thunk(closure) = &thunk else {
             unreachable!("validate_handler_arity guarantees a unary lambda");
         };
-        let Some((param, body)) = closure.comp.arrow() else {
+        let Some((param, body)) = closure.comp().arrow() else {
             unreachable!("validate_handler_arity guarantees a unary lambda");
         };
         let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, session_schemes)

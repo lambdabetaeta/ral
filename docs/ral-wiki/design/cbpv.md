@@ -41,6 +41,11 @@ spawned block shares nothing mutable.
   re-lexed.
 - Closures observe the bindings in force where they were defined, not where they
   run.
+- A thunk value is `⟨M, ρ|occ(M)⟩` by construction: it holds only the session
+  bindings its body mentions. The machine's `⟨M, ρ⟩` in focus is a
+  *computation closure*, transient and holding the whole environment `M` was
+  reached in
+  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (commands are the effect half this splits off),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],

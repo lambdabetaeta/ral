@@ -269,7 +269,7 @@ fn instantiate(
     shell: &mut Shell,
 ) -> Settled<Value> {
     match val {
-        Value::Thunk(ref c) if c.comp.arrow().is_some() => {
+        Value::Thunk(ref c) if c.comp().arrow().is_some() => {
             ral_core::builtins::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
         }
         _ if !options.is_empty() => Err(Break::Error(load_err(format!(
@@ -285,7 +285,7 @@ fn instantiate(
 /// returned a block instead of a map.
 fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
     match val {
-        Value::Thunk(c) if c.comp.arrow().is_some() => Err(load_err(format!(
+        Value::Thunk(c) if c.comp().arrow().is_some() => Err(load_err(format!(
             "plugin '{name}' expects its options map but none was applied; \
              this is an internal error in load-plugin"
         ))),

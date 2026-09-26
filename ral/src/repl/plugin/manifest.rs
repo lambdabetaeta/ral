@@ -397,12 +397,12 @@ mod tests {
     /// A trivial block-shaped `Value::Thunk` handler for well-formed
     /// keybinding entries.
     fn dummy_block() -> Value {
-        Value::Thunk(Closure {
-            comp: std::sync::Arc::new(ral_core::source::Spanned::synthetic(
+        Value::Thunk(Closure::new(
+            std::sync::Arc::new(ral_core::source::Spanned::synthetic(
                 ral_core::ir::CompKind::Return(ral_core::ir::Val::Unit),
             )),
-            env: ral_core::types::Env::default(),
-        })
+            &ral_core::types::Env::default(),
+        ))
     }
 
     fn keybinding_entry(key: &str, guard: Option<&str>) -> Value {

@@ -93,3 +93,5 @@ account in
 and the body-shares-the-session bracket in
 [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]
 as descriptions of the mechanism; their invariants hold by construction now.
+
+Refined by [[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]: capture is a scrub, and the focus is a computation closure, a type apart from the thunk value.

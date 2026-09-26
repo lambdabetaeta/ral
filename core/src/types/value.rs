@@ -19,8 +19,8 @@ use std::sync::Arc;
 /// The runtime representation of every ral value.
 ///
 /// There is one thunk value, `Thunk(Closure)`: a computation closed over the
-/// environment it was captured against. `{ |params| body }` and `{ body }`
-/// are told apart only by the closure's own comp shape —
+/// bindings it mentions. `{ |params| body }` and `{ body }` are told apart
+/// only by the closure's own comp shape —
 /// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and the machine's
 /// `force` rule read the shape rather than a separate variant (S10, the CEK
 /// plan §1.1).
@@ -145,7 +145,7 @@ impl Value {
             Self::List(_) => "List",
             Self::Map(_) => "Map",
             Self::Variant { .. } => "Variant",
-            Self::Thunk(c) if c.comp.arrow().is_some() => "Lambda",
+            Self::Thunk(c) if c.comp().arrow().is_some() => "Lambda",
             Self::Thunk(_) => "Block",
             Self::Native { .. } => "Native",
             Self::Handle(_) => "Handle",
@@ -161,7 +161,7 @@ impl Value {
         let Self::Thunk(c) = self else {
             return None;
         };
-        let (_, mut body) = c.comp.arrow()?;
+        let (_, mut body) = c.comp().arrow()?;
         let mut arity = 1;
         while let crate::ir::CompKind::Lam { body: inner, .. } = &body.item {
             arity += 1;
@@ -283,7 +283,7 @@ impl fmt::Display for Value {
                 None => write!(f, "{TAG_PREFIX}{label}"),
                 Some(p) => write!(f, "{TAG_PREFIX}{label} {p}"),
             },
-            Self::Thunk(c) => match c.comp.arrow() {
+            Self::Thunk(c) => match c.comp().arrow() {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },
@@ -358,15 +358,27 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
     format!("<|{}| block>", params.join(" "))
 }
 
-/// A block over `env` returning `()`.
+/// A block mentioning every session name of `env`, so its capture is `env`
+/// itself.
 #[cfg(test)]
 pub(crate) fn block_over(env: &Env) -> Value {
-    Value::Thunk(Closure {
-        comp: Arc::new(crate::source::Spanned::synthetic(
-            crate::ir::CompKind::Return(crate::ir::Val::Unit),
-        )),
-        env: env.clone(),
-    })
+    use crate::ir::{CompKind, Val, ValListElem};
+    use crate::source::Spanned;
+    let names = env
+        .session_names()
+        .map(|n| ValListElem::Single(Spanned::synthetic(Val::Variable(n.into()))))
+        .collect();
+    let body = Spanned::synthetic(CompKind::Return(Val::List(names)));
+    Value::Thunk(Closure::new(Arc::new(body), env))
+}
+
+/// The scope a block `v` captured.
+#[cfg(test)]
+pub(crate) fn captured(v: Option<&Value>) -> &Env {
+    match v {
+        Some(Value::Thunk(closure)) => closure.env(),
+        other => panic!("expected a block, got {other:?}"),
+    }
 }
 
 /// A chain of `n` blocks over `foot`, each capturing the next in a one-binding
@@ -376,7 +388,7 @@ pub(crate) fn block_over(env: &Env) -> Value {
 #[cfg(test)]
 pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
     let body = Arc::new(crate::source::Spanned::synthetic(
-        crate::ir::CompKind::Return(crate::ir::Val::Unit),
+        crate::ir::CompKind::Return(crate::ir::Val::Variable("tail".into())),
     ));
     let mut v = foot;
     for _ in 0..n {
@@ -388,10 +400,7 @@ pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
                 scheme: None,
             },
         );
-        v = Value::Thunk(Closure {
-            comp: Arc::clone(&body),
-            env,
-        });
+        v = Value::Thunk(Closure::new(Arc::clone(&body), &env));
     }
     v
 }
@@ -443,17 +452,11 @@ mod tests {
     /// Captures are invisible by construction, not merely usually small.
     #[test]
     fn shallow_size_never_descends_into_closure_captures() {
-        let empty_env = crate::types::Env::new();
-        let block = Value::Thunk(Closure {
-            comp: std::sync::Arc::new(crate::source::Spanned::synthetic(
-                crate::ir::CompKind::Return(crate::ir::Val::Unit),
-            )),
-            env: empty_env,
-        });
+        let block = block_over(&Env::new());
         let block_size = block.shallow_size();
         assert!(block_size > 0, "a closure is a small nonzero constant");
 
-        let mut heavy_env = crate::types::Env::new();
+        let mut heavy_env = Env::new();
         heavy_env.bind(
             "heavy".into(),
             Binding {
@@ -461,12 +464,7 @@ mod tests {
                 scheme: None,
             },
         );
-        let heavy_block = Value::Thunk(Closure {
-            comp: std::sync::Arc::new(crate::source::Spanned::synthetic(
-                crate::ir::CompKind::Return(crate::ir::Val::Unit),
-            )),
-            env: heavy_env,
-        });
+        let heavy_block = block_over(&heavy_env);
         assert_eq!(
             heavy_block.shallow_size(),
             block_size,

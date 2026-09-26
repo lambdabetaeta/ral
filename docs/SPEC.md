@@ -3555,10 +3555,10 @@ also prints a `Library:` section.
 
 `explain name` prints the name's summary, full inferred type or command
 signature, and where the name resolves. It understands core and host builtins,
-prelude entries, documented host libraries, locals, aliases, handlers, and
-external commands. If no exact documented name exists, it searches documented
-names case-insensitively. Regex search is used when regex support is compiled
-in; otherwise the search is a substring match.
+prelude entries, documented host libraries, session bindings, aliases,
+handlers, and external commands. If no exact documented name exists, it
+searches documented names case-insensitively. Regex search is used when regex
+support is compiled in; otherwise the search is a substring match.
 
 `help` is the canonical catalogue of documented standard and host-library
 entries, not a list of every command that might be reachable. Arbitrary aliases,

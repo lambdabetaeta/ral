@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d4af249c
-generated_at_date: 2026-09-12
+generated_at_commit: 2ded530f
+generated_at_date: 2026-09-26
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -9,10 +9,10 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/]
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
 per-child confinement choice. It re-enters evaluation only through
-`evaluator::machine::apply` (a handler or alias arm's thunk, from
-`command_call.rs`) and `evaluator::machine::evaluate` (a stage thread's own
-closure, from `pipeline/thread.rs`) — stages carry closures, so the mutual
-recursion is irreducible; the evaluator reaches it at
+`evaluator::machine::apply_handler` (`detach`'s one-shot handler call, from
+`command/detach.rs`) and `evaluator::machine::evaluate` (a stage's
+`(comp, env)`, from `pipeline/thread.rs`) — stages carry computation
+closures, so the mutual recursion is irreducible; the evaluator reaches it at
 `PipeNode::launch`/`join` and, dispatching an `Exec` node, at
 `command_call::classify_command` → `run_base_frame` / `run_external`, and the `command` redirect guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).

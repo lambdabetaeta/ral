@@ -121,7 +121,7 @@ fn shallow(val: &Value, params: &PrintParams) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => crate::types::fmt_float(*f),
         Value::Handle(_) => "<handle>".into(),
-        Value::Thunk(c) => match c.comp.arrow() {
+        Value::Thunk(c) => match c.comp().arrow() {
             Some((param, body)) => crate::types::fmt_lambda(param, body),
             None => "<block>".into(),
         },

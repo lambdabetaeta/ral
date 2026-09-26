@@ -496,10 +496,7 @@ impl Machine {
                     env2.bind(
                         name.clone(),
                         Binding {
-                            value: Value::Thunk(Closure {
-                                comp: rec_node(group, j),
-                                env: env.clone(),
-                            }),
+                            value: Value::Thunk(Closure::new(rec_node(group, j), &env)),
                             scheme: None,
                         },
                     );
@@ -1170,7 +1167,7 @@ mod tests {
     use crate::evaluator::{run_source, with_capture};
     use crate::ir::{Phrase, Toplevel};
     use crate::source::{FileId, Spanned};
-    use crate::types::Break;
+    use crate::types::{Break, captured};
 
     fn toplevel(source: &str) -> Toplevel {
         let ast = crate::syntax::parser::parse_with(source, FileId::DUMMY).expect("parse");
@@ -1349,6 +1346,67 @@ mod tests {
             matches!(out, Value::Bool(true)),
             "expected true, got {out:?}"
         );
+    }
+
+    /// Two runs, as two turns: within one, the grouping pre-pass would lift
+    /// the later `let` above `h`.
+    #[test]
+    fn a_definition_made_after_a_closure_is_invisible_to_it() {
+        let mut shell = new_shell();
+        run_source("let h = { zqx-cmd }", &mut shell).expect("define h");
+        let out = run_source("let zqx-cmd = { 1 }\n!$h", &mut shell);
+        assert!(
+            out.is_err(),
+            "`h` must not see a later `zqx-cmd`, got {out:?}"
+        );
+        assert!(
+            captured(shell.env.get("h"))
+                .session_binding("zqx-cmd")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_block_captures_only_the_names_it_mentions() {
+        let mut shell = new_shell();
+        run_source(
+            "let big = 'payload'\nlet f = { 1 }\nlet g = { $big }\nlet h = { echo $big }",
+            &mut shell,
+        )
+        .expect("define");
+        let holds_big = |name| {
+            captured(shell.env.get(name))
+                .session_binding("big")
+                .is_some()
+        };
+        assert!(!holds_big("f"), "`f` does not mention `big`");
+        assert!(
+            holds_big("g") && holds_big("h"),
+            "`g` and `h` mention `big`"
+        );
+    }
+
+    #[test]
+    fn a_recursive_group_captures_what_it_mentions() {
+        let mut shell = new_shell();
+        let out = run_source(
+            "let k = 1\n\
+             let big = 'payload'\n\
+             let even = { |n| if $[$n == 0] { return true } else { odd $[$n - 1] } }\n\
+             let odd = { |n| if $[$n == 0] { return false } else { even $[$n - $k] } }\n\
+             even 10",
+            &mut shell,
+        )
+        .expect("mutual recursion must terminate");
+        assert!(
+            matches!(out, Value::Bool(true)),
+            "expected true, got {out:?}"
+        );
+        for name in ["even", "odd"] {
+            let env = captured(shell.env.get(name));
+            assert!(env.session_binding("k").is_some(), "`{name}` holds `k`");
+            assert!(env.session_binding("big").is_none(), "`{name}` lacks `big`");
+        }
     }
 
     /// The stack cap: its error text, and a refused push leaves

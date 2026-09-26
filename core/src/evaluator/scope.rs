@@ -235,7 +235,7 @@ fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
     let Value::Thunk(closure) = v else {
         unreachable!("validate_handler_arity guarantees a lambda");
     };
-    crate::typecheck::catch_all_emits_bytes(&closure.comp, handler_schemes(env, shell)).map_err(
+    crate::typecheck::catch_all_emits_bytes(closure.comp(), handler_schemes(env, shell)).map_err(
         |actual| {
             sig(format!(
                 "within handler: catch-all reinterprets every external command, whose payload is \

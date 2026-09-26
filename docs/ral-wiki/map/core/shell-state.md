@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d369a2c0
+generated_at_commit: 2ded530f
 generated_at_date: 2026-09-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -54,7 +54,11 @@ everything `crate::types::*`.
   `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
   one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
-  the wire. `env.rs` — lexical `Env` and
+  the wire. `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
+  fields private and `Closure::new` its one constructor, which `restrict`s
+  the environment to the names its body mentions
+  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+  `env.rs` — lexical `Env` and
   `EnvVars` process-env overrides; a scope entry is
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
@@ -364,7 +368,7 @@ datum (the host builtin table among them) can be silently severed by a call site
 copying only the fields it happened to remember. There are two regimes.
 
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
-`force`/`beta` in `evaluator::machine` step the body's `Closure` *in* the
+`force`/`beta` in `evaluator::machine` put the body in focus *in* the
 caller's `Shell`, no snapshot or restore around the call ([[map/core/evaluator|evaluator]]).
 The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
 caller's `&Mooring` is passed along, so the body observes the caller's audit

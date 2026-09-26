@@ -162,12 +162,12 @@ impl Scrub {
                 applied,
             }),
             Value::Thunk(closure) => {
-                let env = &closure.env;
+                let env = closure.env();
                 let bindings = self.replacement(env.bindings_root())?;
-                Some(Value::Thunk(Closure {
-                    comp: Arc::clone(&closure.comp),
-                    env: Env::from_parts(env.natives_arc(), env.prelude_arc(), bindings),
-                }))
+                Some(Value::Thunk(Closure::new(
+                    Arc::clone(closure.comp()),
+                    &Env::from_parts(env.natives_arc(), env.prelude_arc(), bindings),
+                )))
             }
             Value::Unit
             | Value::Bool(_)
@@ -206,7 +206,7 @@ fn patched<C: Clone, K, V>(
 /// native's applied arguments, never entering a closure.
 fn captured_scopes(v: &Value, out: &mut Vec<BindingMap>) {
     match v {
-        Value::Thunk(closure) => out.push(closure.env.bindings_root().clone()),
+        Value::Thunk(closure) => out.push(closure.env().bindings_root().clone()),
         Value::List(items) => {
             for item in items {
                 captured_scopes(item, out);
@@ -239,14 +239,7 @@ fn captured_scopes(v: &Value, out: &mut Vec<BindingMap>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{block_over, idle_handle};
-
-    fn captured(v: Option<&Value>) -> &Env {
-        match v {
-            Some(Value::Thunk(closure)) => &closure.env,
-            other => panic!("expected a block, got {other:?}"),
-        }
-    }
+    use crate::types::{block_over, captured, idle_handle};
 
     fn is_placeholder(v: Option<&Value>) -> bool {
         matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG)

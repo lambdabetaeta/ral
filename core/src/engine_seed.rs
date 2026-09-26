@@ -89,21 +89,14 @@ mod tests {
     use crate::source::{FileId, Span};
     use crate::subprocess::bare_child_shell;
     use crate::types::{
-        DefaultPolicy, Fork, HookName, HookSig, Mooring, Nursery, Value, block_over, idle_handle,
+        DefaultPolicy, Fork, HookName, HookSig, Mooring, Nursery, Value, block_over, captured,
+        idle_handle,
     };
     use std::sync::{Arc, OnceLock};
 
     fn prelude() -> &'static BakedPrelude {
         static P: OnceLock<BakedPrelude> = OnceLock::new();
         P.get_or_init(BakedPrelude::bake_runtime)
-    }
-
-    /// What `live` resolves to in the scope the block `v` captured.
-    fn live_in(v: Option<&Value>) -> Option<&Value> {
-        match v {
-            Some(Value::Thunk(closure)) => closure.env.get("live"),
-            other => panic!("expected a block, got {other:?}"),
-        }
     }
 
     /// The one snapshot law: an identity fork and a wire-seeded child, both
@@ -191,7 +184,7 @@ mod tests {
                 "{arm} must scrub a handle-carrying binding"
             );
             assert!(
-                opaque(live_in(child.env.get("blk"))),
+                opaque(captured(child.env.get("blk")).get("live")),
                 "{arm} must scrub the handle a block's captured scope binds"
             );
             let frame = child
@@ -200,7 +193,7 @@ mod tests {
                 .iter()
                 .find_map(|f| f.catch_all.as_ref());
             assert!(
-                opaque(live_in(frame)),
+                opaque(captured(frame).get("live")),
                 "{arm} must scrub the handle a handler frame's scope binds"
             );
             let Some(Value::Native { applied, .. }) = child.env.get("nat") else {
@@ -215,5 +208,34 @@ mod tests {
                 "{arm} must leave the parent's hooks behind"
             );
         }
+    }
+
+    /// Rows are per closure: `big` rides the session's row and `h`'s, and
+    /// `f` and `g`, mentioning nothing, share the one empty row.
+    #[test]
+    fn a_seed_carries_a_binding_once_per_closure_that_mentions_it() {
+        const MARKER: &str = "zqx-marker";
+        let mut shell = bare_child_shell(prelude());
+        crate::evaluator::run_source(
+            &format!("let big = '{MARKER}'\nlet f = {{ 1 }}\nlet g = {{ 2 }}\nlet h = {{ $big }}"),
+            &mut shell,
+        )
+        .expect("define");
+        let seed = pack_seed(
+            &shell.fork_scrubbed(),
+            SpawnGrant::Base("confined".to_string()),
+        )
+        .expect("pack seed");
+        let marked = seed
+            .scope_table
+            .iter()
+            .filter(|row| serde_json::to_string(row).expect("encode").contains(MARKER))
+            .count();
+        assert_eq!(marked, 2, "`big` is written once per row that holds it");
+        assert_eq!(
+            seed.scope_table.iter().filter(|row| row.is_empty()).count(),
+            1,
+            "every empty capture interns to one row"
+        );
     }
 }

@@ -269,14 +269,11 @@ pub(crate) fn is_single_command(top: &Toplevel) -> bool {
     matches!(c.item, CompKind::Exec(_))
 }
 
-/// Every name `comp` can reference: `walk_comp`'s entry point, exercised by
-/// the exhaustive-coverage test below — [`Toplevel::referenced_names`] is
-/// the walk's production door, over a whole program's phrases.  No wildcard
-/// arm anywhere in the walk, so a new `CompKind` or `Val` variant is a
-/// compile error here rather than a silently unharvested reference.
-/// Over-approximate by design: a name in an untaken branch renews too, and a
-/// lease only ever lengthens.
-#[cfg(test)]
+/// Every name `comp` mentions, bound or free, with repeats: what a lease
+/// renews and what a closure over `comp` keeps.  No wildcard arm anywhere in
+/// the walk, so a new `CompKind` or `Val` variant is a compile error here
+/// rather than a silently missed name.  Over-approximate by design: a name in
+/// an untaken branch renews too, and a lease only ever lengthens.
 pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
     let mut out = Vec::new();
     walk_comp(comp, &mut out);

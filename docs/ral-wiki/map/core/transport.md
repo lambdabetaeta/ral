@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4dc94095
-generated_at_date: 2026-09-24
+generated_at_commit: 2ded530f
+generated_at_date: 2026-09-26
 covers_paths: [core/src/serial.rs, core/src/serial/, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs, core/src/spawn_grant.rs]
 ---
 
@@ -77,7 +77,11 @@ classifies it — a block, a function, a handle:
 
 **Scopes cross as rows of a table, one per distinct session-tier root, by
 `imbl` `ptr_eq` identity** — so a captured environment with shared structure
-cannot unfold into an O(2^N) tree.
+cannot unfold into an O(2^N) tree. A closure keeps only the bindings it
+mentions, so rows are per closure and small: every empty capture is one row,
+a `Rec` group's siblings share one, and the linear root scan makes interning
+O(roots²). A value two closures mention is written in both rows
+([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 
 - `InternCtx::intern_env` only *reserves* a row and queues the scope; `finish`,
   the table's sole accessor, encodes the queue as a worklist, so encoder stack

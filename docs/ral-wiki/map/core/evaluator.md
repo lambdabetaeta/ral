@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4d859c3
-generated_at_date: 2026-09-16
+generated_at_commit: 2ded530f
+generated_at_date: 2026-09-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -12,8 +12,8 @@ covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 entered only through framed run doors; the machine's own verbs are
 crate-private.** Two reach outside the module:
 
-- `machine::evaluate(closure, mooring, shell)` (`pub(crate)`) — inject
-  `Closure { comp, env }` over the empty stack and step until it is empty.
+- `machine::evaluate(comp, env, mooring, shell)` (`pub(crate)`) — inject the
+  computation closure ⟨M, ρ⟩ over the empty stack and step until it is empty.
   `run_phrases` (`evaluator.rs`) is the phrase-level verb a tool call, a
   REPL run, or a script line settles through: it threads a `Toplevel`'s
   `Phrase::{Define, Run}` sequence over a local `E` starting from
@@ -29,7 +29,9 @@ crate-private.** Two reach outside the module:
   and rolls back `(env, context)` around every run, so a
   panicking run reports as a failed run instead of corrupting the store.
 - `machine::apply(f, args, mooring, shell)` (`pub(crate)`) — the same, from a
-  closed value meeting arguments (`Machine::applying` sets the first state).
+  closed value meeting arguments (`Machine::applying` sets the first state);
+  `machine::force(v, mooring, shell)` is its argument-free twin, the door of a
+  hook's arity-0 entry and of a worker's body.
   A host reaches it only through the run door's hook-program arm or the
   in-frame builtin wrapper (a native applying a user function — collection
   combinators, hook dispatch — runs a *nested* machine on the host stack,
@@ -46,8 +48,9 @@ swallow exit, grant does not bypass tail calls) are regression-tested
 ([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]).
 
 A **same-thread β-step** — forcing a block or applying a lambda — evaluates
-in place on the caller's `Shell`, no snapshot or restore: `force`/`beta` in
-`machine.rs` step the body's `Closure` directly, so `io`, `session`, and
+in place on the caller's `Shell`, no snapshot or restore: `force` puts a
+thunk's computation and environment in focus and `beta` a λ's body, directly,
+so `io`, `session`, and
 `local` state are simply the one `Shell`'s and the caller's `&Mooring` is
 passed along. Block and lambda entry are uniform: an unbracketed store write
 in either body (`cd`, `alias`, a hook registration) persists to the caller,
@@ -64,10 +67,14 @@ Internals:
   Vec<Frame> }`, `step_eval` and its rule table `eval_rules` (one arm per
   `CompKind` — the ξ-rules, each raising with `?` so `step_eval`'s
   `stamp_focus` is their single exit), `step_return` and `step_halt` (one arm
-  per `Frame` each — the two frame-table columns). `CompKind::Capture(body)` installs a buffer through
-  `evaluator::capture`'s `with_capture` and returns the collected bytes
-  exactly, as `Value::Bytes`, under `Frame::Capture`; the checker binds that
-  value to a fresh name and composes a `Decode` node over it, which — since
+  per `Frame` each — the two frame-table columns). `Focus::Eval` and
+  `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
+  from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
+  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` installs a
+  buffer through `evaluator::capture`'s `with_capture` and returns the
+  collected bytes exactly, as `Value::Bytes`, under `Frame::Capture`; the
+  checker binds that value to a fresh name and composes a `Decode` node over
+  it, which — since
   the kernel's `decode` takes a value, not a computation — has no frame of
   its own: `step_eval` closes the bound variable, drops the bind's scope so
   the buffer is unshared and moves into the string uncopied, and reads it as
@@ -79,9 +86,10 @@ Internals:
   sink to restore), so a `Capture` node one level in only ever drains its own
   tail's bytes — the literal continuation of what a separate `eval_seq` used
   to flush. `CompKind::Rec { group, index }` unfolds the n-ary recursive
-  group: every member's name binds to the thunk of its own projection: a
-  recursive reference forces its name, re-entering `Rec` and re-extending
-  from the outer environment; a group of one is Levy's `rec f. M`.
+  group: every member's name binds to the thunk of its own projection, a
+  `Closure::new` over the forced closure's environment: a recursive
+  reference forces its name, re-entering `Rec` and re-extending from that
+  environment; a group of one is Levy's `rec f. M`.
   `CompKind::Exec` classifies the head through the lexical environment and
   dispatches into [[map/core/runtime|runtime]]'s `command_call`.
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
@@ -126,7 +134,8 @@ Internals:
   directly by `machine.rs`'s `Frame::Redirect` and by `with_redirects` for a
   base-frame native's synchronous call, distinct from the external-command
   fd machinery in [[map/core/runtime|runtime]]'s `command/redirect.rs`.
-- `val.rs` holds the side-effect-free `Val` layer (`close`); `expr.rs` holds
+- `val.rs` holds the side-effect-free `Val` layer (`close`, whose `Thunk`
+  arm builds `⟨M, ρ|occ(M)⟩` through `Closure::new`); `expr.rs` holds
   the primitive operators the elaborator's expression desugaring emits
   (`Negate` / `Not` / `Binary`) and value indexing (`Index`).
 - The command/pipeline machinery — external-command dispatch,
@@ -136,7 +145,7 @@ Internals:
   → `run_base_frame` / `run_external`, and at
   `PipeNode::launch`/`join`; runtime re-enters the machine only through
   `machine::apply_handler` (`cfg(unix)`, `detach`'s one-shot handler call) and
-  `machine::evaluate` (a stage thread's own closure, from `pipeline/thread.rs` —
+  `machine::evaluate` (a stage's `(comp, env)`, from `pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
   body in process, OS confinement being per-child in `build_command`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).

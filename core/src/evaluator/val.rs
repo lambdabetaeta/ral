@@ -1,6 +1,9 @@
 //! Value-layer evaluator for the CBPV IR — literals, variables, thunks,
 //! collection literals, none of them effectful. Closing a value is pure: it
-//! reads `Env` and nothing else, so it can never observe a `cd`.
+//! reads `Env` and nothing else, so it can never observe a `cd`. A thunk
+//! value is `⟨M, ρ|occ(M)⟩`: it keeps only the bindings its body mentions.
+
+use std::sync::Arc;
 
 use crate::diagnostic;
 use crate::ir::{MapPart, MapParts, Val, ValListElem};
@@ -23,8 +26,8 @@ pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
 }
 
 /// Closes a value term: `Variable` resolves through `env` alone, so a miss is
-/// an undefined variable; `Thunk(M)` closes to `Value::Thunk(Closure { comp:
-/// M, env })` — a computation closure held as data (§1.1 of the CEK plan).
+/// an undefined variable; `Thunk(M)` closes to the thunk value
+/// `⟨M, env|occ(M)⟩`, through [`Closure::new`].
 pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
     match val {
         Val::Unit => Ok(Value::Unit),
@@ -43,10 +46,7 @@ pub(crate) fn close(val: &Val, env: &Env) -> Result<Value, Error> {
             };
             Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
         }),
-        Val::Thunk(comp) => Ok(Value::Thunk(Closure {
-            comp: comp.clone(),
-            env: env.clone(),
-        })),
+        Val::Thunk(comp) => Ok(Value::Thunk(Closure::new(Arc::clone(comp), env))),
         Val::List(elems) => eval_list(elems, env),
         Val::Record(entries) => eval_map(entries, env),
         Val::Map(entries) => eval_map(entries, env),

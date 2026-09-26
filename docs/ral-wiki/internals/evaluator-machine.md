@@ -1,7 +1,7 @@
 ---
-verified_at_commit: b22f78fd
+verified_at_commit: 2ded530f
 verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Env, restrict, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -31,7 +31,10 @@ bare-lambda error — unreachable for a checked program, since the checker
 reads it inline in `step_eval`, and the checker reaches it through a bind
 over `Capture` rather than nesting the two.
 
-**One thunk value.** `Value::Thunk(Closure)` is a closure held as data;
+**One thunk value.** `Value::Thunk(Closure)` is `⟨M, ρ|occ(M)⟩`, built only
+by `Closure::new`, which `restrict`s the environment to the names `M`
+mentions — the lease harvest's walk
+([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 `force` of it puts its computation and environment in focus and pushes
 nothing, so `force(thunk M) = M` and a forced block's `cd` persists exactly
 as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
@@ -88,15 +91,18 @@ refused push leaks nothing; `push` itself cannot fail.
 **Recursion is `rec`, n-ary.** `Rec { group, index }` binds every member's
 name to the thunk of its own projection and runs the chosen member; a
 recursive reference forces its name, which re-enters `Rec` and re-extends
-from the outer environment. Bodies are never rewritten; a group of one is
-Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`
-advance and β, so `let f = { !f }; !f` is interruptible.
+from the forced closure's environment. That environment is already scrubbed
+for the whole group, so every sibling's `Closure::new` is the identity and
+shares its root. Bodies are never rewritten; a group of one is Levy's
+`rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec` advance
+and β, so `let f = { !f }; !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
 (`core/src/types/env.rs`) is three tiers — the language natives, the frozen
 prelude, and a persistent `imbl::HashMap` of everything bound since. `bind`
 is an insert that disturbs no environment a closure captured; `clone` is
-O(1). The **store** is everything else on `Shell`: sinks, the dynamic
+O(1); `restrict` narrows the bindings tier to a closure's names. The
+**store** is everything else on `Shell`: sinks, the dynamic
 `Context` (grants, handlers, env overrides, cwd, args, modules, hooks), the
 trail, workers, leases. `Context` is read in O(1) by capability checks and
 command dispatch and changed only by frames holding their own undo; it is

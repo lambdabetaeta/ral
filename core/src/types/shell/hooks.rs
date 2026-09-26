@@ -180,7 +180,7 @@ impl Hook {
     pub(crate) fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {
-            Value::Thunk(c) if c.comp.arrow().is_none() => 0,
+            Value::Thunk(c) if c.comp().arrow().is_none() => 0,
             Value::Thunk(_) => self.binding.value.lambda_arity().unwrap_or(0),
             Value::Native { entry, applied } => entry.fixed_arity().saturating_sub(applied.len()),
             other => {

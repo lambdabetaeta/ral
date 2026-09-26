@@ -57,7 +57,7 @@ pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<Closure> {
     match val {
         // A spawn body takes no parameters: `comp.arrow()` is `None` for a
         // block-shaped thunk.
-        Value::Thunk(closure) if closure.comp.arrow().is_none() => Ok(closure.clone()),
+        Value::Thunk(closure) if closure.comp().arrow().is_none() => Ok(closure.clone()),
         other => Err(Break::Error(
             Error::new(
                 format!("{cmd} expects a Block, got {} '{other}'", other.type_name()),
@@ -382,7 +382,7 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.clone(), value_to_json_lossy_bytes(v)))
                 .collect(),
         ),
-        Value::Thunk(c) => match c.comp.arrow() {
+        Value::Thunk(c) => match c.comp().arrow() {
             Some((param, _)) => {
                 serde_json::json!({"type": "Lambda", "param": format!("{param:?}")})
             }

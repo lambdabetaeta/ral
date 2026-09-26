@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 4dc94095
-verified_at_date: 2026-09-24
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+verified_at_commit: 2ded530f
+verified_at_date: 2026-09-26
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -39,7 +39,9 @@ Use is read off the program text, never off the running lookup path. When a
 run compiles, an exhaustive walk over its typed IR (`ir::referenced_names`)
 collects every variable occurrence and command-head name and renews those
 entries; the same harvest runs when `use` (or a host loader) compiles code
-mid-run. Nothing renews at dispatch: a bare head can only resolve to a
+mid-run. The same walk also defines a closure's capture: `Closure::new` keeps
+exactly the names it finds
+([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Nothing renews at dispatch: a bare head can only resolve to a
 binding the elaborator already saw — prelude, session, and lexical names are
 all in its bound set, and nothing installs into a running environment behind
 its back — so the harvest is complete by construction. Writing a name is
@@ -66,8 +68,8 @@ only between runs, on the session scope by construction — so a mid-frame calle
 such as a builtin body is refused rather than allowed to unset from a
 transient frame.
 
-What it does not do: it never frees memory by itself (it removes the future
-name, not the bytes), it never touches a closure, and it never tells the
+What it does not do: it never touches a closure, so it frees a value's bytes
+only when no live closure mentions its name, and it never tells the
 model anything at prune time — the only model-visible consequence is an
 ordinary `undefined variable` if the model names the binding again, with the
 paper trail waiting in `record.jsonl`'s `Notice::Prune` commit.
@@ -85,18 +87,19 @@ let f = { … $big … }        # then f is called every run
 reference lives inside `f`'s stored body, compiled once on the run that
 defined `f`; later calls recompile nothing, so nothing harvests `big` again.
 After 256 idle calls the live name `big` is pruned — and `f` keeps working,
-forever. A closure captures its `Env` by value at creation — an O(1) clone of
-a persistent map — and resolves its body against that captured scope; the
-session scope is copy-on-write, so unsetting `big` there cannot reach what `f`
+forever. A closure keeps, at creation, the session bindings its body mentions
+— `big` among `f`'s — and resolves its body against that scope; the session
+scope is copy-on-write, so unsetting `big` there cannot reach what `f`
 already holds.
 
 This is correct, not a near-miss: once captured, the top-level name `big`
 routes nothing. The value's real owner is `f`'s capture, and `f` — the thing
 actually being used — is the thing whose lease renews. The cost is memory,
-not correctness: the captured bytes stay resident until `f`'s own name falls
-or is rebound and the capture drops. That residency is exactly what the
-large-binding warning exists to head off — bind a file path, not five
-megabytes of captured text.
+not correctness: a closure keeps only what it mentions, so pruning `big`
+frees its bytes unless a live closure mentions `big`; `f`'s capture keeps them
+resident until `f`'s own name falls or is rebound and the capture drops.
+That residency is exactly what the large-binding warning exists to head off
+— bind a file path, not five megabytes of captured text.
 
 There is no command-position exception: `big args` inside hot `f` compiles
 to an application of the bound variable, exactly like `$big`, resolves

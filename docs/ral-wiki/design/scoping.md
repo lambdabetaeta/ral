@@ -45,13 +45,15 @@ different one, and they should not be conflated.
   structural rather than a pushed-and-popped frame: `M to x. N` closes `N` over
   the environment the `To` frame carries, extended with `x`, and nothing else
   whatever `M` did along the way. Cloning an `Env` is O(1) — the persistent
-  map's root is shared, not copied — which is the hot path for recursion and
-  for every closure capture.
+  map's root is shared, not copied — so recursion clones; capture scrubs. A
+  closure holds only the session bindings its body mentions, `⟨M, ρ|occ(M)⟩`
+  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 - **Fork inheritance** is [[map/core/shell-state|the flow matrix]] in
-  `inherit.rs`: when a genuine runtime fork (a `spawn` worker, a pipeline stage,
-  a REPL aside, a sub-agent session) needs the parent's lexical environment, it
-  clones the *whole* `Env` into the new shell, alongside the rest of the
-  parent→child manifest (builtin table, dynamic context, cancel root).
+  `inherit.rs`: a genuine runtime fork (a `spawn` worker, a pipeline stage,
+  a REPL aside, a sub-agent session) clones the parent's *session* `Env`
+  whole into the new shell, alongside the rest of the parent→child manifest
+  (builtin table, dynamic context, cancel root); a worker's body brings its
+  own capture in its closure.
 
 A same-thread β-step bridges the two: applying a thunk puts its closure's
 `Env` in focus directly — `force(thunk M) = M` pushes nothing — while the

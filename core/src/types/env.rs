@@ -40,8 +40,8 @@ static EMPTY_PRELUDE: LazyLock<Arc<PreludeMap>> = LazyLock::new(|| Arc::new(Prel
 /// ([`Self::install_natives`]), never written after. `prelude` is the baked
 /// prelude's bindings, one map per process, shared by every shell that boots
 /// from it. `bindings` is everything bound since: a persistent map, so
-/// `bind` is O(log₃₂ n) and cloning the whole environment is O(1) — the
-/// clone every closure capture takes.
+/// `bind` is O(log₃₂ n) and cloning the whole environment is O(1). A thunk
+/// value keeps only its [`Self::restrict`] to the names it mentions.
 #[derive(Debug, Clone)]
 pub struct Env {
     natives: Arc<NativeMap>,
@@ -131,6 +131,25 @@ impl Env {
     /// Every name bound since the prelude — what the binding lease adopts.
     pub(crate) fn session_names(&self) -> impl Iterator<Item = &str> {
         self.bindings.keys().map(String::as_str)
+    }
+
+    /// `self` with its session tier narrowed to `names`, repeats welcome.  The
+    /// two constant tiers stay whole: a name they answer is not in the session
+    /// tier and is not copied.  Narrowing that drops nothing is the identity,
+    /// root included.
+    pub(crate) fn restrict<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        let bindings: BindingMap = names
+            .into_iter()
+            .filter_map(|n| self.bindings.get(n).map(|b| (n.to_owned(), b.clone())))
+            .collect();
+        if bindings.len() == self.bindings.len() {
+            return self.clone();
+        }
+        Self {
+            natives: Arc::clone(&self.natives),
+            prelude: Arc::clone(&self.prelude),
+            bindings,
+        }
     }
 
     /// Bind `name` in the session tier, replacing any existing binding —
@@ -410,5 +429,42 @@ mod tests {
 
         env.unset("map");
         assert_eq!(env.get("map"), Some(&Value::string("prelude-map")));
+    }
+
+    #[test]
+    fn restrict_keeps_the_named_session_bindings_and_shares_the_tiers() {
+        let binding = |value| Binding {
+            value,
+            scheme: None,
+        };
+        let prelude = PreludeMap::from_iter([("map".to_string(), binding(Value::string("p")))]);
+        let mut env = Env::with_prelude(Arc::new(NativeMap::default()), Arc::new(prelude));
+        for (name, n) in [("a", 0), ("b", 1), ("map", 2)] {
+            env.bind(name.into(), binding(Value::Int(n)));
+        }
+
+        let narrow = env.restrict(["a", "map", "zzz", "a"]);
+        assert!(narrow.session_binding("a").is_some());
+        assert!(narrow.session_binding("b").is_none());
+        assert_eq!(
+            narrow.get("map"),
+            Some(&Value::Int(2)),
+            "a session binding shadowing the prelude is kept"
+        );
+        assert!(narrow.get("zzz").is_none());
+        assert!(Arc::ptr_eq(&narrow.prelude_arc(), &env.prelude_arc()));
+
+        assert!(
+            env.restrict([])
+                .bindings_root()
+                .ptr_eq(env.restrict([]).bindings_root()),
+            "every empty capture shares one root"
+        );
+        assert!(
+            env.restrict(["a", "b", "map", "a"])
+                .bindings_root()
+                .ptr_eq(env.bindings_root()),
+            "narrowing that drops nothing is the identity, repeats or not"
+        );
     }
 }
