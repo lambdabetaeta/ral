@@ -359,8 +359,10 @@ other, as do `conversation.js` and `projector.js`: safe because every binding
 crossed is a hoisted function declaration and nothing calls across a cycle
 during evaluation, which is stated at the import itself. Beside them are the
 three libraries the window vendors and the nothing it fetches:
-`marked.min.js` (GFM), `purify.min.js`, and `katex/` (KaTeX 0.18.1, its
-stylesheet and its twenty `woff2` faces; the only web fonts the app ships).
+marked (GFM), DOMPurify, and KaTeX 0.18.1 (its stylesheet and its twenty
+`woff2` faces; the only web fonts the app ships), each verbatim under
+`ui/vendor/` beside its licence, with versions and SHA-256s in
+`ui/vendor/README.md`.
 Assistant prose is markdown with TeX, and `renderAssistantMarkdown` is the
 single path model text takes to the DOM. Its order is the load-bearing part:
 each formula is **lifted out before marked sees it** — markdown would read

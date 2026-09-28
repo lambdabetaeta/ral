@@ -16,3 +16,10 @@ synod/gen/schemas/*.json text eol=lf
 # CRLF, so the checkout is pinned to LF regardless of what the clone was
 # configured to prefer.
 *.sh text eol=lf
+
+# Third-party files vendored verbatim, each beside its licence (see
+# synod/ui/vendor/README.md). `-text` keeps every byte as upstream published
+# it, so a checkout never rewrites line endings and the SHA-256s in that README
+# stay true on every platform; `linguist-vendored` keeps them out of the
+# repository's language statistics.
+synod/ui/vendor/** -text linguist-vendored
