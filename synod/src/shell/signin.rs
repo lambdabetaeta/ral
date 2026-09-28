@@ -18,6 +18,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::Shared;
 use ral_core::sync::LockExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager, State};
@@ -79,7 +80,7 @@ pub fn sign_in(
 
     std::thread::spawn(move || {
         let accounts = app.state::<super::Accounts>();
-        let Ok((store, catalog)) = accounts.resolved() else {
+        let Ok(Shared { store, catalog, .. }) = accounts.resolved() else {
             // Refused above, before this thread was ever spawned.
             return;
         };

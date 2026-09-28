@@ -561,7 +561,7 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
 mod tests {
     use super::*;
     use crate::provider::identity::{
-        Auth, Billing, Service, ServiceName, built_in, chatgpt_service,
+        Auth, Billing, Meter, Service, ServiceName, built_in, chatgpt_service,
     };
     use genai::adapter::AdapterKind;
     use std::cell::Cell;
@@ -582,7 +582,7 @@ mod tests {
             auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
             billing: Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         })
     }
 

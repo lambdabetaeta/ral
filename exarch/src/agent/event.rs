@@ -95,6 +95,12 @@ pub enum ProviderErrorRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<serde_json::Value>,
     },
+    Exhausted {
+        resets_at: jiff::Timestamp,
+        cause: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
+    },
     Api {
         status: Option<u16>,
         model: String,
@@ -179,7 +185,16 @@ impl From<&ProviderError> for ProviderErrorRecord {
                 cause,
                 body,
             } => Self::RateLimited {
-                retry_after_secs: retry_after.map(|d| d.as_secs()),
+                retry_after_secs: retry_after.map(|wait| wait.get().as_secs()),
+                cause: cause.clone(),
+                body: body.as_deref().cloned(),
+            },
+            ProviderError::Exhausted {
+                resets_at,
+                cause,
+                body,
+            } => Self::Exhausted {
+                resets_at: *resets_at,
                 cause: cause.clone(),
                 body: body.as_deref().cloned(),
             },

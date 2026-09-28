@@ -3,8 +3,9 @@
 //! [`Avatar::deliberate`] drives the provider until it stops calling tools,
 //! bounded by [`MAX_TURNS`] since a headless run has no Esc to hand.
 //! Auto-eviction is weighed at every turn boundary, against the policy in
-//! [`digest`](crate::agent::digest); the pressure reminder that precedes it
-//! rides the steering channel at a tool boundary.
+//! [`digest`](crate::agent::digest); the standing-condition warnings
+//! ([`gauge`](crate::agent::gauge)) ride the steering channel at a tool
+//! boundary.
 //! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
 use crate::agent::Avatar;
@@ -262,13 +263,16 @@ impl Avatar {
                 return Ok(Outcome::Severed(s));
             }
             // `announce` draws each arrival's own chrome; the texts coalesce
-            // with the pressure reminder into the one steering message the
-            // protocol admits after a batch.
+            // with the warnings into the one steering message the protocol
+            // admits after a batch.
             for item in &injected {
                 announce(item, &recorder);
             }
             let mut steering: Vec<String> = injected.iter().map(Item::text).collect();
-            steering.extend(self.pressure_reminder(provider));
+            match self.warnings(provider) {
+                Ok(warnings) => steering.extend(warnings),
+                Err(s) => return Ok(Outcome::Severed(s)),
+            }
             if !steering.is_empty() {
                 self.log
                     .lock()
@@ -297,17 +301,6 @@ impl Avatar {
         }
         let keep = suffix_keep_budget(log.history_bytes());
         log.plan_eviction(keep)
-    }
-
-    /// The context-pressure reminder this tool boundary owes the model, to
-    /// join the one steering message the protocol admits after a batch.
-    /// Budget-free and edge-triggered: the latch is
-    /// [`Nudges`](crate::agent::nudge::Nudges)'s, so an excursion is announced
-    /// once and a `--chat` trunk, which keeps none, is never told.
-    fn pressure_reminder(&mut self, provider: &Provider) -> Option<String> {
-        let pressure = self.pressure_gauge(provider);
-        let nudges = self.nudges.as_mut()?;
-        nudges.pressure_reminder(&pressure, &mut self.log.lock())
     }
 
     /// Shed the older half of the context, the harness writing no note of its

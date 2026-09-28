@@ -281,7 +281,7 @@ impl Scratch {
     /// along with it.
     ///
     /// Beside, because a real session's log and scratch are separate roots,
-    /// and `check_disk_warn` sums the two: nested, the log would be counted
+    /// and `disk_warning` sums the two: nested, the log would be counted
     /// twice and a test double would measure what no session ever does.
     ///
     /// # Errors

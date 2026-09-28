@@ -2,6 +2,7 @@
 //! readout the TUI block and the headless printer both render.
 
 use crate::agent::event::{CutShortRecord, ProviderErrorRecord};
+use crate::clock;
 use crate::provider;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -66,12 +67,6 @@ impl Readout {
     }
 }
 
-/// Body keys carrying the retry-after wait as a second count, in precedence
-/// order — read by [`wait_from_body`], then suppressed from the body dump
-/// (along with the absolute `resets_at` twin) once the retry-after field
-/// carries them.
-const RETRY_SECS_KEYS: &[&str] = &["resets_in_seconds", "retry_after_seconds", "retry_after"];
-
 /// The ordered field list under either headline.  `Cancelled` never reaches
 /// here: [`Readout::fatal`] returns before the call, and a cancel never
 /// commits as a stall — `Engine::complete` exempts it by name.
@@ -82,29 +77,21 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
             retry_after_secs,
             cause,
             body,
-        } => {
-            let mut fs = Vec::new();
-            let wait = retry_after_secs.or_else(|| body.as_ref().and_then(wait_from_body));
-            if let Some(secs) = wait {
-                fs.push(Field {
-                    label: "retry-after".into(),
-                    datum: Datum::Seconds(secs),
-                });
-            }
-            match body {
-                // Suppress the raw keys the wait field already subsumes.
-                Some(b) => {
-                    let consumed: Vec<&str> = RETRY_SECS_KEYS
-                        .iter()
-                        .copied()
-                        .chain(["resets_at"])
-                        .collect();
-                    fs.extend(body_fields(b, &consumed));
-                }
-                None => fs.push(text_field("cause", prettify(cause))),
-            }
-            fs
-        }
+        } => retry_after_secs
+            .map(|secs| Field {
+                label: "retry-after".into(),
+                datum: Datum::Seconds(secs),
+            })
+            .into_iter()
+            .chain(body_or_cause(body.as_ref(), cause))
+            .collect(),
+        ProviderErrorRecord::Exhausted {
+            resets_at,
+            cause,
+            body,
+        } => std::iter::once(text_field("resets", clock::local(*resets_at)))
+            .chain(body_or_cause(body.as_ref(), cause))
+            .collect(),
         ProviderErrorRecord::Transient {
             cause,
             attempts,
@@ -165,26 +152,20 @@ fn error_kind(e: &ProviderErrorRecord) -> &'static str {
         ProviderErrorRecord::Cancelled { .. } => "cancelled",
         ProviderErrorRecord::Transient { status, .. } => provider::transient_label(*status),
         ProviderErrorRecord::RateLimited { .. } => "rate limited",
+        ProviderErrorRecord::Exhausted { .. } => "usage limit reached",
         ProviderErrorRecord::Api { .. } => "api error",
         ProviderErrorRecord::Truncated { .. } => "truncated",
         ProviderErrorRecord::Other { .. } => "provider error",
     }
 }
 
-/// The retry-after wait carried by a parsed `body`: the first
-/// [`RETRY_SECS_KEYS`] entry reading as a number.  Consulted only when the
-/// response header did not already supply the wait.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "float->int cast saturates: a negative or absurd retry-seconds pins to 0 / u64::MAX, both acceptable for a wait readout"
-)]
-fn wait_from_body(body: &Value) -> Option<u64> {
-    let obj = provider::error_object(body)?;
-    RETRY_SECS_KEYS.iter().find_map(|k| {
-        obj.get(*k)
-            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-    })
+/// A wait-bearing failure's body fields, the keys its dedicated fields
+/// already carry suppressed; the free-text `cause` when there is no body.
+fn body_or_cause(body: Option<&Value>, cause: &str) -> Vec<Field> {
+    match body {
+        Some(b) => body_fields(b, provider::reset::BODY_KEYS),
+        None => vec![text_field("cause", prettify(cause))],
+    }
 }
 
 /// One JSON value as the text a field row shows, syntax stripped.  `Null`

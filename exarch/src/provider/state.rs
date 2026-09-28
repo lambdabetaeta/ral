@@ -132,7 +132,7 @@ pub fn save(dir: &Path, state: &State) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
-    use crate::provider::identity::{ServiceName, built_in};
+    use crate::provider::identity::{Meter, ServiceName, built_in};
 
     fn tmp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -178,7 +178,7 @@ mod tests {
             auth: crate::provider::identity::Auth::Env("LOCAL_LLAMA_KEY".into()),
             billing: crate::provider::identity::Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         });
         let available = [llama.clone()];
         let state = State::new(&llama, &available, "llama-3", &Tuning::default(), None);

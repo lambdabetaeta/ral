@@ -396,7 +396,7 @@ mod tests {
     use super::*;
     use crate::provider::oauth::OAuthToken;
     use genai::adapter::AdapterKind;
-    use identity::{Billing, ServiceName};
+    use identity::{Billing, Meter, ServiceName};
 
     // The `resolve_and_scrub` scenarios live in `tests/credential_env.rs`: they
     // mutate the process-global environment, which no library test may share.
@@ -414,7 +414,7 @@ mod tests {
             auth: Auth::Unnamed,
             billing: Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         })
     }
 

@@ -1,28 +1,30 @@
 //! One owner for provider construction.
 //!
-//! [`Provider::build`] needs an [`Engine`] and a [`Credential`], and a
-//! [`Provider`] retains neither, so every front-end wanting a second
-//! selection has had to hold the engine, the credential store, and the model
-//! catalog as three unrelated locals. The bureau is that trio named once, and
-//! the only place a live [`Provider`] is minted.
+//! [`Provider::build`] needs a backend over an [`Engine`] and a credential, and
+//! a [`Provider`] retains neither, so every front-end wanting a second
+//! selection has had to hold the engine, the credential store, the model
+//! catalog, and the allowance record as unrelated locals. The bureau is those
+//! named once, and the only place a live [`Provider`] is minted.
 //!
 //! Two arms, mirroring [`Provider`]'s own backends: [`Engine::new`] primes the
 //! pricing catalog over the network, so a unit test holds
 //! [`Bureau::Scripted`], which mints nothing and says so.
 //!
-//! The store and catalog are *shared* halves rather than owned ones, so two
-//! hosts compose: exarch builds one bureau over its own pair, while synod
-//! keeps the same pair as application-wide state and mints an engine per
-//! conversation. They are two mutexes and not one because the spawn path
-//! touches only the store and the picker's pump only the catalog; under a
-//! single lock a spawn would queue behind a model-list fetch for no reason.
+//! The store, catalog, and [`Rations`] are *shared* halves rather than owned
+//! ones, so two hosts compose: exarch builds one bureau over its own, while
+//! synod keeps the same as application-wide state and mints an engine per
+//! conversation. The store and catalog are two mutexes and not one because
+//! the spawn path touches only the store and the picker's pump only the
+//! catalog; under a single lock a spawn would queue behind a model-list fetch
+//! for no reason.
 //!
-//! Lock discipline, inherited from synod's own rule: both halves are locked
-//! briefly, and never across a network call, a picker frame, or a machine
-//! boot. [`Bureau::admit`] is the one place both are held at once, store
-//! first. The converse obligation binds the other way too: a UI thread must
-//! never hold either lock while waiting on an agent thread, which takes the
-//! store whenever it mints a child's provider.
+//! Lock discipline, inherited from synod's own rule: the store and catalog
+//! are locked briefly, and never across a network call, a picker frame, or a
+//! machine boot. [`Bureau::admit`] is the one place both are held at once,
+//! store first. [`Rations`]' own lock is a leaf, held for one map access and
+//! never with either. The converse obligation binds the other way too: a UI
+//! thread must never hold the store or catalog while waiting on an agent
+//! thread, which takes the store whenever it mints a child's provider.
 
 use std::sync::{Arc, Mutex};
 
@@ -31,16 +33,17 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{LiveSource, ModelCatalog};
-use super::{Account, Engine, Provider, Tuning, identity, oauth};
+use super::{Account, Backend, Engine, Provider, Rations, Tuning, oauth};
 
 /// Where a session's providers come from.
 pub enum Bureau {
-    /// A live session: the engine its requests run on, over the credentials
-    /// and catalog the whole application shares.
+    /// A live session: the engine its requests run on, over the credentials,
+    /// catalog, and allowance record the whole application shares.
     Live {
         engine: Arc<Engine>,
         store: Arc<Mutex<CredentialStore>>,
         catalog: Arc<Mutex<ModelCatalog<LiveSource>>>,
+        rations: Arc<Rations>,
     },
     /// A scripted session mints nothing.
     Scripted,
@@ -103,23 +106,32 @@ impl Bureau {
         route: Option<String>,
         max_tokens: Option<u32>,
     ) -> Result<Arc<Provider>, String> {
-        let Self::Live { engine, store, .. } = self else {
+        let Self::Live {
+            engine,
+            store,
+            rations,
+            ..
+        } = self
+        else {
             return Err(mints_nothing());
         };
-        let credential = {
-            let store = store.lock_ignore_poison();
-            store.get(&account.id).cloned().ok_or_else(|| {
-                format!(
-                    "{} has no resolved credential",
-                    identity::label(account, &store.available())
-                )
-            })?
+        // Locked only long enough to clone the roster out; the reads the meter
+        // later runs have the lock long released.
+        let roster = store.lock_ignore_poison().roster();
+        let credential = roster
+            .credential(&account.id)
+            .ok_or_else(|| format!("{} has no resolved credential", roster.label(account)))?;
+        let transport = engine.transport_for(account, &model, credential);
+        let backend = Backend::Live {
+            engine: Arc::clone(engine),
+            transport,
+            meters: LiveMeters::new(roster),
+            rations: Arc::clone(rations),
         };
         Ok(Arc::new(Provider::build(
-            engine.clone(),
+            backend,
             account,
             model,
-            &credential,
             max_tokens,
             tuning.clone(),
             route,
@@ -173,17 +185,19 @@ impl Bureau {
         }
     }
 
-    /// Open a survey over every available account. `None` when the bureau is
-    /// scripted and has no store — the command then says so rather than
+    /// Open a survey over every available account. `None` when the bureau
+    /// is scripted and has no store — the command then says so rather than
     /// drawing an empty card.
     pub fn survey_allowances(&self) -> Option<Survey> {
-        let Self::Live { store, .. } = self else {
+        let Self::Live { store, rations, .. } = self else {
             return None;
         };
-        // Locked only long enough to clone the roster out; the fetches
-        // `Survey::open` spawns run with the lock long released.
         let roster = store.lock_ignore_poison().roster();
-        Some(Survey::open(&roster, &LiveMeters::new(roster.clone())))
+        Some(Survey::open(
+            &roster,
+            &LiveMeters::new(roster.clone()),
+            Arc::clone(rations),
+        ))
     }
 }
 

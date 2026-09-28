@@ -13,6 +13,7 @@ pub mod agent;
 pub mod bootstrap;
 pub mod bus;
 pub mod cli;
+pub mod clock;
 pub mod config;
 pub mod egress;
 pub mod fleet;
@@ -27,7 +28,7 @@ pub mod tui;
 
 use agent::Avatar;
 use clap::Parser;
-use provider::{Bureau, Engine};
+use provider::{Bureau, Engine, Rations};
 use std::sync::{Arc, Mutex};
 use tui::SessionInfo;
 
@@ -238,6 +239,7 @@ pub fn run() -> Result<(), String> {
         engine,
         store: Arc::new(Mutex::new(store)),
         catalog: Arc::new(Mutex::new(catalog)),
+        rations: Arc::new(Rations::default()),
     });
     let provider = bureau.build(&account, model.clone(), &tuning, route, c.max_tokens)?;
     let mut session = Avatar::root(

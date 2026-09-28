@@ -6,20 +6,18 @@
 //!
 //! Two kinds of nudge, one message: a **repair** (`Empty`, `Stopped`,
 //! `Truncated`, a returning agent's un-replied `Complete`) is event-shaped,
-//! exceptional, and spends the per-exchange [`BUDGET`]; a **standing
-//! condition** (the pin register, context pressure) is a fact about the
-//! agent's own live state, told once when it changes and never re-told while
-//! it holds — budget-free.  An edge is consumed in the same act as the part's
-//! emission, so "told but not sent" and "sent but not told" are
+//! exceptional, and spends the per-exchange [`BUDGET`]; the **pin register** is
+//! a fact about the agent's own live state, told once when it changes and never
+//! re-told while it holds — budget-free.  An edge is consumed in the same act
+//! as the part's emission, so "told but not sent" and "sent but not told" are
 //! inexpressible.
 //!
-//! The two standing conditions ride different channels, because they are owed
-//! at different boundaries.  The pin register joins [`Nudges::react`]'s
-//! post-deliberation message; context pressure is owed at every turn
-//! boundary, so [`Nudges::pressure_reminder`] hands it to the deliberate loop
-//! for the one steering message the protocol admits after a tool batch — an
-//! agentic run takes one prompt and then two hundred tool turns, and a
-//! warning that waited for the next exchange would arrive after the cut.
+//! The pin register joins [`Nudges::react`]'s post-deliberation message.  The
+//! conditions that climb a ladder — context pressure, the disk ceiling, the
+//! ration — are [`gauge`](crate::agent::gauge)'s, told at the tool boundary
+//! through [`Nudges::remind`], since an agentic run takes one prompt and then
+//! two hundred tool turns, and a warning that waited for the next exchange
+//! would arrive after the cut.
 //!
 //! [`Nudges`] is per-session because the attend loop runs one
 //! `Avatar::deliberate` per inbox item, not one per exchange, so this state
@@ -46,21 +44,6 @@ fn wrap_reminder(body: &str) -> String {
     format!("{EXARCH_REMINDER_OPEN}{body}{EXARCH_REMINDER_CLOSE}")
 }
 
-/// One stateless reading of the context-pressure gauge, taken by the caller.
-/// `Unknown` (a stale token measure under a known window) must neither warn
-/// nor re-arm: a stale measure relieves nothing.
-pub(crate) enum Pressure {
-    Over {
-        /// The rendered detail, e.g. "173000 of 200000 tokens".
-        detail: String,
-        /// The turns the next boundary's cut would take, `None` when nothing
-        /// is old enough to shed.
-        planned: Option<Vec<u64>>,
-    },
-    Under,
-    Unknown,
-}
-
 /// The agent-side facts one nudge decision reads, assembled by `take_up` in
 /// `agent/attend.rs`.
 pub(crate) struct Facts {
@@ -78,14 +61,12 @@ pub(crate) struct Facts {
 }
 
 /// Per-session nudge state, entered from [`Self::react`] at the end of a
-/// deliberation and [`Self::pressure_reminder`] at a tool boundary within one.
+/// deliberation and [`Self::remind`] at a tool boundary within one.
 pub(crate) struct Nudges {
     /// Repairs spent this exchange.
     used: u32,
     /// The pin digest last told to the model; a differing register re-arms.
     pinned_told: Option<String>,
-    /// This pressure excursion has been told; an `Under` reading re-arms.
-    pressure_told: bool,
 }
 
 impl Nudges {
@@ -93,7 +74,6 @@ impl Nudges {
         Self {
             used: 0,
             pinned_told: None,
-            pressure_told: false,
         }
     }
 
@@ -104,25 +84,12 @@ impl Nudges {
         self.used = 0;
     }
 
-    /// The context-pressure reminder the deliberate loop owes this tool
-    /// boundary, or `None`.  Budget-free: the cut is announced before it
-    /// happens, so the model can leave its future self a line.
-    pub fn pressure_reminder(&mut self, pressure: &Pressure, log: &mut AgentLog) -> Option<String> {
-        match pressure {
-            // The excursion has ended; the next one is a new condition.
-            Pressure::Under => {
-                self.pressure_told = false;
-                None
-            }
-            // A stale measure relieves nothing and warns of nothing.
-            Pressure::Unknown => None,
-            Pressure::Over { .. } if self.pressure_told => None,
-            Pressure::Over { detail, planned } => {
-                self.pressure_told = true;
-                record_nudge(log, self.used, "context pressure".into());
-                Some(wrap_reminder(&pressure_message(detail, planned.as_deref())))
-            }
-        }
+    /// A standing condition's reminder for the tool boundary, its breadcrumb
+    /// recorded. Budget-free: the condition, not the exchange, decides when
+    /// it is owed.
+    pub fn remind(&self, cause: String, body: &str, log: &mut AgentLog) -> String {
+        record_nudge(log, self.used, cause);
+        wrap_reminder(body)
     }
 
     /// Decide the synthetic prompt the attend loop self-posts, or `None` to
@@ -220,27 +187,6 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
     a final message on its own is not delivered.";
 
-/// Shown once the gauge crosses its soft line, budget-free like the
-/// pinned-state reminder.  With nothing old enough to shed there is no cut to
-/// announce, and the reading alone is the whole message.
-fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
-    match planned {
-        Some(turns) if !turns.is_empty() => {
-            let runs = crate::record::model::runs(turns);
-            let first = turns[0];
-            let last_plus_one = turns[turns.len() - 1] + 1;
-            format!(
-                "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
-                 leave your context; they stay readable with `exarch-transcript`. To leave your \
-                 future self a line, run `exarch-context `evict [turns: !{{range {first} \
-                 {last_plus_one}}}, note: '…']` now — a prompt whose exchange is still in \
-                 hand stays on its own; otherwise nothing is required of you."
-            )
-        }
-        _ => format!("Context pressure: {detail}."),
-    }
-}
-
 const EMPTY_MESSAGE: &str = "Your previous turn produced no text and no tool calls. \
     If you are finished, say so explicitly; otherwise continue.";
 
@@ -262,13 +208,6 @@ mod tests {
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
             .expect("session log")
-    }
-
-    fn over(planned: Option<Vec<u64>>) -> Pressure {
-        Pressure::Over {
-            detail: "400 of 500 tokens".into(),
-            planned,
-        }
     }
 
     fn facts() -> Facts {
@@ -476,38 +415,14 @@ mod tests {
         assert_eq!(nudges.used, 1, "only the reply half spends budget");
     }
 
-    /// The reminder carries both the reading and the turns the next boundary
-    /// would cut, and spends no budget.
+    /// A reminder is budget-free, and its breadcrumb is the only record of it.
     #[test]
-    fn pressure_reminder_names_the_cut_and_offers_the_note() {
-        let mut nudges = Nudges::new();
+    fn remind_wraps_the_body_and_spends_no_budget() {
+        let nudges = Nudges::new();
         let mut log = fresh_log();
-        let msg = nudges
-            .pressure_reminder(&over(Some(vec![1, 2, 3, 4, 5, 6, 7])), &mut log)
-            .expect("pressure due should remind");
-        assert!(msg.contains("400 of 500 tokens"), "{msg}");
-        assert!(
-            msg.contains("turns 1–7 will leave your context")
-                && msg.contains("`exarch-context `evict [turns: !{range 1 8}"),
-            "must name the cut and offer the note: {msg}"
-        );
-        assert_eq!(nudges.used, 0, "the pressure reminder is budget-free");
-    }
-
-    /// Nothing old enough to shed: the reading stands alone, with no cut to
-    /// announce and no note to offer.
-    #[test]
-    fn pressure_without_a_planned_cut_states_the_reading_alone() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-        let msg = nudges
-            .pressure_reminder(&over(None), &mut log)
-            .expect("pressure due should remind");
-        assert!(msg.contains("400 of 500 tokens"), "{msg}");
-        assert!(
-            !msg.contains("evict") && !msg.contains("will leave your context"),
-            "with no cut planned there is nothing to announce: {msg}"
-        );
+        let msg = nudges.remind("context pressure".into(), "look out", &mut log);
+        assert_eq!(msg, wrap_reminder("look out"));
+        assert_eq!(nudges.used, 0);
     }
 
     #[test]
@@ -588,70 +503,6 @@ mod tests {
             .react(&complete(), &with("tasks 4/8"), &mut log)
             .expect("re-pinning even the identical digest after an empty register must fire");
         assert!(refired.contains("tasks 4/8"));
-    }
-
-    /// `Over` repeatedly fires once; `Under` re-arms; a second `Over` fires
-    /// again.
-    #[test]
-    fn pressure_fires_once_per_excursion() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-
-        assert!(
-            nudges
-                .pressure_reminder(&over(Some(vec![7])), &mut log)
-                .is_some()
-        );
-        assert!(
-            nudges
-                .pressure_reminder(&over(Some(vec![7])), &mut log)
-                .is_none(),
-            "the same excursion must not re-fire"
-        );
-        assert!(
-            nudges
-                .pressure_reminder(&Pressure::Under, &mut log)
-                .is_none()
-        );
-        assert!(
-            nudges
-                .pressure_reminder(&over(Some(vec![7])), &mut log)
-                .is_some(),
-            "a fresh excursion after Under must fire again"
-        );
-    }
-
-    /// A stale token measure (`Unknown`) neither warns nor re-arms a warning
-    /// still owed.
-    #[test]
-    fn stale_measure_neither_warns_nor_rearms() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-
-        assert!(
-            nudges
-                .pressure_reminder(&over(Some(vec![7])), &mut log)
-                .is_some()
-        );
-        for _ in 0..3 {
-            assert!(
-                nudges
-                    .pressure_reminder(&Pressure::Unknown, &mut log)
-                    .is_none(),
-                "an unknown reading must neither re-fire nor re-arm"
-            );
-        }
-        assert!(
-            nudges
-                .pressure_reminder(&Pressure::Under, &mut log)
-                .is_none()
-        );
-        assert!(
-            nudges
-                .pressure_reminder(&over(Some(vec![7])), &mut log)
-                .is_some(),
-            "a genuine Under reading re-arms; the next Over then fires"
-        );
     }
 
     /// A must-reply completion at budget with a pin due returns `None` and

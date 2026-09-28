@@ -14,7 +14,7 @@
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process gate suffices.
 
-use crate::provider::{Auth, Billing, Service, ServiceName, built_in};
+use crate::provider::{Auth, Billing, Meter, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
 use ral_core::types::{Break, Capabilities, Escape, Mooring, Value};
@@ -266,7 +266,7 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
         auth: key_env.map_or(Auth::Unnamed, Auth::Env),
         billing: Billing::Metered,
         routes: false,
-        meter: None,
+        meter: Meter::Unpublished,
     })
 }
 
@@ -390,7 +390,7 @@ mod tests {
                 auth: Auth::Env("HOUSE_LLM_KEY".into()),
                 billing: Billing::Metered,
                 routes: false,
-                meter: None,
+                meter: Meter::Unpublished,
             },
             Service {
                 name: ServiceName::declared("ollama").unwrap(),
@@ -400,7 +400,7 @@ mod tests {
                 auth: Auth::Unnamed,
                 billing: Billing::Metered,
                 routes: false,
-                meter: None,
+                meter: Meter::Unpublished,
             },
         ];
         save_declared(&path, &written, LABEL).expect("write");
@@ -433,7 +433,7 @@ mod tests {
                 auth: Auth::Unnamed,
                 billing: Billing::Metered,
                 routes: false,
-                meter: None,
+                meter: Meter::Unpublished,
             }],
             LABEL,
         )

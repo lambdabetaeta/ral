@@ -6,6 +6,9 @@
 //! driver in `retry.rs` keys its backoff on the resulting variant, and
 //! [`crate::agent::event::ProviderErrorRecord`] mirrors it for the TUI.
 
+use super::reset;
+use super::retry::Wait;
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use std::fmt;
@@ -41,7 +44,14 @@ pub enum ProviderError {
     /// asked for one; `retry.rs` gives this variant a longer leash than a
     /// generic transient.
     RateLimited {
-        retry_after: Option<Duration>,
+        retry_after: Option<Wait>,
+        cause: String,
+        body: Option<Body>,
+    },
+    /// HTTP 429 naming a reset past what the patient tier waits in place: the
+    /// account's allowance is spent until `resets_at`. Never retried here.
+    Exhausted {
+        resets_at: Timestamp,
         cause: String,
         body: Option<Body>,
     },
@@ -105,14 +115,7 @@ impl ProviderError {
                 headers,
                 body,
             } if status == StatusCode::TOO_MANY_REQUESTS => {
-                let retry_after = headers
-                    .and_then(retry_after_header)
-                    .or_else(|| parse_retry_after(&msg));
-                Self::RateLimited {
-                    retry_after,
-                    cause: msg,
-                    body,
-                }
+                Self::refused(headers, body, msg, model)
             }
             Fault::Status { status, body, .. } if status.is_server_error() => Self::Transient {
                 cause: msg,
@@ -133,6 +136,44 @@ impl ProviderError {
                 status: None,
             },
             Fault::Terminal(inner) => Self::Other(inner.unwrap_or(msg)),
+        }
+    }
+
+    /// A 429, read three ways: a quota spent, which no wait clears; a reset
+    /// past what the patient tier waits in place; or a rate to back off from.
+    fn refused(
+        headers: Option<&HeaderMap>,
+        body: Option<Body>,
+        cause: String,
+        model: &str,
+    ) -> Self {
+        if body.as_deref().is_some_and(reset::unwaitable) {
+            return Self::Api {
+                status: Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                model: model.to_string(),
+                message: cause,
+                body,
+            };
+        }
+        let now = Timestamp::now();
+        let Some(at) = reset::at(headers, body.as_deref(), &cause, now) else {
+            return Self::RateLimited {
+                retry_after: None,
+                cause,
+                body,
+            };
+        };
+        match Wait::patient(Duration::try_from(at.duration_since(now)).unwrap_or_default()) {
+            Some(wait) => Self::RateLimited {
+                retry_after: Some(wait),
+                cause,
+                body,
+            },
+            None => Self::Exhausted {
+                resets_at: at,
+                cause,
+                body,
+            },
         }
     }
 }
@@ -315,80 +356,6 @@ fn json_status_code(body: &serde_json::Value) -> Option<u16> {
         .and_then(|c| u16::try_from(c).ok())
 }
 
-/// The server's explicit back-off, read from the headers genai retains on
-/// `ResponseFailedStatus` rather than scraped out of `Display`. RFC 9110
-/// allows `Retry-After` as either delta-seconds or an HTTP-date; both forms
-/// reach real providers, so both are read.
-fn retry_after_header(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim();
-    if let Ok(secs) = value.parse() {
-        return Some(Duration::from_secs(secs));
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    parse_http_date(value, now)
-}
-
-/// `Retry-After`'s HTTP-date form, the IMF-fixdate RFC 9110 requires a sender
-/// use: `Sun, 06 Nov 1994 08:49:37 GMT`. A date already past floors at `0`
-/// rather than going negative — the caller backs off immediately.
-fn parse_http_date(s: &str, now_secs: u64) -> Option<Duration> {
-    let (_, rest) = s.split_once(", ")?;
-    let mut parts = rest.split_ascii_whitespace();
-    let day: i64 = parts.next()?.parse().ok()?;
-    let month = match parts.next()? {
-        "Jan" => 1,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        _ => return None,
-    };
-    let year: i64 = parts.next()?.parse().ok()?;
-    let mut hms = parts.next()?.split(':');
-    let hour: i64 = hms.next()?.parse().ok()?;
-    let min: i64 = hms.next()?.parse().ok()?;
-    let sec: i64 = hms.next()?.parse().ok()?;
-    if parts.next()? != "GMT" || hms.next().is_some() || parts.next().is_some() {
-        return None;
-    }
-    let epoch_secs = days_from_civil(year, month, day)
-        .checked_mul(86_400)?
-        .checked_add(hour * 3600 + min * 60 + sec)?;
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "now_secs is real wall-clock time, far below i64::MAX"
-    )]
-    let wait = epoch_secs - now_secs as i64;
-    Some(Duration::from_secs(wait.max(0).unsigned_abs()))
-}
-
-/// Days since the Unix epoch for a Gregorian civil date — Howard Hinnant's
-/// `days_from_civil`, the standard branch-free algorithm; valid for every
-/// date this era's HTTP servers will ever send.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400; // [0, 399]
-    let mp = (m + 9) % 12; // [0, 11]
-    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe - 719_468
-}
-
 impl ProviderError {
     /// One line, for a failure crossing an agent boundary as a flat string —
     /// the `AgentOutcome::Failed` a parent receives from a sub-agent.  The TUI's
@@ -402,6 +369,9 @@ impl ProviderError {
                 with_body_message(transient_label(*status), body.as_deref())
             }
             Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_deref()),
+            Self::Exhausted { body, .. } => {
+                with_body_message("usage limit reached", body.as_deref())
+            }
             Self::Api {
                 status,
                 message,
@@ -514,26 +484,6 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
-
-/// The fallback for a 429 whose typed variant carries no `Retry-After` header;
-/// genai surfaces it inconsistently, and missing is fine — the retry loop just
-/// backs off exponentially instead.
-fn parse_retry_after(msg: &str) -> Option<Duration> {
-    let needle = "retry-after";
-    // Slice the lowercased copy, never the original with an offset taken from
-    // it: a char whose lowercasing changes byte length (`İ`) shifts every later
-    // offset, so `&msg[i..]` could land mid-character and panic.
-    let lower = msg.to_lowercase();
-    let i = lower.find(needle)?;
-    let tail = &lower[i + needle.len()..];
-    let digits: String = tail
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let secs: u64 = digits.parse().ok()?;
-    Some(Duration::from_secs(secs))
-}
 
 /// The first `https?://…` in `msg`, so the renderer can label the endpoint that
 /// failed.  A trailing `)` or `,` is trimmed, so genai's `for url (https://…)`
@@ -671,7 +621,7 @@ mod tests {
         );
         match e {
             ProviderError::RateLimited { retry_after, .. } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(7)));
+                assert_eq!(retry_after.map(Wait::get), Some(Duration::from_secs(7)));
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
@@ -690,10 +640,60 @@ mod tests {
         );
         match e {
             ProviderError::RateLimited { retry_after, .. } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(11)));
+                assert_eq!(retry_after.map(Wait::get), Some(Duration::from_secs(11)));
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    fn too_many_requests(body: &serde_json::Value) -> ProviderError {
+        ProviderError::from_genai(
+            &genai::Error::HttpError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                canonical_reason: "Too Many Requests".into(),
+                body: body.to_string(),
+                headers: Box::new(HeaderMap::new()),
+            },
+            "m",
+        )
+    }
+
+    /// A reset hours off is a spent allowance, not congestion: it surfaces at
+    /// once, at the instant the body names.
+    #[test]
+    fn from_genai_classifies_a_codex_usage_limit_as_exhausted() {
+        let resets_at = Timestamp::now().as_second() + 5 * 3600;
+        let e = too_many_requests(&serde_json::json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "resets_at": resets_at,
+                "plan_type": "plus",
+            }
+        }));
+        match e {
+            ProviderError::Exhausted { resets_at: at, .. } => {
+                assert_eq!(at.as_second(), resets_at);
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+    }
+
+    /// A quota spent is cleared by no wait, so it must not be retried or scheduled.
+    #[test]
+    fn from_genai_classifies_insufficient_quota_as_api() {
+        let e = too_many_requests(&serde_json::json!({
+            "error": {"type": "insufficient_quota", "message": "You exceeded your quota"}
+        }));
+        assert!(
+            matches!(
+                e,
+                ProviderError::Api {
+                    status: Some(429),
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
     }
 
     /// The verbose `Display` would land a wall of JSON in a parent agent's
@@ -831,16 +831,6 @@ mod tests {
         assert!(
             matches!(e, ProviderError::Transient { .. }),
             "a non-streamed 503 must classify Transient, got {e:?}"
-        );
-    }
-
-    /// `İ` → `i̇` is one byte longer, so a slice taken from the shorter original
-    /// would land mid-character and panic.
-    #[test]
-    fn parse_retry_after_survives_length_changing_lowercase() {
-        assert_eq!(
-            parse_retry_after("İ retry-after: 9 seconds"),
-            Some(Duration::from_secs(9))
         );
     }
 

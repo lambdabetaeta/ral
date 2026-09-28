@@ -16,6 +16,23 @@ const MAX_DELAY_MS: u64 = 8_000;
 const RATE_LIMIT_MAX_DELAY_MS: u64 = 30_000;
 const RETRY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// A server-named wait the patient tier sits out in place: only
+/// [`Wait::patient`] makes one, so no provider value can stall the loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wait(Duration);
+
+impl Wait {
+    /// `None` past the patient tier's ceiling: a wait that long is a spent
+    /// allowance, not congestion.
+    pub(super) fn patient(wait: Duration) -> Option<Self> {
+        (wait <= Duration::from_millis(RATE_LIMIT_MAX_DELAY_MS)).then_some(Self(wait))
+    }
+
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
 /// The first attempt keeps the full [`STREAM_IDLE_TIMEOUT`]; retries take the
 /// shorter one, spending the attempt budget rather than the clock.
 pub(super) fn idle_timeout(attempt: u32) -> Duration {
@@ -33,12 +50,11 @@ fn retry_limits(error: &ProviderError) -> (u32, u64) {
     }
 }
 
-/// The server's own `Retry-After` wins when present, capped like the
-/// exponential fallback so one provider value cannot stall the loop; the shift
-/// cap only guards `1u64 << shift` against overflow.
-async fn backoff_sleep(attempt: u32, retry_after: Option<Duration>, max_delay_ms: u64) {
-    if let Some(delay) = retry_after {
-        tokio::time::sleep(delay.min(Duration::from_millis(max_delay_ms))).await;
+/// The server's own [`Wait`] wins when present; the shift cap only guards
+/// `1u64 << shift` against overflow.
+async fn backoff_sleep(attempt: u32, retry_after: Option<Wait>, max_delay_ms: u64) {
+    if let Some(wait) = retry_after {
+        tokio::time::sleep(wait.0).await;
         return;
     }
     let shift = attempt.saturating_sub(1).min(16);
@@ -183,11 +199,10 @@ mod tests {
         ));
     }
 
-    /// From the wire error to the clock: a provider asking for ten minutes is
-    /// honoured only up to the cap, so a 429 costs the session minutes, not an
-    /// hour indistinguishable from a hang.
+    /// From the wire error to the loop: a provider asking for ten minutes has
+    /// spent the allowance, so the first attempt is the last.
     #[test]
-    fn rate_limited_429_spends_its_budget_under_the_delay_cap() {
+    fn a_429_naming_a_distant_reset_surfaces_on_its_first_attempt() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::RETRY_AFTER,
@@ -204,36 +219,22 @@ mod tests {
             },
             "m",
         );
-        assert!(matches!(
-            error,
-            ProviderError::RateLimited {
-                retry_after: Some(_),
-                ..
-            }
-        ));
+        assert!(
+            matches!(error, ProviderError::Exhausted { .. }),
+            "{error:?}"
+        );
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .start_paused(true)
-            .build()
-            .expect("build paused retry test runtime");
-        runtime.block_on(async {
-            let calls = std::cell::Cell::new(0u32);
-            let start = tokio::time::Instant::now();
-            let out: Result<(), ProviderError> =
-                retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
-                    calls.set(calls.get() + 1);
-                    Attempt::Failed(error.clone())
-                })
-                .await;
-            assert!(matches!(out, Err(ProviderError::RateLimited { .. })));
-            assert_eq!(calls.get(), RATE_LIMIT_MAX_ATTEMPTS);
-            let elapsed = start.elapsed();
-            assert!(
-                elapsed >= Duration::from_secs(140) && elapsed < Duration::from_secs(200),
-                "five waits capped at {RATE_LIMIT_MAX_DELAY_MS}ms, got {elapsed:?}"
-            );
-        });
+        let calls = std::cell::Cell::new(0u32);
+        let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
+            "test",
+            &cancel::Token::new(),
+            async |_attempt| {
+                calls.set(calls.get() + 1);
+                Attempt::Failed(error.clone())
+            },
+        ));
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(out, Err(ProviderError::Exhausted { .. })));
     }
 
     #[test]

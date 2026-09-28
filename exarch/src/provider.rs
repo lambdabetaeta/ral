@@ -2,7 +2,8 @@
 //! transport.
 //!
 //! History lives in the transcript the caller renders, not here; transport,
-//! request shaping, retry, streaming, and usage each keep their own sibling
+//! request shaping, retry, streaming, usage, and the per-account record of
+//! what is left of an allowance ([`rations`]) each keep their own sibling
 //! module.
 
 pub mod accounts;
@@ -16,7 +17,9 @@ pub mod listing;
 pub mod models;
 pub mod oauth;
 pub mod pricing;
+mod rations;
 mod request;
+pub(crate) mod reset;
 mod retry;
 pub mod scripted;
 mod secret_file;
@@ -32,6 +35,7 @@ pub use error::{CutShort, ProviderError};
 pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
+pub use rations::Rations;
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
 pub use stream::{Delta, StepOut};
 pub use transport::Engine;
@@ -42,7 +46,8 @@ use genai::chat::ChatMessage;
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::agent::cancel;
-use credential::{Credential, CredentialStore};
+use allowance::{Allowance, LiveMeters};
+use credential::CredentialStore;
 use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
 use transport::Transport;
@@ -78,31 +83,34 @@ pub struct Provider {
 
 /// A live transport over the shared [`Engine`], or a scripted replay so
 /// agent-loop tests never touch the network.
-enum Backend {
+pub(in crate::provider) enum Backend {
     Live {
         engine: Arc<Engine>,
         transport: Arc<Transport>,
+        /// This selection's meter, over the roster it was minted from: as
+        /// fresh as its transport and no fresher — a rotated key reaches both
+        /// at the next mint.
+        meters: LiveMeters,
+        rations: Arc<Rations>,
     },
     Scripted(scripted::Script),
 }
 
 impl Provider {
-    /// Build a live provider selection on a shared engine.
+    /// Build a provider selection on `backend`.
     ///
-    /// [`bureau::Bureau::build`] is the only caller: minting a provider needs
-    /// a credential, and the bureau is what holds one.
-    pub(crate) fn build(
-        engine: Arc<Engine>,
+    /// [`bureau::Bureau::build`] is the only caller that minds a live backend:
+    /// minting one needs a credential, and the bureau is what holds one.
+    pub(in crate::provider) fn build(
+        backend: Backend,
         account: &Account,
         model: String,
-        credential: &Credential,
         max_tokens_override: Option<u32>,
         tuning: Tuning,
         route: Option<String>,
     ) -> Self {
-        let transport = engine.transport_for(account, &model, credential);
         Self {
-            backend: Backend::Live { engine, transport },
+            backend,
             account: account.clone(),
             model,
             max_tokens_override,
@@ -113,14 +121,14 @@ impl Provider {
 
     /// Build a provider that replays scripted outcomes instead of dialling out.
     pub fn scripted(model: &str, script: scripted::Script) -> Self {
-        Self {
-            backend: Backend::Scripted(script),
-            account: Account::of_service(scripted_service()),
-            model: model.to_string(),
-            max_tokens_override: None,
-            tuning: Tuning::default(),
-            route: None,
-        }
+        Self::build(
+            Backend::Scripted(script),
+            &Account::of_service(scripted_service()),
+            model.to_string(),
+            None,
+            Tuning::default(),
+            None,
+        )
     }
 
     /// The user-supplied output cap, or `None` for the adapter default.
@@ -143,6 +151,15 @@ impl Provider {
         &self.account
     }
 
+    /// The record's last reading of this selection's account; empty when
+    /// scripted, or before one has landed.
+    pub fn allowances(&self) -> Vec<Allowance> {
+        match &self.backend {
+            Backend::Live { rations, .. } => rations.reading(&self.account.id),
+            Backend::Scripted(_) => Vec::new(),
+        }
+    }
+
     /// This model's context window when the pricing catalog knows it.
     pub fn context_window(&self) -> Option<u64> {
         pricing::context_window(&self.model)
@@ -163,19 +180,29 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
-            Backend::Live { engine, transport } => engine.complete(
+            Backend::Live {
+                engine,
                 transport,
-                &self.model,
-                self.max_tokens_override,
-                &self.tuning,
-                self.openrouter_route(),
-                system,
-                transcript,
-                tools,
-                search,
-                on_delta,
-                cancel,
-            ),
+                meters,
+                rations,
+            } => {
+                rations.admit(&self.account, meters)?;
+                let outcome = engine.complete(
+                    transport,
+                    &self.model,
+                    self.max_tokens_override,
+                    &self.tuning,
+                    self.openrouter_route(),
+                    system,
+                    transcript,
+                    tools,
+                    search,
+                    on_delta,
+                    cancel,
+                );
+                rations.settle(&self.account.id, &outcome);
+                outcome
+            }
             Backend::Scripted(script) => script.complete(&self.model, on_delta),
         }
     }

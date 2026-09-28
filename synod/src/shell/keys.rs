@@ -16,6 +16,7 @@
 //! to rule out. Declaring a *new* endpoint is the one exception — there is
 //! no account yet, only the name it is to be given.
 
+use super::Shared;
 use synod::accounts::{self, AccountList};
 use tauri::{AppHandle, State};
 
@@ -26,7 +27,7 @@ use tauri::{AppHandle, State};
 /// read this computer's accounts at all.
 #[tauri::command]
 pub fn list_accounts(accounts_state: State<'_, super::Accounts>) -> Result<AccountList, String> {
-    let (store, _) = accounts_state.resolved()?;
+    let Shared { store, .. } = accounts_state.resolved()?;
     Ok(accounts::list(store))
 }
 
@@ -42,7 +43,7 @@ pub fn save_key(
     account: String,
     key: String,
 ) -> Result<AccountList, String> {
-    let (store, catalog) = accounts_state.resolved()?;
+    let Shared { store, catalog, .. } = accounts_state.resolved()?;
     accounts::set_key(store, catalog, &account, &key)?;
     Ok(settled(&app, store))
 }
@@ -58,7 +59,7 @@ pub fn forget_key(
     accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
-    let (store, _) = accounts_state.resolved()?;
+    let Shared { store, .. } = accounts_state.resolved()?;
     accounts::forget_key(store, &account)?;
     Ok(settled(&app, store))
 }
@@ -78,7 +79,7 @@ pub fn save_endpoint(
     protocol: String,
     key: Option<String>,
 ) -> Result<AccountList, String> {
-    let (store, catalog) = accounts_state.resolved()?;
+    let Shared { store, catalog, .. } = accounts_state.resolved()?;
     accounts::add_endpoint(store, catalog, &name, &endpoint, &protocol, key.as_deref())?;
     Ok(settled(&app, store))
 }
@@ -95,7 +96,7 @@ pub fn forget_endpoint(
     accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
-    let (store, _) = accounts_state.resolved()?;
+    let Shared { store, .. } = accounts_state.resolved()?;
     accounts::forget_endpoint(store, &account)?;
     Ok(settled(&app, store))
 }

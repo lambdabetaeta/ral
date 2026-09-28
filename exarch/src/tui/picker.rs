@@ -1060,7 +1060,7 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ReasoningEffort;
+    use crate::provider::{Meter, ReasoningEffort};
     use ratatui::crossterm::event::KeyCode;
 
     /// A built-in service's sole account, named by the service alone.
@@ -1081,7 +1081,7 @@ mod tests {
             auth: identity::Auth::Env(format!("{}_KEY", name.to_uppercase())),
             billing: identity::Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         })
     }
 

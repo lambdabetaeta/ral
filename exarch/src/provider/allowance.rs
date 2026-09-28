@@ -6,13 +6,15 @@
 
 mod meters;
 
-use crate::agent::resources::hms;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Readout, Span};
+use crate::clock::hms;
+use crate::provider::Rations;
 use crate::provider::credential::Roster;
 use crate::provider::identity::{AccountId, Meter};
 use crate::provider::listing::Fetches;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One rationed window of an account's entitlement, as the provider reports it.
@@ -55,9 +57,13 @@ pub enum Unit {
 }
 
 impl Allowance {
-    /// The proportion consumed, `None` when the provider disclosed no bound —
-    /// then there is nothing to draw a bar against.
-    pub fn fraction(&self) -> Option<f64> {
+    /// The share consumed as the card shows it, `None` when the provider
+    /// disclosed no bound — then there is nothing to draw a bar against.
+    pub fn percent(&self) -> Option<u32> {
+        self.fraction().map(percent_from_fraction)
+    }
+
+    fn fraction(&self) -> Option<f64> {
         match self.used {
             Consumption::Fraction(f) => Some(f),
             Consumption::Counted {
@@ -96,15 +102,15 @@ impl Allowance {
             Some(rp) => format!("{window_part} · {rp}"),
             None => window_part,
         };
-        let value = if let Some(f) = self.fraction() {
+        let value = if let Some(value) = self.percent() {
             FieldVal::Readout(Readout {
-                value: percent_from_fraction(f),
+                value,
                 max: Some(100),
                 unit: Some("%".into()),
             })
         } else {
             let Consumption::Counted { used, limit, unit } = &self.used else {
-                unreachable!("fraction() is None only for Consumption::Counted")
+                unreachable!("percent() is None only for Consumption::Counted")
             };
             FieldVal::Inline(vec![Span::plain(inline_text(*used, *limit, *unit))])
         };
@@ -269,35 +275,41 @@ impl MeterSource for LiveMeters {
             .roster
             .account(id)
             .ok_or_else(|| format!("{id} is not a known account"))?;
-        let Some(meter) = account.service.meter else {
-            return Ok(Vec::new());
+        let read = match account.service.meter {
+            Meter::Unpublished => return Ok(Vec::new()),
+            Meter::Codex => meters::codex::read,
+            Meter::OpenRouterCredits => meters::openrouter::read,
         };
         let credential = self
             .roster
             .credential(id)
             .ok_or_else(|| format!("{} has no resolved credential", self.roster.label(account)))?;
-        match meter {
-            Meter::Codex => meters::codex::read(account, credential, &self.roster),
-            Meter::OpenRouterCredits => meters::openrouter::read(account, credential, &self.roster),
-        }
+        read(account, credential, &self.roster)
     }
 }
 
 /// Every available account's ration, fetched concurrently.
 ///
-/// There is no cache and no store: a reading is an instantaneous fact about a
-/// rolling window, and a TTL would hand the user a stale number in exactly the
-/// situation where they typed `/limits` because they suspected one.
+/// There is no cache and no TTL for the card: a reading is an instantaneous
+/// fact about a rolling window, and a TTL would hand the user a stale number
+/// in exactly the situation where they typed `/limits` because they suspected
+/// one. Each reading is landed in the [`Rations`] record as well, where it
+/// goes on being useful.
 pub struct Survey {
     fetches: Fetches<AccountId, Vec<Allowance>>,
     /// Computed at [`Self::open`], on the caller's thread, from the full
     /// account set — [`identity::label`] needs the set, and the set must not
     /// cross to a background thread piecemeal.
     labels: Vec<(AccountId, String)>,
+    rations: Arc<Rations>,
 }
 
 impl Survey {
-    pub fn open<S: MeterSource + Clone + Send + 'static>(roster: &Roster, source: &S) -> Self {
+    pub fn open<S: MeterSource + Clone + Send + 'static>(
+        roster: &Roster,
+        source: &S,
+        rations: Arc<Rations>,
+    ) -> Self {
         let labels = roster
             .accounts()
             .iter()
@@ -309,11 +321,15 @@ impl Survey {
             let source = source.clone();
             fetches.spawn(id.clone(), move || source.read(&id));
         }
-        Self { fetches, labels }
+        Self {
+            fetches,
+            labels,
+            rations,
+        }
     }
 
-    /// Block until every fetch has reported, then compose the card. Called on
-    /// the survey thread, never the UI thread.
+    /// Block until every fetch has reported, land each reading in the record,
+    /// then compose the card. Called on the survey thread, never the UI thread.
     pub fn settle(self) -> Card {
         let mut results: BTreeMap<AccountId, Result<Vec<Allowance>, String>> =
             self.fetches.settle().into_iter().collect();
@@ -324,8 +340,14 @@ impl Survey {
             .into_iter()
             .map(|(id, label)| {
                 let reading = match results.remove(&id) {
-                    Some(Ok(allowances)) if allowances.is_empty() => Reading::Unmetered,
-                    Some(Ok(allowances)) => Reading::Allowances(allowances),
+                    Some(Ok(allowances)) => {
+                        self.rations.land(&id, allowances.clone());
+                        if allowances.is_empty() {
+                            Reading::Unmetered
+                        } else {
+                            Reading::Allowances(allowances)
+                        }
+                    }
                     Some(Err(reason)) => Reading::Failed(reason),
                     None => Reading::Failed("no reading arrived".to_string()),
                 };
@@ -490,7 +512,7 @@ mod tests {
             auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
             billing: Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         })
     }
 
@@ -534,14 +556,20 @@ mod tests {
             resets_at: None,
         };
         let mut readings = BTreeMap::new();
-        readings.insert(loaded.id, Ok(vec![allowance.clone()]));
+        readings.insert(loaded.id.clone(), Ok(vec![allowance.clone()]));
         readings.insert(unmetered.id.clone(), Ok(Vec::new()));
         readings.insert(failing.id.clone(), Err("network is down".to_string()));
         let source = FakeSource {
             readings: std::sync::Arc::new(readings),
         };
 
-        let card = Survey::open(&roster, &source).settle();
+        let rations = Arc::new(Rations::default());
+        let card = Survey::open(&roster, &source, Arc::clone(&rations)).settle();
+        assert_eq!(
+            rations.reading(&loaded.id),
+            vec![allowance.clone()],
+            "a survey lands what it read in the record"
+        );
 
         assert_eq!(
             card.0.len(),

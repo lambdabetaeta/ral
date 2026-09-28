@@ -18,7 +18,6 @@ use crate::tui::DEMOTE_IDLE;
 use ral_core::protocol::{Severed, reading};
 use serde::Serialize;
 use std::path::Path;
-use std::time::Duration;
 
 /// One probed accumulator, one row per figure: what the fold renders. A probe
 /// fold is an interactive diagnostic, read when it is run; no session keeps a
@@ -218,25 +217,6 @@ pub fn frontend_rows(
     ]
 }
 
-/// The shared 4-tier `d/h/m/s` formatter — `3d 04h` / `2h 05m` / `41m 09s` /
-/// `12s` — with `sep` between the two units of the multi-unit forms.
-pub fn hms(secs: u64, sep: &str) -> String {
-    if secs >= 86400 {
-        format!("{}d{sep}{:02}h", secs / 86400, (secs % 86400) / 3600)
-    } else if secs >= 3600 {
-        format!("{}h{sep}{:02}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m{sep}{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
-/// A duration as terse probe ink, for the nearest-reap notes.
-pub fn terse_duration(d: Duration) -> String {
-    hms(d.as_secs(), "")
-}
-
 /// Total bytes of every regular file under `root`, recursively; symlinks are
 /// not followed (their target may leave the probed tree) and an unreadable
 /// entry counts zero rather than failing the fold.
@@ -392,7 +372,7 @@ impl Avatar {
             running_worker,
             None,
             "reap",
-            nearest_reap.map(|d| format!("nearest reap in {}", terse_duration(d))),
+            nearest_reap.map(|d| format!("nearest reap in {}", crate::clock::hms(d.as_secs(), ""))),
         ));
         rows.push(ProbeRow::new(
             "workers.running[durable]",
@@ -634,24 +614,6 @@ mod tests {
             panic!("a probe field renders inline spans");
         };
         assert_eq!(spans[0].text, "7", "an unarmed cap adds nothing");
-    }
-
-    #[test]
-    fn terse_duration_picks_the_coarsest_fitting_unit() {
-        assert_eq!(terse_duration(Duration::from_secs(12)), "12s");
-        assert_eq!(terse_duration(Duration::from_secs(69)), "1m09s");
-        assert_eq!(terse_duration(Duration::from_mins(125)), "2h05m");
-    }
-
-    #[test]
-    fn hms_adds_a_day_tier_above_the_existing_arms() {
-        assert_eq!(hms(3 * 86400 + 4 * 3600, " "), "3d 04h");
-        assert_eq!(hms(86400, ""), "1d00h");
-        assert_eq!(hms(7 * 86400, " "), "7d 00h");
-        // The pre-existing arms hold exactly as before.
-        assert_eq!(hms(12, ""), "12s");
-        assert_eq!(hms(69, " "), "1m 09s");
-        assert_eq!(hms(7500, ""), "2h05m");
     }
 
     /// A missing directory reads zero rather than failing the fold.

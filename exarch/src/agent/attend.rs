@@ -1,20 +1,24 @@
 //! The one loop every node runs: pull the next item off the node's own inbox,
-//! take it up, do the ready-boundary housekeeping, and turn a nudge-worthy
-//! outcome into a self-posted nudge.  Stepping the model to quiescence over
-//! one item is [`super::deliberate`]'s job; nothing here special-cases a
-//! node's position, since a child's reply is deposited on its own agent and a
-//! non-reply end is delivered up its parent's mailbox by the spawn site.
+//! take it up, and turn a nudge-worthy outcome into a self-posted nudge.
+//! Stepping the model to quiescence over one item is [`super::deliberate`]'s
+//! job; nothing here special-cases a node's position, since a child's reply
+//! is deposited on its own agent and a non-reply end is delivered up its
+//! parent's mailbox by the spawn site.
 
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
+use crate::agent::gauge::{Pressure, Warning};
 use crate::agent::nudge;
 use crate::agent::seat::EngineLost;
 use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
+use crate::clock;
+use crate::fleet::schedule::Trigger;
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
 use ral_core::protocol::{Severed, reading};
 use ral_core::serial::FOValue;
+use std::time::Duration;
 
 /// What the surrounding loop does next: `Stop` on `/quit` or a headless root's
 /// `reply`; `Severed` hands the loop the engine's loss to record once it ends.
@@ -25,8 +29,11 @@ enum Flow {
 }
 
 /// ral calls between disk-warn ceiling checks: the walk is a full scan of the
-/// session log dir and scratch, too costly to pay at every ready boundary.
+/// session log dir and scratch, too costly to pay at every tool boundary.
 const DISK_WARN_CHECK_INTERVAL: u64 = 32;
+
+/// The label of the one-shot wakeup armed at a spent allowance's reset.
+const RESUME_LABEL: &str = "usage-reset";
 
 /// What [`Avatar::attend`] does once [`Control`] has run a slash command.
 pub enum Verdict {
@@ -93,9 +100,7 @@ impl Avatar {
             // deliberately not drained here: core pushes its `` `notice `` on
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
-            if let Err(s) = self.check_disk_warn() {
-                break Some(s);
-            }
+            //
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
             // hand the agent is not idle for any observable moment, and the
@@ -149,9 +154,6 @@ impl Avatar {
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         let lost = loop {
             if let Some(s) = self.seat.severed() {
-                break Some(s);
-            }
-            if let Err(s) = self.check_disk_warn() {
                 break Some(s);
             }
             let Some(item) = self.inbox.next_item() else {
@@ -248,6 +250,9 @@ impl Avatar {
             && let Err(error) = self.log.lock().record_provider_error(e)
         {
             eprintln!("exarch: a provider error was not recorded: {error}");
+        }
+        if let Err(ProviderError::Exhausted { resets_at, .. }) = &outcome {
+            self.resume_at(*resets_at);
         }
         if let Ok(deliberate::Outcome::Severed(s)) = &outcome {
             return Flow::Severed(s.clone());
@@ -355,68 +360,119 @@ impl Avatar {
     /// against [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading
     /// carries the cut [`Avatar::planned_eviction`] would make, so the
     /// reminder can name it.
-    pub(super) fn pressure_gauge(&self, provider: &Provider) -> nudge::Pressure {
+    pub(super) fn pressure_gauge(&self, provider: &Provider) -> Pressure {
         match provider.context_window() {
             Some(w) if w > 0 => match self.token_pressure(w) {
-                Some(detail) => nudge::Pressure::Over {
+                Some(detail) => Pressure::Over {
                     detail,
                     planned: self.planned_eviction(),
                 },
-                None if self.measured_input().is_some() => nudge::Pressure::Under,
-                None => nudge::Pressure::Unknown,
+                None if self.measured_input().is_some() => Pressure::Under,
+                None => Pressure::Unknown,
             },
             _ => {
                 let bytes = self.log.lock().history_bytes();
                 if bytes >= PRESSURE_THRESHOLD_FALLBACK {
-                    nudge::Pressure::Over {
+                    Pressure::Over {
                         detail: format!("{} KB", bytes / 1024),
                         planned: self.planned_eviction(),
                     }
                 } else {
-                    nudge::Pressure::Under
+                    Pressure::Under
                 }
             }
         }
     }
 
-    /// Warn once per excursion above the operator's disk-warn ceiling, as an
-    /// operational note ([`Forensic::SystemNote`](crate::record::Forensic::SystemNote))
-    /// — nothing is ever rotated or deleted.  Unconfigured it walks nothing at
-    /// all; otherwise it walks on the [`Self::ral_epoch`] cadence of
+    /// The disk-warn ceiling's verdict, as an operational note once per
+    /// excursion — nothing is ever rotated or deleted.  Unconfigured it walks
+    /// nothing at all; otherwise it walks on the [`Self::ral_epoch`] cadence of
     /// [`DISK_WARN_CHECK_INTERVAL`].
     ///
     /// # Errors
     /// The engine's severance, from the `EXARCH_SCRATCH` probe.
-    fn check_disk_warn(&mut self) -> Result<(), Severed> {
+    fn disk_warning(&mut self) -> Result<Option<Warning>, Severed> {
         let Some(ceiling) = self.agent.disk_warn_bytes else {
-            return Ok(());
+            return Ok(None);
         };
         if self.ral_epoch < self.disk_check_epoch {
-            return Ok(());
+            return Ok(None);
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
         let mut total = crate::agent::resources::dir_size(self.log.lock().dir());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }
-        if total > ceiling {
-            if !self.disk_warn_latched {
-                self.disk_warn_latched = true;
-                Self::note(
-                    format!(
-                        "disk: session log + scratch is {} KiB, over the {} KiB warn ceiling \
-                         — forensic records are never rotated or deleted automatically; \
-                         clean up by hand",
-                        total / 1024,
-                        ceiling / 1024
-                    ),
-                    self,
-                );
-            }
-        } else {
-            self.disk_warn_latched = false;
+        Ok(self.gauges.disk(total, ceiling))
+    }
+
+    /// Every standing condition newly climbed, told: the user's lines noted,
+    /// the model's reminders returned for the one steering message the
+    /// protocol admits after a tool batch.
+    ///
+    /// # Errors
+    /// The engine's severance, from the disk probe.
+    pub(super) fn warnings(&mut self, provider: &Provider) -> Result<Vec<String>, Severed> {
+        let mut told: Vec<Warning> = self
+            .gauges
+            .pressure(&self.pressure_gauge(provider))
+            .into_iter()
+            .collect();
+        told.extend(self.disk_warning()?);
+        told.extend(
+            self.gauges
+                .ration
+                .climb(provider.account(), &provider.allowances()),
+        );
+        Ok(self.tell(told))
+    }
+
+    /// Note each user line; turn each model part into a reminder, dropped
+    /// for a `--chat` trunk, which keeps no [`nudge::Nudges`].
+    fn tell(&self, warnings: Vec<Warning>) -> Vec<String> {
+        warnings
+            .into_iter()
+            .filter_map(|warning| {
+                if let Some(line) = warning.user {
+                    Self::note(line, self);
+                }
+                let (cause, body) = warning.model?;
+                let nudges = self.nudges.as_ref()?;
+                Some(nudges.remind(cause, &body, &mut self.log.lock()))
+            })
+            .collect()
+    }
+
+    /// Arm the one-shot wakeup that resumes the task when a spent allowance
+    /// resets, replacing any earlier one.
+    fn resume_at(&self, resets_at: jiff::Timestamp) {
+        let now = jiff::Timestamp::now();
+        let delay = wake_delay(resets_at, now);
+        let prompt = format!(
+            "The provider's usage limit paused this task at {}; it has now reset. \
+             Carry on where you left off.",
+            clock::local(now)
+        );
+        let schedules = &self.agent.schedules;
+        schedules.unschedule(RESUME_LABEL);
+        match schedules.schedule(
+            Trigger::After(delay),
+            prompt,
+            RESUME_LABEL.into(),
+            &self.mailbox(),
+        ) {
+            Ok(_) => Self::note(
+                format!(
+                    "usage limit reached — resuming {}, in {}",
+                    clock::local(resets_at),
+                    clock::hms(delay.as_secs(), " ")
+                ),
+                self,
+            ),
+            Err(refusal) => self.note_error(format!(
+                "usage limit reached, but the resume could not be scheduled: {refusal}"
+            )),
         }
-        Ok(())
     }
 
     /// The one edge both loops end on: a severance they broke on, or one a
@@ -443,6 +499,13 @@ impl Avatar {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
     }
+}
+
+/// Whole seconds to the reset, rounded up so the wake never lands inside the
+/// hold, and at least one.
+fn wake_delay(resets_at: jiff::Timestamp, now: jiff::Timestamp) -> Duration {
+    let wait = Duration::try_from(resets_at.duration_since(now)).unwrap_or_default();
+    Duration::from_secs((wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1))
 }
 
 /// Emit the chrome an item's source shows as it enters context.  A nudge is an
@@ -1080,116 +1143,112 @@ mod tests {
     }
 
     /// Unconfigured, the check returns before the epoch bookkeeping: no walk,
-    /// no emission, no cost.
+    /// no warning, no cost.
     #[test]
-    fn check_disk_warn_unconfigured_never_walks_or_warns() {
+    fn disk_warning_unconfigured_never_walks_or_warns() {
         let mut session = Avatar::for_test("system").unwrap();
         assert!(session.agent.disk_warn_bytes.is_none());
 
-        let (tx, rx) = crate::bus::channel();
-        session.recorder().attach(crate::record::FleetSink {
-            id: session.agent.id,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
-
+        assert!(
+            session
+                .disk_warning()
+                .expect("an identity seat never severs")
+                .is_none(),
+            "unconfigured: never warns, ever"
+        );
         assert_eq!(
             session.disk_check_epoch, 0,
             "the early return never advances the check epoch"
-        );
-        assert!(
-            !crate::bus::drain_records(&rx)
-                .into_iter()
-                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
-            "unconfigured: never emits, ever"
-        );
-    }
-
-    /// The latch suppresses a repeat until the figure falls back under.
-    #[test]
-    fn check_disk_warn_still_above_does_not_repeat() {
-        let mut session = warned_at(WARN_CEILING);
-        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; OVER_CEILING]).unwrap();
-
-        let (tx, rx) = crate::bus::channel();
-        session.recorder().attach(crate::record::FleetSink {
-            id: session.agent.id,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
-        assert!(
-            crate::bus::drain_records(&rx)
-                .into_iter()
-                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
-            "the first crossing warns"
-        );
-
-        // Force the amortization window open without driving real ral calls.
-        session.disk_check_epoch = session.ral_epoch;
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
-        assert!(
-            crate::bus::drain_records(&rx).is_empty(),
-            "still above the ceiling: the latch suppresses a repeat"
         );
     }
 
     /// Falling back under clears the latch, so a re-crossing warns again.
     #[test]
-    fn check_disk_warn_falling_below_rearms_the_latch() {
+    fn disk_warning_falling_below_rearms_the_latch() {
         let mut session = warned_at(WARN_CEILING);
-        // The ceiling sits comfortably above the session's own baseline plus
-        // one durable warning note's own footprint, so the big file alone —
-        // not the warning's own record — decides whether it is crossed.
         let big = session.log_dir().join("big.txt");
         std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
 
-        let (tx, rx) = crate::bus::channel();
-        session.recorder().attach(crate::record::FleetSink {
-            id: session.agent.id,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
-        let note = crate::bus::drain_records(&rx)
-            .into_iter()
-            .find_map(|record| match record {
-                Record::Forensic(Forensic::SystemNote { text }) => Some(text),
-                _ => None,
-            })
+        let warning = session
+            .disk_warning()
+            .expect("an identity seat never severs")
             .expect("the first crossing warns");
-        assert!(note.contains("disk"), "{note}");
+        let line = warning.user.expect("the user is told");
+        assert!(line.contains("disk"), "{line}");
+        assert!(warning.model.is_none(), "the model is never told of disk");
 
         std::fs::remove_file(&big).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
         assert!(
-            crate::bus::drain_records(&rx).is_empty(),
+            session
+                .disk_warning()
+                .expect("an identity seat never severs")
+                .is_none(),
             "back under the ceiling: no warning, just the latch clearing"
         );
-        assert!(!session.disk_warn_latched, "the latch is cleared");
 
         std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session
-            .check_disk_warn()
-            .expect("an identity seat never severs");
         assert!(
-            crate::bus::drain_records(&rx)
-                .into_iter()
-                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
+            session
+                .disk_warning()
+                .expect("an identity seat never severs")
+                .is_some(),
             "re-crossing after falling below warns again"
+        );
+    }
+
+    /// A spent allowance leaves exactly one wakeup at its reset, however many
+    /// times it is refused.
+    #[test]
+    fn an_exhausted_outcome_arms_one_usage_reset_wakeup() {
+        let mut session = Avatar::for_test("system").unwrap();
+        let resets_at = jiff::Timestamp::now() + Duration::from_hours(5);
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::error(ProviderError::Exhausted {
+                    resets_at,
+                    cause: "429".into(),
+                    body: None,
+                }))
+                .then(Reply::error(ProviderError::Exhausted {
+                    resets_at,
+                    cause: "429".into(),
+                    body: None,
+                })),
+        ));
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+        session.couple(&emit);
+        let mut control = NoControl;
+        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
+        for prompt in ["first", "again"] {
+            session.seed(prompt.into());
+            let item = session.inbox.next_item().expect("the seeded item");
+            session.take_up(&item, &mut control, &emit, &mut final_outcome);
+        }
+
+        assert!(
+            session.agent.schedules.unschedule(RESUME_LABEL),
+            "the wakeup bears the usage-reset label"
+        );
+        assert!(
+            !session.agent.schedules.armed(),
+            "the second refusal replaced the first rather than adding to it"
+        );
+    }
+
+    #[test]
+    fn a_wake_rounds_up_to_whole_seconds_and_a_past_reset_to_one() {
+        let now = jiff::Timestamp::now();
+        assert_eq!(
+            wake_delay(now + Duration::from_millis(100_900), now),
+            Duration::from_secs(101)
+        );
+        assert_eq!(
+            wake_delay(now - Duration::from_secs(30), now),
+            Duration::from_secs(1)
         );
     }
 

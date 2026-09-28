@@ -43,6 +43,7 @@ pub mod deliberate;
 mod dial;
 pub mod digest;
 pub mod event;
+pub(crate) mod gauge;
 pub mod nudge;
 pub mod resources;
 pub(crate) mod seat;
@@ -148,7 +149,7 @@ pub struct Agent {
     /// which hardcodes it `false`.
     pub(crate) allow_schedule: bool,
     /// The operator's ceiling, shared verbatim by every fork — a host setting.
-    /// `None` means [`Avatar::check_disk_warn`] never walks the dirs at all.
+    /// `None` means [`Avatar::disk_warning`] never walks the dirs at all.
     disk_warn_bytes: Option<u64>,
     /// The network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
@@ -252,15 +253,13 @@ pub struct Avatar {
     last_input: (u64, usize),
     /// The ral-call clock, bumped at the top of every [`Self::ral`] — a
     /// failed eval is still a call.  The settled-worker sweep, the
-    /// binding-lease ledger, and [`Self::check_disk_warn`] all read it.  Never
+    /// binding-lease ledger, and [`Self::disk_warning`] all read it.  Never
     /// rewound, not even by `/clear`.
     ral_epoch: u64,
-    /// The [`Self::ral_epoch`] at which the next disk walk falls due, so the
-    /// walk amortizes over ral calls rather than over ready boundaries.
+    /// The [`Self::ral_epoch`] at which the next disk walk falls due.
     disk_check_epoch: u64,
-    /// Latched on crossing the ceiling, so the warning fires once per
-    /// excursion rather than once per boundary.
-    disk_warn_latched: bool,
+    /// Where each standing condition has last been weighed.
+    gauges: gauge::Gauges,
 }
 
 /// The depth budget exarch's trunks start with.

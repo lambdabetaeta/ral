@@ -87,8 +87,8 @@ pretended otherwise.
    under pressure, the edge-triggered, budget-free reminder joins the one
    steering message the protocol admits after a batch (`append_steering`),
    naming the turn the next boundary would cut through.
-   `Nudges::pressure_reminder` keeps the one latch; a `--chat` trunk, holding
-   no `Nudges`, is never told.
+   `gauge::Gauges` keeps the one latch; a `--chat` trunk, holding no
+   `Nudges`, is never told.
 
 7. **A child inherits the table.** `Protocol::Inherited { source, through,
    turns, cuts }` carries the parent's whole table at the fork (every turn

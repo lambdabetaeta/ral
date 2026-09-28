@@ -46,8 +46,9 @@
 
 mod shell;
 
-use shell::{Accounts, commands, highlight, keys, review, signin};
+use shell::{Accounts, Shared, commands, highlight, keys, review, signin};
 
+use exarch::provider::Rations;
 use exarch::provider::models::{LiveSource, ModelCatalog};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -59,7 +60,11 @@ fn main() {
             LiveSource::new(&store),
             synod::session::SYNOD,
         )));
-        (Arc::new(Mutex::new(store)), catalog)
+        Shared {
+            store: Arc::new(Mutex::new(store)),
+            catalog,
+            rations: Arc::new(Rations::default()),
+        }
     }));
 
     #[allow(

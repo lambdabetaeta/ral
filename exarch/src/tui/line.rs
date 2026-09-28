@@ -969,7 +969,7 @@ fn wait_field(label: String, secs: u64) -> FieldRow {
     FieldRow {
         label,
         value: vec![
-            Span::raw(format!("{}  ", crate::agent::resources::hms(secs, " "))),
+            Span::raw(format!("{}  ", crate::clock::hms(secs, " "))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
         ],
     }

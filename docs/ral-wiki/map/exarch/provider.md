@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fef4bf2b
-generated_at_date: 2026-09-22
+generated_at_commit: c8731be6
+generated_at_date: 2026-09-28
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -117,7 +117,10 @@ this account publish what is left*. The two are orthogonal and the table says
 both: OpenRouter is `Metered` and publishes a credit balance, a declared local
 endpoint is `Metered` and publishes nothing, chatgpt is `FlatRate` and
 publishes two rolling windows. A derivation either way would have to guess at
-one of those rows.
+one of those rows. Publishing nothing is itself a variant, `Meter::Unpublished`,
+and the field is no `Option`: the `keyed` builder takes the meter as an
+argument, so every row states one and no row can default it — which is how
+`opencode-go`, a subscription, is visibly unpublished rather than forgotten.
 
 What a meter reports is one value type, `provider/allowance.rs`'s `Allowance`:
 a quantity of entitlement, consumed against a bound, renewing over a span. Its
@@ -133,10 +136,34 @@ path knows this one: `MeterSource` is the single seam the network sits behind,
 `Fetches` pump that reads every account concurrently — the same pump `Listing`
 uses, unchanged. The one `match` from `Meter` to a request lives in
 `LiveMeters::read`, and it is the whole extension point: another vendor is one
-`Meter` variant, one arm, one `allowance::meters` module, and one `meter:`
-field in the table row. Nothing else moves. There is no cache and no TTL: a
-ration is an instantaneous fact about a rolling window, and a stale figure
-would be wrong in exactly the situation that prompted the question.
+`Meter` variant, one arm, one `allowance::meters` module, and one `meter`
+argument to the `keyed` builder. Nothing else moves. `/limits` keeps no cache
+and no TTL: a ration is an instantaneous fact about a rolling window, and a
+stale figure would be wrong in exactly the situation that prompted the
+question.
+
+**What is known of each account's allowance has one home, `Rations`
+(`provider/rations.rs`), fed on the one road every model request travels.**
+The record is the third shared half of `Bureau::Live`, beside the store and
+catalog — exarch builds one, synod one for all its conversations — and keeps,
+per account, the last meter reading and the instant a refusal said it is spent
+until. `Provider::complete` is the only caller of `Engine::complete`, so its
+live arm is where nothing can go around: `Rations::admit` before the send
+refuses a held account with `Exhausted` and nothing sent, else spawns a read
+of the account's meter when two minutes have passed, its reading landing
+straight in the record; `Rations::settle` after it keeps a refusal's
+`resets_at`, the later of old and new. The read source rides the provider:
+`Bureau::build` clones the roster out under one store lock, binds the
+transport to its credential, and hands the roster to a `LiveMeters` in the
+same `Backend::Live`, so the meter is exactly as fresh as the transport.
+`Rations` holds no store and takes no lock but its own leaf one. `/limits`
+(`Bureau::survey_allowances`) reads every account fresh and `Survey::settle`
+lands each reading in the record before drawing its card, so no frontend can
+survey without feeding it; the agent's ration gauge
+([[map/exarch/agent|agent]]) only climbs `Provider::allowances`, the record's
+last reading, at `Allowance::percent` — the figure the card shows, so a
+warning and the card never disagree. Success responses carry usage too, but genai does not expose
+their headers; when it does, they are one more input to `settle`.
 
 On disk the login store is persisted through one door, `write_private`
 (`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm
@@ -342,7 +369,10 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
   turn was cut short, and each arm carries its own remedy
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 - Rate limits get a larger budget and a higher backoff ceiling than transient
-  failures (`retry_limits`), and an explicit `retry-after` is honoured.
+  failures (`retry_limits`), and a named wait is honoured. A wait past that
+  ceiling is a spent allowance, `Exhausted`, surfaced on its first attempt and
+  resumed by a wakeup at the reset
+  ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 Transport retry lives here, so the [[map/exarch/agent|nudge]] rules cover
 only model-behaviour outcomes, not transport.
@@ -357,10 +387,13 @@ the `StatusCode`, the response `HeaderMap`, and the parsed JSON body across the 
 paths a non-2xx reaches us by: `HttpError`, `WebModelCall(ResponseFailedStatus)`,
 the `HttpError` boxed inside a streaming `WebStream` (recursion), and a mid-stream
 `ChatResponse` frame whose code lives in `body["error"]["code"]` / `body["code"]`.
-The status drives the `RateLimited` (429) / `Transient` (5xx) / `Api` (other 4xx)
-split; a `retry-after` header is read directly when carried. The `_ => Terminal`
-floor makes the walk total — a contract breach (a non-JSON 2xx) or an unrecognised
-shape surfaces raw rather than being retried on a `Display`-string guess. The full
+The status drives the split: `refused` reads a 429 as a spent quota (`Api`), a
+reset past the patient tier (`Exhausted`), or congestion (`RateLimited`), taking
+the reset instant from `provider/reset.rs`, which reads every header and body
+convention providers name one by; a 5xx is `Transient`, any other 4xx `Api`.
+The `_ => Terminal` floor makes the walk total — a contract breach (a non-JSON
+2xx) or an unrecognised shape surfaces raw rather than being retried on a
+`Display`-string guess. The full
 tutorial is [[internals/provider-fault-recovery|provider-fault-recovery]]
 ([[invariants/transcript-admission|transcript-admission]]).
 
@@ -368,9 +401,10 @@ Each retryable and 4xx variant carries the parsed body (boxed at the error
 boundary) as an optional JSON value, so the renderer can print a
 labelled, structured error from the JSON rather than scraping the cause text;
 the chrome lives in [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]].
-`parse_retry_after` slices the *lowercased* copy it searches, never indexing
-the original with an offset taken from it, so a length-changing lowercase (`İ`)
-cannot land mid-character and panic (X8).
+`reset.rs`'s last-resort text scrape, `parse_retry_after`, slices the
+*lowercased* copy it searches, never indexing the original with an offset taken
+from it, so a length-changing lowercase (`İ`) cannot land mid-character and
+panic (X8).
 
 ## Usage, pricing, and the token formatter
 

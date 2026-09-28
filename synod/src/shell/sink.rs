@@ -22,6 +22,7 @@ use exarch::bus::card::{
     observation_display_card, to_card_notice,
 };
 use exarch::bus::{AgentId, Sink};
+use exarch::clock;
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
 use serde::Serialize;
 use ts_rs::TS;
@@ -121,7 +122,7 @@ fn suffix(prefix: &str, text: &str) -> String {
 }
 
 /// A [`ProviderErrorRecord`] as the one-line bracketed sentence the dial
-/// shows, exhaustively over its six variants — `label` is the tag word
+/// shows, exhaustively over its variants — `label` is the tag word
 /// ("provider" or "stalled") the two events that carry one prefix it with.
 fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
     let body = match record {
@@ -138,6 +139,13 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
         } => format!(
             "rate limited{}{}",
             retry_after_secs.map_or_else(String::new, |secs| format!(" — retry in {secs}s")),
+            suffix(" — ", cause),
+        ),
+        ProviderErrorRecord::Exhausted {
+            resets_at, cause, ..
+        } => format!(
+            "usage limit reached — resets {}{}",
+            clock::local(*resets_at),
             suffix(" — ", cause),
         ),
         ProviderErrorRecord::Api {
@@ -181,6 +189,7 @@ fn provider_error_severity(record: &ProviderErrorRecord) -> Severity {
         ProviderErrorRecord::Cancelled { .. }
         | ProviderErrorRecord::Transient { .. }
         | ProviderErrorRecord::RateLimited { .. }
+        | ProviderErrorRecord::Exhausted { .. }
         | ProviderErrorRecord::Truncated { .. } => Severity::Warn,
     }
 }

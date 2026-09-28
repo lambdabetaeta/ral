@@ -12,7 +12,7 @@
 //! and "which of the known accounts is this".
 
 use super::credential::{CredentialStore, well_formed_key};
-use super::identity::{self, Account, Auth, Billing, Service, ServiceName};
+use super::identity::{self, Account, Auth, Billing, Meter, Service, ServiceName};
 
 /// The endpoints declared beyond the built-in table.
 ///
@@ -64,7 +64,7 @@ pub fn declare_endpoint(
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
-        meter: None,
+        meter: Meter::Unpublished,
     })
 }
 
@@ -175,7 +175,7 @@ mod tests {
             auth: Auth::Unnamed,
             billing: Billing::Metered,
             routes: false,
-            meter: None,
+            meter: Meter::Unpublished,
         })
     }
 

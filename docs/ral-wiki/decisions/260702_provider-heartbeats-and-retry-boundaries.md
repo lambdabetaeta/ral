@@ -4,6 +4,15 @@ status: proposed
 
 # Provider heartbeats are not model turns
 
+> *Amended 2026-09-28*: a 429 naming a reset past the patient tier is
+> `Exhausted`, surfaced on its first attempt rather than retried against a
+> server that said "not yet". The turn still ends honestly and the transcript
+> does not grow; the attend loop then arms a one-shot `usage-reset` wakeup at
+> the reset. That wakeup is a new exchange — a `Post::Wakeup` the model reads
+> as a scheduled turn — not a synthetic continuation of the refused request,
+> so the rule below stands
+> ([[internals/provider-fault-recovery|provider-fault-recovery]]).
+
 **Exarch should judge provider liveness by *wire progress*, not by semantic
 model output, and provider recovery should stay below the transcript.** Modern
 Claude-class models, including `claude-fable-5` and `claude-sonnet-5`, may spend

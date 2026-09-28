@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use super::Shared;
 use ral_core::sync::LockExt;
 use serde::Serialize;
 use synod::session::{Choice, Conversation};
@@ -179,7 +180,7 @@ pub fn list_models(
     accounts: State<'_, super::Accounts>,
     refresh_started: State<'_, Once>,
 ) -> Result<synod::session::ModelMenu, String> {
-    let (store, catalog) = accounts.resolved()?;
+    let Shared { store, catalog, .. } = accounts.resolved()?;
     let instant = synod::session::menu(store, catalog);
 
     refresh_started.call_once(|| super::refresh_menu_async(&app));
@@ -480,7 +481,12 @@ fn converse(
     // a failure here means the credential scrub's outcome flipped under us,
     // which cannot happen — but a worker that finds no store stands down
     // rather than panics.
-    let Ok((store, catalog)) = accounts.resolved() else {
+    let Ok(Shared {
+        store,
+        catalog,
+        rations,
+    }) = accounts.resolved()
+    else {
         return ConversationEnded {
             stopped: false,
             explained: false,
@@ -507,20 +513,27 @@ fn converse(
             );
         }
     });
-    let (mut conversation, opening) =
-        match Conversation::begin(picked, store, catalog, choice, baseline_stop, report_walk) {
-            Ok(begun) => begun,
-            Err(e) => {
-                emitter.emit(
-                    "synod-event",
-                    super::sink::SynodEvent::Failure { message: e },
-                );
-                return ConversationEnded {
-                    stopped: false,
-                    explained: true,
-                };
-            }
-        };
+    let (mut conversation, opening) = match Conversation::begin(
+        picked,
+        store,
+        catalog,
+        rations,
+        choice,
+        baseline_stop,
+        report_walk,
+    ) {
+        Ok(begun) => begun,
+        Err(e) => {
+            emitter.emit(
+                "synod-event",
+                super::sink::SynodEvent::Failure { message: e },
+            );
+            return ConversationEnded {
+                stopped: false,
+                explained: true,
+            };
+        }
+    };
 
     emitter.emit("synod-opening", opening);
     emitter.state("ready", false);

@@ -14,7 +14,8 @@
 
 use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
 use exarch::provider::identity::{
-    Account, AccountId, Auth, Billing, Service, ServiceName, built_in_services, chatgpt_service,
+    Account, AccountId, Auth, Billing, Meter, Service, ServiceName, built_in_services,
+    chatgpt_service,
 };
 use exarch::provider::oauth::{self, OAuthToken};
 use ral_core::sync::LockExt as _;
@@ -365,7 +366,7 @@ fn declared_service_resolves_and_scrubs_its_key() {
         auth: Auth::Env("LOCAL_LLAMA_KEY".into()),
         billing: Billing::Metered,
         routes: false,
-        meter: None,
+        meter: Meter::Unpublished,
     };
     with_env(
         &[
@@ -412,7 +413,7 @@ fn keyless_declared_service_resolves_to_placeholder() {
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
-        meter: None,
+        meter: Meter::Unpublished,
     };
     with_env(
         &[

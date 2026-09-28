@@ -116,16 +116,16 @@ pub struct Service {
     /// pins — true for `OpenRouter` alone, and the reason no code below compares
     /// a service name against the string "openrouter".
     pub routes: bool,
-    /// `None` for a service that publishes nothing — every key-bearing vendor
-    /// that simply bills what you use.
-    pub meter: Option<Meter>,
+    pub meter: Meter,
 }
 
-/// Where this service publishes what is left of its ration, if anything.
+/// Where this service publishes what is left of its allowance, or that it
+/// does not. Every row names one: an absence is an answer a row gives, never
+/// a default it forgot.
 ///
 /// Plain data, so a declared service carries one exactly as a built-in row
 /// does, and the one `match` that turns it into a request lives in
-/// `allowance::meters`.
+/// `allowance`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Meter {
     /// The Codex backend's rate-limit readout: a 5-hour and a weekly window,
@@ -133,6 +133,9 @@ pub enum Meter {
     Codex,
     /// `GET /api/v1/key`: credits spent against the key's cap, in dollars.
     OpenRouterCredits,
+    /// Every key-bearing vendor that simply bills what you use, and a
+    /// subscription with no readout (`opencode-go`).
+    Unpublished,
 }
 
 /// What a *declaration* knows about a request's bearer token. Not where the
@@ -245,7 +248,7 @@ fn unqualified(account: &Account) -> String {
 /// The built-in table: nine key-bearing services plus chatgpt.
 pub fn built_in_services() -> Vec<Service> {
     let keyed =
-        |name, endpoint: Option<&str>, adapter, default_model: &str, env, billing| Service {
+        |name, endpoint: Option<&str>, adapter, default_model: &str, env, billing, meter| Service {
             name: ServiceName::built_in(name),
             endpoint: endpoint.map(str::to_string),
             adapter,
@@ -253,7 +256,7 @@ pub fn built_in_services() -> Vec<Service> {
             auth: Auth::Env(String::from(env)),
             billing,
             routes: false,
-            meter: None,
+            meter,
         };
     vec![
         keyed(
@@ -263,6 +266,7 @@ pub fn built_in_services() -> Vec<Service> {
             "claude-opus-4",
             "ANTHROPIC_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         keyed(
             "openai",
@@ -271,10 +275,10 @@ pub fn built_in_services() -> Vec<Service> {
             "gpt-5.5",
             "OPENAI_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         Service {
             routes: true,
-            meter: Some(Meter::OpenRouterCredits),
             ..keyed(
                 "openrouter",
                 Some("https://openrouter.ai/api/v1/"),
@@ -282,6 +286,7 @@ pub fn built_in_services() -> Vec<Service> {
                 "anthropic/claude-opus-4",
                 "OPENROUTER_API_KEY",
                 Billing::Metered,
+                Meter::OpenRouterCredits,
             )
         },
         keyed(
@@ -291,6 +296,7 @@ pub fn built_in_services() -> Vec<Service> {
             "deepseek-chat",
             "DEEPSEEK_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         keyed(
             "gemini",
@@ -299,6 +305,7 @@ pub fn built_in_services() -> Vec<Service> {
             "gemini-2.5-pro",
             "GEMINI_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         // opencode issues one key per account; the endpoint alone tells Zen from Go.
         keyed(
@@ -308,6 +315,7 @@ pub fn built_in_services() -> Vec<Service> {
             "glm-5.1",
             "OPENCODE_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         keyed(
             "opencode-go",
@@ -316,6 +324,7 @@ pub fn built_in_services() -> Vec<Service> {
             "glm-5.2",
             "OPENCODE_API_KEY",
             Billing::FlatRate,
+            Meter::Unpublished,
         ),
         keyed(
             "xai",
@@ -324,6 +333,7 @@ pub fn built_in_services() -> Vec<Service> {
             "grok-4.3",
             "XAI_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         keyed(
             "qwen",
@@ -332,6 +342,7 @@ pub fn built_in_services() -> Vec<Service> {
             "qwen3.6-plus",
             "DASHSCOPE_API_KEY",
             Billing::Metered,
+            Meter::Unpublished,
         ),
         chatgpt_service(),
     ]
@@ -354,7 +365,7 @@ pub fn chatgpt_service() -> Service {
         auth: Auth::OAuth,
         billing: Billing::FlatRate,
         routes: false,
-        meter: Some(Meter::Codex),
+        meter: Meter::Codex,
     }
 }
 
@@ -369,7 +380,7 @@ pub fn scripted_service() -> Service {
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,
-        meter: None,
+        meter: Meter::Unpublished,
     }
 }
 
@@ -402,16 +413,15 @@ mod tests {
         built_in(&ServiceName::declared(name).unwrap()).unwrap()
     }
 
-    /// A new built-in row must declare a meter deliberately: this asserts the
-    /// full table rather than a sample, so an addition cannot slip through
-    /// with an implicit `None`.
+    /// Asserts the whole table; `opencode-go` documents that a subscription
+    /// with no readout is a choice the row states.
     #[test]
     fn only_chatgpt_and_openrouter_meter_anything() {
         for service in built_in_services() {
             let expected = match service.name.as_str() {
-                "chatgpt" => Some(Meter::Codex),
-                "openrouter" => Some(Meter::OpenRouterCredits),
-                _ => None,
+                "chatgpt" => Meter::Codex,
+                "openrouter" => Meter::OpenRouterCredits,
+                _ => Meter::Unpublished,
             };
             assert_eq!(service.meter, expected, "{}", service.name);
         }

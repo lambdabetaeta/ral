@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4dc94095
-generated_at_date: 2026-09-24
+generated_at_commit: c8731be6
+generated_at_date: 2026-09-28
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -278,9 +278,9 @@ expiring a settled entry's unclaimed result — rather than one an eliminator
 observed away. Transcript and TUI only — the rendered one-liner is
 [[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
 model-facing, since delivery of a reap to the model itself is deferred.
-What `attend`'s
-top still runs, each pass its own ready boundary: `check_disk_warn`. (No pin is
-protected or reconciled — [[design/pins|pins]].)
+`attend`'s top runs nothing else; the disk ceiling is weighed at the tool
+boundary with the other gauges (below). (No pin is protected or reconciled —
+[[design/pins|pins]].)
 
 The retention clock itself is core's: the engine ticks the worker registry
 once per source dispatch and sweeps it at each settled run's ready
@@ -289,7 +289,7 @@ boundary ([[map/core/shell-state|shell-state]]), armed with
 agent keeps its own mirror of the same drum — `Avatar::ral_epoch`,
 incremented once at the top of every `Avatar::ral` call, a failed eval still
 a call — which `/resources` reads to render nearest time-to-reap and
-`check_disk_warn` reads for its amortisation; the two clocks coincide
+`disk_warning` reads for its amortisation; the two clocks coincide
 one-to-one (`decisions/260629_agent-binding-reaping`). The counter starts
 at 0, a fork's child starts its own at 0, and `/clear` does not rewind it.
 Retention notices need no plumbing of their own: they ride the same drain
@@ -359,9 +359,9 @@ Nudging splits into two disciplines, named and owned by `agent/nudge.rs`'s
 **repair** — `Empty`, `Stopped`, `Truncated`, or a returning agent's
 `Complete` without `reply` — is event-shaped, exceptional, and spends the
 per-exchange repair budget (`BUDGET`, 3); a **standing condition** — the pin
-register, context pressure — is a fact about the agent's own live
-state, **edge-triggered**: told once when it changes, silent while it holds,
-budget-free.
+register here, and the ladder conditions of `agent/gauge.rs` below — is a fact
+about the agent's own live state, **edge-triggered**: told once when it
+changes, silent while it holds, budget-free.
 
 **The two kinds ride two channels, because they are owed at different
 boundaries.** `react`, the post-deliberation entry point, composes the repairs
@@ -369,8 +369,8 @@ and the pin reminder into at most one `EXARCH_REMINDER` message per
 completion, self-posted as `Post::Nudge` and committed by `append_user` inside
 the same exchange, gated on `quiet` — no standing reply, no detached shell
 work, no busy children, the one condition those kinds share.
-`Nudges::pressure_reminder` is the other entry point, called by `deliberate`
-at a *tool* boundary, where its text joins the one steering message the
+`Nudges::remind` is the other entry point, reached from `Avatar::warnings` at
+a *tool* boundary, where a gauge's text joins the one steering message the
 protocol admits after a batch: an agentic run takes one prompt and then two
 hundred tool turns, so a warning that waited for the next completion would
 arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
@@ -383,6 +383,7 @@ arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-at
 | reply repair | `react` | quiet ∧ `Ok(Complete)` ∧ `must_reply` | spends |
 | pin reminder | `react` | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
 | pressure reminder | steering | gauge `Over` ∧ excursion untold | free |
+| usage reminder | steering | an allowance window climbs past 90 or 95% | free |
 
 The pressure reminder names the set it is warning about: `pressure_gauge`
 calls `Avatar::planned_eviction` — a walk back over the turn table's own
@@ -402,12 +403,10 @@ trips without quiescing — the wrong channel for a terminal condition, which
 already reaches its consumer through `AgentOutcome::Stopped("turn cap
 reached")`), and every unclassified provider error (the transport's own).
 
-`Nudges` is the one owner of every nudge-relevant latch: the repair budget
-`used`, the pin digest last told (`pinned_told`), and whether the live
-pressure excursion has been told (`pressure_told`, re-armed by the `Under`
-reading `pressure_reminder` itself takes). Nobody else holds
-state — `pressure_gauge` is a pure `&self` reading with no latch of its own,
-and `deliberate` neither latches nor unlatches around it. An edge is **consumed
+`Nudges` owns the repair budget `used` and the pin digest last told
+(`pinned_told`); the ladder latches are `gauge::Gauges`' (below).
+`pressure_gauge` is a pure `&self` reading with no latch of its own, and
+`deliberate` neither latches nor unlatches around it. An edge is **consumed
 at decide time, in the same act as the part's emission**, so "told but not
 sent" and "sent but not told" have no spelling. `reset()`, called on every
 exchange-opening item, clears only the budget — a new exchange is not a new
@@ -452,6 +451,39 @@ synthetic ever joins the conversation. Its provider errors still reach the
 human, since that report is the attend loop's own step — `take_up` emits
 `Forensic::ProviderError` for whatever error the attempt carries before it
 ever asks for a nudge, so `react` decides and nothing more.
+
+**Ladder conditions** live in `agent/gauge.rs`: a reading climbs a ladder of
+levels, each rung told once per excursion, and a fall below a rung re-arms it.
+One `Latch` serves every ladder: it keeps the level last weighed, and `climb`
+answers the highest rung between that and the new level, so a first reading
+past two rungs tells the higher alone; `cross` is the one-rung ladder of a
+yes-or-no condition. A ladder is bare numbers, and who hears a rung is written
+once, where its `Warning` is built. Three ladders ride it, gathered in
+`Avatar::gauges`:
+
+| condition | reading | rungs | audience |
+|---|---|---|---|
+| context pressure | `pressure_gauge` (`Unknown` leaves the latch) | over the soft line | model |
+| disk ceiling | `disk_warning`, walked every `DISK_WARN_CHECK_INTERVAL` ral calls | over `disk_warn_bytes` | user |
+| usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | 50, 75 / 90, 95% | user / both, from `MODEL_HEARS` |
+
+`Avatar::warnings` weighs all three after every tool batch, and `tell` delivers
+each climbed rung: a user line as a `Forensic::SystemNote`, a model line
+through `Nudges::remind` into the steering message — dropped for a `--chat`
+trunk, which reaches no tool boundary anyway. The ration gauge reads nothing
+itself: the read is the provider's, spawned on the road every request takes
+and shared by every agent on the account
+([[map/exarch/provider|provider]]'s `Rations`), and `gauge::ration::Ration`
+only climbs its own latches against the last reading. The network is read once
+per account; each conversation on it is told once.
+
+The same allowance ends as a provider error when it is spent: `take_up`
+answers `ProviderError::Exhausted` with `resume_at`, which replaces any
+`usage-reset` schedule with a one-shot wakeup at the reset and notes the time
+to the user. Once one agent's request is refused, `Provider::complete` refuses
+every later request on the account before sending, so each sibling on it ends
+its turn the same way and schedules its own wakeup
+([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 ## The Fleet
 
@@ -689,18 +721,18 @@ resident turn range answering it and its weight — the read-only sibling
 `ReplControl::command` serves alongside `/clear`, `/evict`, `/branch`, and
 `/quit`.
 
-`Avatar::check_disk_warn` is the disk half of the same ADR ("Disk: report
+`Avatar::disk_warning` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.
 Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it rides the same
 `ral_epoch` the settled-worker and binding-lease sweeps already read,
-amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
-ready boundary `attend`'s loop walks each pass.
+amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, weighed at the
+tool boundary with the other gauges.
 Crossing the ceiling (the session log dir, sized host-side by
 `resources::dir_size`, plus `EXARCH_SCRATCH`, read and sized in the engine by
-`reading::env_var` and `reading::path_bytes`) emits one `Forensic::SystemNote`, latched until
-a later check finds the total back under — one warning per excursion, not
-one per boundary.
+`reading::env_var` and `reading::path_bytes`) is told to the user once, as a
+`Forensic::SystemNote`, on the disk ladder's `Latch` — one warning per
+excursion, not one per boundary.
 
 A fork builds the child `Avatar` (and, inside it, the child `Agent`) for
 [[design/agents|sub-agent spawning]] out of a fork the *engine* makes of itself

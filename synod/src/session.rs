@@ -36,7 +36,7 @@ use crate::workspace;
 use baseline::Baseline;
 use exarch::agent::{Avatar, RecordedAccount};
 use exarch::provider::{
-    self, Bureau, Engine, Provider,
+    self, Bureau, Engine, Provider, Rations,
     credential::CredentialStore,
     identity::{self, Account},
     models::{LiveSource, ModelCatalog, resolve_account},
@@ -182,6 +182,7 @@ impl Conversation {
         folder: &Path,
         store: &Arc<Mutex<CredentialStore>>,
         catalog: &Arc<Mutex<ModelCatalog<LiveSource>>>,
+        rations: &Arc<Rations>,
         choice: Option<Choice>,
         baseline_stop: &workspace::manifest::Stop,
         baseline_progress: Box<dyn FnMut(u64) + Send>,
@@ -248,12 +249,14 @@ impl Conversation {
         let system =
             crate::prompt::assemble(&caps, machine.workspace_path(), &grant.name(), &config_dir)?;
 
-        // Synod's engine is per-conversation; the credentials and catalog it
-        // draws on are the application's, held for its whole life.
+        // Synod's engine is per-conversation; the credentials, catalog, and
+        // allowance record it draws on are the application's, held for its
+        // whole life.
         let bureau = Arc::new(Bureau::Live {
             engine: Engine::new(),
             store: Arc::clone(store),
             catalog: Arc::clone(catalog),
+            rations: Arc::clone(rations),
         });
         let provider = bureau.build(&account, model.clone(), &tuning, None, None)?;
 

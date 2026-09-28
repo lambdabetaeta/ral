@@ -7,7 +7,7 @@ use crate::agent::dial::Dial;
 use crate::agent::event::{AgentLog, EditAuthority};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
+use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, gauge, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::{Fleet, Unborn};
@@ -320,7 +320,7 @@ impl Avatar {
             last_input: (0, 0),
             ral_epoch: 0,
             disk_check_epoch: 0,
-            disk_warn_latched: false,
+            gauges: gauge::Gauges::default(),
         })
     }
 
