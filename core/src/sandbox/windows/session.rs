@@ -203,6 +203,7 @@ pub(crate) fn confine(
     // Traced in three parts, because each is a different kind of cost and only
     // the middle one is per-path kernel work: minting the profile, the
     // effective-access filter, and the stamp itself.
+    #[cfg(debug_assertions)]
     let t_confine = std::time::Instant::now();
     // One critical section on purpose: minting a profile, stamping capability
     // ACEs and reading back the SIDs must not interleave with another thread
@@ -258,7 +259,9 @@ pub(crate) fn confine(
     // Cheapest filter first: the memo, then existence, then the well-known-SID
     // effective-access check, which is a real `GetNamedSecurityInfoW` and DACL
     // walk per path.
+    #[cfg(debug_assertions)]
     let t_filter = std::time::Instant::now();
+    #[cfg(debug_assertions)]
     let (offered_rw, offered_ro) = (readwrite.len(), readonly.len());
     let readwrite = filter_out_granted(&proj.granted, readwrite, GrantKind::ReadWrite);
     let readonly = filter_out_granted(&proj.granted, readonly, GrantKind::ReadOnly);
@@ -289,7 +292,9 @@ pub(crate) fn confine(
 
     // Each of these is a witness check on a path already stamped, and a whole
     // tree propagation on one that is not — once ever, for every session.
+    #[cfg(debug_assertions)]
     let t_stamp = std::time::Instant::now();
+    #[cfg(debug_assertions)]
     let (kept_rw, kept_ro, kept_deny) = (readwrite.len(), readonly.len(), deny.len());
     ensure_grants(proj, fs_cap_sids, readwrite, GrantKind::ReadWrite, cancel)?;
     ensure_grants(proj, fs_cap_sids, readonly, GrantKind::ReadOnly, cancel)?;
@@ -385,10 +390,12 @@ pub(crate) fn boot_recover() {
                     report.profiles_deleted,
                 );
             }
+            #[cfg(debug_assertions)]
             for e in &report.errors {
                 crate::dbg_trace!("sandbox-win", "orphan DACL recovery: {e}");
             }
         }
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         Err(e) => crate::dbg_trace!("sandbox-win", "orphan DACL recovery failed: {e}"),
     }
 }
@@ -405,6 +412,7 @@ pub(crate) fn teardown() {
     };
     // Traced separately from `confine`: one profile delete per projection, and
     // no ACE work at all — an exit that looks like a hang is no longer this.
+    #[cfg(debug_assertions)]
     let t_teardown = std::time::Instant::now();
     let SessionSandbox {
         mut dacl,

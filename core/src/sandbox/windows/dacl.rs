@@ -776,6 +776,7 @@ fn write_bytes_atomic(path: &Path, json: &[u8]) -> Result<(), DaclError> {
     match fs::remove_file(&tmp) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         Err(e) => crate::dbg_trace!(
             "sandbox-win-dacl",
             "pre-write cleanup of {} failed ({e}); a leftover tmp may obstruct the write",
