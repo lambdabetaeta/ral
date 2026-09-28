@@ -26,6 +26,9 @@ vm-manager = { path = "../vm-manager" }
 tauri      = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# Parsing a link the assistant wrote, so only a web or email link is ever
+# handed to the system.  Already in the tree through tauri.
+url        = "2"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 ts-rs      = { workspace = true }

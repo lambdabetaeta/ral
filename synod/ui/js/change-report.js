@@ -113,16 +113,19 @@ function renderReport() {
   const list = $("cards");
   list.innerHTML = "";
   // Sorted by folder, then by name, so each folder is named exactly once.
-  const rows = files.slice().sort((a, b) => dirOf(a.path).localeCompare(dirOf(b.path))
-    || baseOf(a.path).localeCompare(baseOf(b.path)));
+  // Each row keeps its place in the report as the shell sent it: that place
+  // is how its button names the file back to the shell.
+  const rows = files.map((file, index) => ({ file, index }))
+    .sort((a, b) => dirOf(a.file.path).localeCompare(dirOf(b.file.path))
+      || baseOf(a.file.path).localeCompare(baseOf(b.file.path)));
   let group = null;
-  for (const file of rows) {
+  for (const { file, index } of rows) {
     const dir = dirOf(file.path);
     if (dir !== group) {
       group = dir;
       list.appendChild(groupHeading(dir));
     }
-    list.appendChild(renderCard(file, shown.has(file.path)));
+    list.appendChild(renderCard(file, index, shown.has(file.path)));
   }
 }
 
@@ -141,8 +144,9 @@ function groupHeading(dir) {
   return el;
 }
 
-// `settled` says the row was already on screen before this render.
-function renderCard(file, settled) {
+// `index` is the file's place in the report; `settled` says the row was
+// already on screen before this render.
+function renderCard(file, index, settled) {
   const k = KINDS[file.kind] || UNKNOWN_KIND;
   const row = document.createElement("div");
   row.className = "card" + (file.kind === "touched" ? " touched" : "") + (settled ? " settled" : "");
@@ -158,9 +162,15 @@ function renderCard(file, settled) {
 
   row.append(glyph, nameCell(file));
 
-  if (file.current_path) {
-    row.appendChild(actionButton("Open", "btn-mini", async () => {
-      try { await invoke("open_file", { path: file.current_path }); }
+  // The shell decides which files are safe to open: a document opens in
+  // its own application, and anything else the assistant wrote (a script,
+  // a shortcut, a web page) is only shown in its folder. The button names
+  // the card by its place and name, never by a path, and the shell finds
+  // the file itself.
+  if (file.open) {
+    const label = file.open === "open" ? "Open" : "Show in folder";
+    row.appendChild(actionButton(label, "btn-mini", async () => {
+      try { await invoke("open_file", { index, path: file.path }); }
       catch (err) { showBanner(String(err)); }
     }));
   }

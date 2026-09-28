@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the one window is allowed to reach: the native folder picker, opening files with the user's own applications, and the core webview surface. Custom commands (start_job, change_set, accept/discard) are always callable from the window and need no entry here.",
+  "description": "What the one window is allowed to reach: the native folder picker and the core webview surface. Opening a link or a changed file goes only through synod's own open_url and open_file commands, which check what they are handed, so the opener plugin is deliberately not granted here. Custom commands are always callable from the window and need no entry here.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "dialog:default",
-    "opener:default"
+    "dialog:default"
   ]
 }

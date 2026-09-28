@@ -6,8 +6,9 @@
 //! conversation is a [`synod::session::Conversation`] driven on its own
 //! worker thread for as long as the window wants it, with its narration
 //! streamed into the window as [`super::sink::SynodEvent`]s and messages
-//! handed across an in-process channel; opening a file hands the path to
-//! the user's default application through the opener plugin.
+//! handed across an in-process channel; opening a file hands a document the
+//! shell has checked to the user's default application through the opener
+//! plugin, and shows any other file in its folder rather than running it.
 //!
 //! The credential store is resolved once, at startup, before this module
 //! ever runs — see [`super::Accounts`] — so every command here either
@@ -234,28 +235,112 @@ pub fn send_message(state: State<'_, Running>, message: String) -> Result<(), St
         .map_err(|_| "The assistant has already finished; nothing was sent.".to_string())
 }
 
-/// Open a file as it is now, with the user's own application for that kind
-/// of file — the "Open" button on a change card.
+/// Act on the file a change card names — the card's one button.
+///
+/// The window names the card by its place in the report it was given and
+/// the name it showed, never by a path: the guest wrote every file a card
+/// names, so the shell finds the file itself, inside the granted folder, and
+/// refuses a link (see [`super::review::file_to_open`]).  A document of a
+/// kind its application reads as data is opened with the user's own
+/// application for it; anything else is shown selected in the file manager,
+/// and nothing is run.  Either way the file is first marked as having come
+/// from outside this computer (see [`mark_from_elsewhere`]).
 ///
 /// # Errors
-/// Returns a sentence naming the file if the system cannot open it.
+/// Returns a sentence naming the file if the card no longer matches the
+/// report, the file is not a plain file inside the folder, or the system
+/// cannot open or show it.
 #[tauri::command]
-pub fn open_file(app: AppHandle, path: String) -> Result<(), String> {
-    open_with_default(&app, &path)
+pub fn open_file(
+    app: AppHandle,
+    review: State<'_, super::review::Review>,
+    index: usize,
+    path: String,
+) -> Result<(), String> {
+    use super::review::OpenAs;
+    use tauri_plugin_opener::OpenerExt;
+    let target = super::review::file_to_open(&review, index, &path)?;
+    mark_from_elsewhere(&target.path);
+    match target.how {
+        OpenAs::Open => open_with_default(&app, &target.path),
+        OpenAs::Reveal => app
+            .opener()
+            .reveal_item_in_dir(&target.path)
+            .map_err(|e| format!("Could not show {path} in its folder: {e}")),
+    }
+}
+
+/// Mark a file the guest wrote as having come from the internet, so the
+/// protections Windows gives a downloaded file apply to it too: the system
+/// warns before running it, and Office opens it in Protected View.  The mark
+/// is the `Zone.Identifier` stream a browser writes beside a download.
+///
+/// A failure is only logged, and the file is still opened: a folder on a
+/// file system without alternate streams (FAT, many network shares) cannot
+/// carry the mark at all, and refusing every file there would leave the
+/// card's button dead for no protection gained.
+#[cfg(windows)]
+fn mark_from_elsewhere(path: &Path) {
+    let mut stream = path.as_os_str().to_os_string();
+    stream.push(":Zone.Identifier");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:mark-of-the-web] the Zone.Identifier stream beside a file the guest \
+                  wrote, set by the shell before the user opens it; the file's own bytes are \
+                  untouched"
+    )]
+    let written = std::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    if let Err(e) = written {
+        eprintln!(
+            "synod: could not mark {} as from elsewhere: {e}",
+            path.display()
+        );
+    }
+}
+
+/// macOS's counterpart is the `com.apple.quarantine` extended attribute,
+/// which Gatekeeper reads; it is not written yet.
+#[cfg(not(windows))]
+fn mark_from_elsewhere(_path: &Path) {}
+
+/// The link a click in an assistant message may hand to the system, or a
+/// plain sentence refusing it.
+///
+/// The assistant's words are untrusted, and the system would run whatever a
+/// bare name or a share path named, so only a web page (`http`, `https`,
+/// with a host) or an email address (`mailto`) is let through.  A relative
+/// name, a `file:` link, a Windows path read as a scheme (`C:\…`), and every
+/// other scheme are refused.
+///
+/// # Errors
+/// A sentence naming the link when it is not one of those.
+pub(crate) fn link_to_follow(raw: &str) -> Result<url::Url, String> {
+    let refuse = || {
+        format!("Synod opens only web and email links, and {raw} is neither, so it was not opened.")
+    };
+    let url = url::Url::parse(raw).map_err(|_| refuse())?;
+    match url.scheme() {
+        "http" | "https" if url.host().is_some() => Ok(url),
+        "mailto" => Ok(url),
+        _ => Err(refuse()),
+    }
 }
 
 /// Open a link the assistant wrote in the user's own browser — a hyperlink
 /// in a rendered assistant message, handed here rather than followed inside
 /// the window, whose one document is the conversation and must never
-/// navigate away from it.
+/// navigate away from it.  Only web and email links are opened; see
+/// [`link_to_follow`].
 ///
 /// # Errors
-/// Returns a sentence naming the link if the system cannot open it.
+/// Returns a sentence naming the link if it is not a web or email link, or
+/// if the system cannot open it.
 #[tauri::command]
 pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let link = link_to_follow(&url)?;
     app.opener()
-        .open_url(url.clone(), None::<&str>)
+        .open_url(link.as_str(), None::<&str>)
         .map_err(|e| format!("Could not open {url}: {e}"))
 }
 
@@ -468,10 +553,54 @@ fn converse(
     }
 }
 
-/// Hand `path` to the user's default application for that file.
-pub(crate) fn open_with_default(app: &AppHandle, path: &str) -> Result<(), String> {
+/// Hand `path` to the user's default application for that file.  The system
+/// runs whatever `path` names, so the one caller, [`open_file`], passes only
+/// a document it has already checked.
+fn open_with_default(app: &AppHandle, path: &Path) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .open_path(path.to_string(), None::<&str>)
-        .map_err(|e| format!("Could not open {path}: {e}"))
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("Could not open {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_and_email_links_are_followed() {
+        for link in [
+            "https://example.com/page?q=1",
+            "http://example.com",
+            "HTTPS://Example.com/",
+            "mailto:someone@example.com",
+        ] {
+            assert!(link_to_follow(link).is_ok(), "{link}");
+        }
+    }
+
+    #[test]
+    fn anything_that_could_run_a_program_is_refused() {
+        for link in [
+            "cmd.exe",
+            "calc",
+            "./run.bat",
+            "../x.exe",
+            r"\\host\share\x.exe",
+            "//host/share/x.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "C:/Windows/System32/cmd.exe",
+            "file:///C:/Windows/System32/cmd.exe",
+            "file://host/share/x.exe",
+            "javascript:alert(1)",
+            "ms-settings:",
+            "search-ms:query=x",
+            "vbscript:x",
+            "tel:123",
+            "http://",
+            "",
+        ] {
+            assert!(link_to_follow(link).is_err(), "{link}");
+        }
+    }
 }

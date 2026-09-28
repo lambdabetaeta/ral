@@ -92,8 +92,11 @@ function refreshComposer() {
 // A link the assistant wrote is opened in the user's own browser, never
 // followed inside the window — the window's one document is this
 // conversation, and navigating it away would throw the conversation out.
-// DOMPurify has already dropped any unsafe scheme before the anchor
-// reached the DOM.
+// DOMPurify lets a bare name or a share path through as a relative link,
+// and the system would run whatever such a link named, so the raw href goes
+// to `open_url`, which opens only web and email links and answers anything
+// else with a sentence of its own. That check is the boundary; nothing here
+// second-guesses it.
 $("transcript").addEventListener("click", (e) => {
   // The click target of a listener on an element is always an Element,
   // never bare text or the document itself.
