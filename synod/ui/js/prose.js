@@ -32,7 +32,7 @@ export function growProse(bubble, block) {
     live.remove();
     return;
   }
-  live.replaceChildren(renderChunk(tail.slice(cut)));
+  live.replaceChildren(renderAssistantMarkdown(tail.slice(cut)));
   placeCaret(live);
 }
 
@@ -47,11 +47,14 @@ function liveTail(bubble) {
 
 // A run of closed blocks as nodes — the one rendering each settled block
 // ever gets, so its code is coloured and its formulae typeset just once.
+// Only settled code is coloured. The live tail is rebuilt on every token,
+// and a ral block still open there is a new source each time, so colouring
+// it would cost a round trip to the shell per token that no cache could
+// answer; its code reads as plain text until the block closes and settles.
 function renderChunk(src) {
-  const holder = document.createElement("template");
-  holder.innerHTML = renderAssistantMarkdown(src);
-  for (const code of holder.content.querySelectorAll("code.language-ral")) highlightRal(code);
-  return holder.content;
+  const nodes = renderAssistantMarkdown(src);
+  for (const code of nodes.querySelectorAll("code.language-ral")) highlightRal(code);
+  return nodes;
 }
 
 // How much of `tail` is closed markdown: everything before the run of

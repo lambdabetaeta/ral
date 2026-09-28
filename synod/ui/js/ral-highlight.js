@@ -1,9 +1,10 @@
 import { invoke } from "./core.js";
 
-// Keyed on the exact source string: the dial streams and the assistant
-// bubble both re-render on their own cadence, and a source already seen
-// costs no round trip to the shell the second time. A growing block is a
-// fresh key on every flush, so the oldest go once the window is reached.
+// Keyed on the exact source string: the dial rebuilds its scripts at every
+// revision, and a source already seen costs no round trip to the shell the
+// second time. The assistant bubble asks only once a block has settled —
+// never for a block still growing, which would be a fresh key per token —
+// so the oldest go once the window is reached.
 /** @type {Map<string, import("./bindings/RalToken.ts").RalToken[]>} */
 const cache = new Map();
 const CACHE_MAX = 64;

@@ -71,6 +71,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(navigation_guard())
         .manage(commands::Running::default())
         .manage(accounts)
         .manage(std::sync::Once::new())
@@ -111,4 +112,80 @@ fn main() {
         })
         .run(context)
         .expect("synod's window could not start");
+}
+
+/// The window never leaves the app's own pages.
+///
+/// The transcript renders model output, and model output may be
+/// prompt-injected.  A page that navigated the window elsewhere — a link, a
+/// form, a `<meta>` refresh, script that slipped the scrub — would put a
+/// foreign document where this one stood, with the whole command bridge
+/// (`withGlobalTauri`) in reach of it.  The window's own link handler already
+/// sends a link to the user's browser instead, and the scrub drops the markup
+/// that navigates by itself; this guard is the layer that holds when both of
+/// those miss, by refusing every navigation outside the app's origin.
+///
+/// A plugin rather than `WebviewWindowBuilder::on_navigation`, because the
+/// window is declared in `tauri.conf.json` and never built in code: a plugin's
+/// hook runs for every webview the app opens, that one included.
+fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|webview, url| {
+            is_own_page(url) || is_dev_server(url, webview.config().build.dev_url.as_ref())
+        })
+        .build()
+}
+
+/// Whether `url` is one of the addresses Tauri serves the embedded frontend
+/// from: `tauri://localhost` on macOS and Linux, `http://tauri.localhost` (or
+/// `https://`, with `useHttpsScheme`) on Windows.  Any port, or any other
+/// host, is someone else's page.
+fn is_own_page(url: &tauri::Url) -> bool {
+    let host = url.host_str();
+    url.port().is_none()
+        && match url.scheme() {
+            "tauri" => host == Some("localhost"),
+            "http" | "https" => host == Some("tauri.localhost"),
+            _ => false,
+        }
+}
+
+/// Whether `url` is on the configured dev server, which serves the frontend
+/// in place of the embedded assets — admitted only in a dev build, so a
+/// release never trusts a local port.
+fn is_dev_server(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    tauri::is_dev() && dev_url.is_some_and(|dev| dev.origin() == url.origin())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_own_page;
+
+    fn own(url: &str) -> bool {
+        is_own_page(&url.parse().expect("a well-formed test URL"))
+    }
+
+    #[test]
+    fn the_app_origin_is_admitted_on_every_platform() {
+        assert!(own("tauri://localhost/index.html"));
+        assert!(own("http://tauri.localhost/"));
+        assert!(own("https://tauri.localhost/index.html#top"));
+    }
+
+    #[test]
+    fn every_other_origin_is_refused() {
+        for url in [
+            "https://example.com/",
+            "http://tauri.localhost.example.com/",
+            "http://tauri.localhost:8080/",
+            "http://localhost/",
+            "tauri://evil/",
+            "file:///C:/Windows/win.ini",
+            "data:text/html,<p>hi</p>",
+            "javascript:alert(1)",
+            "about:blank",
+        ] {
+            assert!(!own(url), "{url} should be refused");
+        }
+    }
 }

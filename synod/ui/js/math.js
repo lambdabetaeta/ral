@@ -9,8 +9,8 @@ marked.setOptions({ gfm: true, breaks: true });
 // `x_1 * x_2` as emphasis and eats the marks, and `breaks: true` cuts a
 // multi-line `$$` block with a `<br>` that no delimiter scan can then
 // see across. So each formula leaves a sentinel behind, the prose around
-// it is parsed and scrubbed exactly as before, and the typeset formula
-// is put back into the finished tree.
+// it is parsed, the typeset formula is put back into the parsed tree, and
+// only then is the whole of it scrubbed.
 //
 // Sentinels are private-use code points, and any the model itself sends
 // are dropped from the source first — so text can never forge one.
@@ -27,18 +27,51 @@ const MATH_PAIRS = [
 ];
 
 // The one path model text takes to the DOM: lift the mathematics out,
-// parse the prose, scrub it, then typeset the formulae into the result.
-// Never assign assistant output to innerHTML without passing through
-// here.
+// parse the prose, typeset the formulae into the parsed tree, and scrub
+// that tree last. What comes back is nodes, not markup: the caller
+// appends them as they are. Scrubbed markup that is serialised and
+// parsed again is not the markup that was scrubbed — the parser may
+// rearrange it on the way back in, which is the whole of mutation XSS —
+// so nothing after the scrub ever turns this tree into a string or a
+// string into a tree. Never put assistant output in the DOM by any
+// other road: the inert template below is the one innerHTML it meets.
+/** @returns {DocumentFragment} */
 export function renderAssistantMarkdown(src) {
   const { prose, formulae } = liftMath(src);
-  const html = DOMPurify.sanitize(marked.parse(prose));
-  if (!formulae.length) return html;
+  // A template's content is inert: nothing parsed into it runs, loads,
+  // or fires a handler, so the unscrubbed tree is safe to hold here.
   const tree = document.createElement("template");
-  tree.innerHTML = html;
-  fillMath(tree.content, formulae);
-  return tree.innerHTML;
+  tree.innerHTML = marked.parse(prose);
+  if (formulae.length) fillMath(tree.content, formulae);
+  return DOMPurify.sanitize(tree.content, SCRUB);
 }
+
+// All of DOMPurify's configuration, in the one place it is used.
+//
+// Its defaults stand for the prose — scripts, handlers, and unsafe URL
+// schemes go — and three additions shape it to this window:
+//
+// - KaTeX's markup survives the scrub it now passes through. Its layout
+//   is inline `style` metrics, `aria-hidden` spans, and SVG, all of which
+//   the defaults already keep; its MathML twin (the accessible reading)
+//   wraps each formula in `<semantics>` with the source in an
+//   `<annotation>`, two tags the defaults drop, and lays out a matrix
+//   with two `<mtable>` attributes they drop as well.
+// - Nothing in the transcript can take the window somewhere else. A form
+//   (and a button's `formaction`) submits, an image map's `<area>` is a
+//   link that the transcript's link handler does not see, `<base>`
+//   repoints every relative URL, `<meta>` refreshes, and `target` opens
+//   a window of its own. The navigation guard in `main.rs` holds
+//   whatever slips past this.
+// - `<style>` goes too: a sheet in a reply would restyle the whole app,
+//   and neither marked nor KaTeX ever writes one.
+const SCRUB = Object.freeze({
+  RETURN_DOM_FRAGMENT: true,
+  ADD_TAGS: ["semantics", "annotation"],
+  ADD_ATTR: ["columnalign", "columnspacing"],
+  FORBID_TAGS: ["form", "area", "map", "base", "meta", "style"],
+  FORBID_ATTR: ["formaction", "action", "target"],
+});
 
 // The source with every formula lifted out: the prose left behind, and
 // the formulae in the order their sentinels number them.
@@ -195,36 +228,34 @@ function fillMath(root, formulae) {
         return;
       }
       const formula = formulae[Number(part)];
-      const html = formula && !inCode ? typeset(formula) : null;
-      if (html === null) {
-        filled.appendChild(document.createTextNode(formula ? formula.raw : ""));
-        return;
-      }
-      const holder = document.createElement("template");
-      holder.innerHTML = html;                 // KaTeX's own spans, unwrapped
-      filled.appendChild(holder.content);
+      const typeset = formula && !inCode ? typesetFormula(formula) : null;
+      filled.appendChild(typeset ?? document.createTextNode(formula ? formula.raw : ""));
     });
     node.replaceWith(filled);
   }
 }
 
 // A formula in the block still being written is typeset afresh on every
-// token, so each one is remembered by its own source.
+// token, so each one is remembered by its own source — as nodes, handed
+// out as copies, since a node can stand in only one place.
+/** @type {Map<string, DocumentFragment | null>} */
 const typesetCache = new Map();
 
-function typeset(formula) {
+function typesetFormula(formula) {
   const key = (formula.display ? "display " : "inline ") + formula.tex;
-  if (!typesetCache.has(key)) typesetCache.set(key, katexHtml(formula));
-  return typesetCache.get(key);
+  if (!typesetCache.has(key)) typesetCache.set(key, katexNodes(formula));
+  const nodes = typesetCache.get(key);
+  return nodes ? nodes.cloneNode(true) : null;
 }
 
-// KaTeX with `trust` off can emit neither a link nor a raw node, so its
-// output carries no markup from the model. That is why the formula is put
-// back *after* the scrub instead of through it: DOMPurify's CSS filter
-// would strip the inline metrics the layout is entirely made of.
-function katexHtml(formula) {
+// KaTeX builds its nodes itself rather than handing back markup to parse,
+// and with `trust` off it can emit neither a link nor a raw node, so its
+// output carries no markup from the model. It still passes through the
+// scrub with the prose around it, which `SCRUB` shapes to keep it whole.
+function katexNodes(formula) {
+  const holder = document.createElement("span");
   try {
-    return katex.renderToString(formula.tex, {
+    katex.render(formula.tex, holder, {
       displayMode: formula.display,
       throwOnError: false,   // a mistyped formula shows in red, in place
       trust: false,
@@ -233,4 +264,7 @@ function katexHtml(formula) {
   } catch (err) {
     return null;             // beyond even KaTeX's own error rendering
   }
+  const nodes = document.createDocumentFragment();
+  nodes.append(...holder.childNodes);
+  return nodes;
 }

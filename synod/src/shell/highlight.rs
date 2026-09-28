@@ -30,7 +30,13 @@ pub struct RalToken {
 /// A token with no hue of its own ([`Class::Plain`]) is left out entirely —
 /// the window renders those stretches as plain text, like the gaps between
 /// tokens.
-#[tauri::command]
+///
+/// Run on the async runtime (`async` in the attribute), not on the main
+/// thread a plain synchronous command would occupy: the main thread is the
+/// window's event loop, and a long script classified there stalls every
+/// repaint and every other command behind it.  The work is pure and takes
+/// only owned arguments, so moving it off the loop costs nothing.
+#[tauri::command(async)]
 pub fn highlight_ral(src: String) -> Vec<RalToken> {
     to_utf16(&src, classify(&src))
 }

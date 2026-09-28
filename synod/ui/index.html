@@ -171,9 +171,12 @@
 
   <!-- Rendering assistant prose as markdown with TeX for mathematics: marked
        parses the prose, KaTeX typesets the formulae, and DOMPurify scrubs the
-       parsed prose before it ever reaches innerHTML. All three are vendored
-       locally (this app ships no bundler and pulls nothing at runtime); the
-       scrub is not optional, since the source is model output. -->
+       result last, handing back nodes that are appended as they are (see
+       js/math.js). All three are vendored locally (this app ships no bundler
+       and pulls nothing at runtime); the scrub is not optional, since the
+       source is model output. Every script here is a file: the page's
+       Content-Security-Policy, in tauri.conf.json, admits no inline script,
+       no handler attribute, and nothing from off the machine. -->
   <script src="marked.min.js"></script>
   <script src="purify.min.js"></script>
   <script src="katex/katex.min.js"></script>
