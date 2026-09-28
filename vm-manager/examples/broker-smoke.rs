@@ -23,7 +23,12 @@
 //! refusal now carries the guest's own last words off its console, which is the
 //! other half of the same repair.
 //!
-//! Usage: `broker-smoke <folder>`
+//! The folder is granted with changes allowed, as a writable grant in synod
+//! is; `--read-only` before it asks for a read-only grant instead. The two are
+//! checked differently by the service — a writable grant needs the right to
+//! add to the folder, not only to list it — so both are worth witnessing.
+//!
+//! Usage: `broker-smoke [--read-only] <folder>`
 
 #![allow(
     clippy::disallowed_methods,
@@ -33,9 +38,13 @@
 use vm_manager::MachineSpec;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let read_only = args.first().is_some_and(|first| first == "--read-only");
+    if read_only {
+        args.remove(0);
+    }
     let Ok([folder]) = <[String; 1]>::try_from(args) else {
-        eprintln!("usage: broker-smoke <folder>");
+        eprintln!("usage: broker-smoke [--read-only] <folder>");
         std::process::exit(2);
     };
 
@@ -52,11 +61,18 @@ fn main() {
         }
     };
 
+    let grant = if read_only {
+        "read-only"
+    } else {
+        "with changes allowed"
+    };
     println!(
-        "asking {} for a machine over {folder}...",
+        "asking {} for a machine over {folder}, {grant}...",
         hypervisor.name()
     );
-    let mut machine = match hypervisor.boot(&MachineSpec::for_folder(&folder)) {
+    let mut spec = MachineSpec::for_folder(&folder);
+    spec.workspace.read_only = read_only;
+    let mut machine = match hypervisor.boot(&spec) {
         Ok(machine) => machine,
         Err(err) => {
             eprintln!("boot failed: {err}");

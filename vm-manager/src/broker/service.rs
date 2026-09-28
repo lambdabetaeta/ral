@@ -8,8 +8,10 @@
 //!   speak to a privileged service at all ([`PIPE_SDDL`]);
 //! - [`media`] reads the boot artifact from *this executable's own* directory,
 //!   so no caller can name a kernel;
-//! - [`readable_by_client`] answers "may the person on the other end of this
-//!   pipe read this folder" by *becoming* them for the length of the question;
+//! - [`open_for_client`] answers "may the person on the other end of this
+//!   pipe use this folder as they ask — read it, or change it" by *becoming*
+//!   them for the length of the question, and keeps the folder they opened
+//!   pinned for as long as the machine serves it ([`Granted`]);
 //! - [`serve_client`] holds one machine for one connection and drops it when the
 //!   connection ends, so a client that dies cannot leave a machine running.
 //!
@@ -23,6 +25,7 @@
 //! argument in [`super`] stops being true.
 
 use std::io;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{
     AsRawHandle, AsRawSocket, AsSocket, BorrowedSocket, FromRawHandle, IntoRawHandle, OwnedHandle,
 };
@@ -35,6 +38,13 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{RevertToSelf, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileAttributeTagInfo,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, ImpersonateNamedPipeClient,
     PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -224,6 +234,10 @@ fn serve_client(pipe: OwnedHandle) {
     // is std's reader/writer over exactly such a handle, and takes ownership so
     // it is closed once, on return.
     let mut stream = unsafe { std::fs::File::from_raw_handle(pipe.into_raw_handle()) };
+    // The client's own handle on the granted folder, held for as long as the
+    // machine that serves it. Declared before `machine` so it is dropped
+    // after it: the folder stays pinned until the machine is gone.
+    let mut pinned: Option<Granted> = None;
     let mut machine: Option<Box<dyn Machine>> = None;
     // The broker's own handles on the two wires, held only until the client
     // says it has made its own ([`Request::Adopted`]).  One `Option` around
@@ -247,6 +261,7 @@ fn serve_client(pipe: OwnedHandle) {
                 match boot_for(handle, &folder, read_only) {
                     Ok(booted) => {
                         machine = Some(booted.machine);
+                        pinned = Some(booted.folder);
                         wires = Some(booted.wires);
                         Reply::Booted {
                             workspace: booted.workspace,
@@ -287,6 +302,8 @@ fn serve_client(pipe: OwnedHandle) {
                     Some(machine) => machine.shutdown().map_err(|e| e.to_string()),
                     None => Ok(()),
                 };
+                // Only now that the machine is gone is the folder let go.
+                drop(pinned.take());
                 let _ = frame::write(&mut stream, &Reply::Stopped(outcome));
                 return;
             }
@@ -317,22 +334,18 @@ impl Versioned for Reply {
 }
 
 /// One booted machine, as the serving thread has to hold it: the machine
-/// itself, where its workspace is, the two wires the broker still owns, and
-/// the description of each made for the client.
+/// itself, the client's handle on the folder it serves, where its workspace
+/// is, the two wires the broker still owns, and the description of each made
+/// for the client.
 struct Booted {
     machine: Box<dyn Machine>,
+    folder: Granted,
     workspace: PathBuf,
     wires: crate::Wires,
     control_description: Vec<u8>,
     net_description: Vec<u8>,
 }
 
-/// Boot one machine for the client on `pipe`, and describe its two wires for
-/// that client's process.
-///
-/// Every check the broker makes is here, in order: the folder must be one the
-/// *caller* can read; the media is this installation's; the spec is constructed,
-/// never received.
 /// How a refused boot is worded for the client: the backend's own reason, and
 /// the folder it was asked about, spelled plainly.
 ///
@@ -361,16 +374,34 @@ fn refused_over(folder: &Path) -> impl FnOnce(Error) -> String {
     }
 }
 
+/// Boot one machine for the client on `pipe`, and describe its two wires for
+/// that client's process.
+///
+/// Every check the broker makes is here, in order: the folder must be one the
+/// *caller* may use in the way the grant asks, read-only or with changes
+/// allowed, and it is the folder the caller's own handle reached rather than
+/// the name they sent; the media is this installation's; the spec is
+/// constructed, never received.
 fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, String> {
     // SAFETY: `pipe` is the connected server end this thread owns.
-    unsafe { readable_by_client(pipe, folder) }?;
+    let granted = unsafe { open_for_client(pipe, folder, read_only) }?;
 
     let artifact = media()?;
-    let mut spec = MachineSpec::for_folder(folder);
+    // The path the client's own handle resolved to, never the string they
+    // sent. [`Granted`] is why it keeps naming the same folder while the
+    // compute service, running as itself, opens it by name.
+    let mut spec = MachineSpec::for_folder(granted.path());
     spec.workspace.read_only = read_only;
 
     let hypervisor = crate::hcs::Hyperv::new(artifact, cache());
-    let mut machine = hypervisor.boot(&spec).map_err(refused_over(folder))?;
+    let mut machine = hypervisor
+        .boot(&spec)
+        .map_err(refused_over(granted.path()))?;
+    // `boot` resolved the path once more, as this service, and the share was
+    // made from that answer. The one change the held handle cannot prevent is
+    // an empty folder being turned into a link, so it is asked again here; a
+    // refusal drops `machine`, which stops it.
+    granted.unchanged()?;
     let workspace = machine.workspace_path().to_path_buf();
 
     let client = client_process(pipe)?;
@@ -379,6 +410,7 @@ fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Stri
     let net_description = describe_socket(wires.net.as_socket(), client)?;
     Ok(Booted {
         machine,
+        folder: granted,
         workspace,
         wires,
         control_description,
@@ -386,24 +418,175 @@ fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Stri
     })
 }
 
-/// Whether the client on the other end of `pipe` can read `folder`.
+/// `IsReparseTagNameSurrogate`: the bit a reparse tag carries when the point
+/// stands for *another name* — a junction, a symbolic link — rather than for
+/// data kept somewhere unusual, as a cloud placeholder or a deduplicated file
+/// does.
+const REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// The rights the client must hold on the folder itself for a grant.
 ///
-/// Answered by becoming them: `ImpersonateNamedPipeClient` puts the caller's
-/// token on this thread, the folder is opened under it, and the token is dropped
-/// again. Anything less — checking as `LocalSystem`, which can read everything —
-/// would let one user have another user's documents mounted into their own
-/// guest, which is a worse hole than the one this service exists to close.
+/// Read-only asks for the folder to be listed and passed through, and for its
+/// attributes to be read, which the check does straight afterwards
+/// ([`Granted::open`]). With changes allowed it adds creating a file and
+/// creating a folder in it: the two rights that let a person put something new
+/// there themselves, and the two a standard user lacks on `C:\Program Files`,
+/// `C:\Windows` and the root of the system drive.
+///
+/// `FILE_DELETE_CHILD` is left out deliberately. *Modify*, the grant most
+/// shared folders carry, does not include it — someone with Modify deletes a
+/// file by their right on the file — so asking for it would refuse the
+/// commonest writable folder there is while proving nothing more about who
+/// may write.
+const fn rights_for(read_only: bool) -> u32 {
+    let read = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES;
+    if read_only {
+        read
+    } else {
+        read | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY
+    }
+}
+
+/// A folder the client has proved they may use, held open as them.
+///
+/// The handle is the proof and the pin at once. It was opened under the
+/// client's own token asking for exactly the rights the grant needs
+/// ([`rights_for`]), so that it opened at all is Windows' own access check,
+/// made against the folder's real security descriptor rather than inferred
+/// from a listing. It was opened *as* the folder, never through it — a
+/// junction or symbolic link in the last place is refused rather than
+/// followed — and the path it answers with ([`Granted::path`]) is the one
+/// Windows resolved every earlier link to, under the client's token too.
+///
+/// It is held without `FILE_SHARE_DELETE` for as long as the machine lives.
+/// While it is open the folder cannot be renamed or deleted, and neither can
+/// any folder above it, so the path keeps naming this folder for the compute
+/// service — which opens it by name, as itself, after the check is over.
+pub struct Granted {
+    handle: OwnedHandle,
+    path: PathBuf,
+}
+
+impl Granted {
+    /// Open `folder` for a grant as whichever token this thread holds.
+    ///
+    /// Only [`open_for_client`] calls this in the service, with the client's
+    /// token on the thread; tests call it directly, as themselves.
+    fn open(folder: &Path, read_only: bool) -> Result<Self, String> {
+        let shown = crate::hcs::plain(folder.to_path_buf());
+        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated wide string alive for the call; no
+        // security attributes and no template are passed. Backup semantics is
+        // what lets `CreateFileW` open a directory at all, and grants nothing
+        // more unless the token has the backup privilege enabled, which a
+        // standard user's does not.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                rights_for(read_only),
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            let cause = io::Error::last_os_error();
+            return Err(if read_only {
+                format!(
+                    "the folder {} cannot be opened by the account that asked for it: {cause}",
+                    shown.display()
+                )
+            } else {
+                format!(
+                    "the folder {} cannot be opened for changes by the account that asked for \
+                     it, so it cannot be granted with changes allowed: {cause}",
+                    shown.display()
+                )
+            });
+        }
+        // SAFETY: a fresh handle this function owns.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+
+        let tag = attribute_tag(&handle).map_err(|cause| {
+            format!(
+                "synod's machine service could not read what kind of thing {} is: {cause}",
+                shown.display()
+            )
+        })?;
+        judge(&shown, tag)?;
+        let path = final_path(&handle).map_err(|cause| {
+            format!(
+                "synod's machine service could not tell where the folder {} really is: {cause}",
+                shown.display()
+            )
+        })?;
+        Ok(Self { handle, path })
+    }
+
+    /// Where the folder really is: the path Windows resolved it to, in the
+    /// verbatim spelling `std::fs::canonicalize` also answers with.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Whether the folder is still the real folder the client opened.
+    ///
+    /// The held handle stops the folder and everything above it from being
+    /// renamed or deleted, but not an *empty* folder from being made into a
+    /// junction in place, and a junction is followed by anything that opens
+    /// the path by name. So once the compute service has done that, the folder
+    /// is asked again.
+    ///
+    /// # Errors
+    /// Returns the sentence to show the person who granted the folder.
+    fn unchanged(&self) -> Result<(), String> {
+        let shown = crate::hcs::plain(self.path.clone());
+        let moved = || {
+            format!(
+                "the folder {} was changed into a link to somewhere else while its machine was \
+                 starting, so the machine was stopped",
+                shown.display()
+            )
+        };
+        let tag = attribute_tag(&self.handle).map_err(|_| moved())?;
+        judge(&shown, tag).map_err(|_| moved())?;
+        match final_path(&self.handle) {
+            Ok(now) if now == self.path => Ok(()),
+            _ => Err(moved()),
+        }
+    }
+}
+
+/// Whether the client on the other end of `pipe` may use `folder` as the grant
+/// asks, answered by becoming them, and the folder held open as them if so.
+///
+/// `ImpersonateNamedPipeClient` puts the caller's token on this thread, the
+/// folder is opened under it ([`Granted`] says how and why), and the token is
+/// dropped again. Anything less — checking as `LocalSystem`, which can read and
+/// write nearly everything — would let one user have another user's documents
+/// mounted into their own guest, or have this service's own program handed to
+/// a guest to change, which is worse again.
+///
+/// A client that connected at the *identification* level, which lets the
+/// service learn who they are but not act as them, is refused here too: the
+/// open fails, and a failed open is never waved through.
 ///
 /// # Errors
 /// Returns the sentence to show the person who granted the folder: that it
-/// cannot be read, or that the check itself could not be made (which is refused,
-/// never waved through).
+/// cannot be opened as the grant asks, that it is a link rather than a folder,
+/// or that the check itself could not be made.
 ///
 /// # Safety
 /// `pipe` must be a live, *connected* server end of a named pipe. Impersonation
 /// is meaningless on anything else, and on a handle that is not a pipe at all
 /// the platform is being asked to read a kind of object it was not given.
-pub unsafe fn readable_by_client(pipe: HANDLE, folder: &Path) -> Result<(), String> {
+pub unsafe fn open_for_client(
+    pipe: HANDLE,
+    folder: &Path,
+    read_only: bool,
+) -> Result<Granted, String> {
     // SAFETY: `pipe` is a connected server-end handle; impersonation lasts until
     // `RevertToSelf`, which the guard below performs on every path out.
     if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
@@ -413,24 +596,91 @@ pub unsafe fn readable_by_client(pipe: HANDLE, folder: &Path) -> Result<(), Stri
         ));
     }
     let guard = Impersonation;
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: the access check itself — reading the granted folder as the \
-                  caller. Host-side, before any machine exists; no shell, no run, no card."
-    )]
-    let readable = std::fs::read_dir(folder);
+    let granted = Granted::open(folder, read_only);
     drop(guard);
+    granted
+}
 
-    match readable {
-        Ok(_) => Ok(()),
-        Err(cause) => Err(format!(
-            "the folder {} cannot be opened by the account that asked for it: {cause}",
-            folder.display()
-        )),
+/// Whether an object with these attributes may be granted as a folder.
+///
+/// A reparse point is refused only when it stands for another name — a
+/// junction or a symbolic link. The object was opened as itself, so the access
+/// check was made against the link and not against what it points at, and
+/// whatever later opens the path by name would follow it somewhere the check
+/// never looked. Other reparse points are the folder's own data kept in an
+/// unusual way — a `OneDrive` folder whose files are online-only is one — and
+/// refusing them would refuse an ordinary Documents folder.
+fn judge(shown: &Path, tag: FILE_ATTRIBUTE_TAG_INFO) -> Result<(), String> {
+    if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && tag.ReparseTag & REPARSE_TAG_NAME_SURROGATE != 0
+    {
+        return Err(format!(
+            "{} is a link to another folder (a junction or a symbolic link), and synod's machine \
+             service grants only a real folder: grant the folder it points to instead",
+            shown.display()
+        ));
+    }
+    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(format!("{} is not a folder", shown.display()));
+    }
+    Ok(())
+}
+
+/// The attributes and reparse tag of the object `handle` names, read from the
+/// handle rather than by name.
+fn attribute_tag(handle: &OwnedHandle) -> io::Result<FILE_ATTRIBUTE_TAG_INFO> {
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: the handle is live and was opened with `FILE_READ_ATTRIBUTES`;
+    // `tag` is a writable structure of exactly the type and size this
+    // information class fills in.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).expect("a small structure"),
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(tag)
+}
+
+/// The path of the object `handle` names, with every link on the way to it
+/// resolved: `\\?\C:\…`, or `\\?\UNC\server\share\…` on a file share.
+fn final_path(handle: &OwnedHandle) -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 512];
+    loop {
+        let capacity = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        // SAFETY: the handle is live, and `buffer` is writable for `capacity`
+        // wide characters.
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                handle.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                capacity,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = usize::try_from(written).expect("a u32 fits a usize here");
+        if written < buffer.len() {
+            // It fitted: `written` excludes the terminating NUL.
+            buffer.truncate(written);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
+        }
+        // Too small: `written` is the size needed, NUL included.
+        buffer.resize(written, 0);
     }
 }
 
-/// Reverts impersonation on every path out of [`readable_by_client`], including
+/// Reverts impersonation on every path out of [`open_for_client`], including
 /// an unwind — a thread left wearing a client's token would answer the *next*
 /// client's questions as this one.
 struct Impersonation;
@@ -661,5 +911,214 @@ mod tests {
             Reply::Stopped(Ok(())).versioned(VERSION),
             Reply::Stopped(Ok(()))
         ));
+    }
+
+    /// A read-only grant asks to list and pass through the folder and nothing
+    /// that changes it; a grant with changes allowed adds exactly the two
+    /// rights that let a person put something new there. Neither asks for more
+    /// than it proves — in particular not `FILE_DELETE_CHILD`, which *Modify*
+    /// lacks.
+    #[test]
+    fn each_grant_asks_for_the_rights_it_needs_and_no_more() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_DELETE_CHILD, FILE_WRITE_ATTRIBUTES, WRITE_DAC,
+        };
+        let read = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES;
+        let add = FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+        assert_eq!(rights_for(true), read);
+        assert_eq!(rights_for(true) & add, 0, "read-only proves no write");
+        assert_eq!(rights_for(false), read | add);
+        for right in [DELETE, FILE_DELETE_CHILD, FILE_WRITE_ATTRIBUTES, WRITE_DAC] {
+            assert_eq!(rights_for(false) & right, 0, "{right:#x} is not asked for");
+        }
+    }
+
+    /// Junctions and symbolic links are refused, because the check was made on
+    /// the link; a folder whose data is kept in an unusual way — a `OneDrive`
+    /// placeholder — is not; and a file is not a folder.
+    #[test]
+    fn only_a_real_folder_is_judged_grantable() {
+        const JUNCTION: u32 = 0xA000_0003;
+        const SYMLINK: u32 = 0xA000_000C;
+        const CLOUD: u32 = 0x9000_001A;
+        let shown = Path::new(r"C:\Users\secretary\Documents");
+        let tagged = |attributes, tag| FILE_ATTRIBUTE_TAG_INFO {
+            FileAttributes: attributes,
+            ReparseTag: tag,
+        };
+        let link = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+        for tag in [JUNCTION, SYMLINK] {
+            let why = judge(shown, tagged(link, tag)).expect_err("a link is refused");
+            assert!(why.contains("link to another folder"), "{why}");
+            assert!(why.contains(r"C:\Users\secretary\Documents"), "{why}");
+        }
+        judge(shown, tagged(link, CLOUD)).expect("an online-only folder is a folder");
+        judge(shown, tagged(FILE_ATTRIBUTE_DIRECTORY, 0)).expect("a plain folder");
+        let why = judge(shown, tagged(0x80, 0)).expect_err("a file is refused");
+        assert!(why.contains("is not a folder"), "{why}");
+    }
+
+    /// A folder this account made is granted either way, and the path handed
+    /// on is the one Windows resolved, spelled as `canonicalize` spells it —
+    /// so the compute service's own resolution, later, lands on it unchanged.
+    #[test]
+    fn a_folder_one_owns_is_granted_read_only_and_writable() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let real = std::fs::canonicalize(dir.path()).expect("canonical");
+        for read_only in [true, false] {
+            let granted = Granted::open(dir.path(), read_only).expect("granted");
+            assert_eq!(granted.path(), real, "read_only = {read_only}");
+            granted.unchanged().expect("nothing moved");
+        }
+    }
+
+    /// A folder this account may read but not add to is granted read-only and
+    /// refused with changes allowed — the check that list access alone never
+    /// made.
+    #[test]
+    fn a_folder_one_may_only_read_is_refused_with_changes_allowed() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let restricted = Restricted::to(dir.path(), "D:P(A;OICI;FRFX;;;WD)");
+        Granted::open(dir.path(), true).expect("readable, so granted read-only");
+        let why = Granted::open(dir.path(), false)
+            .err()
+            .expect("not writable, so refused with changes allowed");
+        assert!(why.contains("cannot be opened for changes"), "{why}");
+        drop(restricted);
+    }
+
+    /// A folder this account may not even list is refused either way.
+    #[test]
+    fn a_folder_one_may_not_read_is_refused() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let restricted = Restricted::to(dir.path(), "D:P(A;OICI;RC;;;WD)");
+        for read_only in [true, false] {
+            assert!(Granted::open(dir.path(), read_only).is_err(), "{read_only}");
+        }
+        drop(restricted);
+    }
+
+    /// A junction is refused rather than followed, even to a folder this
+    /// account could have granted directly: the rights checked were the
+    /// link's, not its target's.
+    #[test]
+    fn a_junction_is_refused() {
+        let target = tempfile::tempdir().expect("scratch folder");
+        let holder = tempfile::tempdir().expect("scratch folder");
+        let link = holder.path().join("away");
+        if !junction(&link, target.path()) {
+            eprintln!("mklink /J is not available here; skipping");
+            return;
+        }
+        for read_only in [true, false] {
+            let why = Granted::open(&link, read_only)
+                .err()
+                .expect("a junction is refused");
+            assert!(why.contains("link to another folder"), "{why}");
+        }
+    }
+
+    /// A junction *above* the folder is resolved, under the same token, and the
+    /// machine is handed the real path — so no later resolution by name can
+    /// land anywhere the check did not.
+    #[test]
+    fn a_folder_reached_through_a_junction_is_granted_as_itself() {
+        let target = tempfile::tempdir().expect("scratch folder");
+        std::fs::create_dir(target.path().join("inner")).expect("inner folder");
+        let holder = tempfile::tempdir().expect("scratch folder");
+        let link = holder.path().join("away");
+        if !junction(&link, target.path()) {
+            eprintln!("mklink /J is not available here; skipping");
+            return;
+        }
+        let granted = Granted::open(&link.join("inner"), false).expect("granted");
+        let real = std::fs::canonicalize(target.path().join("inner")).expect("canonical");
+        assert_eq!(granted.path(), real);
+    }
+
+    /// While the grant is held, neither the folder nor the folder above it can
+    /// be renamed — which is what keeps its path naming it for the compute
+    /// service — and once it is dropped, both can.
+    #[test]
+    fn a_held_folder_cannot_be_moved_from_under_its_path() {
+        let root = tempfile::tempdir().expect("scratch folder");
+        let parent = root.path().join("parent");
+        let folder = parent.join("folder");
+        std::fs::create_dir_all(&folder).expect("folders");
+
+        let granted = Granted::open(&folder, true).expect("granted");
+        assert!(
+            std::fs::rename(&folder, parent.join("moved")).is_err(),
+            "the folder itself is pinned"
+        );
+        assert!(
+            std::fs::rename(&parent, root.path().join("moved")).is_err(),
+            "and so is the folder above it"
+        );
+        drop(granted);
+        std::fs::rename(&folder, parent.join("moved")).expect("free once released");
+    }
+
+    /// A file is not a folder, and is refused as one.
+    #[test]
+    fn a_file_is_refused() {
+        let dir = tempfile::tempdir().expect("scratch folder");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, b"hello").expect("a file");
+        let why = Granted::open(&file, true).err().expect("refused");
+        assert!(why.contains("is not a folder"), "{why}");
+    }
+
+    /// Make a junction at `link` pointing at `target`, which needs no
+    /// privilege, unlike a symbolic link. `false` where `cmd` cannot.
+    fn junction(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    /// A folder whose DACL is replaced for the length of a test, and handed
+    /// back afterwards so the temporary directory can be deleted. The owner
+    /// keeps the right to rewrite the DACL whatever it says.
+    struct Restricted(PathBuf);
+
+    impl Restricted {
+        fn to(folder: &Path, sddl: &str) -> Self {
+            set_dacl(folder, sddl);
+            Self(folder.to_path_buf())
+        }
+    }
+
+    impl Drop for Restricted {
+        fn drop(&mut self) {
+            set_dacl(&self.0, "D:P(A;OICI;FA;;;WD)");
+        }
+    }
+
+    fn set_dacl(folder: &Path, sddl: &str) {
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetFileSecurityW};
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated and alive; `descriptor` is a
+        // writable slot the call fills with a `LocalAlloc`'d descriptor.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(converted, 0, "{}", io::Error::last_os_error());
+        let path: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `path` is NUL-terminated and `descriptor` a valid descriptor.
+        let set = unsafe { SetFileSecurityW(path.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+        let cause = io::Error::last_os_error();
+        // SAFETY: allocated by the conversion above and not used after this.
+        unsafe { LocalFree(descriptor.cast()) };
+        assert_ne!(set, 0, "{cause}");
     }
 }

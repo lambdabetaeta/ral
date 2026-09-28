@@ -37,11 +37,15 @@
 //!   one share, one socket, one console, and no network adapter. There is no
 //!   pass-through of anything, so there is no request that could ask for one;
 //! - the **folder** is checked against the *caller's own* rights, not the
-//!   service's, by impersonating the client across the pipe
-//!   ([`service::readable_by_client`]). Without that check a broker running as
-//!   `LocalSystem` would happily mount one user's documents into another
-//!   user's guest, which is a far worse hole than the one it was built to
-//!   close;
+//!   service's, by impersonating the client across the pipe and opening it as
+//!   them with the rights the grant needs — to read it, and to add to it when
+//!   changes are allowed ([`service::open_for_client`]). The folder is opened as
+//!   itself, a junction or symbolic link is refused rather than followed, and
+//!   the machine is given the path that handle resolved to, held open so it
+//!   cannot be moved while the machine lives. Without that check a broker
+//!   running as `LocalSystem` would happily mount one user's documents into
+//!   another user's guest, or its own program folder into a guest allowed to
+//!   change it;
 //! - the **resources** are clamped to what a session may ask for, so a caller
 //!   cannot request a machine larger than the computer.
 //!
