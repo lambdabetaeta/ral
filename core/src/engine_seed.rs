@@ -216,6 +216,7 @@ mod tests {
     fn a_seed_carries_a_binding_once_per_closure_that_mentions_it() {
         const MARKER: &str = "zqx-marker";
         let mut shell = bare_child_shell(prelude());
+        shell.context.set_env_var("PATH", "");
         crate::evaluator::run_source(
             &format!("let big = '{MARKER}'\nlet f = {{ 1 }}\nlet g = {{ 2 }}\nlet h = {{ $big }}"),
             &mut shell,

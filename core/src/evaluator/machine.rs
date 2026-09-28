@@ -1221,8 +1221,11 @@ mod tests {
         value
     }
 
+    /// An empty `PATH`, so a session `let` never meets the host's commands.
     fn new_shell() -> Shell {
-        Shell::new(crate::io::TerminalState::default())
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.context.set_env_var("PATH", "");
+        shell
     }
 
     /// `M to x. N`: a `let` in `rest` is invisible once the `To` frame pops
