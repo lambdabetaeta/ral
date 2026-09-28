@@ -229,24 +229,34 @@ impl Grant {
             )
         })?;
 
-        Self::refuse_too_much(&root)?;
+        Self::refuse_too_much(&root, &Territory::of_this_host())?;
         Ok(Self { root })
     }
 
     /// Refuse a grant that is not a *folder for a job* but a whole
-    /// territory: the disk, the home folder, or any folder containing
-    /// the home folder.
+    /// territory — the disk, the home folder, or any folder containing
+    /// the home folder — or that is a place where this user's programs
+    /// keep their own settings.
     ///
-    /// One law covers all three — a grant must not contain the user's
-    /// home folder — with the disk root caught first, since the home
-    /// folder may be unknown.  It is deliberately not a size or a
-    /// depth test: a network share at `/Volumes/Registry/Admissions`
-    /// is a perfectly ordinary grant and must stay one.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "host-env: the territory being protected is the launching user's real home, canonicalised for the comparison"
-    )]
-    fn refuse_too_much(root: &Path) -> Result<(), String> {
+    /// The first law is that a grant must not contain the user's home
+    /// folder, with the disk root caught first, since the home folder may
+    /// be unknown.  It is deliberately not a size or a depth test: a
+    /// network share at `/Volumes/Registry/Admissions` is a perfectly
+    /// ordinary grant and must stay one.
+    ///
+    /// The second law is about *where* inside home, not how much.  The
+    /// folder is granted writable, and some folders inside home are read
+    /// back by the computer itself: the Windows Startup folder under the
+    /// roaming `AppData`, `~/Library/LaunchAgents` on macOS, and
+    /// `~/.config/autostart` on Linux all run what they hold the next time
+    /// the person signs in.  So a grant may neither lie inside one of
+    /// [`Territory::settings`] nor contain one, and a hidden folder
+    /// directly under home (`~/.ssh`, `~/.config`, …) is refused on the
+    /// same ground.  The one carve-out is a folder strictly inside
+    /// [`Territory::scratch`]: on Windows the temp folder lives under the
+    /// local `AppData`, but it holds no settings and runs nothing at sign-in,
+    /// and it is where a document opened from an email attachment lands.
+    fn refuse_too_much(root: &Path, territory: &Territory) -> Result<(), String> {
         if root.parent().is_none() {
             return Err(format!(
                 "{} is the whole disk — every file on this computer. \
@@ -255,25 +265,62 @@ impl Grant {
             ));
         }
 
-        let Some(home) = ral_core::host::home() else {
-            return Ok(()); // No home to contain: nothing for this law to say.
+        let Some(home) = territory.home.as_deref() else {
+            return Ok(()); // No home to contain: nothing for either law to say.
         };
-        let home = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(&home));
-        if home == root {
-            return Err(format!(
-                "{} is your whole home folder — your entire computer's worth of files. \
-                 Choose the one folder that holds the documents for this job, \
-                 such as {}.",
-                root.display(),
-                home.join("Documents").join("Admissions").display()
-            ));
+        if within(home, root) {
+            return Err(if within(root, home) {
+                format!(
+                    "{} is your whole home folder — your entire computer's worth of files. \
+                     Choose the one folder that holds the documents for this job, \
+                     such as {}.",
+                    root.display(),
+                    home.join("Documents").join("Admissions").display()
+                )
+            } else {
+                format!(
+                    "{} contains your home folder, and so nearly everything you own. \
+                     Choose the one folder that holds the documents for this job.",
+                    root.display()
+                )
+            });
         }
-        if home.starts_with(root) {
-            return Err(format!(
-                "{} contains your home folder, and so nearly everything you own. \
-                 Choose the one folder that holds the documents for this job.",
-                root.display()
-            ));
+
+        let in_scratch = territory
+            .scratch
+            .as_deref()
+            .is_some_and(|tmp| strictly_within(root, tmp));
+        if in_scratch {
+            return Ok(());
+        }
+        let settings_refusal = || {
+            format!(
+                "{} is where the programs on this computer keep their own settings, \
+                 and some of what is kept there runs by itself the next time you sign in. \
+                 Choose a folder of documents instead, such as one inside {}.",
+                root.display(),
+                home.join("Documents").display()
+            )
+        };
+        for tree in &territory.settings {
+            if within(root, tree) {
+                return Err(settings_refusal());
+            }
+            if within(tree, root) {
+                return Err(format!(
+                    "{} holds {}, where the programs on this computer keep their own settings, \
+                     and some of what is kept there runs by itself the next time you sign in. \
+                     Choose the one folder inside it that holds the documents for this job.",
+                    root.display(),
+                    tree.display()
+                ));
+            }
+        }
+        let hidden = rest_after(root, home)
+            .and_then(|mut rest| rest.next())
+            .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'));
+        if hidden {
+            return Err(settings_refusal());
         }
         Ok(())
     }
@@ -397,6 +444,127 @@ impl Grant {
     }
 }
 
+/// The parts of this user's computer a grant is judged against, resolved
+/// once and canonicalised so they compare with the canonical root.
+///
+/// Built from the real host by [`Territory::of_this_host`]; the tests build
+/// their own, so no refusal test depends on the machine it runs on.
+#[derive(Debug, Default)]
+struct Territory {
+    /// The user's home folder, if the host names one.
+    home: Option<PathBuf>,
+    /// The per-user application-data trees: where programs keep their
+    /// settings, and where the places that run things at sign-in live.
+    /// See [`settings_trees`].
+    settings: Vec<PathBuf>,
+    /// The system temp folder, strictly inside which a grant is allowed
+    /// even when the temp folder itself lies in a settings tree.
+    scratch: Option<PathBuf>,
+}
+
+impl Territory {
+    /// The territory of the user running synod.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: the territory being protected is the launching user's real home and \
+                  application-data folders, read from this process's own environment and \
+                  canonicalised for the comparison"
+    )]
+    fn of_this_host() -> Self {
+        // A tree that does not exist yet is compared as spelled: it can
+        // still be created inside a grant, so it is still refused.
+        let canonical = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let home = ral_core::host::home().map(|h| canonical(PathBuf::from(h)));
+        let settings = settings_trees(home.as_deref(), |name| std::env::var_os(name))
+            .into_iter()
+            .map(canonical)
+            .collect();
+        Self {
+            home,
+            settings,
+            scratch: Some(canonical(std::env::temp_dir())),
+        }
+    }
+}
+
+/// The per-user application-data trees for this platform, from the home
+/// folder and an environment lookup — pure, so a test can hand it both.
+///
+/// - **Windows** — the roaming and the local `AppData` folders as
+///   `%APPDATA%` and `%LOCALAPPDATA%` name them (either may be redirected
+///   elsewhere, to a network profile for instance), and `home\AppData`
+///   besides, which is where both live when nothing redirects them and so
+///   the fallback when the variables are unset.  A variable holding a
+///   relative path names nothing and is ignored.
+/// - **macOS** — `~/Library`, which holds `LaunchAgents`.
+/// - **Linux and the other Unixes** — `~/.config`, which holds
+///   `autostart`, and `~/.local`.  Every hidden folder directly under home
+///   is refused besides, by [`Grant::refuse_too_much`]'s own rule.
+fn settings_trees(
+    home: Option<&Path>,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut trees = Vec::new();
+    if cfg!(windows) {
+        trees.extend(
+            ["APPDATA", "LOCALAPPDATA"]
+                .into_iter()
+                .filter_map(|name| env(name).map(PathBuf::from))
+                .filter(|p| p.is_absolute()),
+        );
+        trees.extend(home.map(|h| h.join("AppData")));
+    } else if cfg!(target_os = "macos") {
+        trees.extend(home.map(|h| h.join("Library")));
+    } else if let Some(h) = home {
+        trees.extend([h.join(".config"), h.join(".local")]);
+    }
+    trees
+}
+
+/// What remains of `path` after `base`, if `path` is `base` or lies inside
+/// it — compared component by component, as [`Path::starts_with`] does,
+/// and on Windows without regard to case, since its filesystem folds case.
+/// A drive prefix compares by its letter alone, so `\\?\C:` (the canonical
+/// spelling) and `C:` (an environment variable's) agree.
+fn rest_after<'a>(path: &'a Path, base: &Path) -> Option<std::path::Components<'a>> {
+    let mut rest = path.components();
+    for want in base.components() {
+        if !same_component(rest.next()?, want) {
+            return None;
+        }
+    }
+    Some(rest)
+}
+
+/// Whether `path` is `base` or lies inside it.
+fn within(path: &Path, base: &Path) -> bool {
+    rest_after(path, base).is_some()
+}
+
+/// Whether `path` lies inside `base` and is not `base` itself.
+fn strictly_within(path: &Path, base: &Path) -> bool {
+    rest_after(path, base).is_some_and(|mut rest| rest.next().is_some())
+}
+
+/// One component of [`rest_after`]'s comparison.
+fn same_component(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
+    use std::path::{Component, Prefix};
+    if !cfg!(windows) {
+        return a == b;
+    }
+    let disk = |c: Component<'_>| match c {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(d.to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    match (disk(a), disk(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -465,6 +633,181 @@ mod tests {
                 "granting a folder above $HOME should be refused"
             );
         }
+    }
+
+    /// A made-up home, spelled the way this platform spells an absolute
+    /// path, so the territory tests judge no real machine.
+    fn fake_home() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\ada")
+        } else {
+            PathBuf::from("/home/ada")
+        }
+    }
+
+    /// A territory over [`fake_home`] whose one settings tree is the
+    /// roaming `AppData`, and whose temp folder lies under the local one.
+    fn fake_territory() -> Territory {
+        let home = fake_home();
+        let app_data = home.join("AppData");
+        Territory {
+            settings: vec![app_data.join("Roaming"), app_data.join("Local")],
+            scratch: Some(app_data.join("Local").join("Temp")),
+            home: Some(home),
+        }
+    }
+
+    fn judged(root: &Path) -> Result<(), String> {
+        Grant::refuse_too_much(root, &fake_territory())
+    }
+
+    /// The finding this law answers: the Startup folder runs what it holds
+    /// at the next sign-in, so a writable grant there, or of any settings
+    /// tree whole, is refused and says why.
+    #[test]
+    fn a_folder_inside_the_settings_trees_is_refused() {
+        let roaming = fake_home().join("AppData").join("Roaming");
+        let startup = roaming
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join("Startup");
+        for root in [&startup, &roaming] {
+            let message = judged(root).expect_err("a settings folder must be refused");
+            assert!(
+                message.contains("keep their own settings")
+                    && message.contains("runs by itself the next time you sign in")
+                    && message.contains("Documents"),
+                "the refusal should say why and what to pick instead: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_holding_a_settings_tree_is_refused() {
+        let message = judged(&fake_home().join("AppData"))
+            .expect_err("a folder over AppData must be refused");
+        assert!(
+            message.contains("holds") && message.contains("Roaming"),
+            "the refusal should name the settings folder it holds: {message}"
+        );
+    }
+
+    /// `~/.config/autostart`, `~/.ssh` and their kind: a hidden folder
+    /// directly under home is refused, however deep the grant inside it.
+    /// A hidden folder deeper down, inside an ordinary one, is just a
+    /// folder.
+    #[test]
+    fn a_hidden_folder_under_home_is_refused() {
+        let home = fake_home();
+        for root in [
+            home.join(".config").join("autostart"),
+            home.join(".ssh"),
+            home.join(".local").join("share"),
+        ] {
+            let message = judged(&root).expect_err("a hidden home folder must be refused");
+            assert!(
+                message.contains("keep their own settings"),
+                "{} should be refused as settings: {message}",
+                root.display()
+            );
+        }
+        judged(&home.join("Documents").join(".drafts"))
+            .expect("a hidden folder inside an ordinary one is an ordinary grant");
+        judged(&home.join("Documents").join("Admissions"))
+            .expect("an ordinary folder inside home is an ordinary grant");
+    }
+
+    /// The temp folder lies under the local `AppData` on Windows but runs
+    /// nothing at sign-in: a folder inside it opens, the whole of it does
+    /// not.
+    #[test]
+    fn a_folder_inside_the_temp_folder_is_allowed() {
+        let temp = fake_home().join("AppData").join("Local").join("Temp");
+        judged(&temp.join("Admissions")).expect("a folder inside temp must open");
+        judged(&temp).expect_err("the whole temp folder is still a settings tree's");
+    }
+
+    /// Windows paths fold case and have two spellings of a drive; the
+    /// comparison must agree with the filesystem on both, or a grant of
+    /// `c:\users\ada\appdata\roaming` would slip past the law.
+    #[cfg(windows)]
+    #[test]
+    fn the_comparison_folds_case_and_drive_spelling_on_windows() {
+        for root in [
+            r"\\?\c:\users\ADA\appdata\roaming\Microsoft",
+            r"c:\USERS\ada\AppData\Roaming",
+        ] {
+            judged(Path::new(root)).expect_err("the same folder spelled differently");
+        }
+        assert!(
+            judged(Path::new(r"\\?\C:\USERS\ADA"))
+                .expect_err("home, spelled differently")
+                .contains("your whole home folder")
+        );
+        judged(Path::new(r"D:\Users\ada\AppData\Roaming"))
+            .expect("another drive is another folder");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_settings_trees_on_windows_follow_the_environment() {
+        let home = fake_home();
+        let env = |name: &str| match name {
+            "APPDATA" => Some(r"\\profiles\ada\Roaming".into()),
+            "LOCALAPPDATA" => Some(r"Local".into()), // relative: names nothing
+            _ => None,
+        };
+        assert_eq!(
+            settings_trees(Some(&home), env),
+            [
+                PathBuf::from(r"\\profiles\ada\Roaming"),
+                home.join("AppData")
+            ]
+        );
+        assert_eq!(
+            settings_trees(Some(&home), |_| None),
+            [home.join("AppData")],
+            "with nothing set, the fallback is home's own AppData"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_settings_tree_on_macos_is_the_library() {
+        let home = fake_home();
+        assert_eq!(
+            settings_trees(Some(&home), |_| None),
+            [home.join("Library")]
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_settings_trees_on_linux_are_config_and_local() {
+        let home = fake_home();
+        assert_eq!(
+            settings_trees(Some(&home), |_| None),
+            [home.join(".config"), home.join(".local")]
+        );
+    }
+
+    /// The real host, once: the Startup folder this machine would actually
+    /// run things from is refused, and the temp folder the fixtures above
+    /// work in is not.
+    #[cfg(windows)]
+    #[test]
+    fn this_hosts_startup_folder_is_refused() {
+        let territory = Territory::of_this_host();
+        let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) else {
+            return; // Nothing names a roaming AppData here; nothing to assert.
+        };
+        let roaming = std::fs::canonicalize(&roaming).unwrap_or(roaming);
+        let startup = roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup");
+        Grant::refuse_too_much(&startup, &territory).expect_err("the real Startup folder");
+        let (_dir, grant) = granted("grant-real-temp");
+        Grant::refuse_too_much(grant.root(), &territory).expect("a folder inside temp");
     }
 
     /// An ordinary folder opens, and `root` is the resolved form — the
