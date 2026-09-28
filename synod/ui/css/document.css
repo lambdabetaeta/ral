@@ -30,6 +30,11 @@
       line-height: 1.55;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      /* Model markup keeps inline `style` (KaTeX's layout is made of it), so
+         a reply could position an element over the whole window. Paint
+         containment makes the bubble the containing block for fixed and
+         absolute descendants and clips them to it. */
+      contain: paint;
     }
     .msg.user .bubble {
       background: var(--accent);

@@ -366,11 +366,12 @@ single path model text takes to the DOM. Its order is the load-bearing part:
 each formula is **lifted out before marked sees it** — markdown would read
 `x_1 * x_2` as emphasis, and `breaks: true` would cut a multi-line `$$` with
 a `<br>` — leaving a private-use sentinel that the prose carries through
-marked and DOMPurify unharmed; the typeset formula is put back into the
-scrubbed tree afterwards, because DOMPurify's CSS filter would strip the
-inline metrics KaTeX's layout is made of. That is safe only because KaTeX
-runs with `trust` off, where it can emit neither a link nor a raw node: the
-scrub still covers everything that came from the model as markup. An
+marked unharmed; KaTeX's nodes (with `trust` off, neither a link nor a raw
+node) replace each sentinel in the parsed, inert tree, and **DOMPurify scrubs
+that whole tree last**, returning a fragment the caller appends as it is. No
+scrubbed tree is ever serialised and parsed again, which is what closes
+mutation XSS; one `SCRUB` config keeps KaTeX's MathML and inline metrics and
+drops every element that could navigate the window or restyle it. An
 unterminated formula is not one, which is what keeps a half-streamed `$$`
 from flashing red while it arrives; a `$` inside code, beside a space, or
 against a digit (`$5-$10`) is a dollar sign, not a delimiter. Code is judged

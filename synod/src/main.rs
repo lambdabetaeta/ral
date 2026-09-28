@@ -70,7 +70,14 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        // No injected click script: a link in the transcript is opened only
+        // through `open_url`, which checks it, and the window holds no
+        // permission to call the plugin's own `open_url` besides.
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(navigation_guard())
         .manage(commands::Running::default())
         .manage(accounts)
