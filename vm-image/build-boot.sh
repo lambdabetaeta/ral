@@ -399,6 +399,10 @@ SIM=$(apt-get install -s --no-install-recommends -t "$SUITE" linux-image-generic
 IMAGE_PKG=$(echo "$SIM" | grep -oE 'linux-image-[0-9][^ ]*-generic' | sed -n 1p)
 MODULES_PKG=$(echo "$SIM" | grep -oE 'linux-modules-[0-9][^ ]*-generic' | sed -n 1p)
 echo ">> [container] fetching $IMAGE_PKG + $MODULES_PKG (no firmware)"
+# RAL_BUILD_CACHE keeps /build between runs for cargo's sake alone; the kernel
+# and cpio staging below must start empty, or a previous run's modules block
+# `zstd -o` and a previous kernel's .debs match the globs beside this one's.
+rm -rf /build/kernel-debs /build/kernel-extract /build/cpio /build/vmlinuz
 mkdir -p /build/kernel-debs /build/kernel-extract
 ( cd /build/kernel-debs && apt-get download "$IMAGE_PKG" "$MODULES_PKG" )
 for deb in /build/kernel-debs/"$IMAGE_PKG"_*.deb /build/kernel-debs/"$MODULES_PKG"_*.deb; do
