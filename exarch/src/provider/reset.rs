@@ -1,8 +1,8 @@
-//! When a refusing provider may be asked again, read from every convention
-//! a 429 names it by. `at` takes the latest instant any names: asking before
-//! the last named clock runs out is refused again.
+//! What a 429 says: when the provider may be asked again, read from every
+//! convention that names it, and what ran out. `at` takes the latest instant
+//! any names: asking before the last named clock runs out is refused again.
 
-use super::error::error_object;
+use super::error::{Limit, error_object};
 use jiff::Timestamp;
 use jiff::fmt::rfc2822::DateTimeParser;
 use reqwest::header::HeaderMap;
@@ -26,6 +26,9 @@ const UNWAITABLE: &[&str] = &[
     "project_spend_limit_exceeded",
     "organization_usage_limit_exceeded",
 ];
+
+/// Error `type`s and `code`s of a plan's allowance spent, account-wide.
+const ALLOWANCE: &[&str] = &["usage_limit_reached"];
 
 pub(super) fn at(
     headers: Option<&HeaderMap>,
@@ -53,11 +56,25 @@ pub(super) fn at(
 
 /// A quota or credit spent rather than a rate exceeded.
 pub(super) fn unwaitable(body: &Value) -> bool {
+    names(body, UNWAITABLE)
+}
+
+/// What `body` names as run out: the plan's allowance, or else a rate.
+pub(super) fn limit(body: &Value) -> Limit {
+    if names(body, ALLOWANCE) {
+        Limit::Allowance
+    } else {
+        Limit::Rate
+    }
+}
+
+/// Whether the error's `type` or `code` is one of `list`.
+fn names(body: &Value, list: &[&str]) -> bool {
     error_object(body).is_some_and(|o| {
         ["type", "code"]
             .iter()
             .filter_map(|k| o.get(*k)?.as_str())
-            .any(|s| UNWAITABLE.contains(&s))
+            .any(|s| list.contains(&s))
     })
 }
 
@@ -302,6 +319,23 @@ mod tests {
             &json!({"error": {"type": "usage_limit_reached"}})
         ));
         assert!(!unwaitable(&json!({"error": {"code": 429}})));
+    }
+
+    #[test]
+    fn limit_reads_the_allowance_on_type_and_code() {
+        assert_eq!(
+            limit(&json!({"error": {"type": "usage_limit_reached"}})),
+            Limit::Allowance
+        );
+        assert_eq!(
+            limit(&json!({"error": {"code": "usage_limit_reached"}})),
+            Limit::Allowance
+        );
+        assert_eq!(
+            limit(&json!({"error": {"type": "rate_limit_exceeded"}})),
+            Limit::Rate
+        );
+        assert_eq!(limit(&json!({"error": {"code": 429}})), Limit::Rate);
     }
 
     /// `İ` → `i̇` is one byte longer, so a slice taken from the shorter original

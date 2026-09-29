@@ -8,7 +8,7 @@
 
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
-use crate::provider::{CutShort, ProviderError, Tuning, Usage};
+use crate::provider::{CutShort, ProviderError, Refusal, Tuning, Usage};
 use crate::record::model::{Context, Linked, TranscriptRead, TurnRow};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
@@ -70,7 +70,7 @@ impl From<&UsageDelta> for Usage {
 }
 
 /// Serialisable mirror of [`ProviderError`]: its `&'static str` site an owned
-/// string, its retry wait whole seconds.
+/// string.
 ///
 /// `tui::line` renders from this shape, so `record.jsonl` reconstructs the
 /// on-screen block.
@@ -89,18 +89,7 @@ pub enum ProviderErrorRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
     },
-    RateLimited {
-        retry_after_secs: Option<u64>,
-        cause: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<serde_json::Value>,
-    },
-    Exhausted {
-        resets_at: jiff::Timestamp,
-        cause: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<serde_json::Value>,
-    },
+    Refused(Refusal),
     Api {
         status: Option<u16>,
         model: String,
@@ -150,8 +139,7 @@ impl ProviderErrorRecord {
         match self {
             Self::Cancelled { .. } => "cancelled",
             Self::Transient { status, .. } => crate::provider::transient_label(*status),
-            Self::RateLimited { .. } => "rate limited",
-            Self::Exhausted { .. } => "usage limit reached",
+            Self::Refused(r) => r.limit.label(),
             Self::Api { .. } => "api error",
             Self::Truncated { .. } => "truncated",
             Self::Other { .. } => "provider error",
@@ -193,24 +181,7 @@ impl From<&ProviderError> for ProviderErrorRecord {
                 body: body.as_deref().cloned(),
                 status: *status,
             },
-            ProviderError::RateLimited {
-                retry_after,
-                cause,
-                body,
-            } => Self::RateLimited {
-                retry_after_secs: retry_after.map(|wait| wait.get().as_secs()),
-                cause: cause.clone(),
-                body: body.as_deref().cloned(),
-            },
-            ProviderError::Exhausted {
-                resets_at,
-                cause,
-                body,
-            } => Self::Exhausted {
-                resets_at: *resets_at,
-                cause: cause.clone(),
-                body: body.as_deref().cloned(),
-            },
+            ProviderError::Refused(r) => Self::Refused(r.clone()),
             ProviderError::Api {
                 status,
                 model,

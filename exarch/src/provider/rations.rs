@@ -1,10 +1,13 @@
 //! What is known of each account's allowance, shared by every agent and
-//! frontend in the process: the last reading of its meter, and the instant a
-//! refusal said it is spent until. Fed on the one road every request
+//! frontend in the process: the last reading of its meter, and the instants
+//! refusals said it is held until — the whole account for a spent allowance,
+//! one model for a rate. Fed on the one road every request
 //! travels, `Provider::complete`; read by the ration gauge and by `/limits`.
 
 use super::allowance::{Allowance, MeterSource};
-use super::{Account, AccountId, Meter, ProviderError, StepOut};
+use super::retry::Recovery;
+use super::{Account, AccountId, Limit, Meter, ProviderError, Refusal, StepOut};
+use crate::latch::Latch;
 use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,31 +26,62 @@ struct Standing {
     reading: Vec<Allowance>,
     /// When the last read was spawned.
     asked: Option<Instant>,
-    /// From a refusal: no request is sent before this instant.
-    spent_until: Option<jiff::Timestamp>,
+    /// Until when the plan's allowance is spent: every model is held.
+    allowance_until: Option<jiff::Timestamp>,
+    /// Until when each model's rate is spent: that model alone is held.
+    rate_until: HashMap<String, jiff::Timestamp>,
+    /// The user's latches, one per window: a rung is told once per account,
+    /// by whichever agent climbs it first.
+    told: HashMap<Option<Duration>, Latch>,
+}
+
+impl Standing {
+    /// The refusal a request for `model` meets unsent: the later hold on it,
+    /// when that lies past what the retry loop waits in place. A nearer one is
+    /// let through, for the provider's own refusal to be waited out there.
+    fn hold(&self, account: &Account, model: &str, now: jiff::Timestamp) -> Option<Refusal> {
+        let (limit, until) = [
+            (Limit::Allowance, self.allowance_until),
+            (Limit::Rate, self.rate_until.get(model).copied()),
+        ]
+        .into_iter()
+        .filter_map(|(limit, until)| Some((limit, until?)))
+        .max_by_key(|&(_, until)| until)?;
+        let service = &account.service.name;
+        let cause = match limit {
+            Limit::Allowance => {
+                format!("nothing was sent: {service}'s plan allowance is spent until it resets")
+            }
+            Limit::Rate => {
+                format!(
+                    "nothing was sent: {model} on {service} is held until its rate limit resets"
+                )
+            }
+        };
+        let refusal = Refusal {
+            limit,
+            resets_at: Some(until),
+            received: now,
+            cause,
+            body: None,
+        };
+        matches!(refusal.recovery(), Recovery::Deferred(_)).then_some(refusal)
+    }
 }
 
 impl Rations {
-    /// The gate before a request: refused while a refusal's reset is still
-    /// ahead — nothing is sent — else a read of the account's meter spawned
-    /// when one is due, its reading landing in the record when it does.
+    /// The gate before a request: refused by a [`Standing::hold`], nothing
+    /// sent — else a read of the account's meter spawned when one is due, its
+    /// reading landing in the record when it does.
     pub(crate) fn admit<S: MeterSource>(
         self: &Arc<Self>,
         account: &Account,
+        model: &str,
         source: &S,
     ) -> Result<(), ProviderError> {
         let due = self.with(&account.id, |standing| {
-            if let Some(until) = standing.spent_until
-                && until > jiff::Timestamp::now()
-            {
-                return Err(ProviderError::Exhausted {
-                    resets_at: until,
-                    cause: format!(
-                        "nothing was sent: {}'s allowance is spent until it resets",
-                        account.service.name
-                    ),
-                    body: None,
-                });
+            if let Some(refusal) = standing.hold(account, model, jiff::Timestamp::now()) {
+                return Err(ProviderError::Refused(refusal));
             }
             let due = !matches!(account.service.meter, Meter::Unpublished)
                 && standing.asked.is_none_or(|at| at.elapsed() >= INTERVAL);
@@ -67,11 +101,28 @@ impl Rations {
         Ok(())
     }
 
-    /// After a request: a refusal's reset is kept, the later of old and new.
-    pub(crate) fn settle(&self, account: &AccountId, outcome: &Result<StepOut, ProviderError>) {
-        if let Err(ProviderError::Exhausted { resets_at, .. }) = outcome {
-            self.with(account, |standing| {
-                standing.spent_until = standing.spent_until.max(Some(*resets_at));
+    /// After a request: a refusal's reset is kept, the later of old and new,
+    /// on the scope of what it says ran out.
+    pub(crate) fn settle(
+        &self,
+        account: &AccountId,
+        model: &str,
+        outcome: &Result<StepOut, ProviderError>,
+    ) {
+        if let Err(ProviderError::Refused(Refusal {
+            limit,
+            resets_at: Some(at),
+            ..
+        })) = outcome
+        {
+            self.with(account, |standing| match limit {
+                Limit::Allowance => {
+                    standing.allowance_until = standing.allowance_until.max(Some(*at));
+                }
+                Limit::Rate => {
+                    let held = standing.rate_until.entry(model.to_string()).or_insert(*at);
+                    *held = (*held).max(*at);
+                }
             });
         }
     }
@@ -83,6 +134,23 @@ impl Rations {
             .get(account)
             .map(|standing| standing.reading.clone())
             .unwrap_or_default()
+    }
+
+    /// The windows of `account`'s last reading that newly reach a rung of
+    /// `ladder`, climbed on latches every agent on the account shares.
+    pub(crate) fn climb(&self, account: &AccountId, ladder: &[u32]) -> Vec<Allowance> {
+        self.with(account, |standing| {
+            let Standing { reading, told, .. } = standing;
+            reading
+                .iter()
+                .filter(|a| {
+                    a.percent()
+                        .and_then(|pct| told.entry(a.window).or_default().climb(ladder, pct))
+                        .is_some()
+                })
+                .cloned()
+                .collect()
+        })
     }
 
     /// A reading that landed, from a spawned read or a survey.
@@ -140,16 +208,21 @@ mod tests {
         }
     }
 
-    fn exhausted(resets_at: jiff::Timestamp) -> Result<StepOut, ProviderError> {
-        Err(ProviderError::Exhausted {
-            resets_at,
-            cause: "429".into(),
-            body: None,
+    fn refused(limit: Limit, resets_at: jiff::Timestamp) -> Result<StepOut, ProviderError> {
+        Err(ProviderError::Refused(Refusal {
+            resets_at: Some(resets_at),
+            ..Refusal::for_test(limit, None)
+        }))
+    }
+
+    fn rate_until(rations: &Rations, account: &Account, model: &str) -> Option<jiff::Timestamp> {
+        rations.with(&account.id, |standing| {
+            standing.rate_until.get(model).copied()
         })
     }
 
-    fn spent_until(rations: &Rations, account: &Account) -> Option<jiff::Timestamp> {
-        rations.with(&account.id, |standing| standing.spent_until)
+    fn allowance_until(rations: &Rations, account: &Account) -> Option<jiff::Timestamp> {
+        rations.with(&account.id, |standing| standing.allowance_until)
     }
 
     /// A read lands on a thread of its own.
@@ -160,43 +233,60 @@ mod tests {
         }
     }
 
+    /// An allowance holds every model, a rate its own alone; a hold the loop
+    /// would wait out in place, or one already past, lets the request through.
     #[test]
-    fn a_refusal_holds_the_account_until_its_reset_passes() {
-        let rations = Arc::new(Rations::default());
+    fn a_hold_refuses_what_ran_out_while_its_reset_is_deferred() {
         let account = Account::built_in("anthropic");
         let source = FakeSource::answering(Ok(Vec::new()));
-        let until = jiff::Timestamp::now() + Duration::from_hours(1);
-        rations.settle(&account.id, &exhausted(until));
-
-        let Err(ProviderError::Exhausted {
-            resets_at, cause, ..
-        }) = rations.admit(&account, &source)
-        else {
-            panic!("a request inside the hold is refused");
+        let admit = |limit, resets_at, model: &str| {
+            let rations = Arc::new(Rations::default());
+            rations.settle(&account.id, "a", &refused(limit, resets_at));
+            rations.admit(&account, model, &source)
         };
-        assert_eq!(resets_at, until);
-        assert!(cause.contains("nothing was sent"), "{cause}");
-
-        rations.with(&account.id, |standing| {
-            standing.spent_until = Some(jiff::Timestamp::now() - Duration::from_secs(1));
-        });
-        assert!(rations.admit(&account, &source).is_ok());
+        let now = jiff::Timestamp::now();
+        let hour = now + Duration::from_hours(1);
+        let Err(ProviderError::Refused(refusal)) = admit(Limit::Allowance, hour, "b") else {
+            panic!("an allowance holds every model");
+        };
+        assert!(
+            refusal.cause.contains("nothing was sent"),
+            "{}",
+            refusal.cause
+        );
+        assert!(admit(Limit::Rate, hour, "a").is_err());
+        assert!(admit(Limit::Rate, hour, "b").is_ok());
+        assert!(admit(Limit::Allowance, now + Duration::from_secs(10), "a").is_ok());
+        assert!(admit(Limit::Allowance, now - Duration::from_secs(1), "a").is_ok());
     }
 
     #[test]
-    fn settle_keeps_the_later_of_two_instants() {
+    fn settle_keeps_the_later_of_two_instants_per_scope() {
         let rations = Rations::default();
         let account = Account::built_in("anthropic");
         let now = jiff::Timestamp::now();
         let (soon, late) = (now + Duration::from_mins(1), now + Duration::from_hours(1));
-        rations.settle(&account.id, &exhausted(late));
-        rations.settle(&account.id, &exhausted(soon));
-        assert_eq!(spent_until(&rations, &account), Some(late));
-        rations.settle(&account.id, &exhausted(late + Duration::from_mins(1)));
-        assert_eq!(
-            spent_until(&rations, &account),
-            Some(late + Duration::from_mins(1))
-        );
+        let later = late + Duration::from_mins(1);
+        for limit in [Limit::Allowance, Limit::Rate] {
+            rations.settle(&account.id, "a", &refused(limit, late));
+            rations.settle(&account.id, "a", &refused(limit, soon));
+        }
+        assert_eq!(allowance_until(&rations, &account), Some(late));
+        assert_eq!(rate_until(&rations, &account, "a"), Some(late));
+        rations.settle(&account.id, "a", &refused(Limit::Rate, later));
+        assert_eq!(rate_until(&rations, &account, "a"), Some(later));
+        assert_eq!(allowance_until(&rations, &account), Some(late));
+        assert_eq!(rate_until(&rations, &account, "b"), None);
+    }
+
+    #[test]
+    fn a_rung_is_climbed_once_per_account() {
+        let rations = Rations::default();
+        let account = Account::built_in("openrouter");
+        rations.land(&account.id, reading(0.80));
+        let ladder = [50, 75, 90, 95];
+        assert_eq!(rations.climb(&account.id, &ladder), reading(0.80));
+        assert!(rations.climb(&account.id, &ladder).is_empty());
     }
 
     #[test]
@@ -204,7 +294,7 @@ mod tests {
         let rations = Arc::new(Rations::default());
         let account = Account::built_in("anthropic");
         let source = FakeSource::answering(Ok(reading(0.5)));
-        rations.admit(&account, &source).unwrap();
+        rations.admit(&account, "m", &source).unwrap();
         assert!(rations.with(&account.id, |standing| standing.asked.is_none()));
         assert_eq!(source.calls(), 0);
     }
@@ -214,10 +304,10 @@ mod tests {
         let rations = Arc::new(Rations::default());
         let account = Account::built_in("openrouter");
         let source = FakeSource::answering(Ok(reading(0.5)));
-        rations.admit(&account, &source).unwrap();
+        rations.admit(&account, "m", &source).unwrap();
         eventually(|| !rations.reading(&account.id).is_empty());
         assert_eq!(rations.reading(&account.id), reading(0.5));
-        rations.admit(&account, &source).unwrap();
+        rations.admit(&account, "m", &source).unwrap();
         assert_eq!(source.calls(), 1, "the second admit is inside INTERVAL");
     }
 
@@ -227,7 +317,7 @@ mod tests {
         let account = Account::built_in("openrouter");
         rations.land(&account.id, reading(0.5));
         let source = FakeSource::answering(Err("network is down".into()));
-        rations.admit(&account, &source).unwrap();
+        rations.admit(&account, "m", &source).unwrap();
         eventually(|| source.calls() == 1);
         assert_eq!(source.calls(), 1);
         assert_eq!(rations.reading(&account.id), reading(0.5));

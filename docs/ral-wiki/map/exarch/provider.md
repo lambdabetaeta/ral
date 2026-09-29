@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c8731be6
-generated_at_date: 2026-09-28
+generated_at_commit: 0714e80c
+generated_at_date: 2026-09-29
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -145,18 +145,23 @@ question.
 **What is known of each account's allowance has one home, `Rations`
 (`provider/rations.rs`), fed on the one road every model request travels.**
 The record is the third of the `Holdings`, beside the store and catalog —
-exarch builds one, synod one for all its conversations — and keeps,
-per account, the last meter reading and the instant a refusal said it is spent
-until. `Provider::complete` is the only caller of `Engine::complete`, so its
-live arm is where nothing can go around: `Rations::admit` before the send
-refuses a held account with `Exhausted` and nothing sent, else spawns a read
-of the account's meter when two minutes have passed, its reading landing
-straight in the record; `Rations::settle` after it keeps a refusal's
-`resets_at`, the later of old and new. The read source rides the provider:
-`Bureau::build` clones the roster out under one store lock, binds the
-transport to its credential, and hands the roster to a `LiveMeters` in the
-same `Backend::Live`, so the meter is exactly as fresh as the transport.
-`Rations` holds no store and takes no lock but its own leaf one. `/limits`
+exarch builds one, synod one for all its conversations — and keeps, per
+account, the last meter reading, the user's ration latches, and the instants
+refusals said it is held until: the whole account for a spent allowance, one
+model for a rate. `Provider::complete` is the only caller of
+`Engine::complete`, so its live arm is where nothing can go around:
+`Rations::admit` before the send refuses a held request with `Refused` and
+nothing sent — only when the hold's `Refusal::recovery` is `Deferred`, a
+nearer one being waited out in place — else spawns a read of the account's
+meter when two minutes have passed, its reading landing straight in the
+record; `Rations::settle` after it keeps a refusal's `resets_at`, the later of
+old and new, on the scope its `Limit` names. The read source rides the
+provider: `Bureau::build` clones the roster out under one store lock, binds
+the transport to its credential, and hands the roster to a `LiveMeters` in the
+same `Backend::Live`, so the meter is exactly as fresh as the transport. The
+latches are one per window, so a usage rung is told to the user once per
+account, by whichever agent climbs it first (`Rations::climb`). `Rations`
+holds no store and takes no lock but its own leaf one. `/limits`
 (`Bureau::survey_allowances`) reads every account fresh and `Survey::settle`
 lands each reading in the record before drawing its card, so no frontend can
 survey without feeding it; the agent's ration gauge
@@ -370,9 +375,9 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
   turn was cut short, and each arm carries its own remedy
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 - Rate limits get a larger budget and a higher backoff ceiling than transient
-  failures, and a named wait is honoured. A wait past that
-  ceiling is a spent allowance, `Exhausted`, surfaced on its first attempt and
-  resumed by a wakeup at the reset
+  failures, and a named wait is honoured. A `Refused` whose
+  reset lies past that ceiling (`Recovery::Deferred`) surfaces on its first
+  attempt, and the terminal trunk resumes it by a wakeup at the reset
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 Transport retry lives here, so the [[map/exarch/agent|nudge]] rules cover
@@ -388,10 +393,11 @@ the `StatusCode`, the response `HeaderMap`, and the parsed JSON body across the 
 paths a non-2xx reaches us by: `HttpError`, `WebModelCall(ResponseFailedStatus)`,
 the `HttpError` boxed inside a streaming `WebStream` (recursion), and a mid-stream
 `ChatResponse` frame whose code lives in `body["error"]["code"]` / `body["code"]`.
-The status drives the split: `refused` reads a 429 as a spent quota (`Api`), a
-reset past the patient tier (`Exhausted`), or congestion (`RateLimited`), taking
-the reset instant from `provider/reset.rs`, which reads every header and body
-convention providers name one by; a 5xx is `Transient`, any other 4xx `Api`.
+The status drives the split: `refused` reads a 429 as a spent quota (`Api`) or
+else a `Refused` stated whole — its `Limit`, reset and receipt — taking the
+first two from `provider/reset.rs`, which reads every header and body
+convention providers name one by, and leaving recovery to `Refusal::recovery`;
+a 5xx is `Transient`, any other 4xx `Api`.
 The `_ => Terminal` floor makes the walk total — a contract breach (a non-JSON
 2xx) or an unrecognised shape surfaces raw rather than being retried on a
 `Display`-string guess. The full

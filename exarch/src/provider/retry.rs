@@ -1,9 +1,11 @@
 //! Cancellation-aware retry policy and idle budgets for the attempt loops in
 //! `stream.rs`, keyed on the variant `error.rs` classified.
 
-use super::ProviderError;
 use super::tls::STREAM_IDLE_TIMEOUT;
+use super::{ProviderError, Refusal};
 use crate::agent::cancel;
+use crate::clock;
+use jiff::Timestamp;
 use std::time::Duration;
 
 /// Retry budget for transient stream and network failures.
@@ -22,14 +24,37 @@ const RETRY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 pub struct Wait(Duration);
 
 impl Wait {
-    /// `None` past the patient tier's ceiling: a wait that long is a spent
-    /// allowance, not congestion.
+    /// `None` past the patient tier's ceiling: a wait the loop does not sit
+    /// out in place.
     pub(super) fn patient(wait: Duration) -> Option<Self> {
         (wait <= Duration::from_millis(RATE_LIMIT_MAX_DELAY_MS)).then_some(Self(wait))
     }
 
     pub fn get(self) -> Duration {
         self.0
+    }
+}
+
+/// What the retry loop does with a refusal, read from its named wait alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Back off and ask again, for the server's own wait when it named one.
+    InPlace(Option<Wait>),
+    /// The reset lies past what the loop waits in place: surfaced at once.
+    Deferred(Timestamp),
+}
+
+impl Refusal {
+    /// The one reading of its wait, shared by the loop, the renderers, the
+    /// hold and the resume.
+    pub fn recovery(&self) -> Recovery {
+        let Some(at) = self.resets_at else {
+            return Recovery::InPlace(None);
+        };
+        match Wait::patient(clock::until(at, self.received)) {
+            Some(wait) => Recovery::InPlace(Some(wait)),
+            None => Recovery::Deferred(at),
+        }
     }
 }
 
@@ -63,9 +88,10 @@ pub(super) enum Attempt<T> {
     Failed(ProviderError),
 }
 
-/// Drive `one` through the shared retry policy: only `Transient` and
-/// `RateLimited` are retried, each against its own budget, and cancellation
-/// races the backoff sleep, so a cancel mid-delay never waits it out.
+/// Drive `one` through the shared retry policy: only `Transient` and a
+/// `Refused` waited in place are retried, each against its own budget, and
+/// cancellation races the backoff sleep, so a cancel mid-delay never waits it
+/// out.
 pub(super) async fn retry_with_backoff<T>(
     cancel_site: &'static str,
     cancel: &cancel::Token,
@@ -83,11 +109,10 @@ pub(super) async fn retry_with_backoff<T>(
             Attempt::Failed(error) => error,
         };
         let (max_attempts, max_delay_ms, retry_after) = match &error {
-            ProviderError::RateLimited { retry_after, .. } => (
-                RATE_LIMIT_MAX_ATTEMPTS,
-                RATE_LIMIT_MAX_DELAY_MS,
-                *retry_after,
-            ),
+            ProviderError::Refused(refusal) => match refusal.recovery() {
+                Recovery::InPlace(wait) => (RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_MAX_DELAY_MS, wait),
+                Recovery::Deferred(_) => return Err(error),
+            },
             ProviderError::Transient { .. } => (MAX_ATTEMPTS, MAX_DELAY_MS, None),
             _ => return Err(error),
         };
@@ -118,6 +143,7 @@ pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Limit;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -155,11 +181,10 @@ mod tests {
     /// A refusal naming a distant reset is not retried.
     #[test]
     fn a_429_naming_a_distant_reset_surfaces_on_its_first_attempt() {
-        let error = ProviderError::Exhausted {
-            resets_at: jiff::Timestamp::now() + Duration::from_mins(10),
-            cause: "429".into(),
-            body: None,
-        };
+        let error = ProviderError::Refused(Refusal::for_test(
+            Limit::Rate,
+            Some(Duration::from_mins(10)),
+        ));
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             "test",
@@ -170,7 +195,20 @@ mod tests {
             },
         ));
         assert_eq!(calls.get(), 1);
-        assert!(matches!(out, Err(ProviderError::Exhausted { .. })));
+        assert!(matches!(out, Err(ProviderError::Refused(_))));
+    }
+
+    #[test]
+    fn recovery_waits_in_place_up_to_the_patient_ceiling() {
+        let after =
+            |secs: Option<u64>| Refusal::for_test(Limit::Rate, secs.map(Duration::from_secs));
+        assert_eq!(
+            after(Some(30)).recovery(),
+            Recovery::InPlace(Wait::patient(Duration::from_secs(30)))
+        );
+        let late = after(Some(31));
+        assert_eq!(late.recovery(), Recovery::Deferred(late.resets_at.unwrap()));
+        assert_eq!(after(None).recovery(), Recovery::InPlace(None));
     }
 
     #[test]

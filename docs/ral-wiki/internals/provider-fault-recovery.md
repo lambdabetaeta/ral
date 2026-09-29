@@ -1,7 +1,7 @@
 ---
-verified_at_commit: c8731be6
-verified_at_date: 2026-09-28
-anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Exhausted, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+verified_at_commit: 0714e80c
+verified_at_date: 2026-09-29
+anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -113,20 +113,21 @@ three ways:
 | leaf | `ProviderError` | retried? |
 |---|---|---|
 | `Status` 429, quota spent | `Api` | **no** — no wait clears it |
-| `Status` 429, reset past the patient tier | `Exhausted { resets_at, cause, body }` | **no** — a wakeup resumes at the reset |
-| `Status` 429, otherwise | `RateLimited { retry_after, cause, body }` | yes — patient tier |
+| `Status` 429, otherwise | `Refused(Refusal { limit, resets_at, received, cause, body })` | as `Refusal::recovery` reads it: in place (patient tier), or surfaced at once |
 | `Status` 5xx | `Transient { cause, attempts, body }` | yes — transient tier |
 | `Status` other (4xx, redirect) | `Api { status, model, message, body }` | **no** — the user must change the request |
 | `Transport(detail)` | `Transient` (no body) | yes |
 | `Terminal` | `Other(String)` | no — rendered raw |
 
-A 429 is read by `refused`, three ways. A body whose error `type` or `code`
-names a quota or credit spent (`insufficient_quota`, `usage_not_included`, the
-spend- and usage-limit codes — the set Codex itself treats as unwaitable) is
-`Api`: waiting does not refill a purse. Otherwise `provider/reset.rs`'s `at`
-reads when the provider may be asked again, from every convention one is named
-by, and takes the **latest** instant any names — asking before the last named
-clock runs out is only refused again:
+A 429 is read by `refused`. A body whose error `type` or `code` names a quota
+or credit spent (`insufficient_quota`, `usage_not_included`, the spend- and
+usage-limit codes — the set Codex itself treats as unwaitable) is `Api`:
+waiting does not refill a purse. Every other 429 is stated whole as a
+`Refusal`: what ran out (`Limit`: `Allowance` when the body's `type` or `code`
+is `usage_limit_reached`, else `Rate`), when it was `received`, and the reset,
+which `provider/reset.rs`'s `at` reads from every convention one is named by,
+taking the **latest** instant any names — asking before the last named clock
+runs out is only refused again:
 
 | where | convention | who |
 |---|---|---|
@@ -144,12 +145,14 @@ does `parse_retry_after` scrape the cause text. (It slices the *lowercased*
 copy it searches, so a length-changing lowercase like `İ` can never land
 mid-character and panic.)
 
-`RateLimited`'s `retry_after` is a `retry::Wait`, and only `Wait::patient`
-makes one: it refuses a wait past `RATE_LIMIT_MAX_DELAY_MS`, the ceiling the
-patient tier waits in place, and `refused` then answers `Exhausted` — the
-account's allowance is spent until `resets_at`, an absolute instant because it
-will sit for hours. `record::fault`'s readout suppresses `reset::BODY_KEYS` from the
-body dump, since the dedicated field already carries them.
+How to recover is not part of a `Refusal` but the retry policy's reading of
+it, `Refusal::recovery`: `InPlace(Some(Wait))` when the wait from `received`
+is within `RATE_LIMIT_MAX_DELAY_MS` (only `Wait::patient` makes a `Wait`),
+`InPlace(None)` when none is named, and `Deferred(at)` past the ceiling. The
+loop, the hold, the resume and the renderers all share this one reading; the
+record carries the `Refusal` itself, so a replay reads it as the live run did.
+`record::fault`'s readout suppresses `reset::BODY_KEYS` from the body dump,
+since the dedicated field already carries them.
 
 A transport leaf carries its deepest `source` (`root_cause`) as `detail`, and
 that becomes the cause outright — genai's wrapper text above it is discarded,
@@ -216,11 +219,11 @@ The loop is small and the rules read straight off it:
 
 - A `Done` returns the value. A `Failed(Cancelled)` returns immediately — a
   cancel is never retried or reclassified.
-- A `Failed(e)` retries **only** when `e` is `Transient` or `RateLimited` and
-  budget remains; any other variant (`Api`, `Exhausted`, `Other`) surfaces at
-  once, and a `Transient` out of budget is stamped with its final attempt
-  count. So a 4xx never burns the budget, and a spent allowance surfaces on
-  its first attempt.
+- A `Failed(e)` retries **only** when `e` is `Transient` or a `Refused` whose
+  `Refusal::recovery` is `InPlace`, and budget remains; any other variant (`Api`, a
+  `Deferred` `Refused`, `Other`) surfaces at once, and a `Transient` out of
+  budget is stamped with its final attempt count. So a 4xx never burns the
+  budget, and a refusal past the patient tier surfaces on its first attempt.
 - Between attempts it `select!`s the backoff sleep against the cancel token, so
   a user can interrupt a wait.
 
@@ -237,43 +240,47 @@ is bounded by exactly the tiers above, and it is the *only* copy the retry
 loop pays, not a copy of a copy. See
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]].
 
-`retry_with_backoff`'s one match gives rate limits a strictly more patient
-tier than generic transient faults — they are the only thing now retried on a 429, so they must be
-the patient one:
+`retry_with_backoff`'s one match gives a refusal waited in place a strictly
+more patient tier than generic transient faults — it is the only thing retried
+on a 429, so it must be the patient one:
 
 | tier | attempts | delay ceiling |
 |---|---|---|
 | `Transient` | `MAX_ATTEMPTS` = 3 | `MAX_DELAY_MS` = 8 s |
-| `RateLimited` | `RATE_LIMIT_MAX_ATTEMPTS` = 6 | `RATE_LIMIT_MAX_DELAY_MS` = 30 s |
+| `Refused`, in place | `RATE_LIMIT_MAX_ATTEMPTS` = 6 | `RATE_LIMIT_MAX_DELAY_MS` = 30 s |
 
 `backoff_sleep` is exponential — `BASE_DELAY_MS` (750 ms) × 2^(attempt−1),
-capped at the tier ceiling — but a server's explicit `retry_after` overrides the
+capped at the tier ceiling — but a server's explicit `Wait` overrides the
 curve, uncapped: a `Wait` past the ceiling has no spelling, so the ceiling is
-also the line between congestion, waited out here, and a spent allowance,
-waited out by the agent.
+also the line between a refusal waited out here and one deferred to the agent.
 
-## Resuming a spent allowance
+## Resuming at a refusal's reset
 
-`Exhausted` ends the turn honestly, like every surfaced provider error — the
-transcript does not grow ([[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]).
-The attend loop then arms one wakeup of its own: `resume_at` replaces any
-`usage-reset` schedule with a one-shot at `resets_at`, whose prompt says when
-the task was paused and to carry on. It fires as an ordinary `Post::Wakeup`, a
-new exchange the log admits after `quiesce(Aborted)`, and an armed schedule
-parks a headless root `UntilCancelled` rather than letting it exit.
+A `Deferred` refusal ends the turn honestly, like every surfaced provider
+error — the transcript does not grow
+([[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]).
+Only exarch's terminal trunk then arms a wakeup of its own
+(`resume_on_reset`): `resume_at` replaces any `provider-reset` schedule with a
+one-shot at the reset, whose prompt says when requests were refused and until
+when, and to carry on. It is a wall-clock `Trigger::At`, and fires as an
+ordinary `Post::Wakeup`, a new exchange the log admits after
+`quiesce(Aborted)`. The harness arms it, not the model, so the
+`allow_schedule` grant does not apply. Nobody else resumes: a headless run
+fails fast with the reset in its summary (`usage limit reached until Tue
+14:05`), synod's exchange ends on the refusal (Law B leaves nothing to wake
+it), and a child fails up to its parent, whose next request meets the hold
+itself. Every fork gets `resume_on_reset: false`, and `converse_settled`
+refuses a trunk that holds it.
 
-The refusal is also the account's, not only the turn's: `Rations::settle`
-keeps its `resets_at` in the per-account record
-([[map/exarch/provider|provider]]), and until that instant passes
-`Provider::complete` answers every request on the account with the same
-`Exhausted` before anything is sent — so a sibling agent, a `/model` switch
-back, or a user's typed prompt all meet the hold rather than a doomed request,
-and each schedules its own resume. `wake_delay` rounds the wait **up** to whole
-seconds: a wake inside the hold would be refused locally and re-armed for one
-more second. The harness arms it, not the model, so the
-`allow_schedule` grant does not apply. Three limits stand: the reaper's
-deadlines are monotonic and stop while macOS sleeps, schedules live in memory
-only, and a child's idle lease can reap it during a long wait.
+The refusal is also the account's or the model's, not only the turn's:
+`Rations::settle` keeps its `resets_at` in the per-account record
+([[map/exarch/provider|provider]]), scoped by what it says ran out — the whole
+account for an `Allowance`, one model for a `Rate`. `Provider::complete`
+answers a request with the same `Refused` before anything is sent, but
+**only** when the hold's `Refusal::recovery` is `Deferred`; a nearer hold is
+let through, and the provider's own refusal is waited out in place. A sibling
+agent, a `/model` switch back, or a user's typed prompt all meet the hold
+rather than a doomed request. One limit stands: schedules live in memory only.
 
 Because transport retry lives entirely here, [[map/exarch/agent|the nudge
 rules]] upstream cover only *model-behaviour* outcomes — they never see a
@@ -342,12 +349,12 @@ non-retryable cases explicit rather than accidental:
 ## Testing the classifier without a network
 
 The suite tests two independent axes — the *source* (which genai variant
-carried the fault) and the *outcome* (`RateLimited` / `Transient` / `Api` /
+carried the fault) and the *outcome* (`Refused` / `Transient` / `Api` /
 `Other`) — and pins each **once**, not their cross product. A handful of
 hand-built `genai::Error` fixtures cover every source: a `WebStream` boxing an
 `HttpError` (recursion + 4xx, the named 400 regression), a `WebModelCall` with a
 `Retry-After` header (429 + the header read), a Codex-shaped
-`usage_limit_reached` body (`Exhausted` at its instant), an
+`usage_limit_reached` body (`Refused` as an `Allowance`, deferred to its instant), an
 `insufficient_quota` body (`Api`), a non-streamed 5xx, a `ChatResponse`
 JSON frame, a non-JSON `WebModelCall` (the contract-breach `Terminal`), and a
 `WebStream` with an unrecognised boxed cause (the `Terminal` floor).

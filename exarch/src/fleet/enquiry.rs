@@ -605,6 +605,7 @@ impl Datum for Trigger {
         match self {
             Self::Cron { expr, .. } => tag("cron", Some(expr.encode())),
             Self::After(delay) => tag("after", Some(fmt_duration(delay).encode())),
+            Self::At(at) => tag("at", Some(at.to_string().encode())),
         }
     }
 
@@ -626,18 +627,13 @@ impl Datum for Trigger {
     }
 }
 
-/// A cron with nothing inside its search horizon says "never" as the
-/// saturated ceiling.
 impl Datum for ScheduleInfo {
     fn encode(self) -> FOValue {
         FOValue::Map {
             entries: vec![
                 ("label".into(), self.label.encode()),
                 ("trigger".into(), self.trigger.encode()),
-                (
-                    "next-s".into(),
-                    self.next_in.map_or(u64::MAX, |d| d.as_secs()).encode(),
-                ),
+                ("next-s".into(), self.next_in.as_secs().encode()),
                 ("fires".into(), self.fires.encode()),
             ],
         }
@@ -648,7 +644,7 @@ impl Datum for ScheduleInfo {
         Ok(Self {
             label: field(v, "label")?,
             trigger: field(v, "trigger")?,
-            next_in: Some(Duration::from_secs(field(v, "next-s")?)),
+            next_in: Duration::from_secs(field(v, "next-s")?),
             fires: field(v, "fires")?,
         })
     }

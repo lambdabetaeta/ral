@@ -3,32 +3,12 @@
 
 pub(crate) mod ration;
 
-/// The level a gauge's reading has last been weighed at.
-#[derive(Default)]
-pub(crate) struct Latch(u32);
+use crate::latch::Latch;
 
-impl Latch {
-    /// The highest rung of `ladder` that `level` newly reaches, recorded; a
-    /// lower level lowers the latch, re-arming the rungs above it.
-    pub(crate) fn climb(&mut self, ladder: &[u32], level: u32) -> Option<u32> {
-        let told = std::mem::replace(&mut self.0, level);
-        ladder
-            .iter()
-            .copied()
-            .rfind(|&rung| told < rung && rung <= level)
-    }
-
-    /// A one-rung ladder: whether `over` newly holds.
-    fn cross(&mut self, over: bool) -> bool {
-        self.climb(&[1], u32::from(over)).is_some()
-    }
-}
-
-/// A climbed rung, as each audience hears it.
-pub(crate) struct Warning {
-    pub(crate) user: Option<String>,
-    /// The breadcrumb cause and the reminder body.
-    pub(crate) model: Option<(String, String)>,
+/// A climbed rung, told to the one audience its ladder names.
+pub(crate) enum Warning {
+    User(String),
+    Model { cause: String, body: String },
 }
 
 /// One stateless reading of the context-pressure gauge, taken by the caller.
@@ -64,26 +44,24 @@ impl Gauges {
                 self.pressure.cross(false);
                 None
             }
-            Pressure::Over { detail, planned } => self.pressure.cross(true).then(|| Warning {
-                user: None,
-                model: Some((
-                    "context pressure".into(),
-                    pressure_message(detail, planned.as_deref()),
-                )),
-            }),
+            Pressure::Over { detail, planned } => {
+                self.pressure.cross(true).then(|| Warning::Model {
+                    cause: "context pressure".into(),
+                    body: pressure_message(detail, planned.as_deref()),
+                })
+            }
         }
     }
 
     pub(crate) fn disk(&mut self, total: u64, ceiling: u64) -> Option<Warning> {
-        self.disk.cross(total > ceiling).then(|| Warning {
-            user: Some(format!(
+        self.disk.cross(total > ceiling).then(|| {
+            Warning::User(format!(
                 "disk: session log + scratch is {} KiB, over the {} KiB warn ceiling \
                  — forensic records are never rotated or deleted automatically; \
                  clean up by hand",
                 total / 1024,
                 ceiling / 1024
-            )),
-            model: None,
+            ))
         })
     }
 }
@@ -111,8 +89,6 @@ fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
 mod tests {
     use super::*;
 
-    const LADDER: &[u32] = &[50, 90];
-
     fn over() -> Pressure {
         Pressure::Over {
             detail: "400 of 500 tokens".into(),
@@ -120,39 +96,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_latch_tells_each_rung_once_and_skips_one_already_passed() {
-        let mut latch = Latch::default();
-        assert_eq!(latch.climb(LADDER, 49), None);
-        assert_eq!(latch.climb(LADDER, 50), Some(50));
-        assert_eq!(latch.climb(LADDER, 70), None);
-        assert_eq!(latch.climb(LADDER, 95), Some(90));
-        assert_eq!(latch.climb(LADDER, 96), None);
-        assert_eq!(
-            Latch::default().climb(LADDER, 95),
-            Some(90),
-            "a first reading past two rungs tells the higher alone"
-        );
-    }
-
-    #[test]
-    fn a_fall_below_a_rung_rearms_it() {
-        let mut latch = Latch::default();
-        assert_eq!(latch.climb(LADDER, 95), Some(90));
-        assert_eq!(latch.climb(LADDER, 60), None);
-        assert_eq!(latch.climb(LADDER, 91), Some(90));
-        assert_eq!(latch.climb(LADDER, 10), None);
-        assert_eq!(latch.climb(LADDER, 55), Some(50));
-    }
-
     /// The reminder carries both the reading and the turns the next boundary
     /// would cut.
     #[test]
     fn pressure_names_the_cut_and_offers_the_note() {
-        let (cause, body) = Gauges::default()
-            .pressure(&over())
-            .and_then(|w| w.model)
-            .expect("pressure due should remind");
+        let Some(Warning::Model { cause, body }) = Gauges::default().pressure(&over()) else {
+            panic!("pressure due should remind the model");
+        };
         assert_eq!(cause, "context pressure");
         assert!(body.contains("400 of 500 tokens"), "{body}");
         assert!(
@@ -201,11 +151,9 @@ mod tests {
     fn disk_tells_the_user_alone() {
         let mut gauges = Gauges::default();
         assert!(gauges.disk(10 * 1024, 64 * 1024).is_none());
-        let warning = gauges
-            .disk(2048 * 1024, 64 * 1024)
-            .expect("a crossing warns");
-        assert!(warning.model.is_none());
-        let line = warning.user.expect("the user is told");
+        let Some(Warning::User(line)) = gauges.disk(2048 * 1024, 64 * 1024) else {
+            panic!("a crossing tells the user");
+        };
         assert!(line.contains("disk") && line.contains("2048 KiB"), "{line}");
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::agent::event::{CutShortRecord, ProviderErrorRecord};
 use crate::clock;
-use crate::provider;
+use crate::provider::{self, Recovery};
 use serde_json::Value;
 use std::borrow::Cow;
 
@@ -69,33 +69,21 @@ impl Readout {
 fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
     match e {
         ProviderErrorRecord::Cancelled { .. } => Vec::new(),
-        ProviderErrorRecord::RateLimited {
-            retry_after_secs,
-            cause,
-            body,
-        } => retry_after_secs
-            .map(|secs| Field {
+        ProviderErrorRecord::Refused(r) => match r.recovery() {
+            Recovery::InPlace(Some(wait)) => Some(Field {
                 label: "retry-after".into(),
-                datum: Datum::Seconds(secs),
-            })
-            .into_iter()
-            .chain(body_or_cause(
-                body.as_ref(),
-                provider::reset::BODY_KEYS,
-                cause,
-            ))
-            .collect(),
-        ProviderErrorRecord::Exhausted {
-            resets_at,
-            cause,
-            body,
-        } => std::iter::once(text_field("resets", clock::local(*resets_at)))
-            .chain(body_or_cause(
-                body.as_ref(),
-                provider::reset::BODY_KEYS,
-                cause,
-            ))
-            .collect(),
+                datum: Datum::Seconds(wait.get().as_secs()),
+            }),
+            Recovery::InPlace(None) => None,
+            Recovery::Deferred(at) => Some(text_field("resets", clock::local(at))),
+        }
+        .into_iter()
+        .chain(body_or_cause(
+            r.body.as_deref(),
+            provider::reset::BODY_KEYS,
+            &r.cause,
+        ))
+        .collect(),
         ProviderErrorRecord::Transient {
             cause,
             attempts,

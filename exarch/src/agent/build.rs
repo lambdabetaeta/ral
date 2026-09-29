@@ -53,7 +53,7 @@ const TRUNK_NAME: &str = "main";
 /// where the adopted fork is seated.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
+    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, resume_on_reset, search); not a candidate for a combined enum"
 )]
 pub(crate) struct Build {
     /// The tab-bar identity — known to every caller before construction, `/branch`'s
@@ -86,6 +86,7 @@ pub(crate) struct Build {
     pub(crate) interactive: bool,
     pub(crate) returns: bool,
     pub(crate) allow_schedule: bool,
+    pub(crate) resume_on_reset: bool,
     /// The tools provider requests advertise — empty only for a `--chat`
     /// trunk.
     pub(crate) tools: Toolset,
@@ -174,7 +175,7 @@ impl RecordedAccount {
 /// Everything [`Avatar::root`] needs beyond the seat choice and the provider.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool sets an independent, orthogonal axis on the trunk (allow_schedule, interactive, chat); not a candidate for a combined enum"
+    reason = "each bool sets an independent, orthogonal axis on the trunk (allow_schedule, resume_on_reset, interactive, chat); not a candidate for a combined enum"
 )]
 pub struct RootConfig {
     pub system: String,
@@ -185,6 +186,11 @@ pub struct RootConfig {
     pub model: String,
     pub account: RecordedAccount,
     pub allow_schedule: bool,
+    /// Whether a turn refused until a reset past the in-place wait is resumed
+    /// there by a harness wakeup. Only exarch's terminal trunk sets it: a
+    /// headless run fails fast, synod's exchange ends on the refusal, and a
+    /// child fails up to its parent.
+    pub resume_on_reset: bool,
     pub interactive: bool,
     pub chat: bool,
     /// Whether requests also advertise the `thinking` relay — `--thinking-tool`.
@@ -254,6 +260,7 @@ impl Avatar {
             interactive,
             returns,
             allow_schedule,
+            resume_on_reset,
             tools,
             search,
             fleet,
@@ -290,6 +297,7 @@ impl Avatar {
             search,
             returns,
             allow_schedule,
+            resume_on_reset,
             disk_warn_bytes,
             egress,
             dial,
@@ -346,6 +354,7 @@ impl Avatar {
             model,
             account,
             allow_schedule,
+            resume_on_reset,
             interactive,
             chat,
             thinking_tool,
@@ -465,6 +474,7 @@ impl Avatar {
             interactive,
             returns: !interactive,
             allow_schedule,
+            resume_on_reset,
             tools: if chat {
                 Toolset::default()
             } else {
@@ -642,6 +652,7 @@ impl Avatar {
         let TestTrunk {
             system,
             allow_schedule,
+            resume_on_reset,
             egress,
             disk_warn_bytes,
             lease,
@@ -710,6 +721,7 @@ impl Avatar {
             interactive: false,
             returns: true,
             allow_schedule,
+            resume_on_reset,
             tools: Toolset::offered(false),
             search,
             fleet: Fleet::with_lease(lease),
@@ -728,6 +740,7 @@ impl Avatar {
 pub(crate) struct TestTrunk {
     pub(crate) system: String,
     pub(crate) allow_schedule: bool,
+    pub(crate) resume_on_reset: bool,
     /// The network policy the trunk's `search` reach is derived from.
     pub(crate) egress: crate::egress::Egress,
     pub(crate) disk_warn_bytes: Option<u64>,
@@ -742,6 +755,7 @@ impl TestTrunk {
         Self {
             system: system.to_string(),
             allow_schedule: false,
+            resume_on_reset: false,
             egress: crate::egress::Egress::for_test(),
             disk_warn_bytes: None,
             lease: crate::fleet::AGENT_LEASE_IDLE,
@@ -969,6 +983,7 @@ mod tests {
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
                 allow_schedule: false,
+                resume_on_reset: false,
                 // interactive: withholds `reply`.
                 interactive: true,
                 chat: false,
@@ -1338,6 +1353,7 @@ mod tests {
                 model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),
                 allow_schedule: false,
+                resume_on_reset: false,
                 interactive: true,
                 chat: false,
                 thinking_tool: false,
@@ -1478,6 +1494,7 @@ mod tests {
                 model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),
                 allow_schedule: false,
+                resume_on_reset: false,
                 interactive: true,
                 chat: false,
                 thinking_tool: false,

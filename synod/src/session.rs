@@ -270,6 +270,9 @@ impl Conversation {
             // conversing office assistant still runs on nothing but
             // the messages it is handed, never on its own authority.
             allow_schedule: false,
+            // The exchange ends on a refusal, and Law B leaves nothing to
+            // wake it.
+            resume_on_reset: false,
             // A conversation, not a job: the agent converses,
             // withholding `reply` and parking between messages rather
             // than returning once — [`exarch::headless::converse_sink`]

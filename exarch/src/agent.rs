@@ -87,7 +87,7 @@ use std::time::{Duration, Instant};
 /// only [`Weak`], and every walk prunes what fails to upgrade.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, resume_on_reset, search); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -148,6 +148,9 @@ pub struct Agent {
     /// schedule harness test can grant it on a [`Avatar::for_test`] trunk,
     /// which hardcodes it `false`.
     pub(crate) allow_schedule: bool,
+    /// Whether a refusal until a reset past the in-place wait arms a wakeup
+    /// to resume there: the terminal trunk alone, never a fork.
+    pub(crate) resume_on_reset: bool,
     /// The operator's ceiling, shared verbatim by every fork — a host setting.
     /// `None` means [`Avatar::disk_warning`] never walks the dirs at all.
     disk_warn_bytes: Option<u64>,

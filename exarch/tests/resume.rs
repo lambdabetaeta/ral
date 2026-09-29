@@ -67,6 +67,7 @@ fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
         model: "test-model".into(),
         account: RecordedAccount::for_test("test"),
         allow_schedule: false,
+        resume_on_reset: false,
         interactive: true,
         chat: false,
         thinking_tool: false,

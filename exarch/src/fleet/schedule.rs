@@ -1,22 +1,31 @@
-//! Scheduled wakeups: a five-field cron grammar, plus a one-shot relative
-//! `after <dur>`.
+//! Scheduled wakeups: a five-field cron grammar, a one-shot relative
+//! `after <dur>`, and the harness's own one-shot `At`, a wall-clock instant.
 //!
 //! The grammar is parsed here rather than taken from a `chrono`-based crate
 //! that would drag a second datetime tree in beside `jiff`.
 //!
-//! Cron is wall-clock, the reaper monotonic.  Every fire recomputes the next
-//! absolute occurrence in the host timezone and arms the reaper with the
-//! delta to it, so DST shifts, clock steps, and suspends are absorbed rather
-//! than accumulated.
+//! Every occurrence is a wall-clock instant — a cron's next in the host
+//! timezone, an `after`'s counted from when it was armed, an `At` as given.
+//! The reaper's clock is monotonic and stops while the machine sleeps, so each
+//! entry is armed toward its instant at most [`WALL_CHECK`] at a time, and
+//! every wake re-reads the wall clock: after a suspend a fire is at most that
+//! late, and a clock step moves it with the clock.
 
 use crate::bus::{Mailbox, Stamped};
+use crate::clock;
 use jiff::civil::DateTime;
-use jiff::{ToSpan, Zoned};
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};
 use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+/// The longest the reaper sleeps toward a wall-clock instant. Its clock
+/// stops while the machine sleeps, so after a wake a fire is late by at most
+/// this.
+const WALL_CHECK: Duration = Duration::from_mins(1);
 
 const MONTHS: &[(&str, u8)] = &[
     ("jan", 1),
@@ -238,6 +247,8 @@ pub enum Trigger {
         expr: String,
     },
     After(Duration),
+    /// One-shot at a wall-clock instant: armed by the harness, never parsed.
+    At(Timestamp),
 }
 
 impl Trigger {
@@ -246,22 +257,16 @@ impl Trigger {
         matches!(self, Self::Cron { .. })
     }
 
-    /// The delay from now to the next fire, recomputed against the host
-    /// timezone on every call.  `None` past a cron's search horizon.
-    pub fn next_delay(&self) -> Option<Duration> {
+    /// The instant of the next fire after `now`; `None` past a cron's search horizon.
+    pub fn next_after(&self, now: Timestamp) -> Option<Timestamp> {
         match self {
-            Self::After(d) => Some(*d),
-            Self::Cron { schedule, .. } => {
-                let now = Zoned::now();
-                let next = schedule.next_after(&now)?;
-                let secs = next.timestamp().duration_since(now.timestamp()).as_secs();
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "max(0) floors the delay to a non-negative seconds count"
-                )]
-                let secs = secs.max(0) as u64;
-                Some(Duration::from_secs(secs))
-            }
+            Self::Cron { schedule, .. } => Some(
+                schedule
+                    .next_after(&now.to_zoned(TimeZone::system()))?
+                    .timestamp(),
+            ),
+            Self::After(d) => now.checked_add(*d).ok(),
+            Self::At(t) => Some(*t),
         }
     }
 
@@ -270,6 +275,7 @@ impl Trigger {
         match self {
             Self::Cron { expr, .. } => expr.clone(),
             Self::After(d) => format!("after {}", fmt_duration(*d)),
+            Self::At(t) => format!("at {}", clock::local(*t)),
         }
     }
 }
@@ -325,8 +331,8 @@ pub type ScheduleId = u64;
 pub struct ScheduleInfo {
     pub label: String,
     pub trigger: String,
-    /// `None` for a cron with no further occurrence.
-    pub next_in: Option<Duration>,
+    /// Until the next fire; zero once overdue.
+    pub next_in: Duration,
     pub fires: u64,
 }
 
@@ -360,6 +366,8 @@ struct Entry {
     prompt: String,
     label: String,
     fires: u64,
+    /// The wall-clock instant of the next fire.
+    next: Timestamp,
     /// The next occurrence, armed on the reaper; dropping it disarms.
     deadline: Deadline,
 }
@@ -394,8 +402,9 @@ impl ScheduleRegistry {
         label: String,
         mailbox: &Mailbox,
     ) -> Result<ScheduleReceipt, String> {
-        let delay = trigger
-            .next_delay()
+        let now = Timestamp::now();
+        let next = trigger
+            .next_after(now)
             .ok_or_else(|| "this trigger has no next occurrence".to_string())?;
         let mut g = self.lock();
         if g.entries.values().any(|e| e.label == label) {
@@ -405,7 +414,7 @@ impl ScheduleRegistry {
         }
         let id = g.next_id;
         g.next_id += 1;
-        let deadline = self.arm_deadline(id, mailbox, delay);
+        let deadline = self.arm_deadline(id, mailbox, next);
         g.entries.insert(
             id,
             Entry {
@@ -413,13 +422,14 @@ impl ScheduleRegistry {
                 prompt,
                 label: label.clone(),
                 fires: 0,
+                next,
                 deadline,
             },
         );
         drop(g);
         Ok(ScheduleReceipt {
             label,
-            next_in: delay,
+            next_in: clock::until(next, now),
         })
     }
 
@@ -447,6 +457,7 @@ impl ScheduleRegistry {
 
     /// Snapshot the live schedules, ordered by id.
     pub fn list(&self) -> Vec<ScheduleInfo> {
+        let now = Timestamp::now();
         let mut rows: Vec<(ScheduleId, ScheduleInfo)> = {
             let g = self.lock();
             g.entries
@@ -457,7 +468,7 @@ impl ScheduleRegistry {
                         ScheduleInfo {
                             label: e.label.clone(),
                             trigger: e.trigger.describe(),
-                            next_in: e.trigger.next_delay(),
+                            next_in: clock::until(e.next, now),
                             fires: e.fires,
                         },
                     )
@@ -474,18 +485,20 @@ impl ScheduleRegistry {
         self.lock().entries.clear();
     }
 
-    /// Arm one occurrence on the reaper.  Takes no registry lock, so `fire`
-    /// may call it under one.
-    fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, delay: Duration) -> Deadline {
+    /// Arm the reaper toward `next`, at most [`WALL_CHECK`] ahead.  Takes no
+    /// registry lock, so `fire` may call it under one.
+    fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, next: Timestamp) -> Deadline {
         let reg = self.clone();
         let mailbox = mailbox.clone();
+        let delay = clock::until(next, Timestamp::now()).min(WALL_CHECK);
         arm_callback(delay, move || reg.fire(id, &mailbox))
     }
 
-    /// The reaper fired this schedule: post a wakeup unless a previous one is
-    /// still queued (the overlap-skip — the inbox already dedupes by id, so
-    /// asking it is the only source of truth this needs), then re-arm, or
-    /// drop a spent one-shot.  The overlap check runs before the registry
+    /// The reaper fired this schedule.  Woken before its instant, it re-arms
+    /// toward it and posts nothing.  Otherwise it posts a wakeup unless a
+    /// previous one is still queued (the overlap-skip — the inbox already
+    /// dedupes by id, so asking it is the only source of truth this needs),
+    /// then re-arms, or drops a spent one-shot.  The overlap check runs before the registry
     /// lock is taken, never under it: a park verdict reads `armed()` under
     /// the inbox mutex, so the lock order is inbox → registry, and this must
     /// not invert it.  Composing and pushing straddle the registry guard's
@@ -497,6 +510,11 @@ impl ScheduleRegistry {
         let Some(entry) = g.entries.get_mut(&id) else {
             return; // unscheduled or cleared between arming and firing
         };
+        let now = Timestamp::now();
+        if now < entry.next {
+            entry.deadline = self.arm_deadline(id, mailbox, entry.next);
+            return;
+        }
         let recurring = entry.trigger.is_recurring();
         let msg = if already_queued {
             None
@@ -513,8 +531,9 @@ impl ScheduleRegistry {
             ))
         };
         if recurring {
-            if let Some(delay) = entry.trigger.next_delay() {
-                entry.deadline = self.arm_deadline(id, mailbox, delay);
+            if let Some(next) = entry.trigger.next_after(now) {
+                entry.next = next;
+                entry.deadline = self.arm_deadline(id, mailbox, next);
             } else {
                 g.entries.remove(&id);
             }
@@ -763,6 +782,45 @@ mod tests {
         assert!(
             reg.list().is_empty(),
             "a one-shot schedule is removed after firing"
+        );
+    }
+
+    #[test]
+    fn a_fire_before_its_instant_rearms_and_posts_nothing() {
+        let reg = ScheduleRegistry::new();
+        let inbox = Inbox::new();
+        let at = Timestamp::now()
+            .checked_add(Duration::from_hours(1))
+            .unwrap();
+        reg.schedule(
+            Trigger::At(at),
+            "later".into(),
+            "later".into(),
+            &inbox.mailbox(),
+        )
+        .unwrap();
+        reg.fire(0, &inbox.mailbox());
+        assert!(inbox.next_item().is_none(), "no wakeup is queued");
+        let live = reg.list();
+        assert_eq!(live.len(), 1, "the entry is still live");
+        assert_eq!(live[0].fires, 0, "an early wake counts no fire");
+    }
+
+    #[test]
+    fn list_reports_the_time_remaining() {
+        let reg = ScheduleRegistry::new();
+        let inbox = Inbox::new();
+        reg.schedule(
+            Trigger::After(Duration::from_hours(2)),
+            "x".into(),
+            "x".into(),
+            &inbox.mailbox(),
+        )
+        .unwrap();
+        let next_in = reg.list()[0].next_in;
+        assert!(
+            next_in > Duration::from_mins(119) && next_in <= Duration::from_hours(2),
+            "got {next_in:?}"
         );
     }
 

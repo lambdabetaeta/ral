@@ -7,18 +7,17 @@
 
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
-use crate::agent::gauge::{Pressure, Warning};
+use crate::agent::gauge::{Pressure, Warning, ration};
 use crate::agent::nudge;
 use crate::agent::seat::EngineLost;
 use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::clock;
 use crate::fleet::schedule::Trigger;
-use crate::provider::{Provider, ProviderError};
+use crate::provider::{Limit, Provider, ProviderError, Recovery};
 use crate::shell_eval;
 use ral_core::protocol::{Severed, reading};
 use ral_core::serial::FOValue;
-use std::time::Duration;
 
 /// What the surrounding loop does next: `Stop` on `/quit` or a headless root's
 /// `reply`; `Severed` hands the loop the engine's loss to record once it ends.
@@ -32,8 +31,8 @@ enum Flow {
 /// session log dir and scratch, too costly to pay at every tool boundary.
 const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 
-/// The label of the one-shot wakeup armed at a spent allowance's reset.
-const RESUME_LABEL: &str = "usage-reset";
+/// The label of the one-shot wakeup armed at a refusal's reset.
+const RESUME_LABEL: &str = "provider-reset";
 
 /// What [`Avatar::attend`] does once [`Control`] has run a slash command.
 pub enum Verdict {
@@ -243,8 +242,11 @@ impl Avatar {
         {
             eprintln!("exarch: a provider error was not recorded: {error}");
         }
-        if let Err(ProviderError::Exhausted { resets_at, .. }) = &outcome {
-            self.resume_at(*resets_at);
+        if let Err(ProviderError::Refused(refusal)) = &outcome
+            && self.agent.resume_on_reset
+            && let Recovery::Deferred(at) = refusal.recovery()
+        {
+            self.resume_at(at, refusal.limit);
         }
         if let Ok(deliberate::Outcome::Severed(s)) = &outcome {
             return Flow::Severed(s.clone());
@@ -407,55 +409,65 @@ impl Avatar {
             .into_iter()
             .collect();
         told.extend(self.disk_warning()?);
-        told.extend(
-            self.gauges
-                .ration
-                .climb(provider.account(), &provider.allowances()),
-        );
+        let account = provider.account();
+        told.extend(ration::told(
+            account,
+            &provider.climb_allowances(ration::USER_HEARS),
+        ));
+        told.extend(self.gauges.ration.climb(
+            account,
+            &provider.allowances(),
+            self.agent.resume_on_reset,
+        ));
         Ok(self.tell(told))
     }
 
-    /// Note each user line; turn each model part into a reminder, dropped
+    /// Note each user line; turn each model one into a reminder, dropped
     /// for a `--chat` trunk, which keeps no [`nudge::Nudges`].
     fn tell(&self, warnings: Vec<Warning>) -> Vec<String> {
         warnings
             .into_iter()
-            .filter_map(|warning| {
-                if let Some(line) = warning.user {
+            .filter_map(|warning| match warning {
+                Warning::User(line) => {
                     self.note(line);
+                    None
                 }
-                let (cause, body) = warning.model?;
-                let nudges = self.nudges.as_ref()?;
-                Some(nudges.remind(cause, &body, &mut self.log.lock()))
+                Warning::Model { cause, body } => Some(self.nudges.as_ref()?.remind(
+                    cause,
+                    &body,
+                    &mut self.log.lock(),
+                )),
             })
             .collect()
     }
 
-    /// Arm the one-shot wakeup that resumes the task when a spent allowance
-    /// resets, replacing any earlier one.
-    fn resume_at(&self, resets_at: jiff::Timestamp) {
+    /// Arm the one-shot wakeup that resumes the task at a refusal's reset,
+    /// replacing any earlier one.
+    fn resume_at(&self, resets_at: jiff::Timestamp, limit: Limit) {
         let now = jiff::Timestamp::now();
-        let delay = wake_delay(resets_at, now);
         let prompt = format!(
-            "The provider's usage limit paused this task at {}; it has now reset. \
+            "The provider refused requests at {} until {}; that time has passed. \
              Carry on where you left off.",
-            clock::local(now)
+            clock::local(now),
+            clock::local(resets_at)
         );
         let schedules = &self.agent.schedules;
         schedules.unschedule(RESUME_LABEL);
         match schedules.schedule(
-            Trigger::After(delay),
+            Trigger::At(resets_at),
             prompt,
             RESUME_LABEL.into(),
             &self.mailbox(),
         ) {
             Ok(_) => self.note(format!(
-                "usage limit reached — resuming {}, in {}",
+                "{} — resuming {}, in {}",
+                limit.label(),
                 clock::local(resets_at),
-                clock::hms(delay.as_secs())
+                clock::hms(clock::until(resets_at, now).as_secs())
             )),
             Err(refusal) => self.note_error(format!(
-                "usage limit reached, but the resume could not be scheduled: {refusal}"
+                "{} — the resume could not be scheduled: {refusal}",
+                limit.label()
             )),
         }
     }
@@ -488,13 +500,6 @@ impl Avatar {
         self.note(lost.logged());
         *final_outcome = (AgentOutcome::Failed(lost.to_string()), None);
     }
-}
-
-/// Whole seconds to the reset, rounded up so the wake never lands inside the
-/// hold, and at least one.
-fn wake_delay(resets_at: jiff::Timestamp, now: jiff::Timestamp) -> Duration {
-    let wait = clock::until(resets_at, now);
-    Duration::from_secs((wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1))
 }
 
 /// Emit the chrome an item's source shows as it enters context.  A nudge is an
@@ -625,9 +630,12 @@ fn agent_outcome(
 )]
 mod tests {
     use super::*;
+    use crate::agent::TestTrunk;
     use crate::agent::testkit::*;
+    use crate::provider::Refusal;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
+    use std::time::Duration;
 
     /// Every item `announce` draws records its display commit through the
     /// seam: a prompt commits `Display::Prompt`, and a subagent's breadcrumb
@@ -1142,9 +1150,9 @@ mod tests {
     /// and the file alone crosses it.
     #[test]
     fn disk_warning_walks_the_log_dir() {
-        let mut session = Avatar::for_test_with(crate::agent::TestTrunk {
+        let mut session = Avatar::for_test_with(TestTrunk {
             disk_warn_bytes: Some(64 * 1024),
-            ..crate::agent::TestTrunk::new("system")
+            ..TestTrunk::new("system")
         })
         .expect("a trunk under a disk-warn ceiling");
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 1024 * 1024]).unwrap();
@@ -1156,26 +1164,21 @@ mod tests {
         );
     }
 
-    /// A spent allowance leaves exactly one wakeup at its reset, however many
-    /// times it is refused.
-    #[test]
-    fn an_exhausted_outcome_arms_one_usage_reset_wakeup() {
-        let mut session = Avatar::for_test("system").unwrap();
-        let resets_at = jiff::Timestamp::now() + Duration::from_hours(5);
-        session.agent.provider.swap(scripted(
-            "test-model",
-            Script::new()
-                .then(Reply::error(ProviderError::Exhausted {
-                    resets_at,
-                    cause: "429".into(),
-                    body: None,
-                }))
-                .then(Reply::error(ProviderError::Exhausted {
-                    resets_at,
-                    cause: "429".into(),
-                    body: None,
-                })),
-        ));
+    /// A trunk refused twice, until a reset `resets_in` after each refusal.
+    fn refused_twice(resume_on_reset: bool, resets_in: Duration) -> Avatar {
+        let mut session = Avatar::for_test_with(TestTrunk {
+            resume_on_reset,
+            ..TestTrunk::new("system")
+        })
+        .unwrap();
+        let refusal = || {
+            Reply::error(ProviderError::Refused(Refusal::for_test(
+                Limit::Allowance,
+                Some(resets_in),
+            )))
+        };
+        let script = Script::new().then(refusal()).then(refusal());
+        session.agent.provider.swap(scripted("test-model", script));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.couple(&emit);
@@ -1186,10 +1189,17 @@ mod tests {
             let item = session.inbox.next_item().expect("the seeded item");
             session.take_up(&item, &mut control, &emit, &mut final_outcome);
         }
+        session
+    }
 
+    /// A deferred refusal leaves exactly one wakeup at its reset, however many
+    /// times it is refused.
+    #[test]
+    fn a_deferred_refusal_arms_one_resume_wakeup() {
+        let session = refused_twice(true, Duration::from_hours(5));
         assert!(
             session.agent.schedules.unschedule(RESUME_LABEL),
-            "the wakeup bears the usage-reset label"
+            "the wakeup bears the provider-reset label"
         );
         assert!(
             !session.agent.schedules.armed(),
@@ -1198,16 +1208,10 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_rounds_up_to_whole_seconds_and_a_past_reset_to_one() {
-        let now = jiff::Timestamp::now();
-        assert_eq!(
-            wake_delay(now + Duration::from_millis(100_900), now),
-            Duration::from_secs(101)
-        );
-        assert_eq!(
-            wake_delay(now - Duration::from_secs(30), now),
-            Duration::from_secs(1)
-        );
+    fn only_a_resuming_trunk_arms_a_resume_and_only_past_the_in_place_wait() {
+        let armed = |resumes, resets_in| refused_twice(resumes, resets_in).agent.schedules.armed();
+        assert!(!armed(false, Duration::from_hours(5)));
+        assert!(!armed(true, Duration::from_secs(5)));
     }
 
     /// A binding prune is transcript/TUI-only: it must never grow the

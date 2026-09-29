@@ -612,20 +612,20 @@ fn exchange_ending(
 ///
 /// # Errors
 /// Refuses at once, before touching the bus or seeding `message`, if
-/// `session` holds `allow_schedule`: an armed self-schedule may park past
-/// [`ParkMode::UntilCancelled`](crate::bus::ParkMode), a wait this driver's
-/// policy does not cover and Law B forbids waiting out regardless. Otherwise
+/// `session` holds `allow_schedule` or `resume_on_reset`: an armed wakeup may
+/// park past [`ParkMode::UntilCancelled`](crate::bus::ParkMode), a wait this
+/// driver's policy does not cover and Law B forbids waiting out regardless. Otherwise
 /// returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_settled<S: Sink>(
     session: &mut Avatar,
     message: String,
     sink: &mut S,
 ) -> Result<(), String> {
-    if session.agent.allow_schedule {
+    if session.agent.allow_schedule || session.agent.resume_on_reset {
         return Err(
             "converse_settled ends an exchange only once the fleet quiesces, and an armed \
-             self-schedule may fire again with nothing to wait it out — refused rather than \
-             parked past quiescence"
+             self-schedule or reset-resume wakeup may fire again with nothing to wait it out — \
+             refused rather than parked past quiescence"
                 .to_string(),
         );
     }
@@ -678,6 +678,7 @@ mod tests {
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
                 allow_schedule: false,
+                resume_on_reset: false,
                 interactive: true,
                 chat: false,
                 thinking_tool: false,
@@ -1003,7 +1004,12 @@ mod tests {
     /// A conversing trunk with real spawn fuel, so a test may register a
     /// genuine live child under it — [`converse_trunk`]'s `fuel: 0` exists
     /// precisely to refuse that.
-    fn settled_trunk(tag: &str, script: Script, allow_schedule: bool) -> Avatar {
+    fn settled_trunk(
+        tag: &str,
+        script: Script,
+        allow_schedule: bool,
+        resume_on_reset: bool,
+    ) -> Avatar {
         let scratch = Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
                 .expect("scratch dir"),
@@ -1019,6 +1025,7 @@ mod tests {
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
                 allow_schedule,
+                resume_on_reset,
                 interactive: true,
                 chat: false,
                 thinking_tool: false,
@@ -1099,6 +1106,7 @@ mod tests {
                 .then(Reply::text("on it"))
                 .then(Reply::text("thanks for the update")),
             false,
+            false,
         );
         let child = live_child(&session, "helper");
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -1149,6 +1157,7 @@ mod tests {
                 .then(Reply::text("on it"))
                 .then(Reply::text("thanks for the update")),
             false,
+            false,
         );
         let mut no_reply = Script::new();
         for _ in 0..8 {
@@ -1185,22 +1194,27 @@ mod tests {
         );
     }
 
-    /// `allow_schedule` is refused at construction, the same class of refusal
-    /// as a missing dialler: an armed self-schedule may fire again with
+    /// A trunk that arms its own wakeups is refused at construction, the same
+    /// class of refusal as a missing dialler: an armed wakeup may fire with
     /// nothing left to wait it out once the fleet quiesces.
     #[test]
-    fn converse_settled_refuses_an_allow_schedule_trunk() {
-        let mut session = settled_trunk("allow-schedule", Script::new(), true);
-        let mut sink = Collecting::default();
-        let err = converse_settled(&mut session, "hello".into(), &mut sink)
-            .expect_err("an allow_schedule trunk must be refused, not run");
-        assert!(
-            err.contains("allow_schedule") || err.to_lowercase().contains("schedule"),
-            "the refusal must name what it refuses: {err}"
-        );
-        assert!(
-            sink.facts.is_empty() && sink.transients.is_empty(),
-            "a refused construction must touch no bus"
-        );
+    fn converse_settled_refuses_a_trunk_that_arms_its_own_wakeups() {
+        for (tag, allow_schedule, resume_on_reset) in [
+            ("allow-schedule", true, false),
+            ("resume-on-reset", false, true),
+        ] {
+            let mut session = settled_trunk(tag, Script::new(), allow_schedule, resume_on_reset);
+            let mut sink = Collecting::default();
+            let err = converse_settled(&mut session, "hello".into(), &mut sink)
+                .expect_err("a trunk that arms its own wakeups must be refused, not run");
+            assert!(
+                err.contains("wakeup"),
+                "the refusal must name what it refuses: {err}"
+            );
+            assert!(
+                sink.facts.is_empty() && sink.transients.is_empty(),
+                "a refused construction must touch no bus"
+            );
+        }
     }
 }

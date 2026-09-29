@@ -150,6 +150,7 @@ fn main() {
             id: "test".to_string(),
         },
         allow_schedule: false,
+        resume_on_reset: false,
         interactive: true,
         chat: false,
         thinking_tool: false,

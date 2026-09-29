@@ -4,13 +4,14 @@ status: proposed
 
 # Provider heartbeats are not model turns
 
-> *Amended 2026-09-28*: a 429 naming a reset past the patient tier is
-> `Exhausted`, surfaced on its first attempt rather than retried against a
-> server that said "not yet". The turn still ends honestly and the transcript
-> does not grow; the attend loop then arms a one-shot `usage-reset` wakeup at
-> the reset. That wakeup is a new exchange — a `Post::Wakeup` the model reads
-> as a scheduled turn — not a synthetic continuation of the refused request,
-> so the rule below stands
+> *Amended 2026-09-29*: a 429 whose reset lies past the patient tier
+> (`Recovery::Deferred`) surfaces on its first attempt rather than being
+> retried against a server that said "not yet". The turn still ends honestly
+> and the transcript does not grow; exarch's terminal trunk alone then arms a
+> one-shot `provider-reset` wakeup at the reset, while a headless run, synod's
+> exchange and a child fail instead. That wakeup is a new exchange — a
+> `Post::Wakeup` the model reads as a scheduled turn — not a synthetic
+> continuation of the refused request, so the rule below stands
 > ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 **Exarch should judge provider liveness by *wire progress*, not by semantic
@@ -208,7 +209,7 @@ The tests should pin the distinctions, not sleep for real minutes.
 - **raw silence still fails:** no heartbeat and no semantic event trips raw idle,
   classifies as `Transient`, and retries internally.
 - **provider errors do not nudge:** a scripted exhausted `Transient` or
-  `RateLimited` surfaces as `ProviderError` with no `InboxMsg::Nudge`.
+  `Refused` surfaces as `ProviderError` with no `InboxMsg::Nudge`.
 - **partial content still continues:** a stall after text or reasoning commits a
   `CutShort::Stalled` assistant message and uses the truncation nudge.
 - **headless accounting:** provider retries increment attempt counters, not

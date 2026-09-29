@@ -23,6 +23,7 @@ use exarch::bus::card::{
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::clock;
+use exarch::provider::Recovery;
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
 use serde::Serialize;
 use ts_rs::TS;
@@ -130,21 +131,14 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
         ProviderErrorRecord::Transient {
             cause, attempts, ..
         } => format!("{} (attempt {attempts})", suffix(" — ", cause)),
-        ProviderErrorRecord::RateLimited {
-            retry_after_secs,
-            cause,
-            ..
-        } => {
-            retry_after_secs.map_or_else(String::new, |secs| format!(" — retry in {secs}s"))
-                + &suffix(" — ", cause)
+        ProviderErrorRecord::Refused(r) => {
+            let wait = match r.recovery() {
+                Recovery::InPlace(Some(wait)) => format!(" — retry in {}s", wait.get().as_secs()),
+                Recovery::InPlace(None) => String::new(),
+                Recovery::Deferred(at) => format!(" — resets {}", clock::local(at)),
+            };
+            wait + &suffix(" — ", &r.cause)
         }
-        ProviderErrorRecord::Exhausted {
-            resets_at, cause, ..
-        } => format!(
-            " — resets {}{}",
-            clock::local(*resets_at),
-            suffix(" — ", cause)
-        ),
         ProviderErrorRecord::Api {
             status,
             model,
@@ -178,8 +172,7 @@ fn provider_error_severity(record: &ProviderErrorRecord) -> Severity {
         ProviderErrorRecord::Api { .. } | ProviderErrorRecord::Other { .. } => Severity::Bad,
         ProviderErrorRecord::Cancelled { .. }
         | ProviderErrorRecord::Transient { .. }
-        | ProviderErrorRecord::RateLimited { .. }
-        | ProviderErrorRecord::Exhausted { .. }
+        | ProviderErrorRecord::Refused { .. }
         | ProviderErrorRecord::Truncated { .. } => Severity::Warn,
     }
 }

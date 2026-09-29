@@ -7,10 +7,12 @@
 //! [`crate::agent::event::ProviderErrorRecord`] mirrors it for the TUI.
 
 use super::reset;
-use super::retry::Wait;
+use super::retry::Recovery;
+use crate::clock;
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A provider's JSON error frame, boxed: `genai` turns on `serde_json`'s
@@ -39,21 +41,9 @@ pub enum ProviderError {
         /// TUI headline key their label on.
         status: Option<u16>,
     },
-    /// HTTP 429.  `retry_after` is the server's own explicit wait, when it
-    /// asked for one; `retry.rs` gives this variant a longer leash than a
-    /// generic transient.
-    RateLimited {
-        retry_after: Option<Wait>,
-        cause: String,
-        body: Option<Body>,
-    },
-    /// HTTP 429 naming a reset past what the patient tier waits in place: the
-    /// account's allowance is spent until `resets_at`. Never retried here.
-    Exhausted {
-        resets_at: Timestamp,
-        cause: String,
-        body: Option<Body>,
-    },
+    /// HTTP 429, whole. [`Refusal::recovery`] alone decides whether the retry
+    /// loop waits it out in place.
+    Refused(Refusal),
     /// A non-success status that is neither 429 nor 5xx: auth, bad request,
     /// model not found.  Never retried — the user has to change something.
     ///
@@ -72,6 +62,64 @@ pub enum ProviderError {
     Truncated { cause: Box<CutShort> },
     /// Anything else, rendered raw.
     Other(String),
+}
+
+/// What a 429 names as run out — which is also what it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Limit {
+    /// A rate over one model: every 429 not known to say otherwise.
+    Rate,
+    /// The plan's allowance, over the whole account.
+    Allowance,
+}
+
+impl Limit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rate => "rate limited",
+            Self::Allowance => "usage limit reached",
+        }
+    }
+}
+
+/// A 429 as the provider stated it. How to recover is the retry policy's
+/// reading of it ([`Refusal::recovery`]), never part of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Refusal {
+    pub limit: Limit,
+    /// The latest instant it names for asking again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<Timestamp>,
+    /// When it was read: the instant its named wait runs from.
+    pub received: Timestamp,
+    pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Body>,
+}
+
+impl Refusal {
+    /// Its label, and the reset when the retry loop does not wait for it:
+    /// `usage limit reached until Tue 14:05`.
+    pub fn headline(&self) -> String {
+        match self.recovery() {
+            Recovery::Deferred(at) => format!("{} until {}", self.limit.label(), clock::local(at)),
+            Recovery::InPlace(_) => self.limit.label().to_string(),
+        }
+    }
+
+    /// Received now, naming a reset `resets_in` later if given.
+    #[cfg(test)]
+    pub(crate) fn for_test(limit: Limit, resets_in: Option<std::time::Duration>) -> Self {
+        let received = Timestamp::now();
+        Self {
+            limit,
+            resets_at: resets_in.map(|wait| received + wait),
+            received,
+            cause: "429".into(),
+            body: None,
+        }
+    }
 }
 
 /// Why an assistant turn ended before the model chose to stop.
@@ -138,8 +186,7 @@ impl ProviderError {
         }
     }
 
-    /// A 429, read three ways: a quota spent, which no wait clears; a reset
-    /// past what the patient tier waits in place; or a rate to back off from.
+    /// A 429: a quota spent, which no wait clears, or a refusal stated whole.
     fn refused(
         headers: Option<&HeaderMap>,
         body: Option<Body>,
@@ -154,26 +201,14 @@ impl ProviderError {
                 body,
             };
         }
-        let now = Timestamp::now();
-        let Some(at) = reset::at(headers, body.as_deref(), &cause, now) else {
-            return Self::RateLimited {
-                retry_after: None,
-                cause,
-                body,
-            };
-        };
-        match Wait::patient(crate::clock::until(at, now)) {
-            Some(wait) => Self::RateLimited {
-                retry_after: Some(wait),
-                cause,
-                body,
-            },
-            None => Self::Exhausted {
-                resets_at: at,
-                cause,
-                body,
-            },
-        }
+        let received = Timestamp::now();
+        Self::Refused(Refusal {
+            limit: body.as_deref().map_or(Limit::Rate, reset::limit),
+            resets_at: reset::at(headers, body.as_deref(), &cause, received),
+            received,
+            cause,
+            body,
+        })
     }
 }
 
@@ -367,10 +402,7 @@ impl ProviderError {
             Self::Transient { body, status, .. } => {
                 with_body_message(transient_label(*status), body.as_deref())
             }
-            Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_deref()),
-            Self::Exhausted { body, .. } => {
-                with_body_message("usage limit reached", body.as_deref())
-            }
+            Self::Refused(r) => with_body_message(&r.headline(), r.body.as_deref()),
             Self::Api {
                 status,
                 message,
@@ -499,6 +531,7 @@ pub(crate) fn extract_url(msg: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::retry::Wait;
     use genai::ModelIden;
     use genai::adapter::AdapterKind;
     use reqwest::header::HeaderValue;
@@ -620,10 +653,14 @@ mod tests {
             "gpt-5.5",
         );
         match e {
-            ProviderError::RateLimited { retry_after, .. } => {
-                assert_eq!(retry_after.map(Wait::get), Some(Duration::from_secs(7)));
+            ProviderError::Refused(r) => {
+                assert_eq!(r.limit, Limit::Rate);
+                assert_eq!(
+                    r.recovery(),
+                    Recovery::InPlace(Wait::patient(Duration::from_secs(7)))
+                );
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => panic!("expected Refused, got {other:?}"),
         }
     }
 
@@ -639,11 +676,39 @@ mod tests {
             "gpt-5.5",
         );
         match e {
-            ProviderError::RateLimited { retry_after, .. } => {
-                assert_eq!(retry_after.map(Wait::get), Some(Duration::from_secs(11)));
+            ProviderError::Refused(r) => {
+                assert_eq!(
+                    r.recovery(),
+                    Recovery::InPlace(Wait::patient(Duration::from_secs(11)))
+                );
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => panic!("expected Refused, got {other:?}"),
         }
+    }
+
+    /// A long wait with nothing said about an allowance is a rate, deferred:
+    /// the ceiling decides recovery, never the cause.
+    #[test]
+    fn from_genai_classifies_a_long_bare_retry_after_as_a_deferred_rate() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            HeaderValue::from_static("600"),
+        );
+        let e = ProviderError::from_genai(
+            &web_model_call(StatusCode::TOO_MANY_REQUESTS, headers),
+            "gpt-5.5",
+        );
+        let ProviderError::Refused(r) = &e else {
+            panic!("expected Refused, got {e:?}");
+        };
+        assert_eq!(r.limit, Limit::Rate);
+        assert!(matches!(r.recovery(), Recovery::Deferred(_)));
+        assert!(
+            e.summary().starts_with("rate limited until "),
+            "{}",
+            e.summary()
+        );
     }
 
     fn too_many_requests(body: &serde_json::Value) -> ProviderError {
@@ -658,10 +723,10 @@ mod tests {
         )
     }
 
-    /// A reset hours off is a spent allowance, not congestion: it surfaces at
-    /// once, at the instant the body names.
+    /// A reset hours off is stated whole, as the allowance the body names: the
+    /// retry policy defers it.
     #[test]
-    fn from_genai_classifies_a_codex_usage_limit_as_exhausted() {
+    fn from_genai_classifies_a_codex_usage_limit_as_a_deferred_allowance() {
         let resets_at = Timestamp::now().as_second() + 5 * 3600;
         let e = too_many_requests(&serde_json::json!({
             "error": {
@@ -671,10 +736,12 @@ mod tests {
             }
         }));
         match e {
-            ProviderError::Exhausted { resets_at: at, .. } => {
-                assert_eq!(at.as_second(), resets_at);
+            ProviderError::Refused(r) => {
+                assert_eq!(r.limit, Limit::Allowance);
+                assert_eq!(r.resets_at.map(Timestamp::as_second), Some(resets_at));
+                assert!(matches!(r.recovery(), Recovery::Deferred(_)));
             }
-            other => panic!("expected Exhausted, got {other:?}"),
+            other => panic!("expected Refused, got {other:?}"),
         }
     }
 
@@ -700,8 +767,7 @@ mod tests {
     /// one-line breadcrumb.
     #[test]
     fn summary_reads_body_message_not_the_json_wall() {
-        let e = ProviderError::RateLimited {
-            retry_after: None,
+        let e = ProviderError::Refused(Refusal {
             cause: "Web stream error for model 'glm-5.2 (adapter: OpenAI)'.\n\
                     Cause: HTTP error.\nStatus: 429 Too Many Requests\nBody:\n  \
                     {\"error\":{\"message\":\"Weekly usage limit reached. Resets in 4 days.\"}}"
@@ -713,7 +779,8 @@ mod tests {
                     "message": "Weekly usage limit reached. Resets in 4 days.",
                 },
             }))),
-        };
+            ..Refusal::for_test(Limit::Rate, None)
+        });
         let s = e.summary();
         assert_eq!(
             s,
@@ -729,11 +796,10 @@ mod tests {
     /// Never the verbose `cause` — the breadcrumb has no room for it.
     #[test]
     fn summary_without_body_is_the_kind_label() {
-        let e = ProviderError::RateLimited {
-            retry_after: None,
+        let e = ProviderError::Refused(Refusal {
             cause: "Web stream error.\nStatus: 429".into(),
-            body: None,
-        };
+            ..Refusal::for_test(Limit::Rate, None)
+        });
         assert_eq!(e.summary(), "rate limited");
     }
 
@@ -789,7 +855,7 @@ mod tests {
     }
 
     /// A status read out of the body routes exactly as a header one does:
-    /// nested and flat bodies are both read, 429 reaches `RateLimited` rather
+    /// nested and flat bodies are both read, 429 reaches `Refused` rather
     /// than the generic `Api` path, and a body with no code stays terminal.
     #[test]
     fn from_genai_classifies_json_body_status_in_both_shapes() {
@@ -804,8 +870,8 @@ mod tests {
         };
         let nested = route(serde_json::json!({"error": {"code": 429}}));
         assert!(
-            matches!(nested, ProviderError::RateLimited { .. }),
-            "a JSON 429 must route to RateLimited, got {nested:?}"
+            matches!(nested, ProviderError::Refused(_)),
+            "a JSON 429 must route to Refused, got {nested:?}"
         );
         let flat = route(serde_json::json!({"code": 503}));
         assert!(

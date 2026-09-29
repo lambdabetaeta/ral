@@ -18,6 +18,7 @@ pub mod config;
 pub mod egress;
 pub mod fleet;
 pub mod headless;
+pub(crate) mod latch;
 pub mod net_policy;
 pub mod policy;
 pub mod prompt;
@@ -245,6 +246,7 @@ pub fn run() -> Result<(), String> {
             model,
             account: recorded_account,
             allow_schedule: c.allow_schedule,
+            resume_on_reset: !headless,
             // An interactive trunk parks for the human; a headless one
             // terminates once its seeded work is idle.
             interactive: !headless,

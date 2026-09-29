@@ -584,6 +584,7 @@ impl ExarchDesk {
             interactive: s.agent.interactive(),
             returns,
             allow_schedule: s.agent.allow_schedule,
+            resume_on_reset: false,
             tools: s.agent.tools(),
             search,
             fleet: s.fleet.clone(),

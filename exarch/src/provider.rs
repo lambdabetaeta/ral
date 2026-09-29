@@ -31,12 +31,13 @@ mod usage;
 mod wire;
 
 pub use bureau::{Bureau, Holdings};
-pub use error::{CutShort, ProviderError};
+pub use error::{CutShort, Limit, ProviderError, Refusal};
 pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use rations::Rations;
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
+pub use retry::Recovery;
 pub use stream::{Delta, StepOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
@@ -160,6 +161,15 @@ impl Provider {
         }
     }
 
+    /// The windows of [`Self::allowances`] that newly reach a rung of
+    /// `ladder`, told once per account; empty when scripted.
+    pub(crate) fn climb_allowances(&self, ladder: &[u32]) -> Vec<Allowance> {
+        match &self.backend {
+            Backend::Live { rations, .. } => rations.climb(&self.account.id, ladder),
+            Backend::Scripted(_) => Vec::new(),
+        }
+    }
+
     /// This model's context window when the pricing catalog knows it.
     pub fn context_window(&self) -> Option<u64> {
         pricing::context_window(&self.model)
@@ -186,7 +196,7 @@ impl Provider {
                 meters,
                 rations,
             } => {
-                rations.admit(&self.account, meters)?;
+                rations.admit(&self.account, &self.model, meters)?;
                 let outcome = engine.complete(
                     transport,
                     &self.model,
@@ -200,7 +210,7 @@ impl Provider {
                     on_delta,
                     cancel,
                 );
-                rations.settle(&self.account.id, &outcome);
+                rations.settle(&self.account.id, &self.model, &outcome);
                 outcome
             }
             Backend::Scripted(script) => script.complete(&self.model, on_delta),

@@ -4,6 +4,12 @@ status: proposed
 
 # A wakeup schedules the agent, not a worker
 
+> *Amended 2026-09-29*: every occurrence is now a wall-clock instant, armed
+> on the reaper at most a minute at a time and re-checked against the wall
+> clock on every wake, so a machine suspend delays a fire by at most a minute.
+> The harness's own one-shot `At` (used for resuming at a provider reset)
+> joins `cron` and `after` as a trigger.
+
 > leases-and-budgets and
 > [[decisions/260705_session-ledger|session-ledger]] dissolve this page's
 > `ScheduleId` pin against the binding reaper, and the open
@@ -76,12 +82,13 @@ Cron is *calendar* scheduling, and three facts make it the right surface:
   a *direct* `chrono` dep for one string; the irony is that the `date` it sidesteps
   is what drags `jiff` in regardless.)
 
-Cron is wall-clock; the reaper is monotonic `Instant`. The scheduler bridges the
-two: `jiff` computes the next absolute occurrence in the host-local timezone, the
-daemon sleeps the monotonic delta to it, and recomputes on each fire. DST shifts,
-NTP steps, and machine suspend are absorbed by *recompute-on-fire* plus the
-overlap-skip below (a long sleep past several occurrences fires at most once on
-wake, not a burst).
+Every occurrence is a wall-clock instant; the reaper is monotonic `Instant` and
+stops while the machine sleeps. The scheduler bridges the two: `jiff` computes
+the next absolute occurrence (a cron's in the host-local timezone), the registry
+arms the daemon toward it at most a minute at a time, and every wake re-reads the
+wall clock, re-arming if the instant has not come. DST shifts, NTP steps, and
+machine suspend are absorbed by that re-check plus the overlap-skip below (a
+long sleep past several occurrences fires at most once on wake, not a burst).
 
 ## Decided
 
@@ -97,8 +104,8 @@ wake, not a burst).
 
   | form | recurrence | semantics | substrate |
   |---|---|---|---|
-  | `cron "<expr>"` | repeats | next calendar occurrence in host-local tz | `jiff` → monotonic deadline |
-  | `after <dur>` | one-shot | a relative delay from now (`30m`, `2h`) | reaper's `Instant`, no calendar |
+  | `cron "<expr>"` | repeats | next calendar occurrence in host-local tz | `jiff` → wall-clock instant, armed a minute at a time |
+  | `after <dur>` | one-shot | a relative delay from now (`30m`, `2h`) | wall-clock instant fixed at arming, armed a minute at a time |
 
   `cron` subsumes recurring-calendar scheduling (`*/30`, ranges, lists,
   day-of-week names). `after` covers "in two hours", which cron *cannot* express —

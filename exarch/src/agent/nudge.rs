@@ -203,6 +203,7 @@ const TRUNCATED_MESSAGE: &str = "Your previous reply was cut off before it compl
 )]
 mod tests {
     use super::*;
+    use crate::provider::{Limit, Refusal};
     use ral_core::serial::FOValue;
 
     fn fresh_log() -> AgentLog {
@@ -243,13 +244,7 @@ mod tests {
     fn provider_failures_do_not_consume_budget() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
-        let attempt = || {
-            Err(ProviderError::RateLimited {
-                retry_after: None,
-                cause: "429".into(),
-                body: None,
-            })
-        };
+        let attempt = || Err(ProviderError::Refused(Refusal::for_test(Limit::Rate, None)));
         for _ in 0..=BUDGET {
             assert!(
                 nudges.react(&attempt(), &facts(), &mut log).is_none(),

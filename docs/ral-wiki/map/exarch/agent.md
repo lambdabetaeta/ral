@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c8731be6
-generated_at_date: 2026-09-28
-covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+generated_at_commit: 0714e80c
+generated_at_date: 2026-09-29
+covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
@@ -454,18 +454,18 @@ ever asks for a nudge, so `react` decides and nothing more.
 
 **Ladder conditions** live in `agent/gauge.rs`: a reading climbs a ladder of
 levels, each rung told once per excursion, and a fall below a rung re-arms it.
-One `Latch` serves every ladder: it keeps the level last weighed, and `climb`
-answers the highest rung between that and the new level, so a first reading
-past two rungs tells the higher alone; `cross` is the one-rung ladder of a
-yes-or-no condition. A ladder is bare numbers, and who hears a rung is written
-once, where its `Warning` is built. Three ladders ride it, gathered in
-`Avatar::gauges`:
+One `Latch` (`latch.rs`) serves every ladder: it keeps the level last weighed,
+and `climb` answers the highest rung between that and the new level, so a first
+reading past two rungs tells the higher alone; `cross` is the one-rung ladder
+of a yes-or-no condition. A ladder is bare numbers, and who hears a rung is written
+once, where its `Warning` is built. Three ladders ride it; two are gathered in
+`Avatar::gauges`, the third's user latches live in `Rations`:
 
 | condition | reading | rungs | audience |
 |---|---|---|---|
 | context pressure | `pressure_gauge` (`Unknown` leaves the latch) | over the soft line | model |
 | disk ceiling | `disk_warning`, walked every `DISK_WARN_CHECK_INTERVAL` ral calls | over `disk_warn_bytes` | user |
-| usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | 50, 75 / 90, 95% | user / both, from `MODEL_HEARS` |
+| usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | user 50, 75, 90, 95% (`USER_HEARS`); model 90, 95% (`MODEL_HEARS`) | user once per account; model once per agent |
 
 `Avatar::warnings` weighs all three after every tool batch, and `tell` delivers
 each climbed rung: a user line as a `Forensic::SystemNote`, a model line
@@ -473,16 +473,21 @@ through `Nudges::remind` into the steering message — dropped for a `--chat`
 trunk, which reaches no tool boundary anyway. The ration gauge reads nothing
 itself: the read is the provider's, spawned on the road every request takes
 and shared by every agent on the account
-([[map/exarch/provider|provider]]'s `Rations`), and `gauge::ration::Ration`
-only climbs its own latches against the last reading. The network is read once
-per account; each conversation on it is told once.
+([[map/exarch/provider|provider]]'s `Rations`). The user's latches are
+`Rations`' too (`Provider::climb_allowances`, on `USER_HEARS`), so a rung is
+told once per account by whichever agent climbs it first; the model's are each
+agent's own `gauge::ration::Ration`, since each model needs its own reminder,
+and its outcome sentence reads `resume_on_reset`: paused until the reset and
+resumed, or refused until it. The network is read once per account; the user
+hears once per account, each conversation's model once.
 
-The same allowance ends as a provider error when it is spent: `take_up`
-answers `ProviderError::Exhausted` with `resume_at`, which replaces any
-`usage-reset` schedule with a one-shot wakeup at the reset and notes the time
-to the user. Once one agent's request is refused, `Provider::complete` refuses
-every later request on the account before sending, so each sibling on it ends
-its turn the same way and schedules its own wakeup
+A refusal whose reset lies past the in-place wait ends as a provider error:
+on the terminal trunk alone (`resume_on_reset`), `take_up` answers
+`ProviderError::Refused` with `resume_at`, which replaces any `provider-reset`
+schedule with a one-shot wakeup at the reset and notes the time to the user.
+Headless, synod and every fork fail instead. Once one agent's request is
+refused, `Provider::complete` refuses every later request the hold covers
+(the account for an allowance, one model for a rate) before sending
 ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 
 ## The Fleet
