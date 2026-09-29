@@ -46,26 +46,16 @@
 
 mod shell;
 
-use shell::{Accounts, Shared, commands, highlight, keys, review, signin};
+use shell::{Accounts, commands, highlight, keys, review, signin};
 
-use exarch::provider::Rations;
-use exarch::provider::models::{LiveSource, ModelCatalog};
-use std::sync::{Arc, Mutex};
+use exarch::provider::Holdings;
 use tauri::Manager;
 
 fn main() {
     exarch::exit_if_re_exec_child();
-    let accounts = Accounts::new(synod::session::prepare().map(|store| {
-        let catalog = Arc::new(Mutex::new(ModelCatalog::new(
-            LiveSource::new(&store),
-            synod::session::SYNOD,
-        )));
-        Shared {
-            store: Arc::new(Mutex::new(store)),
-            catalog,
-            rations: Arc::new(Rations::default()),
-        }
-    }));
+    let accounts = Accounts::new(
+        synod::session::prepare().map(|store| Holdings::new(store, synod::session::SYNOD)),
+    );
 
     #[allow(
         clippy::disallowed_methods,

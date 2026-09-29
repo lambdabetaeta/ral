@@ -8,7 +8,7 @@
 //! stages share one file: fetch, serve from disk, upsert, expire.
 
 use exarch::bootstrap::App;
-use exarch::provider::identity::{AccountId, ServiceName, built_in};
+use exarch::provider::identity::{AccountId, ServiceName};
 use exarch::provider::models::{ModelCatalog, ModelSource, ProviderEndpoint};
 use std::path::Path;
 use std::sync::Arc;
@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A key-bearing built-in service's account id is its own name.
 fn account_id(name: &str) -> AccountId {
-    let service = built_in(&ServiceName::declared(name).unwrap()).unwrap();
-    AccountId::of_service(&service.name)
+    AccountId::of_service(&ServiceName::declared(name).unwrap())
 }
 
 /// One list for every account, counting the fetches no cache could absorb.

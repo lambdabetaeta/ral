@@ -69,8 +69,8 @@ impl From<&UsageDelta> for Usage {
     }
 }
 
-/// Serialisable mirror of [`ProviderError`], flattening its `&'static str` and
-/// `Duration` fields to owned strings and whole seconds.
+/// Serialisable mirror of [`ProviderError`]: its `&'static str` site an owned
+/// string, its retry wait whole seconds.
 ///
 /// `tui::line` renders from this shape, so `record.jsonl` reconstructs the
 /// on-screen block.
@@ -142,6 +142,19 @@ impl ProviderErrorRecord {
                 cause: CutShortRecord::Stalled { error },
             } => Some(error),
             _ => None,
+        }
+    }
+
+    /// Short human label for the failure's kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Cancelled { .. } => "cancelled",
+            Self::Transient { status, .. } => crate::provider::transient_label(*status),
+            Self::RateLimited { .. } => "rate limited",
+            Self::Exhausted { .. } => "usage limit reached",
+            Self::Api { .. } => "api error",
+            Self::Truncated { .. } => "truncated",
+            Self::Other { .. } => "provider error",
         }
     }
 }

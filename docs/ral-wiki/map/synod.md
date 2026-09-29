@@ -271,12 +271,13 @@ binary, no stdin framing. One window, three states: choose a folder and a
 model (with a Thinking control beside the Assistant picker) and describe the
 job; watch the assistant work, its narration streamed in; then read what
 changed. `mod.rs` owns `Accounts` — the credential
-scrub's outcome paired with the model catalog, a private field reached only
-through `resolved()`. Both halves are `Arc<Mutex<_>>`, because a conversation
-outlives no store of its own: `Conversation::begin` builds an
-`exarch::provider::Bureau::Live` over the very pair the window keeps, plus the
-engine it mints per conversation, so a sign-in admitted through the window is
-visible to a running conversation's next spawn and the two can never drift.
+scrub's outcome as an `exarch::provider::Holdings` (the store, the model
+catalog built from it, and the allowance record), a private field reached only
+through `resolved()`. The holdings are shared, because a conversation outlives
+no store of its own: `Conversation::begin` builds an
+`exarch::provider::Bureau::Live` over the very holdings the window keeps, plus
+the engine it mints per conversation, so a sign-in admitted through the window
+is visible to a running conversation's next spawn and the two can never drift.
 `mod.rs` also owns the two refresh entries, `refresh_menu_now`
 (synchronous) and `refresh_menu_async` (off the calling thread); the debounce
 that decides when a refresh is worth asking for at all, `RefreshGate`, lives

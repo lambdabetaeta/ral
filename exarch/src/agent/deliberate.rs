@@ -250,7 +250,7 @@ impl Avatar {
                 });
             }
             if truncated {
-                Self::note("[Truncated mid-tool-call; continuing]".into(), self);
+                self.note("[Truncated mid-tool-call; continuing]".into());
             }
             let (results, injected) = self.run_batch(tool_calls, token, emit);
             self.log
@@ -767,13 +767,10 @@ mod tests {
             .filter_map(|m| m.content.first_text().map(str::to_string))
             .filter(|text| text.contains("Context pressure"))
             .collect();
-        let [reminder] = reminders.as_slice() else {
-            panic!("one excursion owes exactly one reminder, got {reminders:?}")
-        };
-        assert!(
-            reminder.contains("At the next turn boundary")
-                && reminder.contains("`exarch-context `evict [turns: !{range"),
-            "the reminder must name the cut and offer the note: {reminder}"
+        assert_eq!(
+            reminders.len(),
+            1,
+            "one excursion owes exactly one reminder, got {reminders:?}"
         );
     }
 

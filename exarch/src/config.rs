@@ -14,7 +14,7 @@
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process gate suffices.
 
-use crate::provider::{Auth, Billing, Meter, Service, ServiceName, built_in};
+use crate::provider::{Auth, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
 use ral_core::types::{Break, Capabilities, Escape, Mooring, Value};
@@ -258,16 +258,12 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
         ));
     }
 
-    Ok(Service {
+    Ok(Service::declared(
         name,
-        endpoint: Some(endpoint),
-        adapter: adapter_for_protocol(&protocol, &where_)?,
-        default_model: None,
-        auth: key_env.map_or(Auth::Unnamed, Auth::Env),
-        billing: Billing::Metered,
-        routes: false,
-        meter: Meter::Unpublished,
-    })
+        endpoint,
+        adapter_for_protocol(&protocol, &where_)?,
+        key_env.map_or(Auth::Unnamed, Auth::Env),
+    ))
 }
 
 fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<String, String> {
@@ -382,26 +378,18 @@ mod tests {
         let path = dir.join("providers.ral");
 
         let written = vec![
-            Service {
-                name: ServiceName::declared("house-llm").unwrap(),
-                endpoint: Some("https://llm.house.example/v1/".into()),
-                adapter: AdapterKind::OpenAIResp,
-                default_model: None,
-                auth: Auth::Env("HOUSE_LLM_KEY".into()),
-                billing: Billing::Metered,
-                routes: false,
-                meter: Meter::Unpublished,
-            },
-            Service {
-                name: ServiceName::declared("ollama").unwrap(),
-                endpoint: Some("http://localhost:11434/v1/".into()),
-                adapter: AdapterKind::OpenAI,
-                default_model: None,
-                auth: Auth::Unnamed,
-                billing: Billing::Metered,
-                routes: false,
-                meter: Meter::Unpublished,
-            },
+            Service::declared(
+                ServiceName::declared("house-llm").unwrap(),
+                "https://llm.house.example/v1/".into(),
+                AdapterKind::OpenAIResp,
+                Auth::Env("HOUSE_LLM_KEY".into()),
+            ),
+            Service::declared(
+                ServiceName::declared("ollama").unwrap(),
+                "http://localhost:11434/v1/".into(),
+                AdapterKind::OpenAI,
+                Auth::Unnamed,
+            ),
         ];
         save_declared(&path, &written, LABEL).expect("write");
         let read = load_declared(&path, LABEL).expect("read back");
@@ -425,16 +413,12 @@ mod tests {
         let path = std::env::temp_dir().join("exarch-declared-quote.ral");
         let err = save_declared(
             &path,
-            &[Service {
-                name: ServiceName::declared("it's-llm").unwrap(),
-                endpoint: Some("https://x.example/v1/".into()),
-                adapter: AdapterKind::OpenAI,
-                default_model: None,
-                auth: Auth::Unnamed,
-                billing: Billing::Metered,
-                routes: false,
-                meter: Meter::Unpublished,
-            }],
+            &[Service::declared(
+                ServiceName::declared("it's-llm").unwrap(),
+                "https://x.example/v1/".into(),
+                AdapterKind::OpenAI,
+                Auth::Unnamed,
+            )],
             LABEL,
         )
         .unwrap_err();

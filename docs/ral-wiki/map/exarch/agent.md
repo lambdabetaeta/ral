@@ -240,7 +240,7 @@ Three nested loops, the same for trunk and child alike:
 - **A severed seat runs nothing more.** `attend` breaks at the first
   severance it sees and every park quiesces behind one; `run_batch` answers
   each call left in the batch with the `EngineLost` sentence, and
-  `deliberate` ends the exchange `Outcome::Severed`. `settle_severance`
+  `deliberate` ends the exchange `Outcome::Severed`. `close`
   records the loss once — the plain sentence as the failed outcome, the
   logged form (code and the engine's own words) as a durable note — and
   headless and [[map/synod|synod]] end the conversation on it.

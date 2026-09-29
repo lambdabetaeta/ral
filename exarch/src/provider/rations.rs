@@ -31,14 +31,11 @@ impl Rations {
     /// The gate before a request: refused while a refusal's reset is still
     /// ahead — nothing is sent — else a read of the account's meter spawned
     /// when one is due, its reading landing in the record when it does.
-    pub(crate) fn admit<S>(
+    pub(crate) fn admit<S: MeterSource>(
         self: &Arc<Self>,
         account: &Account,
         source: &S,
-    ) -> Result<(), ProviderError>
-    where
-        S: MeterSource + Clone + Send + 'static,
-    {
+    ) -> Result<(), ProviderError> {
         let due = self.with(&account.id, |standing| {
             if let Some(until) = standing.spent_until
                 && until > jiff::Timestamp::now()
@@ -60,10 +57,10 @@ impl Rations {
             Ok(due)
         })?;
         if due {
-            let (rations, source, id) = (Arc::clone(self), source.clone(), account.id.clone());
+            let (rations, source, account) = (Arc::clone(self), source.clone(), account.clone());
             std::thread::spawn(move || {
-                if let Ok(reading) = source.read(&id) {
-                    rations.land(&id, reading);
+                if let Ok(reading) = source.read(&account) {
+                    rations.land(&account.id, reading);
                 }
             });
         }
@@ -107,12 +104,7 @@ impl Rations {
 mod tests {
     use super::*;
     use crate::provider::allowance::Consumption;
-    use crate::provider::{ServiceName, built_in};
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn account(name: &str) -> Account {
-        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
-    }
 
     fn reading(fraction: f64) -> Vec<Allowance> {
         vec![Allowance {
@@ -142,7 +134,7 @@ mod tests {
     }
 
     impl MeterSource for FakeSource {
-        fn read(&self, _: &AccountId) -> Result<Vec<Allowance>, String> {
+        fn read(&self, _: &Account) -> Result<Vec<Allowance>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.answer.clone()
         }
@@ -171,7 +163,7 @@ mod tests {
     #[test]
     fn a_refusal_holds_the_account_until_its_reset_passes() {
         let rations = Arc::new(Rations::default());
-        let account = account("anthropic");
+        let account = Account::built_in("anthropic");
         let source = FakeSource::answering(Ok(Vec::new()));
         let until = jiff::Timestamp::now() + Duration::from_hours(1);
         rations.settle(&account.id, &exhausted(until));
@@ -194,7 +186,7 @@ mod tests {
     #[test]
     fn settle_keeps_the_later_of_two_instants() {
         let rations = Rations::default();
-        let account = account("anthropic");
+        let account = Account::built_in("anthropic");
         let now = jiff::Timestamp::now();
         let (soon, late) = (now + Duration::from_mins(1), now + Duration::from_hours(1));
         rations.settle(&account.id, &exhausted(late));
@@ -210,7 +202,7 @@ mod tests {
     #[test]
     fn an_unpublished_account_is_never_read() {
         let rations = Arc::new(Rations::default());
-        let account = account("anthropic");
+        let account = Account::built_in("anthropic");
         let source = FakeSource::answering(Ok(reading(0.5)));
         rations.admit(&account, &source).unwrap();
         assert!(rations.with(&account.id, |standing| standing.asked.is_none()));
@@ -220,7 +212,7 @@ mod tests {
     #[test]
     fn a_published_account_is_read_once_per_interval() {
         let rations = Arc::new(Rations::default());
-        let account = account("openrouter");
+        let account = Account::built_in("openrouter");
         let source = FakeSource::answering(Ok(reading(0.5)));
         rations.admit(&account, &source).unwrap();
         eventually(|| !rations.reading(&account.id).is_empty());
@@ -232,7 +224,7 @@ mod tests {
     #[test]
     fn a_failed_read_leaves_the_last_reading_standing() {
         let rations = Arc::new(Rations::default());
-        let account = account("openrouter");
+        let account = Account::built_in("openrouter");
         rations.land(&account.id, reading(0.5));
         let source = FakeSource::answering(Err("network is down".into()));
         rations.admit(&account, &source).unwrap();

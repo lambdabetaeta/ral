@@ -9,7 +9,6 @@ use super::block::Detail;
 use super::highlight::highlight_ral_spans;
 use super::palette::{CYAN, Col, LIME, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w};
 use super::row::Row;
-use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{
     Card, Field as CardField, FieldVal, Mark, Measure, Readout as CardReadout, Role,
     Span as CardSpan,
@@ -874,7 +873,7 @@ pub(super) fn push_wrapped(
 // ── Aligned-field rendering (the `fields` mark + provider errors) ────────────
 
 /// One `(label, value)` row ahead of layout — what the `fields` mark and
-/// [`provider_error`] both feed into [`render_field_rows`].  The value arrives
+/// [`render_readout`] both feed into [`render_field_rows`].  The value arrives
 /// styled: [`hang`] folds spans, so there is no second, flatter kind of value
 /// that exists only in order to wrap.
 struct FieldRow {
@@ -899,7 +898,7 @@ fn field_label(label: &str, col: Col) -> Span<'static> {
 }
 
 /// Aligned `(label, value)` rows in one shared `label_w` column — the primitive
-/// [`render_fields`], [`provider_error`] and [`legend_rows`] all feed.  Every
+/// [`render_fields`], [`render_readout`] and [`legend_rows`] all feed.  Every
 /// value starts alike, and each value hangs under its label.
 fn render_field_rows(rows: &[FieldRow], label: Col, width: usize) -> Vec<Line<'static>> {
     rows.iter()
@@ -930,24 +929,10 @@ fn label_col(rows: &[FieldRow]) -> Col {
 
 // ── Provider-error rendering ────────────────────────────────────────────────
 
-/// A [`ProviderErrorRecord`] as a block: the `error: <kind>` headline, then an
-/// ordered field list in one shared column — [`Readout::fatal`]'s description,
-/// laid out here.
-pub(super) fn provider_error(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
-    render_readout(Readout::fatal(e), width)
-}
-
-/// A stall as a block: the same weight and the same field list a fatal failure
-/// gets, under a headline that says the exchange survived it —
-/// [`Readout::stall`]'s description, laid out here.
-pub(super) fn stalled(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
-    render_readout(Readout::stall(e), width)
-}
-
 /// Lay a [`Readout`] out as the headline row, then its fields in one shared
 /// column.  An empty field list (cancellation's) draws no rows at all:
 /// [`render_field_rows`] returns nothing for an empty slice.
-fn render_readout(readout: Readout, width: u16) -> Vec<Line<'static>> {
+pub(super) fn render_readout(readout: Readout, width: u16) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default(), headline(&readout.headline)];
     let rows: Vec<FieldRow> = readout.fields.into_iter().map(field_row).collect();
     ls.extend(render_field_rows(&rows, label_col(&rows), width.into()));
@@ -969,7 +954,7 @@ fn wait_field(label: String, secs: u64) -> FieldRow {
     FieldRow {
         label,
         value: vec![
-            Span::raw(format!("{}  ", crate::clock::hms(secs, " "))),
+            Span::raw(format!("{}  ", crate::clock::hms(secs))),
             size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
         ],
     }

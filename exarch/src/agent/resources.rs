@@ -372,7 +372,7 @@ impl Avatar {
             running_worker,
             None,
             "reap",
-            nearest_reap.map(|d| format!("nearest reap in {}", crate::clock::hms(d.as_secs(), ""))),
+            nearest_reap.map(|d| format!("nearest reap in {}", crate::clock::hms(d.as_secs()))),
         ));
         rows.push(ProbeRow::new(
             "workers.running[durable]",
@@ -490,10 +490,7 @@ impl Avatar {
         let rows = match self.resource_rows() {
             Ok(rows) => rows,
             Err(s) => {
-                Self::note(
-                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
-                    self,
-                );
+                self.note(EngineLost::running(&s, self.agent.run_dir()).to_string());
                 return;
             }
         };

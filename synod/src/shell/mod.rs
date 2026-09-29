@@ -18,53 +18,35 @@ pub mod review;
 pub mod signin;
 pub mod sink;
 
-use exarch::provider::Rations;
-use exarch::provider::credential::CredentialStore;
-use exarch::provider::models::{LiveSource, ModelCatalog};
-use std::sync::{Arc, Mutex};
+use exarch::provider::Holdings;
 use tauri::{AppHandle, Emitter as _, Manager};
-
-/// The halves [`Accounts`] holds.  Behind `Arc`s because a conversation's
-/// [`exarch::provider::Bureau`] shares them for its whole life, while the
-/// window goes on reading the same ones through this state.
-pub(crate) struct Shared {
-    pub(crate) store: Arc<Mutex<CredentialStore>>,
-    pub(crate) catalog: Arc<Mutex<ModelCatalog<LiveSource>>>,
-    /// One record for every conversation: an allowance is the account's.
-    pub(crate) rations: Arc<Rations>,
-}
 
 /// The credential scrub's outcome, resolved once at startup — while the
 /// process is still single-threaded, [`synod::session::prepare`] requires —
-/// paired with the model catalog built from it and the [`Rations`] record of
-/// each account's allowance, and held as Tauri state for the app's whole life.
-/// Every command that needs a working model account surfaces the `Err` as its
-/// own plain-sentence failure rather than re-running or second-guessing it;
-/// the pairing makes "no catalog without credentials" a type fact instead of a
-/// runtime invariant the halves could drift out of sync on.
+/// and held as Tauri state for the app's whole life. Every command that needs
+/// a working model account surfaces the `Err` as its own plain-sentence
+/// failure rather than re-running or second-guessing it; the pairing makes
+/// "no catalog without credentials" a type fact.
 ///
-/// The store and catalog are behind a [`Mutex`] because both grow: a sign-in
-/// from the window ([`synod::session::sign_in`]) admits a fresh `ChatGPT`
-/// account to the store and its credential to the catalog, and the scrub that
-/// built them cannot be re-run in a process that is no longer
-/// single-threaded.
-/// Every holder in `synod::session` takes them locked only briefly — for an
-/// account list, a cached model list, an admission — never across a network
-/// call or a machine boot.
-pub struct Accounts(Result<Shared, String>);
+/// The store and catalog grow: a sign-in from the window
+/// ([`synod::session::sign_in`]) admits a fresh `ChatGPT` account to the store
+/// and its credential to the catalog, and the scrub that built them cannot be
+/// re-run in a process that is no longer single-threaded. Locking follows
+/// [`Holdings`].
+pub struct Accounts(Result<Holdings, String>);
 
 impl Accounts {
     /// Wrap the credential scrub's outcome, composed in `main`, as Tauri
     /// state.  The field stays private; every reach from here on goes
     /// through [`Self::resolved`].
-    pub(crate) fn new(resolved: Result<Shared, String>) -> Self {
+    pub(crate) fn new(resolved: Result<Holdings, String>) -> Self {
         Self(resolved)
     }
 
-    /// The store and catalog, or a fresh copy of the startup failure that
-    /// left this run with neither — every command answers with the same
-    /// sentence rather than each restating how to unwrap it.
-    pub(crate) fn resolved(&self) -> Result<&Shared, String> {
+    /// The holdings, or a fresh copy of the startup failure that left this
+    /// run with none — every command answers with the same sentence rather
+    /// than each restating how to unwrap it.
+    pub(crate) fn resolved(&self) -> Result<&Holdings, String> {
         self.0.as_ref().map_err(Clone::clone)
     }
 }
@@ -77,7 +59,7 @@ impl Accounts {
 /// has the menu can have that guarantee by calling it directly.
 pub(crate) fn refresh_menu_now(app: &AppHandle) {
     let accounts = app.state::<Accounts>();
-    let Ok(Shared { store, catalog, .. }) = accounts.resolved() else {
+    let Ok(Holdings { store, catalog, .. }) = accounts.resolved() else {
         return;
     };
     let menu = synod::session::refresh_menu(store, catalog);

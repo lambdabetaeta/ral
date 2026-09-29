@@ -144,8 +144,8 @@ question.
 
 **What is known of each account's allowance has one home, `Rations`
 (`provider/rations.rs`), fed on the one road every model request travels.**
-The record is the third shared half of `Bureau::Live`, beside the store and
-catalog — exarch builds one, synod one for all its conversations — and keeps,
+The record is the third of the `Holdings`, beside the store and catalog —
+exarch builds one, synod one for all its conversations — and keeps,
 per account, the last meter reading and the instant a refusal said it is spent
 until. `Provider::complete` is the only caller of `Engine::complete`, so its
 live arm is where nothing can go around: `Rations::admit` before the send
@@ -265,9 +265,10 @@ genai `Client`:
 
 `Provider::build` needs an `Engine` and a `Credential`, and a `Provider`
 retains neither — it keeps a built `Transport`. So minting a *second*
-selection has nothing to work from unless the engine, the credential store,
-and the model catalog are reachable together. `provider/bureau.rs` is that
-trio named once: `Bureau::Live { engine, store, catalog }`, or
+selection has nothing to work from unless the engine and the application's
+`Holdings` — credential store, model catalog, allowance record, whose lock
+discipline is stated once on the type — are reachable together.
+`provider/bureau.rs` names them once: `Bureau::Live { engine, holdings }`, or
 `Bureau::Scripted` for a session that mints nothing (`Engine::new` primes the
 pricing catalog over the network, so no unit test may build one). It mirrors
 `Provider`'s own `Backend::{Live, Scripted}` split rather than inventing a
@@ -369,7 +370,7 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
   turn was cut short, and each arm carries its own remedy
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 - Rate limits get a larger budget and a higher backoff ceiling than transient
-  failures (`retry_limits`), and a named wait is honoured. A wait past that
+  failures, and a named wait is honoured. A wait past that
   ceiling is a spent allowance, `Exhausted`, surfaced on its first attempt and
   resumed by a wakeup at the reset
   ([[internals/provider-fault-recovery|provider-fault-recovery]]).

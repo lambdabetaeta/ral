@@ -20,6 +20,7 @@ use super::rail::{self, RailKind};
 use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{Card, Landing, Mark, Span as CardSpan};
+use crate::record::fault::Readout;
 use crate::record::{Seq, Verdict};
 use ral_core::types::Observed;
 use ratatui::style::{Color, Modifier, Style};
@@ -85,8 +86,8 @@ impl Chrome {
             Self::Note(s) => text(line::note(s)),
             Self::StopReason(raw) => text(line::stop_reason(raw)),
             Self::Error(msg) => text(line::error(msg)),
-            Self::ProviderError(e) => line::provider_error(e, width),
-            Self::Stalled(e) => line::stalled(e, width),
+            Self::ProviderError(e) => line::render_readout(Readout::fatal(e), width),
+            Self::Stalled(e) => line::render_readout(Readout::stall(e), width),
             Self::Cancelled => line::note("cancelled"),
             Self::Settled(spans) | Self::Spawned(spans) => text(line::render_text(spans)),
             Self::Opening(card) => banner::opening(card, width),

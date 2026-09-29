@@ -150,16 +150,11 @@ impl Listing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::identity::{Account, ServiceName, built_in};
+    use crate::provider::identity::Account;
     use ral_core::sync::LockExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-
-    fn fam(name: &str) -> Account {
-        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
-    }
-
     type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
 
     /// A fake [`ModelSource`] whose state is shared, not forked, across a clone
@@ -222,7 +217,7 @@ mod tests {
 
     #[test]
     fn everything_cached_loads_with_no_fetch() {
-        let anthropic = fam("anthropic");
+        let anthropic = Account::built_in("anthropic");
         let source = FakeSource::new(one(&anthropic.id, &["claude-opus-4"]));
         let mut catalog = ModelCatalog::memo_only(source.clone());
         catalog.record(&anthropic.id, vec!["claude-opus-4".into()]);
@@ -243,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_miss_loads_in_the_background_and_records_into_the_catalog() {
-        let deepseek = fam("deepseek");
+        let deepseek = Account::built_in("deepseek");
         let source = FakeSource::new(one(&deepseek.id, &["deepseek-chat"]));
         let mut catalog = ModelCatalog::memo_only(source);
 
@@ -271,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_lands_failed_and_is_not_recorded() {
-        let openai = fam("openai");
+        let openai = Account::built_in("openai");
         let mut lists = BTreeMap::new();
         lists.insert(openai.id.clone(), Err("network down".to_string()));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
@@ -290,8 +285,8 @@ mod tests {
 
     #[test]
     fn settle_returns_every_outstanding_result() {
-        let anthropic = fam("anthropic");
-        let openai = fam("openai");
+        let anthropic = Account::built_in("anthropic");
+        let openai = Account::built_in("openai");
         let mut lists = one(&anthropic.id, &["claude-opus-4"]);
         lists.insert(openai.id.clone(), Err("no key".to_string()));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));

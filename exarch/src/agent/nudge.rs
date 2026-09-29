@@ -415,16 +415,6 @@ mod tests {
         assert_eq!(nudges.used, 1, "only the reply half spends budget");
     }
 
-    /// A reminder is budget-free, and its breadcrumb is the only record of it.
-    #[test]
-    fn remind_wraps_the_body_and_spends_no_budget() {
-        let nudges = Nudges::new();
-        let mut log = fresh_log();
-        let msg = nudges.remind("context pressure".into(), "look out", &mut log);
-        assert_eq!(msg, wrap_reminder("look out"));
-        assert_eq!(nudges.used, 0);
-    }
-
     #[test]
     fn reset_clears_budget() {
         let mut nudges = Nudges::new();

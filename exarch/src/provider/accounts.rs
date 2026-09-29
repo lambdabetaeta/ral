@@ -12,7 +12,7 @@
 //! and "which of the known accounts is this".
 
 use super::credential::{CredentialStore, well_formed_key};
-use super::identity::{self, Account, Auth, Billing, Meter, Service, ServiceName};
+use super::identity::{self, Account, Auth, Service, ServiceName};
 
 /// The endpoints declared beyond the built-in table.
 ///
@@ -56,16 +56,7 @@ pub fn declare_endpoint(
     }
     let endpoint = well_formed_endpoint(endpoint)?;
     let adapter = crate::config::adapter_for_protocol(protocol, label)?;
-    Ok(Service {
-        name,
-        endpoint: Some(endpoint),
-        adapter,
-        default_model: None,
-        auth: Auth::Unnamed,
-        billing: Billing::Metered,
-        routes: false,
-        meter: Meter::Unpublished,
-    })
+    Ok(Service::declared(name, endpoint, adapter, Auth::Unnamed))
 }
 
 /// Whether `name` is already spoken for — by the built-in table or by an
@@ -167,16 +158,12 @@ mod tests {
     use genai::adapter::AdapterKind;
 
     fn declared(name: &str) -> Account {
-        Account::of_service(Service {
-            name: ServiceName::declared(name).unwrap(),
-            endpoint: Some(format!("https://{name}.example/v1/")),
-            adapter: AdapterKind::OpenAI,
-            default_model: None,
-            auth: Auth::Unnamed,
-            billing: Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        })
+        Account::of_service(Service::declared(
+            ServiceName::declared(name).unwrap(),
+            format!("https://{name}.example/v1/"),
+            AdapterKind::OpenAI,
+            Auth::Unnamed,
+        ))
     }
 
     #[test]
@@ -212,7 +199,7 @@ mod tests {
 
     #[test]
     fn a_built_in_service_refuses_withdrawal() {
-        let anthropic = Account::of_service(identity::built_in_services().remove(0));
+        let anthropic = Account::built_in("anthropic");
         let err = refuse_built_in(&anthropic).unwrap_err();
         assert!(err.contains("built-in"), "{err}");
     }

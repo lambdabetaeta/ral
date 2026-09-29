@@ -132,7 +132,7 @@ pub fn save(dir: &Path, state: &State) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
-    use crate::provider::identity::{Meter, ServiceName, built_in};
+    use crate::provider::identity::{Auth, Service, ServiceName};
 
     fn tmp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -144,15 +144,11 @@ mod tests {
         dir
     }
 
-    fn fam(name: &str) -> Account {
-        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
-    }
-
     #[test]
     fn save_load_round_trip() {
         let dir = tmp_dir();
-        let deepseek = fam("deepseek");
-        let available = [fam("anthropic"), deepseek.clone()];
+        let deepseek = Account::built_in("deepseek");
+        let available = [Account::built_in("anthropic"), deepseek.clone()];
         let state = State::new(
             &deepseek,
             &available,
@@ -170,16 +166,12 @@ mod tests {
     #[test]
     fn custom_provider_round_trips_by_service_name() {
         let dir = tmp_dir();
-        let llama = Account::of_service(crate::provider::identity::Service {
-            name: ServiceName::declared("local-llama").unwrap(),
-            endpoint: Some("https://llama.example/v1/".into()),
-            adapter: genai::adapter::AdapterKind::OpenAI,
-            default_model: None,
-            auth: crate::provider::identity::Auth::Env("LOCAL_LLAMA_KEY".into()),
-            billing: crate::provider::identity::Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        });
+        let llama = Account::of_service(Service::declared(
+            ServiceName::declared("local-llama").unwrap(),
+            "https://llama.example/v1/".into(),
+            genai::adapter::AdapterKind::OpenAI,
+            Auth::Env("LOCAL_LLAMA_KEY".into()),
+        ));
         let available = [llama.clone()];
         let state = State::new(&llama, &available, "llama-3", &Tuning::default(), None);
         save(&dir, &state).unwrap();
@@ -215,14 +207,14 @@ mod tests {
             top_p: None,
             route: None,
         };
-        let available = [fam("anthropic")];
+        let available = [Account::built_in("anthropic")];
         assert!(state.account(&available).is_none());
     }
 
     #[test]
     fn tuning_round_trips() {
         let dir = tmp_dir();
-        let anthropic = fam("anthropic");
+        let anthropic = Account::built_in("anthropic");
         let available = [anthropic.clone()];
         let tuning = Tuning {
             effort: Some(ReasoningEffort::High),
@@ -272,8 +264,11 @@ mod tests {
         .unwrap();
         let loaded = load(&dir).expect("a pre-change file must still load");
         assert_eq!(loaded.provider_name, "", "defaulted, not fabricated");
-        let available = [fam("anthropic")];
-        assert_eq!(loaded.account(&available), Some(fam("anthropic")));
+        let available = [Account::built_in("anthropic")];
+        assert_eq!(
+            loaded.account(&available),
+            Some(Account::built_in("anthropic"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

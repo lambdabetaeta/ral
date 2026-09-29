@@ -212,17 +212,6 @@ mod tests {
         Account::of_service(service)
     }
 
-    /// A signed-in `ChatGPT` account, whose service names no default model
-    /// and so stands in for every service [`menu_from`] cannot fall back on.
-    fn chatgpt(handle: &str) -> Account {
-        let service = identity::chatgpt_service();
-        Account {
-            id: AccountId::of_login(&service.name, handle),
-            service,
-            handle: handle.to_string(),
-        }
-    }
-
     type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
 
     /// A fake [`ModelSource`] whose list is shared (not forked) across a
@@ -342,7 +331,7 @@ mod tests {
     #[test]
     fn a_chatgpt_style_account_with_no_service_default_starts_empty() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let account = chatgpt("work-account");
+        let account = Account::chatgpt("work-account", "work-account");
 
         let menu = menu_from(std::slice::from_ref(&account), &mut catalog);
 
@@ -352,7 +341,7 @@ mod tests {
 
     #[test]
     fn refresh_menu_folds_fetched_lists_in_and_serves_them() {
-        let account = chatgpt("work-account");
+        let account = Account::chatgpt("work-account", "work-account");
         let source = FakeSource::new(one(account.id.clone(), &["gpt-5.5-codex"]));
         let catalog = Mutex::new(ModelCatalog::memo_only(source));
 

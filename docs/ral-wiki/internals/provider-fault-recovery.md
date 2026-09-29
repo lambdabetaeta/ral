@@ -1,7 +1,7 @@
 ---
 verified_at_commit: c8731be6
 verified_at_date: 2026-09-28
-anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Exhausted, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Exhausted, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -133,8 +133,7 @@ clock runs out is only refused again:
 | `retry-after-ms` header | delta milliseconds | OpenAI SDK convention, opencode |
 | `retry-after` header | delta seconds, or an HTTP-date (jiff's RFC 2822 parser) | RFC 9110 |
 | `x-ratelimit-reset`, `ratelimit-reset` headers | `epoch_or_delta` | GitHub-style, IETF draft |
-| body `resets_at` | epoch seconds | Codex `usage_limit_reached` |
-| body `resets_in_seconds`, `retry_after_seconds`, `retry_after` | delta seconds | older Codex, others |
+| body `resets_at`, `resets_in_seconds`, `retry_after_seconds`, `retry_after` | `epoch_or_delta` | Codex `usage_limit_reached` (an epoch), older Codex and others (a delta) |
 | body `details[]` `google.rpc.RetryInfo` → `retryDelay` | `"38s"` | Gemini |
 | body `metadata.headers` `x-ratelimit-reset` | `epoch_or_delta` | OpenRouter's relayed limit |
 
@@ -218,9 +217,10 @@ The loop is small and the rules read straight off it:
 - A `Done` returns the value. A `Failed(Cancelled)` returns immediately — a
   cancel is never retried or reclassified.
 - A `Failed(e)` retries **only** when `e` is `Transient` or `RateLimited` and
-  budget remains; any other variant (`Api`, `Exhausted`, `Other`) is stamped
-  with its final attempt count and surfaced. So a 4xx never burns the budget,
-  and a spent allowance surfaces on its first attempt.
+  budget remains; any other variant (`Api`, `Exhausted`, `Other`) surfaces at
+  once, and a `Transient` out of budget is stamped with its final attempt
+  count. So a 4xx never burns the budget, and a spent allowance surfaces on
+  its first attempt.
 - Between attempts it `select!`s the backoff sleep against the cancel token, so
   a user can interrupt a wait.
 
@@ -237,8 +237,8 @@ is bounded by exactly the tiers above, and it is the *only* copy the retry
 loop pays, not a copy of a copy. See
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]].
 
-`retry_limits` gives rate limits a strictly more patient tier than generic
-transient faults — they are the only thing now retried on a 429, so they must be
+`retry_with_backoff`'s one match gives rate limits a strictly more patient
+tier than generic transient faults — they are the only thing now retried on a 429, so they must be
 the patient one:
 
 | tier | attempts | delay ceiling |

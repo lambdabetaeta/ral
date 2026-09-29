@@ -8,6 +8,7 @@ use crate::provider::error::body_detail;
 use crate::provider::identity::Account;
 use crate::provider::models::blocking_runtime;
 use crate::provider::oauth;
+use jiff::Timestamp;
 use ral_core::sync::LockExt;
 use serde::Deserialize;
 use std::time::Duration;
@@ -90,7 +91,8 @@ struct Window {
     /// Absolute unix seconds. `reset_after_seconds` is discarded, as upstream
     /// itself does: a reading sitting on a channel cannot quietly age against
     /// an absolute figure the way it would against a relative one.
-    reset_at: Option<u64>,
+    #[serde(default, with = "jiff::fmt::serde::timestamp::second::optional")]
+    reset_at: Option<Timestamp>,
 }
 
 /// `None` when the payload disclosed no window at all — whether it omitted
@@ -140,12 +142,12 @@ mod tests {
                 Allowance {
                     window: Some(Duration::from_hours(5)),
                     used: Consumption::Fraction(0.42),
-                    resets_at: Some(1_780_000_000),
+                    resets_at: Timestamp::from_second(1_780_000_000).ok(),
                 },
                 Allowance {
                     window: Some(Duration::from_hours(168)),
                     used: Consumption::Fraction(0.11),
-                    resets_at: Some(1_780_500_000),
+                    resets_at: Timestamp::from_second(1_780_500_000).ok(),
                 },
             ]
         );

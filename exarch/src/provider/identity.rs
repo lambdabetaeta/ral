@@ -162,6 +162,23 @@ pub enum Billing {
     FlatRate,
 }
 
+impl Service {
+    /// An endpoint the user declared: metered, unrouted, unmetered by any
+    /// readout, and suggesting no model.
+    pub fn declared(name: ServiceName, endpoint: String, adapter: AdapterKind, auth: Auth) -> Self {
+        Self {
+            name,
+            endpoint: Some(endpoint),
+            adapter,
+            default_model: None,
+            auth,
+            billing: Billing::Metered,
+            routes: false,
+            meter: Meter::Unpublished,
+        }
+    }
+}
+
 /// Who is asking. Several accounts may belong to one [`Service`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -184,6 +201,34 @@ impl Account {
             handle: service.name.as_str().to_string(),
             service,
         }
+    }
+
+    /// A `ChatGPT` login, identified by its token's `issued` stamp.
+    pub fn chatgpt(issued: &str, handle: impl Into<String>) -> Self {
+        let service = chatgpt_service();
+        Self {
+            id: AccountId::of_login(&service.name, issued),
+            handle: handle.into(),
+            service,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Account {
+    /// A built-in service's sole account.
+    pub(crate) fn built_in(name: &str) -> Self {
+        Self::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
+    }
+
+    /// A declared endpoint's sole account, keyed by `{NAME}_KEY`.
+    pub(crate) fn declared(name: &str) -> Self {
+        Self::of_service(Service::declared(
+            ServiceName::declared(name).unwrap(),
+            format!("https://{name}.example/v1/"),
+            AdapterKind::OpenAI,
+            Auth::Env(format!("{}_KEY", name.to_uppercase())),
+        ))
     }
 }
 
@@ -409,10 +454,6 @@ pub(super) fn adapter_for_model(service: &Service, model: &str) -> AdapterKind {
 mod tests {
     use super::*;
 
-    fn service(name: &str) -> Service {
-        built_in(&ServiceName::declared(name).unwrap()).unwrap()
-    }
-
     /// Asserts the whole table; `opencode-go` documents that a subscription
     /// with no readout is a choice the row states.
     #[test]
@@ -427,25 +468,16 @@ mod tests {
         }
     }
 
-    fn login(handle: &str, issued: &str) -> Account {
-        let service = chatgpt_service();
-        Account {
-            id: AccountId::of_login(&service.name, issued),
-            service,
-            handle: handle.to_string(),
-        }
-    }
-
     #[test]
     fn openai_service_keeps_openai_adapter_split() {
-        let openai = service("openai");
+        let openai = Account::built_in("openai").service;
         assert_eq!(adapter_for_model(&openai, "gpt-4.1"), AdapterKind::OpenAI);
         assert_eq!(
             adapter_for_model(&openai, "gpt-5.5"),
             AdapterKind::OpenAIResp
         );
         assert_eq!(
-            adapter_for_model(&service("deepseek"), "gpt-5.5"),
+            adapter_for_model(&Account::built_in("deepseek").service, "gpt-5.5"),
             AdapterKind::DeepSeek
         );
     }
@@ -464,8 +496,8 @@ mod tests {
 
     #[test]
     fn a_key_bearing_account_is_named_by_its_service_alone() {
-        let anthropic = Account::of_service(service("anthropic"));
-        let go = Account::of_service(service("opencode-go"));
+        let anthropic = Account::built_in("anthropic");
+        let go = Account::built_in("opencode-go");
         let among = [anthropic.clone(), go.clone()];
         assert_eq!(label(&anthropic, &among), "anthropic");
         assert_eq!(label(&go, &among), "opencode-go");
@@ -474,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_lone_chatgpt_account_keeps_its_handle() {
-        let one = login("alex@bristol.ac.uk", "acct-1");
+        let one = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
         assert_eq!(
             label(&one, std::slice::from_ref(&one)),
             "chatgpt · alex@bristol.ac.uk"
@@ -483,13 +515,13 @@ mod tests {
 
     #[test]
     fn two_accounts_on_one_email_draw_two_distinguishable_labels() {
-        let personal = login("alex@bristol.ac.uk", "acct-1");
-        let work = login("alex@bristol.ac.uk (Acme Ltd)", "acct-2");
+        let personal = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
+        let work = Account::chatgpt("acct-2", "alex@bristol.ac.uk (Acme Ltd)");
         let among = [personal.clone(), work.clone()];
         assert_ne!(label(&personal, &among), label(&work, &among));
 
         // Handles that stayed identical fall back to the ids, which cannot collide.
-        let twin = login("alex@bristol.ac.uk", "acct-2");
+        let twin = Account::chatgpt("acct-2", "alex@bristol.ac.uk");
         let among = [personal.clone(), twin.clone()];
         assert_ne!(label(&personal, &among), label(&twin, &among));
         assert!(
@@ -504,11 +536,11 @@ mod tests {
     /// rendering; the labels must still read apart.
     #[test]
     fn a_handle_embedding_anothers_qualified_rendering_still_reads_apart() {
-        let plain = login("alex@work", "acct-1");
+        let plain = Account::chatgpt("acct-1", "alex@work");
         // The twin forces `plain` onto its id-qualified form...
-        let twin = login("alex@work", "acct-2");
+        let twin = Account::chatgpt("acct-2", "alex@work");
         // ...which is exactly what this handle spells out.
-        let imposter = login("alex@work · chatgpt:acct-1", "acct-3");
+        let imposter = Account::chatgpt("acct-3", "alex@work · chatgpt:acct-1");
         let among = [plain.clone(), twin.clone(), imposter.clone()];
         let labels = [
             label(&plain, &among),

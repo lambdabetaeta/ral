@@ -102,12 +102,7 @@ impl OAuthToken {
 /// The `chatgpt` [`Account`] a persisted login names — the one conversion
 /// every other reader of the token store goes through.
 pub(super) fn to_account(token: &OAuthToken) -> Account {
-    let service = identity::chatgpt_service();
-    Account {
-        id: AccountId::of_login(&service.name, &token.issued),
-        handle: token.handle(),
-        service,
-    }
+    Account::chatgpt(&token.issued, token.handle())
 }
 
 /// The token-endpoint success body shared by both interactive flows.

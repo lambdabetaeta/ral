@@ -18,12 +18,10 @@
 //! whichever one account is set up on this computer, and its default
 //! model.
 //!
-//! The store the whole module reads is held behind a [`Mutex`] because
-//! [`sign_in`] can add to it: a `ChatGPT` plan signed in from the window
-//! becomes available to the very next [`menu`] and conversation, with no
-//! restart.  Every function here that takes it locks it only for as long
-//! as it takes to read the account list — never across a network fetch or
-//! a machine boot.
+//! The store is shared and grows: [`sign_in`] can add to it, so a `ChatGPT`
+//! plan signed in from the window becomes available to the very next
+//! [`menu`] and conversation, with no restart. Locking follows
+//! [`exarch::provider::Holdings`].
 
 mod baseline;
 mod engine_log;
@@ -36,10 +34,10 @@ use crate::workspace;
 use baseline::Baseline;
 use exarch::agent::{Avatar, RecordedAccount};
 use exarch::provider::{
-    self, Bureau, Engine, Provider, Rations,
+    self, Bureau, Engine, Holdings, Provider,
     credential::CredentialStore,
     identity::{self, Account},
-    models::{LiveSource, ModelCatalog, resolve_account},
+    models::resolve_account,
     pricing,
 };
 use ral_core::sync::LockExt;
@@ -180,9 +178,7 @@ impl Conversation {
     /// this call.
     pub fn begin(
         folder: &Path,
-        store: &Arc<Mutex<CredentialStore>>,
-        catalog: &Arc<Mutex<ModelCatalog<LiveSource>>>,
-        rations: &Arc<Rations>,
+        holdings: &Holdings,
         choice: Option<Choice>,
         baseline_stop: &workspace::manifest::Stop,
         baseline_progress: Box<dyn FnMut(u64) + Send>,
@@ -210,7 +206,7 @@ impl Conversation {
             label,
             model,
             effort,
-        } = select_account(store, choice)?;
+        } = select_account(&holdings.store, choice)?;
         let announced_model = model.clone();
         let tuning = resolve_tuning(effort, &model)?;
         let announced_effort = provider::effort_label(&tuning.effort)
@@ -254,9 +250,7 @@ impl Conversation {
         // whole life.
         let bureau = Arc::new(Bureau::Live {
             engine: Engine::new(),
-            store: Arc::clone(store),
-            catalog: Arc::clone(catalog),
-            rations: Arc::clone(rations),
+            holdings: holdings.clone(),
         });
         let provider = bureau.build(&account, model.clone(), &tuning, None, None)?;
 

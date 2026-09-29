@@ -231,7 +231,7 @@ fn prime_pricing(runtime: &tokio::runtime::Runtime) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::identity::{ServiceName, built_in, chatgpt_service};
+    use super::super::identity::chatgpt_service;
     use super::*;
 
     fn token(access_token: &str) -> oauth::OAuthToken {
@@ -246,22 +246,9 @@ mod tests {
         }
     }
 
-    fn service(name: &str) -> Service {
-        built_in(&ServiceName::declared(name).unwrap()).unwrap()
-    }
-
-    fn login(issued: &str) -> Account {
-        let service = chatgpt_service();
-        Account {
-            id: AccountId::of_login(&service.name, issued),
-            service,
-            handle: "me@example.com".into(),
-        }
-    }
-
     #[test]
     fn transport_key_separates_rotated_api_keys() {
-        let account = Account::of_service(service("anthropic"));
+        let account = Account::built_in("anthropic");
         let key = |secret: &str| {
             TransportKey::for_selection(
                 &account,
@@ -275,7 +262,7 @@ mod tests {
 
     #[test]
     fn oauth_keys_ignore_rotated_secret() {
-        let chat = login("account");
+        let chat = Account::chatgpt("account", "me@example.com");
         let credential = |secret: &str| Credential::OAuth(Arc::new(Mutex::new(token(secret))));
         assert_eq!(
             TransportKey::for_selection(&chat, "gpt-5.5", &credential("first")),
@@ -288,12 +275,12 @@ mod tests {
     #[test]
     fn subscription_turns_report_tokens_but_never_a_cost() {
         let flat_rate = Transport::build(
-            &service("opencode-go"),
+            &Account::built_in("opencode-go").service,
             "glm-5.2",
             &Credential::ApiKey("k".into()),
         );
         let keyed = Transport::build(
-            &service("anthropic"),
+            &Account::built_in("anthropic").service,
             "claude-opus-4",
             &Credential::ApiKey("k".into()),
         );

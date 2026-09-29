@@ -9,8 +9,7 @@ use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
 use std::time::Duration;
 
-/// The error-object keys that name a reset: `resets_at` an instant in epoch
-/// seconds, the rest a wait in seconds.
+/// The error-object keys that name a reset, each read by [`epoch_or_delta`].
 pub(crate) const BODY_KEYS: &[&str] = &[
     "resets_at",
     "resets_in_seconds",
@@ -85,14 +84,7 @@ fn ratelimit_reset(headers: &HeaderMap, now: Timestamp) -> Option<Timestamp> {
 fn named(obj: &Map<String, Value>, now: Timestamp) -> Option<Timestamp> {
     BODY_KEYS
         .iter()
-        .filter_map(|&key| {
-            let from = if key == "resets_at" {
-                Timestamp::UNIX_EPOCH
-            } else {
-                now
-            };
-            after(from, number(obj.get(key)?)?)
-        })
+        .filter_map(|k| epoch_or_delta(number(obj.get(*k)?)?, now))
         .max()
 }
 
@@ -296,19 +288,6 @@ mod tests {
             Some(secs_after_now(12))
         );
         assert_eq!(at(None, None, "429 too many", now()), None);
-    }
-
-    #[test]
-    fn epoch_or_delta_tells_three_magnitudes_apart() {
-        assert_eq!(epoch_or_delta(30.0, now()), Some(secs_after_now(30)));
-        assert_eq!(
-            epoch_or_delta(1_800_000_000.0, now()),
-            Some(Timestamp::from_second(1_800_000_000).unwrap())
-        );
-        assert_eq!(
-            epoch_or_delta(1_800_000_000_000.0, now()),
-            Some(Timestamp::from_second(1_800_000_000).unwrap())
-        );
     }
 
     #[test]

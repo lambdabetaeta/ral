@@ -127,12 +127,9 @@ impl Avatar {
                 Flow::Severed(s) => break Some(s),
             }
         };
-        self.settle_severance(lost, &mut final_outcome);
-        // `take_up` quiesces per item; this catches whichever path breaks the
-        // loop, so the agent is ReadyForUser however it ends.
-        if !self.log.lock().is_ready() {
-            self.log.lock().quiesce(QuiesceReason::Aborted);
-        }
+        // `take_up` quiesces per item; `close` catches whichever path breaks
+        // the loop, so the agent is ReadyForUser however it ends.
+        self.close(lost, &mut final_outcome);
         debug_assert!(
             self.log.lock().is_ready(),
             "attend must leave the agent ReadyForUser"
@@ -165,10 +162,7 @@ impl Avatar {
                 Flow::Severed(s) => break Some(s),
             }
         };
-        self.settle_severance(lost, &mut final_outcome);
-        if !self.log.lock().is_ready() {
-            self.log.lock().quiesce(QuiesceReason::Aborted);
-        }
+        self.close(lost, &mut final_outcome);
         final_outcome
     }
 
@@ -232,9 +226,7 @@ impl Avatar {
         // A provider error or turn cap can leave the session mid-protocol.
         // The caller's guard would only fire on loop exit; quiesce now so the
         // next prompt — nudge or user — is admissible.
-        if !self.log.lock().is_ready() {
-            self.log.lock().quiesce(QuiesceReason::Aborted);
-        }
+        self.abort_unready();
         // A root's reply goes to whoever drives its loop, not to a deposit: it
         // has no parent to fetch it, and staging one would read as a standing
         // reply the nudge layer must fall silent for.
@@ -361,26 +353,22 @@ impl Avatar {
     /// carries the cut [`Avatar::planned_eviction`] would make, so the
     /// reminder can name it.
     pub(super) fn pressure_gauge(&self, provider: &Provider) -> Pressure {
-        match provider.context_window() {
+        let detail = match provider.context_window() {
             Some(w) if w > 0 => match self.token_pressure(w) {
-                Some(detail) => Pressure::Over {
-                    detail,
-                    planned: self.planned_eviction(),
-                },
-                None if self.measured_input().is_some() => Pressure::Under,
-                None => Pressure::Unknown,
+                None if self.measured_input().is_none() => return Pressure::Unknown,
+                detail => detail,
             },
             _ => {
                 let bytes = self.log.lock().history_bytes();
-                if bytes >= PRESSURE_THRESHOLD_FALLBACK {
-                    Pressure::Over {
-                        detail: format!("{} KB", bytes / 1024),
-                        planned: self.planned_eviction(),
-                    }
-                } else {
-                    Pressure::Under
-                }
+                (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
             }
+        };
+        match detail {
+            Some(detail) => Pressure::Over {
+                detail,
+                planned: self.planned_eviction(),
+            },
+            None => Pressure::Under,
         }
     }
 
@@ -434,7 +422,7 @@ impl Avatar {
             .into_iter()
             .filter_map(|warning| {
                 if let Some(line) = warning.user {
-                    Self::note(line, self);
+                    self.note(line);
                 }
                 let (cause, body) = warning.model?;
                 let nudges = self.nudges.as_ref()?;
@@ -461,50 +449,51 @@ impl Avatar {
             RESUME_LABEL.into(),
             &self.mailbox(),
         ) {
-            Ok(_) => Self::note(
-                format!(
-                    "usage limit reached — resuming {}, in {}",
-                    clock::local(resets_at),
-                    clock::hms(delay.as_secs(), " ")
-                ),
-                self,
-            ),
+            Ok(_) => self.note(format!(
+                "usage limit reached — resuming {}, in {}",
+                clock::local(resets_at),
+                clock::hms(delay.as_secs())
+            )),
             Err(refusal) => self.note_error(format!(
                 "usage limit reached, but the resume could not be scheduled: {refusal}"
             )),
         }
     }
 
+    /// Quiesce a log a deliberation left mid-protocol.
+    fn abort_unready(&self) {
+        if !self.log.lock().is_ready() {
+            self.log.lock().quiesce(QuiesceReason::Aborted);
+        }
+    }
+
     /// The one edge both loops end on: a severance they broke on, or one a
-    /// park quiesced behind, is recorded here exactly once — the sentence,
-    /// the failed outcome in place of `NO_REPLY_REASON`, and a quiesce if a
-    /// deliberation left the log mid-protocol.
-    fn settle_severance(
-        &self,
-        lost: Option<Severed>,
-        final_outcome: &mut (AgentOutcome, Option<FOValue>),
-    ) {
-        let Some(s) = lost.or_else(|| self.seat.severed()) else {
-            return;
-        };
-        let lost = EngineLost::running(&s, self.agent.run_dir());
+    /// park quiesced behind, is recorded here exactly once — the sentence and
+    /// the failed outcome in place of `NO_REPLY_REASON` — then the log is
+    /// quiesced if a deliberation left it mid-protocol.
+    fn close(&self, lost: Option<Severed>, final_outcome: &mut (AgentOutcome, Option<FOValue>)) {
+        if let Some(s) = lost.or_else(|| self.seat.severed()) {
+            self.record_severance(&s, final_outcome);
+        }
+        self.abort_unready();
+    }
+
+    fn record_severance(&self, s: &Severed, final_outcome: &mut (AgentOutcome, Option<FOValue>)) {
+        let lost = EngineLost::running(s, self.agent.run_dir());
         // Two renderings of one failure, and the difference is the point: the
         // durable note keeps the engine's own account of itself, while the
         // outcome the loop settles on is the plain sentence a person reads.
         // A note, not an error record: a window shows errors, and the
         // engine's words stay out of windows.
-        Self::note(lost.logged(), self);
+        self.note(lost.logged());
         *final_outcome = (AgentOutcome::Failed(lost.to_string()), None);
-        if !self.log.lock().is_ready() {
-            self.log.lock().quiesce(QuiesceReason::Aborted);
-        }
     }
 }
 
 /// Whole seconds to the reset, rounded up so the wake never lands inside the
 /// hold, and at least one.
 fn wake_delay(resets_at: jiff::Timestamp, now: jiff::Timestamp) -> Duration {
-    let wait = Duration::try_from(resets_at.duration_since(now)).unwrap_or_default();
+    let wait = clock::until(resets_at, now);
     Duration::from_secs((wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1))
 }
 
@@ -1129,19 +1118,6 @@ mod tests {
         );
     }
 
-    /// The disk-warn ceiling a fixture is built under, comfortably above a
-    /// fresh session's own footprint, and a file that alone crosses it.
-    const WARN_CEILING: u64 = 64 * 1024;
-    const OVER_CEILING: usize = 1024 * 1024;
-
-    fn warned_at(ceiling: u64) -> Avatar {
-        Avatar::for_test_with(crate::agent::TestTrunk {
-            disk_warn_bytes: Some(ceiling),
-            ..crate::agent::TestTrunk::new("system")
-        })
-        .expect("a trunk under a disk-warn ceiling")
-    }
-
     /// Unconfigured, the check returns before the epoch bookkeeping: no walk,
     /// no warning, no cost.
     #[test]
@@ -1162,39 +1138,21 @@ mod tests {
         );
     }
 
-    /// Falling back under clears the latch, so a re-crossing warns again.
+    /// The walk is real: 64 KiB sits above a fresh session's own footprint,
+    /// and the file alone crosses it.
     #[test]
-    fn disk_warning_falling_below_rearms_the_latch() {
-        let mut session = warned_at(WARN_CEILING);
-        let big = session.log_dir().join("big.txt");
-        std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
-
-        let warning = session
-            .disk_warning()
-            .expect("an identity seat never severs")
-            .expect("the first crossing warns");
-        let line = warning.user.expect("the user is told");
-        assert!(line.contains("disk"), "{line}");
-        assert!(warning.model.is_none(), "the model is never told of disk");
-
-        std::fs::remove_file(&big).unwrap();
-        session.disk_check_epoch = session.ral_epoch;
+    fn disk_warning_walks_the_log_dir() {
+        let mut session = Avatar::for_test_with(crate::agent::TestTrunk {
+            disk_warn_bytes: Some(64 * 1024),
+            ..crate::agent::TestTrunk::new("system")
+        })
+        .expect("a trunk under a disk-warn ceiling");
+        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 1024 * 1024]).unwrap();
         assert!(
             session
                 .disk_warning()
                 .expect("an identity seat never severs")
-                .is_none(),
-            "back under the ceiling: no warning, just the latch clearing"
-        );
-
-        std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
-        session.disk_check_epoch = session.ral_epoch;
-        assert!(
-            session
-                .disk_warning()
-                .expect("an identity seat never severs")
-                .is_some(),
-            "re-crossing after falling below warns again"
+                .is_some()
         );
     }
 

@@ -396,26 +396,18 @@ mod tests {
     use super::*;
     use crate::provider::oauth::OAuthToken;
     use genai::adapter::AdapterKind;
-    use identity::{Billing, Meter, ServiceName};
+    use identity::ServiceName;
 
     // The `resolve_and_scrub` scenarios live in `tests/credential_env.rs`: they
     // mutate the process-global environment, which no library test may share.
 
-    fn built_in(name: &str) -> Service {
-        identity::built_in(&ServiceName::declared(name).unwrap()).unwrap()
-    }
-
     fn declared(name: &str) -> Account {
-        Account::of_service(Service {
-            name: ServiceName::declared(name).unwrap(),
-            endpoint: Some(format!("http://{name}/v1/")),
-            adapter: AdapterKind::OpenAI,
-            default_model: None,
-            auth: Auth::Unnamed,
-            billing: Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        })
+        Account::of_service(Service::declared(
+            ServiceName::declared(name).unwrap(),
+            format!("http://{name}/v1/"),
+            AdapterKind::OpenAI,
+            Auth::Unnamed,
+        ))
     }
 
     fn oauth_token(issued: &str, email: Option<&str>) -> OAuthToken {
@@ -446,7 +438,7 @@ mod tests {
     /// ever recover.
     #[test]
     fn forgetting_an_admitted_key_reveals_the_environment_beneath_it() {
-        let anthropic = Account::of_service(built_in("anthropic"));
+        let anthropic = Account::built_in("anthropic");
         let mut store = CredentialStore {
             ready: BTreeMap::from([(anthropic.id.clone(), Credential::ApiKey("from-env".into()))]),
             all: vec![anthropic.clone()],
@@ -489,7 +481,7 @@ mod tests {
 
     #[test]
     fn add_oauth_new_account_sorts_after_built_in_and_before_declared() {
-        let anthropic = Account::of_service(built_in("anthropic"));
+        let anthropic = Account::built_in("anthropic");
         let llama = declared("local-llama");
         let mut store = CredentialStore {
             ready: BTreeMap::from([
@@ -586,7 +578,7 @@ mod tests {
     /// must never shadow a login's token cell.
     #[test]
     fn admit_from_never_touches_a_signed_in_login() {
-        let anthropic = Account::of_service(built_in("anthropic"));
+        let anthropic = Account::built_in("anthropic");
         let mut store = CredentialStore {
             ready: BTreeMap::new(),
             all: vec![anthropic.clone()],

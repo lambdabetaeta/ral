@@ -14,8 +14,7 @@
 
 use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
 use exarch::provider::identity::{
-    Account, AccountId, Auth, Billing, Meter, Service, ServiceName, built_in_services,
-    chatgpt_service,
+    Account, AccountId, Auth, Billing, Service, ServiceName, built_in_services, chatgpt_service,
 };
 use exarch::provider::oauth::{self, OAuthToken};
 use ral_core::sync::LockExt as _;
@@ -358,16 +357,12 @@ fn multiple_chatgpt_accounts_stay_distinct_and_available() {
 /// precondition.
 #[test]
 fn declared_service_resolves_and_scrubs_its_key() {
-    let declared = Service {
-        name: ServiceName::declared("local-llama").unwrap(),
-        endpoint: Some("https://llama.example/v1/".into()),
-        adapter: genai::adapter::AdapterKind::OpenAI,
-        default_model: None,
-        auth: Auth::Env("LOCAL_LLAMA_KEY".into()),
-        billing: Billing::Metered,
-        routes: false,
-        meter: Meter::Unpublished,
-    };
+    let declared = Service::declared(
+        ServiceName::declared("local-llama").unwrap(),
+        "https://llama.example/v1/".into(),
+        genai::adapter::AdapterKind::OpenAI,
+        Auth::Env("LOCAL_LLAMA_KEY".into()),
+    );
     with_env(
         &[
             ("ANTHROPIC_API_KEY", Some("a")),
@@ -405,16 +400,12 @@ fn declared_service_resolves_and_scrubs_its_key() {
 /// read from or scrubbed from the environment on its behalf.
 #[test]
 fn keyless_declared_service_resolves_to_placeholder() {
-    let declared = Service {
-        name: ServiceName::declared("ollama").unwrap(),
-        endpoint: Some("http://localhost:11434/v1/".into()),
-        adapter: genai::adapter::AdapterKind::OpenAI,
-        default_model: None,
-        auth: Auth::Unnamed,
-        billing: Billing::Metered,
-        routes: false,
-        meter: Meter::Unpublished,
-    };
+    let declared = Service::declared(
+        ServiceName::declared("ollama").unwrap(),
+        "http://localhost:11434/v1/".into(),
+        genai::adapter::AdapterKind::OpenAI,
+        Auth::Unnamed,
+    );
     with_env(
         &[
             ("ANTHROPIC_API_KEY", None),

@@ -12,7 +12,6 @@ use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use std::fmt;
-use std::time::Duration;
 
 /// A provider's JSON error frame, boxed: `genai` turns on `serde_json`'s
 /// `preserve_order`, so a `Value` is 72 bytes here, and three variants carry
@@ -163,7 +162,7 @@ impl ProviderError {
                 body,
             };
         };
-        match Wait::patient(Duration::try_from(at.duration_since(now)).unwrap_or_default()) {
+        match Wait::patient(crate::clock::until(at, now)) {
             Some(wait) => Self::RateLimited {
                 retry_after: Some(wait),
                 cause,
@@ -503,6 +502,7 @@ mod tests {
     use genai::ModelIden;
     use genai::adapter::AdapterKind;
     use reqwest::header::HeaderValue;
+    use std::time::Duration;
 
     /// The classifier never reads the adapter kind, so it is arbitrary.
     fn iden(model: &str) -> ModelIden {

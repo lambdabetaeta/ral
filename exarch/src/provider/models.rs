@@ -560,42 +560,7 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::identity::{
-        Auth, Billing, Meter, Service, ServiceName, built_in, chatgpt_service,
-    };
-    use genai::adapter::AdapterKind;
     use std::cell::Cell;
-
-    /// A built-in, key-bearing account — the common case in these tests.
-    fn fam(name: &str) -> Account {
-        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
-    }
-
-    /// The facts besides the name are immaterial: catalog and resolver key on
-    /// the account id alone, which for a key-bearing account is its name.
-    fn custom(name: &str) -> Account {
-        Account::of_service(Service {
-            name: ServiceName::declared(name).unwrap(),
-            endpoint: Some(format!("https://{name}.example/v1/")),
-            adapter: AdapterKind::OpenAI,
-            default_model: None,
-            auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
-            billing: Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        })
-    }
-
-    /// Two `ChatGPT` logins on one email — distinguished only by their ids,
-    /// since a bare handle is what this whole plan exists to stop confusing.
-    fn chatgpt_login(issued: &str, handle: &str) -> Account {
-        let service = chatgpt_service();
-        Account {
-            id: AccountId::of_login(&service.name, issued),
-            service,
-            handle: handle.into(),
-        }
-    }
 
     /// Counts fetches, so a test can assert the memo prevents a second one.
     struct FakeSource {
@@ -650,7 +615,7 @@ mod tests {
 
     #[test]
     fn lists_then_memoises() {
-        let anthropic = fam("anthropic");
+        let anthropic = Account::built_in("anthropic");
         let source = FakeSource::new(one(&anthropic, &["claude-opus-4", "claude-haiku-4"]));
         let mut cat = ModelCatalog::memo_only(source);
         match cat.list(&anthropic.id) {
@@ -708,7 +673,7 @@ mod tests {
     /// source seam instead, for the note beside its manual-entry row.
     #[test]
     fn failed_fetch_is_none_with_reason_at_the_source() {
-        let deepseek = fam("deepseek");
+        let deepseek = Account::built_in("deepseek");
         let mut lists = BTreeMap::new();
         lists.insert(deepseek.id.clone(), Err("network down".to_string()));
         let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
@@ -723,8 +688,8 @@ mod tests {
 
     #[test]
     fn resolve_prefers_listing_match() {
-        let anthropic = fam("anthropic");
-        let deepseek = fam("deepseek");
+        let anthropic = Account::built_in("anthropic");
+        let deepseek = Account::built_in("deepseek");
         let mut lists = BTreeMap::new();
         lists.insert(anthropic.id.clone(), Ok(vec!["claude-opus-4".into()]));
         lists.insert(deepseek.id.clone(), Ok(vec!["deepseek-chat".into()]));
@@ -738,8 +703,8 @@ mod tests {
 
     #[test]
     fn resolve_prefers_custom_listing_match() {
-        let anthropic = fam("anthropic");
-        let llama = custom("local-llama");
+        let anthropic = Account::built_in("anthropic");
+        let llama = Account::declared("local-llama");
         let mut lists = BTreeMap::new();
         lists.insert(anthropic.id.clone(), Ok(vec!["claude-opus-4".into()]));
         lists.insert(llama.id.clone(), Ok(vec!["llama-3".into()]));
@@ -753,8 +718,8 @@ mod tests {
 
     #[test]
     fn resolve_two_accounts_listing_one_model_is_refused_naming_both() {
-        let personal = chatgpt_login("acc-1", "alex@bristol.ac.uk");
-        let work = chatgpt_login("acc-2", "alex@work (Acme Ltd)");
+        let personal = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
+        let work = Account::chatgpt("acc-2", "alex@work (Acme Ltd)");
         let mut lists = BTreeMap::new();
         lists.insert(personal.id.clone(), Ok(vec!["gpt-5.5".into()]));
         lists.insert(work.id.clone(), Ok(vec!["gpt-5.5".into()]));
@@ -768,8 +733,8 @@ mod tests {
 
     #[test]
     fn resolve_slug_falls_back_to_openrouter() {
-        let anthropic = fam("anthropic");
-        let openrouter = fam("openrouter");
+        let anthropic = Account::built_in("anthropic");
+        let openrouter = Account::built_in("openrouter");
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let available = [anthropic, openrouter.clone()];
         assert_eq!(
@@ -782,7 +747,7 @@ mod tests {
     /// key set need not name the provider.
     #[test]
     fn resolve_bare_name_to_sole_provider() {
-        let anthropic = fam("anthropic");
+        let anthropic = Account::built_in("anthropic");
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let available = [anthropic.clone()];
         assert_eq!(
@@ -793,7 +758,10 @@ mod tests {
 
     #[test]
     fn resolve_unknown_with_many_providers_errors() {
-        let available = [fam("anthropic"), fam("deepseek")];
+        let available = [
+            Account::built_in("anthropic"),
+            Account::built_in("deepseek"),
+        ];
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
         let err = resolve_model_provider("mystery", &available, &mut cat).unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
@@ -809,17 +777,20 @@ mod tests {
     /// No catalog is even threaded through — pinning skips the lookup.
     #[test]
     fn pin_provider_matches_by_service_name() {
-        let available = [fam("anthropic"), fam("deepseek")];
+        let available = [
+            Account::built_in("anthropic"),
+            Account::built_in("deepseek"),
+        ];
         assert_eq!(
             resolve_pinned_provider("deepseek", &available).unwrap(),
-            fam("deepseek")
+            Account::built_in("deepseek")
         );
     }
 
     #[test]
     fn pin_provider_matches_custom_name() {
-        let llama = custom("local-llama");
-        let available = [fam("anthropic"), llama.clone()];
+        let llama = Account::declared("local-llama");
+        let available = [Account::built_in("anthropic"), llama.clone()];
         assert_eq!(
             resolve_pinned_provider("local-llama", &available).unwrap(),
             llama
@@ -829,7 +800,7 @@ mod tests {
     /// The error names the available accounts rather than falling back to one.
     #[test]
     fn pin_unavailable_provider_errors() {
-        let available = [fam("anthropic")];
+        let available = [Account::built_in("anthropic")];
         let err = resolve_pinned_provider("openai", &available).unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
         assert!(err.contains("anthropic"), "got: {err}");
@@ -845,8 +816,8 @@ mod tests {
     /// both, rather than picking whichever the store happened to list first.
     #[test]
     fn pin_a_service_name_naming_two_accounts_is_refused() {
-        let personal = chatgpt_login("acc-1", "alex@bristol.ac.uk");
-        let work = chatgpt_login("acc-2", "alex@work");
+        let personal = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
+        let work = Account::chatgpt("acc-2", "alex@work");
         let available = [personal, work];
         let err = resolve_pinned_provider("chatgpt", &available).unwrap_err();
         assert!(err.contains("account id"), "{err}");

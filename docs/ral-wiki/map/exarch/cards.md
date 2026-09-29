@@ -145,10 +145,10 @@ standing alone, measures its own. A card is never laid out at a fixed budget and
 lives** for kit content, so the kit can name a role but never a colour, and
 magnitude can never land on hue — the encoding is correct by construction. The quantitative encoders are reused, not duplicated: `measure`
 calls the generalised `size_bar`/`progress_bar` through `readout_spans`,
-`diff` calls the patch body (`diff_body`, the one subject with a module of its own, `tui/diff.rs`), and `fields` plus `provider_error`
+`diff` calls the patch body (`diff_body`, the one subject with a module of its own, `tui/diff.rs`), and `fields` plus `render_readout`
 both feed the shared `render_field_rows` matrix primitive — so
-`provider_error` is one internal caller of the `fields` path, not a duplicate
-label-column. The diff header label reads `diff`. What `provider_error` lays
+`render_readout` is one internal caller of the `fields` path, not a duplicate
+label-column. The diff header label reads `diff`. What `render_readout` lays
 out it does not compose: the headline and fields come from
 `record::fault::Readout` ([[internals/provider-fault-recovery|provider faults]]),
 which the headless printer renders too, so the two surfaces differ in

@@ -125,60 +125,50 @@ fn suffix(prefix: &str, text: &str) -> String {
 /// shows, exhaustively over its variants — `label` is the tag word
 /// ("provider" or "stalled") the two events that carry one prefix it with.
 fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
-    let body = match record {
-        ProviderErrorRecord::Cancelled { where_ } => format!("cancelled{}", suffix(" at ", where_)),
+    let detail = match record {
+        ProviderErrorRecord::Cancelled { where_ } => suffix(" at ", where_),
         ProviderErrorRecord::Transient {
             cause, attempts, ..
-        } => {
-            format!("transient{} (attempt {attempts})", suffix(" — ", cause))
-        }
+        } => format!("{} (attempt {attempts})", suffix(" — ", cause)),
         ProviderErrorRecord::RateLimited {
             retry_after_secs,
             cause,
             ..
-        } => format!(
-            "rate limited{}{}",
-            retry_after_secs.map_or_else(String::new, |secs| format!(" — retry in {secs}s")),
-            suffix(" — ", cause),
-        ),
+        } => {
+            retry_after_secs.map_or_else(String::new, |secs| format!(" — retry in {secs}s"))
+                + &suffix(" — ", cause)
+        }
         ProviderErrorRecord::Exhausted {
             resets_at, cause, ..
         } => format!(
-            "usage limit reached — resets {}{}",
+            " — resets {}{}",
             clock::local(*resets_at),
-            suffix(" — ", cause),
+            suffix(" — ", cause)
         ),
         ProviderErrorRecord::Api {
             status,
             model,
             message,
             ..
-        } => format!(
-            "api {}{}{message}",
-            status.map_or_else(String::new, |status| format!("{status} ")),
-            if model.is_empty() {
-                String::new()
-            } else {
-                format!("{model} ")
-            },
-        ),
+        } => {
+            let status = status.map(|s| s.to_string()).unwrap_or_default();
+            [status.as_str(), model, message]
+                .into_iter()
+                .map(|part| suffix(" ", part))
+                .collect()
+        }
         ProviderErrorRecord::Truncated { cause } => match cause {
-            CutShortRecord::OutputCap { stop_reason } => {
-                format!("truncated — output cap ({stop_reason})")
-            }
+            CutShortRecord::OutputCap { stop_reason } => format!(" — output cap ({stop_reason})"),
             // A stall's sentence is its cause's: `project` reaches one only
             // through `stall_cause`, with the cause already unwrapped.
             CutShortRecord::Stalled { error } => return provider_error_text(label, error),
         },
-        ProviderErrorRecord::Other { cause } => {
-            if cause.is_empty() {
-                "error".to_string()
-            } else {
-                cause.clone()
-            }
+        ProviderErrorRecord::Other { cause } if cause.is_empty() => {
+            return format!("[{label}: error]");
         }
+        ProviderErrorRecord::Other { cause } => return format!("[{label}: {cause}]"),
     };
-    format!("[{label}: {body}]")
+    format!("[{label}: {}{detail}]", record.kind())
 }
 
 /// An API failure or an unclassified one reads as a failure the exchange

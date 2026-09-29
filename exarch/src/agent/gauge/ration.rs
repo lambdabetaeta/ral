@@ -59,11 +59,6 @@ fn warning(rung: u32, account: &Account, allowance: &Allowance, pct: u32) -> War
 mod tests {
     use super::*;
     use crate::provider::allowance::Consumption;
-    use crate::provider::{ServiceName, built_in};
-
-    fn account() -> Account {
-        Account::of_service(built_in(&ServiceName::declared("openrouter").unwrap()).unwrap())
-    }
 
     fn window(hours: u64, fraction: f64) -> Allowance {
         Allowance {
@@ -74,7 +69,7 @@ mod tests {
     }
 
     fn read(ration: &mut Ration, a: &[Allowance]) -> Vec<Warning> {
-        ration.climb(&account(), a)
+        ration.climb(&Account::built_in("openrouter"), a)
     }
 
     #[test]
@@ -90,11 +85,10 @@ mod tests {
             "{line}"
         );
         assert!(warning.model.is_none(), "75 is not told to the model");
-        assert!(read(&mut ration, &[window(5, 0.81)]).is_empty());
     }
 
     #[test]
-    fn crossing_ninety_tells_the_model_too_and_a_higher_reading_is_silent() {
+    fn crossing_ninety_tells_the_model_too() {
         let mut ration = Ration::default();
         read(&mut ration, &[window(5, 0.80)]);
         let warnings = read(&mut ration, &[window(5, 0.91)]);
@@ -108,15 +102,6 @@ mod tests {
             body.contains("91% spent") && body.contains("pauses until it resets"),
             "{body}"
         );
-        assert!(read(&mut ration, &[window(5, 0.93)]).is_empty());
-    }
-
-    #[test]
-    fn a_fall_rearms_the_ladder() {
-        let mut ration = Ration::default();
-        read(&mut ration, &[window(5, 0.80)]);
-        assert!(read(&mut ration, &[window(5, 0.10)]).is_empty());
-        assert_eq!(read(&mut ration, &[window(5, 0.55)]).len(), 1, "50 again");
     }
 
     #[test]

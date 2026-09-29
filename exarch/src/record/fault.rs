@@ -40,15 +40,13 @@ impl Readout {
     /// ([`body_fields`]); without one the free-text `cause`/`message` is
     /// shown honestly rather than dressed as structure.
     pub(crate) fn fatal(e: &ProviderErrorRecord) -> Self {
-        // Cancellation folds its site into the headline and carries no body.
-        if let ProviderErrorRecord::Cancelled { where_ } = e {
-            return Self {
-                headline: format!("cancelled ({where_})"),
-                fields: Vec::new(),
-            };
-        }
+        let headline = if let ProviderErrorRecord::Cancelled { where_ } = e {
+            format!("cancelled ({where_})")
+        } else {
+            e.kind().to_string()
+        };
         Self {
-            headline: error_kind(e).to_string(),
+            headline,
             fields: error_fields(e),
         }
     }
@@ -67,12 +65,10 @@ impl Readout {
     }
 }
 
-/// The ordered field list under either headline.  `Cancelled` never reaches
-/// here: [`Readout::fatal`] returns before the call, and a cancel never
-/// commits as a stall — `Engine::complete` exempts it by name.
+/// The ordered field list under either headline.
 fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
     match e {
-        ProviderErrorRecord::Cancelled { .. } => unreachable!("cancellation carries no fields"),
+        ProviderErrorRecord::Cancelled { .. } => Vec::new(),
         ProviderErrorRecord::RateLimited {
             retry_after_secs,
             cause,
@@ -83,41 +79,39 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
                 datum: Datum::Seconds(secs),
             })
             .into_iter()
-            .chain(body_or_cause(body.as_ref(), cause))
+            .chain(body_or_cause(
+                body.as_ref(),
+                provider::reset::BODY_KEYS,
+                cause,
+            ))
             .collect(),
         ProviderErrorRecord::Exhausted {
             resets_at,
             cause,
             body,
         } => std::iter::once(text_field("resets", clock::local(*resets_at)))
-            .chain(body_or_cause(body.as_ref(), cause))
+            .chain(body_or_cause(
+                body.as_ref(),
+                provider::reset::BODY_KEYS,
+                cause,
+            ))
             .collect(),
         ProviderErrorRecord::Transient {
             cause,
             attempts,
             body,
             status,
-        } => {
-            let mut fs = vec![text_field("attempts", attempts.to_string())];
-            if let Some(s) = status {
-                fs.push(text_field("status", s.to_string()));
-            }
-            match body {
-                Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(text_field("cause", prettify(cause))),
-            }
-            fs
-        }
+        } => std::iter::once(text_field("attempts", attempts.to_string()))
+            .chain(status.map(status_field))
+            .chain(body_or_cause(body.as_ref(), &[], cause))
+            .collect(),
         ProviderErrorRecord::Api {
             status,
             model,
             message,
             body,
         } => {
-            let mut fs = Vec::new();
-            if let Some(s) = status {
-                fs.push(text_field("status", s.to_string()));
-            }
+            let mut fs: Vec<Field> = status.map(status_field).into_iter().collect();
             fs.push(text_field("model", model.clone()));
             if let Some(u) = provider::extract_url(message) {
                 fs.push(text_field("url", u));
@@ -146,24 +140,15 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
     }
 }
 
-/// Short human label for the error headline.
-fn error_kind(e: &ProviderErrorRecord) -> &'static str {
-    match e {
-        ProviderErrorRecord::Cancelled { .. } => "cancelled",
-        ProviderErrorRecord::Transient { status, .. } => provider::transient_label(*status),
-        ProviderErrorRecord::RateLimited { .. } => "rate limited",
-        ProviderErrorRecord::Exhausted { .. } => "usage limit reached",
-        ProviderErrorRecord::Api { .. } => "api error",
-        ProviderErrorRecord::Truncated { .. } => "truncated",
-        ProviderErrorRecord::Other { .. } => "provider error",
-    }
+fn status_field(status: u16) -> Field {
+    text_field("status", status.to_string())
 }
 
-/// A wait-bearing failure's body fields, the keys its dedicated fields
-/// already carry suppressed; the free-text `cause` when there is no body.
-fn body_or_cause(body: Option<&Value>, cause: &str) -> Vec<Field> {
+/// A failure's body fields, the `consumed` keys its dedicated fields already
+/// carry suppressed; the free-text `cause` when there is no body.
+fn body_or_cause(body: Option<&Value>, consumed: &[&str], cause: &str) -> Vec<Field> {
     match body {
-        Some(b) => body_fields(b, provider::reset::BODY_KEYS),
+        Some(b) => body_fields(b, consumed),
         None => vec![text_field("cause", prettify(cause))],
     }
 }

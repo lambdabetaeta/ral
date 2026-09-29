@@ -382,7 +382,7 @@ impl Headless<'_> {
         for f in &readout.fields {
             let value = match &f.datum {
                 record::fault::Datum::Text(text) => text.clone(),
-                record::fault::Datum::Seconds(secs) => crate::clock::hms(*secs, " "),
+                record::fault::Datum::Seconds(secs) => crate::clock::hms(*secs),
             };
             let mut lines = value.split('\n');
             let first = lines.next().unwrap_or("");

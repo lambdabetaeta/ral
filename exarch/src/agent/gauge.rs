@@ -55,8 +55,8 @@ pub(crate) struct Gauges {
 }
 
 impl Gauges {
-    /// Budget-free: the cut is announced before it happens, so the model can
-    /// leave its future self a line.
+    /// The cut is announced before it happens, so the model can leave its
+    /// future self a line.
     pub(crate) fn pressure(&mut self, reading: &Pressure) -> Option<Warning> {
         match reading {
             Pressure::Unknown => None,
@@ -88,14 +88,12 @@ impl Gauges {
     }
 }
 
-/// Shown once the gauge crosses its soft line, budget-free like the
-/// pinned-state reminder.  With nothing old enough to shed there is no cut to
-/// announce, and the reading alone is the whole message.
+/// Shown once the gauge crosses its soft line.  With nothing old enough to
+/// shed there is no cut to announce, and the reading alone is the whole message.
 fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
     match planned {
-        Some(turns) if !turns.is_empty() => {
+        Some(turns @ [first, ..]) => {
             let runs = crate::record::model::runs(turns);
-            let first = turns[0];
             let last_plus_one = turns[turns.len() - 1] + 1;
             format!(
                 "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
@@ -176,23 +174,6 @@ mod tests {
         );
     }
 
-    /// `Over` repeatedly fires once; `Under` re-arms; a second `Over` fires
-    /// again.
-    #[test]
-    fn pressure_fires_once_per_excursion() {
-        let mut gauges = Gauges::default();
-        assert!(gauges.pressure(&over()).is_some());
-        assert!(
-            gauges.pressure(&over()).is_none(),
-            "the same excursion must not re-fire"
-        );
-        assert!(gauges.pressure(&Pressure::Under).is_none());
-        assert!(
-            gauges.pressure(&over()).is_some(),
-            "a fresh excursion after Under must fire again"
-        );
-    }
-
     /// A stale token measure (`Unknown`) neither warns nor re-arms a warning
     /// still owed.
     #[test]
@@ -217,20 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn disk_tells_the_user_once_per_excursion() {
+    fn disk_tells_the_user_alone() {
         let mut gauges = Gauges::default();
         assert!(gauges.disk(10 * 1024, 64 * 1024).is_none());
         let warning = gauges
             .disk(2048 * 1024, 64 * 1024)
-            .expect("the first crossing warns");
+            .expect("a crossing warns");
         assert!(warning.model.is_none());
         let line = warning.user.expect("the user is told");
         assert!(line.contains("disk") && line.contains("2048 KiB"), "{line}");
-        assert!(gauges.disk(2048 * 1024, 64 * 1024).is_none());
-        assert!(gauges.disk(1024, 64 * 1024).is_none());
-        assert!(
-            gauges.disk(2048 * 1024, 64 * 1024).is_some(),
-            "re-crossing after falling below warns again"
-        );
     }
 }

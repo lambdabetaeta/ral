@@ -108,8 +108,8 @@ impl Avatar {
 
     /// An operational note: recorded through the seam as a [`Forensic::SystemNote`],
     /// but with no model-view twin, since the model never saw it.
-    pub(crate) fn note(text: String, session: &Self) {
-        let recorder = session.recorder();
+    pub(crate) fn note(&self, text: String) {
+        let recorder = self.recorder();
         if let Err(error) = recorder.emit(crate::record::Forensic::SystemNote { text }) {
             recorder.report_fault(&error);
         }

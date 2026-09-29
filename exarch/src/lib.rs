@@ -28,8 +28,9 @@ pub mod tui;
 
 use agent::Avatar;
 use clap::Parser;
-use provider::{Bureau, Engine, Rations};
-use std::sync::{Arc, Mutex};
+use provider::{Bureau, Engine, Holdings};
+use ral_core::sync::LockExt as _;
+use std::sync::Arc;
 use tui::SessionInfo;
 
 /// The one boot recipe table, for the identity seat and the `--engine` child
@@ -163,16 +164,13 @@ pub fn run() -> Result<(), String> {
         .into_owned();
     let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
-    let mut catalog = provider::models::ModelCatalog::new(
-        provider::models::LiveSource::new(&store),
-        bootstrap::EXARCH,
-    );
+    let holdings = Holdings::new(store, bootstrap::EXARCH);
     let (account, model, mut tuning, route) = resolve_initial_selection(
         c.provider.as_deref(),
         c.model.as_deref(),
         &state_dir,
         &available,
-        &mut catalog,
+        &mut holdings.catalog.lock_ignore_poison(),
     )?;
     if let Some(rung) = c.effort.as_deref() {
         tuning.effort = provider::effort_by_label(rung)?;
@@ -235,12 +233,7 @@ pub fn run() -> Result<(), String> {
 
     // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
-    let bureau = Arc::new(Bureau::Live {
-        engine,
-        store: Arc::new(Mutex::new(store)),
-        catalog: Arc::new(Mutex::new(catalog)),
-        rations: Arc::new(Rations::default()),
-    });
+    let bureau = Arc::new(Bureau::Live { engine, holdings });
     let provider = bureau.build(&account, model.clone(), &tuning, route, c.max_tokens)?;
     let mut session = Avatar::root(
         agent::RootConfig {

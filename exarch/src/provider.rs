@@ -30,7 +30,7 @@ mod transport;
 mod usage;
 mod wire;
 
-pub use bureau::Bureau;
+pub use bureau::{Bureau, Holdings};
 pub use error::{CutShort, ProviderError};
 pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
@@ -211,11 +211,9 @@ impl Provider {
     /// actually routes — never sent to a service for which the string would
     /// mean nothing.  What the request carries, hence what the trace records.
     pub fn openrouter_route(&self) -> Option<&str> {
-        if self.account.service.routes {
-            self.route.as_deref()
-        } else {
-            None
-        }
+        self.route
+            .as_deref()
+            .filter(|_| self.account.service.routes)
     }
 }
 
@@ -249,8 +247,7 @@ mod tests {
         provider.route = Some("deepinfra".into());
         assert_eq!(provider.openrouter_route(), None);
 
-        provider.account =
-            Account::of_service(built_in(&ServiceName::declared("openrouter").unwrap()).unwrap());
+        provider.account = Account::built_in("openrouter");
         assert_eq!(provider.openrouter_route(), Some("deepinfra"));
     }
 }

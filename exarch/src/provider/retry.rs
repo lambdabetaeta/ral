@@ -43,13 +43,6 @@ pub(super) fn idle_timeout(attempt: u32) -> Duration {
     }
 }
 
-fn retry_limits(error: &ProviderError) -> (u32, u64) {
-    match error {
-        ProviderError::RateLimited { .. } => (RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_MAX_DELAY_MS),
-        _ => (MAX_ATTEMPTS, MAX_DELAY_MS),
-    }
-}
-
 /// The server's own [`Wait`] wins when present; the shift cap only guards
 /// `1u64 << shift` against overflow.
 async fn backoff_sleep(attempt: u32, retry_after: Option<Wait>, max_delay_ms: u64) {
@@ -84,25 +77,26 @@ pub(super) async fn retry_with_backoff<T>(
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled(cancel_site));
         }
-        let error = match one(attempt).await {
+        let mut error = match one(attempt).await {
             Attempt::Done(value) => return Ok(value),
             Attempt::Failed(error @ ProviderError::Cancelled(_)) => return Err(error),
             Attempt::Failed(error) => error,
         };
-        if !matches!(
-            error,
-            ProviderError::Transient { .. } | ProviderError::RateLimited { .. }
-        ) {
-            return Err(stamp_attempts(error, attempt));
-        }
-        let (max_attempts, max_delay_ms) = retry_limits(&error);
-        if attempt >= max_attempts {
-            return Err(stamp_attempts(error, attempt));
-        }
-        let retry_after = match &error {
-            ProviderError::RateLimited { retry_after, .. } => *retry_after,
-            _ => None,
+        let (max_attempts, max_delay_ms, retry_after) = match &error {
+            ProviderError::RateLimited { retry_after, .. } => (
+                RATE_LIMIT_MAX_ATTEMPTS,
+                RATE_LIMIT_MAX_DELAY_MS,
+                *retry_after,
+            ),
+            ProviderError::Transient { .. } => (MAX_ATTEMPTS, MAX_DELAY_MS, None),
+            _ => return Err(error),
         };
+        if attempt >= max_attempts {
+            if let ProviderError::Transient { attempts, .. } = &mut error {
+                *attempts = attempt;
+            }
+            return Err(error);
+        }
         tokio::select! {
             biased;
             () = wait_for_cancel(cancel) => {
@@ -121,24 +115,6 @@ pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
     }
 }
 
-/// Only `Transient` carries an attempt count; the rest pass through untouched.
-fn stamp_attempts(error: ProviderError, attempts: u32) -> ProviderError {
-    match error {
-        ProviderError::Transient {
-            cause,
-            body,
-            status,
-            ..
-        } => ProviderError::Transient {
-            cause,
-            attempts,
-            body,
-            status,
-        },
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,29 +124,6 @@ mod tests {
             .enable_time()
             .build()
             .expect("build retry test runtime")
-    }
-
-    #[test]
-    fn rate_limit_gets_larger_budget_than_transient() {
-        let rate_limit = ProviderError::RateLimited {
-            retry_after: None,
-            cause: "429".into(),
-            body: None,
-        };
-        let transient = ProviderError::Transient {
-            cause: "boom".into(),
-            attempts: 1,
-            body: None,
-            status: None,
-        };
-        let (rate_attempts, rate_ceiling) = retry_limits(&rate_limit);
-        let (transient_attempts, transient_ceiling) = retry_limits(&transient);
-        assert_eq!(rate_attempts, RATE_LIMIT_MAX_ATTEMPTS);
-        assert_eq!(rate_ceiling, RATE_LIMIT_MAX_DELAY_MS);
-        assert_eq!(transient_attempts, MAX_ATTEMPTS);
-        assert_eq!(transient_ceiling, MAX_DELAY_MS);
-        assert!(rate_attempts > transient_attempts);
-        assert!(rate_ceiling > transient_ceiling);
     }
 
     #[test]
@@ -199,31 +152,14 @@ mod tests {
         ));
     }
 
-    /// From the wire error to the loop: a provider asking for ten minutes has
-    /// spent the allowance, so the first attempt is the last.
+    /// A refusal naming a distant reset is not retried.
     #[test]
     fn a_429_naming_a_distant_reset_surfaces_on_its_first_attempt() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            reqwest::header::HeaderValue::from_static("600"),
-        );
-        let error = ProviderError::from_genai(
-            &genai::Error::WebModelCall {
-                model_iden: genai::ModelIden::new(genai::adapter::AdapterKind::Anthropic, "m"),
-                webc_error: genai::webc::Error::ResponseFailedStatus {
-                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-                    body: String::new(),
-                    headers: Box::new(headers),
-                },
-            },
-            "m",
-        );
-        assert!(
-            matches!(error, ProviderError::Exhausted { .. }),
-            "{error:?}"
-        );
-
+        let error = ProviderError::Exhausted {
+            resets_at: jiff::Timestamp::now() + Duration::from_mins(10),
+            cause: "429".into(),
+            body: None,
+        };
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
             "test",

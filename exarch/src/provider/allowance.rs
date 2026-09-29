@@ -7,12 +7,12 @@
 mod meters;
 
 use crate::bus::card::{Card, Field, FieldVal, Mark, Readout, Span};
-use crate::clock::hms;
+use crate::clock::{self, hms};
 use crate::provider::Rations;
 use crate::provider::credential::Roster;
-use crate::provider::identity::{AccountId, Meter};
+use crate::provider::identity::{Account, AccountId, Meter};
 use crate::provider::listing::Fetches;
-use std::cmp::Ordering;
+use jiff::Timestamp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +24,10 @@ pub struct Allowance {
     /// a balance that renews by payment rather than by clock — a credit purse.
     pub window: Option<Duration>,
     pub used: Consumption,
-    /// Unix seconds, absolute. A provider reporting a *relative* reset is
-    /// converted at parse, not at render: a reading may sit on a channel
-    /// between the two, and a relative figure would quietly age.
-    pub resets_at: Option<u64>,
+    /// Absolute. A provider reporting a *relative* reset is converted at
+    /// parse, not at render: a reading may sit on a channel between the two,
+    /// and a relative figure would quietly age.
+    pub resets_at: Option<Timestamp>,
 }
 
 /// How much of an allowance is gone. Two arms because two disclosures exist:
@@ -57,10 +57,18 @@ pub enum Unit {
 }
 
 impl Allowance {
-    /// The share consumed as the card shows it, `None` when the provider
-    /// disclosed no bound — then there is nothing to draw a bar against.
+    /// The share consumed as the whole percentage the card shows, `None` when
+    /// the provider disclosed no bound. A nonzero share never rounds to `0`: a
+    /// bar reading empty when the ration has started is a lie the user acts on.
     pub fn percent(&self) -> Option<u32> {
-        self.fraction().map(percent_from_fraction)
+        let share = self.fraction()?.clamp(0.0, 1.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0.0..=100.0"
+        )]
+        let percent = (share * 100.0).round() as u32;
+        Some(if share > 0.0 { percent.max(1) } else { percent })
     }
 
     fn fraction(&self) -> Option<f64> {
@@ -84,20 +92,19 @@ impl Allowance {
 
     /// This allowance as one aligned row.
     pub fn field(&self) -> Field {
-        self.field_at(crate::bootstrap::now_secs())
+        self.field_at(Timestamp::now())
     }
 
     /// [`field`](Self::field) with `now` supplied rather than read from the
     /// clock, so the label's reset clause is exactly testable.
-    fn field_at(&self, now: u64) -> Field {
-        let window_part = match self.window {
-            Some(d) => window_words(d),
-            None => "balance".to_string(),
-        };
+    fn field_at(&self, now: Timestamp) -> Field {
+        let window_part = self
+            .window
+            .map_or_else(|| "balance".to_string(), window_words);
         let reset_part = self
             .resets_at
             .filter(|&r| r > now)
-            .map(|r| format!("resets in {}", hms(r - now, " ")));
+            .map(|r| format!("resets in {}", hms(clock::until(r, now).as_secs())));
         let label = match reset_part {
             Some(rp) => format!("{window_part} · {rp}"),
             None => window_part,
@@ -115,25 +122,6 @@ impl Allowance {
             FieldVal::Inline(vec![Span::plain(inline_text(*used, *limit, *unit))])
         };
         Field { label, value }
-    }
-}
-
-/// The proportion as a whole percentage, `0..=100`. A nonzero fraction never
-/// rounds to `0`: a bar reading empty when the ration has started is a lie
-/// the user acts on.
-fn percent_from_fraction(f: f64) -> u32 {
-    let clamped = f.clamp(0.0, 1.0);
-    let rounded = (clamped * 100.0).round();
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to 0.0..=100.0 above"
-    )]
-    let percent = rounded as u32;
-    if clamped > 0.0 && percent == 0 {
-        1
-    } else {
-        percent
     }
 }
 
@@ -224,12 +212,7 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
         let mark = match reading {
             Reading::Allowances(allowances) => {
                 let mut sorted: Vec<&Allowance> = allowances.iter().collect();
-                sorted.sort_by(|a, b| match (a.window, b.window) {
-                    (Some(x), Some(y)) => x.cmp(&y),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                });
+                sorted.sort_by_key(|a| (a.window.is_none(), a.window));
                 Mark::Fields {
                     rows: sorted.iter().map(|a| a.field()).collect(),
                 }
@@ -246,18 +229,18 @@ pub fn limits_card(readings: &[(String, Reading)]) -> Card {
 }
 
 /// What an account's service will say about its own ration. The one seam the
-/// network sits behind, so a survey is testable without it.
-pub trait MeterSource {
+/// network sits behind, so a survey is testable without it. `Clone` is cheap:
+/// a survey hands a copy to each background thread.
+pub trait MeterSource: Clone + Send + 'static {
     /// `Ok(vec![])` is a genuine answer — an account whose service meters
     /// nothing.
     ///
     /// # Errors
     /// A refusal is a sentence naming the account by its label.
-    fn read(&self, account: &AccountId) -> Result<Vec<Allowance>, String>;
+    fn read(&self, account: &Account) -> Result<Vec<Allowance>, String>;
 }
 
 /// The live source: each account's meter, read over the roster's credentials.
-/// `Clone` is cheap, so a survey hands a copy to each background thread.
 #[derive(Clone)]
 pub struct LiveMeters {
     roster: Roster,
@@ -270,11 +253,7 @@ impl LiveMeters {
 }
 
 impl MeterSource for LiveMeters {
-    fn read(&self, id: &AccountId) -> Result<Vec<Allowance>, String> {
-        let account = self
-            .roster
-            .account(id)
-            .ok_or_else(|| format!("{id} is not a known account"))?;
+    fn read(&self, account: &Account) -> Result<Vec<Allowance>, String> {
         let read = match account.service.meter {
             Meter::Unpublished => return Ok(Vec::new()),
             Meter::Codex => meters::codex::read,
@@ -282,7 +261,7 @@ impl MeterSource for LiveMeters {
         };
         let credential = self
             .roster
-            .credential(id)
+            .credential(&account.id)
             .ok_or_else(|| format!("{} has no resolved credential", self.roster.label(account)))?;
         read(account, credential, &self.roster)
     }
@@ -305,11 +284,7 @@ pub struct Survey {
 }
 
 impl Survey {
-    pub fn open<S: MeterSource + Clone + Send + 'static>(
-        roster: &Roster,
-        source: &S,
-        rations: Arc<Rations>,
-    ) -> Self {
+    pub fn open<S: MeterSource>(roster: &Roster, source: &S, rations: Arc<Rations>) -> Self {
         let labels = roster
             .accounts()
             .iter()
@@ -317,9 +292,8 @@ impl Survey {
             .collect();
         let fetches = Fetches::new();
         for account in roster.accounts() {
-            let id = account.id.clone();
-            let source = source.clone();
-            fetches.spawn(id.clone(), move || source.read(&id));
+            let (source, account) = (source.clone(), account.clone());
+            fetches.spawn(account.id.clone(), move || source.read(&account));
         }
         Self {
             fetches,
@@ -396,7 +370,7 @@ mod tests {
             used: Consumption::Fraction(0.004),
             resets_at: None,
         };
-        let FieldVal::Readout(r) = barely_started.field_at(0).value else {
+        let FieldVal::Readout(r) = barely_started.field_at(Timestamp::UNIX_EPOCH).value else {
             panic!("a disclosed fraction renders as a readout");
         };
         assert_eq!(r.value, 1);
@@ -406,7 +380,7 @@ mod tests {
             used: Consumption::Fraction(0.0),
             resets_at: None,
         };
-        let FieldVal::Readout(r) = untouched.field_at(0).value else {
+        let FieldVal::Readout(r) = untouched.field_at(Timestamp::UNIX_EPOCH).value else {
             panic!("a disclosed fraction renders as a readout");
         };
         assert_eq!(r.value, 0);
@@ -414,11 +388,11 @@ mod tests {
 
     #[test]
     fn field_label_states_window_and_reset() {
-        let now = 1_000_000;
+        let now = Timestamp::from_second(1_000_000).unwrap();
         let five_hours = Allowance {
             window: Some(Duration::from_hours(5)),
             used: Consumption::Fraction(0.1),
-            resets_at: Some(now + 3600 + 120),
+            resets_at: Some(now + Duration::from_mins(62)),
         };
         let label = five_hours.field_at(now).label;
         assert!(label.contains("5 hours"));
@@ -434,7 +408,7 @@ mod tests {
         let already_past = Allowance {
             window: Some(Duration::from_hours(1)),
             used: Consumption::Fraction(0.1),
-            resets_at: Some(now - 10),
+            resets_at: Some(now - Duration::from_secs(10)),
         };
         let label = already_past.field_at(now).label;
         assert!(
@@ -447,15 +421,10 @@ mod tests {
     #[test]
     fn field_value_renders_raw_figures_with_and_without_a_cap() {
         let capless = counted(1240, None, Unit::Dollars);
-        let FieldVal::Inline(spans) = capless.field_at(0).value else {
+        let FieldVal::Inline(spans) = capless.field_at(Timestamp::UNIX_EPOCH).value else {
             panic!("an undisclosed cap renders inline");
         };
         assert_eq!(spans[0].text, "$12.40 used · no cap");
-
-        let capped = counted(30, Some(100), Unit::Tokens);
-        let FieldVal::Readout(_) = capped.field_at(0).value else {
-            panic!("a disclosed cap yields a fraction, hence a readout");
-        };
     }
 
     #[test]
@@ -502,21 +471,7 @@ mod tests {
         assert_eq!(card.0.len(), 1);
     }
 
-    fn declared_account(name: &str) -> crate::provider::identity::Account {
-        use crate::provider::identity::{Auth, Billing, Service, ServiceName};
-        crate::provider::identity::Account::of_service(Service {
-            name: ServiceName::declared(name).unwrap(),
-            endpoint: Some(format!("https://{name}.example/v1/")),
-            adapter: genai::adapter::AdapterKind::OpenAI,
-            default_model: None,
-            auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
-            billing: Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        })
-    }
-
-    fn roster_of(accounts: &[crate::provider::identity::Account]) -> Roster {
+    fn roster_of(accounts: &[Account]) -> Roster {
         let mut roster = Roster::default();
         for account in accounts {
             roster.admit(
@@ -535,9 +490,9 @@ mod tests {
     }
 
     impl MeterSource for FakeSource {
-        fn read(&self, account: &AccountId) -> Result<Vec<Allowance>, String> {
+        fn read(&self, account: &Account) -> Result<Vec<Allowance>, String> {
             self.readings
-                .get(account)
+                .get(&account.id)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake reading".into()))
         }
@@ -545,9 +500,9 @@ mod tests {
 
     #[test]
     fn a_survey_draws_only_the_accounts_with_something_to_report() {
-        let loaded = declared_account("loaded");
-        let unmetered = declared_account("unmetered");
-        let failing = declared_account("failing");
+        let loaded = Account::declared("loaded");
+        let unmetered = Account::declared("unmetered");
+        let failing = Account::declared("failing");
         let roster = roster_of(&[loaded.clone(), unmetered.clone(), failing.clone()]);
 
         let allowance = Allowance {

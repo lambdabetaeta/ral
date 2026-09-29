@@ -1060,40 +1060,8 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Meter, ReasoningEffort};
+    use crate::provider::ReasoningEffort;
     use ratatui::crossterm::event::KeyCode;
-
-    /// A built-in service's sole account, named by the service alone.
-    fn account(name: &str) -> Account {
-        let service = identity::built_in(&identity::ServiceName::declared(name).unwrap())
-            .expect("a known built-in service name");
-        Account::of_service(service)
-    }
-
-    /// A declared (non-built-in) service's sole account — the shape a
-    /// `config.ral` endpoint takes.
-    fn declared(name: &str) -> Account {
-        Account::of_service(identity::Service {
-            name: identity::ServiceName::declared(name).unwrap(),
-            endpoint: Some(format!("https://{name}.example/v1/")),
-            adapter: genai::adapter::AdapterKind::OpenAI,
-            default_model: None,
-            auth: identity::Auth::Env(format!("{}_KEY", name.to_uppercase())),
-            billing: identity::Billing::Metered,
-            routes: false,
-            meter: Meter::Unpublished,
-        })
-    }
-
-    /// A `ChatGPT` login — the one shape whose accounts can collide on handle.
-    fn login(handle: &str, issued: &str) -> Account {
-        let service = identity::chatgpt_service();
-        Account {
-            id: AccountId::of_login(&service.name, issued),
-            service,
-            handle: handle.to_string(),
-        }
-    }
 
     /// A stub that knows nothing: an empty `supported_parameters` reads as
     /// "supports everything", so every tuning row stays live.
@@ -1102,8 +1070,8 @@ mod tests {
     }
 
     fn loaded_picker() -> Picker {
-        let anthropic = account("anthropic");
-        let deepseek = account("deepseek");
+        let anthropic = Account::built_in("anthropic");
+        let deepseek = Account::built_in("deepseek");
         let mut p = Picker::new(
             vec![anthropic.clone(), deepseek.clone()],
             &Tuning::default(),
@@ -1132,7 +1100,7 @@ mod tests {
 
     /// `vendor/model` ids — the case the serving-provider control exists for.
     fn openrouter_picker() -> Picker {
-        let openrouter = account("openrouter");
+        let openrouter = Account::built_in("openrouter");
         let mut p = Picker::new(vec![openrouter.clone()], &Tuning::default(), caps_unknown);
         p.set_models(
             &openrouter.id,
@@ -1191,7 +1159,7 @@ mod tests {
     /// its email rather than falling back to the id.
     #[test]
     fn a_lone_chatgpt_account_row_keeps_its_email() {
-        let alex = login("alex@bristol.ac.uk", "acct-1");
+        let alex = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
         let mut p = Picker::new(vec![alex.clone()], &Tuning::default(), caps_unknown);
         p.set_models(&alex.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
         assert_eq!(
@@ -1209,7 +1177,7 @@ mod tests {
     /// and the service alone — it never claims a handle it does not have.
     #[test]
     fn flat_rate_provider_rows_are_named_by_their_service_alone() {
-        let go = account("opencode-go");
+        let go = Account::built_in("opencode-go");
         let mut p = Picker::new(vec![go.clone()], &Tuning::default(), caps_unknown);
         p.set_models(&go.id, ModelsState::Loaded(vec!["glm-5.2".into()]));
         assert_eq!(row_labels(&p), vec!["glm-5.2 · opencode-go"]);
@@ -1219,8 +1187,8 @@ mod tests {
     /// one collapsed into the other — the bug this plan exists to kill.
     #[test]
     fn two_accounts_on_one_email_draw_two_distinguishable_rows() {
-        let personal = login("alex@bristol.ac.uk", "acct-1");
-        let work = login("alex@bristol.ac.uk (Acme Ltd)", "acct-2");
+        let personal = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
+        let work = Account::chatgpt("acct-2", "alex@bristol.ac.uk (Acme Ltd)");
         let mut p = Picker::new(
             vec![personal.clone(), work.clone()],
             &Tuning::default(),
@@ -1295,7 +1263,7 @@ mod tests {
     /// A declared service lists and selects exactly like a built-in one.
     #[test]
     fn declared_provider_lists_and_selects() {
-        let llama = declared("local-llama");
+        let llama = Account::declared("local-llama");
         let mut p = Picker::new(vec![llama.clone()], &Tuning::default(), caps_unknown);
         p.set_models(&llama.id, ModelsState::Loaded(vec!["llama-3".into()]));
         let rows = p.rows();
@@ -1432,7 +1400,7 @@ mod tests {
     #[test]
     fn opens_seeded_from_initial_tuning() {
         let p = Picker::new(
-            vec![account("anthropic")],
+            vec![Account::built_in("anthropic")],
             &Tuning {
                 effort: Some(ReasoningEffort::Medium),
                 temperature: Some(0.5),
@@ -1462,7 +1430,7 @@ mod tests {
     /// go dead, yet the rung is still there when a reasoning model returns.
     #[test]
     fn unsupported_effort_is_masked_and_remembered() {
-        let anthropic = account("anthropic");
+        let anthropic = Account::built_in("anthropic");
         let mut p = Picker::new(vec![anthropic.clone()], &Tuning::default(), caps_split);
         p.set_models(
             &anthropic.id,
