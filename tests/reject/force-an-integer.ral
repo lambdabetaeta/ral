@@ -1,0 +1,5 @@
+# contains: couldn't match
+# contains: ϕ
+let t = 42
+let x = !$t
+return $x

@@ -1,0 +1,35 @@
+# Test: rounding, integer conversion, ranges and status limits refuse
+# what cannot be represented, and say so
+
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
+
+# round <x> <places> is the decimal dial and always returns a Float;
+# halves go away from zero
+echo !{round 3.7 0} !{round 3.4 0} !{round 3.14159 2} !{round 2.71828 3}
+echo !{round 2.5 0} !{round -2.5 0} !{round 0.125 2}
+
+# floor, ceil and trunc return the Int in their direction
+echo !{floor 3.9} !{floor -2.5} !{ceil 3.1} !{ceil -3.9} !{trunc 3.9} !{trunc -3.9}
+
+# Floats are finite by construction
+refusal { float 'NaN'; return () }
+refusal { float 'inf'; return () }
+refusal { round !{float "nan"} 2; return () }
+try { let big = $[1.0e308 * 10.0]; return () } { |_| echo "float overflow refused"; return () }
+
+# Results outside the integer range, and places outside 0..
+refusal { floor !{float "1e300"}; return () }
+refusal { trunc !{float "-1e300"}; return () }
+refusal { round 3.14 -1; return () }
+refusal { round 3.14 400; return () }
+refusal { int 1.0e300; return () }
+refusal { int `some 1; return () }
+
+# range checks its arithmetic
+refusal { range -2 9223372036854775807; return () }
+
+# A status must fit an i32
+refusal { fail [status: 4294967296, message: 'status out of i32 range'] }
+refusal { exit 4294967296 }
+
+echo 'numeric tests done'

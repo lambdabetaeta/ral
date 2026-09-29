@@ -1,0 +1,65 @@
+# Test: a spawned block inherits the environment, the grant and the fds of
+# its spawner, and external processes inside it keep their own wiring
+
+let text = { |bytes| to-bytes $bytes | from-string }
+
+# within [env:] reaches the worker
+within [env: [MY_DYN_VAR: hello-from-dyn]] {
+    let h1 = spawn { printenv MY_DYN_VAR }
+    let r1 = await $h1
+    echo !{text $r1[stdout]}
+}
+
+# A grant in force at spawn time binds inside the worker, and only within
+# the grant's extent
+grant [exec: [ls: 'deny']] {
+    let h2 = spawn { ls . }
+    try {
+        let result = await $h2
+        echo LEAKED
+    } { |_|
+        echo 'denied in worker'
+    }
+}
+let ok = !{ls . | from-lines}
+echo 'parent still allowed'
+
+# A redirect inside the block sends bytes to the file, past the record
+let d = temp-dir
+let h3 = spawn { /bin/echo written-to-file > "$d/log" }
+let r3 = await $h3
+echo "[!{text $r3[stdout]}]"
+cat "$d/log"
+rm -rf $d
+
+# 2>&1 dups before ral sees anything, so both streams surface as stdout
+let h4 = spawn { /bin/sh -c "echo both >&2" 2>&1 }
+let r4 = await $h4
+echo !{text $r4[stdout]}
+
+# An external's own fd 2 is labelled `[label:err]` too
+let h5 = watch "job" { sh -c "echo err 1>&2" }
+await $h5
+
+# A handle made and awaited inside a grant with an fs policy just works
+grant [fs: [read: ['/'], write: ['/']]] {
+    let hg = !{spawn { return 1 }}
+    let rg = await $hg
+    echo $rg[value]
+}
+
+# poll samples a handle without blocking; is-done reports settledness
+let hp = !{spawn { sleep 30 }}
+echo !{case !{poll $hp} [`settled: { |_| return false }, `pending: { |_| return true }]}
+echo !{is-done $hp}
+cancel $hp
+let hs = !{spawn { return 7 }}
+let awaited = await $hs
+let sampled = poll $hs
+echo !{case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]}
+echo !{is-done $hs}
+let hc = !{spawn { sleep 30 }}
+cancel $hc
+echo !{try { poll $hc; return false } { |_| return true }}
+
+echo 'spawn context tests done'

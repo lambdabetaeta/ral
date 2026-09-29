@@ -1,0 +1,17 @@
+# Test: is-writable follows symlinks and honours the mode bits
+
+let d = temp-dir
+to-string x > "$d/rw"
+chmod 644 "$d/rw"
+to-string x > "$d/ro"
+chmod 444 "$d/ro"
+ln -s "$d/ro" "$d/link"
+
+echo !{is-writable "$d/rw"} !{is-writable "$d/ro"} !{is-writable "$d/link"}
+# Expected: true false false
+echo !{is-link "$d/link"} !{is-readable "$d/link"} !{is-link "$d/rw"}
+# Expected: true true false
+
+chmod 644 "$d/ro"
+rm -rf $d
+echo 'is-writable tests done'

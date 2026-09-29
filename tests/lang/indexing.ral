@@ -42,3 +42,12 @@ echo ...$words
 let nums = [1, 2, 3]
 let doubled = map { |x| $[$x * 2] } $nums
 echo ...$doubled
+
+# Out-of-range index is a runtime error
+let items = [a, b]
+try { echo $items[5] } { |_| echo 'out of range' }
+
+# Quoted map keys
+let m = ['my key': hello]
+echo $m['my key']
+# Expected: hello

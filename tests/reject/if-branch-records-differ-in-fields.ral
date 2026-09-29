@@ -1,0 +1,2 @@
+# contains: this record has no field named 'b'
+if true { return [a: 1] } else { return [b: 2] }

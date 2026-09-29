@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+# contains: await
+let h = spawn { return 1 }; /bin/echo $h

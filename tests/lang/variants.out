@@ -1,0 +1,10 @@
+`ok 42
+`none
+[`ok 1, `err hello]
+`more [foo: 2, head: 1]
+5
+absent
+got [b] [b]
+[0, 1, 2, 3, 4]
+[x, x, x]
+variant tests done

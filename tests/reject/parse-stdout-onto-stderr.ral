@@ -1,0 +1,2 @@
+# contains: warn
+cmd 1>&2

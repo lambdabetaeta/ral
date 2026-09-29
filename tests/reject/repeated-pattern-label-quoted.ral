@@ -1,0 +1,2 @@
+# contains: binds 'a' twice
+let [a: x, 'a': y] = [a: 1]

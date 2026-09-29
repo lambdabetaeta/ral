@@ -1,0 +1,1 @@
+if true { ^cmd } else { echo x }

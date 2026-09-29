@@ -1,0 +1,2 @@
+# contains: index a value of type Integer
+map { |x| $x[$x] } [1]

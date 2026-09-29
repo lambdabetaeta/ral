@@ -1,4 +1,11 @@
 1
 true
 true
+true
+7 use: boom
+not leaked
+use: undefined variable: $local
+1 42 hidden
+true
+within: unknown key 'dirr'
 module tests done

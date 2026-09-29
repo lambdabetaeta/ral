@@ -39,3 +39,31 @@ let trailing = [
     c,
 ]
 echo !{length $trailing}
+
+# `has` tests for a key
+echo !{has [:, a: 1, b: 2] a}
+echo !{has [:, a: 1, b: 2] c}
+
+# A computed duplicate key: the later entry wins
+let k = 'a'
+let j = 'a'
+let dup = [$k: 1, $j: 2]
+echo $dup[$k]
+
+# Functions are values in lists and maps
+let fns = [{ |x| return $[$x + 1] }, { |x| return $[$x * 2] }]
+echo !{$fns[0] 5}
+let ops = [inc: { |x| return $[$x + 1] }, dbl: { |x| return $[$x * 2] }]
+echo !{$ops[dbl] 5}
+
+# A bare name in list or map position is a literal; `$name` is the value
+let upper = { |x| return $x }
+echo ...[upper, hello]
+echo !{[label: upper, fn: $upper][label]}
+
+# keys, values, entries
+echo ...!{keys [:, a: 1, b: 2, c: 3]}
+echo ...!{values [:, a: 1, b: 2]}
+echo !{length !{keys [:]}}
+let pairs = entries [:, x: hello]
+echo $pairs[0][0] $pairs[0][1]

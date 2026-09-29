@@ -1,0 +1,2 @@
+# contains: not a number
+return $[1e5 + 1]

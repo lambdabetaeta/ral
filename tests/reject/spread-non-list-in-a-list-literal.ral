@@ -1,0 +1,4 @@
+# contains: couldn't match
+# contains: Help:
+let n = 42
+return [...$n]

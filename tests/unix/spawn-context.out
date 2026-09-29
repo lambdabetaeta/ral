@@ -1,0 +1,16 @@
+hello-from-dyn
+
+denied in worker
+parent still allowed
+[]
+written-to-file
+both
+
+[job:err] err
+1
+true
+false
+7
+true
+true
+spawn context tests done

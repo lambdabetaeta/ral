@@ -1,0 +1,4 @@
+# contains: no arm for `ok
+let r = `ok 1
+let x = case $r [`err: { |e| return 1 }]
+return $x

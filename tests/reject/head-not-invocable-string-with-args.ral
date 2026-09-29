@@ -1,0 +1,5 @@
+# codes: T0011
+# contains: cannot be used as a command head
+# contains: function or a thunk
+# absent: argument type
+'foo' bar baz

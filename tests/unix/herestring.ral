@@ -1,0 +1,23 @@
+# Test: `<< str` feeds a string to stdin; the last stdin redirect wins
+
+let d = temp-dir
+
+# A CRLF at the opener is dropped whole, never split
+let crlf = "\r\nabc"
+let got = from-string << $crlf
+echo !{equal $got abc}
+# Expected: true
+
+# A payload far past the pipe buffer must not deadlock the writer
+let block = "xxxxxxxxxxxxxxxx"
+let big = !{fold { |acc _| return "$acc$acc" } $block [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]}
+let echoed = from-string << $big
+echo !{equal $echoed $big} !{length $big}
+
+# Several fd-0 redirects compose POSIX-style: the last wins
+echo "[!{from-string < /dev/null << #'won'#}]"
+echo "[!{from-string << #'lost'# < /dev/null}]"
+# Expected: [won] / []
+
+rm -rf $d
+echo 'here-string tests done'

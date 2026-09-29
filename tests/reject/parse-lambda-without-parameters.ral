@@ -1,0 +1,2 @@
+# contains: at least one parameter
+{ || echo hi }

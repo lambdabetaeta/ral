@@ -1,0 +1,2 @@
+# contains: builtin command
+let f = $echo; return $f

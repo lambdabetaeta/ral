@@ -1,0 +1,3 @@
+# contains: couldn't match
+# contains: `[:, a: 1, b: 2]`
+let r = [a: 1, b: 2]; let _ = !{keys $r}; return ()

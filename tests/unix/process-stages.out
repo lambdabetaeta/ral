@@ -1,0 +1,4 @@
+4
+true
+helper
+[echo, from-line, /bin/echo]

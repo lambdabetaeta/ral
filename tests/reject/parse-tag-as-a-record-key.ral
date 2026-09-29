@@ -1,0 +1,2 @@
+# contains: names a variant
+return [a: 1, `b: 2]

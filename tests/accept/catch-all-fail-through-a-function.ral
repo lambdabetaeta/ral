@@ -1,0 +1,1 @@
+let w = { |o| within $o { () } }; w [handler: { |n a| fail [status: 1, message: 'unhandled command'] }]

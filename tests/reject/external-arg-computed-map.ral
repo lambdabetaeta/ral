@@ -1,0 +1,3 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+let k = 'a'; let m = [$k: 2]; /bin/echo $m

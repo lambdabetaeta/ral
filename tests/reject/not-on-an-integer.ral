@@ -1,0 +1,4 @@
+# contains: couldn't match
+# contains: Help:
+let x = 1
+return $[not $x]

@@ -39,4 +39,28 @@ echo $records[1][a]
 let spaced = !{to-string "\n{\"a\": 1}\n \t\n{\"a\": 2}\r\n\r\r\n" | from-jsonl}
 echo !{length $spaced}
 
+# A nullary native forced with `!$` reads the redirected channel
+let jdir = temp-dir
+to-string '{"y": 7}' > "$jdir/doc.json"
+let jdoc = !$from-json < "$jdir/doc.json"
+echo $jdoc[y]
+rm -rf $jdir
+
+# A decoder takes no argument: it is a first-class nullary thunk
+let decode = $from-json
+let decoded = !{to-json [1, 2] | !$decode}
+echo $decoded[1]
+
+# Every encoder takes its value as its one argument
+echo !{ints-to-bytes [104, 105]}
+let raw = !{echo hi | from-bytes}
+echo !{to-bytes $raw}
+echo !{to-string 'hi'}
+echo !{to-line 1}
+echo !{to-lines ['a', 'b']}
+echo !{to-json [a: 1]}
+echo !{to-jsonl [[a: 1]]}
+echo !{to-csv [[a: 1]]}
+to-lines [1, 2] | grep .
+
 echo 'json tests done'

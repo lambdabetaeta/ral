@@ -1,0 +1,58 @@
+# Test: grant [fs:] read and write sets gate every ral-owned file effect
+
+let dir = temp-dir
+let inside = "$dir/inside"
+let outside = "$dir/outside"
+mkdir -p $inside $outside
+to-string secret > "$outside/secret.txt"
+to-string original > "$outside/log.txt"
+to-string 'let answer = 42' > "$outside/lib.ral"
+to-string 'to-string ran > "$inside/witness.txt"' > "$inside/mod.ral"
+let root = !{absolute-path "$dir/.."}
+let denied = { |body|
+    try { !$body; echo 'ALLOWED' } { |e| echo "denied: !{re-match 'denied by grant' $e[message]}" }
+}
+
+# Redirects: write, append, stdin, stderr
+denied { grant [fs: [write: [$inside]]] { to-string leak > "$outside/new.txt" } }
+echo !{exists "$outside/new.txt"}
+denied { grant [fs: [write: [$inside]]] { to-string more >> "$outside/log.txt" } }
+echo !{from-string < "$outside/log.txt"}
+denied { grant [fs: [read: [$inside]]] { head < "$outside/secret.txt" } }
+denied { grant [fs: [write: [$inside]]] { head /dev/null 2> "$outside/err.log" } }
+echo !{exists "$outside/err.log"}
+grant [fs: [write: [$inside]]] { to-string kept > "$inside/ok.txt" }
+echo !{from-string < "$inside/ok.txt"}
+echo !{grant [fs: [read: [$inside]]] { from-string < "$inside/ok.txt" }}
+
+# A pipeline stage that runs in a helper carries the same grant
+denied { grant [fs: [write: [$inside]]] {
+    let sink = { from-line; /bin/echo seed > "$outside/leak.txt" }
+    echo seed | !$sink
+} }
+echo !{exists "$outside/leak.txt"}
+grant [fs: [write: [$inside]]] {
+    let sink = { from-line; /bin/echo seed > "$inside/kept.txt" }
+    echo seed | !$sink
+}
+echo !{from-string < "$inside/kept.txt"}
+
+# Module loading is a read
+denied { grant [fs: [read: [$inside]]] { use "$outside/lib.ral" } }
+grant [fs: [read: [$inside], write: [$inside]]] { use "$inside/mod.ral" }
+echo !{from-string < "$inside/witness.txt"}
+
+# Read-gated queries and write-gated temp builtins
+denied { grant [fs: [read: [$inside]]] { file-info "$outside/secret.txt" } }
+echo !{grant [fs: [read: [$inside]]] { file-info "$inside/ok.txt" }}[name]
+denied { grant [fs: [read: [$inside]]] { resolve-path $outside } }
+echo !{re-match '^/' !{grant [fs: [read: [$inside]]] { resolve-path $inside }}}
+denied { grant [fs: [write: [$inside]]] { temp-dir } }
+denied { grant [fs: [write: [$inside]]] { temp-file } }
+let td = grant [fs: [write: [$root]]] { temp-dir }
+echo !{exists $td}
+let tf = grant [fs: [write: [$root]]] { temp-file }
+echo !{exists $tf}
+
+rm -rf $dir $td $tf
+echo 'grant fs sets tests done'

@@ -1,0 +1,4 @@
+# contains: a command head must be
+# contains: write the arm out
+let n = 7
+case `a () [`a: "v!{$n x}"]

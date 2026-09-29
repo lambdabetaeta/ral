@@ -1,0 +1,18 @@
+# Test: explain reports what a name is, and what it shadows
+
+# A session binding answers with its generalised scheme
+let idf = { |x| return $x }
+explain idf
+
+# A destructured component is its own session binding; it shadows the
+# prelude's `words` and inherits neither its doc nor its type
+let [words, rest] = [1, 2]
+explain words
+
+# An alias is named as one, not as a handler
+alias greet { |a| echo hi }
+explain greet
+
+# The native is what runs under a dead handler arm; the arm is named as shadowed
+explain length
+within [handlers: [length: { |a| echo 0 }]] { explain length }

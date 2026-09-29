@@ -1,0 +1,44 @@
+# Test: a name taking an argv receives renderings; only the exec boundary
+# refuses shapes an operating system has no argument for
+
+# An arm is handed its argv as text, and may index it as the list it is
+within [handlers: [mycmd: { |args| echo 'got' ...$args }]] { mycmd 1 true }
+alias aliased { |args| echo 'got' ...$args }
+aliased 3.5 [a: 1]
+within [handlers: [second: { |args| echo $args[1] }]] { second first second }
+# Expected: got 1 true / got 3.5 [a: 1] / second
+
+# Rendering inside the shell is total: every value has a text form
+let f = { |x| return $x }
+let blk = { echo hi }
+echo [a: 1] $f $blk 3.5 [1, 2]
+
+# Heading for execve, the same shapes are refused; a parameter hides the
+# shape from the checker, so the run itself refuses
+let show = { |v| cat $v }
+try { show [a: 1]; return () } { |e| echo $e[message] }
+try { show $f; return () } { |e| echo $e[message] }
+try { show [a, b]; return () } { |e| echo $e[message] }
+
+# A spread contributes as many arguments as its list holds: none is fine
+let none = filter { |xs| return $[false] } [[1], [2]]
+cat ...$none << #'
+reads its stdin
+'#
+
+# echo is a base frame: a handler stacked on it intercepts the bare name,
+# and the frame returns at the brace
+within [handlers: [echo: { |args| echo 'mocked' ...$args }]] { echo hi there }
+within [handlers: [echo: { |args| echo 'mocked' }]] { echo hi }
+echo plain
+
+# echo with no arguments writes one newline
+echo
+
+# The manifest row survives: explain still reads it, and answers with the builtin
+let doc = explain echo
+re-find-match 'write one line' $doc
+re-find-match 'Command' $doc
+re-find-match 'echo: builtin' $doc
+
+echo 'argv tests done'

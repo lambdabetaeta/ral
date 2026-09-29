@@ -1,0 +1,5 @@
+# contains: Integer with type String
+# contains: map keys must be Strings
+let k = $[1]
+let m = [$k: foo]
+return $m

@@ -1,0 +1,2 @@
+# contains: spread
+guard ...$b { echo done }

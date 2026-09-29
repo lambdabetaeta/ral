@@ -1,0 +1,26 @@
+hello
+no match: status 1
+/bin/sh: exited with status 137
+/bin/sh: killed by signal 9 (SIGKILL)
+/bin/sh: exited with status 42
+outerr
+HELLO
+hi
+via-handler
+redirected
+redirected
+hello
+stdout_marker
+stderr_marker
+stdin_marker
+stage_marker
+mock_marker
+catchme
+[--flag]
+[]
+[--flag]
+[-n]
+[hello]
+half
+x
+pipeline stage tests done

@@ -14,7 +14,7 @@
 
 use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
 use exarch::provider::identity::{
-    Account, AccountId, Auth, Billing, Service, ServiceName, built_in_services, chatgpt_service,
+    Account, AccountId, Auth, Service, ServiceName, built_in_services, chatgpt_service,
 };
 use exarch::provider::oauth::{self, OAuthToken};
 use ral_core::sync::LockExt as _;
@@ -172,31 +172,6 @@ fn malformed_key_is_scrubbed_and_unavailable() {
     );
 }
 
-/// Several available services all resolve, in declaration order.
-#[test]
-fn multiple_available_services_in_declaration_order() {
-    with_env(
-        &[
-            ("ANTHROPIC_API_KEY", Some("a")),
-            ("OPENAI_API_KEY", None),
-            ("OPENROUTER_API_KEY", Some("o")),
-            ("DEEPSEEK_API_KEY", Some("d")),
-            ("OPENCODE_API_KEY", None),
-        ],
-        || {
-            let store = CredentialStore::resolve_and_scrub(Vec::new());
-            assert_eq!(
-                store
-                    .available()
-                    .into_iter()
-                    .map(|a| a.id)
-                    .collect::<Vec<_>>(),
-                vec![fam("anthropic"), fam("openrouter"), fam("deepseek")]
-            );
-        },
-    );
-}
-
 /// The two opencode services share one `OPENCODE_API_KEY`: setting it
 /// makes both opencode-zen and opencode-go available off the single key,
 /// each resolving to the same trimmed bearer, and the one shared var is
@@ -231,47 +206,6 @@ fn shared_opencode_key_makes_both_zen_and_go_available() {
                     .map(|a| a.id)
                     .collect::<Vec<_>>(),
                 vec![fam("opencode-zen"), fam("opencode-go")]
-            );
-        },
-    );
-}
-
-/// xAI and Qwen are ordinary metered API-key services, each resolving
-/// off its own conventional key var (`XAI_API_KEY`, `DASHSCOPE_API_KEY`)
-/// and neither flat-rate — they bill per token like the other API-key
-/// services.
-#[test]
-fn xai_and_qwen_resolve_as_metered_api_key_services() {
-    with_env(
-        &[
-            ("ANTHROPIC_API_KEY", None),
-            ("OPENAI_API_KEY", None),
-            ("OPENROUTER_API_KEY", None),
-            ("DEEPSEEK_API_KEY", None),
-            ("OPENCODE_API_KEY", None),
-            ("XAI_API_KEY", Some("x-secret")),
-            ("DASHSCOPE_API_KEY", Some("q-secret")),
-        ],
-        || {
-            let store = CredentialStore::resolve_and_scrub(Vec::new());
-            for name in ["xai", "qwen"] {
-                assert!(
-                    matches!(store.get(&fam(name)), Some(Credential::ApiKey(_))),
-                    "{name} should resolve to an ApiKey credential"
-                );
-                let service = built_in_services()
-                    .into_iter()
-                    .find(|s| s.name.as_str() == name)
-                    .unwrap();
-                assert_eq!(service.billing, Billing::Metered, "{name} bills per token");
-            }
-            assert_eq!(
-                store
-                    .available()
-                    .into_iter()
-                    .map(|a| a.id)
-                    .collect::<Vec<_>>(),
-                vec![fam("xai"), fam("qwen")]
             );
         },
     );

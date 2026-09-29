@@ -1,0 +1,5 @@
+# Test: a grant whose paths cannot be decoded is refused before its body runs
+
+try { grant [fs: [read: ['proj']]] { echo BODYRAN }; return () } { |e| echo "$e[message]" }
+
+echo 'grant decode tests done'

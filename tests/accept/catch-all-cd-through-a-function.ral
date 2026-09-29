@@ -1,0 +1,1 @@
+let w = { |o| within $o { () } }; w [handler: { |name args| cd ~ }]

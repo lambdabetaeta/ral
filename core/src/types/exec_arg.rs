@@ -105,7 +105,7 @@ mod tests {
     /// The two readings of one boundary agree — the property the shared set
     /// exists to hold.  Every pair a test can name without an `Env`; the three
     /// `Ty::Thunk` stands for and `Handle` need one, and are paired end to end
-    /// instead (`core/tests/typecheck.rs`, `core/tests/argv_convention.rs`).
+    /// instead (`tests/reject/external-arg-*.ral`, `core/tests/argv_convention.rs`).
     #[test]
     fn a_value_and_its_type_earn_the_same_verdict() {
         let pairs: [(Value, Ty); 9] = [

@@ -1,9 +1,9 @@
 //! Span pinning for typechecker diagnostics.
 //!
-//! Companion to `typecheck_fuzz.rs`.  Where that file checks the
-//! *wording* of diagnostics, this one checks the *position* — that the
-//! caret lands on the offending sub-expression, not somewhere generic
-//! like the `return` keyword or the start of the file.
+//! Where the `tests/reject/` corpus checks the *wording* of diagnostics, this
+//! checks the *position* — that the caret lands on the offending
+//! sub-expression, not somewhere generic like the `return` keyword or the
+//! start of the file.
 //!
 //! Each entry in [`span_cases`] is a [`SpanCase`] `{ src, expected, tag }`.
 //! The test asserts that the type error's span, sliced out of `src`,

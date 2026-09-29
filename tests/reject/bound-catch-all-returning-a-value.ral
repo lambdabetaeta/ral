@@ -1,0 +1,3 @@
+# contains: must emit bytes, not return a value
+# contains: String
+let k = { |n a| return 'x' }; within [handler: $k] { zzz }

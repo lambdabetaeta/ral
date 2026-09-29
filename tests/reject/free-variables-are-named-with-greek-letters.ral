@@ -1,0 +1,5 @@
+# contains: α
+# contains: ρ
+# absent: [a: _,
+let take = { |x| return $x[a] }
+return !{take 1}

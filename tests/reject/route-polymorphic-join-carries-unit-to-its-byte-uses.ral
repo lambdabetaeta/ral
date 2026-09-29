@@ -1,0 +1,3 @@
+# contains: couldn't match
+let g = { |t x| if true { !$t } else { return $x } }
+let y = g { echo hi } 3

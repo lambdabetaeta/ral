@@ -1,0 +1,1 @@
+let o = [handler: { |name args| cd ~ }]; within $o { zzz }

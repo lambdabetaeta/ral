@@ -1,0 +1,3 @@
+# contains: couldn't match
+# contains: Help:
+if true { return 1 } else { return hello }

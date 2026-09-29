@@ -1,0 +1,3 @@
+# contains: no separate value to return
+let h = { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }
+within [handlers: [echo: $h]] { echo hi }

@@ -1,0 +1,2 @@
+# contains: couldn't match type [α] with type String
+map { |x| return $x } 'hello'

@@ -1,0 +1,2 @@
+# contains: escape
+return "\z"

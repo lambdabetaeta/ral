@@ -1,0 +1,2 @@
+let f = { |x| if true { return () } else { return $x }
+                 if true { echo hi } else { return $x } }

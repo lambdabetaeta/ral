@@ -1,0 +1,2 @@
+# contains: takes named options
+let m = [:, dir: "/tmp"]; within $m { return "ok" }

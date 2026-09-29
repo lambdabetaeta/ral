@@ -1,0 +1,1 @@
+return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }

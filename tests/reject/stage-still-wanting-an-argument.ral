@@ -1,0 +1,3 @@
+# codes: T0050
+# contains: length
+echo foo | length

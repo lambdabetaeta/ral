@@ -1,0 +1,2 @@
+# contains: key
+let [42: a] = m

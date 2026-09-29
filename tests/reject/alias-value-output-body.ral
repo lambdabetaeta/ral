@@ -1,0 +1,3 @@
+# contains: couldn't match type Unit
+alias foo { |args| return 3 }
+return ()

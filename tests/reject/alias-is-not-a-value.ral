@@ -1,0 +1,2 @@
+# contains: handler entry
+alias greet { |args| echo hi }; let f = $greet; return $f

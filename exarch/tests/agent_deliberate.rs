@@ -152,33 +152,6 @@ fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
     );
 }
 
-#[test]
-fn tool_call_then_completion() {
-    let mut session = Avatar::for_test("system").unwrap();
-    let provider = scripted(
-        "test-model",
-        Script::new()
-            .then(Reply::tool_calls(vec![ral_call("c1", "let x = 41")]))
-            .then(Reply::text("done")),
-    );
-
-    let Drive { outcome, facts, .. } =
-        drive_deliberate(&mut session, &provider, Some("set x then report"));
-
-    match outcome {
-        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
-        other => panic!("expected Complete, got {other:?}"),
-    }
-    assert!(
-        facts
-            .iter()
-            .any(|f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")),
-        "ral tool call should reach the bus"
-    );
-    assert!(session.is_ready());
-    assert_admissible(&session);
-}
-
 /// A `let` binding committed by an earlier tool call survives into the
 /// next tool call — the persistent-shell contract `deliberate` relies on.
 #[test]

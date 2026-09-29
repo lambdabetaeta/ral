@@ -1,0 +1,3 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+let f = { |x| return $x }; /bin/echo $f

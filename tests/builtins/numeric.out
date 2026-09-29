@@ -1,0 +1,17 @@
+4.0 3.0 3.14 2.718
+3.0 -3.0 0.13
+3 -3 4 -3 3 -3
+float: 'NaN' is not a finite number
+float: 'inf' is not a finite number
+float: 'nan' is not a finite number
+float overflow refused
+floor: 1.0e300 is outside the integer range
+trunc: -1.0e300 is outside the integer range
+round: places must be between 0 and 308, got -1
+round: places must be between 0 and 308, got 400
+int: 1.0e300 is outside the integer range
+int: expected String, Int, or integral Float, got Variant
+range: span from -2 to 9223372036854775807 exceeds the addressable range
+fail: status 4294967296 is outside the exit-code range
+exit: status 4294967296 is outside the exit-code range
+numeric tests done

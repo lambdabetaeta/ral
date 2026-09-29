@@ -9,3 +9,14 @@ true
 true
 false
 n+1 = 5 half = 2
+-3
+-5
+-1.5
+div refused
+mod refused
+min / -1 refused
+min % -1 refused
+false
+true
+true
+false

@@ -8,10 +8,7 @@
 //! ergonomic complement.
 //!
 //! Second — and this is the bar the user actually cares about — every
-//! rejection must read as English to a first-year undergraduate.  The
-//! typechecker's fuzz suite already encodes that rule (`typecheck_fuzz.rs`,
-//! [`JARGON_FRAGMENTS`]); we mirror the same shape here for the lexer and
-//! parser:
+//! rejection must read as English to a first-year undergraduate:
 //!
 //! - No Rust `Debug` dumps (variant names, struct headers, panic strings)
 //!   in the user-facing message.
@@ -22,9 +19,9 @@
 //! - The rendered ariadne report stays jargon-free under the same scan
 //!   (this is what the human actually sees on stderr).
 //!
-//! The curated table near the bottom (`REACHABLE`) names each
-//! diagnostic by an English tag and pins down a fragment we expect to see
-//! — refactors that silently lose a message will fail loudly.
+//! The catalogue of diagnostics — one program per message, each pinning an
+//! English fragment — is the `tests/reject/parse-*.ral` corpus, which
+//! `ral/tests/corpus.rs` runs under the same jargon scan.
 
 use ral_core::diagnostic::format_parse_error_ariadne;
 use ral_core::syntax::parser::ParseError;
@@ -44,7 +41,7 @@ use ral_core::syntax::parser::parse;
 /// be specific enough that it doesn't false-positive on a sentence a
 /// user-facing message might legitimately use.  "atom" is jargon for a
 /// beginner; a message names the shapes instead ("an operand on each
-/// side") — see `parse_expr_operator_without_operand`.
+/// side").
 const JARGON_FRAGMENTS: &[&str] = &[
     // Rust-internal: structural give-aways of an unintended Debug print.
     "ParseError {",
@@ -80,9 +77,7 @@ fn looks_like_debug_dump(msg: &str) -> bool {
 }
 
 /// Strip ANSI escape sequences so the jargon scan doesn't trip on colour
-/// codes ariadne emits around words.  Copied in spirit from
-/// `typecheck_fuzz.rs::strip_ansi` so the two suites assert against the
-/// same definition of "what the user reads".
+/// codes ariadne emits around words.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -370,35 +365,6 @@ fn pathological_structural_inputs() {
     }
 }
 
-/// When a double-quoted string opens *and* a nested form inside it
-/// (`!{…}`, `$(…)`, `$[…]`, `$name[…]`) is also left open, the user's
-/// real mistake is "I never closed the string".  The lexer re-anchors so
-/// the error names the outer string at its opening `"`, with the inner
-/// culprit only as a hint.  This invariant is one property across four
-/// inner forms, so it lives as a single test rather than four REACHABLE
-/// rows.
-#[test]
-fn unterminated_string_with_inner_unclosed_anchors_on_outer_string() {
-    let cases = &[
-        ("inner_force", "\"foo !{cmd"),
-        ("inner_paren", "\"foo $(cmd"),
-        ("inner_arith", "\"foo $[1 + 2"),
-        ("inner_index", "\"foo $name[k"),
-    ];
-    for (tag, src) in cases {
-        let Err(err) = parse(src) else {
-            panic!("{tag}: should reject {src:?}")
-        };
-        assert!(
-            err.message.contains("unterminated double-quoted string"),
-            "{tag}: rejection of {src:?} should anchor at the outer string; \
-             got: {msg}",
-            msg = err.message,
-        );
-        assert_friendly(tag, src, &err);
-    }
-}
-
 /// A nested form inside a double-quoted string (`$[…]`, `$name[…]`) is
 /// lexed once, by the outer lexer, and its tokens are handed to the
 /// sub-parser as they are.  So a diagnostic raised deep inside one still
@@ -444,244 +410,5 @@ fn nested_stream_error_spans_point_into_the_outer_source() {
             "{tag}: report should point at {position}; rendered:\n{rendered}"
         );
         assert_friendly(tag, src, &err);
-    }
-}
-
-/// A spread in a control-operator operand position is rejected by the
-/// parser, so it never reaches the elaborator — whose `Ast::Spread` arm
-/// is `unreachable!` and would otherwise panic.  Regression for the F1
-/// finding of the 2026-06-11 deep review.  One representative per
-/// arity-2 and arity-1 keyword; the operand index of the spread varies
-/// so neither the leading nor the trailing position is left untested.
-#[test]
-fn spread_in_control_op_operand_is_a_parse_error_not_a_panic() {
-    let cases = &[
-        ("try_first", "let x = [1, 2]\ntry ...$x { |e| return () }"),
-        ("try_second", "try { return () } ...$h"),
-        ("guard_first", "guard ...$b { echo done }"),
-        ("audit_only", "audit ...$b"),
-    ];
-    for (tag, src) in cases {
-        let Err(err) = parse(src) else {
-            panic!("{tag}: a spread operand should be rejected: {src:?}")
-        };
-        assert!(
-            err.message.contains("spread"),
-            "{tag}: rejection of {src:?} should name the spread; got: {msg}",
-            msg = err.message,
-        );
-        assert_friendly(tag, src, &err);
-    }
-}
-
-// ── Reachability and shape of every diagnostic ────────────────────────────
-//
-// Each entry pins down a real diagnostic site with:
-//
-// - `src`: an input that reaches it,
-// - `tag`: a short label for failure messages,
-// - `must_contain`: a substring the friendly message must include.
-//
-// The substring is chosen to be the *English* core of the message —
-// "two hex digits", "reserved keyword", "after `if`" — so an
-// implementation that paraphrases (but stays friendly) keeps passing,
-// while one that regresses to jargon (e.g. "expected IDENT") fails.
-
-struct Reachable {
-    tag: &'static str,
-    src: &'static str,
-    must_contain: &'static str,
-}
-
-const fn r(tag: &'static str, src: &'static str, must_contain: &'static str) -> Reachable {
-    Reachable {
-        tag,
-        src,
-        must_contain,
-    }
-}
-
-const REACHABLE: &[Reachable] = &[
-    // ─── Lexer: structural unterminated forms ────────────────────────
-    r("lex_unterm_single_quote", "echo 'hello", "unterminated"),
-    r("lex_unterm_double_quote", "echo \"hello", "unterminated"),
-    r("lex_unterm_bumped", "echo #'hello", "unterminated"),
-    // `!{…}` only exists as a single form inside `"…"`; outside a
-    // string the `!` and `{` lex separately, so the parser (not the
-    // lexer) is what flags the unbalanced brace.  Test the
-    // in-string form here.
-    r("lex_unterm_brace_group", "\"foo !{ cmd", "unterminated"),
-    r("lex_unterm_expr_block", "$[1+2", "unterminated"),
-    r("lex_unclosed_dollar_paren", "\"$(", "unterminated"),
-    // ─── Lexer: free-form errors ─────────────────────────────────────
-    r("lex_empty_tag", "echo ` foo", "tag label"),
-    r("lex_dollar_paren_no_ident", "echo $(123)", "identifier"),
-    r("lex_background_amp", "sleep 1 &", "spawn"),
-    r("lex_and_and", "a && b", "no `&&`"),
-    r("lex_dollar_paren_unclosed_inline", "echo $(name 42", "')'"),
-    r("lex_redirect_amp_no_fd", "cmd >& foo", "file descriptor"),
-    r("lex_dollar_bare", "echo $", "$name"),
-    r("lex_stdout_onto_stderr", "cmd 1>&2", "warn"),
-    // ─── Lexer: escape errors ────────────────────────────────────────
-    r("lex_x_too_short", "return \"\\x4\"", "two hex digits"),
-    r("lex_x_non_hex", "return \"\\xZZ\"", "two hex digits"),
-    r("lex_x_high_byte", "return \"\\x80\"", "ASCII"),
-    r("lex_u_no_brace", "return \"\\u41\"", "\\u{"),
-    r("lex_u_empty", "return \"\\u{}\"", "hex digits"),
-    r("lex_u_too_long", "return \"\\u{1234567}\"", "hex digits"),
-    r("lex_u_non_scalar", "return \"\\u{D800}\"", "Unicode"),
-    r("lex_unknown_escape", "return \"\\z\"", "escape"),
-    // ─── Parser: structural ──────────────────────────────────────────
-    r("parse_let_no_eq", "let x foo", "expected '='"),
-    r("parse_let_in_pipeline", "echo | let x = 1", "binding"),
-    r("parse_return_too_many", "return a b", "at most one"),
-    r("parse_bad_pattern", "let 42 = 1", "expected a pattern"),
-    r("parse_reserved_as_pattern", "let if = 1", "reserved"),
-    r("parse_rest_no_name", "let [a, ...] = $xs", "name after"),
-    r("parse_rest_bad_name", "let [a, ...42] = $xs", "name"),
-    r("parse_map_pattern_bad_key", "let [42: a] = m", "key"),
-    r("parse_map_literal_bad_key", "[42: 1]", "key"),
-    r("parse_map_tag_key", "[:, `b: 2]", "names a variant"),
-    r(
-        "parse_record_tag_key",
-        "return [a: 1, `b: 2]",
-        "names a variant",
-    ),
-    r(
-        "parse_pattern_tag_key",
-        "let [`b: x] = $r",
-        "names a variant",
-    ),
-    r(
-        "parse_lambda_empty_params",
-        "{ || echo hi }",
-        "at least one parameter",
-    ),
-    r("parse_redirect_no_command", "> out", "follow a command"),
-    r("parse_caret_path", "^/abs/path", "bare command name"),
-    r("parse_caret_bad", "^[1,2]", "command name"),
-    r("parse_or_or", "a || b", "no `||`"),
-    r(
-        "parse_caret_in_value",
-        "return ^name",
-        "command-head position",
-    ),
-    r(
-        "parse_if_no_else_keyword",
-        "if true { return 1 } { return 2 }",
-        "else",
-    ),
-    r("parse_list_no_comma", "[a b c]", "',' or ']'"),
-    // A control operator fills fixed operand positions, so a spread
-    // in operand position is rejected at parse time rather than
-    // surviving into the elaborator (which has no lowering for it).
-    r(
-        "parse_control_op_spread",
-        "try ...$x { |e| return () }",
-        "spread",
-    ),
-    // Unterminated top-level `{` / `[`: the lexer tracks the open
-    // delimiter and reports it at EOF (so batch scripts get a real
-    // error and the REPL can prompt for continuation).  Map and list
-    // literals share the `[…]` shape — one entry covers both.
-    r("lex_unterm_block", "{ echo hello", "unterminated"),
-    r("lex_unterm_list", "[a, b", "unterminated"),
-    // ─── Parser: expression-block (Pratt) ────────────────────────────
-    r("parse_expr_bare_dollar", "return $[$]", "$name"),
-    r(
-        "parse_expr_operator_without_operand",
-        "return $[* 2]",
-        "operand on each side",
-    ),
-    r(
-        "parse_expr_bare_word_under_arith",
-        "return $[x + 1]",
-        "did you mean `$x`",
-    ),
-    r(
-        "parse_expr_bare_word_negated",
-        "return $[-x]",
-        "did you mean `$x`",
-    ),
-    r(
-        "parse_expr_bare_non_ident_under_arith",
-        "return $[1e5 + 1]",
-        "not a number",
-    ),
-    // ─── Parser: sub-stream completion contract ──────────────────────
-    // No sub-parse may stop short and drop what follows.  These pin three
-    // shapes: an expression block with extra operands (named as a missing
-    // operator), index keys with a second word, and a stray top-level `}`
-    // (named as an unmatched brace rather than generic trailing input).
-    r(
-        "parse_trailing_expr_block",
-        "echo $[1 2 3]",
-        "expected an operator",
-    ),
-    r(
-        "parse_trailing_index_keys",
-        "let m = [a: 1]\necho $m[a b]",
-        "expected ]",
-    ),
-    r(
-        "parse_trailing_stray_rbrace",
-        "echo a\n}\necho b",
-        "unmatched `}`",
-    ),
-    // ─── Resource caps (depth limits) ────────────────────────────────
-    // These two are the friendly outcome when adversarial input
-    // forces unbounded recursion.  Each cap should name itself —
-    // "nesting is too deep" — so a reader recognises the rejection
-    // as a resource limit, not a syntax error.
-    // A *balanced* deep nest: the lexer is happy (every `{` closes),
-    // so the parser's recursive-descent depth cap is what fires.
-    r(
-        "parse_depth_cap_brace",
-        "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
-        "nesting is too deep",
-    ),
-    r(
-        "lex_depth_cap_expr",
-        "$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[$[",
-        "nesting is too deep",
-    ),
-];
-
-#[test]
-fn every_diagnostic_is_reachable() {
-    let mut silent: Vec<&str> = Vec::new();
-    for r in REACHABLE {
-        if parse(r.src).is_ok() {
-            silent.push(r.tag);
-        }
-    }
-    assert!(
-        silent.is_empty(),
-        "the following diagnostics no longer fire (the input now parses cleanly, \
-         or the lexer changed shape) — refresh them: {silent:?}"
-    );
-}
-
-#[test]
-fn every_diagnostic_contains_its_english_anchor() {
-    let mut drifted: Vec<(String, String)> = Vec::new();
-    for r in REACHABLE {
-        let Err(err) = parse(r.src) else { continue };
-        let rendered = strip_ansi(&format_parse_error_ariadne("fuzz.ral", r.src, &err));
-        if !err.message.contains(r.must_contain) && !rendered.contains(r.must_contain) {
-            drifted.push((r.tag.to_string(), err.message.clone()));
-        }
-    }
-    assert!(
-        drifted.is_empty(),
-        "messages drifted away from their English anchors: {drifted:#?}"
-    );
-}
-
-#[test]
-fn every_diagnostic_is_friendly() {
-    for r in REACHABLE {
-        let Err(err) = parse(r.src) else { continue };
-        assert_friendly(r.tag, r.src, &err);
     }
 }

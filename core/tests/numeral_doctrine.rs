@@ -11,9 +11,11 @@
 //! That normalization is the point of the doctrine, not an accident of it: it is
 //! what makes one spelling per number a fact a reader can rely on.
 //!
-//! Everything here drives the public `run` door, so each test is the session a
-//! user has; the one exception is the interactive renderer, a library function
-//! with no command name to reach it by.
+//! The observable half — the normalisation table, quoting, every position, the
+//! redirect target, printing — is the golden `tests/lang/numerals.ral`.  What
+//! stays here is what a golden cannot reach: the two fixed-point properties,
+//! read off `fmt_float` itself, and the interactive renderer, a library
+//! function with no command name to reach it by.
 
 mod common;
 
@@ -86,155 +88,7 @@ const FLOAT_PROBES: [f64; 16] = [
     std::f64::consts::SQRT_2,
 ];
 
-// ── A numeral denotes its number ─────────────────────────────────────────────
-
-/// The normalization table, read where an argv is observable: `echo` writes
-/// each atom's text form, so what it writes is what the word denoted.
-#[test]
-fn a_numeral_word_reaches_an_argv_as_its_number() {
-    for (word, number) in [
-        ("007", "7"),
-        ("+5", "5"),
-        ("-0", "0"),
-        ("+007", "7"),
-        (".5", "0.5"),
-        ("2.", "2.0"),
-        ("00.500", "0.5"),
-        ("1.50", "1.5"),
-        ("3.0", "3.0"),
-        ("1.50e300", "1.5e300"),
-        ("1.0E5", "100000.0"),
-    ] {
-        assert_eq!(
-            printed(&format!("echo {word}")),
-            format!("{number}\n"),
-            "{word}"
-        );
-    }
-}
-
-/// The version-like token is the edge worth knowing: `3.10` is a numeral, so it
-/// is the number 3.1, and quoting is how the digits stay a name.
-#[test]
-fn a_version_like_numeral_is_a_number_and_quoting_keeps_the_digits() {
-    assert_eq!(printed("echo 3.10"), "3.1\n");
-    assert_eq!(printed("echo '3.10'"), "3.10\n");
-}
-
-/// Quoting is the whole of the escape hatch, and it is exact.
-#[test]
-fn quoting_keeps_a_numerals_bytes() {
-    for word in ["007", "+5", "1.50", "-0", "2."] {
-        assert_eq!(
-            printed(&format!("echo '{word}'")),
-            format!("{word}\n"),
-            "{word}"
-        );
-    }
-}
-
-/// And the grammar's edges are words, not numbers: an exponent with no decimal
-/// point, a digit separator, another base, a spelling past `Int`, and one that
-/// would overflow a `Float` to infinity.
-#[test]
-fn a_word_the_numeral_grammar_refuses_keeps_its_bytes_unquoted() {
-    for word in [
-        "1e6",
-        "1_000",
-        "0x10",
-        "9223372036854775808",
-        "1.8e308",
-        "1.2.3",
-        "inf",
-        "nan",
-    ] {
-        assert_eq!(
-            printed(&format!("echo {word}")),
-            format!("{word}\n"),
-            "{word}"
-        );
-    }
-}
-
-// ── No position is exempt ────────────────────────────────────────────────────
-
-/// A binding, an interpolation, and the three encoders read the same word the
-/// same way — `to-json` included, so the JSON number and the shell's own text
-/// form cannot drift apart.
-#[test]
-fn the_reading_does_not_depend_on_the_position() {
-    assert_eq!(printed("let rate = 1.50; echo $rate"), "1.5\n");
-    assert_eq!(
-        printed(r#"let rate = 3.0; echo "version $rate""#),
-        "version 3.0\n"
-    );
-    assert_eq!(printed("to-line 1.50"), "1.5\n");
-    assert_eq!(printed("to-string 3.0"), "3.0");
-    assert_eq!(printed("to-lines [3.0, 1.50, .5]"), "3.0\n1.5\n0.5\n");
-    assert_eq!(printed("to-lines [007, +5, -0]"), "7\n5\n0\n");
-    assert_eq!(printed("to-json [rate: 3.0]"), "{\"rate\":3.0}");
-    assert_eq!(printed("to-csv [[rate: 1.50]]"), "rate\n1.5\n");
-}
-
-/// A redirect's target is a word like any other, so `> 007` names the file `7`.
-/// The surprising position is exactly the one worth pinning.
-#[test]
-fn a_redirect_target_is_read_as_a_numeral_too() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().display();
-    assert_eq!(
-        printed(&format!("within [dir: '{root}'] {{ echo hi > 007 }}")),
-        ""
-    );
-    assert!(
-        dir.path().join("7").is_file(),
-        "`> 007` must name the file 7"
-    );
-    assert!(
-        !dir.path().join("007").exists(),
-        "`> 007` must not name the file 007"
-    );
-}
-
 // ── One printed spelling per number ──────────────────────────────────────────
-
-/// Floatness survives on screen and on argv: an integral `Float` keeps its
-/// decimal point, where the `Int` beside it has none.  Rust's own `{}` erases
-/// this distinction, which is why the shell does not use it.
-#[test]
-fn an_integral_float_still_prints_as_a_float() {
-    assert_eq!(printed("echo $[1.0 + 2.0]"), "3.0\n");
-    assert_eq!(printed("echo $[1 + 2]"), "3\n");
-    assert_eq!(
-        pretty_print(&Value::Float(3.0), 0, &REPL_PRINT_PARAMS),
-        "3.0",
-        "the interactive renderer agrees with the text form"
-    );
-}
-
-/// A large or small magnitude takes exponent form rather than spelling out
-/// hundreds of digits — and keeps its point there too, so the spelling is a
-/// numeral of the grammar rather than a word that merely looks numeric.
-#[test]
-fn an_extreme_magnitude_prints_in_exponent_form_with_its_point() {
-    assert_eq!(printed("echo $[1.0e300 * 1.0]"), "1.0e300\n");
-    assert_eq!(printed("echo $[1.0e-7 * 1.0]"), "1.0e-7\n");
-    assert_eq!(
-        fmt_float(f64::MAX),
-        "1.7976931348623157e308",
-        "a mantissa that already carries a point is left alone"
-    );
-}
-
-/// Non-finite is unreachable through the language — a `Float` is finite by
-/// construction — so the renderer's answer for it is a last resort, and named
-/// here so it is a choice rather than a surprise.
-#[test]
-fn the_renderer_names_the_unreachable_non_finite_cases() {
-    assert_eq!(fmt_float(f64::NAN), "NaN");
-    assert_eq!(fmt_float(f64::INFINITY), "inf");
-    assert_eq!(fmt_float(f64::NEG_INFINITY), "-inf");
-}
 
 /// The fixed point the doctrine rests on: print a number, hand the spelling
 /// back as a bare word, and the shell writes the very same bytes.  Canonical
@@ -278,23 +132,23 @@ fn printing_a_float_then_classifying_returns_the_same_float() {
 
 // ── The corollary: `unit` is a word, `()` is the literal ─────────────────────
 
-/// A literal whose printed form is *nothing* can obey one-spelling-per-value
-/// from neither end, so `unit` gave the name back.  `()` took its place as
-/// punctuation the renderer prints as itself, beside `[]` and `[:]`.
+/// The interactive renderer, the classifier and the text form agree — the
+/// halves of the doctrine no command name reaches: an integral `Float` keeps
+/// its point, the widest magnitude keeps its mantissa point, non-finite is a
+/// named last resort, and `unit` is a plain word beside the `()` literal.
 #[test]
-fn unit_is_an_ordinary_word_and_the_literal_is_punctuation() {
-    assert_eq!(printed("echo unit"), "unit\n");
+fn the_renderer_and_the_classifier_agree_with_the_text_form() {
+    assert_eq!(
+        pretty_print(&Value::Float(3.0), 0, &REPL_PRINT_PARAMS),
+        "3.0"
+    );
+    assert_eq!(fmt_float(f64::MAX), "1.7976931348623157e308");
+    assert_eq!(fmt_float(f64::NAN), "NaN");
+    assert_eq!(fmt_float(f64::INFINITY), "inf");
+    assert_eq!(fmt_float(f64::NEG_INFINITY), "-inf");
     assert_eq!(
         ral_core::test_access::val_from_word("unit"),
         Val::String("unit".into())
     );
-    assert_eq!(
-        pretty_print(&Value::Unit, 0, &REPL_PRINT_PARAMS),
-        "()",
-        "the renderer prints the literal a user would write"
-    );
-    // `Display` is also the argv rendering and the interpolation form: one
-    // spelling, no special case.
-    assert_eq!(printed("echo a () b"), "a () b\n");
-    assert_eq!(printed("let uu = ()\necho \"u=$uu\""), "u=()\n");
+    assert_eq!(pretty_print(&Value::Unit, 0, &REPL_PRINT_PARAMS), "()");
 }

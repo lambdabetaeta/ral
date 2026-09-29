@@ -31,6 +31,44 @@ echo "let version = 2" > "$tmpdir/reload.ral"
 let mfresh = use "$tmpdir/reload.ral"
 if $[not !{equal $mfresh[version] 2}] { fail [status: 1, message: "module: reload did not pick up the rewritten file"] }
 
+# A module that uses itself is a cycle
+echo "let _ = use '$tmpdir/cycle.ral'" > "$tmpdir/cycle.ral"
+echo !{try { let _ = use "$tmpdir/cycle.ral"; return false } { |e| return !{re-match 'circular dependency' $e[message]} }}
+
+# A failing module keeps its status and is tagged once
+echo "fail [status: 7, message: 'boom']" > "$tmpdir/failing.ral"
+echo !{try { let _ = use "$tmpdir/failing.ral"; return '' } { |e| return "$e[status] $e[message]" }}
+
+# `use` binds nothing in the caller
+echo "let leaked = 7" > "$tmpdir/leak.ral"
+let _ = use "$tmpdir/leak.ral"
+echo !{try { return $leaked } { |_| return 'not leaked' }}
+
+# A module sees the session, earlier definitions included, but not a
+# block's local `let`; only its own non-underscore names come back
+echo 'let reads_local = $local' > "$tmpdir/block-local.ral"
+let outer_define = 41
+echo #'let visible = 1
+let _hidden = 2
+let reads_earlier = $[$outer_define + 1]'# > "$tmpdir/session.ral"
+echo !{try { let _ = !{ let local = 1; use "$tmpdir/block-local.ral" }; return '' } { |e| return $e[message] }}
+let sess = use "$tmpdir/session.ral"
+echo "$sess[visible] $sess[reads_earlier] !{try { return $sess[_hidden] } { |_| return hidden }}"
+
+# A RAL_PATH hit still answers to the fs read grant
+mkdir -p "$tmpdir/lib" "$tmpdir/other"
+echo "let answer = 42" > "$tmpdir/lib/g.ral"
+try {
+    grant [fs: [read: ["$tmpdir/other"]]] {
+        within [dir: "$tmpdir/other", env: [RAL_PATH: "$tmpdir/lib"]] { let _ = use 'g.ral' }
+    }
+} { |e| echo !{re-match 'denied by grant' $e[message]} }
+
+# A module's bundle with a misspelt option meets the runtime's refusal
+echo "let dirr = 'x'" > "$tmpdir/opts.ral"
+let opts = use "$tmpdir/opts.ral"
+try { within $opts { return () } } { |e| echo $e[message] }
+
 # Cleanup
 rm -rf $tmpdir
 

@@ -1,0 +1,2 @@
+# codes: T0056
+let appl = { |f args| $f ...$args }; appl $to-json [1]

@@ -1,0 +1,3 @@
+# contains: couldn't match
+# contains: the catch-all `handler:` stands in for every external command
+let o = [handler: { |n a| return "x" }]; within $o { zzz }

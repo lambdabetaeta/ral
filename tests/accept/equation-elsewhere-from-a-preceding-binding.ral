@@ -1,0 +1,5 @@
+let f = { |t x| let u = if true { return $x } else { return () }
+                   if true { !$t } else { return $x }
+                   let z = 1
+                   if true { echo hi } else { !$t }
+                   return $x }

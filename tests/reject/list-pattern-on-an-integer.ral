@@ -1,0 +1,4 @@
+# contains: couldn't match
+# contains: Help:
+let [a, b] = 42
+return $a

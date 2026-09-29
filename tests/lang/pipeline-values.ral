@@ -1,0 +1,92 @@
+# Test: a pipeline has one transport, bytes on a wire; a stage's returned
+# value simply goes nowhere, and a decoder at the tail supplies the value
+
+let d = temp-dir
+
+# A returned thunk is a value: never applied, so its body never runs
+5 | { echo hi }
+echo 'thunk stage accepted, never forced'
+
+# An interior value is not serialised: the reader sees EOF
+let quiet = return [1, 2] | { |xs| echo $xs } | from-lines
+echo !{length $quiet}
+# Expected: 0
+
+# An explicit encoder does put bytes on the wire
+let loud = to-json [1, 2] | from-lines
+echo !{length $loud}
+# Expected: 1
+
+# An interior decoder returns its bytes as a value; the next stage gets EOF
+let lost = to-lines ['x marks it', 'and again x'] | from-bytes | from-lines
+echo !{length $lost}
+# Expected: 0
+
+# A producer need not write; a discarded statement's bytes still reach the wire
+let silent = !{ return () } | from-lines
+echo !{length $silent}
+# Expected: 0
+!{ echo x; return () } | cat
+# Expected: x
+
+# A consumer need not read; the pipeline's value is its last stage's
+let result = echo x | !{ return 5 }
+echo $result
+# Expected: 5
+
+# A byte-stage in the middle buffers cleanly
+let lines = !{printf 'a\nb\n' | map-lines { |x| return $x } | from-lines}
+echo !{length $lines} $lines[0] $lines[1]
+# Expected: 2 a b
+
+# Streaming line combinators: filter keeps lines in order; a reducer's
+# accumulator is discarded mid-pipe and is the value at the tail
+let kept = !{printf 'aa\nbb\ncc\ndd\n' | filter-lines { |l| contains ['bb', 'dd'] $l } | from-string}
+echo "[$kept]"
+printf 'a\nb\n' | fold-lines { |acc line| echo $line; return $[$acc + 1] } 0 | cat
+let n = printf 'a\nb\n' | fold-lines { |acc _| return $[$acc + 1] } 0
+echo $n
+# Expected: 2
+
+# An outer `<` on a call whose body is a pipeline feeds its first stage
+echo alpha > "$d/in1"
+echo beta >> "$d/in1"
+let first = { cat | head -n 1 }
+first < "$d/in1"
+printf 'one\ntwo\nthree\nfour\n' > "$d/in2"
+let counted = {
+    let count = {
+        let rows = !{from-lines}
+        echo !{length $rows}
+    }
+    !$count | cat
+}
+counted < "$d/in2"
+# Expected: alpha / 4
+
+# guard and audit are channel-transparent
+let g = !{ guard { echo hi } { return () } | from-string }
+echo $g
+let a = !{ echo hi | audit { from-string } }
+case $a[outcome] [`ok: { |v| echo $v }, `err: { |_| return () }]
+let v = echo hi | audit { cat }
+echo !{succeeded $v}
+
+# try's handler value can be the recovery value
+let recovered = try { fail [status: 7, message: 'caught by handler'] } { |_| echo caught }
+echo "x=$recovered"
+
+# A producer failing before any bytes wins over the tail
+let boom = { fail [status: 3, message: 'producer failed'] }
+try { let result = !{!$boom | from-json}; echo $result } { |e| echo "$e[message]" }
+try { echo not-json | from-json; return () } { |e| echo "$e[message]" }
+
+# A list-producing lazy chain of 2000 links crosses the final stage
+let chain = { |xs| if !{is-empty $xs} { return `done } else {
+    let [x, ...rest] = $xs; let tail = !{chain $rest}
+    return `more [head: $x, tail: { return $tail }] } }
+let s = !{to-lines !{range 1 2001} | !{ chain !{from-lines} }}
+echo deep stream done
+
+rm -rf $d
+echo 'pipeline value tests done'

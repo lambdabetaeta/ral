@@ -23,3 +23,6 @@ synod/gen/schemas/*.json text eol=lf
 # stay true on every platform; `linguist-vendored` keeps them out of the
 # repository's language statistics.
 synod/ui/vendor/** -text linguist-vendored
+
+# CRLF is what tests/lang/crlf.ral tests; keep it as committed.
+tests/lang/crlf.ral -text

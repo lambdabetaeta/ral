@@ -1,0 +1,2 @@
+let f = { |d| return [dir: $d, env: [:]] }
+within !{f "/tmp"} { return "ok" }

@@ -1,0 +1,4 @@
+# codes: T0062
+# contains: can't index a value of type String
+let x = 'hello'
+echo $x[0]

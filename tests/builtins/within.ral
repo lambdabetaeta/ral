@@ -95,4 +95,95 @@ within [] {
     echo 'no options'
 }
 
+# An outer frame answers when the inner one has no entry for the name
+within [handlers: [cmd2: { |args| echo outer }]] {
+    within [handlers: [cmd1: { |args| echo inner }]] { cmd2 }
+}
+
+# A per-name entry beats a catch-all, whichever frame holds it
+within [handlers: [other: { |args| echo outer }]] {
+    within [handler: { |n _a| echo catch }] { other }
+}
+
+# An alias installed inside the body sits above the frame
+within [handlers: [foo: { |args| echo A }]] {
+    alias foo { |args| echo B }
+    foo
+}
+
+# The last alias pushed wins
+alias greet { |args| echo hi }
+alias greet { |args| echo 42 }
+greet
+
+# unalias removes an alias, not a within-installed handler
+within [handlers: [keep: { |args| echo kept }]] {
+    attempt { unalias keep }
+    keep
+}
+
+# An alias arm may capture and re-emit its own output
+alias cap { |args| let u = echo hi; echo $u }
+cap
+
+# A computed catch-all whose body yields unit installs
+let quiet = { |name args| cd ~ }
+within [handler: $quiet] { echo installed }
+
+# A handler applies to a command inside a pipeline
+within [handlers: [cat: { |args| echo mocked }]] {
+    let text = !{cat /nonexistent | from-string}
+    echo !{length $text}
+}
+
+# Bad options are errors
+try { within [dir: '/nonexistent_dir_xyz'] { echo bad } } { |_| echo 'missing dir refused' }
+try { within [env: [PWD: '/tmp']] { echo bad } } { |e| echo $e[message] }
+try { within [env: [OLDPWD: '/tmp']] { echo bad } } { |e| echo $e[message] }
+
+# A handler under a native's name installs, but the bare head still resolves
+# to the native: `length` keeps its Int result, not the arm's bytes
+within [handlers: [length: { |xs| echo hi }]] {
+    let r = !{length [1, 2, 3]}
+    echo $[$r + 1]
+}
+
+# An arm stacked on `echo` intercepts the bare name, and may preserve its byte mode
+within [handlers: [echo: { |args| echo mocked }]] { echo hi }
+
+# An alias over an alias keeps the route
+alias one { |args| echo one }
+alias two { |args| one }
+two
+
+# A catch-all whose body diverges installs
+within [handler: { |n a| fail [status: 1, message: 'unhandled command'] }] {
+    try { zzz } { |e| echo $e[message] }
+}
+
+# Value-world spellings for what a handler cannot return
+let three = { |xs| length $xs }
+echo !{three [a, b, c]}
+let inc = { |n| $[!{int $n} + 1] }
+echo !{inc 5}
+
+# A local binding beats a handler of the same name
+within [handlers: [foo: { |args| echo handler }]] {
+    let foo = { return 41 }
+    let r = !{foo}
+    echo $[$r + 1]
+}
+
+# An argv is a list of text whatever was written, and a spread reaches the arm
+within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd hello 1 true }
+alias mycmd2 { |args| echo ...$args }
+mycmd2 hello 1 true
+within [handlers: [spreader: { |args| echo ...$args }]] {
+    let xs = [1]
+    spreader ...$xs
+}
+alias spreader2 { |a| echo ...$a }
+let ys = [hi]
+spreader2 ...$ys
+
 echo 'within tests done'

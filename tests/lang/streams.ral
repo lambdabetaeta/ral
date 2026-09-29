@@ -1,0 +1,36 @@
+# Test: recursive stream types — a stream is a variant whose tail is a thunk
+
+let count = { |n|
+    if $[$n <= 0] { return `done } else { return `more [head: $n, tail: { !{count $[$n - 1]} }] }
+}
+
+# A consumer takes the stream as a thunk and recurses through its tail
+let drain = { |strm|
+    case !$strm [
+        `more: { |cell| echo $cell[head]; drain $cell[tail] },
+        `done: { |_| return () }
+    ]
+}
+drain { count 3 }
+
+# A combinator takes a stream value and produces another
+let smap = { |fun strm|
+    case $strm [
+        `more: { |cell| return `more [head: !{$fun $cell[head]}, tail: { !{smap $fun !$cell[tail]} }] },
+        `done: { |_| return `done }
+    ]
+}
+let total = { |strm|
+    case $strm [
+        `more: { |cell| let rest = !{total !$cell[tail]}; return $[$cell[head] + $rest] },
+        `done: { |_| return 0 }
+    ]
+}
+echo !{total !{smap { |n| return $[$n * 10] } !{count 3}}}
+
+# Piped whole, a stream is a value like any other: a non-final stage's value
+# goes nowhere, so the program is silent rather than wrong
+let one-cell = `more [head: 1, tail: { return `done }]
+$one-cell | { |e| return $[$e + 1] } | { |r| return $[$r * 10] }
+
+echo 'streams done'

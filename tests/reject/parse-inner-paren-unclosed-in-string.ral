@@ -1,0 +1,3 @@
+# contains: unterminated double-quoted string
+# no final newline: a newline would end the `$(` before the string does
+"foo $(cmd

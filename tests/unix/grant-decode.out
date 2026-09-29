@@ -1,0 +1,2 @@
+grant fs: relative path 'proj' is not allowed — use an absolute path, or cwd:proj for "relative to here"
+grant decode tests done

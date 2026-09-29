@@ -1,0 +1,27 @@
+thunk stage accepted, never forced
+0
+1
+0
+0
+x
+5
+2 a b
+[bb
+dd
+]
+a
+b
+2
+alpha
+4
+hi
+
+hi
+
+hi
+true
+x=caught
+producer failed
+from-json: expected ident at line 1 column 2
+deep stream done
+pipeline value tests done

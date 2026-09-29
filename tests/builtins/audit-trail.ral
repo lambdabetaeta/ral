@@ -69,4 +69,110 @@ echo !{length !{commands $gr}}
 echo !{commands $gr}[0][argv][0]
 echo !{commands $gr}[1][argv][0]
 
+# Only refusals are recorded as capability checks; an admitted exec leaves
+# just the command observation. `checks` reads `resource decision detail`.
+let checks = { |report key|
+    fold { |acc o|
+        case $o[what] [
+            `check:   { |c| return [...$acc, "$c[resource] $c[decision] !{get $c[fields] $key ''}"] },
+            `command: { |_| return $acc },
+            `write:   { |_| return $acc },
+            `read:    { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+let argv0s = { |report| map { |c| return "$c[argv][0]" } !{commands $report} }
+
+let admitted = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/echo hi } }
+echo !{checks $admitted name}
+echo !{argv0s $admitted}
+
+# A refusal is recorded whatever the grant says about auditing; it fails the
+# body, and it names the refused command
+let refused = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/sh -c 'exit 0' } }
+echo !{succeeded $refused}
+echo !{checks $refused name}
+
+# So is a refused write, naming the operation
+let scratch = temp-dir
+let blocked = audit { grant [fs: [write: [$scratch]]] { to-string x > '/ralaudit_test.txt' } }
+echo !{checks $blocked op}
+rm -rf $scratch
+
+# A stage of an external pipeline is observed as a command in its own right
+echo !{argv0s !{audit { /bin/echo hi | /bin/cat }}}
+
+# `^name` reaches the binary, and the observation says so
+let caret = audit { echo hi | ^cat }
+echo !{map { |c| return "$c[argv][0] $c[origin]" } !{commands $caret}}
+
+# Observations made inside a pipeline stage merge into the parent's trail
+let relay = { from-line; /bin/echo helper }
+echo !{argv0s !{audit { echo seed | !$relay }}}
+
+# File effects are observations too: a read, and a write with its mode and
+# outcome. A failing body aborts an atomic write; an unopenable target fails it.
+let io-facts = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `write:   { |w| return [...$acc, "write $w[mode] $w[outcome] !{basename $w[path]}"] },
+            `read:    { |r| return [...$acc, "read !{basename $r[path]}"] },
+            `check:   { |_| return $acc },
+            `command: { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+let io-dir = temp-dir
+echo !{io-facts !{audit {
+    to-string x > "$io-dir/a.txt"
+    from-string < "$io-dir/a.txt"
+    to-string y >> "$io-dir/a.txt"
+    to-string z >~ "$io-dir/s.txt"
+}}}
+echo !{io-facts !{audit {
+    try { !{ fail [status: 1, message: 'boom'] } > "$io-dir/never.txt" } { |_| return () }
+    try { to-string x > "$io-dir/no-such-dir/out.txt" } { |_| return () }
+}}}
+echo !{exists "$io-dir/never.txt"}
+rm -rf $io-dir
+
+# A bundled tool is observed as an external command
+echo !{map { |c| return "$c[argv][0] $c[origin] $c[status]" } !{commands !{audit { printf '' }}}}
+
+# An audit that follows a `guard` still records its own commands
+let _ = audit { guard { return () } { return () } }
+echo !{argv0s !{audit { echo hi }}}
+
+# A spawn inside an audit leaves the foreground trail whole
+echo !{argv0s !{audit { echo one; spawn { sleep 0.02 }; echo two }}}
+
+# A guard's cleanup runs on the normal path, and its body's value survives
+echo !{argv0s !{audit { guard { return 7 } { echo cleaned } }}}
+echo !{guard { return 7 } { echo cleaned }}
+
+# A command inside a function body is recorded into the enclosing audit
+let emit = { |_| echo audited-from-fn }
+echo !{argv0s !{audit { emit () }}}
+
+# A command's captured bytes ride beside its argv
+each { |c| echo !{bytes-to-string $c[stdout]} $c[argv][0] } !{commands !{audit { echo hi }}}
+
+# Forcing an arity-0 native records the same observation as applying it
+let forced = audit { !$cwd }
+let applied = audit { cwd }
+let forced-cmd = !{commands $forced}[0]
+let applied-cmd = !{commands $applied}[0]
+echo !{equal $forced-cmd[argv] $applied-cmd[argv]} !{equal $forced-cmd[status] $applied-cmd[status]}
+
+# A pipeline that ends in an audit binds the audit's record, not the piped text
+let piped = echo a | audit { cat }
+echo !{succeeded $piped}
+echo !{argv0s $piped}
+
 echo 'audit trail tests done'

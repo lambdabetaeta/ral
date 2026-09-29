@@ -2,9 +2,9 @@
 //!
 //! The inference pass is unconditional — it writes the evaluator's mode
 //! wires — and any type error is fatal: a value-type clash and a mode
-//! mismatch alike report and refuse to evaluate.  These tests pin that
-//! verdict at the binary boundary, where the in-process checker tests
-//! cannot see the process exit code or the rc-skip-but-boot policy.
+//! mismatch alike report and refuse to evaluate.  The refusals themselves are
+//! the `tests/reject/` corpus; these tests pin what only the binary shows: the
+//! agreement of `--check` with a real run, and the rc-skip-but-boot policy.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -14,72 +14,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Captured output of `ral -c <code>`.
+/// Captured output of a `ral` boot.
 struct Run {
     stdout: String,
     stderr: String,
-    status: i32,
-}
-
-/// Run `ral -c <code>` with stdin from /dev/null.
-fn run_c(code: &str) -> Run {
-    let child = Command::new(common::ral_bin())
-        .arg("-c")
-        .arg(code)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn ral");
-    let out = child.wait_with_output().unwrap();
-    Run {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        status: out.status.code().unwrap_or(1),
-    }
-}
-
-/// A value-type clash blocks evaluation: the process exits nonzero and the
-/// error renders as an Error.
-#[test]
-fn value_type_error_blocks() {
-    let r = run_c("let x = hello\nreturn $[$x + 1]");
-    assert_ne!(r.status, 0, "a value-type error must block");
-    assert!(
-        r.stderr.contains("Error") && r.stderr.contains("couldn't match"),
-        "the type clash must render as an Error; stderr was:\n{}",
-        r.stderr
-    );
-}
-
-/// A stage still waiting for an argument (`length` is `String -> …`) is not a
-/// computation that can run, so the pipeline is fatal at check time; as a bare
-/// builtin, `length` names itself rather than reporting an anonymous mismatch.
-#[test]
-fn stage_shape_error_blocks() {
-    let r = run_c("echo foo | length");
-    assert_ne!(r.status, 0, "a stage-shape error must block");
-    assert!(
-        r.stderr.contains("T0050") && r.stderr.contains("length"),
-        "the stage-shape error must name the verb; stderr was:\n{}",
-        r.stderr
-    );
-}
-
-/// A clean pipeline runs with wires: the pipeline connects byte stage to
-/// byte stage, so it works.
-// Unix-only: drives the pipeline through the absolute external
-// `/bin/cat`, which does not exist on Windows.
-#[cfg(unix)]
-#[test]
-fn clean_pipeline_runs_with_wires() {
-    let r = run_c("echo hi | /bin/cat");
-    assert_eq!(
-        r.status, 0,
-        "a clean pipeline must run; stderr was:\n{}",
-        r.stderr
-    );
-    assert_eq!(r.stdout, "hi\n", "the pipeline must produce its output");
 }
 
 // ── batch honesty: `--check` sees exactly what `run` will run ────────────
@@ -137,26 +75,6 @@ fn run_agrees_ed_insert_is_external_in_batch() {
     );
 }
 
-/// A `?` chain whose arms disagree on their result type is a static error
-/// under `--check`, exactly as a mixed-result `if` would be — the chain's
-/// value is whichever arm succeeds, so every arm must produce one type.
-#[test]
-fn check_rejects_mixed_result_chain() {
-    let r = common::run_with_timeout(
-        "check_mixed_result_chain",
-        &["--check"],
-        "let zzv = return hello ? return 1\nreturn $[$zzv + 1]",
-        Duration::from_secs(10),
-    )
-    .expect("ral --check must not hang");
-    assert_ne!(r.status, 0, "a mixed-result chain must fail --check");
-    assert!(
-        r.stderr.contains("couldn't match"),
-        "expected a type mismatch under --check; stderr was:\n{}",
-        r.stderr
-    );
-}
-
 // ── rc files at boot ──────────────────────────────────────────────────────
 //
 // An rc check error is reported and the boot survives — never fatal.  The
@@ -193,7 +111,6 @@ fn boot_with_rc(rc_body: &str, line: &str) -> Run {
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        status: out.status.code().unwrap_or(1),
     }
 }
 

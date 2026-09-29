@@ -1,0 +1,2 @@
+alias g { |args| echo 42 }; g
+alias h { |args| echo 42 }; unalias h; h

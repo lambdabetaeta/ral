@@ -1,0 +1,18 @@
+# Test: a let-bound function is generalised — usable at several types — whether
+# it is bound by name, through a pattern, or by a self-recursive definition
+
+let ident = { |a| return $a }
+echo !{ident 1} !{ident hello}
+echo !{ident [1, 2]} !{ident [a, b]}
+
+let [fun-a, fun-b] = [{ |a| return $a }, { |b| return $b }]
+echo !{fun-a 1} !{fun-a hello} !{fun-b 2}
+
+let [ident: fun-c] = [ident: { |a| return $a }]
+echo !{fun-c 1} !{fun-c hello}
+
+# A self-recursive definition is polymorphic once bound, monomorphic in its body
+let keep = { |a| if true { return $a } else { !{keep $a} } }
+echo !{keep 1} !{keep hello}
+
+echo 'let polymorphism done'

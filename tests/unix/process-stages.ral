@@ -1,0 +1,18 @@
+# Test: process-staged pipelines keep value, cwd, and audit semantics
+
+# A decoder at the tail of a pipeline returns its value to the parent
+let text = !{echo abc | from-string}
+echo !{length $text}
+# Expected: 4
+
+# A `cd` inside a pipeline stage does not reach the parent
+let before = !{pwd}
+let wander = { from-line; cd /tmp; return () }
+!{echo x | !$wander}
+echo !{equal $before !{pwd}}
+# Expected: true
+
+# Commands run inside a stage still reach the enclosing audit
+let relay = { from-line; /bin/echo helper }
+let report = audit { echo seed | !$relay }
+echo !{map { |c| return $c[argv][0] } !{commands $report}}

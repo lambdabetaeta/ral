@@ -1,0 +1,4 @@
+# codes: T0060
+# contains: you can't read a field from it directly
+let t = { return 42 }
+return $t[a]

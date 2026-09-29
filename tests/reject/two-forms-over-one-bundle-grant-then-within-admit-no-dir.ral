@@ -1,0 +1,6 @@
+# contains: 'dir'
+let f = { |o|
+  grant $o { () }
+  within $o { () }
+}
+f [dir: "/tmp"]

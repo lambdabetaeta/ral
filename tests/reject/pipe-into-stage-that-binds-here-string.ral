@@ -1,0 +1,2 @@
+# contains: the pipe writes into a stdin this `<<` replaces
+echo hi | from-string << #'body'#

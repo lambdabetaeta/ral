@@ -1,0 +1,2 @@
+# contains: malformed alias
+let xs = ["g"]; alias ...xs { return 42 }

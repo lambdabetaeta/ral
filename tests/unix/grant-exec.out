@@ -1,0 +1,10 @@
+listed subcommand runs
+unlisted subcommand denied
+intersection denies outer-only
+grant exec: block form for 'cmd' is not a valid exec policy; use within [handlers: [cmd: ...]] instead
+refused
+under the key
+outside the key denied
+inner layer denies what it omits
+policy shapes run
+grant exec tests done

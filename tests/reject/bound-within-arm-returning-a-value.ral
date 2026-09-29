@@ -1,0 +1,2 @@
+# contains: couldn't match type Unit with type Integer
+let h = { |args| return 3 }; within [handlers: [foo: $h]] { foo }

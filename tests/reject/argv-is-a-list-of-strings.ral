@@ -1,0 +1,2 @@
+# contains: type [String]
+alias f { |a| return !{upper $a} }; f x

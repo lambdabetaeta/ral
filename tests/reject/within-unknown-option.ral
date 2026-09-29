@@ -1,0 +1,2 @@
+# contains: dirr
+within [dirr: "x"] { return "ok" }

@@ -3,7 +3,7 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Scripts excluded from running at all — not because they're broken, but
 /// because they can't reach a clean exit in the configuration the test builds.
@@ -30,21 +30,9 @@ fn strip_cr(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().copied().filter(|&b| b != b'\r').collect()
 }
 
-fn discover(dir: &Path) -> Vec<PathBuf> {
-    let mut scripts = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                scripts.extend(discover(&path));
-            } else if path.extension().is_some_and(|e| e == "ral") {
-                scripts.push(path);
-            }
-        }
-    }
-    scripts.sort();
-    scripts
-}
+/// The static corpora, run by `corpus.rs`: their programs are rejected or
+/// merely checked, never run.
+const CORPUS_DIRS: &[&str] = &["reject", "accept"];
 
 /// Run a `.ral` script through the `ral` binary and return its captured output.
 fn run_capture(path: &Path) -> std::process::Output {
@@ -63,7 +51,7 @@ fn run_capture(path: &Path) -> std::process::Output {
 fn scripts() {
     let bless = std::env::var_os("RAL_BLESS").is_some();
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests");
-    let scripts = discover(&base);
+    let scripts = common::discover(&base, CORPUS_DIRS);
     assert!(
         !scripts.is_empty(),
         "no .ral test scripts found in {}",

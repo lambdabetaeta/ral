@@ -4,4 +4,7 @@ all entries: 5
 h or w files: 2
 recursive txt: 3
 no match: 0
+[a.txt]
+[.hidden.txt]
+1
 glob tests done

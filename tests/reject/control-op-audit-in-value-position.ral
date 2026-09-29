@@ -1,0 +1,3 @@
+# contains: 'audit' is a control operator
+let x = $audit
+return $x

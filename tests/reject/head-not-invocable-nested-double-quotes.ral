@@ -1,0 +1,3 @@
+# contains: nested double quotes
+let p = less
+let m = "sh -c 'bat --pager="$(p)" --width=80'"

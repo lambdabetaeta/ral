@@ -1,0 +1,2 @@
+# codes: T0020 T0056
+let r = [a: 1]; to-json ...$r[missing]

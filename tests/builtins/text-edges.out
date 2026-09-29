@@ -1,0 +1,14 @@
+ok: dedent multibyte
+ok: dedent blank line
+ok: dedent crlf
+ok: dedent framing
+ok: dedent relative
+ok: dedent single line
+ok: words
+ok: nub
+ok: re-find-match
+ok: re-find-matches
+re-find-match: no match for pattern '[0-9]+'
+ok: string-replace
+string-replace: 'from' matches 2 times — must match exactly once; widen the pattern with surrounding context to disambiguate
+text edge tests done

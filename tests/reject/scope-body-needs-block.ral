@@ -1,0 +1,2 @@
+# contains: `within`, `grant`, `try`, `guard` and `audit` each run a block
+within [dir: "x"] 5

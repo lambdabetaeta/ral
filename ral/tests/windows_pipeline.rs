@@ -137,28 +137,6 @@ fn helper_to_external_pipeline_runs() {
     assert!(out.stdout.contains('c'), "stdout={}", out.stdout);
 }
 
-/// A block literal in stage position is an ordinary value: the stage
-/// returns a thunk and runs nothing.  The upstream list is never
-/// serialised onto the wire either — a returned value in non-final
-/// position is simply discarded — so the bound result is the thunk, not
-/// the `3` the block would have computed had anything forced it.
-#[test]
-fn block_literal_stage_returns_a_thunk_and_runs_nothing() {
-    let out = run(
-        "win_pipeline_thunk_stage",
-        r"
-        let res = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
-        echo $res
-        ",
-    );
-    assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(
-        !out.stdout.contains('3'),
-        "the block was forced; stdout={}",
-        out.stdout
-    );
-}
-
 /// `2>&1` inside a pipeline stage.  The stage's stderr must be
 /// duplicated onto whichever target stdout was assigned (here: the
 /// downstream pipe).  Without the Windows arm of `wire_stage_stdio`,
@@ -215,32 +193,6 @@ fn missing_command_in_pipeline_reports_user_command() {
     assert!(
         out.stderr.contains("this-command-does-not-exist-1729"),
         "stderr={}",
-        out.stderr
-    );
-}
-
-/// The other half of the same rule, read off the status rather than the
-/// value: an unforced block never runs, so the `fail` inside it never
-/// fires.  Both stages are thunks nobody forces, and the pipeline — whose
-/// own value is discarded at statement position — succeeds having done
-/// nothing at all.
-#[test]
-fn a_failing_block_in_stage_position_never_fires() {
-    let out = run(
-        "win_pipe_unforced_fail",
-        r#"
-        { fail [status: 1, message: "boom"] } | { |x| echo $x }
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(
-        out.stdout.is_empty(),
-        "an unforced block wrote stdout={}",
-        out.stdout
-    );
-    assert!(
-        !out.stderr.contains("boom"),
-        "the unforced block's failure fired; stderr={}",
         out.stderr
     );
 }

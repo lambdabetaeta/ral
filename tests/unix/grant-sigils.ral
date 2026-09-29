@@ -1,0 +1,53 @@
+# Test: `cwd:` and `gitdir:` grant sigils freeze once, at the grant
+
+let denial = { |body|
+    try { !$body; return 'ALLOWED' } { |e| return $e[message] }
+}
+let root = temp-dir
+let dir-a = "$root/a"
+let dir-b = "$root/b"
+mkdir -p $dir-a $dir-b
+to-string a-pos > "$dir-a/f"
+to-string b-pos > "$dir-b/f"
+
+# `cwd:` names the directory at the grant; a chdir inside cannot widen it
+cd $dir-a
+echo !{grant [fs: [read: ['cwd:']]] { from-string < 'f' }}
+let widened = denial { grant [fs: [read: ['cwd:']]] { cd $dir-b; from-string < 'f' } }
+echo !{re-match '^fs read denied by grant: .*/b/f$' $widened}
+
+# `gitdir:` follows a .git pointer only when the git directory claims the tree back
+let linked = "$root/main/.git/worktrees/wt"
+mkdir -p $linked "$root/wt"
+to-string "gitdir: ../main/.git/worktrees/wt" > "$root/wt/.git"
+to-string "$root/wt/.git" > "$linked/gitdir"
+cd "$root/wt"
+to-string linked-index > "$linked/index"
+let read-at = { |sigil path| grant [fs: [read: [$sigil]]] { from-string < $path } }
+echo !{read-at 'gitdir:/index' "$linked/index"}
+echo !{re-match 'denied by grant' !{denial { read-at 'gitdir:/index' "$root/a/f" }}}
+
+# `core.worktree` in the git directory is an equally good claim
+mkdir -p "$root/repo.git" "$root/tree"
+to-string "gitdir: ../repo.git" > "$root/tree/.git"
+to-string "[core]\n\tworktree = ../tree\n" > "$root/repo.git/config"
+cd "$root/tree"
+to-string bare-config > "$root/repo.git/HEAD"
+echo !{read-at 'gitdir:' "$root/repo.git/HEAD"}
+
+# An unclaimed pointer is refused, naming its target
+mkdir -p "$root/secrets" "$root/rogue"
+to-string "gitdir: ../secrets" > "$root/rogue/.git"
+cd "$root/rogue"
+echo !{re-match 'secrets' !{denial { read-at 'gitdir:' "$root/a/f" }}}
+
+# A git directory that claims another tree is stale
+mkdir -p "$root/moved" "$root/main/.git/worktrees/gone"
+to-string "gitdir: ../main/.git/worktrees/gone" > "$root/moved/.git"
+to-string "$root/elsewhere/wt/.git" > "$root/main/.git/worktrees/gone/gitdir"
+cd "$root/moved"
+echo !{re-match 'does not name this working tree back' !{denial { read-at 'gitdir:' "$root/a/f" }}}
+
+cd $root
+rm -rf $root
+echo 'grant sigil tests done'

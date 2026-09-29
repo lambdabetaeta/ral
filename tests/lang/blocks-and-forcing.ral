@@ -24,4 +24,28 @@ echo $result
 let run = { |_| echo 'deferred' }
 !{run ()}
 
+# Currying: a partial application is a function of the remaining parameters
+let add3 = { |x y z| return $[$x + $y + $z] }
+echo !{add3 1 2 3}
+let add12 = add3 1 2
+echo !{add12 3}
+
+# `!{...}` atoms in one command evaluate left to right, before the command
+let three = { |a b c| return [$a, $b, $c] }
+echo ...!{three !{echo A; return 1} !{echo B; return 2} !{echo C; return 3}}
+
+# A block literal in stage position is a value, not a stage: it is returned
+# unforced, so neither block runs and a failing one never fires
+let staged = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
+echo $staged
+{ fail [status: 1, message: "boom"] } | { |x| echo $x }
+
+# In a sequence, a non-final step's bytes are effect; the block's value is its tail's
+let seq_out = !{ echo one; echo two }
+echo "bound [$seq_out]"
+
+# `let _ = M` captures and drops M's bytes
+let _ = echo secret
+echo done
+
 echo 'block tests done'

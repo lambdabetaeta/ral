@@ -23,4 +23,13 @@ if !{equal $action 'quit'} { echo quitting }
 let other = 'bogus'
 if !{equal $other 'help'} { echo help } else { echo fallback }
 
+# Branches may yield functions
+let pick = if true { |x| return $x } else { |x| return nope }
+echo !{pick hello}
+let pick2 = if false { |x| return nope } else { |x| return $x }
+echo !{pick2 world}
+
+# A `?` arm that is not taken hoists nothing
+echo !{return 1 ? return !{fail [status: 1, message: "untaken arm's hoist ran"]}}
+
 echo 'conditional tests done'

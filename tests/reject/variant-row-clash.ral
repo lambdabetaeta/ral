@@ -1,0 +1,2 @@
+# contains: couldn't match
+return [`ok 1, `err 2, `ok hello]

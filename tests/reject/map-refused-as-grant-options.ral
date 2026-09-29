@@ -1,0 +1,2 @@
+# contains: takes named options
+let m = [:, net: true]; grant $m { return "ok" }

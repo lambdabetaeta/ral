@@ -1,0 +1,3 @@
+# contains: the pipe writes into a stdin this `<` replaces
+# contains: run the stage's producer as its own statement
+echo hi | cat < notes.txt

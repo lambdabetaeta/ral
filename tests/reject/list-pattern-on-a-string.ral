@@ -1,0 +1,2 @@
+# contains: couldn't match type String with type [α]
+let [a, b] = 'hello'

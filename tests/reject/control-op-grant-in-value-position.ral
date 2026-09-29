@@ -1,0 +1,3 @@
+# contains: 'grant' is a control operator
+let x = $grant
+return $x

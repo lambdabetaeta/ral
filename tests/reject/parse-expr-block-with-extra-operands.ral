@@ -1,0 +1,2 @@
+# contains: expected an operator
+echo $[1 2 3]

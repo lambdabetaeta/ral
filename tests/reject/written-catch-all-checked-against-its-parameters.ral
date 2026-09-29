@@ -1,0 +1,2 @@
+# contains: couldn't match type [String] with type Integer
+within [handler: { |n a| let bad = $a[$a]; return () }] { zzz }

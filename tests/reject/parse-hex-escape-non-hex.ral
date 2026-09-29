@@ -1,0 +1,2 @@
+# contains: two hex digits
+return "\xZZ"

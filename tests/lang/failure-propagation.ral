@@ -20,4 +20,15 @@ cat /nonexistent 2> /dev/null ? echo 'recovered'
 # ? chain: when every arm fails, the final error propagates
 try { cat /nonexistent 2> /dev/null ? cat /also-missing 2> /dev/null } { |_| echo 'all arms failed' }
 
+# A failing pipeline under `try` and capture reports through both frames
+echo !{try { !{ echo a | fail [status: 7, message: 'boom'] } } { |e| return $e[status] }}
+
+# A non-final `?` arm's failure stays catchable inside a function
+let broken = { |x| fail [status: 1, message: 'boom'] }
+let fallback = { |y| broken $y ? return 7 }
+echo !{fallback 1}
+
+# A failing `guard` cleanup fails the computation with its own status and message
+echo !{try { let _ = guard { return 7 } { fail [status: 3, message: 'release failed'] }; return '' } { |e| return "$e[status] $e[message]" }}
+
 echo 'failure propagation tests done'

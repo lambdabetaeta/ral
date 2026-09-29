@@ -25,3 +25,17 @@ let servers = [
 for $servers { |[host: h, port: p]|
     echo "$h:$p"
 }
+
+# Wildcards discard
+let _ = 42
+let [_, second] = [1, 2]
+echo $second
+
+# A put destructures to each field's winner
+let dflt = [host: 'local', port: 80]
+let [host: hn, port: pn] = [tier: 'a', ...$dflt, host: 'prod']
+echo "$hn $pn"
+
+# A shape mismatch in length is a runtime error
+try { let [a, b, c] = [1, 2] } { |_| echo 'too few' }
+try { let [a, b] = [1, 2, 3] } { |_| echo 'too many' }

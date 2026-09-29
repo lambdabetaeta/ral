@@ -24,4 +24,47 @@ echo $base
 let total = fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]
 echo $total
 
+# An unbound name is a runtime error
+try { echo $nonexistent } { |_| echo 'undefined caught' }
+
+# A local binding wins at the bare head
+echo !{ let echo = { |n| return $[$n + 1] }; echo 5 }
+
+# A native is shadowed by a `let` and restored when the scope exits
+let inside = !{ let list-dir = 'shadowed'; return $list-dir }
+echo $inside
+let _ = list-dir .
+echo 'native restored'
+
+# A later non-thunk `let` does not capture an earlier use of a builtin
+upper hi
+let upper = 5
+
+# Consecutive thunk lets form one recursive group: forward references resolve
+let fwd = { |n| bwd $n }
+let bwd = { |n| return $[$n + 1] }
+echo !{fwd 41}
+let ta = { return $[!{tb} + 1] }
+let tb = { return 41 }
+echo !{ta}
+
+# A block's `let` never reaches the enclosing scope
+grant [exec: [:]] { let leak_grant = 1 }
+try { echo $leak_grant } { |_| echo 'grant: no leak' }
+within [env: [K: v]] { let leak_within = 1 }
+try { echo $leak_within } { |_| echo 'within: no leak' }
+try { let leak_try = 1 } { |_e| let _ignore = 0 }
+try { echo $leak_try } { |_| echo 'try: no leak' }
+guard { let leak_guard = 1 } { echo 'guard cleanup' }
+try { echo $leak_guard } { |_| echo 'guard: no leak' }
+audit { let leak_audit = 1 }
+try { echo $leak_audit } { |_| echo 'audit: no leak' }
+let forced = !{ let leak_bare = 1 }
+try { echo $leak_bare } { |_| echo 'forced block: no leak' }
+
+# A let's extent is the rest of its own block, never a sibling's
+echo !{ let extent_x = 41; return $[$extent_x + 1] }
+!{ let extent_y = 1; return $extent_y }
+try { !{ return $extent_y } } { |_| echo 'sibling block does not see it' }
+
 echo 'scoping tests done'

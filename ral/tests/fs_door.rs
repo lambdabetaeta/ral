@@ -146,14 +146,6 @@ fn a_link_to_a_denied_file_is_judged_at_the_file() {
     assert_eq!(read(&fx.path("work/secret")), "keep\n");
 }
 
-#[test]
-fn a_plain_new_file_inside_the_grant_still_works() {
-    let fx = Fixture::new("plain", &["."], &[]);
-    let out = fx.run(&[], "echo fresh > 'ROOT/work/new'");
-    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
-    assert_eq!(read(&fx.path("work/new")), "fresh\n");
-}
-
 /// The before-image is a read.  Under a grant that writes `work` but reads
 /// nothing, the replacement lands and the trail carries no old bytes; under
 /// one that also reads, it carries them — so the withholding is the grant's

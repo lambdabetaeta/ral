@@ -13,7 +13,7 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -208,4 +208,25 @@ pub fn run_with_timeout(
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// Every `.ral` file under `dir`, sorted, never entering a directory named in
+/// `prune`.
+pub fn discover(dir: &Path, prune: &[&str]) -> Vec<PathBuf> {
+    let mut scripts = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if !path
+                .file_name()
+                .is_some_and(|n| prune.iter().any(|p| n == *p))
+            {
+                scripts.extend(discover(&path, prune));
+            }
+        } else if path.extension().is_some_and(|e| e == "ral") {
+            scripts.push(path);
+        }
+    }
+    scripts.sort();
+    scripts
 }

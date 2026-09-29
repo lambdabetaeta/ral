@@ -28,6 +28,20 @@ fn run_script(path: &Path, args: &[&str]) -> Output {
 }
 
 /// Run `ral [args…]` with `script` piped on stdin and no script positional.
+fn run_c(code: &str) -> Output {
+    let out = ral_command()
+        .arg("-c")
+        .arg(code)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn ral");
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
 fn run_stdin(args: &[&str], script: &str) -> Output {
     let mut child = ral_command()
         .args(args)
@@ -100,4 +114,38 @@ fn stdin_script_errors_carry_a_stdin_location() {
         o.stderr
     );
     assert!(o.stderr.contains("<stdin>:2:1"), "stderr: {}", o.stderr);
+}
+
+#[test]
+fn exit_escapes_try_and_guard_cleanup_with_its_own_code() {
+    let o = run_c("try { exit 7 } { |_e| return () }");
+    assert_eq!(
+        o.status, 7,
+        "`try` must not swallow `exit`; stderr: {}",
+        o.stderr
+    );
+
+    let o = run_c("guard { echo body } { exit 5 }");
+    assert_eq!(
+        o.status, 5,
+        "a `guard` cleanup's `exit` must escape; stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn a_file_descriptor_prefix_on_input_redirects_is_a_parse_error() {
+    for (source, message) in [
+        ("audit { /bin/cat 1< f }", "always feeds standard input"),
+        ("audit { /bin/cat 2< f }", "always feeds standard input"),
+        ("/bin/cat 1< f", "always feeds standard input"),
+        ("/bin/echo hi 0> f", "standard input cannot be written to"),
+        ("/bin/echo hi 0>> f", "standard input cannot be written to"),
+        ("/bin/echo hi 0>~ f", "standard input cannot be written to"),
+        ("/bin/cat 1<< body", "drop the file-descriptor prefix"),
+    ] {
+        let o = run_c(source);
+        assert_ne!(o.status, 0, "{source:?} must not run");
+        assert!(o.stderr.contains(message), "{source:?} gave {}", o.stderr);
+    }
 }

@@ -12,7 +12,10 @@
 //! That gate is read twice.  A shape is what a type states, so wherever an
 //! argument's type is concrete the checker refuses it before the run (T0057);
 //! where polymorphism hides it, the pre-spawn refusal is still there to catch it.
-//! One refused set, two moments — and the tests below pin which moment answers.
+//! One refused set, two moments.  The run-time half — what an arm receives,
+//! total rendering, the refusal at the exec boundary — is the golden
+//! `tests/lang/argv.ral`; the tests below keep what a golden cannot say, the
+//! hint on the refusal and the absence of a static diagnostic.
 //!
 //! Everything here drives the public `run` door, so each test is the session a
 //! user has.
@@ -72,13 +75,6 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
     }
 }
 
-/// What `src` writes to stdout, the run having succeeded.
-fn printed(src: &str) -> String {
-    let (result, out) = run_capture(src);
-    result.unwrap_or_else(|e| panic!("{src:?} must run: {e:?}"));
-    out
-}
-
 /// The type diagnostics `src` earns without ever reaching the evaluator, by
 /// code — empty when it does reach it.
 fn static_codes(src: &str) -> Vec<String> {
@@ -107,78 +103,6 @@ fn static_codes(src: &str) -> Vec<String> {
     }
 }
 
-/// Run `src` expecting a `Break::Error` whose message contains `needle`.
-fn refused(src: &str, needle: &str) {
-    match run_capture(src).0 {
-        Err(Break::Error(e)) => assert!(
-            e.message.contains(needle),
-            "{src:?}: error {:?} should mention {needle:?}",
-            e.message
-        ),
-        Ok(v) => panic!("{src:?}: expected a refusal mentioning {needle:?}, got {v:?}"),
-        Err(other) => panic!("{src:?}: expected Break::Error, got {other:?}"),
-    }
-}
-
-// ── An arm receives renderings ────────────────────────────────────────────────
-
-/// The runtime half of the argv rule: the arm is handed the argv as text, so
-/// what it spreads onward is the text form of each atom the call site wrote.
-#[test]
-fn an_arm_receives_its_argv_rendered() {
-    assert_eq!(
-        printed(r"within [handlers: [mycmd: { |args| echo 'got' ...$args }]] { mycmd 1 true }"),
-        "got 1 true\n"
-    );
-    assert_eq!(
-        printed(r"alias mycmd { |args| echo 'got' ...$args }; mycmd 3.5 [a: 1]"),
-        "got 3.5 [a: 1]\n"
-    );
-}
-
-/// An arm may also read its argv as the list it is, element by element.
-#[test]
-fn an_arm_can_index_its_argv() {
-    assert_eq!(
-        printed(r"within [handlers: [mycmd: { |args| echo $args[1] }]] { mycmd first second }"),
-        "second\n"
-    );
-}
-
-// ── Rendering inside is total; the exec boundary is gated ─────────────────────
-
-/// Every value has a text form, so every value crosses an in-shell argv.  A
-/// map, a lambda and a block are the shapes an external will refuse, and here
-/// they simply print.
-#[test]
-fn rendering_an_argv_is_total() {
-    assert_eq!(
-        printed(
-            r"let f = { |x| return $x }; let blk = { echo hi }; echo [a: 1] $f $blk 3.5 [1, 2]"
-        ),
-        "[a: 1] <|x| block> <block> 3.5 [1, 2]\n"
-    );
-}
-
-/// The same shapes reaching a real spawn are refused, because `execve(2)` has
-/// no argument for them.  This is the boundary the total renderer must not be
-/// mistaken for: `cat` is a bundled tool, vetted exactly as a host binary is.
-///
-/// A parameter is what hides the shape from the checker here — inside the arm
-/// `$v` is any type at all — so these runs reach the evaluator and are refused
-/// by `vet`, one step from the syscall.
-#[test]
-fn the_exec_boundary_refuses_what_rendering_accepts() {
-    refused(
-        "let show = { |v| cat $v }; show [a: 1]",
-        "cannot pass Map to external command",
-    );
-    refused(
-        r"let show = { |v| cat $v }; let f = { |x| return $x }; show $f",
-        "cannot pass Lambda to external command",
-    );
-}
-
 /// A list is refused there too, and the refusal names the notation that lowers
 /// it — so the gate teaches the argv the user meant.
 #[test]
@@ -192,21 +116,7 @@ fn the_exec_boundary_names_the_spread_that_lowers_a_list() {
     }
 }
 
-// ── One refused set, read at two moments ──────────────────────────────────────
-
-/// Written out, the shape is in the type, and the type is in hand before the
-/// run: the refusal comes as a diagnostic and nothing is spawned.
-#[test]
-fn a_concretely_unrenderable_argument_never_reaches_the_spawn() {
-    for src in [
-        "let r = [a: 1]; cat $r",
-        "let xs = [a, b]; cat $xs",
-        r"let f = { |x| return $x }; cat $f",
-        "let h = spawn { return 1 }; cat $h",
-    ] {
-        assert_eq!(static_codes(src), ["T0057"], "{src:?}");
-    }
-}
+// ── What the checker leaves to the spawn ──────────────────────────────────────
 
 /// And what the type does not say, the checker does not say either: a
 /// parameter's shape is the run's business, so the same call passes the gate
@@ -218,88 +128,12 @@ fn a_polymorphic_argument_is_left_to_the_spawn() {
         static_codes("let show = { |v| cat $v }; show [a: 1]").is_empty(),
         "a parameter's shape is not known here, so nothing may be refused"
     );
-}
-
-/// Nor does the checker say anything about a spread's elements, however concrete
-/// their type — and this is the run that says why.  A spread contributes as many
-/// arguments as its list holds; an empty one contributes none and so reaches
-/// `execve(2)` cleanly, though every element it could have held is a refused
-/// shape.  A static refusal here would reject a call that runs.
-#[test]
-fn an_empty_spread_of_unrenderable_elements_spawns_cleanly() {
-    let src = "let none = filter { |xs| return $[false] } [[1], [2]]; cat ...$none";
-    assert!(static_codes(src).is_empty(), "a spread is not gated");
-    assert_eq!(printed(src), "", "`cat` with no argument reads empty stdin");
-}
-
-/// The gate is the exec boundary's alone.  An argv the shell renders itself —
-/// `echo`'s frame, a handler arm — takes every shape, before the run as at it.
-#[test]
-fn an_in_shell_argv_is_gated_by_nothing() {
-    for src in [
-        "echo [a: 1]",
-        r"let f = { |x| return $x }; echo $f [1, 2]",
-        r"alias mycmd { |args| echo ...$args }; mycmd [a: 1]",
-        r"within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd [a: 1] }",
-    ] {
-        assert!(static_codes(src).is_empty(), "{src:?} must typecheck");
-    }
-}
-
-// ── `echo` is a base frame ────────────────────────────────────────────────────
-
-/// `^echo` is the path-head arm too (ruling 2): the operating system's `echo`,
-/// not this frame — so a lambda argument is refused at the exec boundary
-/// exactly as any other external's is, statically, since its type is concrete.
-#[test]
-fn caret_echo_is_the_path_binary_and_refuses_a_lambda() {
-    let src = r"let f = { |x| return $x }; ^echo $f";
-    assert_eq!(static_codes(src), ["T0057"], "{src:?}");
-}
-
-/// Being a frame rather than a value, `echo` can be stacked on: a handler under
-/// its name intercepts the bare head.  Self-masking (bare `echo` inside the
-/// arm, not `^echo` — ruling 2 makes that the binary) is what reaches the
-/// frame underneath.
-#[test]
-fn a_handler_stacked_on_echo_intercepts_the_bare_name() {
-    assert_eq!(
-        printed(r"within [handlers: [echo: { |args| echo 'mocked' ...$args }]] { echo hi there }"),
-        "mocked hi there\n"
-    );
-}
-
-/// And the frame is restored at the brace, the stack being scoped.
-#[test]
-fn echos_frame_returns_at_the_brace() {
-    assert_eq!(
-        printed(r"within [handlers: [echo: { |args| echo 'mocked' }]] { echo hi }; echo plain"),
-        "mocked\nplain\n"
-    );
-}
-
-/// A base frame keeps its manifest row, so the two verbs that read the manifest
-/// still answer for it: `explain` prints the row's doc and type, and reports the
-/// frame as what would run — as the builtin it is, since answering through the
-/// stack is what distinguishes it from a handler someone installed, not
-/// something the reader has to be told.
-#[test]
-fn explain_still_reads_echos_manifest_row() {
-    let out = printed("explain echo");
-    for fragment in ["write one line", "[String] → Command", "echo: builtin"] {
-        assert!(
-            out.contains(fragment),
-            "explain echo should mention {fragment:?}, got:\n{out}"
-        );
-    }
-}
-
-/// `help`'s overview likewise still lists it.
-#[test]
-fn help_still_lists_echo() {
-    let out = printed("help");
+    // Nor is a spread's elements' shape: an empty spread reaches `execve(2)`
+    // cleanly, and a static refusal would reject a call that runs.
     assert!(
-        out.contains("echo — echo <args...>"),
-        "help should list `echo`, got:\n{out}"
+        static_codes("let none = filter { |xs| return $[false] } [[1], [2]]; cat ...$none")
+            .is_empty(),
+        "a spread is not gated"
     );
 }
+

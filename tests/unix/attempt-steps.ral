@@ -1,0 +1,15 @@
+# Test: attempt makes each step a verdict of its own
+
+# A child killing itself with the terminal's key did not press it: no
+# terminal was lent, so attempt recovers and the script carries on
+attempt { sh -c 'kill -INT $$' }
+echo $[1234*2]
+# Expected: 2468
+
+# Every step runs, and the audit observes all of them
+let result = audit { attempt { echo A }; attempt { /usr/bin/false }; attempt { echo C } }
+echo !{succeeded $result}
+echo !{length $result[trail]}
+# Expected: true / 3
+
+echo 'attempt tests done'

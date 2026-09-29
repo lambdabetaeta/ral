@@ -1,0 +1,31 @@
+# Test: grant [exec:] subcommand policies
+
+# A listed subcommand runs; an unlisted one is denied
+grant [exec: ['/bin/sh': [-c]]] { /bin/sh -c 'exit 0' }
+echo 'listed subcommand runs'
+try { grant [exec: ['/bin/sh': [-c]]] { /bin/sh -s } } { |_| echo 'unlisted subcommand denied' }
+
+# Nested grants intersect: -s is in the outer list only
+try {
+    grant [exec: ['/bin/sh': [-c, -s]]] { grant [exec: ['/bin/sh': [-c]]] { /bin/sh -s } }
+} { |_| echo 'intersection denies outer-only' }
+
+# A thunk is not an exec policy
+try { grant [exec: [cmd: { return ok }]] { cmd } } { |e| echo $e[message] }
+
+# Refusal needs no audit trail around it
+try { grant [exec: ['/bin/echo': 'allow']] { /bin/sh -c 'exit 0' } } { |_| echo 'refused' }
+
+# A directory key admits what lives under it and nothing else
+grant [exec: ['/bin/': 'allow']] { /bin/echo 'under the key' }
+try { grant [exec: ['/bin/': 'allow']] { /usr/bin/env true } } { |_| echo 'outside the key denied' }
+
+# An inner layer's exec map is a complete opinion: /bin/echo is not in it
+try {
+    grant [exec: ['/bin/': 'allow']] { grant [exec: ['/usr/bin/env': 'allow']] { /bin/echo hi } }
+} { |_| echo 'inner layer denies what it omits' }
+
+# Each policy shape is accepted: a subcommand list, an inline string, a subpath
+grant [exec: [git: ['status', 'log'], make: 'allow', '/usr/bin/': 'allow']] { echo 'policy shapes run' }
+
+echo 'grant exec tests done'

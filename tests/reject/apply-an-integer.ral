@@ -1,0 +1,3 @@
+# contains: couldn't match type Integer
+let f = 42
+f 1 2 3

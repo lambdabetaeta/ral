@@ -1,0 +1,3 @@
+# contains: no field named 'nope'
+let r = [dummy: 0, ...[flag: 1]]
+return $r[nope]

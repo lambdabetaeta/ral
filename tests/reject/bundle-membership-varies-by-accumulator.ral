@@ -1,0 +1,4 @@
+# contains: 'dir'
+let step = { |acc x| return [...$acc, dir: "/tmp"] }
+let o = fold $step [env: [:]] [1]
+within $o { return "ok" }

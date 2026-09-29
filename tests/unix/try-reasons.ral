@@ -1,0 +1,20 @@
+# Test: how try reports a command that did not succeed
+
+# The handler's record names why: exited, not-found, signaled, not-runnable
+try { sh -c 'exit 3'; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+try { /nonexistent/ral-no-such-command; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+try { ral-no-such-command; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+try { sh -c 'kill -SEGV $$'; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+
+# A file without the execute bit is not runnable, by path or through PATH
+let dir = temp-dir
+to-string '#!/bin/sh' > "$dir/not-executable"
+within [dir: $dir] {
+    try { ./not-executable; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+}
+within [env: [PATH: "$dir:/bin:/usr/bin"]] {
+    try { not-executable; fail [status: 99, message: 'ran'] } { |e| echo $e[reason] $e[status] }
+}
+rm -rf $dir
+
+echo 'try reason tests done'

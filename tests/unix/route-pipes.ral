@@ -1,0 +1,75 @@
+# Test: how a stage's bytes and reads are joined across a pipe — which
+# statement of a block reads the pipe, and where a branch's writes go
+
+let d = temp-dir
+echo note > "$d/notes.txt"
+echo line > "$d/input.txt"
+
+# A producer need not write; the reader sees EOF
+return hello | echo
+
+# guard: cleanup bytes are ambient (here, the pipe); either arm may read
+guard { return () } { echo cleanup } | cat
+echo one | guard { from-string } { return () }
+echo two | guard { return () } { from-string }
+
+# A stage-root `<` answers the stage's reads; a `<` off the root does not
+within [dir: $d] {
+    cat < notes.txt | from-string
+    echo hi | !{ cat < notes.txt ; from-string }
+    # The rewrites the refusal names keep every command written
+    cat < notes.txt
+    echo hi ; cat < notes.txt
+    let handle = spawn { echo spawned }
+    cat < notes.txt
+    await $handle
+}
+
+# A forced variable can still become a byte-reading stage at the edge
+let feed = { |k| echo a | !$k }
+feed { /bin/cat }
+
+# A reader anywhere in a block stage, not just its last statement, takes the pipe
+echo foo | within [env: [X: 'y']] { from-lines; return () }
+echo foo | within [env: [X: 'y']] { let got = !{from-lines}; length $got }
+# ... and a stage that never reads leaves the bytes unread
+echo foo | within [env: [X: 'y']] { let n = [1]; length $n }
+
+# A block literal in stage position is a value; forcing it makes it a stage
+let reader = { from-line }
+let got = cat "$d/input.txt" | !$reader
+echo "[$got]"
+cat "$d/input.txt" | { from-line }
+
+# A branch's writes belong to the stage, not to its returned value
+if true { echo hi; return 1 } else { return 2 } | cat
+if true { echo a; return 1 } else { echo b; return 2 } | cat
+!{ let bound = !{ echo inner; return 5 }; return () } | cat
+!{ let held = echo swallowed; length $held } | from-string
+echo 'binding kept its bytes out of the pipe'
+
+# A frame routes a pipeline as bytes
+echo hi | grep .
+let words = [a, b]
+echo ...$words | grep .
+
+# A spread is how a list becomes an external's argv
+let flags = [hello, world]
+/bin/echo ...$flags
+
+# Every remedy the exec-boundary refusals name is itself well-typed
+let nums = [1, 2]
+/bin/echo ...$nums
+let rec = [a: 1]
+/bin/echo $rec[a]
+/bin/echo !{to-json $rec}
+let blk = { echo hi }
+/bin/echo !{!$blk}
+let hd = spawn { return 1 }
+let res = await $hd
+/bin/echo $res[value]
+let raw = !{echo hi | from-bytes}
+to-bytes $raw | /bin/cat
+
+rm -rf $d
+echo 'route pipes done'

@@ -15,5 +15,41 @@ within [env: [HOME: '/ral-home-probe']] {
 }
 if !{equal !{absolute-path '~/x'} "$real_home/x"} { echo 'home restored' }
 
+# `within [dir:]` anchors relative paths of builtins and the cwd of children
+let wd = temp-dir
+within [dir: $wd] {
+    to-string hello > 'note.txt'
+    echo !{equal !{cwd} $wd}
+    echo !{from-string < 'note.txt'}
+    echo !{exists 'note.txt'}
+    echo !{length !{glob '*.txt'}}
+    echo !{equal !{/bin/pwd} $wd}
+}
+rm -rf $wd
+
+# ral keeps no previous directory, so children never see OLDPWD
+try { /usr/bin/env | grep -q '^OLDPWD='; echo leaked } { |_| echo 'no OLDPWD' }
+
+# `absolute-path` is lexical: it anchors to the logical cwd without
+# canonicalising, tolerates missing components, and folds `.`/`..` as text
+let lexroot = temp-dir
+mkdir -p "$lexroot/d1/real"
+ln -s "$lexroot/d1/real" "$lexroot/link"
+within [dir: $lexroot] {
+    echo !{equal !{absolute-path 'no/such/./dir/../leaf'} "$lexroot/no/such/leaf"}
+    echo !{equal !{absolute-path 'link'} "$lexroot/link"}
+    echo !{equal !{absolute-path 'link/../x'} "$lexroot/x"}
+    echo !{equal !{absolute-path ''} $lexroot}
+    echo !{equal !{absolute-path 'sub/'} "$lexroot/sub"}
+}
+echo !{absolute-path '/..'}
+echo !{absolute-path '/a/../../x'}
+
+# `resolve-path` is physical but still anchors to the logical cwd
+to-string x > "$lexroot/leaf"
+within [dir: $lexroot] { echo !{equal !{resolve-path 'leaf'} !{resolve-path "$lexroot/leaf"}} }
+within [dir: $lexroot] { echo !{equal !{resolve-path 'link'} !{resolve-path "$lexroot/d1/real"}} }
+rm -rf $lexroot
+
 rm -rf $t
 echo 'paths tests done'

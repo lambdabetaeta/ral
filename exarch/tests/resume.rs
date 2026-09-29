@@ -28,16 +28,6 @@ fn envelope_line(record: &record::Record) -> String {
     serde_json::json!({ "at_unix_ms": 0, "record": record }).to_string()
 }
 
-/// The fold's blocks, each as its own `{:?}` — the debug vocabulary these
-/// tests compare against, rather than a rendered string.
-fn debug_kinds(blocks: &Blocks) -> Vec<String> {
-    blocks
-        .blocks()
-        .iter()
-        .map(|b| format!("{:?}", b.kind()))
-        .collect()
-}
-
 /// Whether any resident block carries `needle` in its own text — matched on
 /// the fold's kinds directly (`Prompt`/`Answer`), not a rendered string.
 fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
@@ -173,49 +163,6 @@ fn scripted_run_kill_resume_and_continue() {
     );
 }
 
-/// The fold's blocks are a pure function of whatever the log admitted, so
-/// folding the same file twice — the regenerability law step 6 exists for —
-/// must agree block for block, whether or not a scrollback in between ever
-/// flushed `user.log` from a resident window rather than the whole history.
-#[test]
-fn the_view_folds_render_is_a_pure_function_of_the_log() {
-    let root = tempfile::tempdir().expect("scratch dir");
-    let path = root.path().join("record.jsonl");
-    let emit = record::Emitter::create(&path).expect("fresh record log");
-    let _ = emit
-        .emit(record::Display::Prompt {
-            text: "hello".into(),
-        })
-        .expect("a display commit records");
-    let _ = emit
-        .emit(record::Display::Answer {
-            text: "hi back".into(),
-        })
-        .expect("a display commit records");
-    let _ = emit
-        .emit(record::Forensic::SystemNote {
-            text: "a note".into(),
-        })
-        .expect("a forensic record records");
-
-    let first = debug_kinds(
-        &record::replay::<View>(&path, Blocks::default()).expect("a fresh log replays cleanly"),
-    );
-    let second = debug_kinds(
-        &record::replay::<View>(&path, Blocks::default())
-            .expect("replaying the same log twice must agree"),
-    );
-    assert_eq!(
-        first, second,
-        "the fold's blocks are a pure function of the log, never an accumulator with its own state"
-    );
-    assert!(
-        first.iter().any(|k| k.contains("hello"))
-            && first.iter().any(|k| k.contains("hi back"))
-            && first.iter().any(|k| k.contains("a note"))
-    );
-}
-
 /// A record the fold does not recognise refuses the whole session rather
 /// than silently dropping the line or panicking — the versioned display
 /// vocabulary's own law.
@@ -252,45 +199,6 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
             "a record the fold cannot parse must refuse the whole replay, not silently succeed"
         ),
     }
-}
-
-/// A `record.jsonl` written before the identity fields split carries a bare
-/// `"provider"` and no `"service"`/`"account"` — the wire shape the
-/// rename-not-remove on `record.rs`'s three identity fields exists to keep
-/// resumable. The bookend is `Forensic`: a log older than *that* change does
-/// not resume at all, and is not what this pins.
-#[test]
-fn a_pre_change_record_log_still_resumes() {
-    let root = tempfile::tempdir().expect("run root");
-    let run_dir = root.path().to_path_buf();
-    let sessions = run_dir.join("sessions/0");
-    std::fs::create_dir_all(&sessions).expect("session dir");
-    let path = sessions.join("record.jsonl");
-    let line = serde_json::json!({
-        "at_unix_ms": 0,
-        "record": {
-            "Forensic": {
-                "kind": "session_started",
-                "session_id": 0,
-                "parent": null,
-                "model": "old-model",
-                "provider": "old-label",
-                "system_prompt_bytes": 0,
-                "log_dir": sessions,
-                "at_unix_ms": 0,
-            }
-        }
-    })
-    .to_string();
-    std::fs::write(&path, format!("{line}\n")).expect("write pre-change record.jsonl");
-
-    let resumed = Avatar::root(
-        root_config(&run_dir, true),
-        identity_seat("pre-change-resume"),
-        scripted("test-model", Script::new()),
-    )
-    .expect("a pre-change record.jsonl must still resume");
-    assert!(resumed.is_ready());
 }
 
 #[test]

@@ -1,0 +1,2 @@
+# contains: payload route
+try { echo hi } { |_| return 's' }

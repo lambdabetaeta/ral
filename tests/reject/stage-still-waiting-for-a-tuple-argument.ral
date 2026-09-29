@@ -1,0 +1,3 @@
+# contains: a pipeline stage must be ready to run
+let s = `more [head: 1, tail: { return `done }]
+$s | !{ |e| return $[$e + 1] }

@@ -1,0 +1,2 @@
+# contains: names a variant
+let [`b: x] = $r

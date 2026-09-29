@@ -1,0 +1,2 @@
+# contains: fail requires a nonzero status
+fail [status: 0, message: 'zero status should be rejected']

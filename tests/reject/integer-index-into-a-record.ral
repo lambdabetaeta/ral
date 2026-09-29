@@ -1,0 +1,4 @@
+# codes: T0062
+# contains: with a runtime key
+let m = [a: 1, b: 2]
+return $m[0]

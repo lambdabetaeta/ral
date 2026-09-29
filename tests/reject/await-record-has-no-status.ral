@@ -1,0 +1,4 @@
+# contains: no field named 'status'
+let h = !{spawn { return 1 }}
+let r = await $h
+return $r[status]

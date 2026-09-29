@@ -1,0 +1,8 @@
+[job] from-watch-1
+[job] from-watch-2
+marker-after
+[a] alpha
+[b] beta
+[job:err] err
+[build-prod] step
+watch tests done

@@ -1,0 +1,41 @@
+# Test: dedent, words, nub, re-find-* and string-replace at their edges
+
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
+let check = { |name expected actual|
+    if !{equal $expected $actual} { echo "ok: $name" } else {
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+# dedent counts characters, not bytes: a no-break space is one column
+check 'dedent multibyte' "a\nb" !{dedent "\u{00A0}a\n b"}
+# blank lines pass through verbatim
+check 'dedent blank line' "a\n  \nb" !{dedent "  a\n  \n  b"}
+# interior CRLF is kept; the closing framing line takes the last terminator
+check 'dedent crlf' "a\r\nb" !{dedent "  a\r\n  b\r\n"}
+# the opening and closing newlines of a quoted block are framing
+check 'dedent framing' "foo\nbar" !{dedent "\n  foo\n  bar\n"}
+# only the common margin goes
+check 'dedent relative' "  let x = 1\nlet y = 2" !{dedent #'
+      let x = 1
+    let y = 2
+'#}
+# a lone line has no peers to share a margin with
+check 'dedent single line' "  hello" !{dedent "  hello"}
+
+# words drops empties at both ends
+check 'words' [hello, world] !{words ' hello world '}
+
+# nub keeps the first sighting, in order
+check 'nub' [b, a, c] !{nub ['b', 'a', 'b', 'c', 'a']}
+
+# re-find-match takes the first, re-find-matches all, and absence is an error
+check 're-find-match' '12' !{re-find-match '[0-9]+' 'a12b34'}
+check 're-find-matches' ['12', '34'] !{re-find-matches '[0-9]+' 'a12b34'}
+refusal { re-find-match '[0-9]+' 'abc'; return () }
+
+# string-replace demands exactly one literal occurrence
+check 'string-replace' 'hello ral' !{string-replace 'world' 'ral' 'hello world'}
+refusal { string-replace 'o' '0' 'foo'; return () }
+
+echo 'text edge tests done'

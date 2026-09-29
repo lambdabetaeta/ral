@@ -26,3 +26,7 @@ echo !{length $small}
 let h = spawn { yes ral | head -c 20000000 }
 let res = await $h
 echo !{length $res[stdout]}
+
+# Under audit, stderr rides the same buffer and is captured in full
+let noisy = audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' } 2> /dev/null
+echo !{length !{commands $noisy}[0][stderr]}

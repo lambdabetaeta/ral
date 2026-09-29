@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+# contains: !{!$b}
+let b = { echo hi }; /bin/echo $b

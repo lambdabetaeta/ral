@@ -13,20 +13,6 @@ mod common;
 use common::run;
 
 #[test]
-fn an_abandoned_tail_is_named() {
-    let out = run(
-        "ral_abandoned_tail",
-        "echo first\n/usr/bin/false\necho second\necho third\n",
-    );
-    assert!(
-        out.stderr.contains("later steps in this block did not run"),
-        "stderr: {}",
-        out.stderr
-    );
-    assert!(!out.stdout.contains("second"), "stdout: {}", out.stdout);
-}
-
-#[test]
 fn a_failing_final_part_abandons_nothing() {
     let out = run("ral_abandoned_none", "echo first\n/usr/bin/false\n");
     assert!(
@@ -36,6 +22,7 @@ fn a_failing_final_part_abandons_nothing() {
     );
 }
 
+/// The tail after the failing step is named, once, on the innermost block.
 #[test]
 fn the_hint_belongs_to_the_innermost_sequence() {
     let out = run(
@@ -47,6 +34,7 @@ fn the_hint_belongs_to_the_innermost_sequence() {
         "the inner block abandoned steps; stderr: {}",
         out.stderr
     );
+    assert!(!out.stdout.contains("last"), "stdout: {}", out.stdout);
 }
 
 /// A signal death already carries its own hint, which says more about the
@@ -67,44 +55,5 @@ fn a_more_specific_hint_survives() {
         !out.stderr.contains("did not run"),
         "the signal's own hint holds the one hint slot; stderr: {}",
         out.stderr
-    );
-}
-
-/// A child killing itself with the terminal's key did not press it: no
-/// terminal was lent, so `attempt` recovers and the script carries on.
-#[cfg(unix)]
-#[test]
-fn a_self_inflicted_sigint_is_the_childs_own_failure() {
-    let out = run(
-        "ral_self_sigint",
-        "attempt { sh -c #'kill -INT $$'# }; echo $[1234*2]\n",
-    );
-    assert!(
-        out.stdout.contains("2468"),
-        "stdout: {}; stderr: {}",
-        out.stdout,
-        out.stderr
-    );
-}
-
-#[test]
-fn attempt_runs_every_step_and_reports_on_each() {
-    let out = run(
-        "ral_attempt_battery",
-        "let result = audit { attempt { echo A }; attempt { /usr/bin/false }; attempt { echo C } }\n\
-         echo !{succeeded $result}\n\
-         echo !{length $result[trail]}\n",
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    let lines: Vec<&str> = out.stdout.lines().collect();
-    assert!(
-        lines.contains(&"A") && lines.contains(&"C"),
-        "every step ran; stdout: {}",
-        out.stdout
-    );
-    assert!(
-        lines.contains(&"true") && lines.contains(&"3"),
-        "the block succeeded and observed all three steps; stdout: {}",
-        out.stdout
     );
 }

@@ -52,4 +52,14 @@ echo !{range 3 7}
 echo !{range 5 5}
 # Expected: []
 
+echo !{range -2 1}
+# Expected: [-2, -1, 0]
+
+# first is a non-failing search
+echo !{first { |_| return true } []}
+echo !{first { |x| $[$x > 2] } [1, 2, 3, 4]}
+
+echo !{flat-map { |x| return [$x, $x] } [1, 2]}
+# Expected: [1, 1, 2, 2]
+
 echo 'stdlib tests done'

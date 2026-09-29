@@ -1,0 +1,3 @@
+# contains: 'dir'
+let f = { |c| if $c { return [dir: "/tmp", env: [:]] } else { return [env: [:]] } }
+within !{f true} { return "ok" }

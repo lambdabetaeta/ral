@@ -1,0 +1,32 @@
+# Test: where a branching command's bytes go — bound when the join is bound,
+# written through when it is a statement
+
+let picked = if true { echo a } else { echo b }
+echo "bound [$picked]"
+let num = if true { return 1 } else { return 2 }
+echo "value $num"
+let chosen = echo a ? echo b
+echo "chain [$chosen]"
+let first-ok = return 1 ? return 2
+echo $[$first-ok + 1]
+
+# An empty arm is subsumed by the byte side
+if true { echo shown } else {}
+if false { echo hidden } else {}
+
+# In statement position nothing reads a case's payload, so no arm is bound
+let named = { |pl| echo named }
+let tagged = `some ()
+case $tagged [`some: $named, `none: { |pl| echo other }]
+case $tagged [`some: { |pl| $named $pl }, `none: { |pl| echo other }]
+
+# try relaxes an echo body against a unit handler
+try { echo relaxed } { |_| return () }
+
+# A join whose arm is a parameter stays polymorphic in its route
+let either = { |thunk val| if true { !$thunk } else { return $val } }
+either { echo hi } ()
+let three = either { return 3 } 4
+echo $three
+
+echo 'route joins done'

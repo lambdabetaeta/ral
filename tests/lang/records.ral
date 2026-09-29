@@ -42,4 +42,15 @@ let get_x = { |r| return $r[x] }
 echo !{get_x [x: 99, y: 0]}
 echo !{get_x [label: a, x: 42]}
 
+# A put over a base whose fields are unknown is exact: the written entry wins
+let with-x = { |base| return [x: 0, ...$base] }
+let shadowed = with-x [x: 'shadowed']
+let extended = with-x [y: 1]
+echo [$shadowed[x], $extended[x], $extended[y]]
+
+# A put keeps the base's other fields, and the written one wins at its own type
+let base = [host: localhost, port: 80]
+let nine = [...$base, port: 'nine']
+echo [$nine[host], $nine[port]]
+
 echo 'records ok'

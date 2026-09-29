@@ -1,0 +1,1 @@
+let f = { |m| fail [status: 1, message: $m] }; return ()

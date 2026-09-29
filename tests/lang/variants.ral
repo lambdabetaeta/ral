@@ -1,0 +1,53 @@
+# Test: variants (`tag payload) and the `case` eliminator
+
+# A variant displays as its tag and payload; a payload may be a record,
+# whose keys print sorted
+let xv = `ok 42
+echo $xv
+echo `none
+echo [`ok 1, `err hello]
+echo `more [head: 1, foo: 2]
+
+# case dispatches on the tag, nullary or not
+let res = `ok 5
+echo !{case $res [`ok: { |x| return $x }, `err: { |_| return -1 }]}
+let none = `none
+echo !{case $none [`none: { |_| return absent }, `some: { |_| return present }]}
+
+# An arm naming a handler binds the payload as surely as an inline one
+let h = { |p| echo b }
+let named = case `some () [`some: $h, `none: { |p| echo z }]
+let inline = case `some () [`some: { |p| $h $p }, `none: { |p| echo z }]
+echo "got [$named] [$inline]"
+
+# A lazy list: the tail is a thunk, so a producer runs only as far as demand
+# reaches, and one set of combinators serves every element type
+let cons = { |head tail| return `more [head: $head, tail: $tail] }
+let take-lazy = { |n s|
+    if $[$n <= 0] { return `done } else {
+        case $s [
+            `more: { |p| cons $p[head] { !{take-lazy $[$n - 1] !$p[tail]} } },
+            `done: { |_| return `done }
+        ]
+    }
+}
+let to-list = { |s|
+    case $s [
+        `more: { |p|
+            let rest = !{to-list !$p[tail]}
+            return [$p[head], ...$rest]
+        },
+        `done: { |_| return [] }
+    ]
+}
+let nats = { |n| cons $n { !{nats $[$n + 1]} } }
+let chars = { |c| cons $c { !{chars $c} } }
+echo !{to-list !{take-lazy 5 !{nats 0}}}
+echo !{to-list !{take-lazy 3 !{chars 'x'}}}
+
+echo 'variant tests done'
+
+# An arm is a branch, not a frame: a script ending in a case whose arm
+# answers false still exits 0 — a Bool is data, not a verdict
+true
+case `go () [`go: { |_| false }]

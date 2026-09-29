@@ -91,22 +91,6 @@ fn value_producer_into_decoder_is_accepted_cross_run() {
     );
 }
 
-/// The same edge in a single program typechecks too: the pipe's rule is
-/// about a stage's shape (`F[ρ] A`), never about whether its neighbour
-/// reads or writes.
-#[test]
-fn value_producer_into_decoder_is_accepted_in_run() {
-    let sh = shell();
-    let errs = check_errors(&sh, "let f = { return 3 }\n$f | from-json");
-    assert!(
-        errs.is_empty(),
-        "expected a value producer piped into a decoder to typecheck in one run, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
-}
-
 // ─── (2) byte producer into byte consumer typechecks via harvested scheme ────
 
 /// `let f = { echo hi }` then `f | wc -l`: the harvested scheme for `f`
@@ -271,26 +255,6 @@ fn alias_visible_to_next_run() {
         check_errors(&sh, "return $three").is_empty(),
         "expected `three` to fall back to an ordinary external name after unalias, \
          so `$three` is merely unbound, not a handler entry"
-    );
-}
-
-/// A value-output alias body is refused at the next run's check too — the
-/// arm is byte-routed by construction (uniform A), so its being a *previous*
-/// run's alias, seeded fresh into this run's session schemes, changes
-/// nothing about that.
-#[test]
-fn value_output_alias_is_refused_even_seeded_from_a_prior_run() {
-    let sh = shell();
-    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
-    assert!(
-        errs.iter().any(|e| {
-            let m = e.kind.render_message();
-            m.contains("Integer") && m.contains("Unit")
-        }),
-        "expected the value-output alias to be refused at install, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
     );
 }
 

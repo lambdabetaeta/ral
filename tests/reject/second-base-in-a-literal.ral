@@ -1,0 +1,4 @@
+# contains: one other record, not two
+let a = [x: 1]
+let b = [y: 's']
+return [...$a, ...$b, z: true]

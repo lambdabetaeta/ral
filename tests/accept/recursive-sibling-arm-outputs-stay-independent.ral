@@ -1,0 +1,4 @@
+let h = { |v| case $v [ `go: { |_| !{f 0} }, `alt: { |_| !{g 0} }, `stop: { |_| return () } ] }
+let f = { |n| return $h; echo x; return () }
+let g = { |n| return $h; return () }
+return ()

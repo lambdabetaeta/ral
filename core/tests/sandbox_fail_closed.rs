@@ -184,36 +184,6 @@ fn external_write_outside_grant_denied_in_block_body() {
     let _ = std::fs::remove_file(&denied);
 }
 
-/// When the confined external fails, its status is the failure's own exit
-/// code, not the previous run's value: a denied write fails closed, and the
-/// outcome's status reports it.
-#[test]
-fn denied_external_installs_failing_status_into_mobile() {
-    let work = unique_workdir("stat");
-    let work_s = work.to_string_lossy().into_owned();
-    let denied = denied_path("stat");
-    let denied_s = denied.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let result = top_level_under(
-        &mut shell,
-        restrict_to(&work_s),
-        &format!("sh -c 'echo x > {denied_s}'"),
-    );
-    assert!(
-        result.is_err(),
-        "expected the confined external to fail closed, got Ok"
-    );
-    assert_ne!(
-        ral_core::run::status(&result),
-        0,
-        "a denied confined external must report a non-zero status"
-    );
-    assert!(!denied.exists());
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&denied);
-}
-
 /// A `spawn { … }` worker evaluates its body on a worker thread, but an
 /// external it spawns is confined the same way — the per-command launcher
 /// folds the same effective projection. A write outside the grant inside

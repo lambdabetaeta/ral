@@ -1,0 +1,3 @@
+let xs = [1]
+let ys = [2]
+return [...$xs, ...$ys, 5]

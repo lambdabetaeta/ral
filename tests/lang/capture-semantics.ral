@@ -36,4 +36,10 @@ assert_eq 'to-json bind captures its write' 42 $obj2[a]
 let raw = !{ints-to-bytes [72, 105, 255] | from-bytes}
 assert_eq 'ints-to-bytes non-utf8 roundtrip' 3 !{length $raw}
 
+# The byte-to-value coercion is syntax, not a call: an alias standing under
+# the coercion's old name cannot blank a captured binding
+alias __decode-captured { |_| echo "" }
+let greeting = echo hello
+assert_eq 'alias cannot blank a capture' hello $greeting
+
 echo 'capture semantics done'

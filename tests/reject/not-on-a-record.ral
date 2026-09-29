@@ -1,0 +1,3 @@
+# contains: couldn't match
+let r = [a: 1]
+return $[not $r]

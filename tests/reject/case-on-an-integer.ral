@@ -1,0 +1,6 @@
+# codes: T0032
+# contains: `case` needs a variant value
+# contains: Help:
+let x = 1
+let r = case $x [`ok: { |i| return $i }]
+return $r

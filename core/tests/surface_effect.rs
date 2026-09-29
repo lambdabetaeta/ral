@@ -127,25 +127,3 @@ fn surface_forwards_the_event_to_the_sink() {
         Some("tasks")
     );
 }
-
-/// The sink is inherited into thunk bodies, so an event surfaced from
-/// inside a called closure still reaches the host.
-#[test]
-fn surface_reaches_through_a_thunk_body() {
-    let mut shell = host_shell();
-    let (log, sink) = recording();
-    let out = run(
-        &mut shell,
-        r#"let emit = { |d| surface `task [status: "done", desc: $d] }
-emit "ship it""#,
-        Some(sink),
-    );
-    out.expect("surface from a thunk should succeed");
-
-    let events = kit_events(&log.lock().unwrap());
-    assert_eq!(events.len(), 1, "the thunk's event reached the sink");
-    let FOValue::Variant { label, .. } = &events[0] else {
-        panic!("expected a variant");
-    };
-    assert_eq!(label, "task");
-}

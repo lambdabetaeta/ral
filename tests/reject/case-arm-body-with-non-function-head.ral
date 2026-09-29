@@ -1,0 +1,3 @@
+# contains: a command head must be
+let n = 7
+case `a () [`a: { |_| $n x }]

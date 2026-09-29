@@ -1,0 +1,5 @@
+# codes: T0054
+# contains: to-string
+# contains: from-json
+let x = hello
+from-lines $x

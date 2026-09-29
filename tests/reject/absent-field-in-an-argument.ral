@@ -1,0 +1,4 @@
+# contains: this record is missing a field named 'b'
+let r = [a: 1]
+let take = { |x| return $x[b] }
+return !{take $r}

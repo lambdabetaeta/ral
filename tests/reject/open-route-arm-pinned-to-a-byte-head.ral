@@ -1,0 +1,4 @@
+# contains: couldn't match
+# contains: no separate value to return
+alias echo { |args| fold-lines { |a l| fail [status: 5, message: 'callback never runs'] } 0 }
+return ()

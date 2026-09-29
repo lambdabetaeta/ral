@@ -1,0 +1,4 @@
+# codes: T0020
+# contains: this record has no field named 'b'
+let m = [a: 1]
+echo $m[b]

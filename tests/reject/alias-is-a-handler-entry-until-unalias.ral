@@ -1,0 +1,7 @@
+# codes: T0041
+# contains: is a handler entry
+alias foo { |args| echo 3 }
+let f = $foo
+unalias foo
+let g = $foo
+return ()

@@ -11,3 +11,25 @@ let y = 5
 let f = { |_| echo $y }
 let y = 10
 !{f ()}
+
+# A bare name is a literal; `$name` is the bound value
+let up = { |x| return $x }
+echo !{return up}
+# Expected: up
+echo !{up hello}
+# Expected: hello
+
+# Unit is a value
+echo !{return ()}
+let m = [done: ()]
+echo $m[done]
+
+# $NPROC is a positive integer
+echo $[$NPROC > 0]
+# Expected: true
+
+# In a `let` right-hand side, a bare name is applied
+let upper = { |x| return $x }
+let applied = upper hello
+echo $applied
+# Expected: hello

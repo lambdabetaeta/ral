@@ -1,0 +1,2 @@
+# contains: a `try` handler is given the error the body raised
+try { echo hi } 5

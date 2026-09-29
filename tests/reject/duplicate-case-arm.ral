@@ -1,0 +1,4 @@
+# contains: already has a `ok arm
+let r = `ok 5
+let x = case $r [`ok: { |s| !{upper $s} }, `ok: { |i| return $[$i + 1] }, `err: { |_| return 0 }]
+return $x

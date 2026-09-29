@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+# contains: to-bytes
+let b = !{echo hi | from-bytes}; /bin/echo $b

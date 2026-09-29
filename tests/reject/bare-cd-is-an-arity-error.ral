@@ -1,0 +1,4 @@
+# codes: T0050
+# contains: `cd` expected 1 argument
+# contains: explain cd
+cd

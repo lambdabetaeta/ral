@@ -1,0 +1,3 @@
+# contains: cannot be used as a command head
+let r = [a: 1]
+$r foo

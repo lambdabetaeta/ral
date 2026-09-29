@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+# contains: ...$xs
+let xs = [1, 2]; /bin/echo $xs

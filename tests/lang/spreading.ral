@@ -30,4 +30,14 @@ let config = [port: 9090, ...$base_opts]
 echo $config[port]
 echo $config[host]
 
+# An explicit field beats a spread, wherever it sits
+let front = [...$base_opts, port: 1]
+echo $front[port]
+echo $front[host]
+
+# A marked map spread stays a map
+let subject = [:, host: 'local', port: 'x']
+let copy = [:, ...$subject]
+echo !{get $copy host ''}
+
 echo 'spreading tests done'

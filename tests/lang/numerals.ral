@@ -1,0 +1,51 @@
+# Test: a bare word shaped like a numeral denotes its number, everywhere a
+# word may stand; every number has one printed spelling
+
+# The normalisation table, read where an argv is observable
+echo 007 +5 -0 +007 .5 2. 00.500 1.50 3.0 1.50e300 1.0E5
+# Expected: 7 5 0 7 0.5 2.0 0.5 1.5 3.0 1.5e300 100000.0
+
+# The version-like token is a number; quoting keeps the digits a name
+echo 3.10
+echo '3.10'
+echo '007' '+5' '1.50' '-0' '2.'
+# Expected: 3.1 / 3.10 / 007 +5 1.50 -0 2.
+
+# Words the numeral grammar refuses keep their bytes, unquoted
+echo 1e6 1_000 0x10 9223372036854775808 1.8e308 1.2.3 inf nan
+# Expected: unchanged
+
+# No position is exempt: bindings, interpolation, encoders
+let rate = 1.50
+echo $rate
+let ver = 3.0
+echo "version $ver"
+to-line 1.50
+to-string 3.0; echo
+to-lines [3.0, 1.50, .5]
+to-lines [007, +5, -0]
+to-json [rate: 3.0]; echo
+to-csv [[rate: 1.50]]
+
+# A redirect's target is a word like any other: `> 007` names the file 7
+let d = temp-dir
+within [dir: $d] { echo hi > 007 }
+echo !{is-file "$d/7"} !{exists "$d/007"}
+# Expected: true false
+rm -rf $d
+
+# Floatness survives printing; large and small magnitudes take exponent form
+echo $[1.0 + 2.0] $[1 + 2]
+echo $[1.0e300 * 1.0] $[1.0e-7 * 1.0]
+# Expected: 3.0 3 / 1.0e300 1.0e-7
+
+# A canonical spelling is a fixed point
+echo 0 7 -7 42 1000000 9223372036854775807 -9223372036854775808 0.5 -0.5 1.5 3.1 100.0 1.0e-7 1.0e16
+
+# `unit` is an ordinary word; `()` is the literal
+echo unit
+echo a () b
+let uu = ()
+echo "u=$uu"
+
+echo 'numeral tests done'

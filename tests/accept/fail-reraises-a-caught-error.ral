@@ -1,0 +1,1 @@
+try { fail [status: 1, message: "boom"] } { |e| fail $e }

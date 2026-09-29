@@ -1,0 +1,2 @@
+# contains: to-lines
+let b = !{echo hi | from-bytes}; to-lines $b

@@ -1,0 +1,4 @@
+# codes: T0050
+# contains: fold-lines
+let step = { |acc _| return $acc }
+echo hi | fold-lines $step | cat

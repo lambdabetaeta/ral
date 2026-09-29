@@ -1,0 +1,2 @@
+# contains: couldn't match type {Command Bool} with type Bool
+if { return $[1 == 1] } { echo yes }

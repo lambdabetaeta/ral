@@ -1,0 +1,2 @@
+# contains: to external command '~/bin/mycmd'
+let xs = [1]; ~/bin/mycmd $xs

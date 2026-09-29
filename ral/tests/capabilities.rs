@@ -124,24 +124,6 @@ fn a_one_sided_allow_does_not_survive_the_meet() {
     std::fs::remove_file(&b).ok();
 }
 
-/// Without `--capabilities`, ambient root authority lets a normal
-/// command through — pins the negative case so a regression making the
-/// flag load even when absent gets caught.
-#[test]
-fn no_flag_leaves_session_unrestricted() {
-    let out = ral(&["-c", "echo hello"]);
-    assert_eq!(
-        out.status, 0,
-        "echo without --capabilities should succeed; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        out.stdout.contains("hello"),
-        "stdout missing 'hello':\n{}",
-        out.stdout
-    );
-}
-
 /// A misspelt `xdg:` name is a load-time error naming the typo and every
 /// kind it could have meant — not a silently frozen literal prefix, and not
 /// a bare non-absolute complaint that hides the real cause.  The companion
@@ -363,24 +345,6 @@ fn undecodable_exec_policy_passes_the_checker_and_is_refused_at_run() {
         out.stderr
     );
     // stdout only: stderr echoes the source line inside the ariadne snippet.
-    assert!(
-        !out.stdout.contains("BODYRAN"),
-        "the body must not run under an undecodable grant; stdout:\n{}",
-        out.stdout
-    );
-}
-
-/// The `fs` axis refuses a relative prefix outright — a grant whose
-/// meaning would shift after a `cd` is no grant at all.
-#[test]
-fn relative_fs_prefix_is_refused_before_the_body_runs() {
-    let out = ral(&["-c", "grant [fs: [read: ['proj']]] { echo BODYRAN }"]);
-    assert_ne!(out.status, 0, "a relative fs prefix must not decode");
-    assert!(
-        out.stderr.contains("'proj'") && out.stderr.contains("cwd:"),
-        "expected the relative-path diagnostic naming the cwd: form; got:\n{}",
-        out.stderr
-    );
     assert!(
         !out.stdout.contains("BODYRAN"),
         "the body must not run under an undecodable grant; stdout:\n{}",

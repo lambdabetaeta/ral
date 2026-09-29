@@ -114,21 +114,6 @@ fn rc_bad_literal_key_fails_the_whole_file() {
     );
 }
 
-/// The same mistake through a *computed* rc return.  What the contract checks
-/// is the inferred row, not the syntax that produced it, so a bound record is
-/// held exactly as a written-out one is.
-#[test]
-fn rc_computed_bad_key_fails_the_whole_file() {
-    let (_dir, env) = rc_home("let cfg = [edit_mode: 42, bindings: [okname: 'yes']]\nreturn $cfg");
-
-    let out = repl(&["-i"], &env, "$okname\n");
-    assert!(
-        out.stderr.contains("skipped due to type errors"),
-        "a computed rc carries a row, and the row is checked: {}",
-        out.stderr
-    );
-}
-
 /// An unknown key is a static error naming the rc's list — and it is caught
 /// through a spread, which a literal-only rule would wave through.
 #[test]

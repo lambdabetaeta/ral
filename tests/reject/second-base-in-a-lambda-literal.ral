@@ -1,0 +1,3 @@
+# contains: one other record, not two
+let f = { |a b| return [x: 0, ...$a, ...$b] }
+return $f

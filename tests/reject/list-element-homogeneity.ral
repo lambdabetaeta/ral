@@ -1,0 +1,2 @@
+# contains: a list is homogeneous — every element has the one type
+let xs = ["a", 1]

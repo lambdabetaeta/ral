@@ -15,58 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::path::Path;
 
-#[test]
-fn explicit_grant_denies_omitted_exec() {
-    let mut shell = Shell::default();
-    let result = shell.with_capabilities(Capabilities::deny_all(), |shell| {
-        shell.check_exec_args("/bin/echo", &["/bin/echo"], &[])
-    });
-    assert!(result.is_err(), "deny-all grant must refuse /bin/echo");
-}
-
-/// A subpath-style key (`/usr/bin/`) admits a command whose
-/// resolved absolute path is inside, even when the same map has
-/// no per-name entry for it.  Replaces the old `exec_dirs`
-/// admittance route.
-// Unix-only: `/usr/bin/...` paths have no Windows analogue and the
-// grant matcher normalises them in ways that don't survive on Windows.
-#[cfg(unix)]
-#[test]
-fn subpath_key_admits_path_under_prefix() {
-    let mut shell = Shell::default();
-    let grant = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    shell
-        .with_capabilities(grant, |shell| {
-            shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
-        })
-        .expect("ls under /usr/bin/ subpath key should be admitted");
-}
-
-/// A subpath key does not admit a binary outside its prefix.
-#[test]
-fn subpath_key_denies_outside_prefix() {
-    let mut shell = Shell::default();
-    let grant = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    let result = shell.with_capabilities(grant, |shell| {
-        shell.check_exec_args("evil", &["evil", "/tmp/evil"], &[])
-    });
-    assert!(result.is_err());
-}
-
 /// Literal beats subpath: a per-name `Subcommands` restriction on
 /// `cargo` is not relaxed by a sibling subpath key admitting the
 /// directory cargo lives in.
@@ -127,41 +75,6 @@ fn subpath_deny_carves_hole_in_subpath_allow() {
     assert!(
         result.is_err(),
         "longer subpath Deny should beat shorter subpath Allow"
-    );
-}
-
-/// Deny-by-default within an opining layer: a layer with `exec`
-/// declared admits *only* what's in its map.  A nested layer that
-/// names `git` does not pass through to outer `/usr/bin/` admits.
-/// (This replaces the old "name-only abstains" pattern, which was
-/// an artefact of the now-removed `exec_dirs` field.)
-#[test]
-fn nested_exec_layer_denies_outside_its_map() {
-    let mut shell = Shell::default();
-    let outer = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/usr/bin")]),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    let inner = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    let result = shell.with_capabilities(outer, |shell| {
-        shell.with_capabilities(inner, |shell| {
-            shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
-        })
-    });
-    assert!(
-        result.is_err(),
-        "inner layer's exec map is a complete opinion; ls is not in it"
     );
 }
 
@@ -363,72 +276,6 @@ fn literal_deny_on_resolved_absolute_still_vetoes() {
     assert!(
         result.is_err(),
         "literal Deny on the resolved absolute path must veto"
-    );
-}
-
-/// No regression: bare `git` admitted under a `reasonable`-shaped grant
-/// (bare `git: Allow`), and its `status` subcommand gating stays intact
-/// when the literal carries a `Subcommands` restriction.
-#[test]
-fn bare_admit_and_subcommand_gating_unregressed() {
-    // Bare git: Allow admits a bare invocation with any args.
-    let mut shell = Shell::default();
-    let allow = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    shell
-        .with_capabilities(allow, |sh| {
-            ral_core::test_access::check_exec_call(
-                sh,
-                "git",
-                &["git", "/usr/bin/git"],
-                &["git", "/usr/bin/git"],
-                &["status".into()],
-            )
-        })
-        .expect("bare git: Allow must admit");
-
-    // Subcommands restriction: `status` admitted, `push` denied.
-    let mut shell = Shell::default();
-    let gated = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([(
-                "git".into(),
-                ExecPolicy::Subcommands(BTreeSet::from(["status".into()])),
-            )]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Capabilities::root()
-    };
-    shell
-        .with_capabilities(gated.clone(), |sh| {
-            ral_core::test_access::check_exec_call(
-                sh,
-                "git",
-                &["git", "/usr/bin/git"],
-                &["git", "/usr/bin/git"],
-                &["status".into()],
-            )
-        })
-        .expect("git status must be admitted under Subcommands([status])");
-    let denied = shell.with_capabilities(gated, |sh| {
-        ral_core::test_access::check_exec_call(
-            sh,
-            "git",
-            &["git", "/usr/bin/git"],
-            &["git", "/usr/bin/git"],
-            &["push".into()],
-        )
-    });
-    assert!(
-        denied.is_err(),
-        "git push must be denied under Subcommands([status])"
     );
 }
 

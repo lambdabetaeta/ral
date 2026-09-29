@@ -1,0 +1,4 @@
+# contains: unmatched `}`
+echo a
+}
+echo b

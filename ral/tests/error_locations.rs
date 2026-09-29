@@ -96,3 +96,30 @@ fn a_bare_missing_command_still_renders_compact() {
         "a fault in the text on screen needs no caret; stderr was:\n{stderr}"
     );
 }
+
+/// A `use`d module's runtime error is drawn against the module's source,
+/// at the failing line, and never against the caller's text.
+#[test]
+fn a_used_module_runtime_error_points_into_the_module() {
+    let dir = common::fresh_tmp_path("ral_use_runtime_err", "d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("mod.ral");
+    std::fs::write(&module, "let a = 1\nlet z = 0\nreturn $[$a / $z]\n").unwrap();
+
+    let out = common::ral_command()
+        .arg("-c")
+        .arg(format!("use '{}'", module.display()))
+        .output()
+        .expect("spawn ral");
+    std::fs::remove_dir_all(&dir).ok();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("division by zero"), "stderr was:\n{stderr}");
+    assert!(
+        stderr.contains("mod.ral:3:"),
+        "the caret must name the module's line 3; stderr was:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("-c:1"),
+        "the caller's text must not be the caret's home; stderr was:\n{stderr}"
+    );
+}

@@ -1,0 +1,65 @@
+# Test: which scopes own the working directory — `within [dir:]` is its local
+# handler; every other block, and the session, share the ambient one
+
+let root = temp-dir
+mkdir -p "$root/outer" "$root/inner/sub"
+let cwd-is = { |path| echo !{equal !{cwd} !{resolve-path $path}} }
+cd "$root/outer"
+
+# An absolute, a no-op and a relative `cd` inside `within [dir:]` stay in its cell
+within [dir: "$root/inner"] { cd "$root/inner/sub"; cwd-is "$root/inner/sub" }
+cwd-is "$root/outer"
+within [dir: "$root/inner"] { cd $CWD; cwd-is "$root/inner" }
+cwd-is "$root/outer"
+within [dir: "$root/inner"] { cd sub; cwd-is "$root/inner/sub" }
+cwd-is "$root/outer"
+
+# The cell is restored when the body fails
+try { within [dir: "$root/inner"] { cd sub; fail [status: 3, message: 'boom'] } } { |_| echo 'failed' }
+cwd-is "$root/outer"
+
+# A child launched after the `cd` starts in the moved cell, and a redirect resolves there
+within [dir: "$root/inner"] { cd sub; ^pwd > here.txt }
+echo !{exists "$root/inner/sub/here.txt"}
+echo !{equal !{within [dir: "$root/inner"] { cd sub; ^pwd }} !{resolve-path "$root/inner/sub"}}
+
+# Nested handlers each restore their own cell
+let back = !{ within [dir: "$root/inner"] {
+    cd sub
+    within [dir: '..'] { cd "$root/outer"; echo deep > deep.txt }
+    cwd
+} }
+echo !{exists "$root/outer/deep.txt"}
+echo !{equal $back !{resolve-path "$root/inner/sub"}}
+cwd-is "$root/outer"
+
+# Entering `within [dir:]` needs no chdir authority; a `cd` inside it does
+echo !{equal !{grant [shell: [chdir: false]] { within [dir: "$root/inner"] { cwd } }} !{resolve-path "$root/inner"}}
+try { grant [shell: [chdir: false]] { within [dir: "$root/inner"] { cd sub } } } { |e|
+    echo $e[message]
+}
+
+# Every other block shares the ambient cell: a `cd` inside persists
+within [env: [PROBE: x]] { cd "$root/inner" }
+cwd-is "$root/inner"
+grant [exec: [:]] { cd "$root/outer" }
+cwd-is "$root/outer"
+!{ cd "$root/inner" }
+cwd-is "$root/inner"
+let hop = { |_| cd "$root/outer"; return () }
+hop ()
+cwd-is "$root/outer"
+
+# `cd` is a native: a handler under its name sits shadowed, and it is a first-class value
+within [handlers: [cd: { |args| echo intercepted }]] { cd "$root/inner"; cwd-is "$root/inner" }
+let chdir-fn = $cd
+$chdir-fn "$root/outer"
+cwd-is "$root/outer"
+
+# The empty path names no directory, and nothing moves
+try { let empty = ''; cd $empty } { |e| echo $e[message] }
+cwd-is "$root/outer"
+
+cd /
+rm -rf $root
+echo 'cwd blocks done'

@@ -1,0 +1,24 @@
+# Test: `watch` streams a spawned block's output live, one labelled line at
+# a time; `await` returns only once both streams are drained
+
+# await flushes before returning: the lines come strictly before what follows
+let h1 = watch "job" { echo from-watch-1; echo from-watch-2 }
+await $h1
+echo marker-after
+
+# Each handle carries its own label
+let ha = watch "a" { echo alpha }
+await $ha
+let hb = watch "b" { echo beta }
+await $hb
+
+# Stderr is prefixed `[label:err]`
+let h2 = watch "job" { warn "err" }
+await $h2
+
+# The label is evaluated in the caller's scope and may interpolate
+let target = "prod"
+let h3 = watch "build-$target" { echo step }
+await $h3
+
+echo 'watch tests done'

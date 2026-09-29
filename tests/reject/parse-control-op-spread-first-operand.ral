@@ -1,0 +1,3 @@
+# contains: spread
+let x = [1, 2]
+try ...$x { |e| return () }

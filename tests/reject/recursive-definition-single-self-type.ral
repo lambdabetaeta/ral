@@ -1,0 +1,2 @@
+# contains: a definition that calls itself is checked at one single type throughout its own body
+let rec = { |n| if $[$n == 0] { return 0 } else { rec "s" } }

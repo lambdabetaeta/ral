@@ -1,0 +1,27 @@
+# Test: grant [fs: [deny:]] blocks reads by containment and omits entries
+
+let dir = temp-dir
+to-string ok > "$dir/visible.txt"
+to-string shh > "$dir/secret.txt"
+mkdir -p "$dir/forbidden"
+to-string no > "$dir/forbidden/leaf.txt"
+
+# A denied file inside a readable region cannot be read
+try {
+    grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { let _ = from-string < "$dir/secret.txt" }
+} { |_| echo 'read denied' }
+
+# A denied directory covers everything beneath it
+try {
+    grant [fs: [read: [$dir], deny: ["$dir/forbidden"]]] { let _ = from-string < "$dir/forbidden/leaf.txt" }
+} { |_| echo 'subpath denied' }
+
+# glob and list-dir drop denied entries and keep their siblings
+let hits = grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { glob "$dir/*.txt" }
+echo !{length $hits}
+echo !{equal $hits[0] "$dir/visible.txt"}
+let entries = grant [fs: [read: [$dir], deny: ["$dir/secret.txt"]]] { list-dir $dir }
+echo !{map { |e| return $e[name] } $entries}
+
+rm -rf $dir
+echo 'grant fs deny tests done'

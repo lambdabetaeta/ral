@@ -1,0 +1,5 @@
+# contains: payload route
+let h = { |v| case $v [ `a: { |_| return () }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }
+let f = { |n| return $h; echo done }
+let g = { |n| return $h; return 5 }
+return ()

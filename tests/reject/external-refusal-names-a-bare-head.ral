@@ -1,0 +1,2 @@
+# contains: to external command 'mycmd'
+let xs = [1]; mycmd $xs

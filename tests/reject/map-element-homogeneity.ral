@@ -1,0 +1,3 @@
+# contains: a map has computed keys, so every value must have the one type
+let k = "x"
+let m = [$k: 1, $k: "two"]

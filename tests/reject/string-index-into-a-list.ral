@@ -1,0 +1,4 @@
+# codes: T0061
+# contains: only records have fields
+let xs = [1, 2, 3]
+return $xs[hello]

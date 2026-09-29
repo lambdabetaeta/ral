@@ -1,0 +1,4 @@
+# Test: a script with CRLF line endings
+
+let peek = 2
+echo $[$peek + 1]

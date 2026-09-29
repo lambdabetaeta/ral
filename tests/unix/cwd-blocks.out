@@ -1,0 +1,24 @@
+true
+true
+true
+true
+true
+true
+failed
+true
+true
+true
+true
+true
+true
+true
+denied: cd requires shell.chdir
+true
+true
+true
+true
+true
+true
+cd: the empty string names no directory — did you mean `cd .`, or `cd ~`?
+true
+cwd blocks done

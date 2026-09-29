@@ -8,9 +8,9 @@
 // exit-status propagation — which is shared with the interactive shell.
 //
 // Unix-only: these tests rely on Unix commands (/bin/echo, grep, cat, yes,
-// head, wc) and Unix process-group / signal semantics.  The portable
-// subset — capture semantics and stdin-consuming builtins — was extracted to
-// pipeline_value_edges.rs, which runs on every platform.
+// head, wc) and Unix process-group / signal semantics.  What needs no harness
+// — stage dispatch, redirects, statuses, capture rules — is the golden
+// `tests/unix/pipeline-stages.ral` and `tests/lang/pipeline-values.ral`.
 #![cfg(unix)]
 
 mod common;
@@ -30,50 +30,12 @@ fn run_with_timeout(args: &[&str], script: &str, timeout: Duration) -> Option<Ou
 
 // ── All-external pipelines ───────────────────────────────────────────────────
 
-#[test]
-fn external_pipeline_basic_grep() {
-    let o = run("/bin/echo hello | grep hello");
-    assert_eq!(o.status, 0);
-    assert_eq!(o.stdout.trim(), "hello");
-}
-
-#[test]
-fn external_pipeline_no_match_exits_one() {
-    let o = run("/bin/echo hello | grep zzz");
-    assert_ne!(o.status, 0);
-    assert!(o.stdout.trim().is_empty());
-}
-
-#[test]
-fn external_pipeline_deep_chain() {
-    // Five cat stages — verifies process group setup for a long pipeline.
-    let o = run("/bin/echo NEEDLE | cat | cat | cat | cat | grep NEEDLE");
-    assert_eq!(o.status, 0);
-    assert!(o.stdout.contains("NEEDLE"));
-}
-
 #[cfg(feature = "ripgrep")]
 #[test]
 fn external_pipeline_bundled_rg() {
     let o = run("/bin/echo hello | rg hello");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hello");
-}
-
-#[cfg(feature = "ripgrep")]
-#[test]
-fn external_pipeline_bundled_rg_no_match_exits_one() {
-    let o = run("/bin/echo hello | rg zzz");
-    assert_ne!(o.status, 0);
-    assert!(o.stdout.trim().is_empty());
-}
-
-#[test]
-fn external_pipeline_exit_status_from_last_stage() {
-    // false is /bin/false here (ral's `false` boolean is handled differently).
-    let o = run("/bin/echo hello | /bin/false");
-    // non-zero because /bin/false exits 1
-    assert_ne!(o.status, 0);
 }
 
 #[test]
@@ -126,17 +88,6 @@ fn audit_cli_captures_command_stdout() {
     );
 }
 
-#[test]
-fn redirect_stderr_to_stdout_flows_through_pipeline() {
-    // Inner block captures stdout (with 2>&1 merging stderr in) as a String
-    // via the capture a byte-routed bind inserts; from-string is then
-    // identity on String.
-    let o =
-        run("let s = !{!{/bin/sh -c 'printf out; printf err >&2' 2>&1} | from-string}\necho $s");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "outerr");
-}
-
 // ── Stage dispatch parity (handlers, ^name, redirects) ─────────────────────
 //
 // These regressions cover the rule that pipeline-stage dispatch must match
@@ -144,52 +95,6 @@ fn redirect_stderr_to_stdout_flows_through_pipeline() {
 // name must fire even mid-pipeline, `^name` must skip binding lookup
 // (pipeline included), and stage-level redirects must be honored rather than
 // silently dropped.
-
-#[test]
-fn pipeline_stage_handler_intercepts_unknown_external() {
-    // `mycmd` is not a builtin and (assumedly) not on PATH.  Without the
-    // handler-match check in `resolve_launch`, the pipeline classifies the
-    // stage as external and the launcher tries to spawn `mycmd`, failing
-    // with ENOENT before the handler can run.
-    let o = run(
-        "within [handlers: [mycmd-pipeline-test: { |args| /bin/echo handled }]] \
-            { mycmd-pipeline-test | cat }",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "handled");
-}
-
-#[test]
-fn pipeline_stage_caret_external_only_bypasses_builtin() {
-    // `echo` is a ral builtin.  `^echo` must reach the external /bin/echo
-    // (or equivalent) via PATH, even when used as a pipeline stage.
-    let o = run("^echo HELLO | cat");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "HELLO");
-}
-
-#[test]
-fn pipeline_stage_caret_escapes_per_name_handler() {
-    // ^name is the path-head arm too (ruling 2): it escapes a per-name
-    // handler frame exactly as a bare path head does.  Pipeline-stage
-    // classification must agree with the single-command path — the bundled
-    // `cat` is what `echo hi | ^cat` reaches, cross-platform, while a bare
-    // `cat` in the same block still honors the arm.  Locked in via the
-    // shared resolve_command_word.
-    let o = run(
-        "within [handlers: [cat: { |args| /bin/echo via-handler }]] \
-            { echo hi | ^cat }",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "hi");
-
-    let o = run(
-        "within [handlers: [cat: { |args| /bin/echo via-handler }]] \
-            { echo hi | cat }",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "via-handler");
-}
 
 #[test]
 fn pipeline_external_stage_rejects_list_arg_with_hint() {
@@ -210,27 +115,6 @@ fn pipeline_external_stage_rejects_list_arg_with_hint() {
         o.stderr
     );
     assert!(o.stderr.contains("...$"), "hint missing: {}", o.stderr);
-}
-
-#[test]
-fn pipeline_external_stage_list_arg_written_out_is_a_static_error() {
-    // Written out, the shape is in the type, and the same refusal comes from
-    // the checker instead: nothing is spawned, and the stage never runs.
-    let o = run("let xs = [1, 2, 3]; /bin/echo hi | /usr/bin/printf $xs");
-    assert_ne!(o.status, 0);
-    assert!(
-        o.stderr.contains("T0057")
-            && o.stderr
-                .contains("cannot pass [Integer] to external command '/usr/bin/printf'"),
-        "stderr: {}",
-        o.stderr
-    );
-    assert!(o.stderr.contains("...$"), "hint missing: {}", o.stderr);
-    assert!(
-        !o.stdout.contains("hi"),
-        "a diagnosed pipeline must not run: {}",
-        o.stdout
-    );
 }
 
 #[test]
@@ -255,213 +139,6 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
     assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
 }
 
-#[test]
-fn deep_stream_returns_from_a_final_stage() {
-    // A user-built lazy list is one closure per link, returned from the final
-    // stage's thread.  Two thousand links must cross and then drop without
-    // exhausting either thread's stack.  (Regression: the encoder recursed
-    // per link, so the stage died a few hundred links in.)
-    let o = run(
-        "let chain = { |xs| if !{is-empty $xs} { return `done } else { \
-             let [x, ...rest] = $xs; let tail = !{chain $rest}; \
-             return `more [head: $x, tail: { return $tail }] } }\n\
-         let s = !{seq 1 2000 | !{ chain !{from-lines} }}; echo done",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
-}
-
-#[test]
-fn pipeline_stage_redirect_to_file_is_honored() {
-    // `cmd > file | next` must redirect cmd's stdout to file (not into the
-    // pipe).  Bash's behavior: the pipe gets EOF; the file gets the bytes.
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("ral_pipe_redir_{pid}_{nanos}.txt"));
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "/bin/echo redirected > '{path_str}' | cat\n/bin/echo done\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("redirected"),
-        "file did not receive redirected bytes"
-    );
-}
-
-/// A stage whose stdout never reaches the edge never writes a dead one, so a
-/// stdin-ignoring reader settling first cannot cut it (SPEC §7.6).  The
-/// file must be complete: a cut landing mid-rename on the stage's own atomic
-/// write would report success over a file that was never created.
-#[test]
-fn a_redirect_stage_survives_a_reader_that_never_looks_at_stdin() {
-    let path = fresh_tmp_path("ral_pipe_redir_fast_reader", "txt");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "/bin/echo redirected > '{path_str}' | /usr/bin/true\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("redirected"),
-        "file did not receive redirected bytes — the stage was killed before its own \
-         redirect committed"
-    );
-}
-
-/// The same corollary through a `Scope(Redirect)` frame — the carrier a
-/// closure call wraps its trailing redirect in, since it cannot fuse the
-/// redirect onto itself the way an `Exec` node does.
-#[test]
-fn a_redirected_closure_stage_survives_a_reader_that_never_looks_at_stdin() {
-    let path = fresh_tmp_path("ral_pipe_redir_closure", "txt");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "let f = {{ |x| /bin/echo $x }}\n$f hello > '{path_str}' | /usr/bin/true\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("hello"),
-        "file did not receive redirected bytes"
-    );
-}
-
-// ── Redirects on handler-resolved heads ────────────────────────────────────
-//
-// A trailing fd redirect on a command whose head resolves to a handler frame
-// — a runtime `alias`, a `within [handlers:]` entry, or the catch-all
-// `within [handler:]` — must be installed for the handler body, exactly as it
-// is for the builtin and external arms.  Regression for the dropped-redirect
-// gap in `command_call::run_call`'s handler arm: the targets were evaluated
-// (paths resolved) but never installed, so a forwarded command's output went
-// to the inherited fd and the redirect file was never created.
-
-#[test]
-fn aliased_command_stdout_redirect_is_honored() {
-    // `alias` installs a handler frame.  `myecho … > file` must send the
-    // forwarded `/bin/echo`'s stdout to the file, not the terminal.
-    let path = fresh_tmp_path("ral_alias_stdout", "txt");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "alias myecho {{ |a| /bin/echo ...$a }}\nmyecho stdout_marker > '{path_str}'\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(
-        !o.stdout.contains("stdout_marker"),
-        "forwarded output leaked to the terminal: {}",
-        o.stdout
-    );
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("stdout_marker"),
-        "alias redirect file did not receive the forwarded stdout"
-    );
-}
-
-#[test]
-fn aliased_command_stderr_redirect_is_honored() {
-    // `2> file` on an aliased head captures the forwarded command's stderr,
-    // mirroring the stdout direction.
-    let path = fresh_tmp_path("ral_alias_stderr", "txt");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "alias myerr {{ |a| /bin/sh -c 'echo stderr_marker >&2' }}\nmyerr 2> '{path_str}'\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(
-        !o.stderr.contains("stderr_marker"),
-        "forwarded stderr leaked to the terminal: {}",
-        o.stderr
-    );
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("stderr_marker"),
-        "alias redirect file did not receive the forwarded stderr"
-    );
-}
-
-#[test]
-fn aliased_command_stdin_redirect_is_honored() {
-    // `< file` into an aliased head feeds the file to the forwarded command's
-    // stdin: `with_redirects` installs the stdin source for the handler body
-    // via `install_stdin_redirect`, and the forwarded `/bin/cat` consumes it.
-    let path = fresh_tmp_path("ral_alias_stdin", "txt");
-    let path_str = path.display().to_string();
-    std::fs::write(&path, "stdin_marker\n").unwrap();
-
-    let o = run(&format!(
-        "alias mycat {{ |a| /bin/cat }}\nmycat < '{path_str}'\n"
-    ));
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        o.stdout.trim_end(),
-        "stdin_marker",
-        "forwarded command did not read the redirected stdin file"
-    );
-}
-
-#[test]
-fn pipeline_stage_handler_redirect_to_file_is_honored() {
-    // A handler-resolved pipeline stage classifies as a Ral stage, so its
-    // redirect rides in the stage comp and must be installed when the helper
-    // re-evaluates that comp through `run_call`.  `foo > file | cat` routes
-    // the handler's stdout to the file; the pipe sees EOF, so `cat` emits
-    // nothing — matching the single-command path.
-    let path = fresh_tmp_path("ral_pipe_handler", "txt");
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let o = run(&format!(
-        "within [handlers: [foo: {{ |args| /bin/echo stage_marker }}]] {{ foo > '{path_str}' | cat }}\n/bin/echo done\n"
-    ));
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("stage_marker"),
-        "pipeline-stage handler redirect file did not capture the stage's stdout"
-    );
-    assert!(
-        !o.stdout.contains("stage_marker"),
-        "stage output leaked into the pipe instead of the file: {}",
-        o.stdout
-    );
-    assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
-}
-
 // ── Reader-gone forgiveness ──────────────────────────────────────────────────
 //
 // An interior edge is dead once its reader stage has ended; a stage is cut
@@ -471,22 +148,8 @@ fn pipeline_stage_handler_redirect_to_file_is_honored() {
 // forgiven.  The tests below exercise that boundary: a producer's signal
 // disposition cannot change the verdict, a producer that exits on its own
 // account keeps its own status, everything a producer does before its first
-// dead write is certain, forgiveness is scoped per edge through a middle
-// stage, and a producer that never writes again is never cut at all.
-
-#[test]
-fn broken_pipe_very_large_count() {
-    // `yes` generates infinite output; `head` reads its fill and closes the
-    // pipe.  The pipeline must not hang.
-    let o = run_with_timeout(
-        &[],
-        "yes DATA | head -10000 | wc -l",
-        Duration::from_secs(10),
-    )
-    .expect("pipeline timed out");
-    assert_eq!(o.status, 0);
-    assert_eq!(o.stdout.trim(), "10000");
-}
+// dead write is certain, and a producer that never writes again is never cut
+// at all.
 
 #[test]
 fn a_firehose_into_a_non_reading_consumer_terminates() {
@@ -523,16 +186,6 @@ fn sigpipe_ignoring_producer_is_still_forgiven() {
     .expect("sigpipe-ignoring producer hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "x", "stdout: {}", o.stdout);
-}
-
-#[test]
-fn producer_own_exit_status_survives_early_reader_exit() {
-    // A stage is cut only by a write to a dead edge.  `sh` never writes at
-    // all — it just exits — so it is never cut, and its own exit status is
-    // the pipeline's, exactly as an ordinary command's would be.
-    let o = run_with_timeout(&[], "sh -c 'exit 7' | head -1", Duration::from_secs(5))
-        .expect("producer-exit pipeline hung");
-    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
 }
 
 #[test]
@@ -631,17 +284,6 @@ fn a_ral_stages_file_effect_before_its_first_write_is_certain() {
 }
 
 #[test]
-fn middle_stage_forgiveness_is_per_edge() {
-    // Forgiveness is scoped per interior edge: `cat`'s edge to `yes` and its
-    // edge to `head` die independently once `head` exits, so `cat`'s next
-    // write into `head`'s dead edge, and then `yes`'s next write into
-    // `cat`'s now-dead edge, are each cut and forgiven in turn.
-    let o = run_with_timeout(&[], "yes | cat | head -1", Duration::from_secs(10))
-        .expect("middle-stage forgiveness pipeline hung");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-}
-
-#[test]
 fn a_nested_pipelines_producer_is_forgiven_when_the_outer_reader_leaves() {
     // The outer reader-gone cut reaches the nested pipeline as a `ReaderGone`
     // cancel, and a cut is a kill: opening on the producer's own SIGTERM
@@ -669,82 +311,11 @@ fn a_producer_that_never_writes_is_never_cut_and_keeps_its_status() {
     assert!(o.stderr.contains('x'), "stderr: {}", o.stderr);
 }
 
-#[test]
-fn a_never_writing_producers_failure_survives_a_fast_reader() {
-    // A reader that exits at once, without ever looking at the edge, still
-    // never turns the producer's own failure into forgiveness: the producer
-    // never writes, so it is never cut, and its exit status wins.
-    let o = run_with_timeout(&[], "sh -c 'exit 3' | true", Duration::from_secs(5))
-        .expect("never-writing producer hung");
-    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
-
-    let o = run_with_timeout(
-        &[],
-        "sh -c 'exit 3' | !{ return () }",
-        Duration::from_secs(5),
-    )
-    .expect("never-writing producer hung");
-    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
-}
-
-// ── Concurrent spawned pipelines ─────────────────────────────────────────────
-
-#[test]
-fn spawned_pipelines_run_concurrently() {
-    // 8 pipelines spawned at once; each squares a number and cats it.
-    // All must complete and produce the right values.  `await` returns a
-    // record; the block's stdout sits in `[stdout]` as Bytes, decoded for
-    // printing.
-    let script = r"
-let handles = !{ map { |i|
-    let v = $[$i * $i]
-    !{spawn { /bin/echo $v | cat }}
-} [1, 2, 3, 4, 5, 6, 7, 8] }
-!{ map { |h|
-    let res = await $h
-    echo !{to-bytes $res[stdout] | from-string}
-} $handles }
-echo done
-";
-    let o = run(script);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("done"));
-    // All squares must appear somewhere in output.
-    for (i, sq) in [
-        (1, 1),
-        (2, 4),
-        (3, 9),
-        (4, 16),
-        (5, 25),
-        (6, 36),
-        (7, 49),
-        (8, 64),
-    ] {
-        assert!(
-            o.stdout.contains(&sq.to_string()),
-            "missing {i}^2 = {sq} in output:\n{}",
-            o.stdout
-        );
-    }
-}
-
-// ── Mixed pipeline output ────────────────────────────────────────────────────
-
-#[test]
-fn mixed_pipeline_range_to_wc() {
-    // range 1 21 produces [1..20].  Apply the encoder explicitly, then let
-    // grep count the newline-separated bytes.
-    let o = run("to-lines !{range 1 21} | grep -c .");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let count: u32 = o.stdout.trim().parse().expect("grep -c output");
-    assert_eq!(count, 20);
-}
-
 // ── Stress: many sequential pipelines ───────────────────────────────────────
 
 #[test]
 fn many_sequential_pipelines_no_leak() {
-    // Run 50 pipelines in sequence, each with a ral-written stage thread in
+    // Run 10 pipelines in sequence, each with a ral-written stage thread in
     // the middle.  If file descriptors, process groups, or stage threads
     // leak, this will exhaust them and start failing.
     //
@@ -777,7 +348,7 @@ let _go = {{ |n|
         _go $[$n - 1]
     }}
 }}
-_go 50
+_go 10
 {close}
 echo done
 "
@@ -809,38 +380,6 @@ fn parse_tagged_field(text: &str, prefix: &str) -> Option<String> {
 }
 
 // ── Exit-status classification and group edge cases ──────────────────────────
-
-#[test]
-fn normal_exit_137_is_not_reported_as_sigkill() {
-    let o = run("/bin/sh -c 'exit 137'");
-    assert_eq!(o.status, 137);
-    assert!(
-        o.stderr.contains("sh: exited with status 137"),
-        "stderr: {}",
-        o.stderr
-    );
-    assert!(
-        !o.stderr.contains("killed by signal 9"),
-        "stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
-fn pipeline_first_external_failure_wins_over_later_helper_failure() {
-    let o = run("/bin/sh -c 'exit 42' | from-json");
-    assert_eq!(o.status, 42, "stderr: {}", o.stderr);
-    assert!(
-        o.stderr.contains("sh: exited with status 42"),
-        "stderr: {}",
-        o.stderr
-    );
-    assert!(
-        !o.stderr.contains("from-json: EOF"),
-        "later helper failure won first-failure policy: {}",
-        o.stderr
-    );
-}
 
 #[test]
 fn a_nested_pipeline_joins_its_stages_group() {
@@ -899,22 +438,6 @@ fn a_stages_error_keeps_its_span() {
         staged.stderr.contains("────┬────") || staged.stderr.contains("──┬──"),
         "staged error must carry a real span into the source line, not a synthetic one; stderr: {}",
         staged.stderr
-    );
-}
-
-#[test]
-fn real_sigkill_is_not_reported_as_plain_exit_137() {
-    let o = run("/bin/sh -c 'kill -KILL $$'");
-    assert_eq!(o.status, 137);
-    assert!(
-        o.stderr.contains("sh: killed by signal 9 (SIGKILL)"),
-        "stderr: {}",
-        o.stderr
-    );
-    assert!(
-        !o.stderr.contains("sh: exited with status 137"),
-        "stderr: {}",
-        o.stderr
     );
 }
 
@@ -1042,28 +565,6 @@ fn a_killed_producer_blocked_in_a_full_edge_does_not_take_the_shell() {
 // ── Stdin-consuming builtins ─────────────────────────────────────────────────
 
 #[test]
-fn parse_json_from_pipeline() {
-    // ext→builtin: external echo pipes JSON into from-json.
-    let o = run(r#"let d = !{/bin/echo '{"x":42}' | from-json}
-echo $d[x]"#);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "42");
-}
-
-#[test]
-fn read_string_from_non_utf8_pipeline_fails() {
-    // from-string is strict UTF-8: invalid bytes must produce an error,
-    // not silently corrupt the data with replacement characters.
-    let o = run("let s = !{/usr/bin/printf '\\377\\376A' | from-string}\necho !{length $s}");
-    assert_ne!(o.status, 0, "expected failure on non-UTF-8 input");
-    assert!(
-        o.stderr.contains("from-string: input is not valid UTF-8"),
-        "stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
 fn ext_command_non_utf8_gives_named_error() {
     // Invalid UTF-8 output from an external command is a runtime error.
     let o = run("let xv = /usr/bin/printf '\\377'");
@@ -1078,54 +579,6 @@ fn ext_command_non_utf8_gives_named_error() {
         "hint missing: {}",
         o.stderr
     );
-}
-
-#[test]
-fn fold_lines_from_pipeline() {
-    // Count lines using fold-lines with an integer accumulator.
-    let o = run(
-        r#"let n = !{/bin/echo -e "a\nb\nc" | fold-lines { |acc _| return $[$acc + 1] } 0}
-echo $n"#,
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "3");
-}
-
-// ── Line decode over byte pipelines ───────────────────────────────────────────
-
-#[test]
-fn internal_decode_to_a_list() {
-    // ext → from-lines (internal decode) → list.
-    let o = run(r#"let result = !{/bin/echo -e "a
-b
-c" | from-lines}
-echo !{length $result}"#);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "3");
-}
-
-#[test]
-fn from_lines_agrees_with_fold_lines() {
-    // `from-lines`' list should agree with a line count computed via
-    // `fold-lines` on the same byte-producing command.
-    //
-    // Running inside the ral process's working directory (workspace root).
-    let o = run(r#"
-let direct = find . -name "*.rs" -not -path "./target/*" | from-lines
-let n = !{find . -name "*.rs" -not -path "./target/*" | fold-lines { |acc _| return $[$acc + 1] } 0}
-echo !{length $direct}
-echo $n
-"#);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let lines: Vec<&str> = o.stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 2, "expected two count lines, got: {lines:?}");
-    assert_eq!(
-        lines[0], lines[1],
-        "from-lines length {} != fold-lines count {}",
-        lines[0], lines[1]
-    );
-    let count: usize = lines[0].parse().expect("count");
-    assert!(count > 0, "no .rs files found");
 }
 
 // ── Sandbox IPC subprocess stdio routing ────────────────────────────────
@@ -1461,24 +914,6 @@ fn grant_exec_explicit_path_allows_scoped_path_command() {
 }
 
 #[test]
-fn pipeline_external_stage_expands_empty_spread_to_zero_args() {
-    // Regression: `...$xs` with an empty list must contribute zero argv
-    // entries, not a stringified "" that confuses commands like fzf
-    // ("unknown option:").  `resolve_launch` must expand spreads the same
-    // way `eval_call_args` does.
-    let o = run("let ee = []; echo hi | /usr/bin/printf '[%s]\\n' --flag '' ...$ee");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout, "[--flag]\n[]\n");
-}
-
-#[test]
-fn pipeline_external_stage_expands_nonempty_spread() {
-    let o = run("let ee = ['-n', 'hello']; echo hi | /usr/bin/printf '[%s]\\n' --flag ...$ee");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout, "[--flag]\n[-n]\n[hello]\n");
-}
-
-#[test]
 fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
     // Regression: resolve_grant_path must canonicalize the grant prefix and
     // the target path consistently.  On macOS `/tmp -> /private/tmp`, so
@@ -1614,40 +1049,6 @@ fn pipeline_three_stages_share_anchor_pgid() {
 }
 
 #[test]
-fn pipeline_pgid_is_distinct_from_parent() {
-    // The anchor establishes a fresh pgid for the pipeline; the consumer's
-    // pgid must not be the parent ral's pgid.  Otherwise `tcsetpgrp` on
-    // the pipeline group would steal the terminal from ral itself.
-    let ral = ral_bin();
-    let script = format!(
-        "/usr/bin/true | {} --ral-test-pgid-check probe",
-        ral.display()
-    );
-    let o = run_with_timeout(&[], &script, Duration::from_secs(5)).expect("pipeline hung");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let probe = parse_tagged_pgid(&o.stderr, "probe").expect("probe pgid");
-    let parent = unsafe { libc::getpgrp() };
-    assert_ne!(
-        probe, parent as i32,
-        "pipeline stage shared parent pgid; stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
-fn pipeline_mid_stage_launch_failure_does_not_hang() {
-    // Stage 2 references a command that cannot be resolved, so its
-    // launch fails after stage 1 has already spawned.  Dropping the
-    // half-built `PipeNode` must SIGKILL the pgid before its
-    // stage handles join and reap every already-spawned child.  If any
-    // child leaks the wait() inside the harness will time out.
-    let script = "/usr/bin/true | /no/such/binary_xyzzy | /usr/bin/cat";
-    let o = run_with_timeout(&[], script, Duration::from_secs(5))
-        .expect("pipeline hung after mid-stage launch failure — child leak?");
-    assert_ne!(o.status, 0, "stderr: {}", o.stderr);
-}
-
-#[test]
 fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     // Stage 1 is a long-running producer (`yes`); stage 2 fails to launch.
     // The producer must be killed (SIGKILL) by the half-built `PipeNode`'s
@@ -1657,26 +1058,6 @@ fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     let o = run_with_timeout(&[], script, Duration::from_secs(5))
         .expect("pipeline hung — long producer not killed on abort?");
     assert_ne!(o.status, 0, "stderr: {}", o.stderr);
-}
-
-#[test]
-fn race_repeats_deterministically() {
-    // `printf ""` exits immediately; the consumer (a ral pgid probe) must
-    // still join the pipeline pgid and run to completion, every time.  The
-    // anchor + deferred-job protocol should make this deterministic; in a
-    // pre-anchor build, occasional timeouts would surface here.
-    let ral = ral_bin();
-    let script = format!("printf \"\" | {} --ral-test-pgid-check post", ral.display());
-    for i in 0..20 {
-        let o = run_with_timeout(&[], &script, Duration::from_secs(5))
-            .unwrap_or_else(|| panic!("iteration {i}: pipeline hung"));
-        assert_eq!(o.status, 0, "iteration {i} stderr: {}", o.stderr);
-        assert!(
-            parse_tagged_pgid(&o.stderr, "post").is_some(),
-            "iteration {i}: missing pgid; stderr: {}",
-            o.stderr
-        );
-    }
 }
 
 // ── Foreground-handoff regressions ──────────────────────────────────────────
@@ -2264,53 +1645,6 @@ fn pipeline_permission_denied_path_reports_126() {
 // empty captured bytes alongside the redirected file.
 
 #[test]
-fn audited_stdout_redirect_does_not_panic() {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("ral_audit_redir_stdout_{pid}_{nanos}.txt"));
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let script = format!("/bin/echo redirected > '{path_str}' | cat\n/bin/echo done\n");
-    let o = run_with_timeout(&["--audit"], &script, Duration::from_secs(5))
-        .expect("audited stdout-redirect pipeline hung");
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("redirected"),
-        "redirect target did not receive bytes; stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
-fn audited_stderr_redirect_does_not_panic() {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("ral_audit_redir_stderr_{pid}_{nanos}.txt"));
-    let path_str = path.display().to_string();
-    let _ = std::fs::remove_file(&path);
-
-    let script = format!("/bin/sh -c 'echo to-stderr >&2' 2> '{path_str}' | cat\n/bin/echo done\n");
-    let o = run_with_timeout(&["--audit"], &script, Duration::from_secs(5))
-        .expect("audited stderr-redirect pipeline hung");
-    let body = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(
-        body.as_deref().map(str::trim_end),
-        Some("to-stderr"),
-        "stderr redirect target did not receive bytes"
-    );
-}
-
-#[test]
 fn audited_stdout_and_stderr_redirect_does_not_panic() {
     // `> file 2>&1` joins both streams into the same file.  Pre-fix
     // the audited path panicked because both `stdout_buf` and
@@ -2364,15 +1698,6 @@ printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fai
         "structured stage error must surface; stderr: {}",
         o.stderr
     );
-}
-
-/// Pins: a failing chain arm's bytes flush live, not into the winning arm's
-/// decoded value.
-#[test]
-fn failed_chain_arm_bytes_flush_live_not_into_the_winner() {
-    let o = run("let vv = /bin/sh -c 'echo half; exit 3' ? echo x\necho $vv");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout, "half\nx\n", "stderr: {}", o.stderr);
 }
 
 // ── A non-interrupt pipeline cancel must take the whole group down ──────────

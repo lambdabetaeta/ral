@@ -1,0 +1,16 @@
+true false
+true false true false false
+equal: cannot compare Block with Block
+equal: cannot compare Lambda with Lambda
+equal: cannot compare Block with Block
+true false false
+true false
+lt: cannot compare Int with String
+gt: cannot compare Int with String
+true true
+[2, 9, 10]
+[10, 9, 2]
+[a, bb, ccc]
+sort-list-by: cannot compare Block with Block
+<native upper> <native lower> <native dedent> <native shell-quote> <native shell-split>
+comparison tests done

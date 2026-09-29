@@ -3,4 +3,14 @@ true
 30
 42
 deferred
+6
+6
+A
+B
+C
+1 2 3
+<|xs| block>
+one
+bound [two]
+done
 block tests done

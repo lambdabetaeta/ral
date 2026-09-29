@@ -1,0 +1,2 @@
+# contains: cannot pass
+let f = { |x| return $x }; ^echo $f

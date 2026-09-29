@@ -1,0 +1,1 @@
+let xss = [[1], [2]]; /bin/echo ...$xss

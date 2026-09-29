@@ -1,0 +1,2 @@
+# contains: couldn't match
+within [handlers: [foo: { |x| return $[$x + 1] }]] { foo "hello" }

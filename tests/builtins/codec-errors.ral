@@ -1,0 +1,27 @@
+# Test: codecs refuse what they cannot represent, and refusal why
+
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
+
+# Decoders are strict about UTF-8 ... except the line reader, which is lossy
+refusal { printf '\377\376A' | from-string; return () }
+refusal { printf '\377\376A' | from-json; return () }
+refusal { printf 'a\377b\n' | fold-lines { |acc _| return $[$acc + 1] } 0; return () }
+let lossy = printf 'a\377b\nc\n' | from-lines
+echo $lossy[0]
+echo $lossy[1]
+
+# JSON Lines names the failing line and column, not the stream's
+refusal { printf '{"a": 1}\n\n{"a":\n' | from-jsonl; return () }
+
+# An integer beyond i64 is refused, not rounded through a float
+refusal { to-string '18446744073709551615' | from-json; return () }
+refusal { to-string "1\n18446744073709551615\n" | from-jsonl; return () }
+
+# Encoders refuse values with no representation, and write nothing
+refusal { to-jsonl [`ok 1, `bad { return 1 }]; return () }
+refusal { to-json { return 1 }; return () }
+
+# Bytes are integers in 0..255
+refusal { ints-to-bytes [256]; return () }
+
+echo 'codec error tests done'

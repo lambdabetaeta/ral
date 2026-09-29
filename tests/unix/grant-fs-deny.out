@@ -1,0 +1,6 @@
+read denied
+subpath denied
+1
+true
+[forbidden, visible.txt]
+grant fs deny tests done

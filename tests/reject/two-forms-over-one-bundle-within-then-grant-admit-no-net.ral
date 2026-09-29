@@ -1,0 +1,6 @@
+# contains: 'net'
+let f = { |o|
+  within $o { () }
+  grant $o { () }
+}
+f [net: true]

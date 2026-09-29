@@ -1,0 +1,2 @@
+# contains: couldn't match
+return [1, hello, true, (), [a: 1]]

@@ -1,0 +1,71 @@
+# Test: what a spawned block writes stays in its handle's record, and a
+# spawned block runs in the dynamic context of its spawner
+
+let text = { |bytes| to-bytes $bytes | from-string }
+
+# await does not replay the block's bytes: they sit in the record until read
+let h1 = spawn { echo from-child }
+let r1 = await $h1
+echo marker-after
+# Expected: marker-after only
+
+# Reading twice from a repeated await gives the same bytes both times
+let h2 = spawn { echo just-once }
+let again1 = await $h2
+let again2 = await $h2
+echo !{text $again1[stdout]}
+echo !{text $again2[stdout]}
+# Expected: just-once twice
+
+# Spawns nobody awaits leak nothing to the caller's stdout
+let lost1 = spawn { echo alpha }
+let lost2 = spawn { echo bravo }
+sleep 0.1
+echo only-this
+
+# The block's stderr lives in the record too
+let h3 = spawn { warn 'diag' }
+let r3 = await $h3
+echo !{text $r3[stderr]}
+
+# A spawn forwards its body's route: a byte-routed body's payload is its
+# stdout, a value-routed body's is its return
+let h4 = spawn { echo hi }
+let r4 = await $h4
+echo "[!{bytes-to-string $r4[stdout]}]"
+let h5 = spawn { return 5 }
+let r5 = await $h5
+echo "$r5[value] [!{bytes-to-string $r5[stdout]}]"
+
+# A pipeline stage can close over a handle from outside and await it in place
+let h6 = spawn { return 7 }
+let r6 = echo x | !{ await $h6 }
+echo $r6[value]
+
+# Handlers installed by `within` reach spawned and parallel blocks ...
+within [handlers: [mycmd: { |args| echo "handled" }]] {
+    let h7 = spawn { mycmd }
+    let r7 = await $h7
+    echo !{text $r7[stdout]}
+    let res = par { |x| let r = mycmd $x; return $r } [a, b] 0
+    echo ...$res
+}
+
+# ... so does `within [dir:]` ...
+let target = temp-dir
+within [dir: $target] {
+    let h8 = spawn { cwd }
+    let r8 = await $h8
+    echo !{equal $r8[value] $target}
+}
+rm -rf $target
+
+# ... but a handler installed inside a spawn does not leak out of it
+let h9 = spawn {
+    within [handlers: [localcmd: { |args| echo "child-handler" }]] { localcmd }
+}
+let r9 = await $h9
+echo !{text $r9[stdout]}
+try { localcmd } { |_| echo "parent: no handler" }
+
+echo 'spawn io tests done'

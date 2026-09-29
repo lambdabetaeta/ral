@@ -1,0 +1,2 @@
+# contains: no field named 'missing'
+let base = [host: localhost]; let r = [...$base, port: 9090]; return $r[missing]

@@ -46,4 +46,18 @@ try {
     retry 3 { echo 'trying...'; fail [status: 1, message: 'retry test'] }
 } { |_err| echo 'retry exhausted' }
 
+# The record carries why the body failed, its status, and where it happened
+try { fail [status: 3, message: 'x'] } { |e| echo $e[reason] $e[status] }
+try { fail [status: 1, message: 'x'] } { |e|
+    case $e[site] [`just: { |s| echo $[$s[line] > 0] }, `none: { |_| echo none }]
+}
+
+# A failure raised by the evaluator itself passes through no command
+try { let _ = $[1 / 0] } { |e| echo $e[cmd] }
+
+# guard: the body's error propagates, not the cleanup's
+try { guard { fail [status: 42, message: 'original failure'] } { echo cleanup } } { |e|
+    echo "status $e[status]"
+}
+
 echo 'try error tests done'

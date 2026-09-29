@@ -1,0 +1,2 @@
+# contains: operand on each side
+return $[* 2]

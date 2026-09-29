@@ -18,4 +18,26 @@ hi
 env=scoped
 bound
 no options
+outer
+outer
+B
+42
+kept
+hi
+installed
+7
+missing dir refused
+within env: `PWD` is the shell's working directory; use `cd` or `within [dir: …]` to change it
+within env: `OLDPWD` is never passed to commands: ral keeps no previous directory for `cd -`
+4
+mocked
+one
+unhandled command
+3
+6
+42
+hello 1 true
+hello 1 true
+1
+hi
 within tests done

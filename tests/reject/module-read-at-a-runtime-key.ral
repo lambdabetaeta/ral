@@ -1,0 +1,4 @@
+# contains: with a runtime key
+let m = use 'lib/versioned.ral'
+let k = 'version'
+return $m[$k]

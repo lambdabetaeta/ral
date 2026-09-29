@@ -1,0 +1,2 @@
+# contains: hex digits
+return "\u{1234567}"

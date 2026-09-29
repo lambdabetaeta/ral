@@ -234,49 +234,6 @@ fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
     );
 }
 
-/// The survivor is alive and is nobody's child here.  On Linux `/proc`
-/// can say who took it instead; on macOS nothing can, so this asserts only
-/// what it can observe there.
-#[test]
-fn a_survivor_is_alive_and_is_no_longer_a_child_of_this_process() {
-    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
-    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
-    let survivor = Survivor::of(&receipt);
-    assert!(
-        survivor.alive(),
-        "the pid the receipt names must be a live process"
-    );
-
-    #[cfg(target_os = "linux")]
-    {
-        let me = libc::pid_t::try_from(std::process::id()).unwrap();
-        let parent = ppid_of(survivor.0).expect("/proc knows a live process's parent");
-        assert_ne!(
-            parent, me,
-            "the double fork must hand the survivor away, and it is still our child"
-        );
-        if parent != 1 {
-            // An ambient `PR_SET_CHILD_SUBREAPER` ancestor — a container
-            // init, a session manager, a test runner — claims orphans before
-            // init does.  That is legal, and it makes the `ppid == 1` half of
-            // the property unobservable, so it is not asserted.  The reaper
-            // must still be an ancestor of ours: anything else means the
-            // survivor went somewhere nobody intended.
-            let mut walk = me;
-            let mut ancestors = Vec::new();
-            while walk > 1 {
-                walk = ppid_of(walk).unwrap_or(1);
-                ancestors.push(walk);
-            }
-            assert!(
-                ancestors.contains(&parent),
-                "the survivor reparented to {parent}, which is neither init nor a subreaper ancestor of this test"
-            );
-        }
-    }
-}
-
 /// The intermediate is reaped inside the birth, so nothing of ours is left
 /// waiting to be collected — and, the survivor never having been ours, this
 /// process ends the birth with no children at all.
@@ -390,26 +347,6 @@ fn a_launch_that_fails_after_admission_gives_the_slot_back() {
     assert!(
         survivor.alive(),
         "the one birth the session had must still be spendable after a failed launch"
-    );
-}
-
-/// Silence permits: a grant that attenuates some *other* dimension says
-/// nothing about survivors, so the verb is spendable inside it — the whole
-/// point of the axis being a meet rather than an opt-in.  The survivor is
-/// born under that frame's projection and keeps it for life.
-#[test]
-fn a_grant_that_attenuates_something_else_still_permits_a_birth() {
-    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
-    let mut shell = armed();
-    let receipt = birth(
-        &mut shell,
-        "grant [fs: [read: ['/bin'], write: []]] \
-         { detach #'a long sleep'# /bin/sleep 300 }",
-    );
-    let survivor = Survivor::of(&receipt);
-    assert!(
-        survivor.alive(),
-        "a grant silent on detach must birth a living survivor"
     );
 }
 

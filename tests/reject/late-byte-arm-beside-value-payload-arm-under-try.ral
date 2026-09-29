@@ -1,0 +1,4 @@
+# contains: payload route
+let h = { |v| try { !{f $v} } { |_| return 5 } }
+let f = { |n| return $h; echo x }
+return ()

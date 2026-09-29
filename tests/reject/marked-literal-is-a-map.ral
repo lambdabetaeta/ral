@@ -1,0 +1,4 @@
+# contains: couldn't match
+# contains: a map has computed keys, so every value must have the one type
+let m = [:, a: 1, b: "x"]
+return $m

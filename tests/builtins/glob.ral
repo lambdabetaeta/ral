@@ -41,4 +41,19 @@ echo "no match: !{length $empty}"
 
 # Clean up
 rm -rf $tmpdir
+# Dotfiles match only a literal name, never a wildcard
+let dotdir = temp-dir
+echo x > "$dotdir/a.txt"
+echo x > "$dotdir/.hidden.txt"
+within [dir: $dotdir] {
+    echo !{glob '*.txt'}
+    echo !{glob '.hidden.txt'}
+}
+
+# A leading `~` expands before the pattern is matched
+within [env: [HOME: $dotdir]] {
+    echo !{length !{glob '~/*.txt'}}
+}
+rm -rf $dotdir
+
 echo 'glob tests done'

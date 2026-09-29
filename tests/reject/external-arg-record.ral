@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: to external command '/bin/echo'
+# contains: to-json
+let r = [a: 1]; /bin/echo $r
