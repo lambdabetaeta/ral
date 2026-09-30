@@ -8,7 +8,6 @@ use unicode_width::UnicodeWidthStr;
 
 /// Muted chrome hues; card spans reach them through a nominal
 /// [`crate::bus::card::Role`] rather than naming a colour.
-pub(super) const PINK: Color = Color::Rgb(220, 140, 175);
 pub(super) const CYAN: Color = Color::Rgb(135, 200, 215);
 pub(super) const LIME: Color = Color::Rgb(165, 210, 155);
 pub(super) const PURPLE: Color = Color::Rgb(175, 145, 210);

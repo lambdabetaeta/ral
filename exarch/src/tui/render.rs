@@ -23,7 +23,7 @@ use super::block::queued_prompt_rows;
 use super::gesture::{FrameGeom, Toast};
 use super::line;
 use super::matrix::strip;
-use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
+use super::palette::{AGENT_HUES, BANNER_CRIMSON, LIME_HOT, READ_W, SLATE};
 use super::row::Row;
 use super::scrollback::{Scrollback, StateSpan};
 use super::select::highlight_range;
@@ -225,7 +225,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             let block = prompt_block(Style::default().fg(SLATE).add_modifier(Modifier::DIM));
             f.render_widget(Paragraph::new(line).block(block), s.prompt);
         } else {
-            f.render_widget(prompt_block(Style::default().fg(PINK)), s.prompt);
+            f.render_widget(prompt_block(Style::default().fg(BANNER_CRIMSON)), s.prompt);
             prompt_state.render(f, inner);
             // No native cursor while an overlay owns the keyboard, or it
             // peeks out from beneath it.
