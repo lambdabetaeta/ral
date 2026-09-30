@@ -1,2 +1,2 @@
-# contains: couldn't match type Unit
+# contains: couldn't match type Command with type Returns Integer
 within [handlers: [foo: { |args| return 3 }]] { foo }

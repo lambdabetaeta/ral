@@ -73,21 +73,12 @@ pub enum Convention {
     Argv,
 }
 
-/// What a row does with stdout, declared per row because a body's writing is
-/// not in its signature.  A `Writes` row answers `Unit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Output {
-    Returns,
-    Writes,
-}
-
 /// A builtin command binding; `doc` is the line `help` and `explain` print.
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
     pub convention: Convention,
     pub(crate) type_rule: BuiltinTypeRule,
     pub doc: &'static str,
-    pub output: Output,
     /// Extra non-typing behaviour the checker's application path reads: which
     /// diagnostic an over-application or a literal misuse earns.  `None` for
     /// the overwhelming majority of rows.
@@ -115,7 +106,6 @@ impl BuiltinEntry {
             convention: Convention::Value,
             type_rule,
             doc,
-            output: Output::Returns,
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
@@ -153,19 +143,11 @@ impl BuiltinEntry {
             convention: Convention::Argv,
             type_rule: argv,
             doc,
-            output: Output::Returns,
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
             unit_cache: OnceLock::new(),
         }
-    }
-
-    /// Declare what the row does with stdout — a builder, so the common case
-    /// (`Returns`) names nothing.
-    pub const fn with_output(mut self, output: Output) -> Self {
-        self.output = output;
-        self
     }
 
     /// Attach a diagnostic facet to an otherwise-built entry — a builder
@@ -257,7 +239,6 @@ impl Clone for BuiltinEntry {
             convention: self.convention,
             type_rule: self.type_rule,
             doc: self.doc,
-            output: self.output,
             diagnostic: self.diagnostic,
             body: self.body.clone(),
             arity_cache: self.arity_cache.clone(),
@@ -415,13 +396,6 @@ mod tests {
         BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SERVICE_BUILTIN, SURFACE_BUILTIN,
         WATCH_BUILTIN,
     };
-    fn result(ct: &CompTy) -> Option<&Ty> {
-        match ct {
-            CompTy::Fun(_, body) => result(body),
-            CompTy::Return(_, ty) => Some(ty),
-            CompTy::Var(_) => None,
-        }
-    }
 
     /// The soundness perimeter: a value of a type the program did not decide
     /// enters typed code only through a boundary.  A row whose scheme
@@ -470,36 +444,5 @@ mod tests {
         let names: Vec<&str> = BOUNDARY_BUILTINS.iter().map(|e| e.name.as_ref()).collect();
         assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
         assert!(CORE_BUILTINS.iter().all(|e| !e.is_boundary()));
-    }
-
-    /// `Writes` is declared, not derived; this is what keeps the declaration
-    /// honest: a row that writes answers `Unit`.
-    #[test]
-    fn a_writing_row_answers_unit() {
-        let sets: [&[BuiltinEntry]; 6] = [
-            CORE_BUILTINS,
-            BOUNDARY_BUILTINS,
-            CORE_BASE_FRAMES,
-            WATCH_BUILTIN,
-            SERVICE_BUILTIN,
-            SURFACE_BUILTIN,
-        ];
-        #[cfg(unix)]
-        let detach = crate::builtins::DETACH_BUILTIN;
-        #[cfg(not(unix))]
-        let detach: &[BuiltinEntry] = &[];
-        for entry in sets.into_iter().flatten().chain(detach) {
-            let scheme = (entry.type_rule)(&mut Unifier::new());
-            let Ty::Thunk(inner) = &scheme.ty else {
-                panic!("{}: a row's scheme is a thunk", entry.name);
-            };
-            if entry.output == Output::Writes {
-                assert!(
-                    matches!(result(inner), Some(Ty::Unit)),
-                    "{}: a writing row's result is `F Unit`",
-                    entry.name
-                );
-            }
-        }
     }
 }

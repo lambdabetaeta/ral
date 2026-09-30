@@ -431,10 +431,8 @@ impl Comp {
 /// True if `top` is a single external/builtin command call.
 ///
 /// A fact about the input's shape, which hosts read to tailor what they say
-/// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec` under
-/// its hoisted temporaries and the checker's byte-to-value coercion — the
-/// tail `Run`'s value is reported now, so a byte-routed external gets
-/// wrapped in `Bind(Capture(_), x, Decode(x))`.
+/// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec`.  A
+/// tail `Run` is never captured, so nothing wraps it.
 pub(crate) fn is_single_command(top: &Toplevel) -> bool {
     let [phrase] = top.phrases.as_slice() else {
         return false;
@@ -442,15 +440,7 @@ pub(crate) fn is_single_command(top: &Toplevel) -> bool {
     let Phrase::Run(comp) = &phrase.item else {
         return false;
     };
-    let mut c = comp.as_ref();
-    loop {
-        c = match &c.item {
-            CompKind::Capture(body) => body,
-            CompKind::Bind { comp, rest, .. } if matches!(rest.item, CompKind::Decode(_)) => comp,
-            _ => break,
-        };
-    }
-    matches!(c.item, CompKind::Exec(_))
+    matches!(comp.item, CompKind::Exec(_))
 }
 
 impl Mentions for Comp {

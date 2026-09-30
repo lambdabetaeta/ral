@@ -1,0 +1,3 @@
+# A command's value is its output, so an arm that runs one joins an arm that
+# returns text: the command arm is captured.
+let f = { |c| if $c { echo big } else { 'small' } }

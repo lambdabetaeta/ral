@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, write_sink, buffer_overflowed]
 ---
@@ -18,13 +18,13 @@ only for neglect — or never, if born a `service`.
 
 **This section names a different mechanism from the drain-to-EOF story
 below, though both swap in a `Sink::Buffer`.** The evaluator's `Capture` node
-is written by the checker, and only by it: `⟦·⟧`, the elaboration of `let`,
-wraps a command that writes in `cap M to d. decode d` wherever the right-hand
-side's result comes from it (`let v = echo hi`; see
+is written by the checker, and only by it: where a value is demanded of a
+computation of type `F^w Unit` (a `let`'s right-hand side, an argument to a
+value-demanding function, an arm joined with a value arm) it wraps the
+computation in `cap M to d. decode d` (`let v = echo hi`; see
 [[internals/type-inference|type-inference]] and
-[[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
-A command is an `F Unit` computation — it writes and returns nothing — so the
-frame inspects no produced value: `cap : F Unit → F Bytes`.
+[[decisions/260930_graded-f|graded-f]]). A command's value is its output, so the
+frame inspects no produced value: `capture : F^w Unit → F Bytes`.
 
 - `CompKind::Capture` pushes `Frame::Capture` (`core/src/evaluator/machine.rs`,
   [[internals/evaluator-machine|evaluator-machine]]) and swaps `shell.io.stdout`
@@ -48,10 +48,10 @@ frame inspects no produced value: `cap : F Unit → F Bytes`.
 **A discarded statement writes to `stdout`, wherever that is.** A block is a
 right-nested `Bind`, `a; b` being `a to _. b`
 ([[internals/evaluator-machine|evaluator-machine]]), and stepping it touches no
-sink. Inside a capture `stdout` is the buffer, so what a block writes before its
-tail is captured with the tail unless an inner `let` takes it: `let x = !{ echo
-a; echo b }` prints `a` and binds `b`, because `⟦·⟧` follows only the block's
-result, while `let x = !{ let y = echo a; echo b }` prints nothing and binds
+sink. Inside a capture `stdout` is the buffer, and the capture wraps the whole
+right-hand side, so everything the block writes is the value unless an inner
+`let` takes it: `let x = !{ echo a; echo b }` prints nothing and binds
+`"a\nb"`, while `let x = !{ let y = echo a; echo b }` prints nothing and binds
 `b`. A captured stand-in's every statement is captured.
 
 ## Capture is a drain to EOF

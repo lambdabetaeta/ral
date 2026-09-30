@@ -2,17 +2,16 @@
 //! `CompTy`, mutually recursive through thunks.
 
 use super::builtins::{BuiltinDiagnostic, fail_status_is_zero_literal};
-use super::capture::HeadClass;
-use super::env::{BoundaryValue, InferCtx, TyEnv};
+use super::env::{BoundaryValue, HandlerBinding, InferCtx, TyEnv, comp_key, val_key};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::{FreeVars, generalize};
 use super::index::{Idx, Lbl, Settled};
 use super::kind::Kind;
 use super::scheme::Scheme;
-use super::ty::{CompTy, Label, Row, Ty};
+use super::ty::{CompTy, Grade, Label, Row, Ty};
 use super::unify::WeakSource;
 use crate::ir::{
-    Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, GroupNode,
+    Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode,
     IrPattern, Name, Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
     is_gensym,
 };
@@ -20,8 +19,76 @@ use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{ArithOp, BinaryOp, BinaryOpKind, ScopeAst, StdinSource};
-use crate::types::{BuiltinEntry, LANGUAGE_CONSTANTS, Output, RefusedArg};
+use crate::types::{BuiltinEntry, LANGUAGE_CONSTANTS, RefusedArg};
 use std::sync::Arc;
+
+/// What a bare command head resolves to, by the lookup order the checker and
+/// the runtime share: binding, value builtin, handler, external.
+enum HeadClass {
+    /// A lexical or session binding, called at its scheme.
+    Binding(Arc<Scheme>),
+    /// A value row of the builtin table, applied at its scheme.
+    Value(BuiltinEntry),
+    /// A handler in scope — a user arm, else a base frame such as `echo` —
+    /// standing in for the head it names.
+    Arm(HandlerBinding),
+    /// Anything else, and always `^name`, `./p` and `~/p`.
+    External,
+}
+
+/// What an arm of a joining form is checked as: the value written, the
+/// parameter types its form hands it, and the reason its own shape is held
+/// to.  The form's arms are then joined under the form's reason.
+pub(super) struct JoinArm<'a> {
+    value: &'a Val,
+    span: Option<Span>,
+    params: Vec<Ty>,
+    why: Reason,
+}
+
+impl<'a> JoinArm<'a> {
+    fn new(value: &'a Spanned<Val>, params: Vec<Ty>, why: Reason) -> Self {
+        Self {
+            value: &value.item,
+            span: value.span,
+            params,
+            why,
+        }
+    }
+
+    /// An arm the form carries without a span of its own.
+    pub(super) fn in_hand(value: &'a Val, params: Vec<Ty>, why: Reason) -> Self {
+        Self {
+            value,
+            span: None,
+            params,
+            why,
+        }
+    }
+
+    /// The span the arm's result comes from: its tail, through lambda bodies
+    /// and the rest of each bind, or the arm itself when it is in hand.
+    fn result_span(&self) -> Option<Span> {
+        match self.value {
+            Val::Thunk(comp) => Inferencer::result_span(comp.shape()),
+            _ => self.span,
+        }
+    }
+}
+
+/// A block adapted to a demand of the other producer kind: the type it is
+/// read at.
+enum Adapted {
+    /// A command where a value was demanded: `cap`, then `decode`.
+    Captured(CompTy),
+    /// A `()` producer where a command was demanded: identity at runtime.
+    Upcast(CompTy),
+}
+
+/// `head`'s stand-in type: an argv in, a command out.
+fn command_head() -> CompTy {
+    CompTy::Fun(Box::new(Ty::argv()), Box::new(CompTy::command()))
+}
 
 /// Which argv boundary `argv_ty` is walking, and so what crosses it.
 ///
@@ -138,51 +205,53 @@ fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
     }
 }
 
-/// The elaborator's IR shape for `alias name { body }`.  `Ok(None)` means the
-/// head is not `alias` and the caller falls through to a normal exec; `Err`
-/// means it is `alias`, malformed.
-fn alias_statement_shape(part: &Comp) -> Result<Option<(&str, &Arc<Comp>)>, &'static str> {
-    let CompKind::Exec(exec) = &part.item else {
-        return Ok(None);
+/// A call of a bare name, as `exec_comp_ty` dispatches on it.
+fn bare_call(comp: &Comp) -> Option<(&str, &Exec)> {
+    let CompKind::Exec(exec) = &comp.item else {
+        return None;
     };
     let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
-        return Ok(None);
+        return None;
     };
-    if head.as_ref() != "alias" {
-        return Ok(None);
-    }
-    if !exec.redirects.is_empty() {
-        return Err("alias: redirects in alias definition are not allowed");
-    }
-    let Some(positional) = crate::ir::args::positional(&exec.args) else {
-        return Err("alias: spread arguments in alias definition are not allowed");
-    };
-    let [Val::String(name), Val::Thunk(thunk)] = positional[..] else {
-        return Err("alias: expected `alias name { body }`");
-    };
-    Ok(Some((name.as_str(), thunk.shape())))
+    Some((head.as_ref(), exec))
 }
 
-fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
-    let CompKind::Exec(exec) = &part.item else {
-        return Ok(None);
-    };
-    let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
-        return Ok(None);
-    };
-    if head.as_ref() != "unalias" {
-        return Ok(None);
+/// The elaborator's IR shape for `alias name { body }` and `unalias name`,
+/// which bind and unbind a handler scheme for the statements after them.
+enum HandlerStatement<'a> {
+    Alias(&'a str, &'a Comp),
+    Unalias(&'a str),
+}
+
+impl<'a> HandlerStatement<'a> {
+    /// `Ok(None)` when `comp` is neither statement; `Err` when it is one,
+    /// malformed.
+    fn of(comp: &'a Comp) -> Result<Option<Self>, TypeErrorKind> {
+        let Some((head, exec)) = bare_call(comp) else {
+            return Ok(None);
+        };
+        let malformed = |detail| match head {
+            "alias" => TypeErrorKind::MalformedAlias { detail },
+            _ => TypeErrorKind::MalformedUnalias { detail },
+        };
+        if !matches!(head, "alias" | "unalias") {
+            return Ok(None);
+        }
+        if !exec.redirects.is_empty() {
+            return Err(malformed("redirects are not allowed here"));
+        }
+        let Some(positional) = crate::ir::args::positional(&exec.args) else {
+            return Err(malformed("spread arguments are not allowed here"));
+        };
+        match (head, &positional[..]) {
+            ("alias", [Val::String(name), Val::Thunk(thunk)]) => {
+                Ok(Some(Self::Alias(name.as_str(), thunk.shape())))
+            }
+            ("alias", _) => Err(malformed("expected `alias name { body }`")),
+            (_, [Val::String(name)]) => Ok(Some(Self::Unalias(name.as_str()))),
+            _ => Err(malformed("expected `unalias name`")),
+        }
     }
-    if !exec.redirects.is_empty() {
-        return Err("unalias: redirects are not allowed");
-    }
-    let Some(positional) = crate::ir::args::positional(&exec.args) else {
-        return Err("unalias: spread arguments are not allowed");
-    };
-    let [Val::String(name)] = positional[..] else {
-        return Err("unalias: expected `unalias name`");
-    };
-    Ok(Some(name.as_str()))
 }
 
 /// Type-check a whole [`Toplevel`]: infer each phrase in order, extending
@@ -312,35 +381,86 @@ impl Inferencer<'_> {
         }
     }
 
-    /// What a binder's pattern reaches from its RHS's inferred type: a `Fun`
-    /// RHS is a lambda — evaluating it builds a closure, nothing to capture —
-    /// so the whole arrow is thunked; otherwise the binder consumes what the
-    /// RHS returns.  The capture coercion is already in the RHS's type, put
-    /// there by [`Self::capture_sites`].  Shared by `Bind` and `Phrase::Define`.
-    fn rhs_bound_ty(&mut self, inner_ty: CompTy) -> Ty {
-        if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-            Ty::Thunk(Box::new(inner_ty))
-        } else {
-            self.extract_return(&inner_ty)
+    /// The bind rule: what a binder's pattern reaches from its RHS's type.  A
+    /// `Fun` RHS is a lambda, so the whole arrow is thunked; a command is
+    /// captured, and the binder takes its output; a value producer's value is
+    /// bound; a producer of unknown grade is made a value producer — a `let`
+    /// is a demand for a value, the one defaulting in the system.  Shared by
+    /// `Bind` and `Phrase::Define`.
+    fn rhs_bound_ty(&mut self, rhs: &Comp, cty: CompTy) -> Ty {
+        match self.ctx.unifier.resolve_comp_ty(&cty) {
+            CompTy::Fun(..) => Ty::Thunk(Box::new(cty)),
+            CompTy::Return(Grade::Output, unit) => {
+                debug_assert!(matches!(self.ctx.unifier.resolve_ty(&unit), Ty::Unit));
+                self.ctx.captured.insert(comp_key(rhs));
+                Ty::String
+            }
+            CompTy::Return(Grade::Value, ty) => *ty,
+            CompTy::Return(Grade::Var(grade), ty) => {
+                self.ctx.unifier.bind_grade(grade, Grade::Value);
+                *ty
+            }
+            CompTy::Var(_) => {
+                let ty = self.ctx.unifier.fresh_ty();
+                self.ctx
+                    .unify_comp_ty(&cty, &CompTy::pure(ty.clone()), Reason::ReturnShape);
+                ty
+            }
         }
     }
 
-    /// `cty`'s curried arity: `0` for anything not a `Fun`.
-    fn fun_arity(&mut self, cty: &CompTy) -> usize {
-        match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Fun(_, body) => 1 + self.fun_arity(&body),
-            _ => 0,
+    /// `cty`'s curry spine: its parameters, and what is left past them,
+    /// resolved — a `Return`, or a variable.
+    fn spine(&self, cty: &CompTy) -> (Vec<Ty>, CompTy) {
+        let mut params = Vec::new();
+        let mut cur = self.ctx.unifier.resolve_comp_ty(cty);
+        while let CompTy::Fun(param, body) = cur {
+            params.push(*param);
+            cur = self.ctx.unifier.resolve_comp_ty(&body);
         }
+        (params, cur)
+    }
+
+    /// What `cty` produces once every parameter is supplied: its arity, and
+    /// the grade and value of its `Return` — `None` while that is a variable.
+    fn producer_after_params(&self, cty: &CompTy) -> Option<(usize, Grade, Ty)> {
+        match self.spine(cty) {
+            (params, CompTy::Return(grade, ty)) => Some((params.len(), grade, *ty)),
+            _ => None,
+        }
+    }
+
+    /// `cty` with the `Return` past its parameters rebuilt by `f`; a variable
+    /// there is left as it is.
+    fn map_producer(&self, cty: &CompTy, f: impl FnOnce(Grade, Ty) -> CompTy) -> CompTy {
+        match self.spine(cty) {
+            (params, CompTy::Return(grade, ty)) => {
+                params.into_iter().rev().fold(f(grade, *ty), |body, param| {
+                    CompTy::Fun(Box::new(param), Box::new(body))
+                })
+            }
+            _ => cty.clone(),
+        }
+    }
+
+    /// A stdout redirect takes a command's output, so what is left is a value
+    /// producer: `M > f : F^p A`.
+    fn discharge(&self, cty: &CompTy) -> CompTy {
+        self.map_producer(cty, |_, ty| CompTy::pure(ty))
+    }
+
+    /// The type a captured command block is read at: a producer of the text
+    /// it wrote.
+    fn captured(&self, cty: &CompTy) -> CompTy {
+        self.map_producer(cty, |_, _| CompTy::pure(Ty::String))
     }
 
     /// Record `rhs`'s curried arity for `annotate`'s η-expansion, keyed
     /// by `rhs`'s own address — absent means "not `Fun`-shaped".
-    fn record_arrow_arity(&mut self, rhs: &Arc<Comp>, cty: &CompTy) {
-        let arity = self.fun_arity(cty);
+    fn record_arrow_arity(&mut self, rhs: &Comp, cty: &CompTy) {
+        let arity = self.spine(cty).0.len();
         if arity > 0 {
-            self.ctx
-                .rhs_arrow_arity
-                .insert(std::ptr::from_ref::<Comp>(rhs.as_ref()) as usize, arity);
+            self.ctx.rhs_arrow_arity.insert(comp_key(rhs), arity);
         }
     }
 
@@ -354,12 +474,15 @@ impl Inferencer<'_> {
 
     /// [`Self::extract_return`], reported under a caller-chosen [`Reason`] —
     /// the pipeline stage forcer wants its own hint, not the generic one.
+    /// A variable opens at a fresh grade: only the bind rule decides `p`.
     fn force_return_shape(&mut self, cty: &CompTy, why: Reason) -> Ty {
         if let CompTy::Return(_, ty) = self.ctx.unifier.resolve_comp_ty(cty) {
             *ty
         } else {
             let ty = self.ctx.unifier.fresh_ty();
-            self.ctx.unify_comp_ty(cty, &CompTy::pure(ty.clone()), why);
+            let grade = self.ctx.unifier.fresh_grade();
+            let shape = CompTy::Return(grade, Box::new(ty.clone()));
+            self.ctx.unify_comp_ty(cty, &shape, why);
             ty
         }
     }
@@ -410,35 +533,31 @@ impl Inferencer<'_> {
     /// should name as that verb's own arity error rather than an anonymous
     /// shape mismatch.
     fn discarded_builtin_arity(&self, comp: &Comp) -> Option<(String, usize, usize)> {
-        let CompKind::Exec(exec) = &comp.item else {
+        let (name, exec) = bare_call(comp)?;
+        let HeadClass::Value(entry) = self.head_class(name) else {
             return None;
         };
-        let CommandWord::Name(CommandName::Bare(name)) = &exec.head else {
-            return None;
-        };
-        if self.env.lookup_binding(name).is_some() {
-            return None;
-        }
-        let entry: BuiltinEntry = self.env.builtins.value(name)?;
         let got = crate::ir::args::positional(&exec.args).map_or(0, |p| p.len());
         Some((name.to_string(), entry.fixed_arity(), got))
     }
 
-    /// `arm` against the computation type `expected` its form's other arms
-    /// share: a literal block is inferred in a scope of its own, pushing
-    /// `expected` inwards as a lambda's parameter; a thunk in hand is unified.
-    /// A mismatch is blamed on the arm's own span.
-    fn check_arm(&mut self, arm: &Spanned<Val>, expected: &CompTy, why: &Reason) {
-        self.with_span(arm.span, |this| match &arm.item {
+    /// `arm` against the computation type `expected`: a literal block is
+    /// inferred in a scope of its own, pushing `expected` inwards as a
+    /// lambda's parameter; a thunk in hand is unified.  A mismatch is blamed
+    /// on the arm's own span.  Returns the literal block's own type, which
+    /// the join reads past the pushed parameters.
+    fn check_arm(&mut self, arm: &JoinArm<'_>, expected: &CompTy) {
+        self.with_span(arm.span, |this| match arm.value {
             Val::Thunk(comp) => {
                 let got = this.with_scope(|this| this.check_comp(comp.shape(), expected));
-                let tail = Self::result_span(comp.shape());
-                this.with_span(tail, |this| this.unify_arm(&got, expected, why));
+                this.with_span(arm.result_span(), |this| {
+                    this.ctx.unify_comp_ty(expected, &got, arm.why.clone());
+                });
             }
             other => {
                 let ty = this.infer_val(other);
-                this.ctx
-                    .unify_ty(&ty, &Ty::Thunk(Box::new(expected.clone())), why.clone());
+                let expected = Ty::Thunk(Box::new(expected.clone()));
+                this.ctx.unify_ty(&ty, &expected, arm.why.clone());
             }
         });
     }
@@ -453,36 +572,138 @@ impl Inferencer<'_> {
         }
     }
 
-    /// An arm's computation type against the one its form's arms share: the
-    /// values they return, where both return one, so that a disagreement is
-    /// between two values rather than between two computations.
-    fn unify_arm(&mut self, got: &CompTy, shared: &CompTy, why: &Reason) {
+    /// An arm's result against the join's: the values, where both produce
+    /// one at the same grade, so that a disagreement is between two values
+    /// rather than between two computations.
+    fn unify_arm(&mut self, got: &CompTy, target: &CompTy, why: &Reason) {
         match (
             self.ctx.unifier.resolve_comp_ty(got),
-            self.ctx.unifier.resolve_comp_ty(shared),
+            self.ctx.unifier.resolve_comp_ty(target),
         ) {
-            (CompTy::Return(_, a), CompTy::Return(_, b)) => {
+            (CompTy::Return(g, a), CompTy::Return(h, b)) if g == h => {
                 self.ctx.unify_ty(&b, &a, why.clone());
             }
-            (CompTy::Fun(p, a), CompTy::Fun(q, b)) => {
-                self.ctx.unify_ty(&q, &p, why.clone());
-                self.unify_arm(&a, &b, why);
-            }
-            _ => self.ctx.unify_comp_ty(shared, got, why.clone()),
+            _ => self.ctx.unify_comp_ty(target, got, why.clone()),
         }
     }
 
-    /// The arms of an `if`, joined: exactly one runs, so they share one type.
-    fn join_arms<'a>(
+    /// `got`, captured from the command `shown`, against `target`: a failure
+    /// is reported between the command as written and the target — the two
+    /// the reader wrote.  `true` when they agree.
+    fn unify_coerced(
         &mut self,
-        arms: impl IntoIterator<Item = &'a Spanned<Val>>,
+        shown: &CompTy,
+        got: &CompTy,
+        target: &CompTy,
         why: &Reason,
-    ) -> CompTy {
-        let joined = self.ctx.unifier.fresh_comp_ty();
-        for arm in arms {
-            self.check_arm(arm, &joined, why);
+    ) -> bool {
+        self.ctx.unifier.at = self.ctx.pos;
+        let agreed = self.ctx.unifier.unify_comp_ty(got, target).is_ok();
+        if !agreed {
+            // The producers, past the parameters the two agree on.
+            let kind = TypeErrorKind::CompTyMismatch {
+                expected: self.ctx.unifier.apply_comp_ty(&self.spine(target).1),
+                actual: self.ctx.unifier.apply_comp_ty(&self.spine(shown).1),
+            };
+            self.ctx.report(kind, why.clone());
         }
-        joined
+        agreed
+    }
+
+    /// The arms of a joining form: exactly one runs, so they share one type.
+    ///
+    /// Two passes.  Each arm is first checked against its own fresh result,
+    /// past the parameters its form hands it; then the results decide the
+    /// join: any arm producing a value other than `()` makes it a value
+    /// producer, and every command arm is captured; else any command arm
+    /// makes it a command, and a `()` producer stands as one; else the arms
+    /// simply agree.
+    pub(super) fn join_arms(&mut self, arms: &[JoinArm<'_>], why: &Reason) -> CompTy {
+        let results: Vec<CompTy> = arms
+            .iter()
+            .map(|arm| {
+                let rho = self.ctx.unifier.fresh_comp_ty();
+                let expected = arm.params.iter().rev().fold(rho.clone(), |body, param| {
+                    CompTy::Fun(Box::new(param.clone()), Box::new(body))
+                });
+                self.check_arm(arm, &expected);
+                rho
+            })
+            .collect();
+        let producers: Vec<CompTy> = results
+            .iter()
+            .map(|rho| self.ctx.unifier.resolve_comp_ty(rho))
+            .collect();
+        let is_unit = |this: &Self, ty: &Ty| matches!(this.ctx.unifier.resolve_ty(ty), Ty::Unit);
+        let wants_value = producers
+            .iter()
+            .any(|p| matches!(p, CompTy::Return(Grade::Value, a) if !is_unit(self, a)));
+        let has_command = producers
+            .iter()
+            .any(|p| matches!(p, CompTy::Return(Grade::Output, _)));
+        let target = if wants_value {
+            CompTy::pure(self.ctx.unifier.fresh_ty())
+        } else if has_command {
+            CompTy::command()
+        } else {
+            self.ctx.unifier.fresh_comp_ty()
+        };
+        // The value arms fix the target first, so a captured arm that still
+        // disagrees is reported as the command it is against that value.
+        let captured =
+            |producer: &CompTy| wants_value && matches!(producer, CompTy::Return(Grade::Output, _));
+        let ordered = arms
+            .iter()
+            .zip(&results)
+            .zip(&producers)
+            .filter(|(_, producer)| !captured(producer))
+            .chain(
+                arms.iter()
+                    .zip(&results)
+                    .zip(&producers)
+                    .filter(|(_, producer)| captured(producer)),
+            );
+        for ((arm, rho), producer) in ordered {
+            self.with_span(arm.result_span(), |this| match producer {
+                CompTy::Return(Grade::Output, _) if wants_value => {
+                    this.capture_arm(arm);
+                    let captured = this.captured(rho);
+                    this.unify_coerced(rho, &captured, &target, why);
+                }
+                CompTy::Return(Grade::Value, a) if has_command && is_unit(this, a) => {}
+                _ => this.unify_arm(rho, &target, why),
+            });
+        }
+        target
+    }
+
+    /// Mark `arm` for capture: a literal block by its innermost body, under
+    /// the lambdas its parameters make, a value in hand by itself, η-wrapped
+    /// at that arity.
+    fn capture_arm(&mut self, arm: &JoinArm<'_>) {
+        self.capture_block(arm.value, arm.params.len());
+    }
+
+    fn capture_block(&mut self, value: &Val, arity: usize) {
+        match value {
+            Val::Thunk(comp) => self.capture_body(comp.shape(), arity),
+            other => {
+                self.ctx.captured_vals.insert(val_key(other), arity);
+            }
+        }
+    }
+
+    fn capture_body(&mut self, body: &Comp, arity: usize) {
+        let innermost = Self::innermost_body(body, arity);
+        self.ctx.captured.insert(comp_key(innermost));
+    }
+
+    /// `comp` under `arity` lambdas — as far down as it has them.
+    fn innermost_body(comp: &Comp, arity: usize) -> &Comp {
+        match &comp.item {
+            CompKind::Lam { body, .. } if arity > 0 => Self::innermost_body(body, arity - 1),
+            _ => comp,
+        }
     }
 
     fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
@@ -549,7 +770,7 @@ impl Inferencer<'_> {
                 });
             }
             self.refuse_spread(args, super::error::SpreadHead::Applied);
-            return self.peel_curry_spine(cty);
+            return self.peel_curry_spine(&cty);
         };
         let mut bodies = Vec::new();
         for (i, arg) in positional.into_iter().enumerate() {
@@ -561,17 +782,22 @@ impl Inferencer<'_> {
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
             let result = self.with_span(args[i].slot().span, |this| {
-                let arg_ty = match arg {
-                    Val::Thunk(body) => {
-                        let body_ty = this.ctx.unifier.fresh_comp_ty();
-                        bodies.push((body.clone(), body_ty.clone(), this.ctx.pos));
-                        Ty::Thunk(Box::new(body_ty))
-                    }
-                    _ => this.infer_val(arg),
+                let (arg_ty, coerced) = if let Val::Thunk(body) = arg {
+                    let body_ty = this.ctx.unifier.fresh_comp_ty();
+                    bodies.push((body.clone(), body_ty.clone(), this.ctx.pos));
+                    (Ty::Thunk(Box::new(body_ty)), None)
+                } else {
+                    let ty = this.infer_val(arg);
+                    this.adapt_argument(arg, ty, &cty)
                 };
                 let result = this.ctx.unifier.fresh_comp_ty();
                 let expected = CompTy::Fun(Box::new(arg_ty), Box::new(result.clone()));
-                this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
+                let agreed = coerced.is_none_or(|(shown, given, wanted)| {
+                    this.unify_coerced(&shown, &given, &wanted, &Reason::Argument)
+                });
+                if agreed {
+                    this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
+                }
                 result
             });
             cty = result;
@@ -582,11 +808,84 @@ impl Inferencer<'_> {
         for (body, body_ty, pos) in bodies {
             self.with_span(pos, |this| {
                 let inferred = this.with_scope(|this| this.check_comp(body.shape(), &body_ty));
-                this.ctx
-                    .unify_comp_ty(&inferred, &body_ty, Reason::Argument);
+                this.unify_block_body(body.shape(), &inferred, &body_ty);
             });
         }
         cty
+    }
+
+    /// How a block of type `given` meets the demand `wanted`, when the two
+    /// are producers of one arity of different kinds: a command where a
+    /// value producer is demanded is captured, and a `()` producer where a
+    /// command is demanded stands as one.  `None` when nothing adapts.
+    fn adapt(&self, given: &CompTy, wanted: &CompTy) -> Option<Adapted> {
+        let (n, given_grade, given_ty) = self.producer_after_params(given)?;
+        let (m, wanted_grade, _) = self.producer_after_params(wanted)?;
+        if n != m {
+            return None;
+        }
+        match (given_grade, wanted_grade) {
+            (Grade::Output, Grade::Value) => Some(Adapted::Captured(self.captured(given))),
+            (Grade::Value, Grade::Output)
+                if matches!(self.ctx.unifier.resolve_ty(&given_ty), Ty::Unit) =>
+            {
+                Some(Adapted::Upcast(
+                    self.map_producer(given, |_, _| CompTy::command()),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// A block argument's body of type `inferred`, against the `wanted` its
+    /// parameter fixed: adapted if it must be, then unified.
+    fn unify_block_body(&mut self, body: &Comp, inferred: &CompTy, wanted: &CompTy) {
+        match self.adapt(inferred, wanted) {
+            Some(Adapted::Captured(captured)) => {
+                let arity = self.spine(inferred).0.len();
+                self.capture_body(body, arity);
+                self.unify_coerced(inferred, &captured, wanted, &Reason::Argument);
+            }
+            Some(Adapted::Upcast(upcast)) => {
+                self.unify_coerced(inferred, &upcast, wanted, &Reason::Argument);
+            }
+            None => self.ctx.unify_comp_ty(inferred, wanted, Reason::Argument),
+        }
+    }
+
+    /// An argument in hand of type `ty`, against the parameter `callee` waits
+    /// for: a block adapted to the demand is read at the adapted type, and a
+    /// captured one is η-wrapped at its arity.  Returns the type to apply at,
+    /// and, when adapted, the block's own computation, the adapted one, and
+    /// the demanded one.
+    fn adapt_argument(
+        &mut self,
+        arg: &Val,
+        ty: Ty,
+        callee: &CompTy,
+    ) -> (Ty, Option<(CompTy, CompTy, CompTy)>) {
+        let CompTy::Fun(param, _) = self.ctx.unifier.resolve_comp_ty(callee) else {
+            return (ty, None);
+        };
+        let (Ty::Thunk(given), Ty::Thunk(wanted)) = (
+            self.ctx.unifier.resolve_ty(&ty),
+            self.ctx.unifier.resolve_ty(&param),
+        ) else {
+            return (ty, None);
+        };
+        let adapted = match self.adapt(&given, &wanted) {
+            Some(Adapted::Captured(captured)) => {
+                let arity = self.spine(&given).0.len();
+                self.ctx.captured_vals.insert(val_key(arg), arity);
+                captured
+            }
+            Some(Adapted::Upcast(upcast)) => upcast,
+            None => return (ty, None),
+        };
+        (
+            Ty::Thunk(Box::new(adapted.clone())),
+            Some((*given, adapted, *wanted)),
+        )
     }
 
     /// One application path for every registered builtin, `Scheme` and `Sig`
@@ -630,7 +929,7 @@ impl Inferencer<'_> {
 
         if positional.len() > fixed_arity {
             self.ctx.diagnose(match entry.diagnostic {
-                BuiltinDiagnostic::Decoder => {
+                BuiltinDiagnostic::Decoder if fixed_arity == 0 => {
                     TypeErrorKind::DecoderTakesNoArgument { name: name.into() }
                 }
                 _ => TypeErrorKind::BuiltinArity {
@@ -656,13 +955,8 @@ impl Inferencer<'_> {
     /// head's type becomes when nothing was applied and nothing is residual —
     /// a refused spread is the whole story of the call, so its type is the
     /// saturated result rather than the still-waiting arrow.
-    fn peel_curry_spine(&self, mut cty: CompTy) -> CompTy {
-        loop {
-            let CompTy::Fun(_, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
-                return cty;
-            };
-            cty = *body;
-        }
+    fn peel_curry_spine(&self, cty: &CompTy) -> CompTy {
+        self.spine(cty).1
     }
 
     /// The `CompTy` a fresh instantiation of `entry`'s scheme names once all
@@ -671,7 +965,7 @@ impl Inferencer<'_> {
     fn saturated_result(&mut self, name: &str, entry: &BuiltinEntry) -> CompTy {
         let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let cty = self.instantiate_comp(name, &scheme);
-        self.peel_curry_spine(cty)
+        self.peel_curry_spine(&cty)
     }
 
     /// The head's value type when it is concretely not a function — neither a
@@ -702,9 +996,9 @@ impl Inferencer<'_> {
 
     /// Infer the arm for head `name`, check that it stands in for what the head
     /// is, and generalise.
-    pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
+    fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
         let cty = self.infer_handler_comp(comp);
-        self.install_arm_scheme(name, cty)
+        self.install_arm_scheme(name, &cty)
     }
 
     /// The scheme a `handlers:` arm is bound at.  An arm written out is
@@ -723,84 +1017,108 @@ impl Inferencer<'_> {
                 self.ctx
                     .unify_ty(&ty, &Ty::Thunk(Box::new(cty.clone())), Reason::HandlerArm);
                 self.pin_arm_params_to_argv(&cty);
-                self.install_arm_scheme(name, cty)
+                self.install_arm_scheme(name, &cty)
             }
         }
     }
 
     /// Pin `cty` to what head `name` stands for and generalise — the tail both
     /// spellings of an arm share.  A failure is an ordinary positioned error.
-    fn install_arm_scheme(&mut self, name: &str, cty: CompTy) -> Scheme {
-        if let Err(error) = self.stands_in(name, &cty) {
-            self.ctx.raise(*error);
-        }
+    fn install_arm_scheme(&mut self, name: &str, cty: &CompTy) -> Scheme {
+        let cty = match self.stands_in(name, cty) {
+            Ok(cty) => cty,
+            Err((cty, error)) => {
+                self.ctx.raise(*error);
+                cty
+            }
+        };
         let thunk_ty = Ty::Thunk(Box::new(cty));
         let tied = self.ctx.settle_pending_labels(Some(self.env));
         generalize(&self.ctx.unifier, self.env, &tied, &thunk_ty)
     }
 
     /// What head `name` stands for, as `(arm)` compares an arm against it: the
-    /// type of the base frame or arm already in force under `name`, and
-    /// `[String] → F Unit` for anything else — an external, or a value row's
-    /// name, whose arm is dead because the table is searched first.
+    /// type of the base frame or arm already in force under `name`, and a
+    /// command for anything else — an external, or a value row's name, whose
+    /// arm is dead because the table is searched first.
     fn stands_for(&mut self, name: &str) -> (CompTy, Standing) {
         match self.env.lookup_handler(name).cloned() {
             Some(handler) => (
                 self.instantiate_comp(name, &handler.scheme),
                 Standing::Own(name.to_string()),
             ),
-            None => (
-                CompTy::Fun(Box::new(Ty::argv()), Box::new(CompTy::pure(Ty::Unit))),
-                Standing::Command(name.to_string()),
-            ),
+            None => (command_head(), Standing::Command(name.to_string())),
         }
     }
 
-    /// `(arm)`: an arm's result is what the head it stands in for returns.
-    /// Refused as an error ready to raise, since the run-time door that vets an
+    /// `(arm)`: an arm produces what the head it stands in for produces, and
+    /// is installed at the head's producer kind.  Refused as an error ready to
+    /// raise, with the arm as it was, since the run-time door that vets an
     /// installed arm renders it in its own words.
-    pub(super) fn stands_in(&mut self, name: &str, arm: &CompTy) -> Result<(), Box<TypeError>> {
+    pub(super) fn stands_in(
+        &mut self,
+        name: &str,
+        arm: &CompTy,
+    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
         let (head, standing) = self.stands_for(name);
-        self.arm_result_stands_in(arm, &head, standing)
+        self.arm_stands_in(arm, &head, standing)
     }
 
-    /// The catch-all stands in for every command: it writes, and returns `()`.
-    pub(super) fn catch_all_stands_in(&mut self, arm: &CompTy) -> Result<(), Box<TypeError>> {
-        let head = CompTy::Fun(Box::new(Ty::argv()), Box::new(CompTy::pure(Ty::Unit)));
-        self.arm_result_stands_in(arm, &head, Standing::EveryCommand)
+    /// The catch-all stands in for every command.
+    pub(super) fn catch_all_stands_in(
+        &mut self,
+        arm: &CompTy,
+    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
+        self.arm_stands_in(arm, &command_head(), Standing::EveryCommand)
     }
 
-    /// Unify the results of `arm` and `head`, each past its parameters: an arm
-    /// written without one discards its argv, as the runtime does.
-    fn arm_result_stands_in(
+    /// Unify what `arm` and `head` produce, each past its parameters: an arm
+    /// written without one discards its argv, as the runtime does.  A `()`
+    /// producer stands in for a command: its output is whatever it wrote.
+    fn arm_stands_in(
         &mut self,
         arm: &CompTy,
         head: &CompTy,
         standing: Standing,
-    ) -> Result<(), Box<TypeError>> {
-        let wanted = self.result_after_params(head);
-        let found = self.result_after_params(arm);
+    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
+        let wanted = self.producer_of(head);
+        let found = self.producer_of(arm);
+        let upcast = matches!(
+            (&wanted, &found),
+            (CompTy::Return(Grade::Output, _), CompTy::Return(Grade::Value, unit))
+                if matches!(self.ctx.unifier.resolve_ty(unit), Ty::Unit)
+        );
         self.ctx.unifier.at = self.ctx.pos;
-        self.ctx
-            .unifier
-            .unify_comp_ty(&CompTy::pure(wanted), &CompTy::pure(found))
-            .map_err(|kind| {
-                Box::new(TypeError {
+        let verdict = if upcast {
+            Ok(())
+        } else {
+            self.ctx.unifier.unify_comp_ty(&wanted, &found)
+        };
+        // Installed at the head's producer either way, so a refused arm is
+        // refused once, not again at every call.
+        let wanted = self.ctx.unifier.apply_comp_ty(&wanted);
+        let installed = self.map_producer(arm, |_, _| wanted);
+        match verdict {
+            Ok(()) => Ok(installed),
+            Err(kind) => {
+                let error = TypeError {
                     pos: self.ctx.pos,
                     kind,
                     reason: Some(Reason::StandsIn(standing)),
                     weak: None,
                     unit: None,
-                })
-            })
+                };
+                Err((installed, Box::new(error)))
+            }
+        }
     }
 
-    /// What `cty` returns once every parameter is supplied.
-    fn result_after_params(&mut self, cty: &CompTy) -> Ty {
-        match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Fun(_, body) => self.result_after_params(&body),
-            other => self.extract_return(&other),
-        }
+    /// What `cty` produces once every parameter is supplied, forced to
+    /// `Return` shape.
+    fn producer_of(&mut self, cty: &CompTy) -> CompTy {
+        let (_, tail) = self.spine(cty);
+        let _ = self.extract_return(&tail);
+        self.ctx.unifier.resolve_comp_ty(&tail)
     }
 
     /// Force the argv convention on an arm's parameters.  A written arm is
@@ -976,11 +1294,24 @@ impl Inferencer<'_> {
         match self.head_class(name) {
             HeadClass::Binding(scheme) => self.apply_scheme(name, &scheme, args),
             HeadClass::Value(entry) => self.apply_builtin(&entry, name, args),
-            HeadClass::Arm { handler, .. } => self.apply_alias_arm(name, &handler.scheme, args),
+            HeadClass::Arm(handler) => self.apply_alias_arm(name, &handler.scheme, args),
             // Prelude functions arrive as an `App` on a bound variable, never
             // as a bare `Exec` head.
             HeadClass::External => self.external_exec_comp_ty(name, args),
         }
+    }
+
+    fn head_class(&self, name: &str) -> HeadClass {
+        if let Some(scheme) = self.env.lookup_binding(name) {
+            return HeadClass::Binding(Arc::clone(scheme));
+        }
+        if let Some(entry) = self.env.builtins.value(name) {
+            return HeadClass::Value(entry);
+        }
+        if let Some(handler) = self.env.lookup_handler(name) {
+            return HeadClass::Arm(handler.clone());
+        }
+        HeadClass::External
     }
 
     /// A call of a boundary row: its result is weak, and the node gets a site.
@@ -991,20 +1322,15 @@ impl Inferencer<'_> {
         args: &crate::ir::Args,
         cty: &CompTy,
     ) {
-        let is_boundary = self.env.lookup_binding(name).is_none()
-            && self
-                .env
-                .builtins
-                .value(name)
-                .is_some_and(|entry| entry.is_boundary());
-        if is_boundary && let Some(ty) = self.final_return(cty) {
-            let key = std::ptr::from_ref::<Comp>(comp) as usize;
+        let HeadClass::Value(entry) = self.head_class(name) else {
+            return;
+        };
+        if entry.is_boundary()
+            && let Some((_, _, ty)) = self.producer_after_params(cty)
+        {
+            let key = comp_key(comp);
             self.ctx.record_boundary(key, name, ty);
-            let arity = self
-                .env
-                .builtins
-                .value(name)
-                .map_or(0, |entry| entry.fixed_arity());
+            let arity = entry.fixed_arity();
             let given = crate::ir::args::positional(args).map_or(arity, |given| given.len());
             if given < arity {
                 self.ctx.boundary_missing.insert(key, arity - given);
@@ -1012,25 +1338,13 @@ impl Inferencer<'_> {
         }
     }
 
-    /// What the computation `cty` returns once every argument is applied.
-    fn final_return(&self, cty: &CompTy) -> Option<Ty> {
-        let mut cur = self.ctx.unifier.resolve_comp_ty(cty);
-        loop {
-            match cur {
-                CompTy::Fun(_, body) => cur = self.ctx.unifier.resolve_comp_ty(&body),
-                CompTy::Return(_, ty) => return Some(*ty),
-                CompTy::Var(_) => return None,
-            }
-        }
-    }
-
-    /// An external takes an argv and returns nothing: a command, `F Unit`.
+    /// An external takes an argv and is a command: its value is its output.
     ///
     /// Nothing here declares a parameter for that argv to meet, so the rule's
     /// contribution is its walk and its refusals rather than its type.
     fn external_exec_comp_ty(&mut self, shown: &str, args: &crate::ir::Args) -> CompTy {
         let _argv = self.argv_ty(args, ArgvBoundary::Exec(shown));
-        CompTy::pure(Ty::Unit)
+        CompTy::command()
     }
 
     /// The argv rule: a command's arguments are an argv, and an argv is
@@ -1113,38 +1427,23 @@ impl Inferencer<'_> {
         &mut self,
         phrases: &[Spanned<Phrase>],
     ) -> (Vec<DefineSchemes>, Option<CompTy>) {
-        let tail_index = phrases.len().saturating_sub(1);
         let mut schemes = Vec::with_capacity(phrases.len());
         let mut tail = None;
-        for (index, phrase) in phrases.iter().enumerate() {
-            let is_tail = index == tail_index;
-            let (names, cty) =
-                self.with_span(phrase.span, |this| this.infer_phrase(&phrase.item, is_tail));
+        for phrase in phrases {
+            let (names, cty) = self.with_span(phrase.span, |this| this.infer_phrase(&phrase.item));
             schemes.push(names);
-            if is_tail {
-                tail = cty;
-            }
+            tail = cty;
         }
         (schemes, tail)
     }
 
-    /// One phrase.  `is_tail` marks the toplevel's own last phrase:
-    /// every `Run`'s value is held to the discarded shape, tail included —
-    /// what it writes is never captured into its own report — but the tail's
-    /// arrow arity is additionally read, so η-expansion can rebuild it
-    /// if it resolved to `Fun`.  Only a `Run` has a value, so only a `Run`
-    /// hands a `CompTy` back.
-    fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> (DefineSchemes, Option<CompTy>) {
+    /// One phrase.  Every `Run`'s value is held to the discarded shape, the
+    /// tail's included — its own writes are never captured into the report.
+    /// Only a `Run` has a value, so only a `Run` hands a `CompTy` back.
+    fn infer_phrase(&mut self, phrase: &Phrase) -> (DefineSchemes, Option<CompTy>) {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
-                let inner_ty = self.infer_held(pattern, comp);
-                self.record_arrow_arity(comp, &inner_ty);
-                let bound_ty = self.rhs_bound_ty(inner_ty);
-                let tied = self.ctx.settle_pending_labels(Some(self.env));
-                let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
-                self.bind_pattern(pattern, &concrete, BindMode::Let(&tied));
-                self.note_called(pattern, comp);
-
+                self.infer_let(pattern, comp);
                 let mut names = Vec::new();
                 collect_pattern_names(pattern, &mut names);
                 let schemes = names
@@ -1160,45 +1459,51 @@ impl Inferencer<'_> {
                     .collect();
                 (schemes, None)
             }
-            Phrase::Run(comp) => {
-                let mut alias_already_typed = false;
-                match alias_statement_shape(comp) {
-                    Ok(Some((name, thunk))) => {
-                        let scheme = self.handler_comp_scheme(name, thunk);
-                        self.env.bind_handler(name.to_string(), scheme, true);
-                        alias_already_typed = true;
-                    }
-                    Err(msg) => {
-                        self.ctx
-                            .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
-                    }
-                    Ok(None) => {}
-                }
-                match unalias_statement_shape(comp) {
-                    Ok(Some(name)) => {
-                        self.env.unbind_removable_handler(name);
-                    }
-                    Err(msg) => {
-                        self.ctx
-                            .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
-                    }
-                    Ok(None) => {}
-                }
-                let cty = if alias_already_typed {
-                    super::builtins::pure(Ty::Unit)
-                } else {
-                    self.infer_comp(comp)
-                };
-                if is_tail {
-                    // The run's value is reported (η-expansion may rebuild a
-                    // Fun-typed tail into a thunked λ); its own writes are never
-                    // captured into it.
-                    self.record_arrow_arity(comp, &cty);
-                }
-                self.force_discarded_shape(comp, &cty);
-                (Vec::new(), Some(cty))
-            }
+            Phrase::Run(comp) => (Vec::new(), Some(self.infer_statement(comp))),
         }
+    }
+
+    /// `let pattern = rhs`: the RHS inferred as the holder of the indexes it
+    /// reads, bound by the bind rule, and generalised.
+    fn infer_let(&mut self, pattern: &IrPattern, rhs: &Comp) {
+        let cty = self.infer_held(pattern, rhs);
+        self.record_arrow_arity(rhs, &cty);
+        let bound_ty = self.rhs_bound_ty(rhs, cty);
+        let tied = self.ctx.settle_pending_labels(Some(self.env));
+        let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
+        self.bind_pattern(pattern, &concrete, BindMode::Let(&tied));
+        self.note_called(pattern, rhs);
+    }
+
+    /// A discarded statement: an `alias`/`unalias` binds or unbinds its
+    /// handler scheme for what follows, and anything else is inferred and
+    /// held to the discarded shape.  Its arrow arity is recorded for the one
+    /// statement whose value is reported, the toplevel's tail.
+    fn infer_statement(&mut self, comp: &Comp) -> CompTy {
+        let handled = match HandlerStatement::of(comp) {
+            Ok(Some(HandlerStatement::Alias(name, body))) => {
+                let scheme = self.handler_comp_scheme(name, body);
+                self.env.bind_handler(name.to_string(), scheme, true);
+                true
+            }
+            Ok(Some(HandlerStatement::Unalias(name))) => {
+                self.env.unbind_removable_handler(name);
+                true
+            }
+            Ok(None) => false,
+            Err(kind) => {
+                self.ctx.diagnose(kind);
+                true
+            }
+        };
+        let cty = if handled {
+            CompTy::pure(Ty::Unit)
+        } else {
+            self.infer_comp(comp)
+        };
+        self.record_arrow_arity(comp, &cty);
+        self.force_discarded_shape(comp, &cty);
+        cty
     }
 
     /// Whether `key` repeats a label `existing` already yields — diagnosing
@@ -1427,9 +1732,9 @@ impl Inferencer<'_> {
         let ty = self.ctx.instantiate(&scheme);
         if entry.is_boundary()
             && let Ty::Thunk(body) = &ty
-            && let Some(result) = self.final_return(body)
+            && let Some((_, _, result)) = self.producer_after_params(body)
         {
-            let key = std::ptr::from_ref::<Val>(val) as usize;
+            let key = val_key(val);
             self.ctx.record_boundary(key, &entry.name, result);
             self.ctx.boundary_values.insert(
                 key,
@@ -1520,10 +1825,11 @@ impl Inferencer<'_> {
     }
 
     /// A `|` is a positional operating-system byte wire: a stage feeds the
-    /// next by writing, so every stage but the last is `F Unit` and no value
-    /// row that returns ([`Self::stage_writes`]), and the pipeline's value is
-    /// its final stage's.  Its shape is its own: a stage must be a computation
-    /// ready to run, not a `Fun` still waiting for its argument, forced under
+    /// next by writing, so every stage but the last produces `()`, at any
+    /// grade, and is no decoder ([`Self::stage_writes`]); the pipeline
+    /// produces what its final stage does.  Its shape is its own: a stage must
+    /// be a computation ready to run, not a `Fun` still waiting for its
+    /// argument, forced under
     /// its own [`Reason::PipelineStageShape`] rather than
     /// [`Self::extract_return`]'s generic one, to earn the shape's own hint
     /// text.  Its stdin belongs to the wire: a stage after a `|` may not bind
@@ -1535,7 +1841,7 @@ impl Inferencer<'_> {
         // elaborator preserves that shape, so a `Pipeline` node always has two.
         debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
 
-        let mut value = None;
+        let mut last = None;
         for (position, stage) in stages.iter().enumerate() {
             if position > 0
                 && let Some(feed) = stage_root_stdin_feed(stage)
@@ -1551,49 +1857,54 @@ impl Inferencer<'_> {
             if let Some(next) = stages.get(position + 1)
                 && !matches!(self.ctx.unifier.resolve_comp_ty(&cty), CompTy::Fun(..))
             {
-                self.with_span(stage.span, |this| this.stage_writes(stage, next, &ty));
+                self.with_span(stage.span, |this| this.stage_writes(stage, next, &cty, &ty));
             }
-            let key = std::ptr::from_ref::<Comp>(stage.as_ref()) as usize;
-            self.ctx.stage_types.insert(key, ty.clone());
-            value = Some(ty);
+            self.ctx.stage_types.insert(comp_key(stage), ty.clone());
+            last = Some((cty, ty));
         }
-        CompTy::pure(value.expect("≥2 stages by invariant above"))
+        // The last stage's producer, at its own grade; a stage that was no
+        // producer has been refused, and is not refused again downstream.
+        let (cty, ty) = last.expect("≥2 stages by invariant above");
+        let grade = match self.ctx.unifier.resolve_comp_ty(&cty) {
+            CompTy::Return(grade, _) => grade,
+            _ => self.ctx.unifier.fresh_grade(),
+        };
+        CompTy::Return(grade, Box::new(ty))
     }
 
-    /// `(pipe)` for a stage before the last, of type `F ty`: it feeds `next` by
-    /// writing, so it returns nothing.  A head that is a value row that
-    /// returns is refused before its type is read: whatever its scheme says,
-    /// it writes nothing to the pipe, and for a boundary `∀α. F α` unification
-    /// would otherwise set `α := Unit` and let the failure wait for the decode.
-    fn stage_writes(&mut self, stage: &Comp, next: &Comp, ty: &Ty) {
+    /// `(pipe)` for a stage before the last, of type `F^ε ty` at any grade:
+    /// it feeds `next` by writing, so its value is `()`.  A decoder is
+    /// refused by its own mark rather than by its type: `∀α. F α` would
+    /// unify `α := Unit` and let the failure wait for the decode.
+    fn stage_writes(&mut self, stage: &Comp, next: &Comp, cty: &CompTy, ty: &Ty) {
+        if let Some(name) = self.stage_decoder(stage) {
+            return self.ctx.diagnose(TypeErrorKind::DecoderMidPipeline {
+                name,
+                next: Self::stage_head(next),
+            });
+        }
         let why = Reason::PipelineStageWrites {
             stage: Self::stage_head(stage),
             next: Self::stage_head(next),
         };
-        let unit = CompTy::pure(Ty::Unit);
-        let found = CompTy::pure(ty.clone());
-        if self.stage_returns(stage) {
-            let actual = CompTy::pure(self.ctx.unifier.apply_ty(ty));
-            let kind = TypeErrorKind::CompTyMismatch {
-                expected: unit,
-                actual,
-            };
-            self.ctx.report(kind, why);
-        } else {
-            self.ctx.unify_comp_ty(&found, &unit, why);
-        }
+        let grade = match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Return(grade, _) => grade,
+            _ => Grade::Value,
+        };
+        let found = CompTy::Return(grade, Box::new(ty.clone()));
+        let unit = CompTy::Return(grade, Box::new(Ty::Unit));
+        self.ctx.unify_comp_ty(&found, &unit, why);
     }
 
-    /// Whether `stage` runs a value row that returns, past the binds hoisted
-    /// around it.
-    fn stage_returns(&self, stage: &Comp) -> bool {
-        let CompKind::Exec(exec) = &Self::discard_tail(stage).item else {
-            return false;
-        };
-        let CommandWord::Name(CommandName::Bare(name)) = &exec.head else {
-            return false;
-        };
-        matches!(self.head_class(name), HeadClass::Value(entry) if entry.output == Output::Returns)
+    /// The decoder `stage` runs, past the binds hoisted around it.
+    fn stage_decoder(&self, stage: &Comp) -> Option<String> {
+        let (name, _) = bare_call(Self::discard_tail(stage))?;
+        match self.head_class(name) {
+            HeadClass::Value(entry) if entry.diagnostic == BuiltinDiagnostic::Decoder => {
+                Some(name.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// The name of the command a stage runs, when it is written as one.
@@ -1677,47 +1988,25 @@ impl Inferencer<'_> {
         elem
     }
 
-    /// Infer one `case` arm against `Fun(payload, joined)`, the type every arm
-    /// shares: a literal `{ |p| … }` binds its pattern to a fresh payload type,
-    /// and a thunk in hand is unified.  The payload is then forced to agree
-    /// with what the scrutinee constructs at this label.  Returns the payload
-    /// type the closed scrutinee row carries at `label`.
-    ///
-    /// The agreement is forced here, while pos is still on the arm; the final
-    /// row-unify would report it with the caret on the whole `case` form.
-    fn infer_case_arm(
+    /// A `case` arm's bound payload against what the scrutinee constructs at
+    /// its label, forced while pos is on the arm; the final row-unify would
+    /// report it with the caret on the whole `case` form.  Returns the
+    /// payload type the closed scrutinee row carries at `label`.
+    fn case_arm_payload(
         &mut self,
-        arm: &CaseArm,
-        label: &Label,
-        scrut_payloads: &std::collections::HashMap<Label, Ty>,
-        joined: &CompTy,
-        why: &Reason,
+        arm: &JoinArm<'_>,
+        payload_ty: &Ty,
+        scrut_payload: Option<&Ty>,
     ) -> Ty {
-        let payload_ty = self.ctx.unifier.fresh_ty();
-        let expected = CompTy::Fun(Box::new(payload_ty.clone()), Box::new(joined.clone()));
-        let why = match arm.body.item {
-            Val::Thunk(_) => why,
-            _ => &Reason::CaseArmHandler,
-        };
-        self.check_arm(&arm.body, &expected, why);
-        let at = match &arm.body.item {
-            Val::Thunk(comp) => Self::result_span(comp.shape()),
-            _ => arm.body.span,
-        };
-        self.with_span(at, |this| {
-            let Some(scrut_payload) = scrut_payloads.get(label) else {
+        self.with_span(arm.result_span(), |this| {
+            let Some(scrut_payload) = scrut_payload else {
                 return payload_ty.clone();
             };
-            if this
-                .ctx
-                .unifier
-                .unify_ty(&payload_ty, scrut_payload)
-                .is_ok()
-            {
+            if this.ctx.unifier.unify_ty(payload_ty, scrut_payload).is_ok() {
                 return payload_ty.clone();
             }
             let expected = this.ctx.unifier.apply_ty(scrut_payload);
-            let actual = this.ctx.unifier.apply_ty(&payload_ty);
+            let actual = this.ctx.unifier.apply_ty(payload_ty);
             this.ctx.report(
                 TypeErrorKind::TyMismatch {
                     expected: Box::new(expected),
@@ -1757,17 +2046,27 @@ impl Inferencer<'_> {
         let scrut_payloads: std::collections::HashMap<Label, Ty> =
             collect_extends(&scrut_resolved_row).into_iter().collect();
 
-        // Exactly one arm runs, so they share one type.  Source order
-        // throughout, so a program's complaints arrive in the order it was
-        // written.
-        let why = Reason::CaseArms {
-            writer: arms.iter().find_map(|arm| self.arm_writer(&arm.body.item)),
-        };
-        let joined = self.ctx.unifier.fresh_comp_ty();
+        // Exactly one arm runs, so they share one type: a literal `{ |p| … }`
+        // binds its pattern to a fresh payload type, and a thunk in hand is
+        // unified.  Source order throughout, so a program's complaints arrive
+        // in the order it was written.
+        let join_arms: Vec<JoinArm<'_>> = arms
+            .iter()
+            .map(|arm| {
+                let why = match arm.body.item {
+                    Val::Thunk(_) => Reason::CaseArms,
+                    _ => Reason::CaseArmHandler,
+                };
+                JoinArm::new(&arm.body, vec![self.ctx.unifier.fresh_ty()], why)
+            })
+            .collect();
+        let joined = self.join_arms(&join_arms, &Reason::CaseArms);
         let mut payloads = Vec::with_capacity(arms.len());
-        for arm in arms {
+        for (arm, join_arm) in arms.iter().zip(&join_arms) {
             let label = Label::Case(arm.tag.item.clone());
-            let closed_payload = self.infer_case_arm(arm, &label, &scrut_payloads, &joined, &why);
+            let payload = &join_arm.params[0];
+            let closed_payload =
+                self.case_arm_payload(join_arm, payload, scrut_payloads.get(&label));
             payloads.push((label, closed_payload));
         }
         let arm_labels: Vec<Label> = payloads.iter().map(|(l, _)| l.clone()).collect();
@@ -1876,10 +2175,8 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A `let`'s right-hand side, inferred as the holder of the indexes it reads,
-    /// and with the commands it captures already marked.
+    /// A `let`'s right-hand side, inferred as the holder of the indexes it reads.
     fn infer_held(&mut self, pattern: &IrPattern, rhs: &Comp) -> CompTy {
-        self.capture_sites(rhs);
         let mut names = Vec::new();
         collect_pattern_names(pattern, &mut names);
         let outer = self.ctx.holder;
@@ -1910,63 +2207,20 @@ impl Inferencer<'_> {
                 );
                 cty
             }
-            // `Bind` on `Wildcard` is `Seq`'s old per-part duty: the RHS is a
-            // discarded statement, so an `alias`/`unalias` shape binds or
-            // unbinds its handler scheme over `rest` and anything else is
-            // held to `force_discarded_shape` — never generalised, and
-            // `rest` inherits whatever scope those bindings opened.
+            // `Bind` on `Wildcard` is a discarded statement — never
+            // generalised, and `rest` inherits whatever handler scope an
+            // `alias`/`unalias` opened.
             CompKind::Bind {
                 comp: inner,
                 pattern,
                 rest,
-                ..
-            } if matches!(pattern.as_ref(), IrPattern::Wildcard) => {
-                let mut alias_already_typed = false;
-                match alias_statement_shape(inner) {
-                    Ok(Some((name, thunk))) => {
-                        let scheme = self.handler_comp_scheme(name, thunk);
-                        self.env.bind_handler(name.to_string(), scheme, true);
-                        alias_already_typed = true;
-                    }
-                    Err(msg) => {
-                        self.ctx
-                            .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
-                    }
-                    Ok(None) => {}
-                }
-                match unalias_statement_shape(inner) {
-                    Ok(Some(name)) => {
-                        self.env.unbind_removable_handler(name);
-                    }
-                    Err(msg) => {
-                        self.ctx
-                            .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
-                    }
-                    Ok(None) => {}
-                }
-                let inner_ty = if alias_already_typed {
-                    super::builtins::pure(Ty::Unit)
-                } else {
-                    self.infer_comp(inner)
-                };
-                self.record_arrow_arity(inner, &inner_ty);
-                self.force_discarded_shape(inner, &inner_ty);
-                self.infer_comp(rest)
-            }
-            CompKind::Bind {
-                comp: inner,
-                pattern,
-                rest,
-                ..
             } => {
-                let inner_ty = self.infer_held(pattern, inner);
-                self.record_arrow_arity(inner, &inner_ty);
-                let bound_ty = self.rhs_bound_ty(inner_ty);
-
-                let tied = self.ctx.settle_pending_labels(Some(self.env));
-                let concrete = self.ctx.unifier.apply_ty(&bound_ty);
-                self.bind_pattern(pattern, &concrete, BindMode::Let(&tied));
-                self.note_called(pattern, inner);
+                match pattern.as_ref() {
+                    IrPattern::Wildcard => {
+                        self.infer_statement(inner);
+                    }
+                    pattern => self.infer_let(pattern, inner),
+                }
                 self.infer_comp(rest)
             }
             CompKind::App { head, args } => {
@@ -2007,12 +2261,8 @@ impl Inferencer<'_> {
                         name @ (CommandName::Path(_) | CommandName::TildePath(_)),
                     ) => self.external_exec_comp_ty(&name.written(), &e.args),
                 };
-                if self
-                    .ctx
-                    .captured
-                    .contains(&(std::ptr::from_ref::<Comp>(comp) as usize))
-                {
-                    self.captured(&cty)
+                if e.redirects.stdout.is_some() {
+                    self.discharge(&cty)
                 } else {
                     cty
                 }
@@ -2048,35 +2298,39 @@ impl Inferencer<'_> {
                 self.with_span(cond.span, |this| {
                     this.ctx.unify_ty(&cond_ty, &Ty::Bool, Reason::IfCond);
                 });
-                let why = Reason::IfBranches {
-                    writer: self
-                        .arm_writer(&then.item)
-                        .or_else(|| self.arm_writer(&else_.item)),
-                };
-                self.join_arms([then, else_], &why)
+                let arms = [then, else_].map(|arm| JoinArm::new(arm, vec![], Reason::IfBranches));
+                self.join_arms(&arms, &Reason::IfBranches)
             }
             CompKind::Case { scrutinee, arms } => self.infer_case(scrutinee, arms),
             CompKind::Within {
                 opts,
                 handlers,
                 body,
-            } => CompTy::pure(self.infer_within(opts, handlers.as_deref(), body)),
-            CompKind::Grant { caps, body } => CompTy::pure(self.infer_grant(caps, body)),
-            CompKind::Try { body, handler } => CompTy::pure(self.infer_try(body, handler)),
-            CompKind::Guard { body, cleanup } => CompTy::pure(self.infer_guard(body, cleanup)),
-            CompKind::Audit { body } => CompTy::pure(self.infer_audit(body)),
+            } => self.infer_within(opts, handlers.as_deref(), body),
+            CompKind::Grant { caps, body } => self.infer_grant(caps, body),
+            CompKind::Try { body, handler } => self.infer_try(body, handler),
+            CompKind::Guard { body, cleanup } => self.infer_guard(body, cleanup),
+            CompKind::Audit { body } => self.infer_audit(body),
             // Installs fds, not its own type; carries the body as an
             // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
-            // forms above, so infer it directly.
-            CompKind::Redirect { body, .. } => self.infer_comp(body),
+            // forms above, so infer it directly.  A stdout redirect takes a
+            // command's output, leaving a value producer.
+            CompKind::Redirect { body, redirects } => {
+                let cty = self.infer_comp(body);
+                if redirects.stdout.is_some() {
+                    self.discharge(&cty)
+                } else {
+                    cty
+                }
+            }
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound
             // lambda's body.  `cap M` runs a command and returns what it wrote.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
-                self.ctx
-                    .unify_comp_ty(&body_ty, &CompTy::pure(Ty::Unit), Reason::Capture);
+                let shape = CompTy::Return(self.ctx.unifier.fresh_grade(), Box::new(Ty::Unit));
+                self.ctx.unify_comp_ty(&body_ty, &shape, Reason::Capture);
                 CompTy::pure(Ty::Bytes)
             }
             // The reading half of the same boundary: bytes in, text out.  The
@@ -2089,14 +2343,6 @@ impl Inferencer<'_> {
                 CompTy::pure(Ty::String)
             }
         }
-    }
-
-    /// `(cap)` then `(decode)`: a captured command, typed as the text it
-    /// writes.  The command itself is still `F Unit`, so the premise is checked.
-    fn captured(&mut self, cty: &CompTy) -> CompTy {
-        self.ctx
-            .unify_comp_ty(cty, &CompTy::pure(Ty::Unit), Reason::Capture);
-        CompTy::pure(Ty::String)
     }
 }
 

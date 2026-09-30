@@ -1,4 +1,4 @@
-# contains: couldn't match type Unit with type Integer
+# contains: couldn't match type Command with type Returns Integer
 let h = { |v| try { !{f $v} } { |_| return 5 } }
 let f = { |n| return $h; echo x }
 return ()

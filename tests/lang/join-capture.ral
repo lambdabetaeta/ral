@@ -23,16 +23,16 @@ assert_eq 'empty arm' '' $empty_arm
 let chained = ^false ? echo fallback
 assert_eq 'chain arm' fallback $chained
 
-# `guard`'s cleanup arm stays an effect: its bytes land on stdout (see the
-# golden) while only the body's bytes are bound.
+# A `guard` is one computation, so a binding takes what its cleanup
+# writes too.
 let guarded = guard { echo body } { echo cleanup }
-assert_eq 'guard body' body $guarded
+assert_eq 'guard whole' "body\ncleanup" $guarded
 
 let recovered = try { ^false } { |_| return '' }
 assert_eq 'try handler' '' $recovered
 
-# The body arm is a block in hand, not a literal: a `let` captures only the
-# command it can see, so the text it writes is asked for at the pipe.
+# The body arm is a block in hand: the join is still a command, and a
+# decoder may read it at the pipe.
 let arm = { echo indirect }
 let indirect = try $arm { |_| return () } | from-line
 assert_eq 'eta-expanded arm' indirect $indirect

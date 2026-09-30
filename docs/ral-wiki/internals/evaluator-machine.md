@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
 ---
@@ -109,11 +109,11 @@ time; `Redirect` and `Unmask` are boxed).
 writes to `stdout`, which is wherever the run's stdout is, so inside a capture
 it is the buffer. On return the frame
 restores the sink and yields the buffer as `Bytes`, ignoring the body's value
-(`cap : F Unit → F Bytes`); a buffer past `SINK_BUFFER_CAP` halts
+(`cap : F^w Unit → F Bytes`); a buffer past `SINK_BUFFER_CAP` halts
 (`capture_overflowed`). On a halt it flushes what the body wrote to the sink it
-replaced (`Shell::write_sink`) and propagates the halt. Which commands a `let`
-wraps in it is decided by the checker, not here
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+replaced (`Shell::write_sink`) and propagates the halt. Which computations a value
+demand wraps in it is decided by the checker, not here
+([[decisions/260930_graded-f|graded-f]]).
 
 `a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
 `_؟_`, `Core.Derived`), right-associated so the last arm stays in tail

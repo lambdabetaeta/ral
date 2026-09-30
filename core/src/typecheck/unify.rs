@@ -380,7 +380,7 @@ impl Unifier {
         Row::Var(self.fresh_row_var())
     }
 
-    pub(crate) fn fresh_grade_var(&mut self) -> GradeVar {
+    pub fn fresh_grade_var(&mut self) -> GradeVar {
         GradeVar(self.grades.fresh())
     }
     pub(crate) fn fresh_grade(&mut self) -> Grade {

@@ -11,18 +11,18 @@ let assert_eq = { |name expected actual|
 let both = sh -c 'echo err >&2; echo out' 2>&1
 assert_eq 'fused dup' "err\nout" $both
 
-# A redirect around a block is not: the block's writes go where they always do,
-# and the `let` binds what the block returns
+# A block that runs the command is the command, and a redirect on the call
+# is the command's own
 let noisy = { sh -c 'echo err >&2; echo out' }
 let dup = noisy 2>&1
-assert_eq 'framed dup' true !{equal () $dup}
+assert_eq 'framed dup' "err\nout" $dup
 
-# Bound externals and functions differ only at the call
+# A function that runs an external is a command: a call binds its output
 let ls-dir = { |d| ls $d; echo done }
 let d = temp-dir
 echo entry > "$d/entry"
 let streamed = ls-dir $d
-assert_eq 'streamed' true !{equal () $streamed}
+assert_eq 'streamed' "entry\ndone" $streamed
 let listed = ls-dir $d | from-line
 assert_eq 'listed' "entry\ndone" $listed
 

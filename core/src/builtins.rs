@@ -14,7 +14,7 @@
 use crate::diagnostic;
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
 use crate::types::{
-    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Output, Settled, Shell, Value,
+    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Settled, Shell, Value,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
@@ -53,23 +53,12 @@ macro_rules! with_diagnostic_if_any {
     };
 }
 
-/// `entry.with_output(out)` when an `out` is given — the registry macro's
-/// optional `output:` field, `Returns` when absent.
-macro_rules! with_output_if_any {
-    ($entry:expr) => {
-        $entry
-    };
-    ($entry:expr, $out:expr) => {
-        $entry.with_output($out)
-    };
-}
-
 /// One entry per builtin, expanded into [`CORE_BUILTINS`].  Arity is never
 /// declared — [`BuiltinEntry::fixed_arity`] reads it off the type rule.
 ///
 /// `call` must be a non-capturing closure — it is coerced to a fn pointer.
 /// `names` splits its first literal out from the rest so an optional
-/// `diagnostic:` or `output:` — one row's own never varies with how many names
+/// `diagnostic:` — one row's own never varies with how many names
 /// alias it — can sit beside it without zipping against a repetition of
 /// mismatched length; such a row is always written with one name, which
 /// is every row this macro carries one for today.
@@ -82,7 +71,6 @@ macro_rules! builtin_registry {
                 ty: $ty:expr,
                 doc: $doc:literal,
                 $(diagnostic: $diag:expr,)?
-                $(output: $out:expr,)?
                 call: $call:expr,
             }
         ),+ $(,)?
@@ -110,17 +98,14 @@ macro_rules! builtin_registry {
         static CORE_BUILTINS_ARR: [BuiltinEntry; count_builtins!($($name0 $(, $namerest)*),+)] = [
             $(
                 $(#[$meta])*
-                with_output_if_any!(
-                    with_diagnostic_if_any!(
-                        BuiltinEntry::new(
-                            Cow::Borrowed($name0),
-                            $ty,
-                            $doc,
-                            BuiltinBody::Static(__core_thunks::$variant),
-                        )
-                        $(, $diag)?
+                with_diagnostic_if_any!(
+                    BuiltinEntry::new(
+                        Cow::Borrowed($name0),
+                        $ty,
+                        $doc,
+                        BuiltinBody::Static(__core_thunks::$variant),
                     )
-                    $(, $out)?
+                    $(, $diag)?
                 ),
                 $(
                     BuiltinEntry::new(
@@ -145,11 +130,9 @@ macro_rules! builtin_registry {
 builtin_registry! {
     Clear { names: ["clear"], ty: scheme::terminal_control,
         doc: "clear  — clear screen and scrollback (ESC[H ESC[2J ESC[3J). Shadows external `clear`; use `^clear` for the ncurses binary.",
-        output: Output::Writes,
         call: |args, _mooring, shell| misc::builtin_clear(args, shell), },
     Reset { names: ["reset"], ty: scheme::terminal_control,
         doc: "reset  — emit ESC c (RIS) to reset the terminal. Does not touch stty modes; use `^reset` for the full ncurses terminfo reset.",
-        output: Output::Writes,
         call: |args, _mooring, shell| misc::builtin_reset(args, shell), },
     Each { names: ["each"], ty: scheme::each_op,
         doc: "each <fn> <list>  — call fn on each element for side effects.",
@@ -270,35 +253,27 @@ builtin_registry! {
         call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], ty: scheme::to_bytes,
         doc: "to-bytes <bytes>  — pass a Bytes value through to the byte channel; the inverse of from-bytes.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_bytes(args, shell), },
     IntsToBytes { names: ["ints-to-bytes"], ty: scheme::ints_to_bytes,
         doc: "ints-to-bytes <ints>  — write a list of Ints, each 0 through 255, to the byte channel as those bytes. ral has no byte literal, so this is how bytes are written by number: `ints-to-bytes [104, 105] | from-bytes` is the Bytes value \"hi\".",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_ints_to_bytes(args, shell), },
     ToString { names: ["to-string"], ty: scheme::to_any_bytes,
         doc: "to-string <value>  — encode a value's String form to the byte channel.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_string(args, shell), },
     ToLine { names: ["to-line"], ty: scheme::to_line,
         doc: "to-line <value>  — encode value with a trailing newline (inverse of from-line).",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_line(args, shell), },
     ToLines { names: ["to-lines"], ty: scheme::to_lines,
         doc: "to-lines <list>  — write each element followed by `\\n` to the byte channel; from-lines reads back any list whose elements hold no `\\n` and do not end in `\\r`.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_lines(args, shell), },
     ToJson { names: ["to-json"], ty: scheme::to_any_bytes,
         doc: "to-json <value>  — encode a value as JSON to the byte channel.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_json(args, shell), },
     ToJsonl { names: ["to-jsonl"], ty: scheme::to_lines,
         doc: "to-jsonl <list>  — write each element to the byte channel as to-json encodes it, one per line.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_jsonl(args, shell), },
     ToCsv { names: ["to-csv"], ty: scheme::to_csv,
         doc: "to-csv <rows>  — encode a list of maps of text as CSV to the byte channel; columns are the first row's keys in sorted order.",
-        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_csv(args, shell), },
     Ask { names: ["ask"], ty: scheme::ask,
         doc: "ask <prompt>  — prompt for interactive input, return string.",
@@ -400,11 +375,9 @@ builtin_registry! {
 
     Help { names: ["help"], ty: scheme::help,
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
-        output: Output::Writes,
         call: |args, _mooring, shell| help::builtin_help(args, shell), },
     Explain { names: ["explain"], ty: scheme::explain,
         doc: "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
-        output: Output::Writes,
         call: |args, _mooring, shell| help::builtin_explain(args, shell), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
@@ -423,7 +396,7 @@ static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     scheme::echo,
     "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame — it is the operating system's `echo`, not ral's.",
     BuiltinBody::Static(codecs::builtin_echo),
-).with_output(Output::Writes)];
+)];
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 
 /// Core's boundaries: the doors through which a value of a shape the program
@@ -450,7 +423,8 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
         scheme::from_json_at,
         "from-json-at <tokens>  — decode JSON bytes from the channel and read the value at a path, given as a list of RFC 6901 reference tokens: an object member by exact key, an array element by decimal index. `from-json-at ['items', '3', 'size']` reads `/items/3/size`. Checked against how the script uses the value.",
         codecs::builtin_from_json_at,
-    ),
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
     BuiltinEntry::boundary(
         Cow::Borrowed("use"),
         scheme::use_op,

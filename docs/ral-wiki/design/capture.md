@@ -1,69 +1,84 @@
-# Capture: a `let` captures the command that produces its value
+# Capture: a command's value is its output
 
-**A `let` captures the command that produces its value; a function, block or
-handle in that position binds what it returns, and `| from-line` turns what it
-writes into a value.** A command is `F Unit`: it writes and returns nothing
-([[design/types|types]]). So `let x = hostname` binds the text `hostname`
-writes, because the checker wraps that command in the one coercion, `cap M to d.
-decode d`, and it decides so once, from syntax, before any type is inferred
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
-
-```ral
-let answer = !{ echo visible ; echo captured }
-# prints "visible"; answer is "captured"
-```
-
-**The walk `⟦·⟧` (`capture_sites` in `core/src/typecheck/capture.rs`) follows
-the positions a `let`'s result comes from.** From the right-hand side it
-descends through:
-
-- an `Exec` that writes (`head_writes`: no binding, and no value row unless a
-  `Writes` row applied at its arity) — the site;
-- a pipeline's *final* stage;
-- `Force` of a literal thunk;
-- a `Bind`'s `rest`, hoisted binds included, never its right-hand side;
-- the arms of `If`, `Case`, `Try` (body and handler), `Within` (body), `Grant`
-  (body) and `Guard` (body, not cleanup) when they are literal thunks — for a
-  literal `{ |p| … }` arm, its body.
-
-It stops at `Capture`, `Redirect`, `App`, `Force` of a name, values, `Index`,
-`Interpolation` and `Audit`. So `let x = f` (a function), `let x = !$t`,
-`let x = time { ls }`, `let x = !{ ls } > f` and `let x = a | !$f` bind what the
-thing returns, usually `()`. A redirect fused onto a command stays on its
-`Exec`: `let saved = echo hi > f` binds `""`, and `let x = cmd 2>&1` binds both
-streams. `let _ = cmd` captures and drops.
-
-**A discarded statement is never captured.** `M; N` leaves `M` uncaptured, so
-its bytes go where a command's bytes go: to the run's stdout, which inside a
-capture is that capture's buffer and otherwise the terminal. What a captured
-block writes before its tail is therefore visible, and its tail is the value;
-an inner `let` captures for itself:
+**A command's value is its output. Where a value is demanded of a command, the
+command is captured and its output decoded as a `String`; the demand is found
+by the type, not by the shape of the syntax.** `F` carries a grade
+([[design/types|types]]): a command is `F^w Unit` (printed `Command`), and
+`let x = hostname` binds the text `hostname` writes because the checker
+resolves the right-hand side to `F^w Unit` and wraps it in the one coercion,
+`cap M to d. decode d`
+([[decisions/260930_graded-f|graded-f]]). So `let f = { hostname }; let x = f`
+binds the host name, as does `let g = { |n| echo $n }; let x = g 5`
+(`"5"`), because `f` and `g` have command types; abstraction and application no
+longer hide the fact.
 
 ```ral
-let x = !{ echo a; echo b }          # prints a; x is "b"
-let y = !{ let z = echo a; echo b }  # prints nothing; y is "b" (z is "a")
+let answer = !{ echo first ; echo second }
+# prints nothing; answer is "first\nsecond"
 ```
 
-A captured *stand-in* is the exception that follows from the rule: an arm for
-`curl` is a command, so every statement of it is captured, and
-`curl: { |a| echo note; echo body }` under `let x = curl` binds `"note\nbody"`.
+**Three places demand a value, and capture is placed at exactly those.**
 
-**Why not slurp the whole block.** `$(setup; work)` in a POSIX shell glues
-setup's noise onto the result, which is why shell scripts are littered with
-`2>/dev/null` and why reading a chatty tool is a research project. Ral needs no
-annotation for it: diagnostics reach the terminal, the tail reaches the binding,
-and the statement boundary does the work a redirect would otherwise do by hand.
+- *Bind.* The whole right-hand side of a `let` (or `M to x. N`, or a named
+  pattern) that resolves to `F^w Unit` is captured: `let x = M` is
+  `let x = M | from-line` for every `M` that is a command — a block, a call, a
+  variable holding a block, a pipeline, an `if` with command arms. A right-hand
+  side whose grade is still a variable is defaulted to `p`: a `let` is a demand
+  for a value, and this is the only defaulting in the system.
+- *Argument.* In `apply_args_capped`, an argument whose type ends, after its own
+  parameters, in `F^w Unit`, passed where the callee's parameter ends in
+  `F^p β` at the same arity, sets `β := String` and is coerced: a literal block
+  has its innermost body wrapped, a block in hand is η-wrapped. So
+  `map { |f| echo $f } [1, 2]` is `["1", "2"]` and prints nothing.
+- *Join.* An `F^w Unit` arm of an `if`/`case`/`try` whose join settles on `F^p`
+  is wrapped like an argument ([[design/types|types]]): `try { fetch } { |e|
+  return 'none' }` binds `fetch`'s output.
+
+Anywhere else no coercion is inserted. A command flowing into a bare variable,
+or a demand that resolves only later, is an ordinary mismatch of `Command`
+against `Returns A`, and its hint names the fix.
+
+**What does not capture.** A *tail* `Run` is never coerced: a turn's last
+command prints and reports its value. `each`, `fold`, `fold-lines`, `spawn`,
+`watch`, `service`, `audit` and `defer` absorb a command body: they run it,
+stream its output and keep its value, which for a command is `()`. `warn` is
+`Returns Unit`, since stderr is not the byte channel. A stdout redirect
+*discharges* the grade, `M > f : F^p A`, so `let x = to-json 1 > f` binds `()`.
+A `()`-producer where a command is demanded is a command by a zero-cost upcast
+`F^p Unit ⇝ F^w Unit` (identity at run time); there is no path from
+`F^p Unit` to `F^p String`, so `let x = f` with `f` returning `()` binds `()`.
+
+**The whole computation is the buffer.** Capture wraps the whole right-hand
+side, so nothing escapes to the terminal: `let x = !{ echo pre; echo host }`
+binds `"pre\nhost"`. An inner `let` still captures for itself:
+
+```ral
+let y = !{ let z = echo a; echo b }   # prints nothing; y is "b" (z is "a")
+```
+
+A captured *stand-in* is the same rule: an arm for `curl` is a command, so
+`curl: { |a| echo note; echo body }` under `let x = curl` binds `"note\nbody"`,
+and a `()`-returning arm is admitted and captures `""`.
+
+**Why the type, not a walk of the syntax.** "This computation's result is its
+output" is a fact about a computation, and a walk of a right-hand side cannot
+see it through abstraction, application or a variable, so β/η would not preserve
+meaning. In the grade it passes through all three. The price is the rule's
+placement: it is decided in checking mode, in program order
+([[decisions/260930_graded-f|graded-f]] records the one order-dependence).
 
 **The node returns bytes; the text is composed.** `capture M : F Bytes` is
 total and exact — precisely the bytes `M` wrote, nothing stripped and nothing
-decoded, its body's value ignored. Reading them as a `String` is a second step
-the checker composes over it, `decode (capture M)`, and that step owns both
-things that can go wrong: one trailing terminator is dropped, and output that is
-not valid UTF-8 fails there, naming `| from-bytes` as the way to keep it. Each
-is its own term in the IR (`CompKind::Capture`, `CompKind::Decode`), inserted by
-`annotate` and with no surface syntax, so a step the checker writes into a
-program cannot be a name the program's session resolves
+decoded. Reading them as a `String` is a second step the checker composes over
+it, `decode (capture M)`, and that step owns both things that can go wrong: one
+trailing terminator is dropped, and output that is not valid UTF-8 fails there,
+naming `| from-bytes` as the way to keep it. Each is its own term in the IR
+(`CompKind::Capture`, `CompKind::Decode`), inserted by `annotate` and with no
+surface syntax, so a step the checker writes into a program cannot be a name the
+program's session resolves
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
+`InferCtx.captured` holds the computations a value demand captures, keyed by node
+address, and `captured_vals` the values coerced in hand; `annotate` reads both.
 
 **Exactness is kept by refusal.** The buffer behind a capture is capped at
 16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a detached
@@ -88,9 +103,9 @@ route-free calculus: a terminating `M` has `capture M` return exactly the bytes
 the same signal after writing what `M` wrote (`capture-halts`). The kernel
 covers this ruling only — no kinds, rows, weak variables or boundaries.
 
-What a capture retains is what `⟦·⟧` marks, and a cleanup is not marked:
-`let x = !{ guard { cmd } { echo clean } }` binds `cmd`'s output, and `clean`
-goes where a discarded statement's bytes go.
+The capture is of the whole computation, so everything the body writes is
+retained, a `guard`'s cleanup included: `let x = !{ guard { cmd } { echo clean } }`
+binds `cmd`'s output followed by `clean`.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/pipelines|pipelines]], [[design/codecs|codecs]].

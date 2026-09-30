@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 0c6ec335
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-03
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, seed_natives_and_base, coreutils_invoke]
 ---
@@ -33,7 +33,8 @@ The diagnostic facet is deliberately not a typing rule. It says what a wrong
 call *means* for this verb, which no polytype can state — that an argument
 written to a decoder is a misreading of where the bytes come from, or that
 a zero `status` on `fail` wants `return`. Everything a type can state is in the
-scheme. Bodies are grouped by concern
+scheme — including whether a row writes, which is its result grade (`Command`),
+not a facet ([[decisions/260930_graded-f|graded-f]]). Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
 `concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, `misc.rs` for
 the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).

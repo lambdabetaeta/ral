@@ -33,8 +33,8 @@ return [
 |---|---|---|
 | `name` | `Str` | required |
 | `hooks` | `[Str: {B}]` | `[:]` |
-| `keybindings` | `[[key: Str, handler: {F Unit}, guard?: Str]]` | `[]` |
-| `aliases` | `[Str: {[Str] → F Any}]` | `[:]` |
+| `keybindings` | `[[key: Str, handler: {Returns Unit}, guard?: Str]]` | `[]` |
+| `aliases` | `[Str: {[Str] → Returns Any}]` | `[:]` |
 
 Every unmodified key except `f1`–`f12` requires a `guard`; an
 unguarded binding on such a key is a load-time error (§6).
@@ -85,22 +85,22 @@ needs to know.
 
 | Builtin | Shape | Purpose |
 |---|---|---|
-| `_ed-get` | `F [text: Str, cursor: Int, keymap: Str]` | read state |
-| `_ed-text` | `F Str` | current buffer text |
+| `_ed-get` | `Returns [text: Str, cursor: Int, keymap: Str]` | read state |
+| `_ed-text` | `Returns Str` | current buffer text |
 | `_ed-cursor` | `F Int` | current cursor offset |
-| `_ed-keymap` | `F Str` | current keymap name |
-| `_ed-lbuffer` | `F Str` | text left of cursor |
-| `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → F Unit` | partial buffer update |
-| `_ed-set-lbuffer` | `Str → F Unit` | replace left-of-cursor, preserve right |
-| `_ed-insert` | `Str → F Unit` | insert at cursor, advance |
-| `_ed-push` | `F Unit` | save buffer, clear |
-| `_ed-accept` | `F Unit` | run buffer on return |
-| `_ed-tui` | `{F Unit} → F [output: Str, status: Int]` | suspend editor, run body, capture stdout |
-| `_ed-history` | `Str → Int → F [Str]` | prefix search (limit 0 = all) |
-| `_ed-parse` | `F [words: [Str], current: Int, offset: Int]` | tokenise buffer |
-| `_ed-ghost` | `Str → F Unit` | set suggestion after cursor |
-| `_ed-highlight` | `[[start: Int, end: Int, style: Str]] → F Unit` | set spans |
-| `_ed-state` | `α:data → {α → F α} → F α` | per-plugin persistent cell |
+| `_ed-keymap` | `Returns Str` | current keymap name |
+| `_ed-lbuffer` | `Returns Str` | text left of cursor |
+| `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → Returns Unit` | partial buffer update |
+| `_ed-set-lbuffer` | `Str → Returns Unit` | replace left-of-cursor, preserve right |
+| `_ed-insert` | `Str → Returns Unit` | insert at cursor, advance |
+| `_ed-push` | `Returns Unit` | save buffer, clear |
+| `_ed-accept` | `Returns Unit` | run buffer on return |
+| `_ed-tui` | `∀ν α. {ν α} → Returns [output: Str, status: Int]` | suspend editor, run body, capture stdout |
+| `_ed-history` | `Str → Int → Returns [Str]` | prefix search (limit 0 = all) |
+| `_ed-parse` | `Returns [words: [Str], current: Int, offset: Int]` | tokenise buffer |
+| `_ed-ghost` | `Str → Returns Unit` | set suggestion after cursor |
+| `_ed-highlight` | `[[start: Int, end: Int, style: Str]] → Returns Unit` | set spans |
+| `_ed-state` | `α:data → {α → Returns α} → Returns α` | per-plugin persistent cell |
 
 Indices are character indices, consistent with `length` and `slice`.
 
@@ -113,7 +113,7 @@ if the user had pressed Enter. The pair implements zsh-style
 **`_ed-tui`.** The body runs with the line editor suspended and
 stdout captured. On success the return record's `status` is 0 and
 `output` is the captured stdout, decoded lossily, one trailing newline
-stripped.  The body is a command: it writes and returns `()`, and the call
+stripped.  The body is a command, its value is its output, and the call
 displays a terminal selection rather than computing with it. When the body fails, `status` carries the exit code and
 `output` carries the error message; the call never raises, so plugins
 can discriminate cancellation (fzf 1 = no match, 130 = Esc) from real
@@ -172,8 +172,8 @@ wrappers around anything else.
 
 | Builtin | Shape |
 |---|---|
-| `load-plugin` | `Str → F Unit` |
-| `unload-plugin` | `Str → F Unit` |
+| `load-plugin` | `Str → Returns Unit` |
+| `unload-plugin` | `Str → Returns Unit` |
 
 `load-plugin` resolves its argument in order:
 
@@ -213,11 +213,11 @@ any other shape is a load error.
 
 | Event | Handler | Fires |
 |---|---|---|
-| `buffer-change` | `{Map → F Unit}` | after buffer or cursor changes |
-| `pre-exec` | `{Map → F Unit}` | after Enter, before execution |
-| `post-exec` | `{Map → F Unit}` | after execution completes |
-| `chpwd` | `{Map → F Unit}` | after a line that moved the session's directory |
-| `prompt` | `{Str → F Str}` | before each prompt render |
+| `buffer-change` | `{Map → Returns Unit}` | after buffer or cursor changes |
+| `pre-exec` | `{Map → Returns Unit}` | after Enter, before execution |
+| `post-exec` | `{Map → Returns Unit}` | after execution completes |
+| `chpwd` | `{Map → Returns Unit}` | after a line that moved the session's directory |
+| `prompt` | `{Str → Returns Str}` | before each prompt render |
 
 All handlers for an event run in plugin load order regardless of
 individual failures. A failing handler's error is logged as
@@ -276,7 +276,7 @@ guarded bindings on one chord compose as an ordered pattern match:
 `key: 'tab'` with a guard cooperates with built-in completion, and
 unmatched presses complete as usual.
 
-A handler is `{|ctx| → F Unit}`; its return value carries nothing.
+A handler is `{|ctx| → Returns Unit}`; its return value carries nothing.
 All effects flow through the `_ed-*` builtins (`_ed-set`,
 `_ed-insert`, `_ed-set-lbuffer`, `_ed-push`, `_ed-accept`, `_ed-tui`,
 …). Whether a binding claims a press is decided entirely by its

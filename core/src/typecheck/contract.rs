@@ -96,7 +96,7 @@ impl Table {
 /// it stays the decoder's.
 ///
 /// The catch-all stands in for every command, so it is a function of the name
-/// and the argv that writes and returns `()`.
+/// and the argv that is a command.
 static WITHIN: Table = Table {
     form: "within",
     keys: &[
@@ -270,13 +270,13 @@ static MANIFEST: Table = Table {
     factory: true,
 };
 
-/// What the catch-all `handler:` is: `String → [String] → F Unit`.
+/// What the catch-all `handler:` is: `String → [String] → Command`.
 fn catch_all_ty(_u: &mut Unifier) -> Ty {
     Ty::Thunk(Box::new(CompTy::Fun(
         Box::new(Ty::String),
         Box::new(CompTy::Fun(
             Box::new(Ty::argv()),
-            Box::new(CompTy::pure(Ty::Unit)),
+            Box::new(CompTy::command()),
         )),
     )))
 }

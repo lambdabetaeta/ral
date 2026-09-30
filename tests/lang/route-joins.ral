@@ -23,9 +23,10 @@ case $tagged [`some: { |pl| $named $pl }, `none: { |pl| echo other }]
 # try relaxes an echo body against a unit handler
 try { echo relaxed } { |_| return () }
 
-# A join whose arm is a parameter stays polymorphic in its route
+# A join with a value arm demands a value of its other arm, so a command
+# block handed to it is captured, as text
 let either = { |thunk val| if true { !$thunk } else { return $val } }
-either { echo hi } ()
+echo !{either { echo hi } ''}
 let three = either { return 3 } 4
 echo $three
 

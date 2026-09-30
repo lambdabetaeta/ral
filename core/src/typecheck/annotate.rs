@@ -2,12 +2,11 @@
 //! generalised schemes, boundary sites, and `capture` coercions — over the
 //! tree that was inferred, using [`InferCtx`]'s node-address-keyed side maps.
 //!
-//! The walk is a plain structural rebuild.  Capture is decided before
-//! inference (`capture_sites`), so this pass only wraps the commands the
-//! checker recorded in [`captured_string`]: no demand travels, and no arm is
-//! rewritten.
+//! The walk is a plain structural rebuild: the commands inference recorded
+//! as captured are wrapped in [`captured_string`] where they stand, and a
+//! captured value in hand is η-wrapped into a block that captures its call.
 
-use super::env::InferCtx;
+use super::env::{InferCtx, comp_key, val_key};
 use crate::ir::{
     Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode,
     HandlerArmV, IrPattern, Name, OptionsV, Phrase, Toplevel, Val, ValListElem, ValMapEntry,
@@ -17,14 +16,6 @@ use crate::source::{Span, Spanned};
 use crate::syntax::ast::Redirects;
 use crate::types::Site;
 use std::sync::Arc;
-
-fn comp_key(comp: &Comp) -> usize {
-    std::ptr::from_ref::<Comp>(comp) as usize
-}
-
-fn val_key(val: &Val) -> usize {
-    std::ptr::from_ref::<Val>(val) as usize
-}
 
 /// Rebuild `group`, memoized by its source `Arc`'s identity: every `Rec`
 /// projection of one group is walked here once, so all of them keep sharing
@@ -84,10 +75,34 @@ fn annotate_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
     } else {
         None
     };
+    debug_assert!(
+        arity.is_none() || !ctx.captured.contains(&comp_key(rhs)),
+        "a function-typed RHS is never captured"
+    );
     match arity {
         Some(arity) => Arc::new(eta_expand_arrow(annotated, ctx, arity)),
         None => Arc::new(annotated),
     }
+}
+
+/// `{ |x₁…xₙ| cap (!v x₁ … xₙ) to d. decode d }`: a captured value in hand,
+/// its call wrapped where a literal block's body would be.
+fn captured_block(value: Val, arity: usize, span: Option<Span>, ctx: &mut InferCtx) -> Val {
+    let params: Vec<Name> = (0..arity).map(|_| ctx.fresh_name("eta").into()).collect();
+    let forced = Spanned::with_span(span, CompKind::Force(value));
+    let call = if params.is_empty() {
+        forced.item
+    } else {
+        CompKind::App {
+            head: Arc::new(forced),
+            args: params
+                .iter()
+                .map(|param| ValListElem::Single(Spanned::synthetic(Val::Variable(param.clone()))))
+                .collect(),
+        }
+    };
+    let body = captured_string(Spanned::with_span(span, call), ctx);
+    lambda(span, params, body)
 }
 
 /// Rebuild an arrow-typed RHS of curried arity `arity` as
@@ -201,7 +216,7 @@ fn annotate_comp(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> Comp {
         CompKind::Force(value) => CompKind::Force(annotate_val(value, ctx)),
         CompKind::Return(value) => CompKind::Return(annotate_val(value, ctx)),
         CompKind::Assemble(assembly) => CompKind::Assemble(annotate_assembly(assembly, ctx)),
-        CompKind::Exec(e) => return annotate_exec(comp, e, ctx),
+        CompKind::Exec(e) => annotate_exec(comp, e, ctx),
         CompKind::Binary(op, lhs, rhs) => {
             CompKind::Binary(*op, annotate_val(lhs, ctx), annotate_val(rhs, ctx))
         }
@@ -272,30 +287,6 @@ fn annotate_comp(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> Comp {
         CompKind::Capture(body) => CompKind::Capture(Arc::new(annotate_comp(body, ctx, eta))),
         CompKind::Decode(value) => CompKind::Decode(annotate_val(value, ctx)),
     };
-    Spanned::with_span(comp.span, item)
-}
-
-/// An `Exec`: its site from the checker, η-expanded when it is an under-applied
-/// boundary, and wrapped in the capture coercion when a `let` captures it.
-fn annotate_exec(comp: &Comp, e: &Exec, ctx: &mut InferCtx) -> Comp {
-    let mut exec = Exec {
-        head: e.head.clone(),
-        args: annotate_args(&e.args, ctx),
-        redirects: e.redirects.map(|v| annotate_val(v, ctx)),
-        site: ctx.sites.get(&comp_key(comp)).cloned(),
-    };
-    // An under-applied boundary is a boundary held as a value: a block of the
-    // saturated call, wherever it stands.
-    let item = match ctx.boundary_missing.get(&comp_key(comp)).copied() {
-        Some(missing) => {
-            let params: Vec<Name> = (0..missing).map(|_| ctx.fresh_name("eta").into()).collect();
-            exec.args.extend(params.iter().map(|param| {
-                ValListElem::Single(Spanned::synthetic(Val::Variable(param.clone())))
-            }));
-            lambda_comp(comp.span, params, CompKind::Exec(exec)).item
-        }
-        None => CompKind::Exec(exec),
-    };
     let item = if ctx.captured.contains(&comp_key(comp)) {
         captured_string(Spanned::with_span(comp.span, item), ctx)
     } else {
@@ -304,12 +295,36 @@ fn annotate_exec(comp: &Comp, e: &Exec, ctx: &mut InferCtx) -> Comp {
     Spanned::with_span(comp.span, item)
 }
 
+/// An `Exec`: its site from the checker, η-expanded when it is an
+/// under-applied boundary.
+fn annotate_exec(comp: &Comp, e: &Exec, ctx: &mut InferCtx) -> CompKind {
+    let mut exec = Exec {
+        head: e.head.clone(),
+        args: annotate_args(&e.args, ctx),
+        redirects: e.redirects.map(|v| annotate_val(v, ctx)),
+        site: ctx.sites.get(&comp_key(comp)).cloned(),
+    };
+    // An under-applied boundary is a boundary held as a value: a block of the
+    // saturated call, wherever it stands.
+    match ctx.boundary_missing.get(&comp_key(comp)).copied() {
+        Some(missing) => {
+            let params: Vec<Name> = (0..missing).map(|_| ctx.fresh_name("eta").into()).collect();
+            exec.args.extend(params.iter().map(|param| {
+                ValListElem::Single(Spanned::synthetic(Val::Variable(param.clone())))
+            }));
+            lambda_comp(comp.span, params, CompKind::Exec(exec)).item
+        }
+        None => CompKind::Exec(exec),
+    }
+}
+
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     annotate_val_at(val, None, ctx)
 }
 
 /// [`annotate_val`] for a value written at `span`, which the block a boundary
-/// reference becomes is given, so its errors point where the reference is.
+/// reference or a captured value becomes is given, so its errors point where
+/// the value is.
 fn annotate_val_at(val: &Val, span: Option<Span>, ctx: &mut InferCtx) -> Val {
     if let Some(value) = ctx.boundary_values.get(&val_key(val))
         && let Some(site) = ctx.sites.get(&val_key(val)).cloned()
@@ -317,6 +332,15 @@ fn annotate_val_at(val: &Val, span: Option<Span>, ctx: &mut InferCtx) -> Val {
         let (name, arity) = (value.name.clone(), value.arity);
         return boundary_block(&name, arity, site, span, ctx);
     }
+    let rebuilt = rebuild_val(val, ctx);
+    match ctx.captured_vals.get(&val_key(val)).copied() {
+        Some(arity) => captured_block(rebuilt, arity, span, ctx),
+        None => rebuilt,
+    }
+}
+
+/// The structural rebuild of a value.
+fn rebuild_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
         Val::Thunk(comp) => Val::thunk(Arc::new(annotate(comp.shape(), ctx))),
         Val::List(elems) => Val::list(

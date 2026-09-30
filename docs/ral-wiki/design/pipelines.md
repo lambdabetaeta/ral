@@ -3,12 +3,13 @@
 **`|` connects the left stage's stdout to the right stage's stdin: a stage
 feeds the next by writing.** Every interior edge is an operating-system byte
 pipe, allocated from stage position alone. Every stage but the last is a
-command, `F Unit`; the pipeline's value is its final stage's.
+command whose value is unused (`F^ε Unit`, any grade); the pipeline's value is
+its final stage's.
 
 ```text
-Γ ⊢ M : F Unit       Γ ⊢ N : F B
-────────────────────────────────
-        Γ ⊢ M | N : F B
+Γ ⊢ M : F^ε Unit       Γ ⊢ N : F^ε' B
+──────────────────────────────────────
+        Γ ⊢ M | N : F^ε' B
 ```
 
 Operationally: connect `stdout(M)` to `stdin(N)`, run the stages under the
@@ -25,16 +26,17 @@ echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline ret
 yes | !{ return 5 }               # terminates: yes's next write finds its reader gone
 ```
 
-**Three static rules, each about one stage.** A stage must have shape `F A` — a
+**Three static rules, each about one stage.** A stage must have shape `F^ε A` — a
 computation ready to run, not a function still waiting for an argument;
 `echo hi | !{ |x| echo $x }` is a type error whose help says to apply it rather
-than pipe into it. A stage before the last must write: its head is no value row
-that returns (`Output::Returns` — the decoders, `length`, `fold-lines`), and a
-value or block literal in stage position writes nothing to the pipe.
-`length $xs | cat` is refused under `Reason::PipelineStageWrites` (T0011), whose
-sentence says that a stage feeds the next by writing, that `length` returns an
-`Int` instead so nothing reaches `cat`, and offers `echo !{length …} | cat` or
-binding it with `let`. And a stage after a `|` may not bind standard input at its
+than pipe into it. A stage before the last must write: it is accepted at `Unit` in any grade, but
+a decoder (`from-*`, marked `BuiltinDiagnostic::Decoder`) is refused by its own
+mark (`stage_decoder`, `DecoderMidPipeline`, T0078: "a decoder ends the byte
+pipeline: `from-json` returns a value and writes nothing, so nothing reaches
+`cat`", with the help to bind the value first), and a value or block literal in
+stage position writes nothing to the pipe (`Reason::PipelineStageWrites`,
+T0011). `each { … } $xs | cat` is accepted: `each` streams what its body writes.
+And a stage after a `|` may not bind standard input at its
 own root: `a | b < f` and `a | b << w` are refused, because the feed answers
 every read `b` makes for the stage's whole run and leaves `a` writing for
 nobody — a producer that, concurrently, blocks for nothing until its next
@@ -80,7 +82,7 @@ multi-stage pipeline shares one process group:
   no wire, crosses back. A captured final stage (`let x = a | b`) is a
   `Capture` node, so it runs as a thread stage whose stdin is the pipe and
   whose buffer takes what `b` writes
-  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+  ([[decisions/260930_graded-f|graded-f]]).
 
 Only an external is ever isolated by a process boundary. A stage thread's panic
 is caught at the pipeline boundary and folded as that stage's own failure,

@@ -9,7 +9,7 @@ A
 B
 C
 1 2 3
-one
-bound [two]
+bound [one
+two]
 done
 block tests done

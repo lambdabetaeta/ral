@@ -25,7 +25,7 @@ Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **
 
 Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = cat notes.txt` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
 
-A `let` captures the command that produces its value; a function, block or handle in that position binds what it returns, and `| from-line` turns what it writes into a value: with `let f = { hostname }`, `let x = f` prints the host name and binds `()`, and `let host = f | from-line` binds it.
+A command's value is its output: `let host = hostname` binds what it writes, and so does `let host = f` when `f` is a block or function that runs a command. `| from-lines`, `| from-json` choose another decoding.
 
 A binding shadows a command of the same name; `^name` reaches the command.
 
@@ -70,7 +70,7 @@ Blocks support recursive definitions.
 Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a list of lines; `from-json` turns JSON bytes into a `ral` value:
 
     let cfg     = curl -s https://api.example.com/cfg | from-json
-    let first   = !{head -n1 notes.txt | from-line}
+    let first   = head -n1 notes.txt
     let commits = git log --oneline | from-lines
 
 There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
@@ -114,8 +114,6 @@ When what you want is the merged text of every step, put the block on the byte c
     let steps = { attempt { sort in.txt > sorted.txt }; attempt { wc -l sorted.txt } }
     let text  = !$steps | from-string     # every step's stdout, as one String
     !$steps > log.txt                     # or straight to a file
-
-Beware: `let text = !$steps` binds `()`, the block's value, and the steps write as they always do; `!$steps | from-string` binds everything they write.
 
 In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 

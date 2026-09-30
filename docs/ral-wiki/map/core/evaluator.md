@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8d868e18
+generated_at_commit: 1776d222
 generated_at_date: 2026-09-30
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -75,7 +75,7 @@ Internals:
   `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
   `Frame::Capture`, which holds the sink it replaced, and swaps a fresh buffer
   in as `shell.io.stdout`; on return it restores the sink and yields the buffer
-  exactly, as `Value::Bytes`, ignoring the body's own value (`cap : F Unit → F
+  exactly, as `Value::Bytes`, ignoring the body's own value (`cap : F^w Unit → F
   Bytes`), and a buffer that overflowed `SINK_BUFFER_CAP` is
   `capture_overflowed`; on a halt it flushes what the body wrote to the sink it
   replaced (`Shell::write_sink`) and propagates the halt. The checker binds that

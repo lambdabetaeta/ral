@@ -1,0 +1,4 @@
+# codes: T0011
+# contains: couldn't match type Returns Integer with type Command
+# contains: one branch is a command, whose value is its output (a String); the other gives an Int
+let f = { |c| if $c { hostname } else { return 5 } }

@@ -231,8 +231,8 @@ fn parse_handlers(
         .collect()
 }
 
-/// `handler:` — the catch-all, which stands in for *every* command and so
-/// writes and returns `()`.
+/// `handler:` — the catch-all, which stands in for *every* command, so its
+/// value is its output.
 fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
     validate_handler_arity(v, 2, "within handler: catch-all")?;
     let Value::Thunk(closure) = v else {

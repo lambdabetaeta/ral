@@ -44,20 +44,21 @@ touches the world ([[design/cbpv|cbpv]],
 
 ## Divergences (extensions, mostly)
 
-- **`F` carries its value type and nothing else; a command is `F Unit`.** ral's
-  returner is Levy's `F A`. A command — an external, a builtin that writes, a
-  handler arm standing in for one — writes to stdout and returns `()`, as `cd`
-  does, so `{ echo hi }` is `{Command Unit}` and `{ 'hi' }` is `{Command String}`.
-  That `let x = hostname` binds the text `hostname` writes is no fact about
-  types: it is the capture coercion `cap M to d. decode d`, which the checker
-  wraps around the command a `let` can see, decided from syntax before any
-  type is inferred
-  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
-  [[design/types|types]]). The calculus under it is Levy's unchanged.
+- **`F` carries a grade, a producer kind; a command is `F^w Unit`.** ral's
+  returner is Levy's `F A` with an atomic annotation: `F^p A` produces a value
+  and `F^w Unit` produces output and nothing else. A command — an external, a
+  builtin that writes, a handler arm standing in for one — is the latter, so
+  `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`. The grade
+  says how a result is produced, not whether anything is written, so
+  `{ echo pre; return 5 }` is `F^p Int`. That `let x = hostname` binds the text
+  `hostname` writes is the one coercion `cap : F^w Unit ⇝ F^p String`, which the
+  checker inserts where a value is demanded of a command
+  ([[decisions/260930_graded-f|graded-f]], [[design/types|types]]). Levy's
+  adjunction is unchanged; grades are unified like type variables.
 - **The pipe is a new computation combinator, and it is not a typing fact.**
   CBPV composes computations by sequencing and application only. ral adds `|`,
-  whose static rule says just that a stage feeds the next by writing — `Γ ⊢ M : F Unit`
-  and `Γ ⊢ N : F B` give `Γ ⊢ M | N : F B`, the value the final stage's. What the
+  whose static rule says just that a stage feeds the next by writing — `Γ ⊢ M : F^ε Unit`
+  and `Γ ⊢ N : F^ε' B` give `Γ ⊢ M | N : F^ε' B`, the value the final stage's. What the
   combinator *does* is operational: it connects `M`'s stdout to `N`'s stdin with an
   operating-system pipe. A ral-written
   stage runs its own CEK machine on an OS thread, in a child `Shell` seeded

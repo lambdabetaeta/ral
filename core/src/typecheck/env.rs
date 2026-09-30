@@ -161,6 +161,16 @@ impl TyEnv {
 // Inference context
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The key of a node in [`InferCtx`]'s side tables: its address in the one
+/// live tree both passes walk.
+pub(super) fn comp_key(comp: &crate::ir::Comp) -> usize {
+    std::ptr::from_ref::<crate::ir::Comp>(comp) as usize
+}
+
+pub(super) fn val_key(val: &crate::ir::Val) -> usize {
+    std::ptr::from_ref::<crate::ir::Val>(val) as usize
+}
+
 /// A boundary builtin used as a value: what `annotate` rebuilds into the block
 /// `{ |x…| name x… }`, whose call carries the site.
 pub(super) struct BoundaryValue {
@@ -176,10 +186,13 @@ pub struct InferCtx {
     pub(crate) errors: Vec<TypeError>,
     /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
     pub pos: Option<Span>,
-    /// The commands a `let` captures, keyed by the `Exec` node's address: the
-    /// walk `⟦·⟧` makes before the right-hand side is inferred, which `annotate`
-    /// wraps in `cap … to d. decode d`.
+    /// The computations a value demand captures, keyed by node address:
+    /// `annotate` wraps each in `cap … to d. decode d`.
     pub(crate) captured: HashSet<usize>,
+    /// The values in hand a value demand captures — a command block passed
+    /// where a value producer was wanted — keyed by address, with the arity
+    /// `annotate` η-wraps them at.
+    pub(crate) captured_vals: HashMap<usize, usize>,
     /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
     /// typed spine; the evaluator never reads it.
     pub(crate) stage_types: HashMap<usize, Ty>,
@@ -242,6 +255,7 @@ impl InferCtx {
             errors: Vec::new(),
             pos: None,
             captured: HashSet::new(),
+            captured_vals: HashMap::new(),
             stage_types: HashMap::new(),
             unit_reads: Vec::new(),
             pending_labels: Vec::new(),

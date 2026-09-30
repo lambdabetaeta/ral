@@ -1,0 +1,2 @@
+# A command body beside a value handler: the body is captured, and the try is a value.
+try { echo hi } { |_| return 's' }

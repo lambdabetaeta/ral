@@ -13,7 +13,7 @@ use super::fmt::fmt_scheme;
 use super::generalize::{FreeVars, generalize};
 use super::kind::Kind;
 use super::scheme::{CachedFreeVars, Scheme, WeakVars};
-use super::ty::{CompTy, Label, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
@@ -89,12 +89,25 @@ pub fn fun(param: Ty, body: CompTy) -> CompTy {
 pub fn pure(ty: Ty) -> CompTy {
     CompTy::pure(ty)
 }
+pub fn command() -> CompTy {
+    CompTy::command()
+}
+
+/// `scheme`, quantifying `grades` too.  Public, as [`mk_scheme`] is: a host
+/// row that absorbs a block names the grade it runs at.
+pub fn graded(grades: &[GradeVar], scheme: Scheme) -> Scheme {
+    Scheme {
+        grade_vars: grades.to_vec(),
+        ..scheme
+    }
+}
 
 // ── Scheme DSL ──────────────────────────────────────────────────────
 //
 // `scheme!` writes a builtin's polytype declaratively: `<tv>` declares fresh
 // type vars, `[...]` params curry left-to-right, `pure` means a thunked
-// constant.  Each arm is labelled with the spelling it accepts.
+// constant, and `writes` a command in place of a result.  Each arm is
+// labelled with the spelling it accepts.
 //
 // It expands only inside `mod scheme` below, whose imports are what the
 // expansion resolves against.
@@ -107,31 +120,50 @@ pub fn pure(ty: Ty) -> CompTy {
 // member of this family can be stranded silently the way a loose function can.
 
 macro_rules! scheme {
+    // scheme!(help: writes);
+    ($name:ident: writes) => {
+        pub fn $name(_u: &mut Unifier) -> Scheme {
+            mk_plain_scheme(&[], &[], thunk(command()))
+        }
+    };
     // scheme!(temp_path: pure Ty::String);
     ($name:ident: pure $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
             mk_plain_scheme(&[], &[], thunk(pure($ret)))
         }
     };
+    // scheme!(to_bytes: [Ty::Bytes] -> writes);
+    ($name:ident: [$($p:expr),*] -> writes) => {
+        pub fn $name(_u: &mut Unifier) -> Scheme {
+            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => command())))
+        }
+    };
     // scheme!(str_to_str: [Ty::String] -> Ty::String);
     ($name:ident: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => $ret)))
+            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => pure($ret))))
+        }
+    };
+    // scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
+    ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> writes) => {
+        pub fn $name(u: &mut Unifier) -> Scheme {
+            let $tv = u.fresh_tyvar();
+            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => command())))
         }
     };
     // scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
     ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let $tv = u.fresh_tyvar();
-            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => $ret)))
+            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => pure($ret))))
         }
     };
 }
 
-/// Right-fold parameters into `fun(p₁, fun(p₂, …, pure(ret)))`.
+/// Right-fold parameters into `fun(p₁, fun(p₂, …, tail))`.
 macro_rules! curry {
-    ($p:expr => $ret:expr) => { fun($p, pure($ret)) };
-    ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
+    ($p:expr => $tail:expr) => { fun($p, $tail) };
+    ($p:expr, $($rest:expr),+ => $tail:expr) => { fun($p, curry!($($rest),+ => $tail)) };
 }
 
 /// A record type over a row of fields ending in `tail`.
@@ -405,9 +437,10 @@ pub(crate) fn fs_file_info_ty() -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, FreeVars, Kind, Row, Scheme, Ty, TyEnv, TyVar, Unifier, await_record,
-        closed_record, error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize,
-        mk_plain_scheme, mk_scheme, poll_variant, pure, thunk,
+        CompTy, FreeVars, Grade, GradeVar, Kind, Row, Scheme, Ty, TyEnv, TyVar, Unifier,
+        await_record, closed_record, command, error_record_shape, fs_file_info_ty,
+        fs_list_entry_ty, fun, generalize, graded, mk_plain_scheme, mk_scheme, poll_variant, pure,
+        thunk,
     };
 
     // ── List operations ──────────────────────────────────────────────────
@@ -487,31 +520,39 @@ pub mod scheme {
         )
     }
 
-    /// `each :: ∀α β. U(α → F β) → [α] → F Unit`
+    /// `each :: ∀ε α β. U(α → F^ε β) → [α] → F Unit` — the block's output
+    /// streams, whatever it produces.
     pub(crate) fn each_op(u: &mut Unifier) -> Scheme {
-        let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
+        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        mk_plain_scheme(
-            &[av, bv],
-            &[],
-            thunk(fun(
-                thunk(fun(a.clone(), pure(b))),
-                fun(Ty::List(Box::new(a)), pure(Ty::Unit)),
-            )),
+        graded(
+            &[ev],
+            mk_plain_scheme(
+                &[av, bv],
+                &[],
+                thunk(fun(
+                    thunk(fun(a.clone(), CompTy::Return(Grade::Var(ev), Box::new(b)))),
+                    fun(Ty::List(Box::new(a)), pure(Ty::Unit)),
+                )),
+            ),
         )
     }
 
-    /// `fold :: ∀α β. U(β → α → F β) → β → [α] → F β`
+    /// `fold :: ∀ε α β. U(β → α → F^ε β) → β → [α] → F β`
     pub(crate) fn fold_op(u: &mut Unifier) -> Scheme {
-        let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
+        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        mk_plain_scheme(
-            &[av, bv],
-            &[],
-            thunk(fun(
-                thunk(fun(b.clone(), fun(a.clone(), pure(b.clone())))),
-                fun(b.clone(), fun(Ty::List(Box::new(a)), pure(b))),
-            )),
+        let step = CompTy::Return(Grade::Var(ev), Box::new(b.clone()));
+        graded(
+            &[ev],
+            mk_plain_scheme(
+                &[av, bv],
+                &[],
+                thunk(fun(
+                    thunk(fun(b.clone(), fun(a.clone(), step))),
+                    fun(b.clone(), fun(Ty::List(Box::new(a)), pure(b))),
+                )),
+            ),
         )
     }
 
@@ -599,65 +640,56 @@ pub mod scheme {
 
     // ── Streaming reducers ───────────────────────────────────────────────
 
-    /// `fold-lines :: ∀α. U(α → Str → F α) → α → F α`
+    /// `fold-lines :: ∀ε α. U(α → Str → F^ε α) → α → F α`
     pub(crate) fn fold_lines(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
+        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
         let a = Ty::Var(av);
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                thunk(fun(a.clone(), fun(Ty::String, pure(a.clone())))),
-                fun(a.clone(), pure(a)),
-            )),
+        let step = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
+        graded(
+            &[ev],
+            mk_plain_scheme(
+                &[av],
+                &[],
+                thunk(fun(
+                    thunk(fun(a.clone(), fun(Ty::String, step))),
+                    fun(a.clone(), pure(a)),
+                )),
+            ),
         )
     }
 
     // ── Concurrency ──────────────────────────────────────────────────────
 
-    /// `spawn :: ∀α. U(F α) → F (Handle α)`
+    /// `∀ε α. U(F^ε α) → F (Handle α)`, behind `prefix` leading parameters:
+    /// the block runs in a worker, its output streamed, whatever it produces.
+    fn runs_block(u: &mut Unifier, prefix: &[Ty]) -> Scheme {
+        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
+        let a = Ty::Var(av);
+        let body = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
+        let run = fun(thunk(body), pure(Ty::Handle(Box::new(a))));
+        let spine = prefix
+            .iter()
+            .rev()
+            .fold(run, |body, p| fun(p.clone(), body));
+        graded(&[ev], mk_plain_scheme(&[av], &[], thunk(spine)))
+    }
+
+    /// `spawn :: ∀ε α. U(F^ε α) → F (Handle α)`
     pub fn spawn(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        let body = pure(a.clone());
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
-        )
+        runs_block(u, &[])
     }
 
-    /// `watch :: ∀α. String → U(F α) → F (Handle α)`
+    /// `watch :: ∀ε α. String → U(F^ε α) → F (Handle α)`
     pub(crate) fn watch(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        let body = pure(a.clone());
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::String,
-                fun(thunk(body), pure(Ty::Handle(Box::new(a)))),
-            )),
-        )
+        runs_block(u, &[Ty::String])
     }
 
-    /// `service :: ∀α. String → U(F α) → F (Handle α)` — `watch`'s
+    /// `service :: ∀ε α. String → U(F^ε α) → F (Handle α)` — `watch`'s
     /// scheme, the leading `String` being the mandatory birth description.
     ///
     /// The durable lease class is a runtime fact, invisible to the types.
     pub(crate) fn service(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        let body = pure(a.clone());
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::String,
-                fun(thunk(body), pure(Ty::Handle(Box::new(a)))),
-            )),
-        )
+        runs_block(u, &[Ty::String])
     }
 
     /// `await :: ∀α. Handle α → F {value, stdout, stderr}`
@@ -715,10 +747,10 @@ pub mod scheme {
         mk_plain_scheme(ty_vars, &[], thunk(fun(Ty::argv(), result)))
     }
 
-    /// `echo :: [Str] → F ()` — join the argv with single spaces and write it
+    /// `echo :: [Str] → Command` — join the argv with single spaces and write it
     /// with a trailing newline.
     pub(crate) fn echo(_u: &mut Unifier) -> Scheme {
-        base_frame(&[], pure(Ty::Unit))
+        base_frame(&[], command())
     }
 
     /// `detach :: [Str] → F [pid: Int, desc: Str]` — the receipt of a process this
@@ -753,17 +785,17 @@ pub mod scheme {
 
     // ── Terminal, help & encoders ────────────────────────────────────────
     //
-    // Each writes to stdout and returns `()`.
+    // Each is a command: its value is what it writes.
 
-    scheme!(terminal_control: pure Ty::Unit);
-    scheme!(help: pure Ty::Unit);
-    scheme!(explain: [Ty::String] -> Ty::Unit);
-    scheme!(to_bytes: [Ty::Bytes] -> Ty::Unit);
-    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> Ty::Unit);
-    scheme!(to_any_bytes<av: Kind::DATA>: [Ty::Var(av)] -> Ty::Unit);
-    scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> Ty::Unit);
-    scheme!(to_lines<av: Kind::DATA>: [Ty::List(Box::new(Ty::Var(av)))] -> Ty::Unit);
-    scheme!(to_csv: [Ty::List(Box::new(Ty::Map(Box::new(Ty::String))))] -> Ty::Unit);
+    scheme!(terminal_control: writes);
+    scheme!(help: writes);
+    scheme!(explain: [Ty::String] -> writes);
+    scheme!(to_bytes: [Ty::Bytes] -> writes);
+    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> writes);
+    scheme!(to_any_bytes<av: Kind::DATA>: [Ty::Var(av)] -> writes);
+    scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
+    scheme!(to_lines<av: Kind::DATA>: [Ty::List(Box::new(Ty::Var(av)))] -> writes);
+    scheme!(to_csv: [Ty::List(Box::new(Ty::Map(Box::new(Ty::String))))] -> writes);
 
     // ── Decoders ─────────────────────────────────────────────────────────
     //
@@ -826,36 +858,45 @@ pub mod scheme {
 
     // ── Divergence ───────────────────────────────────────────────────────
 
-    /// `fail :: ∀α r. {status: Int, message: String | r} → F α`.
-    ///
-    /// An error record, open at the tail so a caught error re-raises with the
-    /// fields `try` gave it.  Divergent, so its value joins whatever the context
-    /// needs rather than forcing `Unit` on the other arm of an `if`.
-    pub(crate) fn fail(u: &mut Unifier) -> Scheme {
-        let row = u.fresh_row_var();
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(
-            &[av],
-            &[row],
-            thunk(fun(error_record_shape(row), pure(Ty::Var(av)))),
+    /// `∀ε α. F^ε α`: a divergent computation inhabits every producer type,
+    /// so it joins whatever the other arm of an `if` is, a command included.
+    fn divergent(u: &mut Unifier) -> (TyVar, GradeVar, CompTy) {
+        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
+        (
+            av,
+            ev,
+            CompTy::Return(Grade::Var(ev), Box::new(Ty::Var(av))),
         )
     }
 
-    /// `exit`/`quit` :: ∀α. Int → F α — a status, and no return.
-    /// Divergent like [`fail`]; the elaborator sugars bare `exit` to `exit 0`.
-    pub(crate) fn exit(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(&[av], &[], thunk(fun(Ty::Int, pure(Ty::Var(av)))))
+    /// `fail :: ∀ε α r. {status: Int, message: String | r} → F^ε α`.
+    ///
+    /// An error record, open at the tail so a caught error re-raises with the
+    /// fields `try` gave it.
+    pub(crate) fn fail(u: &mut Unifier) -> Scheme {
+        let row = u.fresh_row_var();
+        let (av, ev, never) = divergent(u);
+        graded(
+            &[ev],
+            mk_plain_scheme(&[av], &[row], thunk(fun(error_record_shape(row), never))),
+        )
     }
 
-    /// `∀α. F α` — nullary and divergent like [`fail`]/[`exit`].
-    ///
-    /// For a host builtin that never returns (a test-only Rust panic trigger,
-    /// say): its value joins whatever the context needs rather than forcing one
-    /// on it.
+    /// `exit`/`quit` :: ∀ε α. Int → F^ε α — a status, and no return.
+    /// The elaborator sugars bare `exit` to `exit 0`.
+    pub(crate) fn exit(u: &mut Unifier) -> Scheme {
+        let (av, ev, never) = divergent(u);
+        graded(
+            &[ev],
+            mk_plain_scheme(&[av], &[], thunk(fun(Ty::Int, never))),
+        )
+    }
+
+    /// `∀ε α. F^ε α` — nullary; for a host builtin that never returns (a
+    /// test-only Rust panic trigger, say).
     pub fn diverges(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(&[av], &[], thunk(pure(Ty::Var(av))))
+        let (av, ev, never) = divergent(u);
+        graded(&[ev], mk_plain_scheme(&[av], &[], thunk(never)))
     }
 }
 

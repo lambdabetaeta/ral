@@ -1,10 +1,13 @@
 ---
-status: accepted
+status: superseded
+superseded_by: decisions/260930_graded-f
 generated_at_commit: 8d868e18
 supersedes: decisions/260601_modes-equality-constrained-shared
 ---
 
 # Capture is decided by syntax
+
+> Superseded by [[decisions/260930_graded-f|graded-f]]: capture is placed by the type, not by syntax.
 
 **`let x = hostname` binds the text `hostname` writes because the checker wraps
 the command in the capture coercion, and it decides that once, before any type

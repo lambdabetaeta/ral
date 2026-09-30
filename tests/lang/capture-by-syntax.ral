@@ -1,5 +1,5 @@
-# Test: a `let` captures the command that produces its value — decided by the
-# syntax of its right-hand side and the class of each head, never by a type.
+# Test: a command's value is its output. Where a value is wanted, a command
+# is captured; where a command is wanted, a command runs.
 
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
@@ -15,56 +15,58 @@ let assert_unit = { |name actual|
     }
 }
 
-# A block's tail command is the value; the statements before it write where
-# they always do
+# A block of commands is a command: its output is the value, all of it
 let x = !{ echo a; echo b }
-assert_eq 'tail' b $x
+assert_eq 'whole block' "a\nb" $x
 let y = !{ let inner = echo a; echo b }
 assert_eq 'inner let' b $y
 
-# A function's writes are never a bind's value; `| from-line` asks for them
+# A function that runs a command is a command function: a call binds its
+# output, and `| from-line` reads the same text at a pipe
 let f = { |n| echo $n; echo done }
 let z = f 1
-assert_unit 'function binds ()' $z
+assert_eq 'function called' "1\ndone" $z
 let w = f 2 | from-line
 assert_eq 'function piped' "2\ndone" $w
 
-# A wrapper runs what it is given and returns what that returns
+# A wrapper that binds what it is given demands a value, so a command block
+# handed to it is captured
 let time = { |t| let r = !$t; $r }
-time { echo hi }
+assert_eq 'wrapper of a command' hi !{time { echo hi }}
 assert_eq 'wrapper of a value' hi !{time { return hi }}
 
-# A block in hand is not the command it holds, but a literal one is
+# A block in hand is the command it holds, as a literal one is
 let t = { echo held }
 let held = !$t
-assert_unit 'block in hand' $held
+assert_eq 'block in hand' held $held
 let lit = !{ echo literal }
 assert_eq 'literal block' literal $lit
 
-# A pipeline's value is its final stage's, and the `let` enters that stage
+# A pipeline's value is its final stage's
 let grepped = echo abc | grep b
 assert_eq 'final stage' abc $grepped
 let p = 'b'
 let hoisted = echo abc | grep "a$p"
 assert_eq 'through the hoist' abc $hoisted
+# a block stage is a command, so a binding takes everything it writes
 let noted = echo a | !{ echo note; cat }
-assert_eq 'statement in a stage' a $noted
+assert_eq 'statement in a stage' "note\na" $noted
 let g = { cat }
 let by_name = echo a | !$g
-assert_unit 'final stage in hand' $by_name
+assert_eq 'final stage in hand' a $by_name
 let lines = echo x | map-lines { |l| return "$l!" }
 assert_unit 'wrapper stage' $lines
 let mapped = echo x | map-lines { |l| return "$l!" } | from-line
 assert_eq 'wrapper piped' "x!" $mapped
 
-# An encoder written out is a command; an encoder held is a function
+# An encoder is a command, written out or held
 let j = to-json [a: 1]
 assert_eq 'encoder called' '{"a":1}' $j
 let enc = to-json
 let ej = enc 7
-assert_unit 'encoder held' $ej
+assert_eq 'encoder held' '7' $ej
 
-# Every arm of a branching form is a position its result comes from
+# A branching form whose arms are commands is one command, captured once
 let c = true
 let big = if $c { echo big } else { echo small }
 assert_eq 'if then' big $big
@@ -80,31 +82,31 @@ let d = temp-dir
 echo file > "$d/entry"
 let listed = within [dir: $d] { ls }
 assert_eq 'within body' entry $listed
+# a guard is one computation: its cleanup's output is part of its output
 let guarded = guard { echo body } { echo cleanup }
-assert_eq 'guard body' body $guarded
+assert_eq 'guard whole' "body\ncleanup" $guarded
 
 # `let _` captures and drops
 let _ = echo secret
 
-# A fused redirect is the command's own: a stdout redirect wins over the capture
+# A stdout redirect takes the output, so what is left is a value: `()`
 let saved = echo hi > "$d/out"
-assert_eq 'fused redirect' '' $saved
+assert_unit 'fused redirect' $saved
 assert_eq 'what it wrote' hi !{cat "$d/out"}
-# ...but a redirect around a block is not the command
 let framed = !{ echo hi } > "$d/out"
 assert_unit 'redirected block' $framed
-# a fused stdin redirect still captures
+# a stdin redirect leaves a command a command
 let upper = tr a-z A-Z < "$d/entry"
 assert_eq 'fused stdin' FILE $upper
 
-# An encoder's bytes are Bytes when a decoder is not asked for
+# An encoder's bytes are Bytes when a decoder asks for them
 let raw = echo hi | from-bytes
 assert_eq 'bytes' 3 !{length $raw}
 
 # An interpolated `!{…}` is a hoisted `let`, so it captures too
 let n = { return 5 }
-assert_eq 'interpolated command' "n: 5" "n: !{n}"
-assert_eq 'interpolated writer' "e: entry" "e: !{within [dir: $d] { ls entry }}"
+assert_eq 'interpolated value' "n: 5" "n: !{n}"
+assert_eq 'interpolated command' "e: entry" "e: !{within [dir: $d] { ls entry }}"
 
 # A `{ … }` is a thunk everywhere: an arm in hand is forced by the form
 let aaah = { return chosen }
@@ -112,6 +114,14 @@ let baaah = { return other }
 assert_eq 'arm in hand' chosen !{if true $aaah else $baaah}
 let inert = if true $aaah else $baaah
 assert_eq 'arm in hand, bound' chosen $inert
+let cmd_a = { echo a }
+let cmd_b = { echo b }
+let picked = if true $cmd_a else $cmd_b
+assert_eq 'command arms in hand' a $picked
+let mixed = if false $cmd_a else { return b }
+assert_eq 'command arm in hand joined with a value' b $mixed
+let mixed_taken = if true $cmd_a else { return b }
+assert_eq 'command arm in hand, taken' a $mixed_taken
 
 # A stand-in writes as the command it stands in for does, all of it
 within [handlers: [curl: { |a| echo note; echo body }]] {
@@ -122,10 +132,21 @@ within [handlers: [curl: { |a| echo '{"ok":1}' }]] {
     let direct = curl | from-json
     assert_eq 'stand-in as a stage' 1 $direct[ok]
 }
+within [handlers: [curl: { |a| return () }]] {
+    let stub = curl foo
+    assert_eq 'a () stub stands in for a command' '' $stub
+}
 
-# A collection callback's writes are effects; `map` still binds what it returns
+# A collection callback that is a command is captured per element where a
+# value is demanded, and streams where it is not
 let mapped_each = map { |e| echo $e } [a, b]
-assert_eq 'map of writers' 2 !{length $mapped_each}
-assert_unit 'first result' $mapped_each[0]
+assert_eq 'map of commands' 2 !{length $mapped_each}
+assert_eq 'first result' a $mapped_each[0]
+let shout = { |e| echo $e }
+let mapped_held = map $shout [c, d]
+assert_eq 'map of a command function in hand' d $mapped_held[1]
+each { |e| echo $e } [e, f]
+let folded = fold { |acc e| echo $e; return $[$acc + 1] } 0 [g, h]
+assert_eq 'fold streams' 2 $folded
 
 echo 'capture by syntax done'

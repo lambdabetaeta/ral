@@ -25,8 +25,8 @@ irreducibility:
 - **It is a base computation** — an operation the prelude has no smaller pieces to
   build from: a regex engine, the string transforms, structural comparison
   dispatched on the runtime value, scalar coercion.
-- **Its type cannot be given to an ordinary binding** — a decoder's `F A` for an
-  `A` the stream decides and an encoder's `A → F Unit` that writes
+- **Its type cannot be given to an ordinary binding** — a decoder's `Returns A` for an
+  `A` the stream decides and an encoder's `A → Command` that writes
   ([[design/codecs|codecs]]), and `fail`'s divergent, open-row result.
 
 Filesystem *effects* are deliberately none of these: there is no `copy-file` or
@@ -39,8 +39,9 @@ spelling would be a second thing to keep capability-checked
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`
-  `range`. Each takes a thunk, and a callback is a plain `F β`: `map { echo $x }`
-  typechecks, `β` being `()`, and what the callback writes goes where writes go.
+  `range`. Each takes a thunk. `each` and `fold` absorb a command callback (run it, stream
+  its output, keep its value), while `map`, `filter` and `sort-list-by` demand a
+  value: `map { |x| echo $x } $xs` captures each call's output as a `String`.
 - **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
   `re-replace-all` `string-replace` `shell-quote` `shell-split`.
@@ -58,12 +59,12 @@ The core entries group by what they compute:
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
 - **Writes** — `echo`: every argument rendered through the total `to-string`,
-  single-space intercalation, a trailing newline, typed `List String -> F Unit`:
-  it writes and returns nothing, like every command. Mixed argument types
+  single-space intercalation, a trailing newline, typed `List String -> Command`:
+  its value is its output, like every command. Mixed argument types
   coexist because the argv boundary renders each element before the list is
   formed.
 - **Diagnostics** — `warn`: one `String` and a newline to standard error,
-  typed `String -> F Unit` as a row that *returns*, not one that writes, so a
+  typed `String -> Returns Unit`, a row that *returns* and does not write, so a
   bind capturing it never picks the message up. ral has no redirect pointing
   standard output at standard error, and this verb is what stands where the
   bash idiom did
@@ -94,9 +95,8 @@ Nullary and divergent are shapes a scheme writes, not a second rule:
   ([[design/failure|failure]]), which is a facet of its registry row rather
   than of its type.
 - **Writing** — every encoder, `help`, `explain` and the terminal controls are
-  `… → F Unit` rows declared `Output::Writes`: the declaration, not the type,
-  tells a bind or a pipeline that the command writes
-  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+  `… → Command` rows: the type tells a bind or a pipeline that the command
+  writes ([[decisions/260930_graded-f|graded-f]]).
 
 One scheme closes a computation variable, which a written quantifier list
 cannot bind, so it generalises against the empty environment instead: `alias`,
@@ -112,7 +112,7 @@ argument as readily as a builtin's, and one application path serves both
 ([[internals/type-inference|type-inference]]).
 
 `echo` and `detach` are not table entries. They are the two rows of the
-*base-frame manifest*, typed `List String -> F Unit` and
+*base-frame manifest*, typed `List String -> Command` and
 `List String -> F [pid: Int, desc: String]` — the argv convention a handler and an external already
 share, `List String` inside and bytes at the OS call — and their schemes are
 seeded into the checker's env at boot, so a base frame is looked up as a handler

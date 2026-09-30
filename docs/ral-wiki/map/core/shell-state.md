@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 74f7d546
+generated_at_commit: 1776d222
 generated_at_date: 2026-09-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -15,7 +15,7 @@ everything `crate::types::*`.
 - `value.rs` — `Value` (the runtime [[design/cbpv|value]] category); beside it
   `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
   `FrameHandle`), `builtin.rs` (`BuiltinEntry` / `BuiltinTable`, kept separate
-  from the handler stack — a `Returns` row whose declared scheme settles at `F Unit`
+  from the handler stack — a `Returns` row whose declared scheme settles at `Unit`
   has its answer coerced to `Unit` regardless of what the body returns,
   `BuiltinEntry::settles_at_unit` reading the curry spine to decide and
   debug-asserting the body agrees), and `handle.rs` (the concurrency

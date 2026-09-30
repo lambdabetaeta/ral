@@ -4,9 +4,9 @@
 
 use super::contract::unknown_key_message;
 use super::error::{CycleVia, KindFound, Reason, SpreadHead, Standing, TypeErrorKind, UnitCall};
-use super::fmt::{FmtCtx, fmt_ty_ctx};
+use super::fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_ty_ctx};
 use super::kind::Kind;
-use super::ty::{CompTy, Label, Row, Ty};
+use super::ty::{CompTy, Grade, Label, Row, Ty};
 use super::unify::WeakSource;
 use crate::serial::plural;
 use crate::source::Span;
@@ -130,6 +130,12 @@ impl TypeErrorKind {
             Self::DecoderTakesNoArgument { name } => {
                 format!("`{name}` takes no argument — it reads the byte channel")
             }
+            Self::DecoderMidPipeline { name, next } => format!(
+                "a decoder ends the byte pipeline: `{name}` returns a value and writes \
+                 nothing, so nothing reaches {}",
+                next.as_ref()
+                    .map_or_else(|| "the next stage".to_string(), |next| format!("`{next}`"))
+            ),
             Self::SpreadIntoApplication { head } => {
                 let takes = match head {
                     SpreadHead::Builtin { name, arity } => {
@@ -232,6 +238,9 @@ impl TypeErrorKind {
                 "an external's arguments are words, and this is not one".into()
             }
             Self::DeadPipeEdge { .. } => "this stage reads here, not from the pipe".into(),
+            Self::DecoderMidPipeline { name, .. } => {
+                format!("`{name}` writes nothing to the pipe")
+            }
             Self::CaseOnNonVariant { .. }
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
@@ -400,63 +409,105 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
     }
 }
 
-/// Prose for a `CompTyMismatch`.  Two commands disagree in what they return;
+/// Prose for a `CompTyMismatch`.  A command against a value producer is
+/// named as such; two producers of one kind disagree in what they return;
 /// `unify.rs` blames no component when the two heads differ in shape —
 /// `Return` against `Fun`.
 fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
-    let (CompTy::Return(_, expected), CompTy::Return(_, actual)) = (expected, actual) else {
-        return "two computations have incompatible shapes — one is a function, the other is not"
-            .into();
-    };
-    let ctx = FmtCtx::for_value_types(&[expected, actual]);
-    format!(
-        "couldn't match type {} with type {}",
-        fmt_ty_ctx(expected, &ctx),
-        fmt_ty_ctx(actual, &ctx)
-    )
+    match (expected, actual) {
+        (CompTy::Return(g, expected), CompTy::Return(h, actual)) if g == h => {
+            let ctx = FmtCtx::for_value_types(&[expected, actual]);
+            format!(
+                "couldn't match type {} with type {}",
+                fmt_ty_ctx(expected, &ctx),
+                fmt_ty_ctx(actual, &ctx)
+            )
+        }
+        (CompTy::Return(..), CompTy::Return(..)) => {
+            let ctx = FmtCtx::for_comp_types(&[expected, actual]);
+            format!(
+                "couldn't match type {} with type {}",
+                fmt_comp_ty_ctx(expected, &ctx),
+                fmt_comp_ty_ctx(actual, &ctx)
+            )
+        }
+        _ => {
+            "two computations have incompatible shapes — one is a function, the other is not".into()
+        }
+    }
 }
 
-/// What a `CompTyMismatch` between two `F` types returns on each side, as
-/// `(expected, actual)`.
-fn returns_of(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
+/// The two value types a mismatch is between, as `(expected, actual)`: a
+/// value mismatch's own, or what two producers of one kind return.
+fn value_sides(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
+    match kind {
+        TypeErrorKind::TyMismatch { expected, actual } => Some((expected, actual)),
+        TypeErrorKind::CompTyMismatch {
+            expected: CompTy::Return(g, expected),
+            actual: CompTy::Return(h, actual),
+        } if g == h => Some((expected, actual)),
+        _ => None,
+    }
+}
+
+/// A command met a value producer: the value's type, and whether the command
+/// was found where the value was demanded.
+fn command_against_value(kind: &TypeErrorKind) -> Option<(&Ty, bool)> {
     match kind {
         TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(_, expected),
-            actual: CompTy::Return(_, actual),
-        } => Some((expected, actual)),
+            expected: CompTy::Return(Grade::Value, value),
+            actual: CompTy::Return(Grade::Output, _),
+        } => Some((value, true)),
+        TypeErrorKind::CompTyMismatch {
+            expected: CompTy::Return(Grade::Output, _),
+            actual: CompTy::Return(Grade::Value, value),
+        } => Some((value, false)),
         _ => None,
     }
 }
 
-/// The non-`()` side of a mismatch between `()` and something else.
-fn against_unit(kind: &TypeErrorKind) -> Option<&Ty> {
-    let (expected, actual) = match kind {
-        TypeErrorKind::TyMismatch { expected, actual } => (&**expected, &**actual),
-        other => returns_of(other)?,
+/// The hint where a command met a value producer, by what demanded which.
+fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
+    let (value, command_found) = command_against_value(kind)?;
+    let form = match reason {
+        Some(Reason::IfBranches) => Some("branch"),
+        Some(Reason::CaseArms) => Some("arm"),
+        Some(Reason::TryArms) => Some("outcome"),
+        Some(Reason::Argument) => None,
+        // Every other reason says what it demanded in its own words.
+        _ => return None,
     };
-    match (expected, actual) {
-        (Ty::Unit, other) | (other, Ty::Unit) if *other != Ty::Unit => Some(other),
-        _ => None,
-    }
+    Some(match (form, command_found, value) {
+        (Some(form), _, _) => format!(
+            "one {form} is a command, whose value is its output (a String); the other gives \
+             {} — give the command {form} a value of that type too (`… | from-json`, or \
+             `return` one), or write the other {form}'s value out with `echo`",
+            describe(value)
+        ),
+        (None, true, Ty::Bool) => "this is a command, so its value is its output — text, not \
+             a Bool; for a yes/no answer, `succeeds { … }`"
+            .to_string(),
+        (None, true, _) => format!(
+            "this is a command, so its value is its output, a String; where {} is needed, \
+             decode it (`… | from-json`) or `return` one",
+            describe(value)
+        ),
+        (None, false, _) => format!(
+            "a command is wanted here, and this returns {} — write it out: `echo …`, \
+             `to-json …`",
+            describe(value)
+        ),
+    })
 }
 
-/// The hint for two arms of a form that disagree: a command that writes
-/// joined against a value, or the plain statement that one type is wanted.
-/// `form` names what the arms are (`branch`, `arm`, `outcome`).
-fn arm_join_hint(kind: &TypeErrorKind, writer: Option<&str>, form: &str) -> String {
-    match (against_unit(kind), writer) {
-        (Some(other), Some(cmd)) => format!(
-            "one {form} runs `{cmd}`, whose output goes to the terminal, so its value is `()`; \
-             the other gives {}. To make the command's output the value, capture it: \
-             `{cmd} … | from-line`. To print in both, `echo …`",
-            describe(other)
-        ),
-        _ => format!(
-            "exactly one {form} happens, so there is a single type that every {form} must \
-             produce — convert the odd one to that type, or have every one return a tagged \
-             value and `case` on it downstream"
-        ),
-    }
+/// The hint for two arms of a form that disagree.  `form` names what the
+/// arms are (`branch`, `arm`, `outcome`).
+fn arm_join_hint(form: &str) -> String {
+    format!(
+        "exactly one {form} happens, so there is a single type that every {form} must \
+         produce — convert the odd one to that type, or have every one return a tagged \
+         value and `case` on it downstream"
+    )
 }
 
 /// An arm that is no block, where an `if` or `case` forces one.
@@ -465,31 +516,35 @@ fn not_a_block(kind: &TypeErrorKind) -> bool {
         if matches!(**expected, Ty::Thunk(_)) != matches!(**actual, Ty::Thunk(_)))
 }
 
-/// The hint for an arm that stands in for a command, and returns the wrong
-/// thing: `expected` is what the head returns, `actual` what the arm does.
+/// What a producer's value is, for a sentence: a command's is its output.
+fn describe_producer(cty: &CompTy) -> String {
+    match cty {
+        CompTy::Return(Grade::Output, _) => "its output, being a command".to_string(),
+        CompTy::Return(_, ty) => describe(ty),
+        CompTy::Fun(..) | CompTy::Var(_) => "something else".to_string(),
+    }
+}
+
+/// The hint for an arm that stands in for a head and produces the wrong
+/// thing: `expected` is what the head produces, `actual` what the arm does.
 fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
-    let returned = returns_of(kind).map_or_else(
-        || "something else".to_string(),
-        |(_, actual)| describe(actual),
-    );
+    let TypeErrorKind::CompTyMismatch { expected, actual } = kind else {
+        return "an arm produces what the head it stands in for produces".to_string();
+    };
+    let returned = describe_producer(actual);
     match standing {
         Standing::Command(head) => format!(
-            "an arm for `{head}` stands in for a command, so it writes and returns `()`; \
+            "an arm for `{head}` stands in for a command, so its value is its output; \
              this one returns {returned} — write it, `echo …`"
         ),
-        Standing::Own(head) => {
-            let wanted = returns_of(kind).map_or_else(
-                || "what it returns".to_string(),
-                |(expected, _)| describe(expected),
-            );
-            format!(
-                "an arm for `{head}` stands in for the `{head}` in force, so it returns what \
-                 that returns — {wanted}; this one returns {returned}"
-            )
-        }
+        Standing::Own(head) => format!(
+            "an arm for `{head}` stands in for the `{head}` in force, so it produces what \
+             that produces — {}; this one returns {returned}",
+            describe_producer(expected)
+        ),
         Standing::EveryCommand => format!(
-            "the catch-all `handler:` stands in for every command in this block, so it \
-             writes and returns `()`; this one returns {returned} — write it, `echo …`, or \
+            "the catch-all `handler:` stands in for every command in this block, so its \
+             value is its output; this one returns {returned} — write it, `echo …`, or \
              handle specific names with `handlers: [name: …]`"
         ),
     }
@@ -502,7 +557,7 @@ fn stage_writes_hint(stage: Option<&str>, next: Option<&str>, kind: &TypeErrorKi
                 next by writing, so write it with `echo`, or put a command here"
             .to_string();
     };
-    let returned = returns_of(kind).map_or_else(
+    let returned = value_sides(kind).map_or_else(
         || "a value".to_string(),
         |(expected, actual)| {
             describe(if *actual == Ty::Unit {
@@ -697,6 +752,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              `to-string $x | from-json`"
                 .to_string(),
         ),
+        TypeErrorKind::DecoderMidPipeline { name, .. } => Some(format!(
+            "bind the value first — `let v = … | {name}` — and work on `$v`, or drop the \
+             decoder to keep the bytes flowing"
+        )),
         // Phrased as the runtime phrases its own missing-key hint, so a reader
         // meeting the two errors meets one language.
         TypeErrorKind::RowExtraField { known, .. }
@@ -752,7 +811,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     if from_kind.is_some() {
         return from_kind;
     }
-    if matches!(reason, Some(Reason::IfBranches { .. })) && not_a_block(kind) {
+    if let Some(hint) = grade_hint(kind, reason) {
+        return Some(hint);
+    }
+    if matches!(reason, Some(Reason::IfBranches)) && not_a_block(kind) {
         return Some(
             "an `if` arm is a block, as in `if $c { … } else { … }`, or a name holding one"
                 .to_string(),
@@ -813,7 +875,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              `ok: { |_| return 5 }"
                 .to_string(),
         ),
-        Reason::CaseArms { writer } => Some(arm_join_hint(kind, writer.as_deref(), "arm")),
+        Reason::CaseArms => Some(arm_join_hint("arm")),
         Reason::ForceOperand => Some(
             "the `!` operator runs a block — its operand must be a \
              block value (something built with `{ ... }`), not data"
@@ -824,8 +886,8 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              or an expression that produces one (e.g. `$[$x == 1]`)"
                 .to_string(),
         ),
-        Reason::IfBranches { writer } => Some(arm_join_hint(kind, writer.as_deref(), "branch")),
-        Reason::TryArms { writer } => Some(arm_join_hint(kind, writer.as_deref(), "outcome")),
+        Reason::IfBranches => Some(arm_join_hint("branch")),
+        Reason::TryArms => Some(arm_join_hint("outcome")),
         Reason::StandsIn(standing) => Some(stands_in_hint(standing, kind)),
         Reason::PipelineStageWrites { stage, next } => {
             Some(stage_writes_hint(stage.as_deref(), next.as_deref(), kind))
@@ -973,10 +1035,7 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
 fn meets_as_peers(reason: &Reason) -> bool {
     matches!(
         reason,
-        Reason::Argument
-            | Reason::IfBranches { .. }
-            | Reason::CaseArms { .. }
-            | Reason::TryArms { .. }
+        Reason::Argument | Reason::IfBranches | Reason::CaseArms | Reason::TryArms
     )
 }
 

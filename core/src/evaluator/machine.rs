@@ -1195,16 +1195,15 @@ mod tests {
         );
     }
 
-    /// A `let` captures the command that produces its value; a statement
-    /// beside it writes where it always does.
+    /// A `let` captures the whole command that produces its value.
     #[test]
     fn a_let_captures_the_command_that_produces_its_value() {
         let mut shell = new_shell();
         let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
             run_source("let x = !{ echo a; echo b }\nreturn $x", shell)
         });
-        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "b"));
-        assert_eq!(bytes, b"a\n", "only the tail command was captured");
+        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "a\nb"));
+        assert!(bytes.is_empty(), "nothing escaped the capture");
     }
 
     /// A stand-in writes as the command it stands in for does, all of it, so a

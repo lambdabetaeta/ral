@@ -50,7 +50,7 @@ pub(crate) use site::pointer_token;
 
 mod builtin;
 pub(crate) use builtin::LANGUAGE_CONSTANTS;
-pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable, Convention, Output};
+pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable, Convention};
 
 // The inner of `Value::List`.
 mod list;

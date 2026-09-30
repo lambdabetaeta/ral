@@ -1,41 +1,48 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
 against: [design/types, design/cbpv, design/capture]
 ---
 
-# CBPVE: grading call-by-push-value, and why ral does not
+# CBPVE: grading call-by-push-value, and how ral's grade differs
 
 Dylan McDermott, *Grading Call-By-Push-Value, Explicitly and Implicitly*, FSCD
 2025 (LIPIcs 337, `10.4230/LIPIcs.FSCD.2025.28`). CBPVE refines Levy's calculus
 ([[related/call-by-push-value|call-by-push-value]]) by annotating the returner
 type with a grade: `F_e A` is the type of computations returning `A` with
 behavioural grade `e`. It is the natural reference to read ral's computation
-types against, and the reading is a negative one: **ral is not a graded CBPV.
-Its returner carries no annotation at all: `F A` is Levy's, and a command is `F Unit`.**
+types against, and the reading is half negative: **ral's returner is graded, but
+not by an effect monoid.** `F^ε A` carries a two-point *producer kind*, `p` (it
+produces a value) or `w` (it produces output and nothing else, `F^w Unit`, a
+command), and that is all the annotation there is
+([[decisions/260930_graded-f|graded-f]]).
 
-## What ral's returner is, in the paper's own terms
+## What ral's grade is, in the paper's own terms
 
 CBPVE assumes grades form an **ordered monoid** `(E, ≤, 1, ·)`: `1` is the grade
 of a computation with no effects, `d·e` grades running `d` then `e`, and `d ≤ e`
 means `e` is more permissive. None of those pieces has a counterpart in ral's
-`F A`:
+grade:
 
-- **No `1`.** A command is `F Unit`, and so is `cd`: writing is not in the type.
-  What a computation may do to the world is the business of the grant that
-  admits it, never of its type ([[design/types|types]]).
-- **No `·`.** A sequence does not multiply its parts' annotations; it takes its
+- **No `1`.** The grade is not "does this write?". `cd` is `F^p Unit` and
+  `{ echo pre; return 5 }` is `F^p Int`: the grade says whether a computation's
+  *result* is its output. What a computation may do to the world is the business
+  of the grant that admits it, never of its type ([[design/types|types]]).
+- **No `·`.** A sequence does not multiply its parts' grades; it takes its
   tail's type, discarding every earlier one. `!{ echo a; return () }` is
-  `F Unit` however loudly the head wrote.
-- **No `≤`.** Arms that must agree are joined by unifying the values they
-  return, not by a permissiveness order carried through the type system.
+  `F^p Unit` however loudly the head wrote. Union grading would need a lub at
+  every `;`, hence constraints, and would reopen "value or output?" for
+  `F^w Int`.
+- **No `≤`.** Grades are atomic: a grade variable binds only `p` or `w`. Arms
+  that must agree are joined by a two-pass rule that chooses a target grade and
+  inserts the one coercion `F^w Unit ⇝ F^p String` (or the identity upcast
+  `F^p Unit ⇝ F^w Unit`), not by a permissiveness order carried through the type
+  system.
 
-The one place a computation's writing matters to a program is `let`, and there
-it is syntax: the checker wraps the command a `let` can see in the capture
-coercion, `cap M to x. decode x`, before it infers any type
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
-The paper itself supplies the sharpest way to see that nothing is graded. Its bind
-rule
+The grade is what makes the capture coercion a consequence of typing: a `let`
+demands a value, and a command demanded as a value is wrapped in `cap M to x.
+decode x` ([[design/capture|capture]]). The paper supplies the sharpest way to
+see how far ral's grade is from CBPVE's. Its bind rule
 
 ```
 Γ ⊢ M : F_d A     Γ, x:A ⊢ N : C
@@ -46,7 +53,8 @@ rule
 applies a **grade action** `⟨⟨d⟩⟩` to the continuation's type, which is exactly
 the move a grade must license: the operand's behaviour is not forgotten when the
 tail is function-shaped. ral's bind performs no action: it hands back `N`'s type
-untouched, and there is no `d` for it to act with.
+untouched, and its grade is consumed, not accumulated — a `p` operand binds its
+value, a `w` operand is captured.
 
 ## The grading that was, and why it went
 
@@ -73,7 +81,8 @@ The paper's central negative finding is that for a graded monadic semantics,
 **coherence for implicitly graded terms is false in general**: different grade
 derivations of the same ungraded term need not denote the same thing, so which
 grading an inference engine picked would be semantically load bearing. ral is
-out of that theorem's scope now, having no grades to infer. The sufficient
+out of that theorem's scope, its grades forming no monoid to be cancellative
+over. The sufficient
 condition is worth recording anyway, because it is what any future ral effect
 system should be checked against:
 
@@ -93,7 +102,7 @@ algebra that counted writes, or tracked order, would multiply differently and
 the condition would need rechecking. **A pure may-use analysis is coherent for
 free; a quantitative one is not.**
 
-## Where ral would narrow CBPVE, if it graded
+## Where ral would narrow CBPVE, if it graded by effect
 
 Three restrictions, each currently sound and each worth knowing before the
 calculus grows:
@@ -107,13 +116,14 @@ calculus grows:
   choice; it is the first restriction seen at the arrow.
 
 And where CBPVE has a general `coerce_D M` over the whole of `<:`, ral has one
-coercion, `capture`, a term the checker writes at a `let` ([[design/types|types]]),
-not a step of a subtyping derivation.
+run-time coercion, `capture`, a term the checker writes where a value is
+demanded of a command ([[design/types|types]]), and an identity upcast from
+`F^p Unit` to `F^w Unit`; neither is a step of a subtyping derivation.
 
 ## What ral could borrow
 
 The graded-monad semantics of §5 interprets `F_e A` as `e∗ F T⟦A⟧` over algebras
-of a graded monad. Nothing in ral needs it while `F` is ungraded, but it is the
+of a graded monad. Nothing in ral needs it while the grade is a producer kind, but it is the
 shape a denotational model would take the day the shell wants a real effect
 discipline over its syscall signature
 ([[design/syscalls-are-effects|syscalls-are-effects]]) rather than a capture

@@ -14,13 +14,13 @@
 //! `WithinScope::parse` has no such caller, and treats an unknown key as an
 //! invariant.
 //!
-//! No rule here builds a `CompTy` directly: each states the value a scope
-//! produces, for its caller to compose into `CompTy::pure`.
+//! A scope form passes its body's producer through, grade included: what
+//! `within [dir: d] { hostname }` is, is a command.
 
 use super::builtins::{audit_record, try_error_record};
 use super::contract::{Form, Holds, Table, declared, field_reason};
 use super::error::{Reason, TypeErrorKind};
-use super::infer::Inferencer;
+use super::infer::{Inferencer, JoinArm};
 use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use crate::ir::{HandlerArmV, OptionsV, Val};
@@ -52,11 +52,33 @@ impl Inferencer<'_> {
     fn check_option(&mut self, label: &str, value: &Val, table: &'static Table) {
         let key = table.keys.iter().find(|k| k.label == label);
         let catch_all = key.is_some_and(|k| matches!(k.holds, Holds::Shaped(_)));
-        let found = match value {
-            Val::Thunk(comp) if catch_all => {
-                Ty::Thunk(Box::new(self.infer_catch_all(comp.shape())))
-            }
-            _ => self.infer_val(value),
+        let found = if catch_all {
+            let cty = match value {
+                Val::Thunk(comp) => self.infer_catch_all(comp.shape()),
+                // A value in hand is pinned to the catch-all's parameters first, so
+                // its producer is what stands in.
+                value => {
+                    let ty = self.infer_val(value);
+                    let result = self.ctx.unifier.fresh_comp_ty();
+                    let shape = CompTy::Fun(
+                        Box::new(Ty::String),
+                        Box::new(CompTy::Fun(Box::new(Ty::argv()), Box::new(result))),
+                    );
+                    self.ctx
+                        .unify_ty(&ty, &Ty::Thunk(Box::new(shape.clone())), Reason::HandlerArm);
+                    shape
+                }
+            };
+            let cty = match self.catch_all_stands_in(&cty) {
+                Ok(cty) => cty,
+                Err((cty, error)) => {
+                    self.ctx.raise(*error);
+                    cty
+                }
+            };
+            Ty::Thunk(Box::new(cty))
+        } else {
+            self.infer_val(value)
         };
         let Some(key) = key else {
             return self.ctx.diagnose(TypeErrorKind::UnknownKey {
@@ -100,7 +122,7 @@ impl Inferencer<'_> {
         opts: &OptionsV,
         handlers: Option<&[HandlerArmV]>,
         body: &Val,
-    ) -> Ty {
+    ) -> CompTy {
         self.check_options(opts, declared(Form::Within));
         let bindings = self.handler_bindings(handlers);
 
@@ -108,67 +130,45 @@ impl Inferencer<'_> {
         for (name, scheme) in bindings {
             self.env.bind_handler(name, scheme, false);
         }
-        let body_cty = self.infer_scope_body_passthrough(body);
+        let body_cty = self.scope_body(body);
         self.env.pop();
-
-        self.extract_return(&body_cty)
+        body_cty
     }
 
-    pub(super) fn infer_grant(&mut self, caps: &OptionsV, body: &Val) -> Ty {
+    pub(super) fn infer_grant(&mut self, caps: &OptionsV, body: &Val) -> CompTy {
         self.check_options(caps, declared(Form::Grant));
-        let body_cty = self.infer_scope_body_passthrough(body);
-        self.extract_return(&body_cty)
+        self.scope_body(body)
     }
 
-    /// `try` yields the body's value or the handler's, so the two types unify:
-    /// `T : U (F A)`, `H : U (Error → F A)`.
-    pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> Ty {
-        let body_cty = self.infer_scope_body_passthrough(body);
-        let body_ty = self.extract_return(&body_cty);
-
-        let handler_result_cty = self.ctx.unifier.fresh_comp_ty();
-        let handler_inner = CompTy::Fun(
-            Box::new(try_error_record()),
-            Box::new(handler_result_cty.clone()),
-        );
-        let handler_ty = self.infer_val(handler);
-        self.ctx.unify_ty(
-            &handler_ty,
-            &Ty::Thunk(Box::new(handler_inner)),
-            Reason::TryHandler,
-        );
-        let handler_value = self.extract_return(&handler_result_cty);
-
-        let why = Reason::TryArms {
-            writer: self.arm_writer(body).or_else(|| self.arm_writer(handler)),
-        };
-        self.ctx.unify_ty(&body_ty, &handler_value, why);
-        body_ty
+    /// `try` produces what its body or its handler produces, so the two
+    /// join: `T : U B`, `H : U (Error → B)`.
+    pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> CompTy {
+        let arms = [
+            JoinArm::in_hand(body, vec![], Reason::ScopeBody),
+            JoinArm::in_hand(handler, vec![try_error_record()], Reason::TryHandler),
+        ];
+        self.join_arms(&arms, &Reason::TryArms)
     }
 
-    /// `guard`'s value passes through from its body; `cleanup` runs for its
-    /// effects and errors only.
-    pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> Ty {
-        let body_cty = self.infer_scope_body_passthrough(body);
-        let value = self.extract_return(&body_cty);
-
-        let _ = self.infer_scope_body_passthrough(cleanup);
-
-        value
+    /// `guard` produces what its body does; `cleanup` runs for its effects
+    /// and errors only.
+    pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> CompTy {
+        let body_cty = self.scope_body(body);
+        let _ = self.scope_body(cleanup);
+        body_cty
     }
 
-    pub(super) fn infer_audit(&mut self, body: &Val) -> Ty {
-        let body_cty = self.infer_scope_body_passthrough(body);
-        // The `` `ok `` payload is the body's raw result — the runtime stores
-        // it undecoded.
+    /// `audit` absorbs its body, whatever it produces: the `` `ok `` payload
+    /// is the body's raw value, which the runtime stores undecoded.
+    pub(super) fn infer_audit(&mut self, body: &Val) -> CompTy {
+        let body_cty = self.scope_body(body);
         let alpha = self.extract_return(&body_cty);
-
-        audit_record(alpha)
+        CompTy::pure(audit_record(alpha))
     }
 
-    /// Constrain `body` to `Thunk(c)` for a bare fresh comp var `c`, and
-    /// return `c`; callers read it back with `extract_return` once resolved.
-    fn infer_scope_body_passthrough(&mut self, body: &Val) -> CompTy {
+    /// Constrain `body` to a thunk of a computation ready to run, and return
+    /// that computation — a `Return` at the body's own grade.
+    fn scope_body(&mut self, body: &Val) -> CompTy {
         let body_cty = self.ctx.unifier.fresh_comp_ty();
         let body_ty = self.infer_val(body);
         self.ctx.unify_ty(
@@ -176,6 +176,7 @@ impl Inferencer<'_> {
             &Ty::Thunk(Box::new(body_cty.clone())),
             Reason::ScopeBody,
         );
+        let _ = self.extract_return(&body_cty);
         body_cty
     }
 }

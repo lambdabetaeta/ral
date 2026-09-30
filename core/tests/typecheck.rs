@@ -676,7 +676,7 @@ fn top_level_pipeline_retains_per_stage_value_types() {
     let (stage_count, types) = &pipelines[0];
     assert_eq!(*stage_count, 2, "two-stage pipeline");
     assert_eq!(types.len(), *stage_count, "one value type per stage");
-    // A command returns nothing: it writes.
+    // A command produces output, not a value: its stage value is `()`.
     assert_eq!(types[0], Ty::Unit, "stage 0 value type retained");
     assert_eq!(types[1], Ty::Unit, "stage 1 value type retained");
 }
@@ -685,23 +685,39 @@ fn top_level_pipeline_retains_per_stage_value_types() {
 fn a_let_captures_the_command_that_produces_its_value() {
     assert_eq!(captures("let x = echo hi"), 1);
     assert_eq!(captures("let f = { let x = echo hi; $x }"), 1);
+    assert_eq!(captures("let f = { echo hi }; let x = f"), 1);
+    assert_eq!(captures("let t = { echo hi }; let x = !$t"), 1);
+    assert_eq!(captures("let g = { |n| echo $n }; let x = g 5"), 1);
 }
 
 #[test]
-fn a_statement_captures_nothing() {
+fn a_statement_and_a_redirected_command_capture_nothing() {
     assert_eq!(captures("echo hi"), 0);
     assert_eq!(captures("let f = { echo hi; echo there }"), 0);
+    assert_eq!(captures("let x = to-json 1 > f"), 0);
 }
 
+/// One `Capture` around the whole right-hand side, however it branches.
 #[test]
-fn a_bound_function_and_a_block_in_hand_are_never_captured() {
-    assert_eq!(captures("let f = { echo hi }; let x = f"), 0);
-    assert_eq!(captures("let t = { echo hi }; let x = !$t"), 0);
-}
-
-#[test]
-fn a_let_enters_the_final_stage_of_a_pipeline_and_the_arms_of_a_form() {
+fn a_let_captures_a_pipeline_and_a_join_whole() {
     assert_eq!(captures("let x = echo hi | cat"), 1);
-    assert_eq!(captures("let x = if true { echo a } else { echo b }"), 2);
-    assert_eq!(captures("let x = try { echo a } { |e| echo b }"), 2);
+    assert_eq!(captures("let x = if true { echo a } else { echo b }"), 1);
+    assert_eq!(captures("let x = try { echo a } { |e| echo b }"), 1);
+    assert_eq!(
+        captures("let t = { echo a }; let u = { echo b }; let x = if true $t else $u"),
+        1
+    );
+}
+
+/// A value demanded of a command block captures the block's innermost body,
+/// or η-wraps a block in hand around a captured call.
+#[test]
+fn a_value_demand_captures_a_block_argument_or_arm() {
+    assert_eq!(captures("map { |f| echo $f } [1, 2]"), 1);
+    assert_eq!(captures("let g = { |n| echo $n }; map $g [1, 2]"), 1);
+    assert_eq!(
+        captures("let t = { echo a }; let x = if true $t else { return b }"),
+        1
+    );
+    assert_eq!(captures("let x = try { hostname } { |e| return none }"), 1);
 }

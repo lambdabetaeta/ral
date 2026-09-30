@@ -179,6 +179,15 @@ impl FmtCtx {
         ctx
     }
 
+    /// [`Self::for_value_types`], for computations.
+    pub(crate) fn for_comp_types(types: &[&CompTy]) -> Self {
+        let mut ctx = Self::default();
+        for t in types {
+            ctx.absorb_comp(t);
+        }
+        ctx
+    }
+
     pub(super) fn absorb_ty(&mut self, ty: &Ty) {
         match ty {
             Ty::Var(v) => {

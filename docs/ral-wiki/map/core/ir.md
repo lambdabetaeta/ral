@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8d868e18
+generated_at_commit: 1776d222
 generated_at_date: 2026-09-30
 covers_paths: [core/src/ir.rs]
 ---
@@ -95,17 +95,17 @@ representable state.
   `site` is the type the checker solved at a boundary call, which that door
   admits its value against, and `None` for every other head.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
-  coercion: run the body, which is `F Unit`, collect what it writes, and return
+  coercion: run the body, which is `F^w Unit`, collect what it writes, and return
   those bytes exactly — total and lossless. `CompKind::Decode(Val)` is the
   other half: read that `Bytes` value as text, one trailing terminator dropped
   and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
   takes a value, so it reads a bound variable rather than nesting a `Comp`.
   Neither has surface syntax; [[map/core/typecheck|typecheck]]'s `annotate`
-  composes them as `Capture(body) to x. Decode(x)` around each command
-  `capture_sites` recorded, and `Mentions`' walk descends into the `Capture`
+  composes them as `Capture(body) to x. Decode(x)` around each computation
+  a value demand recorded, and `Mentions`' walk descends into the `Capture`
   and the `Bind`. The reading is a node and not a command so that its meaning
   is fixed where the checker writes it
-  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+  ([[decisions/260930_graded-f|graded-f]],
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
 

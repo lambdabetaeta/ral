@@ -27,7 +27,7 @@ use common::fresh_shell;
 
 use ral_core::Break;
 use ral_core::builtins::CORE_BUILTINS;
-use ral_core::typecheck::{CompTy, Ty, Unifier};
+use ral_core::typecheck::{CompTy, Grade, Row, Ty, Unifier};
 use ral_core::types::{Map, Mooring, Value};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
@@ -163,6 +163,63 @@ fn every_scheme_reducer_inhabits_its_return_type() {
             // covers no exiting builtins.
             Err(Break::Error(_)) => {}
             Err(other) => panic!("builtin `{name}` escaped under the sweep: {other:?}"),
+        }
+    }
+}
+
+/// Every `Return` reachable in `ty`, as `(grade, value)`.
+fn producers(ty: &Ty, out: &mut Vec<(Grade, Ty)>) {
+    match ty {
+        Ty::Thunk(cty) => {
+            let mut cur: &CompTy = cty;
+            while let CompTy::Fun(param, body) = cur {
+                producers(param, out);
+                cur = body;
+            }
+            if let CompTy::Return(grade, value) = cur {
+                out.push((*grade, (**value).clone()));
+                producers(value, out);
+            }
+        }
+        Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => producers(a, out),
+        Ty::Record(row) | Ty::Variant(row) => {
+            let mut cur = row;
+            while let Row::Extend(_, field, rest) = cur {
+                producers(field, out);
+                cur = rest;
+            }
+        }
+        Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Var(_) => {}
+    }
+}
+
+/// The grade invariant, declared: `F^w` is paired with `Unit` alone, and a
+/// grade variable with one value type, so no instantiation can pair a
+/// command grade with a value.
+#[test]
+fn every_scheme_pairs_a_grade_with_one_value_type() {
+    let table = ral_core::HostSurface::default().builtin_table();
+    let echo = table.get("echo").expect("the base frame `echo`");
+    let rows = CORE_BUILTINS
+        .iter()
+        .chain(ral_core::builtins::BOUNDARY_BUILTINS)
+        .chain(std::iter::once(&echo));
+    for entry in rows {
+        let name = entry.name.as_ref();
+        let mut u = Unifier::new();
+        let scheme = ral_core::test_access::builtin_scheme(entry, &mut u);
+        let mut found = Vec::new();
+        producers(ral_core::test_access::scheme_ty(&scheme), &mut found);
+        let mut paired: std::collections::HashMap<Grade, Ty> = std::collections::HashMap::new();
+        for (grade, value) in found {
+            match grade {
+                Grade::Output => assert_eq!(value, Ty::Unit, "{name}: a command produces `()`"),
+                Grade::Value => {}
+                Grade::Var(_) => {
+                    let first = paired.entry(grade).or_insert_with(|| value.clone());
+                    assert_eq!(*first, value, "{name}: one grade variable, two value types");
+                }
+            }
         }
     }
 }

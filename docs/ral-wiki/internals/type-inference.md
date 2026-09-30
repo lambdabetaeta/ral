@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, capture_sites, head_class, head_writes, stands_in, unify_arm, stage_writes]
+anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, head_writes, stands_in, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -103,61 +103,65 @@ together to a fixpoint, and refuses whatever index is still pending
 (`IndexContainerUnknown`, T0075, with a second caret on the binding that holds
 it, `InferCtx.holder`).
 
-**Capture is decided before a type is inferred, from syntax.** A *command* — an
-external, a value row with `Output::Writes` applied at its arity, or a handler
-arm standing in for one — is a computation of type `F Unit`: it writes and
-returns nothing, like `cd`. `CompTy::Return` carries only its value type, so nothing
-in the unifier knows what a command writes. A
-`let x = hostname` binds text because the checker wraps the command in the
-capture coercion, and `typecheck/capture.rs` decides where, once, from two
-facts: the syntax of the right-hand side and the class of each head
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+**Capture is decided by the type.** `CompTy::Return(Grade, Ty)` carries a grade
+— `Value`, `Output` or a variable — in a fourth atomic union-find beside the
+type, computation and row stores, quantified by `generalize` (`Scheme.grade_vars`)
+and never weak. A *command* — an external, `^name`, a path head, a value row that
+writes, or a handler arm standing in for one — is `Return(Output, Unit)`,
+printed `Command`; `CompTy::command()` builds it and `CompTy::pure` is
+`Return(Value, _)`. `unify` unifies the grades, then the values; a grade
+disagreement is a `CompTyMismatch` reading `Command` against `Returns A`. The
+invariant `F^w A ⇒ A = Unit` is rule-enforced and asserted in `generalize` and
+the annotate walk ([[decisions/260930_graded-f|graded-f]]).
 
-- `head_class` resolves a bare head by the order checker and runtime share:
-  `Binding`, `Value(entry)`, `Arm { handler, output }`, `External`.
-  `head_writes(name, args)` holds when the head is no binding and either not a
-  value row or a `Writes` row applied at its arity, so an under-applied
-  `to-json` is a function, not a write.
-- `capture_sites(rhs)` is the walk `⟦·⟧`. `infer_held`, the `Bind` and
-  `Define` right-hand side, calls it before inferring the right-hand side and
-  records each captured `Exec` node's address in `InferCtx.captured`. It follows
-  the positions a let's *result* comes from — an `Exec` that writes, a
-  pipeline's final stage, the `Force` of a literal thunk, a `Bind`'s `rest`, the
-  arms of `if`, `case`, `try`, `within`, `grant` and `guard`'s body when they are
-  literal thunks — and stops at `Capture`, `Redirect`, an application, the force
-  of a name, values, indexing, interpolation and `audit`.
-- The `Exec` arm of `infer_comp` types the call `F Unit` and answers `F String`
-  for a recorded node. `annotate` is then a plain structural rebuild
-  (`annotate_comp`, `annotate_exec`) that wraps each recorded node in
-  `cap M to d. decode d` (`CompKind::Capture` and `CompKind::Decode`, both
-  checker-inserted).
+- `head_class` (`infer.rs`, beside `exec_comp_ty`) resolves a bare head by the
+  order checker and runtime share: `Binding`, `Value(entry)`, `Arm`, `External`.
+- `rhs_bound_ty`, shared by `Bind` and `Define`, is the bind rule: a `Fun` right-hand
+  side binds a thunk; `Return(Output, _)` inserts the node's address in
+  `InferCtx.captured` and binds `String`; `Return(Value, a)` binds `a`;
+  `Return(Var(g), a)` binds `g := Value` and `a`; a computation variable opens
+  into `Return(Value, fresh)`. `force_return_shape` opens a variable into a fresh
+  *grade*, never `Value`: only the bind rule decides `p`.
+- `apply_args_capped` coerces an argument ending in `Return(Output, Unit)` where
+  the callee's parameter ends in `Return(Value, β)` at the same arity
+  (`producer_after_params` reads the tail), recording a literal block's body
+  address in `captured` or a value in hand in `InferCtx.captured_vals` with its
+  arity.
+- `discharge` applies to the `Exec` and `Redirect` rules when stdout is
+  redirected: `Return(_, a)` becomes `Return(Value, a)`, through `Fun` results.
+- `annotate` is a structural rebuild (`annotate_comp`, `annotate_val_at`) that
+  wraps each recorded node in `cap M to d. decode d` (`CompKind::Capture` and
+  `CompKind::Decode`, both checker-inserted); a value in hand becomes a lambda
+  whose body captures the forced call.
 
-So `let x = f` with `f` a function, `let x = !$t`, `let x = time { ls }` and
-`let x = a | !$f` bind what the thing *returns*, not what it writes; the
-verdict and every printed type are independent of statement order.
+So `let x = f` with `f = { hostname }`, `let x = !$t`, `let x = g 5` and
+`let x = map { |f| echo $f } xs` all capture: β and η preserve meaning.
 
-**Arms join by their values.** Every form that suspends a command — `if`,
-`case`, `try`, `?`, `guard`, `within`, `grant` — takes a thunk `U C` and forces
-the one it chooses; `CompKind::If` and `CaseArm` carry a `Spanned<Val>`. A
-literal block is inferred in a scope of its own against the type its siblings
-share (`check_arm`, `join_arms`), a thunk in hand is unified as a thunk, and the
-two computations meet in `unify_arm`: the values they return, where both return
-one, so a disagreement is `T0010` or `T0020` between two values, and `T0011`
-only between shapes (`Return` against `Fun`). An `else`-less `if` wraps its lone
-arm as `{ body; () }`. When a join meets `()` against another type and the `()`
-arm's tail is a command, the error carries a hint (`writer: Option<String>` on
-`IfBranches`, `CaseArms`, `TryArms`): capture it, `ls … | from-line`, or print in
-both.
+**Arms join by two passes.** Every form that suspends a command — `if`,
+`case`, `try`, `?` — takes a thunk `U C` and forces the one it chooses;
+`CompKind::If` and `CaseArm` carry a `Spanned<Val>`. `join_arms` infers every arm
+against `Fun(params…, ρᵢ)` with a fresh result (`check_arm` pushing the
+parameter types inward as before), resolves each `ρᵢ`, and decides the target:
+`F^p τ` if some arm is `F^p A` with `A` not `Unit` or unresolved, capturing every
+`Output` arm; else `F^w Unit` if some arm is `Output`, upcasting the `F^p Unit`
+arms and binding grade variables to `w`; else unify. `infer_case` and
+`infer_try` route through it. A disagreement is `T0010` or `T0020` between two
+values, and `T0011` between shapes or grades; its hint is derived from the two
+types (one arm is a command, whose value is its output). An `else`-less `if`
+wraps its lone arm as `{ body; () }`. The join decides in program order with no
+pending constraint, so `{ |t| if c { echo hi } else { !$t }; let w = !$t; $w }`
+types `t : {Command}` while the same block with the `let` first types
+`t : {Returns String}`.
 
 **One shape rule, `force_return_shape`, does the work an adjacency rule used to.**
 `extract_return` (`infer.rs`) resolves a `CompTy` to its return type, unifying
-against a freshly minted `Return` when it is still a variable. `infer_pipeline`
+against a freshly minted `Return` (fresh grade and type) when it is still a variable. `infer_pipeline`
 forces **every** stage through it under `Reason::PipelineStageShape`: a stage
 typed `Fun` is a function still waiting for an argument, and the diagnostic says
 to apply it rather than pipe into it. A stage feeds the next by writing, so
-`stage_writes` unifies every stage but the last with `F Unit` and refuses, under
-`Reason::PipelineStageWrites` (T0011), a head that is a value row that *returns*
-(`Output::Returns`, boundaries and `fold-lines` included). The pipeline's value
+`stage_writes` unifies every stage but the last with `F^ε Unit` at its own grade
+(any grade is accepted) and refuses a decoder by its own mark (`stage_decoder`,
+`DecoderMidPipeline`, T0078). The pipeline's type is the last stage's; its value
 is its final stage's, and the stage types are recorded for the structural REPL
 along the way. The rule's one other premise reads no type at all:
 `stage_root_stdin_feed` looks at a non-first stage's root redirects, and a `< f`
@@ -167,9 +171,10 @@ stage's reads for its whole run, so the wire's producer writes for nobody
 
 **An arm stands in for the head it replaces.** `Inferencer::stands_in(name,
 arm)` checks a handler or alias arm against `standsFor(name)`: the scheme of the
-base frame or arm already in force under `name`, else `[String] → F Unit`. An
-arm for `curl` therefore writes and returns `()`, and one for `detach` returns
-what `detach` returns. A refusal is `Reason::StandsIn(Standing)`, with
+base frame or arm already in force under `name`, else `[String] → Command`. An
+arm for `curl` therefore has a command's value, its output (a `()`-returning stub
+is admitted by the upcast and captures `""`), and one for `detach` returns
+what `detach` returns; the installed scheme has the head's producer kind. A refusal is `Reason::StandsIn(Standing)`, with
 `Standing::{Command, Own, EveryCommand}` for a command, a head's own scheme and
 the catch-all handler. The run-time install doors apply the same check
 (`HandlerEntry::vet` through `alias_arm_scheme`, and the catch-all through
@@ -179,17 +184,19 @@ the catch-all handler. The run-time install doors apply the same check
 returned (`note_called`, `called_head`), the callee; a read of that name at type
 `()` is noted in `InferCtx.unit_reads`, and an error raised at that span whose
 kind concerns `()` gains a sentence that `deploy` returns `()` and that
-`| from-line` captures what it prints (`TypeError.unit`, `UnitCall`). `()` is
+`| from-line` captures what it prints (`TypeError.unit`, `UnitCall`); the pipe
+takes everything a stage writes, so the remedy is operationally right. `()` is
 neither a word nor an interpolant: its kind is `scalar`.
 
-**Principality is the textbook result, with its limits stated.** No rule reads
-the order of statements: the only non-compositional fact, where a `let`
-captures, is decided by syntax before inference, and every other rule is
-unification, so typing verdicts do not depend on the order the solver emits
+**Principality is the textbook result, with its limits stated.** One rule reads the
+order of statements: the join, which resolves its arms as they are met and holds
+no pending constraint, so a grade it could have learned later is not waited for
+(the `t : {Command}` against `{Returns String}` case above). Where a `let` captures
+is decided by the type at three syntax-directed sites, and every other rule is
+unification, so typing verdicts do not otherwise depend on the order the solver emits
 constraints. The deferred constraints that remain (`Lbl`, `Idx`) are settled by
-monotone facts of the store and drained at the unit's end. No rule reads an
-arm's value type for its *unsolvedness*. Shape verdicts — the pipeline stage
-forcing, the sequence tail — are introduction-rule choices, not joins.**The row algebra is textbook.** A slot is a label and a type, so the Rémy
+monotone facts of the store and drained at the unit's end. Shape verdicts — the
+pipeline stage forcing, the sequence tail — are introduction-rule choices, not joins.**The row algebra is textbook.** A slot is a label and a type, so the Rémy
 rewrite is unitary and principality over rows is the standard Hindley–Milner
 result. The two rules that build a row from a program — the closed literal and
 the update — mint every payload fresh or as written, and nothing else writes
@@ -227,8 +234,8 @@ follows the SCC
 structure the elaborator found — a non-recursive group generalises at its binding
 point, a mutually recursive group stays monomorphic until its fixed point — which
 is what keeps generalisation sound. A type error aborts with a positioned
-expected-vs-inferred message (`fmt.rs`), where a computation reads `Command A`:
-`{ echo hi }` is `{Command Unit}` and `{ 'hi' }` is `{Command String}`.
+expected-vs-inferred message (`fmt.rs`), where a computation reads `Returns A`, `Command`, or `ν A` for a grade
+variable: `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`.
 
 **Weak variables are the one subtraction.** `generalize` quantifies every
 variable of the type that is neither free in the environment nor *weak*. A

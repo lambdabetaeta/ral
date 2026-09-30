@@ -10,7 +10,8 @@ from *commands*:**
   around the body ([[design/scoping|scoping]]).
 
 The typed calculus is ordinary call-by-push-value ([[design/types|types]]). A
-command is a computation `F Unit`: it writes and returns nothing. Every form
+command is a computation `F^w Unit`: its value is its output, and `F` carries a
+grade saying so. Every form
 that suspends a command — `if`, `case`, `try`, `guard`, `within`, `grant` —
 takes a thunk and forces the one it chooses.
 

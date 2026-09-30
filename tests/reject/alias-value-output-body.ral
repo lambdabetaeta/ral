@@ -1,3 +1,3 @@
-# contains: couldn't match type Unit
+# contains: couldn't match type Command with type Returns Integer
 alias foo { |args| return 3 }
 return ()

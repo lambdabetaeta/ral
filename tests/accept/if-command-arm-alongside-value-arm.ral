@@ -1,0 +1,2 @@
+# A command arm beside a value arm: the command is captured, and the join is a value.
+if true { echo hi } else { return 's' }

@@ -23,63 +23,85 @@ is `∀α:scalar`. See [[decisions/260930_operators-are-kinded|operators-are-kin
 The computation types are three:
 
 ```text
-C ::= F A  |  A → C  |  γ
+C ::= F^ε A  |  A → C  |  γ          ε ::= p | w | ε̂
 ```
 
-A parameterised block has the value type `{A → C}`. `F A` carries only its
-value type: there is no annotation on the returner, and the variables are
-type and row variables.
+A parameterised block has the value type `{A → C}`. `F` carries a *grade* ε,
+a producer kind: `F^p A` produces a value `A` (printed `Returns A`), and
+`F^w Unit` produces output and nothing else (printed `Command`). A grade
+variable prints from the alphabet `ν ξ ο π`, so `explain retry` reads
+`∀α ν. Integer → {ν α} → ν α`, "some producer of α". The variables are type,
+computation, row and grade variables.
 
-## A command is `F Unit`
+## A command is `F^w Unit`
 
-**A computation does two independent things: it writes bytes to stdout, and it
-returns a value.** Stdout is an operating-system stream whose sink is chosen by
-position — a redirect, a capture bracket, a [[design/pipelines|pipeline]]
-stage's place in the line. The returned value is the evaluator's result. The
-types say only the second; the first is said by which head a call has.
+**A command's value is its output.** A computation writes bytes to stdout, an
+operating-system stream whose sink is chosen by position — a redirect, a
+capture bracket, a [[design/pipelines|pipeline]] stage's place in the line — and
+produces a result. The grade says how the result is produced, not whether
+anything is written: it is deliberately a producer kind, not an effect, so
+`{ echo pre; return 5 } : F^p Int`, and the bind rule stays total.
 
-A *command* is a call whose head writes: an external, a builtin row with
-`Output::Writes` applied at its arity, or a handler arm standing in for one. It
-is a computation of type `F Unit` — it writes and returns nothing, like `cd`.
-`{ echo hi }` is `{Command Unit}` and `{ 'hi' }` is `{Command String}`: the
-checker tells a block that prints from one that returns because the program
-does.
+A *command* is a call whose head writes: an external, `^name`, a path head, a
+builtin row that writes, or a handler arm standing in for one. It is `F^w Unit`.
+`{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`; there is no
+`Command A`.
 
 | program | type |
 |---|---|
-| `hostname` | `F Unit` |
-| `echo hi` | `F Unit` |
-| `return 5` | `F Int` |
-| `from-bytes` | `F Bytes` |
-| `from-json` | `F A` |
-| `to-json $x` | `F Unit` |
-| `audit { echo hi }` | `F Record` |
+| `hostname` | `Command` |
+| `echo hi` | `Command` |
+| `to-json $x` | `Command` |
+| `warn hi` | `Returns Unit` |
+| `return 5` | `Returns Integer` |
+| `from-bytes` | `Returns Bytes` |
+| `from-json` | `Returns α` (a boundary) |
+| `audit { echo hi }` | `Returns Report(Unit)` |
 
-`audit` writes and keeps a value; it needs no special case. Every external
-command is `F Unit` (`external_exec_comp_ty` in
-`core/src/typecheck/infer.rs`), so `echo` and `^echo` show the checker one
-shape. A head has one class (`HeadClass` in `core/src/typecheck/capture.rs`): a
-binding, a value row that returns or writes, an arm standing in for a head, or
+The writing builtins are `echo`, `to-json`, `to-string`, `to-line`, `to-lines`,
+`to-jsonl`, `to-csv`, `to-bytes`, `ints-to-bytes`, `help`, `explain`, `clear` and
+`reset`. `warn` is `Returns Unit`: stderr is not the byte channel. `each`,
+`fold`, `fold-lines`, `spawn`, `watch`, `service` and `audit` are polymorphic in
+the grade of their body (`∀ε α. … U(F^ε α) …`), run it, stream its output and
+keep its value; `fail`, `exit` and `diverges` are `F^ε α` for every ε. `map`,
+`filter` and `sort-list-by` demand a value.
+
+**Invariant.** `F^w A ⇒ A = Unit`. Every rule that introduces `w` does so at
+`Unit`, every rule that copies a grade copies the value type with it, and every
+builtin scheme pairs a grade variable with exactly one value variable; a sweep in
+`core/tests/builtin_registry_property.rs` and a `debug_assert` in `generalize`
+guard it. Grades are atomic — a grade variable binds only to `p` or `w` — so
+there is no occurs check, no kind, and a grade is never weak.
+
+Every external command is `F^w Unit` (`external_exec_comp_ty` in
+`core/src/typecheck/infer.rs`). A head has one class (`HeadClass`, same file,
+beside `exec_comp_ty`): a binding, a value row, an arm standing in for a head, or
 an external, in the lookup order the runtime shares.
 
-## One coercion, `capture`, and who places it
+## One coercion, `cap`, and where it fires
 
-**A `let` captures the command that produces its value; a function, block or
-handle in that position binds what it returns, and `| from-line` turns what it
-writes into a value.** So `let x = hostname` binds the text `hostname` writes,
-and `let x = f` binds what `f` returns. The checker decides this once, from the
-syntax of the right-hand side, before any type is inferred: `capture_sites`
-(`⟦·⟧`, [[design/capture|capture]]) records each command whose output the `let`
-wants, the `Exec` arm types it `F Unit` and answers `F String` for a recorded
-node, and `annotate` wraps it:
+**A command's value is its output: where a value is demanded, a command is
+captured.** `cap : F^w Unit ⇝ F^p String` is the one run-time coercion, capture
+then decode; `F^p Unit ⇝ F^w Unit` is a zero-cost upcast (a `()`-producer
+regarded as a command, identity at run time), admitted at joins and handler arms
+only. From `F^p Unit` there is no path to `F^p String`, so `let x = f` with `f`
+returning `()` binds `()`; that keeps the two coherent. `cap` is inserted in
+checking mode at a demand already resolved to `F^p`: the *bind* rule (the whole
+right-hand side of a `let`), an *argument* to a value-demanding function, and a
+*join* that settles on a value ([[design/capture|capture]]).
 
 ```text
-decode (capture M)
+M : F^p A   ⟹  M to x. N  binds x : A
+M : F^w Unit ⟹  M to x. N  binds x : String, elaborated  cap M to d. decode d to x. N
+M : F^ε̂ A   ⟹  ε̂ := p, then the first case
 ```
 
-**`capture` is total and exact.** `capture M : F Bytes` for `M : F Unit` runs
+The bind rule's third case is the only defaulting in the system, and it is
+local: a `let` demands a value. `annotate` wraps the recorded nodes.
+
+**`capture` is total and exact.** `capture M : F Bytes` for `M : F^w Unit` runs
 `M` with its stdout captured and returns precisely the bytes `M` wrote —
-nothing stripped, nothing decoded, and the body's own value ignored
+nothing stripped, nothing decoded
 (`CompKind::Capture` in `core/src/ir.rs`, stepped by the `Frame::Capture` rules
 in `core/src/evaluator/machine.rs`). Its one further clause is handler
 semantics rather than decoding: bytes `M` wrote before failing are flushed to
@@ -99,54 +121,73 @@ that spelling remains theirs to write. A value produced by a decoder is
 composed by application or bind, never by another pipeline edge — a `|` carries
 bytes and nothing else.
 
-## A stage writes
+## A stage feeds by writing
 
 A pipeline stage feeds the next by writing, so every stage but the last is
-`F Unit` and its head is no value row that returns (`Output::Returns`;
-boundaries and `fold-lines` included). `length $xs | cat` is refused under
-`Reason::PipelineStageWrites` (T0011) and asks whether `echo !{length …} | cat`
-or `let x = length …` was meant; a value or block literal in stage position
-"writes nothing to the pipe". The pipeline's value is its final stage's, always
+accepted at `Unit` in any grade, and the pipeline's type is the last stage's.
+A decoder (`from-*`, marked `BuiltinDiagnostic::Decoder`) in a non-final stage is
+refused by its own mark (`stage_decoder`, `DecoderMidPipeline`, T0078):
+"a decoder ends the byte pipeline: `from-json` returns a value and writes
+nothing, so nothing reaches `cat`". A value or block literal in stage position
+"writes nothing to the pipe" (`Reason::PipelineStageWrites`, T0011), and
+`each { … } $xs | cat` is accepted. A stdout redirect *discharges* the grade,
+`M > f : F^p A`; stdin and stderr redirects and `2>&1` preserve it. The pipeline's
+value is its final stage's, always
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
 ## An arm stands in for what it is
 
 `standsFor(c)` is the scheme of the base frame or arm already in force under
-`c`, and `[String] → F Unit` for anything else (`Inferencer::stands_in`). An
-arm for `curl` therefore writes and returns `()`; an arm for `detach` returns
-what `detach` returns. A mismatch is `Reason::StandsIn`, with a sentence naming
-what the arm stands in for and what to write. The catch-all `handler:` stands in
-for every command in its block. The checker at the literal arm and the run-time
-vet at install (`alias_arm_scheme`, `catch_all_stands_in`) apply the same check.
+`c`, and `[String] → Command` for anything else (`Inferencer::stands_in`). An
+arm for `curl` therefore has a command's value, its output; an arm for `detach`
+returns what `detach` returns. A `()`-returning stub for an external is admitted
+by the upcast and captures `""`; the installed scheme has the head's producer
+kind, so a call through the arm types as the head does. A mismatch is
+`Reason::StandsIn`, with a sentence naming what the arm stands in for and what
+to write. The catch-all `handler:` stands in for every command in its block. The
+checker at the literal arm and the run-time vet at install (`alias_arm_scheme`,
+`catch_all_stands_in`) apply the same check.
 
-## Branching is plain HM over thunks
+## Branching is HM over thunks, joined by grade
 
 Every form that suspends a command — `if`, `case`, `try`, `?`, `guard`,
 `within`, `grant` — takes a thunk `U C` and forces the one it chooses. A
 literal `{ … }` is that thunk, and a thunk in hand (`$aaah`) is forced the same
 way. An arm is a literal block, a lambda or a name; any other atom would be
 hoisted and run before the form chose, and is refused at elaboration.
+`within`, `grant` and `guard` pass their body's `F^ε A` through; `audit` absorbs
+it and returns `F^p Report(α)`.
 
-The arms of a join agree by unifying the *values* they return (`unify_arm`):
-`T0010` and `T0020` for disagreeing values, `T0011` only for shape (`F` against
-a function). A join of `()` against another type, where the `()` arm's tail is
-a command, carries a hint: capture it (`ls | from-line`) or print in both. A
-name that `let` bound to what a call returned, read at `()` where a word or an
-interpolant is wanted, says what the call returns and what to write instead
-(the `()` note).
+**Joins take two passes.** Each arm is inferred against a fresh result, then
+resolved: if some arm is `F^p A` with `A` not `Unit` (or unresolved), the target
+is `F^p`, and every `F^w Unit` arm is captured; else if some arm is `F^w Unit`,
+the target is `F^w Unit`, every `F^p Unit` arm upcasts and grade variables bind
+to `w`; else the arms unify. So `if $c { hostname } else { echo b }` is one
+`Command`; `if $c { echo $x } else { warn skip }` is a `Command` in any
+position; `try { fetch } { |e| return 'none' } : F^p String`. A disagreement is
+`T0010` and `T0020` for disagreeing values, `T0011` for shape or grade, with
+hints derived from the two types: one arm is a command, whose value is its
+output, while the other gives another type. A name that `let` bound to what a
+call returned, read at `()` where a word or an interpolant is wanted, says what
+the call returns and what to write instead (the `()` note).
 
-## The calculus is ordinary CBPV
+## The calculus is CBPV, graded by producer kind
 
 `F` is a functor from value types to computation types and the adjunction with
-`U` is unchanged; nothing is annotated and nothing is graded. A sequence takes
-its tail's type ([[related/cbpve|cbpve]]).
+`U` is unchanged; the grade is an annotation on the returner, atomic and
+unifiable like a type variable. A sequence takes its tail's type, and a discard
+accepts any grade ([[related/cbpve|cbpve]]).
 
 Three properties hold:
 
-- a computation's type is stable under substitution and under abstraction;
+- a computation's type, grade included, is stable under substitution and under
+  abstraction, so β and η preserve meaning (`let f = { hostname }; let x = f`
+  binds the host name, like `let x = hostname`);
 - elaboration is total and type-preserving;
-- capture is one coercion, placed by one syntactic walk, so the verdict and
-  every printed type are independent of statement order.
+- capture is placed by the type at three syntax-directed sites, and the result is
+  principal on that stated rule. Joins are decided in program order with no
+  pending constraints, so the verdict is not order-independent in one corner
+  ([[decisions/260930_graded-f|graded-f]]).
 
 Inference is annotation-free; generalisation happens at the `Bind` boundary. A
 leaf, meanwhile, commits before inference begins: a bare word's value type is
@@ -171,7 +212,7 @@ A type error aborts with exit status 1 and a positioned expected-vs-inferred
 message.
 
 See also [[design/cbpv|cbpv]], [[design/capture|capture]], [[design/pipelines|pipelines]],
-[[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+[[decisions/260930_graded-f|graded-f]],
 [[design/row-types|row-types]], [[invariants/fixed-arity|fixed-arity]],
 [[related/rows-and-handlers|rows-and-handlers]] (the effect typing ral
 declined). The volatile code map is [[map/core/typecheck|typecheck]].

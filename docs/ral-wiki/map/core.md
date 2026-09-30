@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8d868e18
+generated_at_commit: 1776d222
 generated_at_date: 2026-09-30
 covers_paths: [core/src/lib.rs]
 ---
@@ -81,8 +81,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/ir|ir]] — the `Val` / `Comp` intermediate representation
   (`core/src/ir.rs`).
 - [[map/core/typecheck|typecheck]] — Hindley–Milner inference with row types
-  (`core/src/typecheck/`), the sole inference engine, including capture by
-  syntax (`capture.rs`).
+  (`core/src/typecheck/`), the sole inference engine, including the grade that places capture
+  (`CompTy::Return(Grade, _)`).
 - [[map/core/evaluator|evaluator]] — the CEK machine over computation closures:
   focus, frame stack, matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the

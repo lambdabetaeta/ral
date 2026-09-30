@@ -13,9 +13,9 @@ use ral_core::serial::datum::Datum;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
-    closed_record, closed_variant, fun, mk_scheme as scheme, open_record, pure, thunk,
+    closed_record, closed_variant, fun, graded, mk_scheme as scheme, open_record, pure, thunk,
 };
-use ral_core::typecheck::{Kind, Scheme, Ty, Unifier};
+use ral_core::typecheck::{CompTy, Grade, Kind, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Site, as_map, sig};
 use ral_core::{Shell, Value};
@@ -221,8 +221,8 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// The body's stdout is captured so that a TUI command (e.g. `fzf`) which
 /// prints its selection on stdout can have that selection delivered back to
 /// the plugin as a String.  The TUI itself draws on /dev/tty via stderr, so
-/// capturing stdout does not disrupt the interface.  The body is a command: it
-/// writes and returns `()`, and the captured bytes are decoded, lossily,
+/// capturing stdout does not disrupt the interface.  The body is a command, and
+/// the captured bytes are decoded, lossily,
 /// trailing newline stripped — the call displays a terminal selection rather
 /// than computing with it.
 ///
@@ -630,17 +630,24 @@ fn scheme_parse(_u: &mut Unifier) -> Scheme {
     )
 }
 
-fn scheme_tui(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(
-            thunk(pure(Ty::Unit)),
-            pure(closed_record(&[
-                ("output", Ty::String),
-                ("status", Ty::Int),
-            ])),
-        )),
+/// `_ed-tui :: ∀ε α. U(F^ε α) → F [output: Str, status: Int]` — absorbs its
+/// body, whatever it produces; the output is the record's.
+fn scheme_tui(u: &mut Unifier) -> Scheme {
+    let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
+    let body = CompTy::Return(Grade::Var(ev), Box::new(Ty::Var(av)));
+    graded(
+        &[ev],
+        scheme(
+            &[(av, Kind::ANY)],
+            &[],
+            thunk(fun(
+                thunk(body),
+                pure(closed_record(&[
+                    ("output", Ty::String),
+                    ("status", Ty::Int),
+                ])),
+            )),
+        ),
     )
 }
 

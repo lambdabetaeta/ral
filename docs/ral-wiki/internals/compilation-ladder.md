@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, stage_types, Capture, captured_string, capture_sites, eta_expand_arrow]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, stage_types, Capture, captured_string, eta_expand_arrow]
 ---
 
 # The compilation ladder: source to typed IR
@@ -56,12 +56,11 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   (`eta_expand_arrow`), so every function-typed thunk's body is a syntactic
   `Lam`.
 
-  Which commands are recorded is decided *before* inference, from syntax alone:
-  `capture_sites` walks the right-hand side of each `let` along the positions
-  its result comes from, and the `Exec` rule of inference answers `F String`
-  for a recorded node after typing the call `F Unit`
+  Which computations are recorded is decided *during* inference, by the type:
+  the bind rule (`rhs_bound_ty`) records a right-hand side of grade `Output`,
+  and an argument or a join records the computation it coerces
   ([[internals/type-inference|type-inference]],
-  [[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+  [[decisions/260930_graded-f|graded-f]]).
   The rebuild places a `Capture` by looking a node up in that record.
 
   This rung is the *only* source of `Capture` nodes, and it runs on every

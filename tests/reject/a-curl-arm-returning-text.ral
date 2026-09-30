@@ -1,4 +1,5 @@
 # codes: T0011
-# contains: an arm for `curl` stands in for a command, so it writes and returns `()`
+# contains: couldn't match type Command with type Returns String
+# contains: an arm for `curl` stands in for a command, so its value is its output
 # contains: write it, `echo …`
 within [handlers: [curl: { |a| '{"ok":1}' }]] { curl }

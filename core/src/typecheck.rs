@@ -5,7 +5,6 @@
 
 mod annotate;
 pub mod builtins;
-mod capture;
 pub mod contract;
 mod env;
 mod error;
@@ -287,7 +286,9 @@ pub(crate) fn alias_arm_scheme(
 ) -> Result<Scheme, Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
         let cty = inferencer.infer_alias_arm(Some(param), body);
-        inferencer.stands_in(head, &cty)?;
+        let cty = inferencer
+            .stands_in(head, &cty)
+            .map_err(|(_, error)| error)?;
         Ok(close_thunk_scheme(
             inferencer,
             cty,
@@ -303,14 +304,17 @@ pub(crate) fn alias_arm_scheme(
 /// frame not outliving its run.
 ///
 /// # Errors
-/// The catch-all, which stands in for every command, returns something but `()`.
+/// The catch-all, which stands in for every command, is no command.
 pub(crate) fn catch_all_stands_in(
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Result<(), Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
         let cty = inferencer.infer_catch_all(body);
-        inferencer.catch_all_stands_in(&cty)
+        inferencer
+            .catch_all_stands_in(&cty)
+            .map(|_| ())
+            .map_err(|(_, error)| error)
     })
 }
 

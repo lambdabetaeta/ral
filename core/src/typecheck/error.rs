@@ -6,10 +6,10 @@ use super::ty::{CompTy, Ty};
 use crate::source::Span;
 use crate::syntax::ast::BinaryOpKind;
 
-/// What an arm stands in for, which decides what it must return.
+/// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
 pub enum Standing {
-    /// A command the program does not define: the arm writes, and returns `()`.
+    /// A command the program does not define: the arm's value is its output.
     Command(String),
     /// A base frame ral itself provides: the arm returns what that returns.
     Own(String),
@@ -39,26 +39,20 @@ pub enum Reason {
     DiscardedValueShape,
     /// An unresolved computation forced to `Return` shape to read its value.
     ReturnShape,
-    /// An arm against what it stands in for: a command writes and returns
-    /// `()`, a base frame returns what it returns.
+    /// An arm against what it stands in for: a command's value is its output,
+    /// a base frame returns what it returns.
     StandsIn(Standing),
-    /// A non-final pipeline stage against `F Unit`: a stage feeds the next by
+    /// A non-final pipeline stage against `Unit`: a stage feeds the next by
     /// writing.  `stage` and `next` are the two heads, when they are named.
     PipelineStageWrites {
         stage: Option<String>,
         next: Option<String>,
     },
     IfCond,
-    /// The `if` arms against one another.  `writer` names a command among
-    /// them, which writes and so returns `()`.
-    IfBranches {
-        writer: Option<String>,
-    },
-    /// Shared by `try` and `?`, which elaborates to nested `try`; `writer` as
-    /// for [`IfBranches`](Self::IfBranches).
-    TryArms {
-        writer: Option<String>,
-    },
+    /// The `if` arms against one another.
+    IfBranches,
+    /// Shared by `try` and `?`, which elaborates to nested `try`.
+    TryArms,
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
@@ -67,11 +61,8 @@ pub enum Reason {
     CaseArmPayload,
     /// The handler an arm names, against the function of the payload it must be.
     CaseArmHandler,
-    /// The `case` arms against one another, where exactly one of them runs;
-    /// `writer` as for [`IfBranches`](Self::IfBranches).
-    CaseArms {
-        writer: Option<String>,
-    },
+    /// The `case` arms against one another, where exactly one of them runs.
+    CaseArms,
     CaseScrutinee,
     ListElem,
     ListSpread,
@@ -276,6 +267,12 @@ pub enum TypeErrorKind {
     DecoderTakesNoArgument {
         name: String,
     },
+    /// A decoder before a pipeline's last stage: it returns a value and
+    /// writes nothing, so `next` is fed by nobody.
+    DecoderMidPipeline {
+        name: String,
+        next: Option<String>,
+    },
     /// `...` in the argument list of a value.  A spread is the notation of an
     /// argv, which only a command, an external, or a handler has; a value takes
     /// its arguments by application, at an arity its own type declares.
@@ -363,6 +360,7 @@ impl TypeErrorKind {
             Self::UnboundVariable { .. } => "T0071",
             Self::HeadBoundToValue { .. } => "T0072",
             Self::IndexContainerUnknown { .. } => "T0075",
+            Self::DecoderMidPipeline { .. } => "T0078",
         }
     }
 }

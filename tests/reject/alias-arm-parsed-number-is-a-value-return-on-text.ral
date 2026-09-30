@@ -1,2 +1,2 @@
-# contains: couldn't match type Unit
+# contains: couldn't match type Command with type Returns Integer
 alias inc { |a| return $[!{int $a[0]} + 1] }; inc hello

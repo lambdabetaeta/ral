@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8d868e18
+generated_at_commit: 1776d222
 generated_at_date: 2026-09-30
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -13,14 +13,13 @@ binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 (`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
 `BuiltinEntry::fixed_arity` derives it from the type rule and caches it, a
 `usize` for every entry in the table. What a row does with stdout is
-*declared*, not derived: `BuiltinEntry::output`
-is `Output::Returns` (the default) or `Output::Writes` (the encoders, `echo`,
-`help`, `explain`, `clear`, `reset`, `ints-to-bytes`), which is what
-`typecheck/capture.rs` reads to decide whether a call is a command a `let`
-captures, and a drift test holds a `Writes` row's scheme to a result of `F Unit`.
-Settling at `Unit` is enforced at the same door as arity:
+in its scheme: a writing row (the encoders, `echo`, `help`, `explain`, `clear`,
+`reset`, `ints-to-bytes`) ends in `Command`, `F^w Unit`, and there is no
+separate declaration
+([[decisions/260930_graded-f|graded-f]]). Settling at `Unit` is enforced at the
+same door as arity:
 `BuiltinEntry::settles_at_unit` reads the declared result off the curry spine,
-and a row whose scheme says `F Unit` answers unit from `call_body`
+and a row whose scheme says `Unit` answers unit from `call_body`
 whatever its Rust body computed, so no builtin
 can hand a value of another type to a name the checker believes is `Unit`.
 The manifest is *authored as two*, and
@@ -95,7 +94,7 @@ Bodies are grouped by concern, one submodule each:
   `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
   `Value::Unit`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
   `to-lines`, `to-json`, and `to-jsonl` are writers: each types
-  `A → F Unit` at its own operand type, and its encoded bytes are what it
+  `A → Command` at its own operand type, and its encoded bytes are what it
   writes. `to-bytes` takes `Bytes` and `ints-to-bytes` takes `[Int]` —
   two names, no union in the table. `builtin_from_jsonl` reads through
   `util::stdin_lines` and parses each line alone, so an error names the input's

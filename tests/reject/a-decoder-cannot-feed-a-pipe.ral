@@ -1,3 +1,4 @@
-# codes: T0011
-# contains: a stage feeds the next by writing, and `from-json` returns
+# codes: T0078
+# contains: a decoder ends the byte pipeline: `from-json` returns a value and writes nothing, so nothing reaches `wc`
+# contains: bind the value first
 cat data.json | from-json | wc -l

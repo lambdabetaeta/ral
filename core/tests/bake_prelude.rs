@@ -124,3 +124,64 @@ fn annotated_binds_carry_the_harvested_schemes() {
         "the returned schemes must be exactly the ones on the annotated toplevel's Phrase::Define"
     );
 }
+
+/// The prelude's producers carry the grades the design gives them: a
+/// wrapper that runs a block produces what the block produces, a wrapper
+/// that binds a value demands one, and a stream combinator's callback may
+/// be a command.
+#[test]
+fn prelude_schemes_carry_their_grades() {
+    let (_, schemes) = rebake();
+    let shown = |name: &str| {
+        let (_, scheme) = schemes
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("the prelude binds {name}"));
+        fmt_scheme(scheme)
+    };
+    assert_eq!(shown("retry"), "∀α ν. Integer → {ν α} → ν α");
+    assert_eq!(shown("attempt"), "∀α ν. {ν α} → Returns Unit");
+    assert_eq!(shown("succeeds"), "∀α ν. {ν α} → Returns Bool");
+    assert_eq!(shown("for"), "∀α β ν. [β] → {β → ν α} → Returns Unit");
+    assert_eq!(
+        shown("par"),
+        "∀α β. {α → Returns β} → [α] → Integer → Returns [β]"
+    );
+    assert_eq!(
+        shown("map-lines"),
+        "∀α. {String → Returns α} → Returns Unit"
+    );
+    assert_eq!(
+        shown("filter-lines"),
+        "{String → Returns Bool} → Returns Unit"
+    );
+    assert_eq!(shown("each-line"), "∀α ν. {String → ν α} → Returns Unit");
+    assert_eq!(shown("bytes-to-string"), "Bytes → Returns String");
+    assert!(
+        shown("defer").starts_with("∀α ν. {ν α} → Returns Handle [outcome: [`ok: α | `err: "),
+        "{}",
+        shown("defer")
+    );
+}
+
+/// The builtin rows the design grades: writers are commands, the runners of
+/// blocks absorb any grade, `map` demands a value, `fail` inhabits every
+/// producer type.
+#[test]
+fn builtin_schemes_carry_their_grades() {
+    let table = ral_core::HostSurface::default().builtin_table();
+    let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
+    assert_eq!(shown("echo"), "[String] → Command");
+    assert_eq!(shown("to-json"), "∀α:data. α → Command");
+    assert_eq!(shown("spawn"), "∀α ν. {ν α} → Returns Handle α");
+    assert_eq!(shown("each"), "∀α β ν. {α → ν β} → [α] → Returns Unit");
+    assert_eq!(shown("map"), "∀α β. {α → Returns β} → [α] → Returns [β]");
+    assert_eq!(
+        shown("fold-lines"),
+        "∀α ν. {α → String → ν α} → α → Returns α"
+    );
+    assert_eq!(
+        shown("fail"),
+        "∀α ν ρ. [status: Integer, message: String, ...ρ] → ν α"
+    );
+}

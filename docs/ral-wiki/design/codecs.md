@@ -4,22 +4,22 @@
 and structured values.** A decoder reads stdin and returns a value. An encoder
 takes one value and writes the encoded bytes:
 
-- every decoder has the computation type `from-X : F A`;
-- every encoder has the type `to-X : A → F Unit`.
+- every decoder has the computation type `from-X : Returns A`;
+- every encoder has the type `to-X : A → Command`.
 
 The two types are inverse: an encoder writes what the matching decoder reads.
 
 ## The crossing is a name
 
-A command is a computation of type `F Unit`: it writes and returns nothing,
-like `cd`. An encoder is a command with an argument, a builtin row with
-`Output::Writes`; an external command is `[String] → F Unit` too. A decoder is
-a value row that returns. Whether a bind sees what a command wrote is not in
-its type but in its syntax: `let x = cat f` binds captured text because its
-right-hand side is a command
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
-[[design/capture|capture]]), while `let x = cat f | from-bytes` binds the bytes
-exactly, because the decoder is where the pipeline's value comes from. A
+A command is a computation of type `F^w Unit` (`Command`): its value is its
+output. An encoder is a command with an argument, a builtin row ending in
+`Command`; an external command is `[String] → Command` too. A decoder is a row
+that returns a value and writes nothing, so it ends the byte pipeline. A bind
+sees what a command wrote because the command's type says so:
+`let x = cat f` binds captured text
+([[decisions/260930_graded-f|graded-f]], [[design/capture|capture]]), while
+`let x = cat f | from-bytes` binds the bytes exactly, because the decoder is
+where the pipeline's value comes from. A
 program crosses between bytes and values only when it names a codec. A
 misspelled codec fails at command lookup
 ([[design/builtins|why each codec is its own builtin]]).
@@ -54,7 +54,7 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
   handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
-**A decoder of undecided shape is checked.** `from-json`'s type is `∀α. F α`,
+**A decoder of undecided shape is checked.** `from-json`'s type is `∀α. Returns α`,
 and its `α` would be a cast. It is instead weak (one type per unit) and the
 decoder admits the value it read against the type the checker solved for it, so
 what fails is the decode, naming the pointer and the line of the use that
@@ -75,14 +75,15 @@ of `Int`, each 0 through 255 — ral has no byte literal, so this is how bytes a
 written by number), `to-string`, `to-lines` (each element followed by `\n`),
 `to-json`, `to-jsonl` (each element as `to-json` writes it, then `\n`),
 `to-csv`, and `to-line` (the line writer that `echo` uses) all
-write the encoded bytes and return `Unit` (`write_encoded` in
+write the encoded bytes (`write_encoded` in
 `core/src/builtins/codecs.rs`). Each encoder names one operand type, so
 `to-bytes 3` and `to-bytes hello` are ordinary unification failures rather than
 a union the checker has to resolve; the operand-prefixed name is what
 distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the write feeds the wire:
 `to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
-[[design/capture|capture]] coercion applies: `let e = to-json $x` binds the
-encoded text as a `String`.
+[[design/capture|capture]] coercion applies, the encoder being a command:
+`let e = to-json $x` binds the encoded text as a `String`, and
+`let e = to-json $x > f` binds `()`, the redirect having discharged the output.
 
 `to-csv` takes a list of records and writes a header row plus one row for each
 record. The columns are the first record's keys in sorted order, because maps
@@ -108,11 +109,11 @@ while the pipe is open, and it is the way to process unbounded input without
 holding it:
 
 - `fold-lines <fn> <init>` folds over stdin line by line:
-  `fold-lines : ∀ α. U (α → String → F α) → α → F α`
+  `fold-lines : ∀ε α. U (α → String → F^ε α) → α → F^p α`
   (`scheme::fold_lines` in `core/src/typecheck/builtins.rs`).
-  It returns its accumulator; a callback is an ordinary `F α`, and what it
-  writes goes where writes go. A fold is a value row that returns, so it may
-  end a pipeline and may not precede the last stage.
+  It returns its accumulator; a callback of either grade is absorbed — its
+  output streams, its value is kept. A fold is not a decoder, so it may end a
+  pipeline, and precede the last stage only with a `()` accumulator.
 
 ## One line rule
 
