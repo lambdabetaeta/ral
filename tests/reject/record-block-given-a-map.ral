@@ -1,0 +1,4 @@
+# codes: T0010
+# contains: a bare label on a block's parameter reads a record field
+let home = { |env| $env[HOME] }
+return !{home $ENV}

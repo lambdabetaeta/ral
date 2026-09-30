@@ -1,0 +1,128 @@
+# Test: a boundary admits a value against the type the script uses it at
+
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
+
+# A match, and a deep mismatch that names its pointer and its line
+let sizes = !{to-string '{"items": [{"size": 1}, {"size": 2}]}' | from-json}
+echo $[$sizes[items][1][size] + 1]
+refusal {
+    let d = !{to-string '{"items": [{"size": 1}, {"size": "12kB"}]}' | from-json}
+    let n = $[$d[items][1][size] + 1]
+    return ()
+}
+
+# A field the file lacks
+refusal {
+    let d = !{to-string '{"a": 1}' | from-json}
+    let n = $d[b]
+    return ()
+}
+
+# An open row admits extra fields; a closed record literal refuses them
+let open = !{to-string '{"name": "x", "extra": true}' | from-json}
+echo $open[name]
+refusal {
+    let d = !{to-string '{"a": 1, "extra": 2}' | from-json}
+    let r = if true { return $d } else { return [a: 1] }
+    return ()
+}
+
+# A kinded variable: `length` needs text, bytes, a list or a map
+refusal {
+    let d = !{to-string '{"a": 5}' | from-json}
+    let n = length $d[a]
+    return ()
+}
+
+# Two decodes the script compares agree on numbers, or on text
+let mixed = !{to-string '{"a": 1, "c": 2.5}' | from-json}
+echo $[$mixed[a] < $mixed[c]]
+refusal {
+    let d = !{to-string '{"a": 1, "c": "x"}' | from-json}
+    let b = $[$d[a] < $d[c]]
+    return ()
+}
+
+# Two decodes only echoed under one variable are parametric, and admitted
+let anything = !{to-string '[1, "a"]' | from-json}
+for $anything { |x| echo $x }
+
+# A JSON whole number is an Int: a position used as a Float refuses it, and
+# `float` at the use accepts both
+refusal {
+    let d = !{to-string '{"price": 3}' | from-json}
+    let p = $[$d[price] * 1.5]
+    return ()
+}
+let price = !{to-string '{"price": 3}' | from-json}
+echo $[!{float $price[price]} * 1.5]
+
+# A recursive document: the walk is typed as a map of itself, so a scalar
+# leaf is refused at the decode, and from-json-at reads the leaf instead
+refusal {
+    let doc = !{to-string '{"a": {"b": 1}}' | from-json}
+    let leaf = fold { |node key| return $node[$key] } $doc ['a', 'b']
+    return ()
+}
+let leaf = !{to-string '{"a": {"b": 1}}' | from-json-at ['a', 'b']}
+echo $[$leaf + 1]
+
+# from-json-at: objects, arrays, and a token that does not resolve
+let second = !{to-string '{"xs": [10, 20, 30]}' | from-json-at ['xs', '1']}
+echo $[$second + 1]
+refusal { let x = !{to-string '{"a": {"b": 1}}' | from-json-at ['a', 'z']}; return () }
+refusal { let x = !{to-string '[1, 2]' | from-json-at ['5']}; return () }
+refusal { let x = !{to-string '[1, 2]' | from-json-at ['01']}; return () }
+refusal { let x = !{to-string '{"a": 1}' | from-json-at ['a', 'b']}; return () }
+
+# A boundary used as a value is admitted like any call
+let decode = $from-json
+let via = !{to-string '{"n": 4}' | decode}
+echo $[$via[n] + 1]
+refusal {
+    let d = !{to-string '{"n": "four"}' | decode}
+    let n = $[$d[n] + 1]
+    return ()
+}
+
+# A decoder helper shared by two uses has one type: consistent uses are fine
+let read = { |text| to-string $text | from-json }
+let r1 = read '{"n": 1}'
+let r2 = read '{"n": 2}'
+echo $[$r1[n] + $r2[n]]
+
+# `use` holds a module's functions to the types the script uses them at, and
+# its record to the names the script reads
+let tmpdir = temp-dir
+echo "let inc = { |n| return \$[\$n + 1] }\nlet label = 'lib'" > "$tmpdir/lib.ral"
+let lib = use "$tmpdir/lib.ral"
+echo !{$lib[inc] 4}
+echo $lib[label]
+refusal {
+    let bad = use "$tmpdir/lib.ral"
+    let r = $bad[inc] 'text'
+    return ()
+}
+refusal {
+    let bad = use "$tmpdir/lib.ral"
+    let r = $bad[missing]
+    return ()
+}
+refusal {
+    let bad = use "$tmpdir/lib.ral"
+    let r = length $bad[inc]
+    return ()
+}
+refusal {
+    let bad = use "$tmpdir/lib.ral"
+    let r = $[$bad[label] + 1]
+    return ()
+}
+rm -rf $tmpdir
+
+# An under-applied boundary is a block of the saturated call, in a tail too
+let partial = { from-json-at }
+let piece = !{to-string '{"a": [1, 2]}' | !$partial ['a']}
+echo $piece
+
+echo 'boundary tests done'

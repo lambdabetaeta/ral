@@ -1,45 +1,20 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
-use super::route::RouteMismatch;
-use super::ty::{CompTy, PayloadRoute, Ty};
+use super::kind::Kind;
+use super::ty::{CompTy, Ty};
 use crate::source::Span;
 use crate::syntax::ast::BinaryOpKind;
 
-/// Which component of a computation type disagreed, within a `CompTyMismatch`.
+/// What an arm stands in for, which decides what it must return.
 #[derive(Debug, Clone)]
-pub enum CompDiff {
-    Route {
-        expected: PayloadRoute,
-        actual: PayloadRoute,
-    },
-    ReturnType {
-        expected: Ty,
-        actual: Ty,
-    },
-}
-
-/// Why an arm cannot be installed under `head`.
-///
-/// The two failures are genuinely different questions — one is about where a
-/// payload lives, the other about what WF-2 then forces the returned value to
-/// be — and the alias install, the handler `vet`, and the checker each render
-/// them in their own words.
-#[derive(Debug, Clone)]
-pub enum PinFailure {
-    /// The arm and the head disagree about where their payload lives. Only
-    /// reachable reinterpreting an existing handler — a fresh name's head is
-    /// `Bytes`, and `Value Unit` subsumes into that, so it never reaches a
-    /// bare route clash.
-    Route(RouteMismatch),
-    /// The head is captured from stdout, so WF-2 makes the arm's value
-    /// `Unit` — and this arm returns something else.
-    ByteHeadReturnsValue {
-        actual: Ty,
-        /// Whether the head is an existing handler this arm reinterprets,
-        /// rather than a fresh name that behaves like an external program.
-        reinterprets: bool,
-    },
+pub enum Standing {
+    /// A command the program does not define: the arm writes, and returns `()`.
+    Command(String),
+    /// A base frame ral itself provides: the arm returns what that returns.
+    Own(String),
+    /// The catch-all `handler:`, for every command in its extent.
+    EveryCommand,
 }
 
 /// Why the inferencer demanded that two types agree.
@@ -62,21 +37,28 @@ pub enum Reason {
     /// argument — [`PipelineStageShape`](Self::PipelineStageShape)'s sibling
     /// for a non-tail `Seq` part and the program's own value.
     DiscardedValueShape,
-    /// An unresolved computation forced to `Return` shape to read its value and route.
+    /// An unresolved computation forced to `Return` shape to read its value.
     ReturnShape,
-    /// An arm's payload route against that of the head it reinterprets.
-    HandlerRoutePin,
-    /// The catch-all `handler:` body against `F[Bytes] Unit` — it reinterprets
-    /// every external name in its extent, each already byte-routed.
-    CatchAllRoutePin,
+    /// An arm against what it stands in for: a command writes and returns
+    /// `()`, a base frame returns what it returns.
+    StandsIn(Standing),
+    /// A non-final pipeline stage against `F Unit`: a stage feeds the next by
+    /// writing.  `stage` and `next` are the two heads, when they are named.
+    PipelineStageWrites {
+        stage: Option<String>,
+        next: Option<String>,
+    },
     IfCond,
-    IfBranches,
-    /// The `if` branches' values, where both branches already route `Value`.
-    IfBranchValues,
-    /// Shared by `try` and `?`, which elaborates to nested `try`.
-    TryArms,
-    /// The outcomes' values, where both already route `Value`.
-    TryArmValues,
+    /// The `if` arms against one another.  `writer` names a command among
+    /// them, which writes and so returns `()`.
+    IfBranches {
+        writer: Option<String>,
+    },
+    /// Shared by `try` and `?`, which elaborates to nested `try`; `writer` as
+    /// for [`IfBranches`](Self::IfBranches).
+    TryArms {
+        writer: Option<String>,
+    },
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
@@ -85,54 +67,51 @@ pub enum Reason {
     CaseArmPayload,
     /// The handler an arm names, against the function of the payload it must be.
     CaseArmHandler,
-    /// The `case` arms against one another, where exactly one of them runs.
-    CaseArms,
-    /// The `case` arms' values, where every arm already routes `Value`.
-    CaseArmValues,
+    /// The `case` arms against one another, where exactly one of them runs;
+    /// `writer` as for [`IfBranches`](Self::IfBranches).
+    CaseArms {
+        writer: Option<String>,
+    },
     CaseScrutinee,
     ListElem,
     ListSpread,
     MapKey,
     MapElem,
-    /// A `...x` inside a record literal, which copies fields.
-    RecordSpread,
+    /// A `...x` inside a record literal, which updates fields; `base` is the
+    /// spread's own name when it is a written variable.
+    RecordUpdate {
+        base: Option<String>,
+    },
     /// A `...x` inside a map literal, which copies entries.
     MapSpread,
-    /// An options-record entry against the type the form declares at `key`.
+    /// A written option's value against the type the form declares at `key`.
     OptionField {
         form: &'static str,
         key: String,
-    },
-    /// A form's options value against the form's own row: what it is at all,
-    /// and that it names no option the form does not declare.
-    FormOptions {
-        form: &'static str,
-        options: Vec<&'static str>,
     },
     /// A `handlers:` arm that arrived as a value, against the block an arm is.
     HandlerArm,
     /// The `!` operator's operand against the block shape it forces.
     ForceOperand,
-    /// `Capture`'s operand against the `Unit` value WF-2 demands, at
-    /// whichever route the operand's own boundary chose.
-    CaptureOperand,
-    /// `Decode`'s operand against `Bytes` — the value the bind above it
-    /// captured, whose own rule already guarantees the shape.
-    DecodeOperand,
+    /// The coercion the checker itself inserted, `cap` and `decode`: no user
+    /// sentence ever needs it.
+    Capture,
     NotOperand,
+    /// Unary `-`'s operand, which must be a number.
+    Negation,
+    /// One part of an interpolated string.
+    Interpolation,
     BinaryOperands(BinaryOpKind),
     ListIndexKey,
     MapIndexKey,
     RecordFieldRead,
-    /// An indexing target pinned to `List` or `Map` by its computed key's type.
+    /// A bare label on a target known to be a map, read as that key.
+    MapKeyRead,
+    /// An indexing target settled to `List` or `Map`, by its key or its kind.
     DynamicIndexTarget,
     /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
     AutoderefHead,
     LetRecSelf,
-    /// An undecided payload route pinned at a value boundary (a `Bind` RHS, a
-    /// join's byte or value side) so a later grounding becomes an honest
-    /// mismatch rather than silent divergence.
-    RoutePin,
 }
 
 /// Which stage-root redirect answers a stage's reads, and so leaves nothing
@@ -167,6 +146,24 @@ pub enum SpreadHead {
     Applied,
 }
 
+/// How a refused binding would close on itself without crossing data: the
+/// edge by which the search met the variable it started from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleVia {
+    Applied,
+    Argument,
+    Returns,
+}
+
+/// What a [`TypeErrorKind::KindMismatch`] found wanting.
+#[derive(Debug, Clone)]
+pub enum KindFound {
+    /// A type whose head the kind does not admit.
+    Type(Box<Ty>),
+    /// Another variable's kind, sharing no head with the required one.
+    Used { kind: Kind, witness: Option<Span> },
+}
+
 /// The structural cause of a type error, raised by the unifier or inferencer.
 /// `InferCtx` attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
@@ -174,20 +171,27 @@ pub enum TypeErrorKind {
     RecursiveRow,
     /// Nesting past the unifier's depth ceiling — a stack-overflow guard.
     TypeTooDeep,
+    /// A binding whose structure reaches its own variable along non-data
+    /// edges alone: a recursive type must pass through a list, map, record or
+    /// variant.
+    CyclicType {
+        via: CycleVia,
+    },
     /// Boxed: two `Ty`s inline make this enum the largest thing every
     /// `Result` in the unifier carries, and a mismatch is the cold path.
     TyMismatch {
         expected: Box<Ty>,
         actual: Box<Ty>,
     },
+    /// A variable's kind, imposed at `witness`, is not met by `found`.
+    KindMismatch {
+        found: KindFound,
+        kind: Kind,
+        witness: Option<Span>,
+    },
     CompTyMismatch {
         expected: CompTy,
         actual: CompTy,
-        diffs: Vec<CompDiff>,
-    },
-    RouteMismatch {
-        expected: PayloadRoute,
-        actual: PayloadRoute,
     },
     RowExtraField {
         label: String,
@@ -212,19 +216,19 @@ pub enum TypeErrorKind {
         key: &'static str,
         advice: &'static str,
     },
-    /// Two declared tables name one label at two types that will not unify,
-    /// which would make the order two constraints arrive in decide the verdict
-    /// — the one thing order-independence is owed by the term rules.
-    ContractClash {
-        label: &'static str,
-        forms: [&'static str; 2],
-    },
-    /// A map where a form's options belong.  A form's options are fields and a
-    /// map's keys are data, so the two have nothing in common but a bracket —
-    /// and the mismatch of a row against `Map α` would say none of that.
-    MapAsOptions {
+    /// A key a contract file returns, or a form is written with, that its
+    /// table does not name.
+    UnknownKey {
         form: &'static str,
-        options: Vec<&'static str>,
+        key: String,
+        offered: Vec<&'static str>,
+    },
+    /// A contract file returns something its table cannot ascribe: not a
+    /// record, not `()`, and not the factory the table admits.
+    ReturnNotRecord {
+        form: &'static str,
+        found: Ty,
+        offered: Vec<&'static str>,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     /// The flag marks a head/args shape suggesting a string split by a stray quote.
@@ -250,6 +254,17 @@ pub enum TypeErrorKind {
     },
     BuiltinNotFirstClass {
         name: String,
+    },
+    /// `$name` names nothing in scope; `suggestions` are the nearest names
+    /// that are.
+    UnboundVariable {
+        name: String,
+        suggestions: Vec<String>,
+    },
+    /// A session binding of something other than a thunk in command position.
+    HeadBoundToValue {
+        name: String,
+        ty: Ty,
     },
     /// Wrong argument count for `name`, whose signature declares `expected`.
     BuiltinArity {
@@ -294,13 +309,16 @@ pub enum TypeErrorKind {
         label: String,
         ty: Ty,
     },
-    /// A field read (`$m[key]`) on a map, whose keys are data rather than labels.
-    FieldOnMap {
-        label: String,
-    },
     /// A computed index (`$v[$k]`) on a value that accepts no key at all.
     DynamicIndexOnScalar {
         ty: Ty,
+    },
+    /// A computed index whose container nothing in the unit decides is a list
+    /// or a map.  `names` is the target and key as written, when both are
+    /// variables; `holder` is the binding whose value holds the index.
+    IndexContainerUnknown {
+        names: Option<(String, String)>,
+        holder: Option<Span>,
     },
     /// A pipe edge into a stage whose own root binds standard input.  The feed
     /// answers every read the stage makes, for the stage's whole run, so the
@@ -316,15 +334,16 @@ impl TypeErrorKind {
         match self {
             Self::RecursiveRow => "T0002",
             Self::TypeTooDeep => "T0003",
+            Self::CyclicType { .. } => "T0073",
+            Self::KindMismatch { .. } => "T0074",
             Self::TyMismatch { .. } => "T0010",
             Self::CompTyMismatch { .. } | Self::CommandNotFunction { .. } => "T0011",
-            Self::RouteMismatch { .. } => "T0012",
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
             Self::DuplicateField { .. } => "T0022",
-            Self::MapAsOptions { .. } => "T0024",
-            Self::ContractClash { .. } => "T0025",
             Self::RefusedKey { .. } => "T0026",
+            Self::UnknownKey { .. } => "T0076",
+            Self::ReturnNotRecord { .. } => "T0077",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",
@@ -340,10 +359,19 @@ impl TypeErrorKind {
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",
-            Self::FieldOnMap { .. } => "T0063",
             Self::DeadPipeEdge { .. } => "T0070",
+            Self::UnboundVariable { .. } => "T0071",
+            Self::HeadBoundToValue { .. } => "T0072",
+            Self::IndexContainerUnknown { .. } => "T0075",
         }
     }
+}
+
+/// A name that `let` bound to what `callee` returned, and `callee` returns `()`.
+#[derive(Debug, Clone)]
+pub(crate) struct UnitCall {
+    pub(crate) name: String,
+    pub(crate) callee: String,
 }
 
 /// A located type error: span, structural cause, and constraint provenance.
@@ -352,12 +380,22 @@ pub struct TypeError {
     pub pos: Option<Span>,
     pub kind: TypeErrorKind,
     pub(crate) reason: Option<Reason>,
+    /// The failed constraint met a weak variable, or the type one was fixed to.
+    pub(crate) weak: Option<super::unify::WeakSource>,
+    /// The failed constraint concerned a name a `let` bound to what a call returned,
+    /// which was `()`.
+    pub(crate) unit: Option<UnitCall>,
 }
 
 impl TypeError {
     /// The optional guidance sentence for this error, composed in `explain.rs`.
     pub fn hint(&self) -> Option<String> {
-        super::explain::hint(&self.kind, self.reason.as_ref())
+        super::explain::hint(
+            &self.kind,
+            self.reason.as_ref(),
+            self.weak.as_ref(),
+            self.unit.as_ref(),
+        )
     }
 }
 

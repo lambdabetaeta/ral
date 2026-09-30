@@ -22,9 +22,21 @@ that names no stream (`1< f`, `0> f`, `3> f`, `1>&2`). The identity dups `1>&1`
 and `2>&2` name the stream they already are, so they denote no redirect:
 `dup` returns `None` and nothing is built.
 
-**Every tier is the same sum over a different operand**: the parsed word
-(`Redirect<Ast>`), the elaborated value (`Redirect<Val>`, inside the IR), the
-evaluated string (`Redirect<String>`, at the runtime). `map` and `try_map` carry
+**A list of redirects is a set of bindings, one per stream.** `Redirects<T>`
+(`core/src/syntax/ast.rs`) is the checked list: `stdin`, `stdout` and `stderr`
+each hold at most one binding, so a stream has one final destination and
+nothing is opened only to be overridden. `Redirects::bind` refuses the second
+binding of a stream at parse time, with a caret on the second redirect and the
+question *which one do you mean?* — `> a > b`, `2> e 2>&1`, `2>&1 2> e` and
+`< a << b` are not programs. `StderrTarget` is `File(mode, t)` or `Stdout`, so
+`2>&1` is a binding of stderr *to stdout's destination*, not a step that reads
+a destination established so far: its position in the list means nothing. The
+interpreter opens the targets in one fixed order, stdin, stdout, stderr
+([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+
+**Every tier is the same shape over a different operand**: the parsed word
+(`Redirects<Ast>`), the elaborated value (`Redirects<Val>`, inside the IR), the
+evaluated string (`Redirects<String>`, at the runtime). `map` and `try_map` carry
 one tier to the next, so no tier re-widens the type and every consumer — the
 in-process redirect frame (`core/src/evaluator/redirect.rs`), the external
 command's stdio plan (`core/src/runtime/command/stdio.rs`), the write
@@ -47,7 +59,7 @@ and do not widen the sum without giving the new form plumbing that means
 something.
 
 See [[internals/surface-syntax|surface-syntax]] for where redirects are lexed
-and parsed, [[design/capture|capture]] for why a redirect moves `ambient` with
-`stdout` (and why an identity dup must *not*), and
+and parsed, [[design/capture|capture]] for what a redirect does to a captured
+command (`let saved = echo hi > f` binds `""`), and
 [[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]
 for what a redirect does when the head turns out to be handled.

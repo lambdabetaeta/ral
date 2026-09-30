@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d369a2c0
-verified_at_date: 2026-09-26
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::addresses, Address, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::addresses, Address, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -35,14 +35,15 @@ resolution, its redirects, and whether a `!{…}` audit captures bytes:
 - `Thread` — the stage's ral computation evaluated on its own OS thread, over
   a cloned `Shell`. An external head becomes a `Thread` stage too whenever a
   redirect or a byte-capturing audit rules `Direct` out; the external is then
-  spawned from inside that thread instead.
+  spawned from inside that thread instead. The stage's redirects are then interpreted by `RedirectState`, the one
+  interpreter a block and a standalone external share; a `Direct` stage has none,
+  and `wire_stdio` wires its stage pipes without reading a redirect list.
 
-No route is consulted — nor could one be, since the checked IR carries none:
-a stage's classification cannot depend on where its payload lives, because the
-choice must be observationally transparent. The node's own `PipeYield` — the
-syntax the checker wrote in place of the last stage's route — never passes
-through resolve at all: it comes committed in the checked IR and rides on
-`PipeNode` itself. Launch consumes the frozen decisions; it does not re-derive
+No type is consulted: a stage's classification cannot depend on what it
+returns, because the choice must be observationally transparent. A final stage
+the checker wrapped in `Capture` (`let x = a | b`) is no `Exec`, so it is a
+`Thread` stage whose stdin is the pipe and whose `cap` buffer takes what the
+command writes. Launch consumes the frozen decisions; it does not re-derive
 a transport mode. There is no
 in-process pipeline fold and no typed value channel between stages.
 
@@ -63,9 +64,7 @@ it settled on its own `StageObservation`, and the value the pipeline keeps is
 read out by position in the fold — stages fold in launch order, so the value
 kept is the last `Ok`, which is the final stage's whenever that stage is `Ok`
 and is unread when it is not, every other stage
-contributing only its verdict and its audit. The node's `PipeYield` — held by
-`PipeNode`, not by the plan — decides there whether that value or `Unit` is the
-pipeline's.
+contributing only its verdict and its audit.
 
 **A non-final stage cannot observe its reader's death by EPIPE.** The parent
 holds a duplicate of each interior edge's read end — `route::HeldEdge { edge,
@@ -96,15 +95,12 @@ with nothing left to write for is the ordinary case, not an error path.
 
 **Bytes reach a stage thread through `Sink::Pipe` and a `SourceReader` with a
 wake.** A `Thread` stage's `Io` is built straight from its `StageRoute`:
-`ByteOut::Downstream` becomes `Sink::Pipe { writer, wake, edge }`, taken by
-`stdout` and `ambient` alike — a non-final stage's ambient *is* its own pipe,
-so a discarded statement's bytes go down the wire like every other byte it
-writes — and ended by the same wake as the stage's reads (below).
-A final stage has no edge, so `ByteOut::Parent` takes the parent's `stdout` for
-its stdout and the parent's **`ambient`** for its ambient: under `!{ … | … }`
-the parent's stdout is a capture buffer, and `Io::ambient` is never one, so a
-final stage's discarded statement leaves the whole capture chain exactly as an
-unpiped one does ([[design/capture|capture]]).
+`ByteOut::Downstream` becomes `Sink::Pipe { writer, wake, edge }` as the stage's
+`stdout`, so a discarded statement's bytes go down the wire like every other
+byte it writes, and is ended by the same wake as the stage's reads (below).
+A final stage has no edge, so `ByteOut::Parent` takes the parent's `stdout`:
+under `!{ … | … }` that is a capture buffer, and the final stage writes into it
+([[design/capture|capture]]).
 On the way in, `ByteIn::Upstream` becomes
 `Source::Reader(SourceReader::pipe(r).interruptible(wake))`,
 the pipe reader beside a `Wake` a blocked read polls with its fd.

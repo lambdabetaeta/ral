@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 912b3740
-generated_at_date: 2026-09-24
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -16,23 +16,18 @@ Entry points (`typecheck.rs`):
   — this function checks a program: infer each phrase in order, extending
   `TyEnv` at each `Define`, then `annotate::annotate_toplevel` writes the
   verdict back, on success returning an *annotated* `Toplevel`. `annotate`
-  writes three things onto the rebuilt IR: a generalised `Scheme` per name a
+  writes two things onto the rebuilt IR: a generalised `Scheme` per name a
   `Phrase::Define` binds — landed on its own phrase, not a shared spine —
   resolved against the final unifier and closed by quantifying its
-  residuals, that is, generalised against the empty environment; a
-  `PipeYield` and a `Vec<Ty>` of
-  per-stage value types on each `Pipeline`; and a `Capture` node wherever a
-  value demand meets a computation whose payload route grounds `Bytes`
-  ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value type in
-  `InferCtx::stage_types`, keyed by stage address, and the *pipeline's* own
-  final route in `InferCtx::pipeline_routes`, keyed by the pipeline comp;
-  `annotate` resolves both against the final unifier, and grounding that route
-  is the **last** place a route is read — a `Bytes` pipeline yields `Unit`, so
-  the checker's verdict leaves as syntax and no route reaches the evaluator. The stage types are
+  residuals, that is, generalised against the empty environment; and a
+  `Capture`/`Decode` pair around each command the checker recorded as
+  captured ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value
+  type in `InferCtx::stage_types`, keyed by stage address, and `annotate`
+  resolves them against the final unifier. The stage types are
   typing metadata for the structural REPL, not a transport channel — the
   evaluator never reads them, so an un-annotated stage keeps the elaborator's
-  `Unit` placeholder without harm. There is no per-stage annotation left,
-  because there is no interior adjacency rule left to record
+  `Unit` placeholder without harm. A pipeline's value is its final stage's, so
+  there is nothing per-pipeline to annotate
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   The seed for a check is one `SessionSchemes { bindings, aliases,
   builtins }`
@@ -48,17 +43,21 @@ Entry points (`typecheck.rs`):
   scheme, which lands in the env so that `lookup_handler` finds a base frame as
   it finds a handler
   ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+  Every name the seed and the program bind is therefore known to the checker: a
+  `$name` outside them is `UnboundVariable` (T0071), and a session binding of a
+  non-thunk in head position is `HeadBoundToValue` (T0072)
+  ([[internals/type-inference|type-inference]]).
 - `bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>)` — called by
   `boot::bake_prelude_to_out_dir` from each host's build script: returns the
   annotated prelude `Toplevel` alongside the schemes harvested off its
   `Phrase::Define`s (`harvest_schemes`), which needs no tree walk since every
   phrase already carries its own — one pass behind both the build-time bake
   and a run's installs.
-- `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, PinFailure>`
-  — infers an alias arm under the runtime handler calling convention, pins it to
-  `head` (`Inferencer::pin_arm_to_head`), and closes it, for `install_alias` and
-  `WithinScope::parse` to store on a frame. A handler or alias arm is a
-  *fixed-arity lambda* — its calling convention is the surface form, not the
+- `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, Box<TypeError>>`
+  — infers an alias arm under the runtime handler calling convention, holds it
+  to what `head` stands in for (`Inferencer::stands_in`), and closes it, for
+  `install_alias` and `WithinScope::parse` to store on a frame. A handler or
+  alias arm is a *fixed-arity lambda* — its calling convention is the surface form, not the
   runtime value's shape, so `param` is non-optional and `infer_alias_arm` types
   the arm `Fun(List(elem), body)`, forcing it on the argv list
   ([[invariants/fixed-arity|fixed-arity]],
@@ -66,16 +65,12 @@ Entry points (`typecheck.rs`):
   Statically `infer_handler_comp` still types a non-`Lam` thunk (e.g. a computed
   `alias g $h`) by its bare body, binding it so `g x` is an arity mismatch
   rather than a silently discarded argument; the runtime install boundary is the
-  sole complete gate on shape. `head_pipe_route` yields a *known* head's
-  resolved route and a fresh variable for an unknown one, so reinterpreting a
-  known head with an incompatible route is the rejected failure while a fresh
-  alias defines its own.
+  sole complete gate on shape.
 
 The sorts split with CBPV:
 
 - value types `Ty` describe data;
-- computation types `CompTy` are `Return(PayloadRoute, Ty)`, `Fun(Ty, CompTy)`,
-  and `Var`;
+- computation types `CompTy` are `Return(Ty)`, `Fun(Ty, CompTy)`, and `Var`;
 - records are open-row-polymorphic ([[design/row-types|row-types]]: `Row` /
   `RowVar`).
 
@@ -85,24 +80,35 @@ monomorphic to keep generalisation sound.
 Internals:
 
 - `infer.rs` — the `Inferencer`; `infer_comp`;
-- `route_solver.rs` — the deferred arm-result join: owns
-  `InferCtx::route_constraints`, the only logic in the checker that decides a
-  join by casing on a route's groundness;
-- `unify.rs` — `Unifier`;
-- `route.rs` — the payload-route types, private to `typecheck`;
-- `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows), re-exporting
-  the route types from `route.rs`;
+- `index.rs` — the deferred reads `Lbl` (a bare label) and `Idx` (a computed key):
+  owns `InferCtx::pending_labels` and `pending_indexes` and their settlement.
+  A pending label is closed as a record at the boundary that owns it; an `Idx`'s
+  variables are weak, nothing settles it at a generalisation, and
+  `settle_pending_indexes` drains both at the unit's end and refuses what is left
+  (`IndexContainerUnknown`, T0075);
+- `unify.rs` — `Unifier`; binding refuses a cycle that crosses no data (`CyclicType`, T0073)
+  and a head its variable's kind does not admit (`KindMismatch`, T0074);
+  the weak set (`mark_weak`, inherited through `unite`), which `generalize.rs` subtracts,
+  `seed_env` re-seeds (`reseed_weak`) and `typecheck` settles (`settle_weak`);
+- `Site` (`core/src/types/site.rs`) — the type solved at a boundary call, frozen
+  at the unit's end by `InferCtx::snapshot_sites` and written onto the `Exec` by
+  `annotate`; the unifier keeps the span that first bound each variable so a
+  refusal can point at the use that imposed what the value met;
+- `kind.rs` — `Kind`: the closed set of predicates a type variable carries (`number`,
+  `comparable`, `scalar`, `sized`, `data`), their meet, and what a head is;
+- `capture.rs` — capture by syntax: `HeadClass`, `head_class`, `head_writes`,
+  `capture_sites`, and the `arm_writer` / `tail_writer` the join hint reads;
+- `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows);
 - `scheme.rs` — `Scheme`;
 - `error.rs` — the error taxonomy: `TypeError` / `TypeErrorKind`, with
-  constraint provenance as data (`Reason`, `CompDiff`), plus `PinFailure`, the
-  two ways an arm can fail to install under a head;
+  constraint provenance as data (`Reason`, `Standing`, `UnitCall`);
 - `explain.rs` — the single home of every user-facing type-checker sentence
   (hints and `TypeErrorKind::render_label`), a pure function of the error data
   so each message is unit-testable. Its wildcard-free `Reason` match gives each
   reason prose or deliberately lists it as hintless: the constraint's other
   side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
-  IR with schemes, pipeline yields, stage types, and `Capture` nodes;
+  IR with schemes, boundary sites, stage types, and `Capture`/`Decode` nodes;
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
 - `fmt.rs` — type display;
@@ -115,18 +121,19 @@ Internals:
   variant, one arm per kind (`command`, `write`, `read`, `grep`, `check`,
   `worker`, `act`), each its own closed record — so reading a fact's fields is
   ordinary row typing rather than a `Map` lookup [[design/audit|audit]];
-- `scope.rs` — the five structural scope nodes, and `check_declared_row`: the
-  one rule that holds a value's row to a declared table, whether that value is
-  a form's options or a contract file's return;
+- `scope.rs` — the five structural scope nodes, and `check_options`: the rule
+  that holds each written option of `within` and `grant` to a declared table,
+  key by key — unknown key T0076, refused key T0026, a clash at the key's own
+  sentence, a written catch-all arm checked in context;
 - `contract.rs` — the declared tables themselves (`within`, `grant`, the rc
   file, the plugin manifest), each a closed keyset whose labels are held at a
   ground type, left to their decoder, or refused with a sentence of their own.
-  It is the single registration point, so the runtime doors that read the same
+  `ascribe` holds a contract file's finished return to its table, after
+  inference and in a scratch copy of the unifier (unknown key T0076, not a
+  record T0077, and the row errors). It is the single registration point, so the runtime doors that read the same
   keysets — `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` —
-  dispatch off it rather than each keeping a copy; and it is where the one
-  condition a variable flag owes is checked, that no two tables name a label at
-  two types that will not unify — the door carrying order-independence
-  ([[decisions/260921_unitarity-lives-in-the-term-rules|unitarity-lives-in-the-term-rules]]).
+  dispatch off it rather than each keeping a copy. No table reaches the
+  unifier ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
 
 `infer.rs`'s `infer_case` is left whole by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Its one
@@ -135,71 +142,6 @@ helper: an arm is syntax, so typing one — bind its pattern, infer its body,
 force its payload to agree with the scrutinee at that label — is a judgment
 that stands alone
 ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-
-## The payload route
-
-`typecheck/route.rs` is a leaf module knowing nothing of `Ty`. It holds four
-types: `PayloadVar`, `PayloadRoute { Value, Bytes, Var }`, its resolved
-counterpart `GroundRoute { Value, Bytes }`, and `RouteMismatch`. All carry serde
-derives, because they ride inside a `Scheme` into the postcard-baked prelude.
-
-The module is private to `typecheck`, and `GroundRoute` is `pub(in
-crate::typecheck)`: routes cannot flow past annotation, because past annotation
-their names do not exist. `PayloadRoute`, `PayloadVar`, and `RouteMismatch`
-stay public — they are in `CompTy`, in `Scheme`, and in `Unifier`'s result, all
-of which host crates write against.
-
-`CompTy::Return(PayloadRoute, Box<Ty>)` is the whole annotation. The route says
-which of a computation's two independent products a *value boundary* reads — the
-evaluator's return or its stdout — and says nothing about whether stdout carries
-anything ([[design/types|types]]). `Unifier::unify_route` is one plain method
-demanding equality on ground routes; `CompTyKey::Return(PayloadRoute,
-Box<TyKey>)` carries it into the one-sided-obligation fingerprint, so two
-obligations differing only in route stay distinct
-([[decisions/260606_unify-one-sided-obligations|unify-one-sided-obligations]]).
-`Unifier::fresh_route` mints an open one; `InferCtx::ground` defaults a residual
-to `Value` at annotation time, the only defaulting site.
-
-A builtin's route is written into its scheme, and there is nowhere else to read
-it from. Most name `Value`; the divergent pair (`fail`, `exit`/`quit`) quantify
-a fresh route variable, since a divergent computation joins either side of a
-byte/value split. `ret_bytes()` builds the byte shape paired with `Ty::Unit`, so
-WF-2 holds structurally for every encoder, `help`, `explain`, and the terminal
-controls.
-`external_exec_comp_ty` (`infer.rs`) gives every external command
-`Return(Bytes, Unit)` for the same reason, and `echo`'s base-frame row states it
-in its own type, `List String -> Return(Bytes, Unit)`
-([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-
-`scheme::fold_lines` is the one hand-written route: it mints a single variable
-and uses it for both the callback's result and the reducer's, which is what
-makes `map-lines` / `filter-lines` / `each-line` (prelude wrappers over it) take
-their boundary behaviour from their callbacks. `spawn`, `watch`, and `service`
-forward a route off the thunk they are handed. No builtin mints a route for its
-*own* result: nothing but an alias pin could ever ground one.
-
-## WF-2, carried by the one byte computation
-
-`ρ = Bytes` implies a `Unit` return type. `PayloadRoute` and the value type
-are independent fields, so the rule is carried by its consequence: there is
-exactly one byte-routed computation type, `CompTy::bytes()` = `F[Bytes] Unit`
-(`ty.rs`, the dual of `CompTy::pure`), and landing on the byte side means
-unifying with it whole — no live code unifies a route against a detached
-`Bytes`:
-
-- `route_solver.rs`'s `conclude_byte_side` unifies each non-subsumed arm with
-  `CompTy::bytes()` when a join lands on the byte side, open arms included;
-- `infer.rs`'s `pin_arm_to_head` unifies the arm's value with `Unit` in the
-  same breath as a pin that lands on bytes, returning
-  `PinFailure::ByteHeadReturnsValue` rather than pinning a bare route and
-  discarding the value type.
-
-`alias_arm_scheme` refuses the install on either `PinFailure`;
-`handler_comp_scheme` reports instead, mapping `Route` onto
-`TypeErrorKind::RouteMismatch` (T0012) and `ByteHeadReturnsValue` onto a
-`CompTyMismatch` (T0011) whose one `CompDiff::ReturnType` names `Unit` against
-the arm's actual type, both under `Reason::HandlerRoutePin`. `HandlerEntry::vet`
-(`core/src/types/handler.rs`) renders both at the runtime install door.
 
 ## The argv rule, and the exec gate
 
@@ -226,11 +168,15 @@ sentence per shape
 ## The pipeline rule
 
 `infer_pipeline` (`infer.rs`) has no adjacency loop. It infers each stage,
-forces it to `Return` shape with `force_return_shape` under
-`Reason::PipelineStageShape`, records the stage's value type, and returns the
-final stage's `CompTy` unchanged. A stage typed `Fun` is a function still
-waiting for an argument; the hint says to apply it rather than pipe into it, or
-to read the incoming bytes with a decoder.
+forces it to ready `Return` shape with `force_ready_shape` under
+`Reason::PipelineStageShape`, records the stage's value type in
+`InferCtx::stage_types`, and returns the *final* stage's value as the
+pipeline's own. Every stage but the last must write (`stage_writes`): it is
+`F Unit`, and its head is no value row that returns (`Output::Returns`,
+boundaries and `fold-lines` included), refused under
+`Reason::PipelineStageWrites` (T0011), as is a value or block literal in stage
+position. A stage typed `Fun` is a function still waiting for an argument; the
+hint says to apply it rather than pipe into it.
 
 One further premise, about a stage's redirects rather than its type: past the
 first position, `stage_root_stdin_feed` reads the stage's root — an `Exec`'s
@@ -242,98 +188,142 @@ nothing inspects an `Ast` node to decide whether a pipeline is well formed — s
 an unforced block literal in stage position is an ordinary value-returning
 stage, accepted, and a read nested inside a stage is left alone.
 
-## The arm-result join
+## Capture by syntax
 
-`route_solver.rs` owns one constraint, `ArmResults` — a plain struct, not an
-enum — and `InferCtx::route_constraints` is its store. `join_arm_results` is the
-single emission point, reached through `merge_branches` (for `if`, a `?`
-fallback chain, and `case`) and `infer_try`. It first tries to *conclude*
-against the unifier's current state, applying the conclusion immediately when
-one exists — sound because a route only ever moves `Var → ground`, never back —
-and otherwise stores an open constraint and returns a fresh target route and
-value type.
+A command is a computation of type `F Unit`: it writes and returns nothing.
+`capture.rs` decides, before any type is inferred, which commands a `let`
+captures
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
-The join runs under the one subsumption instance `Value Unit ⊑ Bytes`: a
-byte-routed arm pulls the whole join onto the byte side and ties every arm's
-value to `Unit`; no byte arm and every arm ground `Value` pulls it onto the
-value side; any arm still open defers, even beside a ground
-`Value`-at-non-`Unit` arm, because that open arm may yet ground `Bytes` and the
-resulting conduit mismatch must be the join's own verdict.
+`HeadClass` (`head_class`) gives a bare head the class the runtime's lookup
+order gives it: `Binding`, `Value(entry)` (a builtin row), `Arm { handler,
+output }` (a handler or base frame standing in for a head), or `External`.
+`head_writes(name, args)` holds when the head is no binding and is either no
+value row or an `Output::Writes` row applied at its arity.
+`capture_sites(rhs)` is the walk `⟦·⟧`: it follows the positions a let's
+*result* comes from — an `Exec` that writes, a pipeline's final stage, the
+force of a literal thunk, a `Bind`'s `rest`, the literal-thunk arms of `if`,
+`case`, `try`, `within`, `grant` and `guard`'s body — and stops at `Capture`,
+`Redirect`, `App`, the force of a name, values, `Index`, `Interpolation` and
+`Audit`. `arm_writer` / `tail_writer` name the command an arm ends in, for the
+join hint below.
 
-The two sides fail differently, so each speaks in its own words. The three join
-reasons — `IfBranches`, `CaseArms`, `TryArms` (shared by `try` and `?`, which
-elaborates to nested `try`) — belong to the byte side, where a route really is
-in dispute and the remedy is a decoder tail. `conclude_value_side` unifies the
-arms' values under the value-side twin (`IfBranchValues`, `CaseArmValues`,
-`TryArmValues`, mapped by `route_solver.rs`'s `value_side`), whose text says
-the arms agree on where the payload lives and disagree on its type — and
-counsels no decoder, since there is no route there for one to move.
+`Inferencer::infer_held` (the `Bind` and `Phrase::Define` right-hand side)
+calls `capture_sites` first, recording each captured `Exec`'s address in
+`InferCtx::captured`. The `Exec` arm of `infer_comp` types the call `F Unit`,
+and for a recorded node `Inferencer::captured` unifies that with `F Unit` under
+`Reason::Capture` and answers `F String`.
 
-The store drains through two entry points, and ownership is the difference.
-`InferCtx::solve_at_boundary` runs at every in-inference point that produces a
-`Scheme` (`infer.rs`'s `Bind` let-generalisation, `infer_letrec`'s group
-fixpoint, and `handler_comp_scheme`) and solves only the constraints touching a
-route variable not free in the environment — the variables that boundary is
-about to quantify, computed by `generalize.rs::env_free_vars` over writable
-positions (`owned_by_env`); a constraint wholly owned by the environment is left
-untouched, neither collapsed nor retried, for its owning boundary.
-`InferCtx::solve_and_finalize` is the terminal drain — the end of `typecheck`
-before `annotate`, plus `alias_arm_scheme` and `binding_value_scheme`, which
-generalise against an empty environment — and collapses everything. Each drain
-retries to quiescence, since a conclusion can unblock a sibling, then collapses
-what it owns: ground-directed residues first (`collapse_ground`, following the
-grounded result's side with that side's full protocol), one at a time with the
-worklist re-run between. No constraint outlives the generalisation of its
-variables
-([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+`annotate.rs` is a plain structural rebuild (`annotate_comp`, `annotate_exec`).
+It wraps each recorded node through the one constructor `captured_string`,
+which builds `Capture(body) to x. Decode(x)` — `x` a fresh name from
+`InferCtx::fresh_name` — with the captured node's span on both the bind and
+the decode. `CompKind::Capture(body)` types as `F Bytes` with `body` unified
+to `F Unit`; `CompKind::Decode(val)` types as `F String` with `val` unified to
+`Bytes`. Both rules fire only when re-inferring a tree that already carries
+`annotate`-inserted nodes — a stored handler or thunk re-checked at a later
+install. Where a computation is held as a function of unknown arity,
+`eta_expand_arrow` η-expands it so every function-typed thunk's body is a
+syntactic `Lam`.
+
+## Arms and joins
+
+`{ … }` is a thunk in every position: `if` and `case` carry `Spanned<Val>`
+arms ([[map/core/ir|ir]]), and `check_arm` types the one it is handed against
+the type its form's arms share. `join_arms` (for `if`) and `infer_case` join
+arms by `unify_arm`, which unifies the *values* two `Return`s carry, so a
+disagreement is `T0010` / `T0020` between two values; `T0011` is left to a
+disagreement of shape, `Return` against `Fun`. The join reasons — `IfBranches`,
+`CaseArms`, `TryArms` (shared by `try` and `?`, which elaborates to nested
+`try`) — carry `writer: Option<String>`: when a join meets `()` against another
+type and the `()` arm's tail is a command, `explain.rs` adds the hint that
+says to capture it (`ls … | from-line`) or to print in both.
+
+`Inferencer::stands_in(name, arm)` holds an arm to the command it stands in
+for. `stands_for` is the scheme of the base frame or arm already in force
+under `name`, else `[String] → F Unit`; `Reason::StandsIn(Standing)` names
+which (`Standing::{Command, Own, EveryCommand}`). `catch_all_stands_in` is the
+same check for the catch-all `handler:`. `alias_arm_scheme`
+(`typecheck.rs`) and the free `catch_all_stands_in` apply them at the install
+door, and `HandlerEntry::vet` / `parse_catch_all` render the error through
+`types::refused_arm`.
 
 ## Display and diagnostics
 
-`fmt_comp_ty_ctx` (`fmt.rs`) renders `Return(Bytes, _)` as
-`Command captured from stdout` and every other `Return` as `Command A`, so a
-stdout-captured command and a command returning a first-class `Bytes` never
-differ by punctuation alone. Open variant rows mark their tail with the same
-backtick as their arms (``[`...]`` / ``[`...ρ]``), while record tails stay
-`[...]` / `[...ρ]`. An open route prints as nothing inside a `Command` type;
-`fmt_route` / `fmt_route_ctx` print one on its own, which the mismatch
-renderer is the only caller of — and the reason `absorb_comp` absorbs the route
-into the shared variable-letter table, so two types sharing a route variable
-give it a consistent letter. `fmt_scheme` does not quantify routes.
+`fmt_comp_ty_ctx` (`fmt.rs`) renders `Return(A)` as `Command A`; a block that
+prints is `{Command Unit}`, one that returns text `{Command String}`. Open
+variant rows mark their tail with the same backtick as their arms
+(``[`...]`` / ``[`...ρ]``), while record tails stay `[...]` / `[...ρ]`.
 
-`CompDiff` has two variants, `Route` and `ReturnType`. `TypeErrorKind::
-RouteMismatch` is T0012, raised only at handler and alias pins, and reads that
-the two computations disagree about where their payload lives.
+`TypeErrorKind::CompTyMismatch { expected, actual }` is T0011, with
+`CommandNotFunction`; T0012 is retired and never renumbered. The two
+constraint notes beyond the join hint are data on the error: `Reason::
+PipelineStageWrites { stage, next }` (T0011) says a stage feeds the next by
+writing, and `TypeError.unit` (`UnitCall`, recorded by `note_unit_read` from
+`TyEnv::note_called` / `InferCtx::unit_reads`) says that a name `let` bound to
+what a call returned is `()`, and what to write instead. `()` is neither a word
+nor an interpolant (kind `scalar`, `RefusedArg::Unit`).
 
-## Capture insertion
+`docs/SPEC.md` has the typing judgments.'''
 
-`CompKind::Capture(body)` types through `Inferencer::infer_comp`: its own route
-grounds `Value`, its value type is `Bytes` — and `body`'s extracted value
-unifies with `Unit`, WF-2 as a typing rule rather than a runtime assert in
-`eval_capture`. `body`'s route is left free: a join arm subsumed at `Value Unit`
-reaches `Capture` too (`Wrap`, below), and constraining the route would refuse
-it. `CompKind::Decode(val)` is the reading step, and its value type is
-`String`; the kernel's `decode` takes a value, so `val` is the variable the
-enclosing bind captured from `Capture`, and its type unifies with `Bytes` —
-the shape `Capture`'s own rule already guarantees, demanded rather than
-assumed. Both rules fire only when re-inferring a tree that already carries
-`annotate`-inserted nodes — a stored handler or thunk re-checked at a later
-install.
+pipe_rule = '''## The pipeline rule
 
-`annotate.rs` inserts the coercion during its write-back walk, as demand
-propagation, through the one constructor `captured_string`, which builds
-`Capture(body) to x. Decode(x)` — `x` a fresh name from `InferCtx::fresh_name`
-— with the captured node's span on both the bind and the decode, so no name
-is resolved and the binder is invisible where the checker composes them
-([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
-A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`'s
-right-hand side, each arm of an `If`, `Try`, or `Case`, and the body of a
-force of a syntactic thunk.
-Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
-`annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
-decides how a join arm is rebuilt; `Wrap` is the subsumption instance, wrapping
-a whole `Value`-at-`Unit` arm so its capture contributes the empty string.
-`annotate_join_arm` dispatches a `Comp` arm this way, and every `Case` arm is
-one, since arms are syntax. An opaque scope arm has no arm syntax to wrap, so
-`eta_expand_captured` η-expands it instead.
+`infer_pipeline` (`infer.rs`) has no adjacency loop. It infers each stage,
+forces it to ready `Return` shape with `force_ready_shape` under
+`Reason::PipelineStageShape`, records the stage's value type in
+`InferCtx::stage_types`, and returns the *final* stage's value as the
+pipeline's own. Every stage but the last must write (`stage_writes`): it is
+`F Unit`, and its head is no value row that returns (`Output::Returns`,
+boundaries and `fold-lines` included), refused under
+`Reason::PipelineStageWrites` (T0011), as is a value or block literal in stage
+position. A stage typed `Fun` is a function still waiting for an argument; the
+hint says to apply it rather than pipe into it.'''
 
-`docs/SPEC.md` has the typing judgments.
+# sections
+out = []
+out += seg(1,1)
+out += ['generated_at_commit: 8d868e18','generated_at_date: 2026-09-30']
+out += seg(4,21)
+out += ['''  writes two things onto the rebuilt IR: a generalised `Scheme` per name a
+  `Phrase::Define` binds — landed on its own phrase, not a shared spine —
+  resolved against the final unifier and closed by quantifying its
+  residuals, that is, generalised against the empty environment; and a
+  `Capture`/`Decode` pair around each command the checker recorded as
+  captured ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value
+  type in `InferCtx::stage_types`, keyed by stage address, and `annotate`
+  resolves them against the final unifier. The stage types are
+  typing metadata for the structural REPL, not a transport channel — the
+  evaluator never reads them, so an un-annotated stage keeps the elaborator's
+  `Unit` placeholder without harm. A pipeline's value is its final stage's, so
+  there is nothing per-pipeline to annotate
+  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).'''] 
+out += seg(37,60)
+out += ['''- `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, Box<TypeError>>`
+  — infers an alias arm under the runtime handler calling convention, holds it
+  to what `head` stands in for (`Inferencer::stands_in`), and closes it, for
+  `install_alias` and `WithinScope::parse` to store on a frame. A handler or
+  alias arm is a''']
+out += seg(65,72)
+out += ['''  sole complete gate on shape.''']
+out += seg(77,80)
+out += ['- computation types `CompTy` are `Return(Ty)`, `Fun(Ty, CompTy)`, and `Var`;']
+out += seg(82,97)
+out += seg(101,110)
+out += ['''- `capture.rs` — capture by syntax: `HeadClass`, `head_class`, `head_writes`,
+  `capture_sites`, and the `arm_writer` / `tail_writer` the join hint reads;
+- `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows);
+- `scheme.rs` — `Scheme`;
+- `error.rs` — the error taxonomy: `TypeError` / `TypeErrorKind`, with
+  constraint provenance as data (`Reason`, `Standing`, `UnitCall`);''']
+out += seg(118,122)
+out += ['''- `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
+  IR with schemes, boundary sites, stage types, and `Capture`/`Decode` nodes;''']
+out += seg(125,158)
+out += seg(224,245)
+out += ['']
+out += pipe_rule.split('\n')
+out += ['']
+out += seg(255,263)
+out += ['']
+out += tail_arm_join.split('\n')
+open('typecheck.md','w').write('\n'.join(out)+'\n')

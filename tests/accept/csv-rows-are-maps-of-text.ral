@@ -1,0 +1,5 @@
+let rows = !{to-string "a,b\n1,2\n3,4\n" | from-csv}
+let kept = !{filter { |r| return $[$r[a] == '1'] } $rows}
+to-csv $kept
+let shouted = upper $rows[0][b]
+to-csv [[:, a: $shouted]]

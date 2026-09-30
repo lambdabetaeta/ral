@@ -1,3 +1,2 @@
-# contains: couldn't match
-# contains: the catch-all `handler:` stands in for every external command
+# contains: `within` takes its options written in its own bracket
 let o = [handler: { |n a| return "x" }]; within $o { zzz }

@@ -69,7 +69,8 @@ pub struct Audit {
     /// dispatch.  `step_exec` in `evaluator::machine` skips the write for
     /// `_`-prefixed names, so a prelude wrapper's observations name the
     /// user's call rather than the wrapper's; `IoLoan` in `crate::run` clears
-    /// the register per run and restores it on drop.
+    /// the register per run and restores it on drop.  A redirect runs its own
+    /// steps under its span (`Shell::at_site`), restoring this on exit.
     pub(crate) call_site: Option<Span>,
 }
 

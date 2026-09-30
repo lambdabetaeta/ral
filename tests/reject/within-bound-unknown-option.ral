@@ -1,3 +1,0 @@
-# contains: dirr
-# contains: `within` takes these options, each written by name: dir, env, handler
-let o = [dirr: "x"]; within $o { return "ok" }

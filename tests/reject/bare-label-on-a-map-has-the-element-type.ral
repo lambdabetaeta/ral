@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: String
+let m = [:, a: 'x']
+let n = $[$m[a] + 1]

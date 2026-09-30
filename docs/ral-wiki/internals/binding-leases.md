@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 74f7d546
-verified_at_date: 2026-09-26
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
 anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
@@ -80,7 +80,7 @@ transient frame.
 What it does not do: it never touches a closure, so it frees a value's bytes
 only when no live closure mentions its name, and it never tells the
 model anything at prune time — the only model-visible consequence is an
-ordinary `undefined variable` if the model names the binding again, with the
+ordinary `undefined variable` diagnostic, refused before it runs, if the model names the binding again, with the
 paper trail waiting in `record.jsonl`'s `Notice::Prune` commit.
 
 ## The capture scenario, worked

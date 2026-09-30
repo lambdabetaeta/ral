@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c56db236
-generated_at_date: 2026-09-25
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -62,8 +62,8 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   production shell is unrepresentable. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
   (`boot::bake_prelude_to_out_dir`) and single decode site
-  (`boot::BakedPrelude`) sit beside one `cargo:rerun-if-changed` shape-file
-  list, so the schema-evolution hazard is one list rather than three that must
+  (`boot::BakedPrelude`) sit together, and the build-dependency edge from each
+  host to `ral-core` reruns the bake, so the schema-evolution hazard has one guard rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `host` probes the underlying machine: `git()`, `os_name`/`arch`/`family`,
@@ -81,8 +81,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/ir|ir]] — the `Val` / `Comp` intermediate representation
   (`core/src/ir.rs`).
 - [[map/core/typecheck|typecheck]] — Hindley–Milner inference with row types
-  (`core/src/typecheck/`), the sole inference engine; the payload-route types in
-  `route.rs` are covered by the same page.
+  (`core/src/typecheck/`), the sole inference engine, including capture by
+  syntax (`capture.rs`).
 - [[map/core/evaluator|evaluator]] — the CEK machine over computation closures:
   focus, frame stack, matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the

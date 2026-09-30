@@ -14,8 +14,7 @@ echo "hello $name"
 echo "line one\nline two"
 # Expected: line one (newline) line two
 
-# Multi-line literal.  Named `stanza`, not `msg`: ral keeps value and
-# command names disjoint, and Windows ships `msg.EXE` on PATH.
+# Multi-line literal
 let stanza = 'first
 second
 third'
@@ -33,7 +32,7 @@ echo "she said \"hello\""
 echo "price: \$5"
 # Expected: price: $5
 
-# Interpolating unit prints its literal
+# Unit is nothing to interpolate; `str` renders its literal
 let uu = ()
-echo "val: $uu end"
+echo "val: !{str $uu} end"
 # Expected: val: () end

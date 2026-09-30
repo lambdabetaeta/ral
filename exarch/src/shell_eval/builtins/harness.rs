@@ -24,12 +24,13 @@ use crate::fleet::enquiry::{
 use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
 use ral_core::typecheck::builtins::{
-    closed_record, fun, mk_scheme as scheme, open_record, open_variant, pure, thunk,
+    closed_record, closed_variant, fun, mk_scheme as scheme, open_variant, pure, thunk,
 };
-use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
+use ral_core::typecheck::{Kind, Row, RowVar, Scheme, Ty, TyVar, Unifier};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, Site, sig};
 use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 const AGENTS: &str = "exarch-agents";
 
@@ -62,9 +63,39 @@ fn builtin_family<F: Family>(
     ask(&verb, request.request(), mooring, shell)
 }
 
+/// A host's answer let into the program: a family whose answer is not one fixed
+/// shape leaves its type to the script, and the site says what the script made
+/// of it.
+fn admitted(verb: &str, site: &Site, answer: Value, shell: &Shell) -> Settled<Value> {
+    site.admit(&answer)
+        .map_err(|mismatch| mismatch.refusal(verb, shell))?;
+    Ok(answer)
+}
+
+/// [`builtin_family`] for a family whose answer is the script's to decide.
+fn boundary_family<F: Family>(
+    args: &[Value],
+    site: &Arc<Site>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    let answer = builtin_family::<F>(args, mooring, shell)?;
+    admitted(&format!("exarch-{}", F::CLASS), site, answer, shell)
+}
+
 /// `exarch-agents <tag>`: `` `start `` forks before it enquires, every other
 /// tag is one enquiry.
-fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_agents(
+    args: &[Value],
+    site: &Arc<Site>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    let answer = agents(args, mooring, shell)?;
+    admitted(AGENTS, site, answer, shell)
+}
+
+fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     match Word::decode(&first_order(AGENTS, &args[0])?).map_err(sig)? {
         Word::Ask(request) => ask(AGENTS, Request::Agents(request), mooring, shell),
         Word::Spawn(spec) => {
@@ -172,10 +203,24 @@ fn hatch_over_the_wire(
 }
 
 fn scheme_branch(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    scheme(&[], &[], thunk(pure(Ty::Unit)))
 }
 
-/// `exarch-agents :: ∀α β ρ1 ρ2 ρ3 ρ4 ρ5. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
+/// A family door's scheme.  `first_order` refuses a block or handle at any
+/// depth of the argument, so the type variables the argument mentions are
+/// data and its row variables deep; `answers` are the result's, which the
+/// door admits against what it sent.
+fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
+    let vars: Vec<_> = data
+        .iter()
+        .map(|&v| (v, Kind::DATA))
+        .chain(answers.iter().map(|&v| (v, Kind::ANY)))
+        .collect();
+    let rows: Vec<_> = rows.iter().map(|&v| (v, true)).collect();
+    scheme(&vars, &rows, ty)
+}
+
+/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d ρ5^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
 ///
 /// The outer tag row is open (`ρ5`) so an unrecognised tag reaches the
 /// runtime door that names the six legal ones, rather than dying as a
@@ -207,9 +252,9 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
     let tag_row = u.fresh_row_var();
     let reply_ty = u.fresh_tyvar();
     let answer_ty = u.fresh_tyvar();
-    scheme(
-        &[reply_ty, answer_ty],
-        &[],
+    door(
+        &[reply_ty],
+        &[answer_ty],
         &[type_row, grant_row, provider_row, model_row, tag_row],
         thunk(fun(
             open_variant(
@@ -262,7 +307,7 @@ fn schedule_row_ty() -> Ty {
 fn scheme_schedules(u: &mut Unifier) -> Scheme {
     let trigger_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
-    scheme(
+    door(
         &[],
         &[],
         &[trigger_row, tag_row],
@@ -287,30 +332,34 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `exarch-pins :: ∀β α ρ1 ρ2. <set [key: Str, body: β] | clear Str | read Str | list | ρ2> → F α`
+/// `exarch-pins :: ∀α ρ1^d ρ2^d. <set [key: Str, body: <| ρ1>] | clear Str | read Str | list | ρ2> → F α`
 ///
 /// Same shape as [`scheme_agents`]: the outer tag row is open (`ρ2`) so an
 /// unrecognised tag reaches the door, and `set`'s record row is closed since
-/// a record literal infers an exact one. `body`'s `β` is left to the door,
-/// which judges whether it is a card. `` `read ``'s
+/// a record literal infers an exact one. `body` is an open variant, the card
+/// type `surface_op` takes, with a deep row: the label check stays
+/// `Card::decode`'s, so one door owns it. `` `read ``'s
 /// answer is `α`, the `from-json`/`` `read `` precedent
 /// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
 /// checked, since only the desk's own decoder can judge whether the card
 /// read back matches the shape it expects.
 fn scheme_pins(u: &mut Unifier) -> Scheme {
-    let body_ty = u.fresh_tyvar();
+    let card_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     let answer_ty = u.fresh_tyvar();
-    scheme(
-        &[body_ty, answer_ty],
+    door(
         &[],
-        &[tag_row],
+        &[answer_ty],
+        &[card_row, tag_row],
         thunk(fun(
             open_variant(
                 &[
                     (
                         "set",
-                        closed_record(&[("key", Ty::String), ("body", Ty::Var(body_ty))]),
+                        closed_record(&[
+                            ("key", Ty::String),
+                            ("body", Ty::Variant(Row::Var(card_row))),
+                        ]),
                     ),
                     ("clear", Ty::String),
                     ("read", Ty::String),
@@ -343,35 +392,38 @@ fn context_receipt_ty() -> Ty {
     ])
 }
 
-/// `exarch-context :: ∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
+/// `exarch-context :: ∀ρ. <survey | evict [turns: [Int], note: <none | some Str>] | ρ> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
 /// tag row so an unknown tag reaches the door naming the two legal ones.
 ///
-/// `evict`'s record row anchors `turns` — the address is the edit, so there
-/// is nothing optional about it — and stays open on `ρ1` because `note` is
-/// optional and a closed row cannot say so; the door refuses a `note` of the
-/// wrong type, or an empty, oversized, or multi-line one — a required `note`
-/// would invite `''`, and a marker
-/// reading `Your note at eviction: ""` is a defect.
+/// `evict`'s record is closed: `note` is `` `none `` or `` `some Str ``, so
+/// absence is data rather than a missing key. The door refuses an empty,
+/// oversized, or multi-line `` `some `` — a marker reading
+/// `Your note at eviction: ""` is a defect.
 ///
 /// One answer for both tags: an edit changes what is addressable, so the
 /// survey the transition leaves behind is what the next edit must be written
 /// against.
 fn scheme_context(u: &mut Unifier) -> Scheme {
-    let evict_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
-    scheme(
+    door(
         &[],
         &[],
-        &[evict_row, tag_row],
+        &[tag_row],
         thunk(fun(
             open_variant(
                 &[
                     ("survey", Ty::Unit),
                     (
                         "evict",
-                        open_record(&[("turns", Ty::List(Box::new(Ty::Int)))], evict_row),
+                        closed_record(&[
+                            ("turns", Ty::List(Box::new(Ty::Int))),
+                            (
+                                "note",
+                                closed_variant(&[("none", Ty::Unit), ("some", Ty::String)]),
+                            ),
+                        ]),
                     ),
                 ],
                 tag_row,
@@ -381,9 +433,9 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `exarch-transcript :: ∀α ρ2 ρ3. <index | read [turns: [Int]] | grep [pattern: Str | ρ2] | ρ3> → F α`
+/// `exarch-transcript :: ∀α ρ. <index | read [turns: [Int]] | grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`
 ///
-/// The outer tag row is open (`ρ3`) so an unrecognised tag reaches the
+/// The outer tag row is open (`ρ`) so an unrecognised tag reaches the
 /// runtime door that names the three legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
@@ -395,16 +447,15 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
 ///
 /// `read`'s record is closed: its one field is the address it reads, so a
 /// misspelling is a type error rather than a call that reaches the host
-/// naming nothing. `grep`'s row is open on `ρ2`, since `turns` narrows it
-/// and `pattern` alone is required, and a closed row cannot say so.
+/// naming nothing. `grep`'s is closed too: `turns` is `` `all `` or `` `only [Int] ``, so
+/// absence is data.
 fn scheme_transcript(u: &mut Unifier) -> Scheme {
-    let grep_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     let answer_ty = u.fresh_tyvar();
-    scheme(
-        &[answer_ty],
+    door(
         &[],
-        &[grep_row, tag_row],
+        &[answer_ty],
+        &[tag_row],
         thunk(fun(
             open_variant(
                 &[
@@ -413,7 +464,19 @@ fn scheme_transcript(u: &mut Unifier) -> Scheme {
                         "read",
                         closed_record(&[("turns", Ty::List(Box::new(Ty::Int)))]),
                     ),
-                    ("grep", open_record(&[("pattern", Ty::String)], grep_row)),
+                    (
+                        "grep",
+                        closed_record(&[
+                            ("pattern", Ty::String),
+                            (
+                                "turns",
+                                closed_variant(&[
+                                    ("all", Ty::Unit),
+                                    ("only", Ty::List(Box::new(Ty::Int))),
+                                ]),
+                            ),
+                        ]),
+                    ),
                 ],
                 tag_row,
             ),
@@ -425,11 +488,11 @@ fn scheme_transcript(u: &mut Unifier) -> Scheme {
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
 static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
-    BuiltinEntry::new(
+    BuiltinEntry::boundary(
         Cow::Borrowed("exarch-agents"),
         scheme_agents,
-        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, detach, editor, shell); note that this may only restrict authority, not expand it. `search` states whether the child may use web search. `provider` and `model` control the inference provider and model: `inherit share your own (default), and `named specify a different one.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name> — stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
-        BuiltinBody::Static(builtin_agents),
+        "exarch-agents <tag>  — agent control: `list extant agents, `start a new one, `message them, `cancel them, `reply to your parent, `read the reply of a descendant.\n\nexarch-agents `list: every extant agent (including yourself), along with their `spawner` (or `root). `state` is `busy while working, `waiting-on-agents while held only by a descendant, `replied, or `waiting if it is parked but has not replied. `idle-s` is seconds since it parked.\n\nexarch-agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch an agent, asynchronously; a reply will arrive later as a notice. An agent with an `amnemon` `type` starts with an empty context, while `mnemon` inherits yours (also reusing cache). Every new agent has the same bindings, cwd, and env as you, except live job handles. `prompt` is the agent's prompt, and can be computed as part of a ral script. `name` is the child's identity (non-empty, at most 24 characters, unique, ASCII only). `grant` controls permissions: `inherit (same as your authority), `confined (offline, no home reads), `read-only (may write to scratch), `edit-only (edits the cwd, no build tooling), `reasonable (everyday tooling), or `restrict <record>, which takes a capability record of the same shape as `grant [...]` (exec, fs, net, detach, editor, shell); note that this may only restrict authority, not expand it. `search` states whether the child may use web search. `provider` and `model` control the inference provider and model: `inherit shares your own, and `named specifies a different one.\n\nexarch-agents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the agent named `to`.\n\nexarch-agents `cancel <name> — stop a descendant agent as soon as possible.\n\nexarch-agents `reply <value>  — hand `value` back to your parent agent. `value` must be first-order data (no blocks, handles, or environments).\n\nexarch-agents `read <name>  — fetch the value the descendant named `name` last handed to `reply, as [name: Str, reply: <value>].",
+        builtin_agents,
     ),
     BuiltinEntry::new(
         Cow::Borrowed("exarch-schedules"),
@@ -437,23 +500,23 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
         "exarch-schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nexarch-schedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nexarch-schedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nexarch-schedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_family::<Schedules>),
     ),
-    BuiltinEntry::new(
+    BuiltinEntry::boundary(
         Cow::Borrowed("exarch-pins"),
         scheme_pins,
-        "exarch-pins <tag>  — your register of pinned state: a small set of named slots that outlive any one exchange. `set` writes a slot, `clear` empties one, `read` fetches a slot back, `list` names every occupied one. Reads and writes your own register only.\n\nexarch-pins `set [key: <Str>, body: <card>]  — overwrite the register slot named `key` with `body`, a `card [...]` value (or one of its marks bare, e.g. `text [...]`).\n\nexarch-pins `clear <key>  — empty the register slot named `key`. Clearing an already-empty slot is not an error.\n\nexarch-pins `read <key>  — the card currently pinned under `key`, as a `card value you can destructure, or () if the slot is empty.\n\nexarch-pins `list  — the keys currently occupied on your register, as [String]. Read one back with `read`.\n\nEach tag is one exchange with the host. Answered only on the run that calls it: inside spawn { … } this errors.",
-        BuiltinBody::Static(builtin_family::<Pins>),
+        "exarch-pins <tag>  — your register of pinned state: a small set of named slots that outlive any one exchange. `set` writes a slot, `clear` empties one, `read` fetches a slot back, `list` names every occupied one. Reads and writes your own register only.\n\nexarch-pins `set [key: <Str>, body: <card>]  — overwrite the register slot named `key` with `body`, a `card [...]` value (or one of its marks bare, e.g. `text [...]`).\n\nexarch-pins `clear <key>  — empty the register slot named `key`. Clearing an already-empty slot is not an error.\n\nexarch-pins `read <key>  — `some` the card currently pinned under `key`, as a `card value you can destructure, or `none if the slot is empty.\n\nexarch-pins `list  — the keys currently occupied on your register, as [String]. Read one back with `read`.\n\nEach tag is one exchange with the host. Answered only on the run that calls it: inside spawn { … } this errors.",
+        boundary_family::<Pins>,
     ),
     BuiltinEntry::new(
         Cow::Borrowed("exarch-context"),
         scheme_context,
-        "exarch-context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `exarch-context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\nexarch-context `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line, or of the `description` its first tool call declared where no prose opened one; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\nexarch-context `evict [turns: [Int], note: Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is optional; if given it is one line of at most 240 bytes and appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `exarch-transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "exarch-context <tag>  — the context: the messages the provider is sent on your next request, as a list of turns. A turn is either a user turn — a prompt, or an import's opening — or an assistant turn — one assistant message, the tool results it called for, and any steering delivered before the next request. Turn ids are minted in one increasing sequence per lineage and never reused; every tool result ends with `TURN: <id>`, the id of the assistant turn it closes, and `exarch-context `survey` lists the rest. Every tag answers the survey after it has acted: [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int].\n\nexarch-context `survey  — acts on nothing. `rows` is one row per turn in the context, oldest first: `id` the turn's id; `role` `user` or `assistant`; `kind` `own` (recorded by this session), `import` (a note the harness imported, e.g. on resume), or `inherited` (recorded by an ancestor before you were forked); `label` the first 50 characters of the turn's first line, or of the `description` its first tool call declared where no prose opened one; `bytes` the serialised size of the turn's messages. `total-bytes` is the serialised size of what is actually sent — the resident turns plus every marker — and is the figure to weigh against the provider's context window.\n\nexarch-context `evict [turns: [Int], note: `none|`some Str]  — removes the named turns from the context. `turns` is a list of turn ids in any order, repeats ignored; `!{range 41 44}` is [41, 42, 43]. Refused, naming the turn: an id never recorded; an id that has already left; the id of the turn being written now, i.e. the assistant turn whose result this call is part of. Kept silently: a user turn while any assistant turn answering it — the assistant turns between it and the next user turn — is in the context and not named; a set left empty by this rule is refused. Every other named turn leaves at once, wherever it lies. Where a run of consecutive turns has left, the context carries one marker in their place stating which turns left, one line per turn (id, role, label, KB; at most 40 lines per marker, older ones collapsed to a count), the note of the eviction that took them, and how to read them back. `note` is `none for no note, or `some with one line of at most 240 bytes, which appears verbatim in that marker. Evicted turns remain in the transcript and are readable with `exarch-transcript `read`. Cost: the provider's cache holds only the prefix before the earliest change, so the next request re-reads everything from the first evicted turn onward.\n\nWhen the context nears the provider's window, the harness evicts the oldest turns itself at the next turn boundary, without a note; as the context grows into the reserve before that point you are warned once, at a tool boundary, naming the turns the cut would take. Making that cut yourself is how a note gets attached.\n\nEach tag is one exchange with the host, and the survey it answers is the context as it stands once the transition has landed; an eviction lands at the desk immediately and is recorded. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_family::<Context>),
     ),
-    BuiltinEntry::new(
+    BuiltinEntry::boundary(
         Cow::Borrowed("exarch-transcript"),
         scheme_transcript,
-        "exarch-transcript <tag>  — the complete record of this session, including turns that have been evicted from the context. Turns are specified as a list (e.g. `!{range 41 44}` or [41, 42, 43]). `exarch-context `survey` and `exarch-transcript `index` show the ids.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn in order. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. A message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — a binary attachment's metadata (not the content); `custom [provider: Str, model: Str] — a provider extension's identity. \n\nexarch-transcript `grep [pattern: Str, turns: [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern` (a Rust regex). `turns` is optional; absent, every recorded turn is searched. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.",
-        BuiltinBody::Static(builtin_family::<Transcript>),
+        "exarch-transcript <tag>  — the complete record of this session, including turns that have been evicted from the context. Turns are specified as a list (e.g. `!{range 41 44}` or [41, 42, 43]). `exarch-context `survey` and `exarch-transcript `index` show the ids.\n\nexarch-transcript `index  — [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]], every recorded turn in order. The first five fields are the survey's; `held` is `resident` (in the context) or `evicted` (left it).\n\nexarch-transcript `read [turns: [Int]]  — [[turn: Int, role: Str, messages: [Message]]], one element per named turn in id order, each turn's messages exactly as the provider was sent them. A message is [role: `system|`user|`assistant|`tool, parts: [Part]]. A Part is one of: `text [content: Str]; `program [tool: Str, source: Str, keys: [Str]] — a tool call, where for the ral tool `source` is the script and `keys` is empty, and for any other tool `source` is empty and `keys` names its arguments; `result [content: Str] — a tool result as the model saw it; `reasoning [content: Str] — reasoning in full; `binary [content-type: Str, name: Str, bytes: Int] — a binary attachment's metadata (not the content); `custom [provider: Str, model: Str] — a provider extension's identity. \n\nexarch-transcript `grep [pattern: Str, turns: `all|`only [Int]]  — [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]: every line of every message in the searched turns matching `pattern` (a Rust regex). `turns` is `all to search every recorded turn, or `only followed by the list of turns to search. `hits` holds at most the 100 oldest matches, each `text` clipped to 200 bytes, `line` 1-based within its message; `total` is the count of all matches. `role` is the message's role.",
+        boundary_family::<Transcript>,
     ),
     BuiltinEntry::new(
         Cow::Borrowed("_exarch-branch"),
@@ -1110,8 +1173,11 @@ mod tests {
         );
     }
 
-    /// The refusal is an ordinary call error, not a termination: a later,
-    /// well-formed `` exarch-agents `reply `` still succeeds.
+    /// A block in the argument is refused statically (`data`, T0074), and the
+    /// refusal is an ordinary error, not a termination: a later, well-formed
+    /// `` exarch-agents `reply `` still succeeds.  The door's own `first_order`
+    /// check stays as the conversion it is — `FOValue::try_from` is fallible —
+    /// but no ral program reaches it with a block.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
@@ -1120,8 +1186,8 @@ mod tests {
 
         let (result, _) = session.ral(r"exarch-agents `reply { echo hi }", 5, &emit);
         assert!(
-            result.contains("first-order"),
-            "must name the first-order rule, got: {result}"
+            result.contains("T0074") && result.contains("data"),
+            "must be refused statically as non-data, got: {result}"
         );
 
         let (ok, _) = session.ral(r"exarch-agents `reply 42", 5, &emit);
@@ -1233,10 +1299,56 @@ mod tests {
         );
     }
 
-    /// An absent key answers `Unit`, which crosses to the parent as `reply`'s
-    /// empty rendering.
+    /// A child's reply is checked where the parent reads it: a field the
+    /// script projects and the reply lacks fails at the `` `read ``, naming
+    /// the pointer, and not at a later step that would use it.
     #[test]
-    fn pin_read_full_stack_absent_key_replies_unit() {
+    fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r"exarch-agents `reply [note: 'all fine']",
+                )]),
+            ),
+        ));
+        session.provider_handle().swap(provider);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+
+        session.ral(r"exarch-agents `start [prompt: #'reply without a verdict'#, name: 'lazy', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]",
+            5,
+            &emit,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(
+            session.next_item_for_test(),
+            Some(crate::bus::Item::Agent(_))
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not settle within the timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let (result, _) = session.ral(
+            "let r = exarch-agents `read 'lazy'\necho $r[reply][verdict]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.contains("exarch-agents: the value at `/reply` has no field `verdict`"),
+            "the read must refuse a reply missing what the script projects, got: {result}"
+        );
+    }
+
+    /// An absent key answers `` `none ``, which crosses to the parent as the
+    /// reply.
+    #[test]
+    fn pin_read_full_stack_absent_key_replies_none() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
@@ -1284,8 +1396,8 @@ mod tests {
 
         let (read, _) = session.ral(r"exarch-agents `read 'reader'", 5, &emit);
         assert!(
-            read.contains("reply: ()"),
-            "an absent key must reply unit, got: {read}"
+            read.contains("reply: `none"),
+            "an absent key must reply `none, got: {read}"
         );
     }
 
@@ -1438,6 +1550,42 @@ mod tests {
         );
     }
 
+    /// `` exarch-tasks `load `` decodes a file inside a stored function, so its
+    /// decoder's site lives in the library's own IR: a list saved and loaded
+    /// back passes that site, statuses and tags included.
+    #[test]
+    fn a_saved_task_list_loads_back_through_its_decoder_site() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let path = std::env::temp_dir().join(format!("tasks-{}.json", std::process::id()));
+
+        session.ral(r#"exarch-tasks `add "keep me""#, 5, &emit);
+        session.ral(r#"exarch-tasks `tag [id: 1, tag: "urgent"]"#, 5, &emit);
+        session.ral("exarch-tasks `status [id: 1, status: `doing]", 5, &emit);
+        let (saved, _) = session.ral(
+            &format!(r#"exarch-tasks `save "{}""#, path.display()),
+            5,
+            &emit,
+        );
+        assert!(!saved.contains("denied"), "the save must land, got: {saved}");
+        session.ral(r#"exarch-pins `clear "tasks""#, 5, &emit);
+        let (loaded, _) = session.ral(
+            &format!(r#"exarch-tasks `load "{}""#, path.display()),
+            5,
+            &emit,
+        );
+        let (listed, _) = session.ral("exarch-tasks `list", 5, &emit);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            !loaded.contains("the value"),
+            "the decode must admit what save wrote, got: {loaded}"
+        );
+        for field in ["keep me", "urgent", "`doing"] {
+            assert!(listed.contains(field), "missing {field} in: {listed}");
+        }
+    }
+
     /// `tasks-sync` clears the slot once no work remains: transitioning the
     /// last open task to `` `done `` empties the pin, and a later `` exarch-tasks `add ``
     /// finds no register and restarts id allocation at 1.
@@ -1452,8 +1600,8 @@ mod tests {
 
         let (read, _) = session.ral(r#"exarch-pins `read "tasks""#, 5, &emit);
         assert!(
-            !read.contains("VALUE:"),
-            "an all-done list must clear the pin to unit, got: {read}"
+            read.contains("`none") && !read.contains("`some"),
+            "an all-done list must clear the pin to `none, got: {read}"
         );
 
         session.ral(r#"exarch-tasks `add "fresh""#, 5, &emit);
@@ -1519,18 +1667,42 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let (result, _) = session.ral("exarch-context `evict [turn: [1]]", 5, &emit);
+        let (result, _) = session.ral("exarch-context `evict [turn: [1], note: `none]", 5, &emit);
         assert!(
             !result.contains("EXIT: 0") && result.contains("turns"),
             "the diagnostic must name the field the row demands, got: {result}"
         );
     }
 
+    /// Absence is a variant, so the calls that leave a key out or pass a bare
+    /// value in its place are type errors naming the key.
+    #[test]
+    fn absence_is_spelled_with_its_variant() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        for (call, key) in [
+            ("exarch-context `evict [turns: [1]]", "note"),
+            ("exarch-context `evict [turns: [1], note: 'x']", "note"),
+            ("exarch-transcript `grep [pattern: 'x']", "turns"),
+            (
+                "exarch-transcript `grep [pattern: 'x', turns: [1]]",
+                "turns",
+            ),
+        ] {
+            let (result, _) = session.ral(call, 5, &emit);
+            assert!(
+                !result.contains("EXIT: 0") && result.contains(key),
+                "`{call}` must be refused naming `{key}`, got: {result}"
+            );
+        }
+    }
+
     /// The whole family through the real shell: an edit answers the survey
     /// the transition leaves behind, so the count of what left is there to
     /// read without a second call. The address names turns — 1 and 2 are the
-    /// first prompt and its reply — and the optional `note` rides the
-    /// open record row, so both shapes type-check.
+    /// first prompt and its reply — and `note` is a variant, so both of its
+    /// shapes type-check.
     #[test]
     fn an_eviction_answers_the_survey_it_leaves_behind() {
         let mut session = trunk_with_an_answered_prompt();
@@ -1539,7 +1711,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let (result, _) = session.ral(
-            "exarch-context `evict [turns: [1, 2], note: 'the old work is done']",
+            "exarch-context `evict [turns: [1, 2], note: `some 'the old work is done']",
             5,
             &emit,
         );
@@ -1557,8 +1729,8 @@ mod tests {
         );
     }
 
-    /// The same tag with no `note`: the open record row admits it, so the
-    /// harness never asks the model for an empty string.
+    /// The same tag with `none` for its note: the harness never asks the model
+    /// for an empty string.
     #[test]
     fn an_eviction_without_a_note_type_checks() {
         let mut session = trunk_with_an_answered_prompt();
@@ -1566,7 +1738,11 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        let (result, _) = session.ral("exarch-context `evict [turns: !{range 1 3}]", 5, &emit);
+        let (result, _) = session.ral(
+            "exarch-context `evict [turns: !{range 1 3}, note: `none]",
+            5,
+            &emit,
+        );
         assert!(
             result.contains("EXIT: 0"),
             "an eviction with no note must succeed, got: {result}"
@@ -1682,8 +1858,7 @@ mod tests {
     /// The answer type is free, so each tag's own shape has to type-check
     /// against the use the program makes of it: an index row carries `id` and
     /// `held`, and a grep answer projects `hits` and `total` as a record, each
-    /// hit naming the turn it lies in. The optional `turns` rides `` `grep ``'s
-    /// open record row.
+    /// hit naming the turn it lies in. `turns` is `` `all `` or `` `only ``.
     #[test]
     fn index_and_grep_answer_their_own_shapes() {
         let mut session = trunk_with_an_answered_prompt();
@@ -1691,17 +1866,14 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let (result, _) = session.ral(
-            // Bindings are named, not lettered: ral keeps value and command
-            // names disjoint, so a one-letter binding fails on any host with
-            // that letter on PATH (plan9port ships a `g`).
             r"let listed = exarch-transcript `index
                echo $listed[0][id] $listed[0][role] $listed[0][held]
-               let matched = exarch-transcript `grep [pattern: 'first (prompt|answer)']
+               let matched = exarch-transcript `grep [pattern: 'first (prompt|answer)', turns: `all]
                echo !{length $matched[hits]} $matched[total]
                echo $matched[hits][0][turn] $matched[hits][1][turn]
-               let narrowed = exarch-transcript `grep [pattern: 'first', turns: [2]]
+               let narrowed = exarch-transcript `grep [pattern: 'first', turns: `only [2]]
                echo $narrowed[total]
-               let missed = exarch-transcript `grep [pattern: 'nothing here', turns: [1, 2]]
+               let missed = exarch-transcript `grep [pattern: 'nothing here', turns: `only [1, 2]]
                echo $missed[total]",
             5,
             &emit,

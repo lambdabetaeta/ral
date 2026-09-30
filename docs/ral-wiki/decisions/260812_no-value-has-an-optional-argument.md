@@ -1,5 +1,5 @@
 ---
-status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the deletion of `ArgSig::Optional`, the flip of `cd`/`fg`/`bg`/`disown` to natives, and every consequence of that (T0050, the route pin losing its subject) stand. What resolves otherwise: `^cd` no longer reaches an installed arm at all — `^name` joins the path-head class, so `^cd` is a `PATH` lookup like any other `^name`, reaching no handler.'
+status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the deletion of `ArgSig::Optional`, the flip of `cd`/`fg`/`bg`/`disown` to natives, and every consequence of that (T0050, the route pin losing its subject) stand; the route pin itself is gone with the route, per [[decisions/260930_capture-is-decided-by-syntax]]. What resolves otherwise: `^cd` no longer reaches an installed arm at all — `^name` joins the path-head class, so `^cd` is a `PATH` lookup like any other `^name`, reaching no handler.'
 ---
 
 # No value has an optional argument

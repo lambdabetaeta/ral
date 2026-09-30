@@ -14,29 +14,6 @@ use crate::process::PgidPolicy;
 use crate::types::{Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
-/// Route stdin for the stage on the pipeline's input boundary, consuming
-/// whatever `<file` or parent pipe sits on `shell.io.stdin` — otherwise
-/// `f < file` on a function whose body is a pipeline drops the redirect.
-/// Unlike `command::stdio::wire_stdin`, a tty fd 0 is inherited only when this
-/// pgid will own the terminal; a backgrounded reader takes SIGTTIN.
-fn route_parent_stdin(holds_terminal: bool, shell: &Shell) -> Settled<command::StdinRoute> {
-    // `Source::Empty` — an exarch tool run — denies byte input outright.
-    if matches!(shell.io.stdin, Source::Empty) {
-        return Ok(command::StdinRoute::Null);
-    }
-    let reader = shell.io.stdin.reader().map_err(command::stdin_error)?;
-    Ok(match reader {
-        Some(r) => command::StdinRoute::Reader(r),
-        None if !shell.io.terminal.startup_stdin_tty => {
-            command::StdinRoute::Inherit(command::TtyInputPermit::for_non_tty_stdin())
-        }
-        None if holds_terminal => {
-            command::StdinRoute::Inherit(command::TtyInputPermit::for_pure_external_pipeline())
-        }
-        None => command::StdinRoute::Null,
-    })
-}
-
 /// A thread reads what a child would inherit, except a tty: reading the
 /// controlling terminal from the shell's own process would SIGTTIN the whole
 /// shell, so it sees EOF, as under capture.  The thread's own wake ends a
@@ -80,54 +57,45 @@ fn dup_stdin_file() -> std::io::Result<std::fs::File> {
         .map(std::fs::File::from)
 }
 
-/// Wire a stage's stdout against its [`ByteOut`] edge, returning the sink the
-/// parent must pump when the boundary stdout is not a plain fd.
-pub(super) fn wire_stage_stdout(
-    cmd: &mut crate::process::Launch,
-    stdout: ByteOut,
-    holds_terminal: bool,
-    shell: &Shell,
-) -> Settled<Option<Sink>> {
-    match stdout {
-        ByteOut::Downstream(writer, _edge) => {
-            cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
-            Ok(None)
-        }
-        ByteOut::Parent => {
-            // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY.
-            let inherit = shell.io.terminal.startup_stdout_tty && holds_terminal;
-            let plan = shell
-                .io
-                .stdout
-                .child_stdout(inherit)
-                .map_err(super::route::pipe_error)?;
-            cmd.stdout(plan.stdio);
-            Ok(plan.pump)
-        }
-    }
-}
-
-/// Wire a direct external stage's stdin, stdout, and stderr from its route.
-pub(super) fn wire_stage_stdio(
+/// Wire a direct external stage: its pipe ends are the source and sink
+/// `wire_stdio` sees, and the parent's streams fill the boundary edges.
+fn wire_stage(
     cmd: &mut crate::process::Launch,
     stdin: ByteIn,
     stdout: ByteOut,
     holds_terminal: bool,
     shell: &Shell,
 ) -> Settled<command::Pumps<Sink>> {
-    let inbound = match stdin {
-        ByteIn::Upstream(r) => command::StdinRoute::Reader(SourceReader::pipe(r)),
-        ByteIn::Parent => route_parent_stdin(holds_terminal, shell)?,
+    let upstream;
+    let stdin = match stdin {
+        ByteIn::Upstream(r) => {
+            upstream = Source::Reader(SourceReader::pipe(r));
+            &upstream
+        }
+        ByteIn::Parent => &shell.io.stdin,
     };
-    cmd.stdin(inbound.into_stdio());
-    let stdout_pump = wire_stage_stdout(cmd, stdout, holds_terminal, shell)?;
-    let stderr_plan = shell
-        .io
-        .stderr
-        .child_stderr()
-        .map_err(super::route::pipe_error)?;
-    cmd.stderr(stderr_plan.stdio);
-    Ok(command::Pumps::new(stdout_pump, stderr_plan.pump))
+    let downstream;
+    let stdout = match stdout {
+        ByteOut::Downstream(writer, edge) => {
+            let wake = crate::process::Wake::new().map_err(super::route::pipe_error)?;
+            downstream = Sink::Pipe {
+                writer: Arc::new(writer),
+                wake,
+                edge,
+            };
+            &downstream
+        }
+        ByteOut::Parent => &shell.io.stdout,
+    };
+    let io = command::ChildIo {
+        stdin,
+        stdout,
+        stderr: &shell.io.stderr,
+    };
+    // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY.
+    let inherit_tty = shell.io.terminal.startup_stdout_tty && holds_terminal;
+    let grant = holds_terminal.then(command::TtyInputPermit::for_pure_external_pipeline);
+    command::wire_stdio(cmd, shell, &io, grant, inherit_tty)
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -190,7 +158,7 @@ fn launch_external_stage_direct(
     // again rather than spawn into an expired wall.
     crate::process::check(cx.mooring)?;
 
-    let pumps = wire_stage_stdio(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
+    let pumps = wire_stage(&mut cmd, stdin, stdout, cx.holds_terminal, cx.shell)?;
 
     let confinement = cmd.confinement();
     let (mut child, leader, jail) = cmd

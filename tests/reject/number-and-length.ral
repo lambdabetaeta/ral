@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: nothing is both
+# contains: `length`
+let f = { |x| length $x; return $[$x + 1] }

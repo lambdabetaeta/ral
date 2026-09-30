@@ -212,16 +212,27 @@ mod tests {
         assert!(msg.contains("'fss'"), "{msg}");
     }
 
-    /// A profile returning a *map* has no row to check, and meets the walker's
-    /// refusal — off the same table — instead.
+    /// A profile returning a map is refused statically: its keys are the
+    /// table's labels, so it is written as a record.
     #[test]
-    fn unknown_key_in_a_mapped_profile_meets_the_walker() {
+    fn a_mapped_profile_is_refused_before_the_file_runs() {
         let msg = load_err_message("return [:, fss: [read: ['/tmp']]]", "<test:typo-map>");
-        assert!(msg.contains("unknown key 'fss'"), "{msg}");
-        assert!(
-            msg.contains("exec, fs, net, detach, editor, shell"),
-            "{msg}"
-        );
+        assert!(msg.contains("`grant` takes a record of settings"), "{msg}");
+    }
+
+    /// `()` is a profile with nothing to set: the lattice top.
+    #[test]
+    fn a_profile_returning_unit_is_the_empty_profile() {
+        let mut shell = shell();
+        let caps = load_capabilities_from_str(
+            &Mooring::adrift(),
+            &mut shell,
+            "return ()",
+            "<test:unit>",
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(caps, Capabilities::default());
     }
 
     #[test]

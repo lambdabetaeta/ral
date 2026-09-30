@@ -39,8 +39,7 @@ pub(crate) struct Ran {
     pub(crate) outcome: Settled<Value>,
 }
 
-/// Whose phrases these are.  Leases and the PATH-shadow check belong to
-/// `Session` alone; the host loading door (`evaluate_checked` — rc, a
+/// Whose phrases these are.  Leases belong to `Session` alone; the host loading door (`evaluate_checked` — rc, a
 /// plugin, a capability file) and a `use` body run under a mode that leases
 /// nothing.  Only `Session` writes each landed `Define` back into
 /// `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run
@@ -75,7 +74,7 @@ pub(crate) fn run_phrases(
     for (i, phrase) in phrases.iter().enumerate() {
         let non_final = i != last;
         let result = crate::process::check(mooring).and_then(|()| match &phrase.item {
-            Phrase::Run(m) => run_phrase_run(m, &env, non_final, mooring, shell),
+            Phrase::Run(m) => machine::evaluate(Arc::clone(m), env.clone(), mooring, shell),
             Phrase::Define {
                 pattern,
                 comp,
@@ -114,21 +113,17 @@ pub(crate) fn run_phrases(
     }
 }
 
-/// `Run(M)`: the last phrase's value is the run's value; a non-final one
-/// runs under the ambient sink exactly as a `Bind`'s RHS does — its
-/// bytes are effect, not the run's value.
-fn run_phrase_run(
-    m: &Arc<Comp>,
-    env: &Env,
-    non_final: bool,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let eval = |shell: &mut Shell| machine::evaluate(Arc::clone(m), env.clone(), mooring, shell);
-    if non_final {
-        return capture::with_ambient_stdout(shell, eval);
+/// Before a session unit runs, admit each stored datum it uses against the
+/// type the unit solved: a later line's misuse of decoded data is caught
+/// where it is written, not where the value finally fails.
+pub(crate) fn readmit(top: &crate::ir::Toplevel, shell: &Shell) -> Settled<()> {
+    for (name, site) in &top.admits {
+        if let Some(value) = shell.env.get(name) {
+            site.admit(value)
+                .map_err(|mismatch| mismatch.refusal(&format!("${name}"), shell))?;
+        }
     }
-    eval(shell)
+    Ok(())
 }
 
 /// A `Phrase::Define`'s three fields, borrowed together — spreading them
@@ -141,9 +136,8 @@ struct DefinePhrase<'a> {
     schemes: &'a [(String, Arc<crate::typecheck::Scheme>)],
 }
 
-/// `Define { pattern, comp, schemes }`: the RHS runs under the ambient sink
-/// (its bytes are effect, its value is what the pattern destructures); under
-/// `Mode::Session` alone, the PATH-shadow check runs first, the landed
+/// `Define { pattern, comp, schemes }`: the RHS's value is what the pattern
+/// destructures; under `Mode::Session` alone, the landed
 /// binding is written to `shell.env` beside `E`, and [`Shell::note_define`]
 /// runs beside each name's install.  All-or-nothing, as
 /// [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit` —
@@ -162,12 +156,7 @@ fn run_phrase_define(
         schemes,
     } = define;
     let is_session = matches!(mode, Mode::Session);
-    if is_session {
-        pattern::check_pattern_shadow(pattern, shell)?;
-    }
-    let v = capture::with_ambient_stdout(shell, |shell| {
-        machine::evaluate(Arc::clone(comp), env.clone(), mooring, shell)
-    })?;
+    let v = machine::evaluate(Arc::clone(comp), env.clone(), mooring, shell)?;
     *env = pattern::bind_pattern_staged(
         pattern,
         &v,
@@ -198,6 +187,7 @@ pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
         None,
     )
     .expect("compile");
+    readmit(&top, shell)?;
     run_phrases(
         &top.phrases,
         shell.env.clone(),

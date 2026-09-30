@@ -1,0 +1,5 @@
+# codes: T0010 T0011
+# contains: Integer
+let date = 5
+date +%s
+$date +%s

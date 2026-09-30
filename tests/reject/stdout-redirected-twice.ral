@@ -1,0 +1,2 @@
+# contains: standard output is redirected twice
+echo hi > a > b

@@ -4,9 +4,7 @@
 //! `group` builds its dependency graph over `let`-bound lambdas from this, and
 //! the strongly connected components of that graph become the `LetRec` knots.
 
-use crate::syntax::ast::{
-    Ast, Head, ListElem, MapEntry, RecordEntry, Redirect, ScopeAst, Stmt, Word,
-};
+use crate::syntax::ast::{Ast, Head, ListElem, MapEntry, RecordEntry, ScopeAst, Stmt, Word};
 use std::collections::HashSet;
 
 fn note_free(
@@ -90,13 +88,13 @@ impl Ast {
                 for arg in args {
                     arg.item.collect_free_refs(candidates, scopes, out);
                 }
-                for r in redirects {
+                for r in redirects.operands() {
                     r.collect_free_refs(candidates, scopes, out);
                 }
             }
             Self::Scope { op, redirects } => {
                 op.collect_free_refs(candidates, scopes, out);
-                for r in redirects {
+                for r in redirects.operands() {
                     r.collect_free_refs(candidates, scopes, out);
                 }
             }
@@ -192,19 +190,6 @@ impl Head {
             Self::Bare(n) => note_free(n, candidates, scopes, out),
             Self::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
             Self::ExternalName(_) | Self::Path(_) | Self::TildePath(_) => {}
-        }
-    }
-}
-
-impl Redirect<Ast> {
-    fn collect_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        if let Some(ast) = self.operand() {
-            ast.collect_free_refs(candidates, scopes, out);
         }
     }
 }

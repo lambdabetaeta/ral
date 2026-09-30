@@ -279,6 +279,14 @@ pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeErro
         return render_messageless(Some(code), &message, hint.as_deref());
     };
     let range = byte_span_to_char_range(source, sp);
+    let secondary = err
+        .kind
+        .witness(err.pos)
+        .filter(|(at, _)| at.file == sp.file)
+        .map(|(at, label)| LabelRange {
+            range: byte_span_to_char_range(source, at),
+            label,
+        });
     render_ariadne(
         file,
         source,
@@ -289,7 +297,7 @@ pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeErro
                 range,
                 label: err.kind.render_label(),
             },
-            secondary: None,
+            secondary,
             hint,
         },
     )
@@ -340,6 +348,7 @@ pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i3
 pub(crate) fn format_runtime_error_ariadne(
     db: &SourceDb,
     span: Option<Span>,
+    witness: Option<Span>,
     message: &str,
     hint: Option<&str>,
 ) -> String {
@@ -356,7 +365,12 @@ pub(crate) fn format_runtime_error_ariadne(
                 range: byte_span_to_char_range(source.as_str(), span),
                 label: "here".into(),
             },
-            secondary: None,
+            secondary: witness
+                .filter(|at| at.file == span.file)
+                .map(|at| LabelRange {
+                    range: byte_span_to_char_range(source.as_str(), at),
+                    label: "the use this script makes of it".into(),
+                }),
             hint: hint.map(ToString::to_string),
         },
     )
@@ -381,7 +395,13 @@ pub fn format_runtime_error_auto(
         Some(root) if err.span.is_none_or(|sp| sp.file == root) => {
             format_runtime_error_compact(err)
         }
-        _ => format_runtime_error_ariadne(db, err.span, &err.message, err.hint.as_deref()),
+        _ => format_runtime_error_ariadne(
+            db,
+            err.span,
+            err.witness.as_deref().copied(),
+            &err.message,
+            err.hint.as_deref(),
+        ),
     }
 }
 
@@ -547,6 +567,7 @@ mod tests {
         let output = format_runtime_error_ariadne(
             &db,
             Some(Span::new(file, 18, 28)),
+            None,
             "undefined variable: $undefined",
             None,
         );
@@ -561,6 +582,7 @@ mod tests {
         let output = format_runtime_error_ariadne(
             &db,
             Some(Span::new(file, 0, 6)),
+            None,
             "list destructuring requires a list, got: 5",
             Some("the right-hand side must evaluate to a list"),
         );
@@ -584,6 +606,8 @@ mod tests {
                 actual: Box::new(crate::typecheck::Ty::String),
             },
             reason: Some(crate::typecheck::Reason::IfCond),
+            weak: None,
+            unit: None,
         };
         let output = format_type_error_ariadne(
             "test.ral",
@@ -606,6 +630,8 @@ mod tests {
             pos: None,
             kind: TypeErrorKind::RecursiveRow,
             reason: None,
+            weak: None,
+            unit: None,
         };
         let output = format_type_error_ariadne("test.ral", "let x = 1", &err);
         assert!(output.contains("infinite row"));
@@ -615,7 +641,8 @@ mod tests {
     #[test]
     fn runtime_error_resolved_source_draws_caret() {
         let (db, file) = db_with("main.ral", "echo x");
-        let out = format_runtime_error_ariadne(&db, Some(Span::new(file, 5, 6)), "boom", None);
+        let out =
+            format_runtime_error_ariadne(&db, Some(Span::new(file, 5, 6)), None, "boom", None);
         assert!(out.contains("R0001"));
         assert!(
             out.contains("here"),
@@ -629,7 +656,7 @@ mod tests {
     fn runtime_error_in_unregistered_source_is_messageless() {
         let (db, _) = db_with("main.ral", "echo x");
         let span = Span::new(FileId::DUMMY, 2, 6);
-        let out = format_runtime_error_ariadne(&db, Some(span), "boom", None);
+        let out = format_runtime_error_ariadne(&db, Some(span), None, "boom", None);
         assert!(out.contains("R0001"));
         assert!(out.contains("boom"));
         assert!(
@@ -654,6 +681,7 @@ mod tests {
         let out = ansi::strip(&format_runtime_error_ariadne(
             &db,
             Some(Span::new(module, 10, 14)),
+            None,
             "kaboom",
             None,
         ));

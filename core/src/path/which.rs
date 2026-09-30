@@ -173,9 +173,7 @@ thread_local! {
     /// while positives ride the generation alone, because a stale miss is a
     /// wrong answer where a stale hit is a spawn that fails with the OS's own
     /// ENOENT, and whose miss sends [`search`] on to its uncached presence
-    /// half to choose between 126 and 127.  Misses are also
-    /// the case worth caching: `evaluator::pattern`'s shadow check walks the
-    /// whole list to the end for every binding name.
+    /// half to choose between 126 and 127.
     static LOCATED: RefCell<LocateCache> = RefCell::new(LocateCache {
         generation: GENERATION.load(Ordering::Relaxed),
         entries: HashMap::new(),

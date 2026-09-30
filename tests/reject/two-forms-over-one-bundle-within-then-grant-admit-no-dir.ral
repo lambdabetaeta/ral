@@ -1,6 +1,0 @@
-# contains: 'dir'
-let f = { |o|
-  within $o { () }
-  grant $o { () }
-}
-f [dir: "/tmp"]

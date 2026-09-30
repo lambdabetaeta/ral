@@ -1,0 +1,7 @@
+let leaf = [value: 1, kids: []]
+let tree = [value: 0, kids: [$leaf, [value: 2, kids: [$leaf]]]]
+let sum = { |t|
+    let below = !{map { |k| sum $k } $t[kids]}
+    return $[$t[value] + !{fold { |a b| return $[$a + $b] } 0 $below}]
+}
+echo !{sum $tree}

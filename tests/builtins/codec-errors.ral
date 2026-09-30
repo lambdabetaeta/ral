@@ -17,10 +17,6 @@ refusal { printf '{"a": 1}\n\n{"a":\n' | from-jsonl; return () }
 refusal { to-string '18446744073709551615' | from-json; return () }
 refusal { to-string "1\n18446744073709551615\n" | from-jsonl; return () }
 
-# Encoders refuse values with no representation, and write nothing
-refusal { to-jsonl [`ok 1, `bad { return 1 }]; return () }
-refusal { to-json { return 1 }; return () }
-
 # Bytes are integers in 0..255
 refusal { ints-to-bytes [256]; return () }
 

@@ -1,14 +1,15 @@
-# Test: use (§8)
+# Tst: use (§8)
 
 # Create a module
 let tmpdir = temp-dir
 echo "let version = 1\nlet _private = 42" > "$tmpdir/lib.ral"
 
 # use returns a record of the module's bindings, excluding _ names; a
-# record is reached by name, so absence shows as the read failing.
+# record is reached by name, and `use` checks it against the names the script
+# reads, so a read of an absent one fails at the `use`.
 let m = use "$tmpdir/lib.ral"
 echo $m[version]
-let private = try { return $m[_private] } { |_| return -1 }
+let private = try { let probe = use "$tmpdir/lib.ral"; return $probe[_private] } { |_| return -1 }
 echo !{equal $private -1}
 
 # re-using an unchanged file yields a structurally equal record
@@ -39,11 +40,6 @@ echo !{try { let _ = use "$tmpdir/cycle.ral"; return false } { |e| return !{re-m
 echo "fail [status: 7, message: 'boom']" > "$tmpdir/failing.ral"
 echo !{try { let _ = use "$tmpdir/failing.ral"; return '' } { |e| return "$e[status] $e[message]" }}
 
-# `use` binds nothing in the caller
-echo "let leaked = 7" > "$tmpdir/leak.ral"
-let _ = use "$tmpdir/leak.ral"
-echo !{try { return $leaked } { |_| return 'not leaked' }}
-
 # A module sees the session, earlier definitions included, but not a
 # block's local `let`; only its own non-underscore names come back
 echo 'let reads_local = $local' > "$tmpdir/block-local.ral"
@@ -53,7 +49,8 @@ let _hidden = 2
 let reads_earlier = $[$outer_define + 1]'# > "$tmpdir/session.ral"
 echo !{try { let _ = !{ let local = 1; use "$tmpdir/block-local.ral" }; return '' } { |e| return $e[message] }}
 let sess = use "$tmpdir/session.ral"
-echo "$sess[visible] $sess[reads_earlier] !{try { return $sess[_hidden] } { |_| return hidden }}"
+let hidden = try { let probe = use "$tmpdir/session.ral"; return $probe[_hidden] } { |_| return hidden }
+echo "$sess[visible] $sess[reads_earlier] $hidden"
 
 # A RAL_PATH hit still answers to the fs read grant
 mkdir -p "$tmpdir/lib" "$tmpdir/other"
@@ -63,11 +60,6 @@ try {
         within [dir: "$tmpdir/other", env: [RAL_PATH: "$tmpdir/lib"]] { let _ = use 'g.ral' }
     }
 } { |e| echo !{re-match 'denied by grant' $e[message]} }
-
-# A module's bundle with a misspelt option meets the runtime's refusal
-echo "let dirr = 'x'" > "$tmpdir/opts.ral"
-let opts = use "$tmpdir/opts.ral"
-try { within $opts { return () } } { |e| echo $e[message] }
 
 # Cleanup
 rm -rf $tmpdir

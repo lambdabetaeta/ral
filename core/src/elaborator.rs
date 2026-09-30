@@ -15,17 +15,17 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, ArmBody, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode,
-    HandlerArmV, IrPattern, Name, Phrase, PipeYield, Register, Toplevel, Val, ValListElem,
-    ValMapEntry, ValRecordEntry,
+    Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GENSYM_PREFIX,
+    GroupNode, HandlerArmV, IrPattern, Name, OptionsV, Phrase, Register, Toplevel, Val,
+    ValListElem, ValMapEntry, ValRecordEntry,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, RecordEntry, Redirect,
-    ScopeAst, Stmt, Word,
+    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Options, Pattern, RecordEntry,
+    Redirects, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
 use crate::syntax::parser::ParseError;
@@ -108,7 +108,7 @@ impl Elaborator {
     fn gensym(&mut self) -> String {
         loop {
             self.counter += 1;
-            let name = format!("_var{}", self.counter);
+            let name = format!("{GENSYM_PREFIX}{}", self.counter);
             if !self.is_bound(&name) {
                 return name;
             }
@@ -209,7 +209,7 @@ impl Elaborator {
         &self,
         name: CommandName,
         args: Args,
-        redirects: Vec<Redirect<Val>>,
+        redirects: Redirects<Val>,
         external_only: bool,
     ) -> Comp {
         let head = if external_only {
@@ -223,6 +223,7 @@ impl Elaborator {
                 head,
                 args,
                 redirects,
+                site: None,
             })
         )
     }
@@ -590,7 +591,7 @@ impl Elaborator {
                         handlers,
                         body,
                     } => {
-                        let opts = self.to_val(opts, binds);
+                        let opts = self.lower_options(opts, binds);
                         let handlers = handlers.as_ref().map(|arms| {
                             arms.iter()
                                 .map(|arm| HandlerArmV {
@@ -614,7 +615,7 @@ impl Elaborator {
                     ScopeAst::Grant { caps, body } => comp!(
                         self,
                         CompKind::Grant {
-                            caps: self.to_val(caps, binds),
+                            caps: self.lower_options(caps, binds),
                             body: self.to_val(body, binds),
                         }
                     ),
@@ -647,16 +648,13 @@ impl Elaborator {
                     comps.push(Arc::new(stage_comp));
                 }
                 // Placeholders, overwritten by the annotation pass with the
-                // stages' value types and the pipeline's yield.  The checker
-                // runs before every evaluation, so an un-annotated pipeline
-                // never reaches the evaluator.
+                // stages' value types.
                 let stage_types = vec![crate::typecheck::Ty::Unit; comps.len()];
                 comp!(
                     self,
                     CompKind::Pipeline {
                         stages: comps,
                         stage_types,
-                        yields: PipeYield::Last,
                     }
                 )
             }
@@ -893,7 +891,7 @@ impl Elaborator {
 
     /// Nest `if`/`elsif`/`else` into `CompKind::If`.  The first cond always
     /// runs, so it hoists into the caller's `binds`; every later cond gets a
-    /// local vector wrapped around the else-arm that guards it.
+    /// local vector wrapped inside the thunk that guards it.
     fn elab_if(
         &mut self,
         branches: &[IfBranch],
@@ -905,82 +903,95 @@ impl Elaborator {
             .expect("if must have at least one branch");
         let one_armed = rest.is_empty() && else_.is_none();
 
-        let mut else_comp = match else_ {
-            Some(e) => self.elab_branch(&e.item),
-            None => Arc::new(comp!(self, CompKind::Return(Val::Unit))),
+        let mut else_arm = match else_ {
+            Some(e) => self.elab_arm(e),
+            None => Self::thunk_of(comp!(self, CompKind::Return(Val::Unit))),
         };
         for branch in rest.iter().rev() {
             let mut local_binds = Vec::new();
             let cond_val = self.to_val(&branch.cond.item, &mut local_binds);
-            let then_comp = self.elab_branch(&branch.body.item);
+            let then_arm = self.elab_arm(&branch.body);
             let nested = comp!(
                 self,
                 CompKind::If {
                     cond: Spanned::with_span(branch.cond.span, cond_val),
-                    then: then_comp,
-                    else_: else_comp,
+                    then: then_arm,
+                    else_: else_arm,
                 }
             );
-            else_comp = Arc::new(wrap_binds(self.current_span, local_binds, nested));
+            else_arm = Self::thunk_of(wrap_binds(self.current_span, local_binds, nested));
         }
 
         let cond_val = self.to_val(&first.cond.item, binds);
-        let then_comp = if one_armed {
-            self.elab_branch_unit(&first.body.item)
+        let then_arm = if one_armed {
+            self.elab_arm_unit(&first.body)
         } else {
-            self.elab_branch(&first.body.item)
+            self.elab_arm(&first.body)
         };
         comp!(
             self,
             CompKind::If {
                 cond: Spanned::with_span(first.cond.span, cond_val),
-                then: then_comp,
-                else_: else_comp,
+                then: then_arm,
+                else_: else_arm,
             }
         )
     }
 
-    fn elab_branch(&mut self, ast: &Ast) -> Arc<Comp> {
-        Arc::new(self.elab_guarded(ast))
+    /// `comp` as the literal thunk a branching form forces.
+    fn thunk_of(comp: Comp) -> Spanned<Val> {
+        Spanned::with_span(comp.span, Val::thunk(Arc::new(comp)))
     }
 
-    /// One `case` arm, in either spelling, as the same `pattern`-and-`body`
-    /// branch.
-    ///
-    /// An arm written `{ |p| … }` *is* that branch: the binder elaborates
-    /// before its names enter scope, as a lambda parameter does, and the body
-    /// runs inline, so tail position passes through and nothing it binds
-    /// escapes.  Any other atom is the function it names applied to the
-    /// payload — elaborated from the very call the user could have written, so
-    /// the two spellings agree on type, route, and coercion by construction.
+    /// One branch of an `if` or a `case`: a literal `{ … }` or `{ |p| … }`, or
+    /// a name in hand — the thunk the form forces.  Anything else would be
+    /// hoisted, and so run before the form chose.
+    fn elab_arm(&mut self, arm: &Spanned<Box<Ast>>) -> Spanned<Val> {
+        let mut hoisted = Vec::new();
+        let comp = self.with_span(arm.span, |this| this.elab_expr(&arm.item, &mut hoisted));
+        let val = match comp.item {
+            CompKind::Return(val) if hoisted.is_empty() => val,
+            _ => {
+                self.error.get_or_insert_with(|| ParseError {
+                    message: "an arm is a block, or a name holding one; to compute the \
+                              block first, bind it: `let arm = $arms[a]`"
+                        .into(),
+                    span: arm.span.or(self.current_span),
+                    lex_kind: None,
+                    incomplete: false,
+                });
+                Val::Unit
+            }
+        };
+        Spanned::with_span(arm.span, val)
+    }
+
+    /// [`Self::elab_arm`] for the lone arm of an `else`-less `if`, whose result
+    /// is discarded so that the form types as `F Unit`: `{ body; () }`, forcing
+    /// a thunk in hand under the wrapper.  A value that is no block is left
+    /// for the checker to refuse.
+    fn elab_arm_unit(&mut self, arm: &Spanned<Box<Ast>>) -> Spanned<Val> {
+        let arm = self.elab_arm(arm);
+        let body = match &arm.item {
+            Val::Thunk(node) => Arc::clone(node.shape()),
+            Val::Variable(_) => Arc::new(comp!(self, CompKind::Force(arm.item.clone()))),
+            _ => return arm,
+        };
+        Self::thunk_of(comp!(
+            self,
+            CompKind::Bind {
+                comp: body,
+                pattern: Arc::new(IrPattern::Wildcard),
+                rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
+            }
+        ))
+    }
+
     fn elab_case_arm(&mut self, arm: &ast::CaseArm) -> CaseArm {
-        let tag = arm.tag.clone();
-        self.with_span(arm.body.span, |this| match arm.body.item.as_ref() {
-            Ast::Lambda { param, body } => {
-                let (pattern, body) = this.elab_binder_scope(param, body);
-                CaseArm {
-                    tag,
-                    pattern,
-                    body: ArmBody::Inline(Arc::new(body)),
-                }
-            }
-            handler => {
-                let payload = this.gensym();
-                let call = Ast::Call {
-                    head: Head::Value(Box::new(handler.clone())),
-                    args: vec![Spanned::with_span(
-                        arm.body.span,
-                        Ast::Variable(payload.clone()),
-                    )],
-                    redirects: Vec::new(),
-                };
-                CaseArm {
-                    tag,
-                    pattern: IrPattern::Name(payload.into()),
-                    body: ArmBody::Applied(Arc::new(this.elab_guarded(&call))),
-                }
-            }
-        })
+        CaseArm {
+            tag: arm.tag.clone(),
+            body: self.elab_arm(&arm.body),
+        }
     }
 
     /// Elaborate `ast` in a context that may not run it.  The fresh binds
@@ -1006,20 +1017,6 @@ impl Elaborator {
         let mut stage_binds = Vec::new();
         let body = self.elab_expr(ast, &mut stage_binds);
         wrap_binds(self.current_span, stage_binds, body)
-    }
-
-    /// Discards the branch's result, so a one-armed `if` types as `F Unit`:
-    /// `body to _. return ()`.
-    fn elab_branch_unit(&mut self, ast: &Ast) -> Arc<Comp> {
-        let body = self.elab_branch(ast);
-        Arc::new(comp!(
-            self,
-            CompKind::Bind {
-                comp: body,
-                pattern: Arc::new(IrPattern::Wildcard),
-                rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
-            }
-        ))
     }
 
     /// Yield the `Val` the parent consumes: `Return(v)` passes through, and
@@ -1071,7 +1068,7 @@ impl Elaborator {
     /// Shared by the two value-application heads, a bound bare name (`f x`) and
     /// an explicit value head (`$f x`, `{…} x`).  A zero-arg call is the head
     /// computation alone: `App` with an empty argument list is not a CBPV form.
-    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Vec<Redirect<Val>>) -> Comp {
+    fn apply_head(&self, head_comp: Comp, arg_vals: Args, redirects: Redirects<Val>) -> Comp {
         let app = if arg_vals.is_empty() {
             head_comp
         } else {
@@ -1087,9 +1084,9 @@ impl Elaborator {
     }
 
     /// Attach trailing `redirects` to `body` as a [`CompKind::Redirect`] frame.
-    /// `Exec` fuses its redirects into the syscall instead, and pipelines and
-    /// chains take none at the surface, so this covers every remaining body.
-    fn wrap_redirect(&self, body: Comp, redirects: Vec<Redirect<Val>>) -> Comp {
+    /// `Exec` carries its own redirects instead, and pipelines and chains take
+    /// none at the surface, so this covers every remaining body.
+    fn wrap_redirect(&self, body: Comp, redirects: Redirects<Val>) -> Comp {
         if redirects.is_empty() {
             return body;
         }
@@ -1106,12 +1103,16 @@ impl Elaborator {
     /// like any other value.
     fn lower_redirects(
         &mut self,
-        redirects: &[Redirect<Ast>],
+        redirects: &Redirects<Ast>,
         binds: &mut Vec<(IrPattern, Comp)>,
-    ) -> Vec<Redirect<Val>> {
-        redirects
-            .iter()
-            .map(|r| r.map(|a| self.to_val(a, binds)))
+    ) -> Redirects<Val> {
+        redirects.map(|a| self.to_val(a, binds))
+    }
+
+    /// A form's written options, each value hoisted like any other value.
+    fn lower_options(&mut self, opts: &Options, binds: &mut Vec<(IrPattern, Comp)>) -> OptionsV {
+        opts.iter()
+            .map(|(name, value)| (Name::from(name.as_str()), self.spanned_val(value, binds)))
             .collect()
     }
 
@@ -1128,11 +1129,12 @@ impl Elaborator {
         let mut r_binds = Vec::new();
         let r_comp = self.with_span(r.span, |this| this.elab_expr(&r.item, &mut r_binds));
         let r_comp = wrap_binds(self.current_span, r_binds, r_comp);
-        let short = comp!(self, CompKind::Return(Val::Bool(!on_true_is_rhs)));
-        let (then_branch, else_branch) = if on_true_is_rhs {
-            (r_comp, short)
+        let rhs = Self::thunk_of(r_comp);
+        let short = Self::thunk_of(comp!(self, CompKind::Return(Val::Bool(!on_true_is_rhs))));
+        let (then_arm, else_arm) = if on_true_is_rhs {
+            (rhs, short)
         } else {
-            (short, r_comp)
+            (short, rhs)
         };
         comp!(
             self,
@@ -1140,8 +1142,8 @@ impl Elaborator {
                 // No surface token holds this cond, so it carries no span and
                 // diagnostics fall back to the enclosing one.
                 cond: Spanned::synthetic(cond),
-                then: Arc::new(then_branch),
-                else_: Arc::new(else_branch),
+                then: then_arm,
+                else_: else_arm,
             }
         )
     }
@@ -1285,7 +1287,10 @@ pub fn elaborate(
     if std::env::var("RAL_DUMP_IR").is_ok() {
         eprintln!("{phrases:#?}");
     }
-    Ok(Toplevel { phrases })
+    Ok(Toplevel {
+        phrases,
+        admits: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -1618,7 +1623,7 @@ mod tests {
             panic!("expected a Bind, got {:?}", seq.item);
         };
         match pattern.as_ref() {
-            IrPattern::Name(n) => assert!(n.starts_with("_var"), "not a gensym: {n}"),
+            IrPattern::Name(n) => assert!(crate::ir::is_gensym(n), "not a gensym: {n}"),
             other => panic!("expected a fresh Name, never Wildcard, got {other:?}"),
         }
     }
@@ -1781,6 +1786,51 @@ mod tests {
             matches!(&rest.item, CompKind::Return(Val::Variable(_))),
             "expected the rest to return the hoisted temporary, got {:?}",
             rest.item
+        );
+    }
+
+    /// An arm is a literal block or a name holding one: anything else would be
+    /// hoisted, and so run before the form chose.
+    #[test]
+    fn an_arm_that_would_hoist_is_refused() {
+        for src in [
+            "if true \"a$[1 + 1]\" else { return () }",
+            "case `a () [`a: !{mk}]",
+        ] {
+            let ast = parse(src).expect("parse");
+            let err = elaborate(&ast, HashSet::new(), "").expect_err(src);
+            assert!(
+                err.message.contains("an arm is a block"),
+                "{src}: {}",
+                err.message
+            );
+        }
+        let ast = parse("let h = { return 1 }; if true $h else { return 2 }").expect("parse");
+        assert!(
+            elaborate(&ast, HashSet::new(), "").is_ok(),
+            "a name holding a block is an arm"
+        );
+    }
+
+    /// A literal arm is a thunk, forced by the form that took it; an `else`-less
+    /// `if` discards its lone arm's result.
+    #[test]
+    fn arms_are_thunks_and_a_lone_arm_returns_unit() {
+        let ast = parse("if true { echo hi }").expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        let CompKind::If { then, else_, .. } = &comp.item else {
+            panic!("expected an if, got {:?}", comp.item);
+        };
+        for arm in [then, else_] {
+            assert!(matches!(arm.item, Val::Thunk(_)), "arm {:?}", arm.item);
+        }
+        let Val::Thunk(node) = &then.item else {
+            unreachable!()
+        };
+        assert!(
+            matches!(&node.shape().item, CompKind::Bind { pattern, .. } if matches!(**pattern, IrPattern::Wildcard)),
+            "the lone arm is wrapped to discard its result, got {:?}",
+            node.shape().item
         );
     }
 }

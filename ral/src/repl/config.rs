@@ -1,11 +1,12 @@
 //! RC file discovery, parsing, and application.
 //!
-//! An rc file is ral source whose return value is a configuration record.
-//! Its eleven keys are declared once, in `Form::Rc`'s table, and the checker
-//! holds the file's inferred return row to them — unknown key or wrong
-//! field type alike — to a static error, whatever syntax produced it, and
-//! the whole file is skipped. A file returning a *map* has no row to check,
-//! so `apply_rc_config` meets the same keyset and the same field types
+//! An rc file is ral source whose return value is a configuration record, or
+//! `()` for a file with nothing to set.  Its eleven keys are declared once, in
+//! `Form::Rc`'s table, and the checker ascribes that table to the file's
+//! inferred return type — unknown key or wrong field type alike — to a static
+//! error, whatever syntax produced it, and the whole file is skipped.  A file
+//! whose return the checker cannot type (decoded JSON) reaches
+//! `apply_rc_config`, which meets the same keyset and the same field types
 //! itself, before applying anything: either mistake refuses the whole rc
 //! there too, agreeing with what the static check already does.
 //!
@@ -67,10 +68,11 @@ impl Datum for Surface {
 const DEFAULT_RC: &str = "\
 # ~/.config/ral/rc — ral shell configuration
 #
-# This file must return a record or a map; all keys are optional.
-# Uncomment any section you want to customise.
+# This file must return a record, or `()` to leave everything at its default;
+# all keys are optional.  To customise, uncomment the `return [` … `]` block
+# with the sections you want, and delete the final `return ()`.
 
-return [
+# return [
     # edit_mode:        vi,          # emacs (default) or vi
     # bell:             false,       # audible bell on readline error (default false)
     # surface:          readline,    # readline (default), minimal, or structural
@@ -103,7 +105,9 @@ return [
     #     value_prefix: \"=> \",
     #     value_color:  yellow,   # black red green yellow blue magenta cyan white none
     # ],
-]
+# ]
+
+return ()
 ";
 
 /// Write the default RC skeleton to the first resolvable config location.
@@ -141,7 +145,7 @@ pub(super) fn create_default_rc() -> Option<String> {
 
 // ── RC config application ────────────────────────────────────────────────
 
-/// The trailer every runtime refusal of a *mapped* rc carries: a bad key or
+/// The trailer every runtime refusal of a *decoded* rc carries: a bad key or
 /// a bad value both mean the whole rc is refused, not applied piecemeal, so
 /// the reader is told plainly that defaults are what actually took effect.
 fn refuse(reason: impl std::fmt::Display) -> String {
@@ -154,7 +158,7 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 /// (and the diagnostic for breaking it) lives with the sourcing in
 /// [`source`]; this function only ever sees a map.
 ///
-/// A map has no row for the checker to hold to the rc's keyset or its
+/// A decoded map has no type for the checker to hold to the rc's keyset or its
 /// fields' types, so both are met here instead, agreeing with what a
 /// record return is held to statically: an unknown key, or a known key
 /// whose value is the wrong shape, refuses the whole rc rather than the
@@ -583,7 +587,7 @@ mod tests {
 
     fn unit_thunk(_u: &mut ral_core::typecheck::Unifier) -> ral_core::Scheme {
         use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], &[], thunk(pure(ral_core::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(ral_core::typecheck::Ty::Unit)))
     }
 
     /// Apply `rc_src` inside a dispatch with the REPL host, as the boot door
@@ -753,7 +757,7 @@ mod tests {
     }
 
     /// Apply `config` to a fresh shell, expecting `apply_rc_config` to
-    /// refuse it — the map spelling's contract door, exercised the way
+    /// refuse it — the decoded spelling's contract door, exercised the way
     /// `apply_to_fresh_env_full` exercises success.  Returns the shell
     /// (untouched by the refused keys) and the refusal text.
     fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {

@@ -9,9 +9,10 @@ from *commands*:**
   command, exactly — `force(thunk M) = M`, one thunk value and no bracket
   around the body ([[design/scoping|scoping]]).
 
-The typed calculus is ordinary call-by-push-value with one annotation on the
-returner: `F[ρ] A` records which of a command's two products — its returned
-value or its stdout — a value boundary observes ([[design/types|types]]).
+The typed calculus is ordinary call-by-push-value ([[design/types|types]]). A
+command is a computation `F Unit`: it writes and returns nothing. Every form
+that suspends a command — `if`, `case`, `try`, `guard`, `within`, `grant` —
+takes a thunk and forces the one it chooses.
 
 Two sigils keep retrieval and forcing distinct:
 

@@ -1,0 +1,2 @@
+# contains: `dir` is written twice in `within`'s options; write it once
+within [dir: "/a", dir: "/b"] { return "ok" }

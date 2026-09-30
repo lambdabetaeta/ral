@@ -12,7 +12,7 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use crate::ir::{Comp, PipeYield};
+use crate::ir::Comp;
 use crate::types::{Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,7 +32,6 @@ use route::open_stage_routes;
 pub(crate) struct PipeNode {
     collect: CollectState,
     group: PipelineGroup,
-    yields: PipeYield,
 }
 
 impl PipeNode {
@@ -45,7 +44,6 @@ impl PipeNode {
     /// thread evaluates its stage under.
     pub(crate) fn launch(
         stages: &[Arc<Comp>],
-        yields: PipeYield,
         env: &Env,
         mooring: &Mooring,
         shell: &mut Shell,
@@ -66,11 +64,7 @@ impl PipeNode {
             .flatten();
 
         let collect = CollectState::new(rx, &tx, group.group(), loan, mooring, started);
-        let mut node = Self {
-            collect,
-            group,
-            yields,
-        };
+        let mut node = Self { collect, group };
         // Declared after `node` so unconsumed routes close before it tears
         // down: a half-wired neighbour must see EOF.
         let routes = open_stage_routes(stages.len())?;
@@ -97,11 +91,10 @@ impl PipeNode {
         let Self {
             mut collect,
             mut group,
-            yields,
         } = self;
         collect.drive();
         group.end_anchor();
-        let value = collect.fold(mooring, shell, yields);
+        let value = collect.fold(mooring, shell);
         drop(group);
         value
     }

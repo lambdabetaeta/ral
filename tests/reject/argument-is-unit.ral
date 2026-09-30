@@ -1,0 +1,4 @@
+# codes: T0057
+# contains: `()` is nothing, so `echo` has no word to take from it
+let out = cd /tmp
+echo $out

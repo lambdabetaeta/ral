@@ -1,7 +1,7 @@
 Your context is the turns the provider is sent on each request; it is the only memory that costs you, and the only memory that can be taken away. Bindings, files, the task list and the goal survive every eviction. The transcript keeps every turn, evicted or not. So before letting a turn go, promote what it established: `let` it, `` exarch-tasks `note `` it, or `` exarch-goal `set `` it.
 
-    exarch-context `survey / `evict [turns: [Int], note: Str]
-    exarch-transcript `index / `grep [pattern: Str, turns: [Int]] / `read [turns: [Int]]
+    exarch-context `survey / `evict [turns: [Int], note: `none|`some Str]
+    exarch-transcript `index / `grep [pattern: Str, turns: `all|`only [Int]] / `read [turns: [Int]]
 
 `explain exarch-context` and `explain exarch-transcript` give the full shapes and rules.
 
@@ -15,14 +15,14 @@ Near the window the harness evicts the oldest turns itself, without a note, and 
 
 Find ids with `grep`, then `read` only those turns. A hit is `[turn, role, line, text]`; `hits` holds the 100 oldest matches, each clipped to 200 bytes, and `total` counts them all.
 
-    let found = exarch-transcript `grep [pattern: 'test result: FAILED']
+    let found = exarch-transcript `grep [pattern: 'test result: FAILED', turns: `all]
     let mine = filter { |h| equal $h[role] 'assistant' } $found[hits]
     map { |h| [$h[turn], $h[line]] } $mine     # [[40, 79], [40, 85], ...]
 
     let turns = exarch-transcript `read [turns: [40]]
     str $turns[0][messages][1][parts]          # parts are variants: `str` shows the tags, `keys` fails
 
-Once ids are known, narrow `grep` with `turns:`. `read` is not clipped, so bind and slice it like any large output. A `mnemon` child shares this record and can search it in its own context.
+Once ids are known, narrow `grep` with `` turns: `only [...] ``. `read` is not clipped, so bind and slice it like any large output. A `mnemon` child shares this record and can search it in its own context.
 
 ## Recovering from failure
 

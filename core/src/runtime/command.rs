@@ -1,17 +1,14 @@
 //! The external arm of command dispatch — `command_call` picks it over
-//! env and handler: vet the resolved identity, wire the call's
-//! redirects into child stdio, spawn under the canonical pgid and
-//! sandbox, reap.
+//! env and handler: vet the resolved identity, wire the shell's streams
+//! into child stdio, spawn under the canonical pgid and sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
 //! [`super::pipeline::PipeNode::launch`] — but share `vet` and
 //! `build_command` with it, so both paths resolve and confine a call the
 //! same way.
 
-use crate::evaluator::audit::{listening, observe};
 use crate::process::Group;
-use crate::syntax::ast::{Redirect, WriteMode};
-use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
+use crate::types::{Break, Error, Mooring, Settled, Shell, Value};
 
 mod child;
 #[cfg(unix)]
@@ -30,17 +27,16 @@ pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
     PendingWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
-    open_write, stderr_mode,
+    open_write,
 };
-use stdio::classify_redirects;
-pub(crate) use stdio::{StdinRoute, TtyInputPermit, stdin_error};
+pub(crate) use stdio::{ChildIo, TtyInputPermit, stdin_error, wire_stdio};
 use vet::ExecImage;
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
 use foreground::ForegroundDecision;
-use process::{pipe_err, spawn};
-use stdio::{inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
+use process::spawn;
+use stdio::inherit_tty;
 
 /// Runs a standalone external call from vetting to reap.  A bundled
 /// coreutils/diffutils/ripgrep head takes the same path as any host
@@ -48,7 +44,6 @@ use stdio::{inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
 pub(crate) fn run(
     id: &CommandIdentity,
     args: &[Value],
-    redirects: &[Redirect<String>],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -66,41 +61,15 @@ pub(crate) fn run(
     )?;
     crate::process::check(mooring)?;
 
-    let plan = classify_redirects(redirects);
-    command.stdin(wire_stdin(shell)?.into_stdio());
-    let (atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, mooring, shell)?;
-    let inherit_tty = inherit_tty(&plan, shell);
-
-    // Stdout before stderr: `wire_stderr`'s `2>&1` case clones a writer
-    // from `shell.io.stdout` on Windows, and its Unix `pre_exec` dup2
-    // needs a real stdout fd already in place pre-fork.
-    let stdout_plan = if plan.stdout_file.is_none() {
-        let p = shell
-            .io
-            .stdout
-            .child_stdout(inherit_tty)
-            .map_err(|e| pipe_err(&e))?;
-        command.stdout(p.stdio);
-        p.pump
-    } else {
-        None
-    };
-    let needs_pump = stdout_plan.is_some();
-
-    let stderr_piped = wire_stderr(
+    let inherit_tty = inherit_tty(shell);
+    let pumps = wire_stdio(
         &mut command,
-        &plan,
-        inherit_tty,
-        stdout_file_dup,
-        mooring,
         shell,
+        &ChildIo::from(&shell.io),
+        Some(TtyInputPermit::for_standalone_external()),
+        inherit_tty,
     )?;
-
-    let stderr_pump = if stderr_piped {
-        Some(shell.io.stderr.clone())
-    } else {
-        None
-    };
+    let needs_pump = pumps.pumps_stdout();
 
     let confinement = command.confinement();
     let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
@@ -136,7 +105,7 @@ pub(crate) fn run(
     let running = RunningChild::assemble_with_owner(
         child,
         cmd_name.clone(),
-        Pumps::new(stdout_plan, stderr_pump),
+        pumps,
         group,
         mooring.cancel.as_scope().clone(),
         jail,
@@ -148,20 +117,9 @@ pub(crate) fn run(
     let pressed = loan.and_then(|loan| loan.reclaim(waited.outcome.death(false)));
     let (outcome, cause) = (waited.outcome, waited.cause.max(pressed));
 
-    // Held rather than `?`-propagated: the drain below must still run for a
-    // command that did run, even when its commit failed.
-    let commit_result = settle_atomic_write(
-        atomic_commit,
-        plan.stdout_file.as_ref(),
-        outcome.is_success(),
-        shell,
-        mooring,
-    );
-
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
     waited.settle();
-    commit_result?;
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
@@ -184,80 +142,6 @@ pub(crate) fn run(
 fn landed_in(led: Option<crate::process::Pgid>, role: &crate::io::LaunchRole) -> Option<Group> {
     led.map(Group::Owns)
         .or_else(|| role.membership().cloned().map(Group::Joins))
-}
-
-/// Settle a `>` staged by [`stdio::wire_stdout_file`], if the call staged
-/// one: commit it on a successful run, abandon it otherwise, and post the
-/// write observation either way.
-fn settle_atomic_write(
-    atomic_commit: Option<PendingWrite>,
-    stdout_file: Option<&(String, WriteMode)>,
-    succeeded: bool,
-    shell: &mut Shell,
-    mooring: &Mooring,
-) -> Settled<()> {
-    let Some(commit) = atomic_commit else {
-        return Ok(());
-    };
-    let (path, mode) =
-        stdout_file.expect("atomic_commit is only Some when plan.stdout_file is Some");
-
-    if !succeeded {
-        commit.abandon();
-        observe(
-            shell,
-            mooring,
-            Observed::Write {
-                path: path.clone(),
-                mode: *mode,
-                outcome: WriteOutcome::Aborted,
-                new_bytes: None,
-                old_bytes: None,
-            },
-        );
-        return Ok(());
-    }
-
-    // Both reads must precede the rename, and cost two whole-file reads:
-    // taken only for an ear to hear them.
-    let (old_bytes, preview) = if listening(shell, mooring) {
-        (
-            commit.old_snapshot_for_diff(shell),
-            commit.new_snapshot_for_diff(),
-        )
-    } else {
-        (None, None)
-    };
-    match commit.commit() {
-        Ok(()) => {
-            observe(
-                shell,
-                mooring,
-                Observed::Write {
-                    path: path.clone(),
-                    mode: *mode,
-                    outcome: WriteOutcome::Committed,
-                    new_bytes: preview,
-                    old_bytes,
-                },
-            );
-            Ok(())
-        }
-        Err(e) => {
-            observe(
-                shell,
-                mooring,
-                Observed::Write {
-                    path: path.clone(),
-                    mode: *mode,
-                    outcome: WriteOutcome::Failed,
-                    new_bytes: None,
-                    old_bytes: None,
-                },
-            );
-            Err(atomic_write_error(&e))
-        }
-    }
 }
 
 /// Announce the running command via the terminal title (OSC 0).

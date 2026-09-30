@@ -40,13 +40,9 @@ fn external_pipeline_bundled_rg() {
 
 #[test]
 fn external_pipeline_argument_errors_are_not_dropped() {
-    let o = run("/bin/echo $missing | cat");
+    let o = run("/bin/echo !{fail [status: 3, message: argboom]} | cat");
     assert_ne!(o.status, 0);
-    assert!(
-        o.stderr.contains("undefined variable"),
-        "stderr: {}",
-        o.stderr
-    );
+    assert!(o.stderr.contains("argboom"), "stderr: {}", o.stderr);
 }
 
 #[test]

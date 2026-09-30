@@ -1,0 +1,3 @@
+let r = [n: 1]
+let s = [...$r, n: "one"]
+return $[$s[n] == "one"]

@@ -97,51 +97,55 @@ let tasks-card = { |ts|
 ## `marks` is one homogeneous list, so single-tag `case`s over different
 ## elements would close its element type around whichever table ran first;
 ## the one `describe` case names every tag, keeping the list one type.
+##
+## An empty slot reads `` `none ``, a pinned one `` `some `card [...] ``.
 let tasks-decode = { |v|
-  if !{equal $v ()} { [] }
-  else {
-    try {
-      case $v [
-        `card: { |marks|
-          let describe = { |m| case $m [
-            `text:    { |_|          [kind: "text",    rows: []] },
-            `measure: { |_|          [kind: "measure", rows: []] },
-            `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
-          ] }
-          let [d0, d1, d2] = map $describe $marks
-          if !{equal $d0[kind] "text"}    { () } else { fail [status: 1, message: "not task-shaped"] }
-          if !{equal $d1[kind] "measure"} { () } else { fail [status: 1, message: "not task-shaped"] }
-          if !{equal $d2[kind] "fields"}  { () } else { fail [status: 1, message: "not task-shaped"] }
-          map { |r|
-            let [label: lbl, value: valv] = $r
-            case $valv [
-              `text: { |[spans: sp]|
-                let [s0, s1, s2, s3] = $sp
-                let [text: word]     = $s0
-                let [text: dtext]    = $s1
-                let [text: tagtext]  = $s2
-                let [text: notetext] = $s3
-                let status =
-                  if    !{equal $word "done"}    { `done }
-                  elsif !{equal $word "doing"}   { `doing }
-                  elsif !{equal $word "blocked"} { `blocked }
-                  elsif !{equal $word "open"}    { `open }
-                  else  { fail [status: 1, message: "not task-shaped"] }
-                let tags =
-                  if !{equal $tagtext ""} { [] }
-                  else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
-                let notes = if !{equal $notetext ""} { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
-                [ id: !{int !{slice $lbl 1 $[!{length $lbl} - 1]}}, desc: !{slice $dtext 2 $[!{length $dtext} - 2]},
-                  status: $status, tags: $tags, notes: $notes ]
-              },
-            ]
-          } $d2[rows]
-        },
-      ]
-    } { |_|
-      fail [status: 1, message: "exarch-tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
-    }
-  }
+  case $v [
+    `none: { |_| [] },
+    `some: { |slot|
+      try {
+        case $slot [
+          `card: { |marks|
+            let describe = { |m| case $m [
+              `text:    { |_|          [kind: "text",    rows: []] },
+              `measure: { |_|          [kind: "measure", rows: []] },
+              `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
+            ] }
+            let [d0, d1, d2] = map $describe $marks
+            if !{equal $d0[kind] "text"}    { () } else { fail [status: 1, message: "not task-shaped"] }
+            if !{equal $d1[kind] "measure"} { () } else { fail [status: 1, message: "not task-shaped"] }
+            if !{equal $d2[kind] "fields"}  { () } else { fail [status: 1, message: "not task-shaped"] }
+            map { |r|
+              let [label: lbl, value: valv] = $r
+              case $valv [
+                `text: { |[spans: sp]|
+                  let [s0, s1, s2, s3] = $sp
+                  let [text: word]     = $s0
+                  let [text: dtext]    = $s1
+                  let [text: tagtext]  = $s2
+                  let [text: notetext] = $s3
+                  let status =
+                    if    !{equal $word "done"}    { `done }
+                    elsif !{equal $word "doing"}   { `doing }
+                    elsif !{equal $word "blocked"} { `blocked }
+                    elsif !{equal $word "open"}    { `open }
+                    else  { fail [status: 1, message: "not task-shaped"] }
+                  let tags =
+                    if !{equal $tagtext ""} { [] }
+                    else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
+                  let notes = if !{equal $notetext ""} { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
+                  [ id: !{int !{slice $lbl 1 $[!{length $lbl} - 1]}}, desc: !{slice $dtext 2 $[!{length $dtext} - 2]},
+                    status: $status, tags: $tags, notes: $notes ]
+                },
+              ]
+            } $d2[rows]
+          },
+        ]
+      } { |_|
+        fail [status: 1, message: "exarch-tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
+      }
+    },
+  ]
 }
 
 let tasks-list = { tasks-decode !{exarch-pins `read "tasks"} }

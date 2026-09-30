@@ -13,13 +13,14 @@ use ral_core::serial::datum::Datum;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
-    closed_record, fun, mk_scheme as scheme, open_record, pure, thunk,
+    closed_record, closed_variant, fun, mk_scheme as scheme, open_record, pure, thunk,
 };
-use ral_core::typecheck::{CompTy, PayloadRoute, Scheme, Ty, Unifier};
+use ral_core::typecheck::{Kind, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map, sig};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Site, as_map, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use super::super::enquiry::{Data, EditorOp, EditorSnapshot, Enquiry, HighlightReq};
 use super::super::highlight_style::style_ansi;
@@ -121,21 +122,32 @@ pub fn builtin_ed_lbuffer(_args: &[Value], mooring: &Mooring, shell: &mut Shell)
 
 // ─── State write ─────────────────────────────────────────────────────────────
 
-/// `_ed-set`'s request: row-polymorphic, so unknown fields are ignored.
+/// `_ed-set`'s request: each field is `` `keep `` or `` `set v ``.
 fn set_op(arg: &Value) -> Settled<EditorOp> {
     let map = as_map(arg, "_ed-set")?;
-    let cursor = match map.get("cursor").as_deref() {
-        Some(Value::Int(n)) => Some(offset(*n)),
+    let choice = |key: &str| match map.get(key).as_deref() {
+        Some(Value::Variant {
+            label,
+            payload: None,
+        }) if &**label == "keep" => Ok(None),
+        Some(Value::Variant {
+            label,
+            payload: Some(v),
+        }) if &**label == "set" => Ok(Some((**v).clone())),
+        _ => Err(sig(format!("_ed-set: {key} must be `keep or `set <value>"))),
+    };
+    let text = choice("text")?
+        .map(|v| as_str(&v, "_ed-set text").map(str::to_owned))
+        .transpose()?;
+    let cursor = match choice("cursor")? {
+        Some(Value::Int(n)) => Some(offset(n)),
         Some(_) => return Err(sig("_ed-set: cursor must be Int")),
         None => None,
     };
-    Ok(EditorOp::Set {
-        text: map.get("text").map(|v| v.to_string()),
-        cursor,
-    })
+    Ok(EditorOp::Set { text, cursor })
 }
 
-/// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
+/// `_ed-set [text: `keep|`set Str, cursor: `keep|`set Int]` — partial write.
 pub fn builtin_ed_set(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-set", shell)?;
     shell.check_editor_write("set")?;
@@ -203,15 +215,16 @@ fn decode_captured(bytes: &[u8]) -> String {
 
 /// `_ed-tui {body}` — suspend editor, run body, return `[output: Str, status: Int]`.
 ///
-/// On success: `status: 0`, `output: <body's return value or captured stdout>`.
+/// On success: `status: 0`, `output: <the body's captured stdout>`.
 /// On error  : `status: <error exit code>`, `output: <error message>`.
 ///
 /// The body's stdout is captured so that a TUI command (e.g. `fzf`) which
 /// prints its selection on stdout can have that selection delivered back to
 /// the plugin as a String.  The TUI itself draws on /dev/tty via stderr, so
-/// capturing stdout does not disrupt the interface.  When the body returns a
-/// non-Unit value it wins; otherwise the captured bytes are decoded
-/// (trailing newline stripped).
+/// capturing stdout does not disrupt the interface.  The body is a command: it
+/// writes and returns `()`, and the captured bytes are decoded, lossily,
+/// trailing newline stripped — the call displays a terminal selection rather
+/// than computing with it.
 ///
 /// The pipeline foreground signal is a derived [`Mooring`]:
 /// [`Mooring::lend_terminal`] raises `terminal_access` to `ExplicitLoan`,
@@ -238,14 +251,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         ral_core::builtins::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
-        Ok(v) => {
-            let v = match v {
-                Value::Unit => Value::string(decode_captured(&bytes)),
-                Value::Bytes(b) => Value::string(decode_captured(&b)),
-                other => other,
-            };
-            Ok(tui_result(v, 0))
-        }
+        Ok(_) => Ok(tui_result(Value::string(decode_captured(&bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
             Value::string(e.message.clone()),
             i64::from(e.exit_code()),
@@ -504,11 +510,31 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
 /// persistent cell.  `default` is used on first call; `updater` is invoked
 /// with the current value and its return becomes the new value, which the
 /// host keeps, so it must be data.
-pub fn builtin_ed_state(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+///
+/// A boundary: the cell persists across sessions, so the value the host hands
+/// back was decided by whichever program last wrote it, and is admitted against
+/// this call's type before the updater runs.  The updater's own result was
+/// produced by typed code and is stored as it is.
+pub fn builtin_ed_state(
+    args: &[Value],
+    site: &Arc<Site>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     require_interactive("_ed-state", shell)?;
     shell.check_editor_write("state")?;
-    let current = answer::<Option<Data>>(shell, mooring, EditorOp::StateGet)?
-        .map_or_else(|| args[0].clone(), |Data(v)| Value::from(v));
+    let current = match answer::<Option<Data>>(shell, mooring, EditorOp::StateGet)? {
+        Some(Data(stored)) => {
+            let stored = Value::from(stored);
+            // The cell outlives every session, so what it holds was decided by
+            // whichever program last wrote it.
+            site.admit(&stored).map_err(|mismatch| {
+                mismatch.refusal("_ed-state (the plugin's persistent cell)", shell)
+            })?;
+            stored
+        }
+        None => args[0].clone(),
+    };
     let new_val = ral_core::builtins::apply(&args[1], vec![current], mooring, shell)?;
     let data = FOValue::try_from(&new_val).map_err(|e| {
         sig(format!(
@@ -530,7 +556,6 @@ fn scheme_ed_get(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(pure(closed_record(&[
             ("text", Ty::String),
             ("cursor", Ty::Int),
@@ -540,30 +565,29 @@ fn scheme_ed_get(_u: &mut Unifier) -> Scheme {
 }
 
 fn scheme_string_thunk(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::String)))
+    scheme(&[], &[], thunk(pure(Ty::String)))
 }
 
 fn scheme_int_thunk(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::Int)))
+    scheme(&[], &[], thunk(pure(Ty::Int)))
 }
 
 fn scheme_unit_thunk(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    scheme(&[], &[], thunk(pure(Ty::Unit)))
 }
 
-fn scheme_ed_set(u: &mut Unifier) -> Scheme {
-    let rho = u.fresh_row_var();
-    let record = open_record(&[("text", Ty::String), ("cursor", Ty::Int)], rho);
-    scheme(&[], &[], &[rho], thunk(fun(record, pure(Ty::Unit))))
+fn scheme_ed_set(_u: &mut Unifier) -> Scheme {
+    let field = |ty| closed_variant(&[("keep", Ty::Unit), ("set", ty)]);
+    let record = closed_record(&[("text", field(Ty::String)), ("cursor", field(Ty::Int))]);
+    scheme(&[], &[], thunk(fun(record, pure(Ty::Unit))))
 }
 
 fn scheme_string_to_bool(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Bool))))
+    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::Bool))))
 }
 
 fn scheme_string_string_to_string(_u: &mut Unifier) -> Scheme {
     scheme(
-        &[],
         &[],
         &[],
         thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String)))),
@@ -571,18 +595,20 @@ fn scheme_string_string_to_string(_u: &mut Unifier) -> Scheme {
 }
 
 fn scheme_highlight(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
+    let rest = u.fresh_row_var();
+    let span = open_record(
+        &[("start", Ty::Int), ("end", Ty::Int), ("style", Ty::String)],
+        rest,
+    );
     scheme(
-        &[av],
         &[],
-        &[],
-        thunk(fun(Ty::List(Box::new(Ty::Var(av))), pure(Ty::Unit))),
+        &[(rest, false)],
+        thunk(fun(Ty::List(Box::new(span)), pure(Ty::Unit))),
     )
 }
 
 fn scheme_history(_u: &mut Unifier) -> Scheme {
     scheme(
-        &[],
         &[],
         &[],
         thunk(fun(
@@ -596,7 +622,6 @@ fn scheme_parse(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(pure(closed_record(&[
             ("words", Ty::List(Box::new(Ty::String))),
             ("current", Ty::Int),
@@ -605,15 +630,12 @@ fn scheme_parse(_u: &mut Unifier) -> Scheme {
     )
 }
 
-fn scheme_tui(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
-    let rv = u.fresh_routevar();
+fn scheme_tui(_u: &mut Unifier) -> Scheme {
     scheme(
-        &[av],
-        &[rv],
+        &[],
         &[],
         thunk(fun(
-            thunk(CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av)))),
+            thunk(pure(Ty::Unit)),
             pure(closed_record(&[
                 ("output", Ty::String),
                 ("status", Ty::Int),
@@ -626,8 +648,7 @@ fn scheme_state(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     let a = Ty::Var(av);
     scheme(
-        &[av],
-        &[],
+        &[(av, Kind::DATA)],
         &[],
         thunk(fun(
             a.clone(),
@@ -672,7 +693,7 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     BuiltinEntry::new(
         Cow::Borrowed("_ed-set"),
         scheme_ed_set,
-        "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
+        "_ed-set [text: `keep|`set <Str>, cursor: `keep|`set <Int>]  — partial write of editor state; `keep leaves a field as it is.",
         BuiltinBody::Static(builtin_ed_set),
     ),
     BuiltinEntry::new(
@@ -741,11 +762,11 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
         "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
         BuiltinBody::Static(builtin_ed_hyperlink),
     ),
-    BuiltinEntry::new(
+    BuiltinEntry::boundary(
         Cow::Borrowed("_ed-state"),
         scheme_state,
         "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
-        BuiltinBody::Static(builtin_ed_state),
+        builtin_ed_state,
     ),
 ];
 
@@ -756,6 +777,13 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn variant(label: &str, payload: Option<Value>) -> Value {
+        Value::Variant {
+            label: label.into(),
+            payload: payload.map(Box::new),
+        }
+    }
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]
@@ -772,12 +800,112 @@ mod tests {
         }
     }
 
+    /// The perimeter test's plugin half: a row whose result only its own call
+    /// determines is a boundary, and `_ed-state` is the editor surface's one.
+    #[test]
+    fn a_result_only_variable_in_the_editor_surface_is_a_boundary() {
+        for entry in ED_BUILTINS.iter().chain(super::super::load::DOORS) {
+            let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
+            assert!(
+                !ral_core::test_access::has_result_only_var(&scheme) || entry.is_boundary(),
+                "{}: a result only its own call determines, and it is no boundary",
+                entry.name
+            );
+        }
+        let boundaries: Vec<&str> = ED_BUILTINS
+            .iter()
+            .filter(|entry| entry.is_boundary())
+            .map(|entry| entry.name.as_ref())
+            .collect();
+        assert_eq!(boundaries, ["_ed-state"]);
+    }
+
+    /// A desk keeping the plugin's cell: it answers `StateGet` with what an
+    /// earlier session stored and counts the writes it is asked for.
+    struct Cell {
+        stored: FOValue,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ral_core::types::EnquiryDesk for Cell {
+        fn enquire(
+            &self,
+            req: FOValue,
+            _cancel: &ral_core::process::CancelScope,
+        ) -> Result<FOValue, ral_core::types::Error> {
+            use super::super::super::enquiry::Enquiry;
+            match Enquiry::decode(&req) {
+                Ok(Enquiry::Editor(EditorOp::StateGet)) => {
+                    Ok(Some(Data(self.stored.clone())).encode())
+                }
+                Ok(Enquiry::Editor(EditorOp::StateSet(_))) => {
+                    self.writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(FOValue::Unit)
+                }
+                other => panic!("the cell answers state reads and writes only, got {other:?}"),
+            }
+        }
+    }
+
+    fn run_with_cell(stored: FOValue) -> (Result<Value, Break>, usize) {
+        let cell = std::sync::Arc::new(Cell {
+            stored,
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        shell.install_builtins(ED_BUILTINS);
+        shell.set_interactive(true);
+        let report = shell.run(ral_core::RunRequest {
+            run: crate::repl::exec::line_run("_ed-state 0 { |n| return $[$n + 1] }"),
+            surface: None,
+            deferred: None,
+            desk: Some(cell.clone()),
+            fork: None,
+        });
+        let ral_core::RunReport::Ran { ending, .. } = report else {
+            panic!("the line must check and run");
+        };
+        (
+            ending.into_result(),
+            cell.writes.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// The cell persists across sessions, so what it holds is admitted against
+    /// the type this call uses it at before the updater runs: a cell an
+    /// earlier program left at another type is refused, and nothing is written.
+    #[test]
+    fn a_stale_state_cell_is_refused_before_the_updater_runs() {
+        let (result, writes) = run_with_cell(FOValue::String {
+            value: "stale".into(),
+        });
+        let Err(Break::Error(e)) = result else {
+            panic!("a stale cell must be refused, got {result:?}");
+        };
+        assert!(
+            e.message
+                .contains("_ed-state (the plugin's persistent cell)")
+                && e.message.contains("the value is text (`'stale'`)"),
+            "{}",
+            e.message
+        );
+        assert_eq!(writes, 0, "the updater must not have run");
+    }
+
+    #[test]
+    fn a_state_cell_of_the_right_type_reaches_the_updater() {
+        let (result, writes) = run_with_cell(FOValue::Int { value: 4 });
+        assert!(matches!(result, Ok(Value::Int(5))), "{result:?}");
+        assert_eq!(writes, 1);
+    }
+
     /// A non-Int cursor is refused at the door, before any request is put.
     #[test]
     fn ed_set_rejects_non_int_cursor() {
         let arg = Value::map(vec![
-            ("text".into(), Value::string("new")),
-            ("cursor".into(), Value::string("3")),
+            ("text".into(), variant("set", Some(Value::string("new")))),
+            ("cursor".into(), variant("set", Some(Value::string("3")))),
         ]);
         assert!(set_op(&arg).is_err());
     }
@@ -785,7 +913,10 @@ mod tests {
     /// A negative cursor floors at zero; the host clamps the rest.
     #[test]
     fn ed_set_floors_a_negative_cursor() {
-        let arg = Value::map(vec![("cursor".into(), Value::Int(-4))]);
+        let arg = Value::map(vec![
+            ("text".into(), variant("keep", None)),
+            ("cursor".into(), variant("set", Some(Value::Int(-4)))),
+        ]);
         assert!(matches!(
             set_op(&arg),
             Ok(EditorOp::Set {

@@ -2114,6 +2114,32 @@ return !{{length $hits}}"
         );
     }
 
+    /// A redirect's entries carry the redirect's own site, not whatever its
+    /// body dispatched last.
+    #[test]
+    fn block_redirect_write_is_stamped_at_the_redirect() {
+        let engine = fresh();
+        let dir = scratch_dir("cov-site");
+        let path = display_no_trailing_sep(&dir.path().join("out"));
+
+        let (r, records) = run_capturing(&engine, &format!("!{{ echo a; true }} > '{path}'"));
+        assert_eq!(r.exit, 0, "stderr was {:?}", String::from_utf8_lossy(&r.stderr));
+
+        let write = records
+            .iter()
+            .filter_map(|r| match r {
+                crate::record::Record::Display(crate::record::Display::Observation { value }) => {
+                    Observation::from_wire(value)
+                }
+                _ => None,
+            })
+            .find(|o| matches!(o.what, Observed::Write { .. }))
+            .expect("the redirect settles one write");
+        let site = write.site.expect("the write carries a site");
+        assert_eq!((site.line, site.col), (1, 1), "the redirect's, not `true`'s");
+    }
+
+
     /// Code loading is not turn-time data I/O: `use` reads through `std::fs`
     /// below the redirect frame, so it raises no io card.  Only the loaded
     /// file's own effects would surface, and this one is pure bindings.

@@ -68,4 +68,5 @@ assets = [
 ral-core = { path = "../core" }
 
 [dev-dependencies]
+ral-core = { path = "../core", features = ["test-util"] }
 tempfile = "3.27"

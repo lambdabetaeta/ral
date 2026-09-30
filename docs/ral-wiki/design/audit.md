@@ -79,7 +79,7 @@ fragment stays self-describing without needing a parent to interpret it.
 observation is appended when the fact it records becomes *true*, not when the
 construct that produced it began: a command's own observation therefore lands
 after those of everything it ran, and a redirect's `` `write `` lands when the
-write settles. The order is a post-order traversal of what happened, and it is
+write settles (a streaming write when its file opens). The order is a post-order traversal of what happened, and it is
 the one order a flat list can carry without lying — an in-order list would have
 to claim a command was finished before the work inside it was.
 

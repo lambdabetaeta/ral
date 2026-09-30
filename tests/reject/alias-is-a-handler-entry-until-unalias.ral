@@ -1,5 +1,6 @@
-# codes: T0041
+# codes: T0041 T0071
 # contains: is a handler entry
+# contains: undefined variable: $foo
 alias foo { |args| echo 3 }
 let f = $foo
 unalias foo

@@ -1,0 +1,5 @@
+# codes: T0075
+# contains: is `$m` a list or a map?
+# contains: this binding holds the index
+# contains: Help:
+let pick = { |m k| $m[$k] }

@@ -105,14 +105,10 @@ fn piped_stdin_runs_as_one_script() {
 fn stdin_script_errors_carry_a_stdin_location() {
     // The stdin source must be registered under a real name, so a runtime
     // error can point a caret at it.
-    let o = run_stdin(&["-s"], "echo hi\n$nope\n");
+    let o = run_stdin(&["-s"], "echo hi\nfail [status: 1, message: nope]\n");
     assert_ne!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "hi\n");
-    assert!(
-        o.stderr.contains("undefined variable: $nope"),
-        "stderr: {}",
-        o.stderr
-    );
+    assert!(o.stderr.contains("nope"), "stderr: {}", o.stderr);
     assert!(o.stderr.contains("<stdin>:2:1"), "stderr: {}", o.stderr);
 }
 

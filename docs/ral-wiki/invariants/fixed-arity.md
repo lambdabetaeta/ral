@@ -13,8 +13,8 @@ undefined ([[design/builtins|builtins]]).
 An external command, an intercepted operation, and a command-shaped builtin
 take an *argv*, not a curried argument sequence: an intercepted operation takes
 as many arguments as the call site writes, and `echo` and `detach` are variadic
-over a list of strings, typed `List String -> Return(Bytes, Unit)` and
-`List String -> F Any`
+over a list of strings, typed `List String -> F Unit` and
+`List String -> F [pid: Int, desc: String]`
 ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 
 **The manifest is authored as two, and arity is the consequence.** A native

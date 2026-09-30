@@ -1,0 +1,4 @@
+# contains: a record's spread comes first
+let c = true
+let f = { |r| if $c { return [x: 1, ...$r] } else { return [y: 2, ...$r] } }
+return $f

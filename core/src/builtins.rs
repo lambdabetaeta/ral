@@ -14,7 +14,7 @@
 use crate::diagnostic;
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
 use crate::types::{
-    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Settled, Shell, Value,
+    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Output, Settled, Shell, Value,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
@@ -53,14 +53,25 @@ macro_rules! with_diagnostic_if_any {
     };
 }
 
+/// `entry.with_output(out)` when an `out` is given — the registry macro's
+/// optional `output:` field, `Returns` when absent.
+macro_rules! with_output_if_any {
+    ($entry:expr) => {
+        $entry
+    };
+    ($entry:expr, $out:expr) => {
+        $entry.with_output($out)
+    };
+}
+
 /// One entry per builtin, expanded into [`CORE_BUILTINS`].  Arity is never
 /// declared — [`BuiltinEntry::fixed_arity`] reads it off the type rule.
 ///
 /// `call` must be a non-capturing closure — it is coerced to a fn pointer.
 /// `names` splits its first literal out from the rest so an optional
-/// `diagnostic:` — one row's own diagnostic never varies with how many names
+/// `diagnostic:` or `output:` — one row's own never varies with how many names
 /// alias it — can sit beside it without zipping against a repetition of
-/// mismatched length; a diagnosed row is always written with one name, which
+/// mismatched length; such a row is always written with one name, which
 /// is every row this macro carries one for today.
 macro_rules! builtin_registry {
     (
@@ -71,6 +82,7 @@ macro_rules! builtin_registry {
                 ty: $ty:expr,
                 doc: $doc:literal,
                 $(diagnostic: $diag:expr,)?
+                $(output: $out:expr,)?
                 call: $call:expr,
             }
         ),+ $(,)?
@@ -98,14 +110,17 @@ macro_rules! builtin_registry {
         static CORE_BUILTINS_ARR: [BuiltinEntry; count_builtins!($($name0 $(, $namerest)*),+)] = [
             $(
                 $(#[$meta])*
-                with_diagnostic_if_any!(
-                    BuiltinEntry::new(
-                        Cow::Borrowed($name0),
-                        $ty,
-                        $doc,
-                        BuiltinBody::Static(__core_thunks::$variant),
+                with_output_if_any!(
+                    with_diagnostic_if_any!(
+                        BuiltinEntry::new(
+                            Cow::Borrowed($name0),
+                            $ty,
+                            $doc,
+                            BuiltinBody::Static(__core_thunks::$variant),
+                        )
+                        $(, $diag)?
                     )
-                    $(, $diag)?
+                    $(, $out)?
                 ),
                 $(
                     BuiltinEntry::new(
@@ -130,9 +145,11 @@ macro_rules! builtin_registry {
 builtin_registry! {
     Clear { names: ["clear"], ty: scheme::terminal_control,
         doc: "clear  — clear screen and scrollback (ESC[H ESC[2J ESC[3J). Shadows external `clear`; use `^clear` for the ncurses binary.",
+        output: Output::Writes,
         call: |args, _mooring, shell| misc::builtin_clear(args, shell), },
     Reset { names: ["reset"], ty: scheme::terminal_control,
         doc: "reset  — emit ESC c (RIS) to reset the terminal. Does not touch stty modes; use `^reset` for the full ncurses terminfo reset.",
+        output: Output::Writes,
         call: |args, _mooring, shell| misc::builtin_reset(args, shell), },
     Each { names: ["each"], ty: scheme::each_op,
         doc: "each <fn> <list>  — call fn on each element for side effects.",
@@ -247,48 +264,45 @@ builtin_registry! {
         doc: "from-lines  — decode the channel to a list of lines, lossy on invalid UTF-8: a line ends at `\\n` or `\\r\\n`, the last need not end, and a lone `\\r` is text.",
         diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_lines(args, shell), },
-    FromJson { names: ["from-json"], ty: scheme::from_json,
-        doc: "from-json  — decode JSON bytes from the channel to a value.",
-        diagnostic: BuiltinDiagnostic::Decoder,
-        call: |args, _mooring, shell| codecs::builtin_from_json(args, shell), },
-    FromJsonl { names: ["from-jsonl"], ty: scheme::from_jsonl,
-        doc: "from-jsonl  — decode JSON Lines from the channel to a list of values, one per line split as from-lines splits them; a blank line holds none.",
-        diagnostic: BuiltinDiagnostic::Decoder,
-        call: |args, _mooring, shell| codecs::builtin_from_jsonl(args, shell), },
-    FromCsv { names: ["from-csv"], ty: scheme::from_json,
-        doc: "from-csv  — decode CSV bytes from the channel to a list of records keyed by the header row (every field a String).",
+    FromCsv { names: ["from-csv"], ty: scheme::from_csv,
+        doc: "from-csv  — decode CSV bytes from the channel to a list of maps keyed by the header row (every field a String).",
         diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], ty: scheme::to_bytes,
         doc: "to-bytes <bytes>  — pass a Bytes value through to the byte channel; the inverse of from-bytes.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_bytes(args, shell), },
     IntsToBytes { names: ["ints-to-bytes"], ty: scheme::ints_to_bytes,
         doc: "ints-to-bytes <ints>  — write a list of Ints, each 0 through 255, to the byte channel as those bytes. ral has no byte literal, so this is how bytes are written by number: `ints-to-bytes [104, 105] | from-bytes` is the Bytes value \"hi\".",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_ints_to_bytes(args, shell), },
     ToString { names: ["to-string"], ty: scheme::to_any_bytes,
         doc: "to-string <value>  — encode a value's String form to the byte channel.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_string(args, shell), },
     ToLine { names: ["to-line"], ty: scheme::to_line,
         doc: "to-line <value>  — encode value with a trailing newline (inverse of from-line).",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_line(args, shell), },
     ToLines { names: ["to-lines"], ty: scheme::to_lines,
         doc: "to-lines <list>  — write each element followed by `\\n` to the byte channel; from-lines reads back any list whose elements hold no `\\n` and do not end in `\\r`.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_lines(args, shell), },
     ToJson { names: ["to-json"], ty: scheme::to_any_bytes,
         doc: "to-json <value>  — encode a value as JSON to the byte channel.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_json(args, shell), },
     ToJsonl { names: ["to-jsonl"], ty: scheme::to_lines,
         doc: "to-jsonl <list>  — write each element to the byte channel as to-json encodes it, one per line.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_jsonl(args, shell), },
-    ToCsv { names: ["to-csv"], ty: scheme::to_any_bytes,
-        doc: "to-csv <records>  — encode a list of records as CSV to the byte channel; columns are the first record's keys in sorted order.",
+    ToCsv { names: ["to-csv"], ty: scheme::to_csv,
+        doc: "to-csv <rows>  — encode a list of maps of text as CSV to the byte channel; columns are the first row's keys in sorted order.",
+        output: Output::Writes,
         call: |args, _mooring, shell| codecs::builtin_to_csv(args, shell), },
     Ask { names: ["ask"], ty: scheme::ask,
         doc: "ask <prompt>  — prompt for interactive input, return string.",
         call: |args, _mooring, _shell| misc::builtin_ask(args).map_err(Break::from), },
-    Use { names: ["use"], ty: scheme::use_op,
-        doc: "use <file>  — load a .ral module, returning its bindings as a record.",
-        call: |args, mooring, shell| modules::builtin_use(args, mooring, shell), },
     Cwd { names: ["cwd"], ty: scheme::pure_string,
         doc: "cwd  — return the current working directory as a String.",
         call: |_args, _mooring, shell| Ok(Value::string(shell.cwd().to_string_lossy())), },
@@ -322,7 +336,7 @@ builtin_registry! {
     IsWritable { names: ["is-writable"], ty: scheme::path_bool,
         doc: "is-writable <path>  — true if path is writable by the caller.",
         call: |args, _mooring, shell| fs::builtin_is_writable(args, shell), },
-    Equal { names: ["equal"], ty: scheme::compare,
+    Equal { names: ["equal"], ty: scheme::equal,
         doc: "equal <a> <b>  — true if a and b are equal.",
         call: |args, _mooring, _shell| predicates::builtin_equal(args), },
     Lt { names: ["lt"], ty: scheme::compare,
@@ -386,9 +400,11 @@ builtin_registry! {
 
     Help { names: ["help"], ty: scheme::help,
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
+        output: Output::Writes,
         call: |args, _mooring, shell| help::builtin_help(args, shell), },
     Explain { names: ["explain"], ty: scheme::explain,
         doc: "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
+        output: Output::Writes,
         call: |args, _mooring, shell| help::builtin_explain(args, shell), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
@@ -407,8 +423,42 @@ static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     scheme::echo,
     "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame — it is the operating system's `echo`, not ral's.",
     BuiltinBody::Static(codecs::builtin_echo),
-)];
+).with_output(Output::Writes)];
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
+
+/// Core's boundaries: the doors through which a value of a shape the program
+/// did not decide enters typed code.  Each is handed the [`Site`] the checker
+/// solved at its call and admits what it lets in against it; they sit apart
+/// from [`CORE_BUILTINS`] because their bodies take that site.
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-json"),
+        scheme::from_json,
+        "from-json  — decode JSON bytes from the channel to a value, checked against how the script uses it.",
+        codecs::builtin_from_json,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-jsonl"),
+        scheme::from_jsonl,
+        "from-jsonl  — decode JSON Lines from the channel to a list of values, one per line split as from-lines splits them; a blank line holds none. Checked against how the script uses the values.",
+        codecs::builtin_from_jsonl,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-json-at"),
+        scheme::from_json_at,
+        "from-json-at <tokens>  — decode JSON bytes from the channel and read the value at a path, given as a list of RFC 6901 reference tokens: an object member by exact key, an array element by decimal index. `from-json-at ['items', '3', 'size']` reads `/items/3/size`. Checked against how the script uses the value.",
+        codecs::builtin_from_json_at,
+    ),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("use"),
+        scheme::use_op,
+        "use <file>  — load a .ral module, returning its bindings as a record; its functions are checked against the types the script uses them at.",
+        modules::builtin_use,
+    ),
+];
+pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;
 
 /// A [`BuiltinTable`](crate::types::BuiltinTable) of core's manifest, every
 /// half, alone.
@@ -419,6 +469,7 @@ pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
     let mut table = crate::types::BuiltinTable::default();
     table.install_static(CORE_BUILTINS);
+    table.install_static(BOUNDARY_BUILTINS);
     table.install_static(CORE_BASE_FRAMES);
     table
 }
@@ -489,7 +540,7 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("detach"),
     scheme::detach,
-    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts is refused, since a handler runs inside this session and nothing could be detached — to stub `detach`, stand in for `detach` itself. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
     BuiltinBody::Static(concurrency::builtin_detach),
 )];
 #[cfg(unix)]

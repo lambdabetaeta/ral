@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: this is a record
+echo !{is-empty [a: 1]}

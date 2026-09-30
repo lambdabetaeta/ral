@@ -10,9 +10,10 @@
 
 use super::env::TyEnv;
 use super::fmt::fmt_scheme;
-use super::generalize::generalize;
-use super::scheme::{CachedFreeVars, Scheme};
-use super::ty::{CompTy, Field, Label, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use super::generalize::{FreeVars, generalize};
+use super::kind::Kind;
+use super::scheme::{CachedFreeVars, Scheme, WeakVars};
+use super::ty::{CompTy, Label, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
@@ -53,25 +54,29 @@ pub(crate) enum BuiltinDiagnostic {
     Decoder,
 }
 
-/// Build a [`Scheme`] from its quantified vars and body.  Public so host crates
-/// can write their own scheme arms without touching `Scheme`'s internals.
-pub fn mk_scheme(
-    ty_vars: &[TyVar],
-    route_vars: &[PayloadVar],
-    row_vars: &[RowVar],
-    ty: Ty,
-) -> Scheme {
+/// Build a [`Scheme`] from its quantified vars and body.
+///
+/// Each type variable comes with its [`Kind`], each row variable with whether
+/// it is deep.  Public so host crates can write their own scheme arms without
+/// touching `Scheme`'s internals.
+pub fn mk_scheme(ty_vars: &[(TyVar, Kind)], row_vars: &[(RowVar, bool)], ty: Ty) -> Scheme {
     Scheme {
         ty_vars: ty_vars.to_vec(),
         comp_ty_vars: vec![],
-        route_vars: route_vars.to_vec(),
         row_vars: row_vars.to_vec(),
-        presence_vars: vec![],
         ty,
         comp_ty_bindings: vec![],
         ty_bindings: vec![],
         cached_fv: Some(CachedFreeVars::default()),
+        weak: WeakVars::default(),
     }
+}
+
+/// [`mk_scheme`] over unconstrained variables and shallow rows.
+pub fn mk_plain_scheme(ty_vars: &[TyVar], row_vars: &[RowVar], ty: Ty) -> Scheme {
+    let kinded: Vec<_> = ty_vars.iter().map(|&v| (v, Kind::ANY)).collect();
+    let rows: Vec<_> = row_vars.iter().map(|&v| (v, false)).collect();
+    mk_scheme(&kinded, &rows, ty)
 }
 
 pub fn thunk(cty: CompTy) -> Ty {
@@ -82,11 +87,6 @@ pub fn fun(param: Ty, body: CompTy) -> CompTy {
 }
 pub fn pure(ty: Ty) -> CompTy {
     CompTy::pure(ty)
-}
-/// An encoder's or terminal write's result: the byte channel itself is the
-/// payload, so WF-2 pins the value to `Unit`.
-pub(crate) fn ret_bytes() -> CompTy {
-    CompTy::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
 }
 
 // ── Scheme DSL ──────────────────────────────────────────────────────
@@ -109,49 +109,20 @@ macro_rules! scheme {
     // scheme!(temp_path: pure Ty::String);
     ($name:ident: pure $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_scheme(&[], &[], &[], thunk(pure($ret)))
-        }
-    };
-    // scheme!(help: bytes); — nullary, the byte channel is the payload.
-    // Listed before the general `[params] -> $ret` arms below: `bytes` parses
-    // as a bare expression too, so a more specific arm must come first or it
-    // is never reached.
-    ($name:ident: bytes) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_scheme(&[], &[], &[], thunk(ret_bytes()))
-        }
-    };
-    // scheme!(to_bytes: [Ty::Bytes] -> bytes);
-    ($name:ident: [$($p:expr),*] -> bytes) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_scheme(&[], &[], &[], thunk(curry_bytes!($($p),*)))
+            mk_plain_scheme(&[], &[], thunk(pure($ret)))
         }
     };
     // scheme!(str_to_str: [Ty::String] -> Ty::String);
     ($name:ident: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_scheme(&[], &[], &[], thunk(curry!($($p),* => $ret)))
+            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => $ret)))
         }
     };
-    // scheme!(to_line<av>: [Ty::Var(av)] -> bytes);
-    ($name:ident<$tv:ident>: [$($p:expr),*] -> bytes) => {
+    // scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
+    ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let $tv = u.fresh_tyvar();
-            mk_scheme(&[$tv], &[], &[], thunk(curry_bytes!($($p),*)))
-        }
-    };
-    // scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
-    ($name:ident<$tv:ident>: [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let $tv = u.fresh_tyvar();
-            mk_scheme(&[$tv], &[], &[], thunk(curry!($($p),* => $ret)))
-        }
-    };
-    // scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
-    ($name:ident<$a:ident,$b:ident>: [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let ($a,$b) = (u.fresh_tyvar(), u.fresh_tyvar());
-            mk_scheme(&[$a,$b], &[], &[], thunk(curry!($($p),* => $ret)))
+            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => $ret)))
         }
     };
 }
@@ -162,20 +133,13 @@ macro_rules! curry {
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
 }
 
-/// [`curry`]'s encoder dual: the fold's base case is [`ret_bytes`], not a
-/// named return type.
-macro_rules! curry_bytes {
-    ($p:expr) => { fun($p, ret_bytes()) };
-    ($p:expr, $($rest:expr),+) => { fun($p, curry_bytes!($($rest),+)) };
-}
-
 /// A record type over a row of fields ending in `tail`.
 pub fn record_row(fields: &[(&str, Ty)], tail: Row) -> Ty {
     let mut row = tail;
     for (l, t) in fields.iter().rev() {
         row = Row::Extend(
             Label::Field((*l).to_string()),
-            Field::present(t.clone()),
+            Box::new(t.clone()),
             Box::new(row),
         );
     }
@@ -187,8 +151,7 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     record_row(fields, Row::Empty)
 }
 
-/// A record type left open on `tail`: the one shape a row can give an
-/// *optional* field, whose type is then the reader's to check.
+/// A record type left open on `tail`: at least these fields, and any others.
 pub fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
     record_row(fields, Row::Var(tail))
 }
@@ -199,7 +162,7 @@ pub fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
     for (l, t) in tags.iter().rev() {
         row = Row::Extend(
             Label::Case((*l).to_string()),
-            Field::present(t.clone()),
+            Box::new(t.clone()),
             Box::new(row),
         );
     }
@@ -231,10 +194,10 @@ pub fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
 pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     Ty::Record(Row::Extend(
         Label::Field("status".into()),
-        Field::present(Ty::Int),
+        Box::new(Ty::Int),
         Box::new(Row::Extend(
             Label::Field("message".into()),
-            Field::present(Ty::String),
+            Box::new(Ty::String),
             Box::new(Row::Var(row)),
         )),
     ))
@@ -441,14 +404,14 @@ pub(crate) fn fs_file_info_ty() -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, PayloadRoute, PayloadVar, Row, Scheme, Ty, TyEnv, TyVar, Unifier, await_record,
-        error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize, mk_scheme,
-        poll_variant, pure, ret_bytes, thunk,
+        CompTy, FreeVars, Kind, Row, Scheme, Ty, TyEnv, TyVar, Unifier, await_record,
+        closed_record, error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize,
+        mk_plain_scheme, mk_scheme, poll_variant, pure, thunk,
     };
 
     // ── List operations ──────────────────────────────────────────────────
 
-    scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
+    scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
@@ -458,8 +421,7 @@ pub mod scheme {
     /// [`crate::builtins::SURFACE_BUILTIN`].
     pub fn surface_op(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
-        mk_scheme(
-            &[],
+        mk_plain_scheme(
             &[],
             &[row],
             thunk(fun(Ty::Variant(Row::Var(row)), pure(Ty::Unit))),
@@ -469,9 +431,8 @@ pub mod scheme {
     /// `keys :: ∀α. Map<α> → F [Str]`
     pub fn keys(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(
                 Ty::Map(Box::new(Ty::Var(av))),
@@ -483,9 +444,8 @@ pub mod scheme {
     /// `has :: ∀α. Map<α> → Str → F Bool`
     pub(crate) fn has(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(
                 Ty::Map(Box::new(Ty::Var(av))),
@@ -494,87 +454,72 @@ pub mod scheme {
         )
     }
 
-    scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
+    scheme!(equal<av: Kind::DATA>: [Ty::Var(av), Ty::Var(av)] -> Ty::Bool);
 
-    /// Result type of a higher-order callback: `F[ρ] τ`, its route
-    /// scheme-quantified — `map { echo $x }` needs it free to instantiate
-    /// `Bytes`.
-    fn callback_result(u: &mut Unifier, ty: Ty) -> (PayloadVar, CompTy) {
-        let rv = u.fresh_routevar();
-        (rv, CompTy::Return(PayloadRoute::Var(rv), Box::new(ty)))
-    }
+    scheme!(compare<av: Kind::COMPARABLE>: [Ty::Var(av), Ty::Var(av)] -> Ty::Bool);
 
-    /// `map :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [β]`
+    /// `map :: ∀α β. U(α → F β) → [α] → F [β]`
     pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (rv, cb_result) = callback_result(u, b.clone());
-        mk_scheme(
+        mk_plain_scheme(
             &[av, bv],
-            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(a.clone(), cb_result)),
+                thunk(fun(a.clone(), pure(b.clone()))),
                 fun(Ty::List(Box::new(a)), pure(Ty::List(Box::new(b)))),
             )),
         )
     }
 
-    /// `filter :: ∀α ρ. U(α → F[ρ] Bool) → [α] → F [α]`
+    /// `filter :: ∀α. U(α → F Bool) → [α] → F [α]`
     pub(crate) fn filter_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (rv, cb_result) = callback_result(u, Ty::Bool);
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(a.clone(), cb_result)),
+                thunk(fun(a.clone(), pure(Ty::Bool))),
                 fun(Ty::List(Box::new(a.clone())), pure(Ty::List(Box::new(a)))),
             )),
         )
     }
 
-    /// `each :: ∀α β ρ. U(α → F[ρ] β) → [α] → F Unit`
+    /// `each :: ∀α β. U(α → F β) → [α] → F Unit`
     pub(crate) fn each_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (rv, cb_result) = callback_result(u, b);
-        mk_scheme(
+        mk_plain_scheme(
             &[av, bv],
-            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(a.clone(), cb_result)),
+                thunk(fun(a.clone(), pure(b))),
                 fun(Ty::List(Box::new(a)), pure(Ty::Unit)),
             )),
         )
     }
 
-    /// `fold :: ∀α β ρ. U(β → α → F[ρ] β) → β → [α] → F β`
+    /// `fold :: ∀α β. U(β → α → F β) → β → [α] → F β`
     pub(crate) fn fold_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (rv, cb_result) = callback_result(u, b.clone());
-        mk_scheme(
+        mk_plain_scheme(
             &[av, bv],
-            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(b.clone(), fun(a.clone(), cb_result))),
+                thunk(fun(b.clone(), fun(a.clone(), pure(b.clone())))),
                 fun(b.clone(), fun(Ty::List(Box::new(a)), pure(b))),
             )),
         )
     }
 
-    /// `sort-list :: ∀α. [α] → F [α]`
+    /// `sort-list :: ∀α:comparable. [α] → F [α]`
     pub(crate) fn sort_list(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         mk_scheme(
-            &[av],
-            &[],
+            &[(av, Kind::COMPARABLE)],
             &[],
             thunk(fun(
                 Ty::List(Box::new(a.clone())),
@@ -583,17 +528,15 @@ pub mod scheme {
         )
     }
 
-    /// `sort-list-by :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [α]`
+    /// `sort-list-by :: ∀α β:comparable. U(α → F β) → [α] → F [α]`
     pub(crate) fn sort_list_by(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (rv, cb_result) = callback_result(u, b);
         mk_scheme(
-            &[av, bv],
-            &[rv],
+            &[(av, Kind::ANY), (bv, Kind::COMPARABLE)],
             &[],
             thunk(fun(
-                thunk(fun(a.clone(), cb_result)),
+                thunk(fun(a.clone(), pure(b))),
                 fun(Ty::List(Box::new(a.clone())), pure(Ty::List(Box::new(a)))),
             )),
         )
@@ -618,9 +561,8 @@ pub mod scheme {
     /// `intercalate :: ∀α. Str → [α] → F Str`
     pub(crate) fn intercalate(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(
                 Ty::String,
@@ -633,8 +575,7 @@ pub mod scheme {
 
     /// `list-dir :: Str → F [{name, type, size, mtime}]`
     pub(crate) fn list_dir(_u: &mut Unifier) -> Scheme {
-        mk_scheme(
-            &[],
+        mk_plain_scheme(
             &[],
             &[],
             thunk(fun(
@@ -646,75 +587,52 @@ pub mod scheme {
 
     /// `file-info :: Str → F {…full stat…}`
     pub(crate) fn file_info(_u: &mut Unifier) -> Scheme {
-        mk_scheme(
-            &[],
-            &[],
-            &[],
-            thunk(fun(Ty::String, pure(fs_file_info_ty()))),
-        )
+        mk_plain_scheme(&[], &[], thunk(fun(Ty::String, pure(fs_file_info_ty()))))
     }
 
     scheme!(temp_path: pure Ty::String);
 
     scheme!(glob: [Ty::String] -> Ty::List(Box::new(Ty::String)));
 
-    scheme!(is_empty<av>: [Ty::Var(av)] -> Ty::Bool);
+    scheme!(is_empty<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Bool);
 
     // ── Streaming reducers ───────────────────────────────────────────────
 
-    /// `fold-lines :: ∀α ρ. U(α → Str → F[ρ] α) → α → F[ρ] α`
-    ///
-    /// The callback's route and the reducer's own route are one variable: a
-    /// callback whose *tail* is a byte write — `map-lines` and `filter-lines`
-    /// in `prelude.ral` — makes the whole stage a byte producer feeding
-    /// downstream, while `return $acc` keeps the route `Value` and the
-    /// accumulator comes home as a value.  WF-2 survives the forwarding: at
-    /// `ρ = Bytes` the callback's own value is `Unit`, and `α` is what the
-    /// reducer returns.
+    /// `fold-lines :: ∀α. U(α → Str → F α) → α → F α`
     pub(crate) fn fold_lines(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let rv = u.fresh_routevar();
-        let route = PayloadRoute::Var(rv);
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(
-                    a.clone(),
-                    fun(Ty::String, CompTy::Return(route, Box::new(a.clone()))),
-                )),
-                fun(a.clone(), CompTy::Return(route, Box::new(a))),
+                thunk(fun(a.clone(), fun(Ty::String, pure(a.clone())))),
+                fun(a.clone(), pure(a)),
             )),
         )
     }
 
     // ── Concurrency ──────────────────────────────────────────────────────
 
-    /// `spawn :: ∀α ρ. U(F[ρ] α) → F (Handle α)`
+    /// `spawn :: ∀α. U(F α) → F (Handle α)`
     pub fn spawn(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let rv = u.fresh_routevar();
-        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
-        mk_scheme(
+        let body = pure(a.clone());
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[],
             thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
         )
     }
 
-    /// `watch :: ∀α ρ. String → U(F[ρ] α) → F (Handle α)`
+    /// `watch :: ∀α. String → U(F α) → F (Handle α)`
     pub(crate) fn watch(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let rv = u.fresh_routevar();
-        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
-        mk_scheme(
+        let body = pure(a.clone());
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[],
             thunk(fun(
                 Ty::String,
@@ -723,18 +641,16 @@ pub mod scheme {
         )
     }
 
-    /// `service :: ∀α ρ. String → U(F[ρ] α) → F (Handle α)` — `watch`'s
+    /// `service :: ∀α. String → U(F α) → F (Handle α)` — `watch`'s
     /// scheme, the leading `String` being the mandatory birth description.
     ///
     /// The durable lease class is a runtime fact, invisible to the types.
     pub(crate) fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let rv = u.fresh_routevar();
-        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
-        mk_scheme(
+        let body = pure(a.clone());
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[],
             thunk(fun(
                 Ty::String,
@@ -747,9 +663,8 @@ pub mod scheme {
     pub(crate) fn await_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(Ty::Handle(Box::new(a.clone())), pure(await_record(a)))),
         )
@@ -759,9 +674,8 @@ pub mod scheme {
     pub(crate) fn poll(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(Ty::Handle(Box::new(a.clone())), pure(poll_variant(a)))),
         )
@@ -771,9 +685,8 @@ pub mod scheme {
     pub(crate) fn race(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(
                 Ty::List(Box::new(Ty::Handle(Box::new(a.clone())))),
@@ -785,9 +698,8 @@ pub mod scheme {
     /// `cancel :: ∀α. Handle α → F Unit`
     pub(crate) fn cancel_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[],
             &[],
             thunk(fun(Ty::Handle(Box::new(Ty::Var(av))), pure(Ty::Unit))),
         )
@@ -799,24 +711,22 @@ pub mod scheme {
     /// One shape for the whole argv half of the manifest — a frame differs
     /// from its siblings only in the result it names.
     fn base_frame(ty_vars: &[TyVar], result: CompTy) -> Scheme {
-        mk_scheme(ty_vars, &[], &[], thunk(fun(Ty::argv(), result)))
+        mk_plain_scheme(ty_vars, &[], thunk(fun(Ty::argv(), result)))
     }
 
-    /// `echo :: [Str] → F[Bytes] ()` — join the argv with single spaces and
-    /// write it with a trailing newline.  Byte-routed, so pipeline typing
-    /// reads it as the write it is.
+    /// `echo :: [Str] → F ()` — join the argv with single spaces and write it
+    /// with a trailing newline.
     pub(crate) fn echo(_u: &mut Unifier) -> Scheme {
-        base_frame(&[], CompTy::bytes())
+        base_frame(&[], pure(Ty::Unit))
     }
 
-    /// `detach :: ∀α. [Str] → F α`.
-    ///
-    /// The `{pid, desc}` receipt is a record, and one frame does not earn a
-    /// former for it, so the caller reads it as whatever it needs; the runtime
-    /// hands back the whole record either way.
-    pub fn detach(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        base_frame(&[av], pure(Ty::Var(av)))
+    /// `detach :: [Str] → F [pid: Int, desc: Str]` — the receipt of a process this
+    /// session stops owning.
+    pub fn detach(_u: &mut Unifier) -> Scheme {
+        base_frame(
+            &[],
+            pure(closed_record(&[("pid", Ty::Int), ("desc", Ty::String)])),
+        )
     }
 
     // ── First-class constants / queries ──────────────────────────────────
@@ -833,8 +743,7 @@ pub mod scheme {
     /// are heterogeneous and reached by name.
     pub fn use_op(u: &mut Unifier) -> Scheme {
         let rv = u.fresh_row_var();
-        mk_scheme(
-            &[],
+        mk_plain_scheme(
             &[],
             &[rv],
             thunk(fun(Ty::String, pure(Ty::Record(Row::Var(rv))))),
@@ -843,17 +752,17 @@ pub mod scheme {
 
     // ── Terminal, help & encoders ────────────────────────────────────────
     //
-    // Each writes to the byte channel: `F[Bytes] ()`, WF-2's `value = Unit`
-    // pinned by [`ret_bytes`].
+    // Each writes to stdout and returns `()`.
 
-    scheme!(terminal_control: bytes);
-    scheme!(help: bytes);
-    scheme!(explain: [Ty::String] -> bytes);
-    scheme!(to_bytes: [Ty::Bytes] -> bytes);
-    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> bytes);
-    scheme!(to_any_bytes<av>: [Ty::Var(av)] -> bytes);
-    scheme!(to_line<av>: [Ty::Var(av)] -> bytes);
-    scheme!(to_lines<av>: [Ty::List(Box::new(Ty::Var(av)))] -> bytes);
+    scheme!(terminal_control: pure Ty::Unit);
+    scheme!(help: pure Ty::Unit);
+    scheme!(explain: [Ty::String] -> Ty::Unit);
+    scheme!(to_bytes: [Ty::Bytes] -> Ty::Unit);
+    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> Ty::Unit);
+    scheme!(to_any_bytes<av: Kind::DATA>: [Ty::Var(av)] -> Ty::Unit);
+    scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> Ty::Unit);
+    scheme!(to_lines<av: Kind::DATA>: [Ty::List(Box::new(Ty::Var(av)))] -> Ty::Unit);
+    scheme!(to_csv: [Ty::List(Box::new(Ty::Map(Box::new(Ty::String))))] -> Ty::Unit);
 
     // ── Decoders ─────────────────────────────────────────────────────────
     //
@@ -862,18 +771,27 @@ pub mod scheme {
     scheme!(from_bytes: pure Ty::Bytes);
     scheme!(from_string: pure Ty::String);
     scheme!(from_lines: pure Ty::List(Box::new(Ty::String)));
+    scheme!(from_csv: pure Ty::List(Box::new(Ty::Map(Box::new(Ty::String)))));
 
-    /// `from-json`/`from-csv` :: ∀α. F α — decode whatever the channel holds.
+    /// `from-json` :: ∀α. F α — decode whatever the channel holds.
     pub fn from_json(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        mk_scheme(&[av], &[], &[], thunk(pure(Ty::Var(av))))
+        mk_plain_scheme(&[av], &[], thunk(pure(Ty::Var(av))))
+    }
+
+    /// `from-json-at` :: ∀α. [String] → F α — the value at a path, whatever it
+    /// holds.
+    pub fn from_json_at(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        let tokens = Ty::List(Box::new(Ty::String));
+        mk_plain_scheme(&[av], &[], thunk(fun(tokens, pure(Ty::Var(av)))))
     }
 
     /// `from-jsonl` :: ∀α. F [α] — a list of whatever each line holds.
     pub fn from_jsonl(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let records = Ty::List(Box::new(Ty::Var(av)));
-        mk_scheme(&[av], &[], &[], thunk(pure(records)))
+        mk_plain_scheme(&[av], &[], thunk(pure(records)))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────
@@ -881,9 +799,9 @@ pub mod scheme {
     scheme!(range: [Ty::Int, Ty::Int] -> Ty::List(Box::new(Ty::Int)));
     scheme!(chdir: [Ty::String] -> Ty::Unit);
     scheme!(path_bool: [Ty::String] -> Ty::Bool);
-    scheme!(int_parse<av>: [Ty::Var(av)] -> Ty::Int);
-    scheme!(float_parse<av>: [Ty::Var(av)] -> Ty::Float);
-    scheme!(str_parse<av>: [Ty::Var(av)] -> Ty::String);
+    scheme!(int_parse<av: Kind::COMPARABLE>: [Ty::Var(av)] -> Ty::Int);
+    scheme!(float_parse<av: Kind::COMPARABLE>: [Ty::Var(av)] -> Ty::Float);
+    scheme!(str_parse<av: Kind::DATA>: [Ty::Var(av)] -> Ty::String);
     scheme!(round: [Ty::Float, Ty::Int] -> Ty::Float);
     // Shared by `floor`, `ceil`, and `trunc`.
     scheme!(float_to_int: [Ty::Float] -> Ty::Int);
@@ -899,7 +817,7 @@ pub mod scheme {
     pub(crate) fn alias(u: &mut Unifier) -> Scheme {
         let block = u.fresh_comp_ty();
         let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
-        generalize(u, &TyEnv::new(), &thunk(body))
+        generalize(u, &TyEnv::new(), &FreeVars::new(), &thunk(body))
     }
     scheme!(unalias: [Ty::String] -> Ty::Unit);
 
@@ -907,70 +825,37 @@ pub mod scheme {
 
     // ── Divergence ───────────────────────────────────────────────────────
 
-    /// `fail :: ∀α ρ r. {status: Int, message: String | r} → F[ρ] α`.
+    /// `fail :: ∀α r. {status: Int, message: String | r} → F α`.
     ///
     /// An error record, open at the tail so a caught error re-raises with the
-    /// fields `try` gave it.  Divergent, so its route and value join whatever
-    /// the context needs rather than forcing `Unit` on the other arm of an
-    /// `if`.
+    /// fields `try` gave it.  Divergent, so its value joins whatever the context
+    /// needs rather than forcing `Unit` on the other arm of an `if`.
     pub(crate) fn fail(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         let av = u.fresh_tyvar();
-        let rv = u.fresh_routevar();
-        mk_scheme(
+        mk_plain_scheme(
             &[av],
-            &[rv],
             &[row],
-            thunk(fun(
-                error_record_shape(row),
-                CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av))),
-            )),
+            thunk(fun(error_record_shape(row), pure(Ty::Var(av)))),
         )
     }
 
-    /// `exit`/`quit` :: ∀α ρ. Int → F[ρ] α — a status, and no return.
+    /// `exit`/`quit` :: ∀α. Int → F α — a status, and no return.
     /// Divergent like [`fail`]; the elaborator sugars bare `exit` to `exit 0`.
     pub(crate) fn exit(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        let rv = u.fresh_routevar();
-        mk_scheme(
-            &[av],
-            &[rv],
-            &[],
-            thunk(fun(
-                Ty::Int,
-                CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av))),
-            )),
-        )
+        mk_plain_scheme(&[av], &[], thunk(fun(Ty::Int, pure(Ty::Var(av)))))
     }
 
-    /// `∀α ρ. F[ρ] α` — nullary and divergent like [`fail`]/[`exit`].
+    /// `∀α. F α` — nullary and divergent like [`fail`]/[`exit`].
     ///
     /// For a host builtin that never returns (a test-only Rust panic trigger,
-    /// say): its route and value join whatever the context needs rather than
-    /// forcing one on it.
+    /// say): its value joins whatever the context needs rather than forcing one
+    /// on it.
     pub fn diverges(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
-        let rv = u.fresh_routevar();
-        mk_scheme(
-            &[av],
-            &[rv],
-            &[],
-            thunk(CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av)))),
-        )
+        mk_plain_scheme(&[av], &[], thunk(pure(Ty::Var(av))))
     }
-}
-
-/// A value builtin's first-class polytype: the type a `$name` reference holds.
-///
-/// `None` when `table` has no value row under `name`.  A base frame is absent
-/// by construction — it takes an argv, and no value does — so this is also the
-/// question "may `$name` hold it?".
-///
-/// Resolution runs against `table`, the checked session's own surface, so a
-/// name means what that session evaluates.
-pub(crate) fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
-    Some((table.value(name)?.type_rule)(u))
 }
 
 /// The formatted type of any manifest row, either half.

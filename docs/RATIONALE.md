@@ -198,14 +198,15 @@ pleasantly named `remove-file` primitive gets to decide, invisibly, whether
 recursion is required.
 
 Structured results need types which compose. `ral` uses Hindley–Milner inference
-with open rows and scoped labels. A record spread prepends fields, duplicate
-labels are retained, and lookup selects the first, so a spread shadows without
-requiring absence predicates or a restriction operator. This is Leijen's
-scoped-label discipline: a modest extension to unification rather than a second
-record calculus.
+with Rémy rows: a row slot is a label and a type, with no presence flags. A
+record spread is an update, `[...$r, k: v]`: the spread comes first, it replaces
+fields its record already has (a field may change its type), and it never adds
+one. Labels are therefore distinct, and no absence predicate or restriction
+operator is needed.
 
-The cost is that shadowing is one-way at the value level: there is no record
-operation which removes the first field to reveal the one beneath it. Dynamic
+The cost is that a record cannot be extended by spreading. A new field is given
+to the record from the start, the record is nested (`[cfg: $cfg, total: …]`),
+or a map is used (`[:, ...$cfg, total: …]`) when the keys are data. Dynamic
 context uses stack frames where later re-exposure is actually needed.
 
 ## Effect handlers reinterpret external names

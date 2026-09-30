@@ -1,0 +1,11 @@
+# Test: a binding shadows a command of the same name, wherever it lives on
+# PATH; `^name` still reaches the command.
+
+let cat = { echo mine }
+cat
+
+let [dd, other] = [1, 2]
+echo $[$dd + $other]
+
+let shown = ^cat < /dev/null
+echo "external: $shown"

@@ -1,0 +1,4 @@
+# codes: T0011
+# contains: an arm for `curl` stands in for a command, so it writes and returns `()`
+# contains: write it, `echo …`
+within [handlers: [curl: { |a| '{"ok":1}' }]] { curl }

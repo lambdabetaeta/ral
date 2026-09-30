@@ -1,0 +1,3 @@
+let is_t = $true
+let is_f = $false
+if $[$is_t == $is_f] { echo same } else { echo different }

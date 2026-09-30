@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $extent_y
+!{ let extent_y = 1; return $extent_y }
+!{ return $extent_y }

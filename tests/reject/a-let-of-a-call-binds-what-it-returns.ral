@@ -1,0 +1,5 @@
+# contains: `$out` is `()`
+# contains: `let out = deploy … | from-line`
+let deploy = { |env| echo deploying $env }
+let out = deploy prod
+echo "got $out"

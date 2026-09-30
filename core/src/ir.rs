@@ -9,7 +9,7 @@
 
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::syntax::ast::{BinaryOp, Pattern, Redirect};
+use crate::syntax::ast::{BinaryOp, Pattern, Redirects};
 use crate::types::Str;
 
 /// A [`crate::syntax::ast::Pattern`] as elaboration hands it to the rest of
@@ -25,6 +25,13 @@ use std::sync::Arc;
 /// bare command head, a variant label. Shared, not copied — a bind, a
 /// capture and a label clone a pointer.
 pub type Name = Arc<str>;
+
+/// What the elaborator's hoisted temporaries are named after: `_var1`, ….
+pub(crate) const GENSYM_PREFIX: &str = "_var";
+
+pub(crate) fn is_gensym(name: &str) -> bool {
+    name.starts_with(GENSYM_PREFIX)
+}
 
 /// Every name a node mentions, bound or free: sorted, distinct. Built only by
 /// [`Node::new`].
@@ -123,6 +130,8 @@ pub type GroupNode = Node<Box<[(Name, Arc<Comp>)]>>;
 pub type ListNode = Node<Box<[Spanned<Val>]>>;
 /// Entries sorted by key, stably; equal keys are the checker's to refuse.
 pub type FieldsNode = Node<Box<[(Name, Spanned<Val>)]>>;
+/// A form's written options, in source order: labels are syntax.
+pub type OptionsV = Box<[(Name, Spanned<Val>)]>;
 
 impl Mentions for Arc<Comp> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
@@ -345,6 +354,9 @@ pub(crate) mod args {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Toplevel {
     pub phrases: Vec<Spanned<Phrase>>,
+    /// Stored session data the checker solved this unit's uses of, each to be
+    /// admitted against that type before the first phrase runs.
+    pub admits: Vec<(String, Arc<crate::types::Site>)>,
 }
 
 /// A `Phrase::Define`'s names, each with its checker-closed scheme.
@@ -367,6 +379,22 @@ pub enum Phrase {
 }
 
 impl Toplevel {
+    /// The scheme each top-level name was closed at, the last `let` of a name
+    /// winning as it does in the environment the phrases build.
+    pub(crate) fn exported_schemes(&self) -> Vec<(String, Arc<crate::typecheck::Scheme>)> {
+        let last: std::collections::BTreeMap<_, _> = self
+            .phrases
+            .iter()
+            .filter_map(|phrase| match &phrase.item {
+                Phrase::Define { schemes, .. } => Some(schemes),
+                Phrase::Run(_) => None,
+            })
+            .flatten()
+            .map(|(name, scheme)| (name.clone(), Arc::clone(scheme)))
+            .collect();
+        last.into_iter().collect()
+    }
+
     /// Every name any phrase can reference — the phrase-level analogue of
     /// [`Mentions`], for the same lease ledger.
     pub(crate) fn referenced_names(&self) -> Vec<&str> {
@@ -449,7 +477,6 @@ impl Mentions for Comp {
             CompKind::Pipeline {
                 stages,
                 stage_types: _,
-                yields: _,
             } => {
                 for stage in stages {
                     stage.mentions(out);
@@ -481,13 +508,13 @@ impl Mentions for Comp {
             CompKind::Observe(_) => {}
             CompKind::If { cond, then, else_ } => {
                 cond.item.mentions(out);
-                then.mentions(out);
-                else_.mentions(out);
+                then.item.mentions(out);
+                else_.item.mentions(out);
             }
             CompKind::Case { scrutinee, arms } => {
                 scrutinee.item.mentions(out);
                 for arm in arms {
-                    arm.body.comp().mentions(out);
+                    arm.body.item.mentions(out);
                 }
             }
             CompKind::Try { body, handler } => {
@@ -589,26 +616,12 @@ impl Mentions for CommandWord {
     }
 }
 
-impl Mentions for Vec<Redirect<Val>> {
+impl Mentions for Redirects<Val> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        for v in self.iter().filter_map(Redirect::operand) {
+        for v in self.operands() {
             v.mentions(out);
         }
     }
-}
-
-/// What a [`CompKind::Pipeline`] returns to whoever ran it: the last stage's
-/// reported value, or unit because that stage's payload stayed on the byte
-/// channel and so never crossed the process boundary.
-///
-/// The annotation pass writes it, from the checker's route, over elaboration's
-/// placeholder — so no route reaches the evaluator.  `Unit` is therefore a
-/// promise about the final stage that the fold checks (`machine::
-/// bytes_promise_broken`) rather than assumes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PipeYield {
-    Last,
-    Unit,
 }
 
 /// The CBPV computation category — the evaluator steps a program by
@@ -638,8 +651,8 @@ pub enum CompKind {
     App { head: Arc<Comp>, args: Args },
     /// Shell command invocation, and the effect boundary — nothing outside
     /// this variant reaches the dispatch chain or an external program.
-    /// Redirects fuse into the call rather than wrapping it, because the
-    /// spawn syscall installs descriptors and execs atomically.
+    /// Redirects live on the call, not around it: they are installed once the
+    /// head is admitted, and the capture wrap goes around them.
     Exec(Exec),
     /// Concurrent stages joined by Unix pipes: stdout of stage N feeds
     /// stdin of stage N+1.
@@ -649,10 +662,6 @@ pub enum CompKind {
         /// Only the structural REPL's typed spine reads it, so an
         /// un-annotated pipeline keeps the `Unit` placeholder harmlessly.
         stage_types: Vec<crate::typecheck::Ty>,
-        /// What the pipeline hands back.  Every interior edge is an operating-
-        /// system byte pipe allocated from stage position alone, so this is
-        /// the whole of the form's value behaviour.
-        yields: PipeYield,
     },
     /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
@@ -677,18 +686,17 @@ pub enum CompKind {
     Rec { group: Arc<GroupNode>, index: usize },
     /// A read of the store, in computation position: what `$CWD` and `~/x` are.
     Observe(Register),
-    /// `if V then M else N` with `V : Bool` and `M, N : C`; the chosen
-    /// branch runs inline.
+    /// `if V T E` with `V : Bool` and `T, E : U C`; the chosen arm is forced.
+    /// Every form that suspends a command takes a thunk, so an arm is a literal
+    /// block or a thunk in hand.
     If {
         cond: Spanned<Val>,
-        then: Arc<Comp>,
-        else_: Arc<Comp>,
+        then: Spanned<Val>,
+        else_: Spanned<Val>,
     },
-    /// Levy's sum eliminator: one arm per tag, each a computation in the
-    /// syntax.  The alternatives are a finite list fixed at parse time, so
-    /// exhaustiveness is always decided statically and every arm body is a
-    /// node the checker can annotate — an `if` with as many branches as the
-    /// scrutinee's row has labels.
+    /// Levy's sum eliminator: one arm per tag, each a thunk of a function of
+    /// the payload.  The alternatives are a finite list fixed at parse time, so
+    /// exhaustiveness is always decided statically.
     Case {
         scrutinee: Spanned<Val>,
         arms: Vec<CaseArm>,
@@ -700,25 +708,25 @@ pub enum CompKind {
     /// it is reported but does not mask the body's result.
     Guard { body: Val, cleanup: Val },
     /// `audit BODY` — record an audit subtree over `body` and reify it as a
-    /// `[status, value, error, children]` record.
+    /// `[outcome: `ok v | `err e, trail]` record.
     Audit { body: Val },
-    /// `within OPTS BODY` — install the option overrides in `opts`, a map
-    /// evaluated at runtime, for the duration of `body`.  `handlers` is not
+    /// `within OPTS BODY` — install the option overrides in `opts`, written
+    /// out pair by pair, for the duration of `body`.  `handlers` is not
     /// among them: its labels are the names it binds in `body`, so the arms
     /// are syntax and `None` is a `within` that wrote none.
     Within {
-        opts: Val,
+        opts: OptionsV,
         handlers: Option<Vec<HandlerArmV>>,
         body: Val,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
-    Grant { caps: Val, body: Val },
+    Grant { caps: OptionsV, body: Val },
     /// Redirect frame for a body that cannot fuse its own redirects — a
     /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
     /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
     Redirect {
         body: Arc<Comp>,
-        redirects: Vec<Redirect<Val>>,
+        redirects: Redirects<Val>,
     },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
@@ -745,49 +753,15 @@ pub struct HandlerArmV {
     pub value: Spanned<Val>,
 }
 
-/// One arm of a [`CompKind::Case`]: a tag, the pattern its payload binds,
-/// and the computation to run.
+/// One arm of a [`CompKind::Case`]: a tag and a thunk of a function of its
+/// payload — a literal `{ |p| … }`, or a thunk in hand.
 ///
-/// Arms are syntax, so every one is visible to the checker — which is what
-/// lets a `Capture` be placed inside each.  The label is stored bare, as
-/// [`Val::Variant`] stores it, so matching is a string comparison and not a
-/// row-label round trip.
+/// The label is stored bare, as [`Val::Variant`] stores it, so matching is a
+/// string comparison and not a row-label round trip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub tag: Spanned<String>,
-    pub(crate) pattern: IrPattern,
-    pub(crate) body: ArmBody,
-}
-
-/// An arm's computation, and which way the surface reached it.
-///
-/// The two are the same branch and are typed by the same rules — the second
-/// is the application the user could have written by hand.  They are kept
-/// apart because a handler that turns out not to be a function is a fault of
-/// the *arm*, and only this distinction lets the diagnostic say so.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum ArmBody {
-    /// The branch written at the arm: `` `tag: { |p| … } ``.
-    Inline(Arc<Comp>),
-    /// A handler named at the arm, applied to the payload the arm binds.
-    Applied(Arc<Comp>),
-}
-
-impl ArmBody {
-    pub fn comp(&self) -> &Arc<Comp> {
-        match self {
-            Self::Inline(body) | Self::Applied(body) => body,
-        }
-    }
-
-    /// The same spelling around a rebuilt computation — what the annotator
-    /// needs, since it reconstructs every node it walks.
-    pub(crate) fn with_comp(&self, comp: Arc<Comp>) -> Self {
-        match self {
-            Self::Inline(_) => Self::Inline(comp),
-            Self::Applied(_) => Self::Applied(comp),
-        }
-    }
+    pub(crate) body: Spanned<Val>,
 }
 
 /// Body of a [`CompKind::Exec`].
@@ -797,7 +771,10 @@ pub struct Exec {
     /// An argv: each element crosses rendered, whichever boundary it reaches —
     /// a handler arm, a base frame, or the syscall itself.
     pub(crate) args: Args,
-    pub(crate) redirects: Vec<Redirect<Val>>,
+    pub(crate) redirects: Redirects<Val>,
+    /// The type the checker solved at a boundary call, which its door admits
+    /// the value it lets in against.  `None` for every other head.
+    pub(crate) site: Option<Arc<crate::types::Site>>,
 }
 
 /// Dispatch shape of an [`Exec`] head — a variant rather than a flag on
@@ -850,7 +827,7 @@ pub(crate) fn test_occ(names: &[&str]) -> Occ {
 mod tests {
     use super::*;
     use crate::path::tilde::TildePath;
-    use crate::syntax::ast::{BinaryOp, WriteMode};
+    use crate::syntax::ast::{BinaryOp, Redirects, StderrTarget, WriteMode};
     use crate::typecheck::Ty;
 
     #[test]
@@ -911,16 +888,21 @@ mod tests {
         let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
             head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
             args: vec![ValListElem::Single(svar("r_exec_arg"))],
-            redirects: vec![Redirect::Stdout(
-                WriteMode::Write,
-                var("r_exec_redirect_target"),
-            )],
+            redirects: Redirects {
+                stdout: Some((WriteMode::Write, var("r_exec_redirect_target"))),
+                ..Redirects::default()
+            },
+            site: None,
         }));
         let exec_external = Spanned::synthetic(CompKind::Exec(Exec {
             head: CommandWord::External(CommandName::Bare("r_exec_external_head".into())),
             args: vec![],
             // A dup has no operand, so contributes no reference to over-collect.
-            redirects: vec![Redirect::StderrToStdout],
+            redirects: Redirects {
+                stderr: Some(StderrTarget::Stdout),
+                ..Redirects::default()
+            },
+            site: None,
         }));
 
         let pipeline = Spanned::synthetic(CompKind::Pipeline {
@@ -933,7 +915,6 @@ mod tests {
                 )))),
             ],
             stage_types: vec![Ty::Unit, Ty::Unit],
-            yields: PipeYield::Last,
         });
 
         let binary = Spanned::synthetic(CompKind::Binary(
@@ -962,15 +943,14 @@ mod tests {
         })));
         let if_ = Spanned::synthetic(CompKind::If {
             cond: Spanned::synthetic(var("r_if_cond")),
-            then: ret("r_if_then"),
-            else_: ret("r_if_else"),
+            then: svar("r_if_then"),
+            else_: svar("r_if_else"),
         });
         let case = Spanned::synthetic(CompKind::Case {
             scrutinee: Spanned::synthetic(var("r_case_scrutinee")),
             arms: vec![CaseArm {
                 tag: Spanned::synthetic("some".into()),
-                pattern: IrPattern::Name("case_arm_bound".into()),
-                body: ArmBody::Inline(ret("r_case_arm_body")),
+                body: svar("r_case_arm_body"),
             }],
         });
 
@@ -983,7 +963,7 @@ mod tests {
             cleanup: var("r_guard_cleanup"),
         });
         let scope_within = Spanned::synthetic(CompKind::Within {
-            opts: var("r_within_opts"),
+            opts: vec![("dir".into(), svar("r_within_opts"))].into(),
             handlers: Some(vec![HandlerArmV {
                 name: "deploy".into(),
                 value: Spanned::synthetic(var("r_within_arm")),
@@ -991,7 +971,7 @@ mod tests {
             body: var("r_within_body"),
         });
         let scope_grant = Spanned::synthetic(CompKind::Grant {
-            caps: var("r_grant_caps"),
+            caps: vec![("net".into(), svar("r_grant_caps"))].into(),
             body: var("r_grant_body"),
         });
         let scope_audit = Spanned::synthetic(CompKind::Audit {
@@ -999,10 +979,13 @@ mod tests {
         });
         let scope_redirect = Spanned::synthetic(CompKind::Redirect {
             body: ret("r_scope_redirect_body"),
-            redirects: vec![Redirect::Stderr(
-                WriteMode::Append,
-                var("r_scope_redirect_target"),
-            )],
+            redirects: Redirects {
+                stderr: Some(StderrTarget::File(
+                    WriteMode::Append,
+                    var("r_scope_redirect_target"),
+                )),
+                ..Redirects::default()
+            },
         });
         let val_list = Spanned::synthetic(CompKind::Return(Val::list(vec![
             Spanned::synthetic(Val::Unit),
@@ -1158,7 +1141,7 @@ mod tests {
             expected.len(),
             "unexpected extra name in {found:?}; every bound-not-referenced \
              name (lam_param_bound, bind_map_bound, bind_rest_bound, \
-             rec_name_bound, case_arm_bound) must be absent"
+             rec_name_bound) must be absent"
         );
 
         for bound in [
@@ -1166,7 +1149,6 @@ mod tests {
             "bind_map_bound",
             "bind_rest_bound",
             "rec_name_bound",
-            "case_arm_bound",
         ] {
             assert!(
                 !found.contains(bound),

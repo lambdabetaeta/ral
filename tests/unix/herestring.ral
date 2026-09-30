@@ -1,4 +1,4 @@
-# Test: `<< str` feeds a string to stdin; the last stdin redirect wins
+# Test: `<< str` feeds a string to stdin; a command reads from one source
 
 let d = temp-dir
 
@@ -14,10 +14,10 @@ let big = !{fold { |acc _| return "$acc$acc" } $block [1, 2, 3, 4, 5, 6, 7, 8, 9
 let echoed = from-string << $big
 echo !{equal $echoed $big} !{length $big}
 
-# Several fd-0 redirects compose POSIX-style: the last wins
-echo "[!{from-string < /dev/null << #'won'#}]"
-echo "[!{from-string << #'lost'# < /dev/null}]"
-# Expected: [won] / []
+# One source feeds fd 0: a file or a string
+echo "[!{from-string < /dev/null}]"
+echo "[!{from-string << #'one'#}]"
+# Expected: [] / [one]
 
 rm -rf $d
 echo 'here-string tests done'

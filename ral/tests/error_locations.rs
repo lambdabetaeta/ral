@@ -47,13 +47,13 @@ fn an_rc_alias_faults_against_the_rc_file() {
     std::fs::create_dir_all(dir.join("ral")).unwrap();
     std::fs::write(
         dir.join("ral").join("rc"),
-        "[\n  aliases: [ boom: { |args| echo $undefined_name } ]\n]\n",
+        "[\n  aliases: [ boom: { |args| fail [status: 1, message: nope] } ]\n]\n",
     )
     .unwrap();
     let stderr = repl_stderr(&dir, &[], "boom\n");
     std::fs::remove_dir_all(&dir).ok();
     assert!(
-        stderr.contains("ral/rc:2:") && stderr.contains("$undefined_name }"),
+        stderr.contains("ral/rc:2:") && stderr.contains("message: nope] }"),
         "the caret must name the rc file, at the alias body's line; stderr was:\n{stderr}"
     );
 }
@@ -65,7 +65,11 @@ fn a_used_function_faults_against_its_own_file() {
     let dir = common::fresh_tmp_path("ral_used_fault", "d");
     std::fs::create_dir_all(&dir).unwrap();
     let module = dir.join("mod.ral");
-    std::fs::write(&module, "let boom = { |x| $undefined_name }\n").unwrap();
+    std::fs::write(
+        &module,
+        "let boom = { |x| fail [status: 1, message: nope] }\n",
+    )
+    .unwrap();
 
     let stderr = repl_stderr(
         &dir,
@@ -74,7 +78,7 @@ fn a_used_function_faults_against_its_own_file() {
     );
     std::fs::remove_dir_all(&dir).ok();
     assert!(
-        stderr.contains("mod.ral:1:") && stderr.contains("$undefined_name }"),
+        stderr.contains("mod.ral:1:") && stderr.contains("message: nope] }"),
         "the caret must name the loaded file; stderr was:\n{stderr}"
     );
 }

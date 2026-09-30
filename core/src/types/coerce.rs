@@ -31,6 +31,15 @@ pub(crate) fn as_map_ref<'a>(val: &'a Value, ctx: &str) -> Result<&'a Map, Error
     }
 }
 
+/// A contract file's settings: a map, or `()` for nothing to set.
+pub fn settings_map(val: &Value) -> Option<std::borrow::Cow<'_, Map>> {
+    match val {
+        Value::Map(m) => Some(std::borrow::Cow::Borrowed(m)),
+        Value::Unit => Some(std::borrow::Cow::Owned(Map::new())),
+        _ => None,
+    }
+}
+
 /// Owning variant of `as_map_ref`.
 ///
 /// # Errors

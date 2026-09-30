@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leak_grant
+grant [exec: [:]] { let leak_grant = 1 }
+echo $leak_grant

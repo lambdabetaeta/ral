@@ -1,0 +1,4 @@
+let enc = to-json
+enc [a: 1]
+let j = to-json [a: 1]
+echo "json: $j"

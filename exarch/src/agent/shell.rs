@@ -273,7 +273,7 @@ mod tests {
     }
 
     fn scheme_panic_now(_u: &mut Unifier) -> Scheme {
-        mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

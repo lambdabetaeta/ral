@@ -167,7 +167,7 @@ mod tests {
     /// The sink's type: an argv in, `Unit` out — the base-frame convention,
     /// since the sink takes whatever a hook body hands it, however much of it.
     fn sink_scheme(_u: &mut Unifier) -> Scheme {
-        mk_scheme(&[], &[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
+        mk_scheme(&[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
     }
 
     /// A test-only sink base frame: `record` appends its argument values into

@@ -23,7 +23,6 @@ refusal { trunc !{float "-1e300"}; return () }
 refusal { round 3.14 -1; return () }
 refusal { round 3.14 400; return () }
 refusal { int 1.0e300; return () }
-refusal { int `some 1; return () }
 
 # range checks its arithmetic
 refusal { range -2 9223372036854775807; return () }

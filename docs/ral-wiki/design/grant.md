@@ -82,23 +82,22 @@ later frame can name the process to widen it. Only the envelope's tie to this
 process's death is dropped, which is what makes it a survivor rather than a
 receipt for something already killed.
 
-**The dimensions are a type, and the bracket is the form's.** `grant` declares
-its six as a closed row — `net` and `detach` at `Bool`, the four structured
-ones at a variable each, their interiors staying the decoder's — minted fresh
-at every occurrence, and the bundle it is handed is unified against it. So a
-misspelled dimension is refused before the program runs, naming `grant` and its
-own six; a bundle computed elsewhere gets the same verdict as one written out,
-at a *fixed* set of dimensions (the branches of an `if` must agree on a type,
-so a bundle whose membership varies has no type — lift the condition to the
-form); a map is refused by name, a map's keys being data
+**The dimensions are syntax, and the bracket is the form's.** `grant` takes
+its six dimensions written out in its own bracket, the way `case` writes its
+arms, and the checker holds each written one to its table: `net` and `detach`
+at `Bool`, the four structured ones left to the decoder. No record type is
+built for the bracket, so a dimension that is not written is an absent premise,
+not a flag. A misspelled dimension is refused before the program runs, naming
+`grant` and its own six; a bundle bound elsewhere (`grant $o { … }`), a spread
+and a repeated dimension are parse errors, since each hides which dimensions
+are written; a map is no bundle either, a map's keys being data
 ([[design/records-and-maps|records-and-maps]]); and `[]` is the empty grant
-rather than the empty list, the bracket being read by the form.
+rather than the empty list, the bracket being read by the form. The values are
+ordinary terms — `grant [fs: $paths, net: false]` — and to grant a dimension
+only sometimes, lift the condition to the form.
 
-Typing the four structured dimensions to full depth is what the row does *not*
-do, and the reason is the one condition the presence discipline owes: within
-one check a label may not be optional at two different ground types, and
-`editor.read: Bool` beside `fs.read: [String]` is exactly that
-([[decisions/260921_a-field-is-a-flag-and-a-type|a-field-is-a-flag-and-a-type]]).
+The four structured dimensions stay the decoder's to judge: a policy value may
+be a string or a list, and `editor.read: Bool` sits beside `fs.read: [String]`.
 
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one

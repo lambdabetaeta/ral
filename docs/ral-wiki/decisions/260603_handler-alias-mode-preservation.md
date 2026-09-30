@@ -4,6 +4,7 @@ superseded_by: decisions/260606_alias-head-defines-its-modes
 ---
 
 > Superseded by [[decisions/260606_alias-head-defines-its-modes|a fresh head defines its own modes]].
+> Also superseded by [[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]: an arm stands in for what it is.
 
 > **2026-06-19.** The bare-block handler and alias examples below
 > (`{ return 3 }`, `{ echo hi }`) are no longer valid surface forms.

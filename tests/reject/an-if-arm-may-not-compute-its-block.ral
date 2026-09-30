@@ -1,0 +1,4 @@
+# codes: P0001
+# contains: an arm is a block, or a name holding one
+let arms = [a: { echo a }, b: { echo b }]
+if true $arms[a] else $arms[b]

@@ -158,9 +158,22 @@ fn unit(v: &FOValue) -> Result<(), String> {
     }
 }
 
-/// A slot's card, or `()` for an empty one.
+/// `` `some `` a slot's card, or `` `none `` for an empty one.
 fn pinned(v: &FOValue) -> Result<(), String> {
-    unit(v).or_else(|_| is::<Card>(v))
+    match v {
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if label == "none" => Ok(()),
+        FOValue::Variant {
+            label,
+            payload: Some(card),
+        } if label == "some" => is::<Card>(card),
+        other => Err(format!(
+            "expected `none or `some card, got {}",
+            other.shape()
+        )),
+    }
 }
 
 // ── `exarch-agents` ──────────────────────────────────────────────────────
@@ -754,23 +767,46 @@ pub(crate) struct Evict {
 
 impl Datum for Evict {
     fn encode(self) -> FOValue {
-        let mut entries = vec![("turns".into(), self.turns.encode())];
-        entries.extend(self.note.map(|note| ("note".into(), note.0.encode())));
-        FOValue::Map { entries }
+        FOValue::Map {
+            entries: vec![
+                ("turns".into(), self.turns.encode()),
+                ("note".into(), absence(self.note, "none", "some")),
+            ],
+        }
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         exact_keys(v, &["turns", "note"])?;
         Ok(Self {
             turns: field(v, "turns")?,
-            note: optional(v, "note")?,
+            note: presence(v, "note", "none", "some")?,
         })
     }
 }
 
-/// A field a record may leave out.
-fn optional<T: Datum>(v: &FOValue, key: &str) -> Result<Option<T>, String> {
-    v.field(key).is_some().then(|| field(v, key)).transpose()
+/// An `Option` as the variant a ral record spells it with.
+fn absence<T: Datum>(x: Option<T>, none: &str, some: &str) -> FOValue {
+    match x {
+        None => tag(none, None),
+        Some(x) => tag(some, Some(x.encode())),
+    }
+}
+
+/// A field that is `` `none `` or `` `some x ``, read back as an `Option`.
+fn presence<T: Datum>(v: &FOValue, key: &str, none: &str, some: &str) -> Result<Option<T>, String> {
+    let f = v
+        .field(key)
+        .ok_or_else(|| format!("no `{key} field in {}", v.shape()))?;
+    match untag(f) {
+        Some((l, None)) if l == none => Ok(None),
+        Some((l, Some(p))) if l == some => T::decode(p)
+            .map(Some)
+            .map_err(|why| format!("`{key}: {why}")),
+        _ => Err(format!(
+            "`{key}: expected `{none} or `{some} <value>, got {}",
+            f.shape()
+        )),
+    }
 }
 
 /// An eviction's note: one short line, since the marker keeps it for the
@@ -789,11 +825,11 @@ impl Datum for Note {
     fn decode(v: &FOValue) -> Result<Self, String> {
         let note = String::decode(v)?;
         if note.is_empty() {
-            return Err("must not be empty — omit it to leave none".into());
+            return Err("text must not be empty — `none leaves no note".into());
         }
         if note.len() > Self::CAP {
             return Err(format!(
-                "is {} bytes; the marker keeps one short line — {} at most. What is the one \
+                "text is {} bytes; the marker keeps one short line — {} at most. What is the one \
                  thing your future self needs to know?",
                 note.len(),
                 Self::CAP
@@ -801,7 +837,7 @@ impl Datum for Note {
         }
         if note.contains(['\n', '\r']) {
             return Err(
-                "must be a single line — the marker draws one row per turn the cut \
+                "text must be a single line — the marker draws one row per turn the cut \
                         takes, and a line break in a note reads as one of them."
                     .into(),
             );
@@ -899,7 +935,7 @@ pub(crate) struct Reading {
 
 record!(Reading { turns: "turns" });
 
-/// A Rust regex over the transcript's text, narrowed to `turns` if given.
+/// A Rust regex over the transcript's text, narrowed to `` `only turns ``.
 pub(crate) struct Grep {
     pub(crate) pattern: Regex,
     pub(crate) turns: Option<Vec<u64>>,
@@ -907,9 +943,12 @@ pub(crate) struct Grep {
 
 impl Datum for Grep {
     fn encode(self) -> FOValue {
-        let mut entries = vec![("pattern".into(), self.pattern.as_str().to_string().encode())];
-        entries.extend(self.turns.map(|turns| ("turns".into(), turns.encode())));
-        FOValue::Map { entries }
+        FOValue::Map {
+            entries: vec![
+                ("pattern".into(), self.pattern.as_str().to_string().encode()),
+                ("turns".into(), absence(self.turns, "all", "only")),
+            ],
+        }
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
@@ -917,7 +956,7 @@ impl Datum for Grep {
         let pattern: String = field(v, "pattern")?;
         Ok(Self {
             pattern: Regex::new(&pattern).map_err(|e| format!("`pattern: {e}"))?,
-            turns: optional(v, "turns")?,
+            turns: presence(v, "turns", "all", "only")?,
         })
     }
 }

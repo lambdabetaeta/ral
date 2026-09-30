@@ -1,0 +1,30 @@
+3
+from-json: the value at `/items/1/size` is text (`'12kB'`), but this script uses it as an Int — line 10
+from-json: the value has no field `b`, which this script reads — line 17
+x
+from-json: the value has a field `extra`, but this script uses it as a record with exactly the fields `a` — line 26
+from-json: the value at `/a` is a whole number (`5`), but this script uses it as text, bytes, a list or a map — line 33
+true
+from-json: `/a` is a number and `/c` is text, and this script compares them — line 42
+1
+a
+from-json: the value at `/price` is a whole number (`3`), but this script uses it as a Float — line 54
+4.5
+from-json: the value at `/a/b` is a whole number (`1`), but this script uses it as a map — line 64
+2
+21
+from-json-at: `/a` has no member `z`; its keys are `b`
+from-json-at: the document has 2 elements, none of them numbered `5`
+from-json-at: the document has 2 elements, none of them numbered `01`
+from-json-at: `/a` is a number, which has nothing at `b`
+5
+from-json: the value at `/n` is text (`'four'`), but this script uses it as an Int — line 81
+3
+5
+lib
+use: the value at `/inc` is a block of type Integer → Command Integer, but this script uses it as {String → Command _}
+use: the value has no field `missing`, which this script reads
+use: the value at `/inc` is a block, but this script uses it as text, bytes, a list or a map — line 113
+use: the value at `/label` is text (`'lib'`), but this script uses it as an Int — line 118
+[1, 2]
+boundary tests done

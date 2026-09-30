@@ -1,0 +1,41 @@
+# Test: a redirect list is declarative.  Each stream binds once; `2>&1` sends
+# stderr wherever stdout goes, wherever it is written; externals and blocks
+# interpret the list alike.
+
+let d = temp-dir
+let both = 'echo err >&2; echo out'
+
+# `2>&1` is position-independent, for an external and for a block.
+/bin/sh -c $both 2>&1 > "$d/a"
+/bin/sh -c $both > "$d/b" 2>&1
+!{ /bin/sh -c $both } 2>&1 > "$d/c"
+!{ /bin/sh -c $both } > "$d/e" 2>&1
+for [a, b, c, e] { |f|
+    echo $f
+    cat "$d/$f"
+}
+
+# Captured, the joined streams arrive in order.
+let x = /bin/sh -c $both 2>&1
+echo "[$x]"
+
+# The inner `>` claims stdout only; stderr follows the outer `2>&1`.
+!{ /bin/sh -c 'echo e >&2' > "$d/g" } 2>&1
+echo g
+cat "$d/g"
+
+# `2>` lands alike on an external and on a block.
+/bin/sh -c 'echo x >&2' 2> "$d/h"
+!{ /bin/sh -c 'echo x >&2' } 2> "$d/i"
+echo h
+cat "$d/h"
+echo i
+cat "$d/i"
+
+# A failing `>` leaves its target untouched, for an external and for a block.
+to-string 'keep' > "$d/j"
+try { /bin/sh -c 'echo clobbered; exit 1' > "$d/j" } { |_| echo external-failed }
+try { !{ /bin/sh -c 'echo clobbered'; /bin/sh -c 'exit 1' } > "$d/j" } { |_| echo block-failed }
+echo !{from-string < "$d/j"}
+
+rm -rf $d

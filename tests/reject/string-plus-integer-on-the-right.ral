@@ -1,4 +1,4 @@
-# contains: couldn't match
+# contains: but a number (Int or Float) is needed
 let x = hello
 let y = 1
 return $[$x + $y]

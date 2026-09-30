@@ -1,0 +1,5 @@
+# codes: T0074
+# contains: this is a block, but data (no blocks or handles) is needed
+# contains: compares data
+let f = { |x| $x }
+let same = $[$f == $f]

@@ -1,58 +1,58 @@
 # Pipelines: positional byte wires, values at boundaries
 
-**`|` connects the left stage's stdout to the right stage's stdin, and neither
-endpoint must prove that it writes or reads.** Every interior edge is an
-operating-system byte pipe, allocated from stage position alone. A non-final
-stage's returned value is discarded; the final stage's
-[[design/types|payload route]] decides what the pipeline as a whole reports.
+**`|` connects the left stage's stdout to the right stage's stdin: a stage
+feeds the next by writing.** Every interior edge is an operating-system byte
+pipe, allocated from stage position alone. Every stage but the last is a
+command, `F Unit`; the pipeline's value is its final stage's.
 
 ```text
-Γ ⊢ M : F[ρ] A       Γ ⊢ N : F[σ] B
-────────────────────────────────────
-          Γ ⊢ M | N : F[σ] B
+Γ ⊢ M : F Unit       Γ ⊢ N : F B
+────────────────────────────────
+        Γ ⊢ M | N : F B
 ```
 
 Operationally: connect `stdout(M)` to `stdin(N)`, run the stages under the
-process-group discipline below, discard `M`'s returned value, and take the
-pipeline's route and value type from `N`.
+process-group discipline below, and take the pipeline's value from `N`.
 
 **This is not a value pipe.** No returned `Bytes`, `String`, record, or other
-value is ever serialised onto an interior edge. A returned value in non-final
-position is simply unused, exactly as bytes written to an unread pipe are simply
-unread. The symmetry is deliberate — a consumer need not read, a producer need
-not write, and an empty stream is still a byte stream:
+value is ever serialised onto an interior edge; what crosses is what a stage
+writes. A consumer need not read, and an empty stream is still a byte stream:
 
 ```ral
 !{ return () } | cat              # cat reads EOF
-!{ echo hi; return () } | cat     # cat reads "hi"; the Unit goes nowhere
-cat f | from-bytes | grep x       # the returned Bytes is discarded; grep reads EOF
+!{ echo hi } | cat                # cat reads "hi"
 echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline returns 5
 yes | !{ return 5 }               # terminates: yes's next write finds its reader gone
 ```
 
-**Two static rules, each about one stage.** A stage must have shape `F[ρ] A` — a
+**Three static rules, each about one stage.** A stage must have shape `F A` — a
 computation ready to run, not a function still waiting for an argument;
 `echo hi | !{ |x| echo $x }` is a type error whose help says to apply it rather
-than pipe into it. And a stage after a `|` may not bind standard input at its
+than pipe into it. A stage before the last must write: its head is no value row
+that returns (`Output::Returns` — the decoders, `length`, `fold-lines`), and a
+value or block literal in stage position writes nothing to the pipe.
+`length $xs | cat` is refused under `Reason::PipelineStageWrites` (T0011), whose
+sentence says that a stage feeds the next by writing, that `length` returns an
+`Int` instead so nothing reaches `cat`, and offers `echo !{length …} | cat` or
+binding it with `let`. And a stage after a `|` may not bind standard input at its
 own root: `a | b < f` and `a | b << w` are refused, because the feed answers
 every read `b` makes for the stage's whole run and leaves `a` writing for
 nobody — a producer that, concurrently, blocks for nothing until its next
 write finds its reader gone. Each rewrite keeps every command already written: drop the pipe, run the
-producer as its own statement, or `spawn` it. No rule relates a stage's *type*
-to its neighbour's.
+producer as its own statement, or `spawn` it.
 
 **The refusal reads the stage's root and nothing deeper**, which is the whole of
 what the pipeline rule can see, and the whole of what answers a stage's reads
 for its entire run. A read one level in — inside a block, or on one command
 among several — supplies that command alone, is not statically dead, and stays
-legal. Redirect composition *within* a stage is untouched:
-`from-string < /dev/null << #'won'#` takes the last feed (`docs/SPEC.md` §7.4).
+legal. A stage's own redirects never collide: a stream takes one binding, so
+`from-string < /dev/null << #'won'#` is refused at parse
+([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 
-The shape rule reads type formers, not spellings, so a stage that *returns* a
-thunk is accepted: `cat f | { from-line }` typechecks, runs nothing, leaves `f`
-unread, and discards the thunk. This footgun is admitted deliberately — a
-syntax-directed rejection is not stable under naming the subterm, and rejecting
-on the type needs a negative premise no sound decidable rule can state
+The final stage carries no such rule, so one that *returns* a thunk is
+accepted: `cat f | { from-line }` typechecks, runs nothing, leaves `f` unread,
+and is the thunk. This footgun is admitted deliberately — a syntax-directed
+rejection is not stable under naming the subterm
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
 Value composition is ordinary call-by-push-value composition: application passes
@@ -76,8 +76,11 @@ multi-stage pipeline shares one process group:
   the stage writing or reading one is a thread or a process;
 - the parent ral process is not a member of the group; a stable anchor process
   holds the pgid joinable for the pipeline's whole life;
-- the final value, when the final route is `Value`, is simply the last
-  stage's thread returning it — no frame, no wire, crosses back.
+- the final value is simply the last stage's thread returning it — no frame,
+  no wire, crosses back. A captured final stage (`let x = a | b`) is a
+  `Capture` node, so it runs as a thread stage whose stdin is the pipe and
+  whose buffer takes what `b` writes
+  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
 Only an external is ever isolated by a process boundary. A stage thread's panic
 is caught at the pipeline boundary and folded as that stage's own failure,
@@ -110,7 +113,7 @@ whatever it is, is kept. A stage whose own redirect diverts every byte of its
 stdout to a file is a corollary of the same rule, not an exception to it: it
 never performs the write the cut watches for, so `cmd > file | next` runs
 `cmd`'s redirect to completion regardless of when `next` settles. Every
-semantic arrow in a pipeline already points tail-ward — value, route, report —
+semantic arrow in a pipeline already points tail-ward — value, report —
 and the cut points the same way: past a `|`, a stage speaks only while its
 reader is there to hear it, and is otherwise left to its own account
 ([[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).

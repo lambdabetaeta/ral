@@ -1,2 +1,2 @@
-# contains: payload route
+# contains: one branch runs `echo`
 if true { echo hi } else { return 's' }

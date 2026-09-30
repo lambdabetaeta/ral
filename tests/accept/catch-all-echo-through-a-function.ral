@@ -1,1 +1,1 @@
-let w = { |o| within $o { () } }; w [handler: { |n a| echo caught }]
+let w = { |h| within [handler: $h] { () } }; w { |n a| echo caught }

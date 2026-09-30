@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'active; superseded in part by [[decisions/260930_capture-is-decided-by-syntax]] — the route, `head_pipe_route` and `PipeYield` go; `^name` and "an external writes" stand.'
 generated_at_commit: 1a02a2ed
 ---
 

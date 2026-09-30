@@ -8,7 +8,11 @@
 //! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
 //! redefine.
 
-use crate::types::{Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
+use crate::types::{
+    Mooring, RefusedArg, Settled, Shell, Site, Value, as_list, as_map_ref, pointer_token, sig,
+    sig_hint,
+};
+use std::sync::Arc;
 
 use super::util::{as_byte_list, as_bytes, decode_utf8_strict, lossy_line_list};
 
@@ -107,16 +111,126 @@ fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
     })
 }
 
-pub(super) fn builtin_from_json(args: &[Value], shell: &Shell) -> Settled<Value> {
+/// Let a decoded `value` into the program if it is what the program makes of
+/// it: the one door every decoder of undecided shape ends at.
+fn admitted(door: &str, site: &Site, value: Value, shell: &Shell) -> Settled<Value> {
+    site.admit(&value)
+        .map_err(|mismatch| mismatch.refusal(door, shell))?;
+    Ok(value)
+}
+
+pub(crate) fn builtin_from_json(
+    args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let text = input_text(args, "from-json", shell)?;
     let json = serde_json::from_str(&text).map_err(|e| sig(format!("from-json: {e}")))?;
-    json_to_value(json).map_err(|e| sig(format!("from-json: {e}")))
+    let value = json_to_value(json).map_err(|e| sig(format!("from-json: {e}")))?;
+    admitted("from-json", site, value, shell)
+}
+
+/// The member or element `token` names under `json`, an object member by exact
+/// key and an array element by canonical decimal (RFC 6901).
+fn step<'a>(
+    json: &'a serde_json::Value,
+    token: &str,
+    at: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let here = if at.is_empty() {
+        "the document".to_owned()
+    } else {
+        format!("`{at}`")
+    };
+    match json {
+        serde_json::Value::Object(members) => members.get(token).ok_or_else(|| {
+            let keys: Vec<_> = members.keys().map(|k| format!("`{k}`")).collect();
+            format!(
+                "{here} has no member `{token}`; its keys are {}",
+                if keys.is_empty() {
+                    "none".to_owned()
+                } else {
+                    keys.join(", ")
+                }
+            )
+        }),
+        serde_json::Value::Array(items) => token
+            .parse::<usize>()
+            .ok()
+            .filter(|index| index.to_string() == token)
+            .and_then(|index| items.get(index))
+            .ok_or_else(|| {
+                format!(
+                    "{here} has {} elements, none of them numbered `{token}`",
+                    items.len()
+                )
+            }),
+        scalar => Err(format!(
+            "{here} is {}, which has nothing at `{token}`",
+            json_kind(scalar)
+        )),
+    }
+}
+
+fn json_kind(json: &serde_json::Value) -> &'static str {
+    match json {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "text",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// `from-json-at tokens`: decode, then read the value the RFC 6901 reference
+/// tokens lead to.  The tokens are a list and not a pointer string, so a key
+/// holding a `/` or a `~` needs no escaping.
+pub(crate) fn builtin_from_json_at(
+    args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    const DOOR: &str = "from-json-at";
+    let tokens: Vec<String> = as_list(&args[0], DOOR)?
+        .iter()
+        .map(|token| match &*token {
+            Value::String(s) => Ok(s.to_string()),
+            other => Err(sig(format!(
+                "{DOOR}: a reference token is text, got {}",
+                other.type_name()
+            ))),
+        })
+        .collect::<Result<_, _>>()?;
+    let text = decode_utf8_strict(
+        read_stdin_bytes(DOOR, shell)?,
+        &format!("{DOOR}: input is not valid UTF-8"),
+        "use from-bytes to keep raw bytes",
+    )?;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| sig(format!("{DOOR}: {e}")))?;
+    let mut leaf = &json;
+    let mut at = String::new();
+    for token in &tokens {
+        leaf = step(leaf, token, &at).map_err(|why| sig(format!("{DOOR}: {why}")))?;
+        at.push('/');
+        at.push_str(&pointer_token(token));
+    }
+    let value = json_to_value(leaf.clone()).map_err(|e| sig(format!("{DOOR}: {e}")))?;
+    admitted(DOOR, site, value, shell)
 }
 
 /// JSON Lines: a JSON text on each line the one line rule splits, a blank line
 /// holding none.  Each line parses alone, so the line an error names is the
 /// input's and serde's own position is only a column.
-pub(super) fn builtin_from_jsonl(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_from_jsonl(
+    args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     no_arguments(args, "from-jsonl")?;
     let mut records = Vec::new();
     for (index, line) in super::util::stdin_lines("from-jsonl", shell)?.enumerate() {
@@ -135,7 +249,7 @@ pub(super) fn builtin_from_jsonl(args: &[Value], shell: &Shell) -> Settled<Value
         })?;
         records.push(json_to_value(json).map_err(|e| sig(format!("from-jsonl: line {n}: {e}")))?);
     }
-    Ok(Value::list(records))
+    admitted("from-jsonl", site, Value::list(records), shell)
 }
 
 /// serde's message less the position it appends, for a caller stating the
@@ -147,9 +261,9 @@ fn unpositioned(e: &serde_json::Error) -> String {
     message
 }
 
-/// Decode CSV into a list of records keyed by the header row; fields stay
+/// Decode CSV into a list of maps keyed by the header row; fields stay
 /// `String`, since CSV is untyped.  A duplicate header is refused rather than
-/// resolved last-write-wins — a record cannot hold two columns of one name.
+/// resolved last-write-wins — a map cannot hold two columns of one name.
 pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::ReaderBuilder::new()
@@ -234,12 +348,19 @@ pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Valu
 }
 
 /// `echo`'s base-frame body: the argv rendered ([`Value::render_argv`]),
-/// single-space intercalate, trailing newline to the byte channel.
+/// single-space intercalate, trailing newline to the byte channel.  `()` is
+/// nothing to print, which the checker refuses and this backstops.
 pub(super) fn builtin_echo(
     args: &[Value],
     _mooring: &crate::types::Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
+    if args.iter().any(|arg| matches!(arg, Value::Unit)) {
+        return Err(sig_hint(
+            "echo: cannot print Unit",
+            RefusedArg::Unit.remedy("echo"),
+        ));
+    }
     let mut s = Value::render_argv(args).join(" ");
     s.push('\n');
     write_encoded(s.as_bytes(), shell)

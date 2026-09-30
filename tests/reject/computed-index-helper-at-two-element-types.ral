@@ -1,0 +1,5 @@
+# codes: T0010
+# contains: shared by every use in its unit
+let nth = { |xs i| $xs[$i] }
+let a = nth [1, 2] 0
+let b = nth ['x'] 0

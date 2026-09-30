@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: this is an Int, but text, bytes, a list or a map is needed
+echo !{length 5}

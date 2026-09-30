@@ -8,20 +8,11 @@
 use crate::capability::FsOp;
 use crate::evaluator::audit::observe;
 use crate::path::{Located, walk::Kind};
-use crate::syntax::ast::{Redirect, StdinSource, WriteMode};
+use crate::syntax::ast::{StdinSource, WriteMode};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read as _;
-
-/// `>` on stderr streams instead: staging diagnostics for an atomic commit
-/// would withhold them until the frame settles.
-pub(crate) fn stderr_mode(mode: WriteMode) -> WriteMode {
-    match mode {
-        WriteMode::Write => WriteMode::Stream,
-        other => other,
-    }
-}
 
 fn io_error(ctx: &str, e: &std::io::Error) -> Break {
     let msg = match e.kind() {
@@ -33,13 +24,12 @@ fn io_error(ctx: &str, e: &std::io::Error) -> Break {
 }
 
 /// An atomic `>` staged in a temp file beside its target, until
-/// [`commit`](Self::commit) renames it or [`abandon`](Self::abandon) unlinks
-/// it — and `Drop` does the latter too, for whichever of the two nobody
-/// called: a staged temp never outlives the frame that staged it.
+/// [`commit`](Self::commit) renames it, and `Drop` unlinks it
+/// if nobody committed: a staged temp never outlives the frame that staged it.
 ///
-/// The `Option` is the commit-by-value latch: `commit`/`abandon` each take
-/// `self` and empty it first, so the `Drop` that follows sees `None` and
-/// does nothing on the path that already decided.
+/// The `Option` is the commit-by-value latch: `commit` takes `self` and
+/// empties it first, so the `Drop` that follows sees `None` and does
+/// nothing on the path that already decided.
 ///
 /// Staging, commit and rollback all act relative to the directory handle the
 /// door located, so nothing between the judgment and the rename can rename
@@ -75,13 +65,6 @@ impl PendingWrite {
             return Err(e);
         }
         Ok(())
-    }
-
-    /// Drop the staged bytes, leaving the target as it was.
-    pub(crate) fn abandon(mut self) {
-        if let Some(staged) = self.0.take() {
-            staged.unlink();
-        }
     }
 
     /// The whole staged file: what will land at the target if `commit`
@@ -208,7 +191,7 @@ fn open_atomic(
 }
 
 /// Open a write redirect's target.  `>` to a regular file returns a
-/// [`PendingWrite`] the caller must commit or abandon once the writer
+/// [`PendingWrite`] the caller must commit, or drop to abandon, once the writer
 /// finishes; every other shape streams.
 /// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
 /// redirect lands right even from a native, where the host cwd never moves.
@@ -266,15 +249,14 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settl
     }
 }
 
-/// Shared by every atomic `>` commit failure — here and
-/// `command::settle_atomic_write`.
+/// Shared by every atomic `>` commit failure.
 pub(crate) fn atomic_write_error(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("atomic write: {e}"), 1))
 }
 
 /// Park the stdin redirect — `< file` or the here-string `<< str` — on
 /// `shell.io.stdin`, returning a [`StdinRedirectGuard`] that puts back
-/// whatever `Source` was there.  When several feed stdin, the last wins.
+/// whatever `Source` was there.
 ///
 /// `<< str` drops one leading newline, so a body may start on the line below
 /// the command, and pushes the payload through a pipe from a detached thread:
@@ -285,14 +267,11 @@ pub(crate) fn atomic_write_error(e: &std::io::Error) -> Break {
 /// `startup_stdin_tty` honest — consumers trust it only when `Source` is
 /// `Terminal`, which then really does mean the inherited fd 0.
 pub(crate) fn install_stdin_redirect(
-    redirects: &[Redirect<String>],
+    stdin: Option<&StdinSource<String>>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<StdinRedirectGuard> {
-    let Some(stdin) = redirects.iter().rev().find_map(|r| match r {
-        Redirect::Stdin(src) => Some(src),
-        _ => None,
-    }) else {
+    let Some(stdin) = stdin else {
         return Ok(StdinRedirectGuard::Untouched);
     };
     let source = match stdin {

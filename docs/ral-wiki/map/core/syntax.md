@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fb9107b8
-generated_at_date: 2026-09-17
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/syntax/]
 ---
 
@@ -27,6 +27,9 @@ sees raw bytes and bare words.
   spelled short) is refused at the lexer, pointing at the `warn` builtin, and
   at `2>&1` for a program holding the direction backwards: a diagnostic is a
   verb here, not a second name for the byte channel.
+  A redirect list is bound stream by stream, `Redirects::bind` refusing a second
+  binding of stdin, stdout or stderr at the second redirect
+  ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
   carries a `FileId`. A `||` after a pipe is refused naming `?`. A bracketed
   literal that opens with `:` is a map (`[:]`, or `[:, …]`); otherwise its

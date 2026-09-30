@@ -1,0 +1,3 @@
+# contains: `within`'s options are named in writing, so a key computed from `$k` cannot be one; write the name out, as in `within [dir: $d]`
+let k = "dir"
+within [$k: "/tmp"] { return "ok" }

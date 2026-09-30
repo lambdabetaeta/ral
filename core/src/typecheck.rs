@@ -5,15 +5,16 @@
 
 mod annotate;
 pub mod builtins;
+mod capture;
 pub mod contract;
 mod env;
 mod error;
 mod explain;
 mod fmt;
 mod generalize;
+mod index;
 pub(crate) mod infer;
-mod route;
-mod route_solver;
+mod kind;
 mod scheme;
 mod scope;
 mod ty;
@@ -22,18 +23,20 @@ mod unify;
 pub use self::builtins::builtin_type_hint;
 pub use self::contract::{Form, Table};
 pub use self::env::{InferCtx, TyEnv};
-pub use self::error::{PinFailure, Reason, TypeError, TypeErrorKind};
-pub use self::fmt::{
-    FmtCtx, fmt_comp_ty_ctx, fmt_route, fmt_route_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
-};
-pub use self::route::{PayloadRoute, PayloadVar, RouteMismatch};
+pub use self::error::{CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind};
+pub(crate) use self::explain::NO_STATUS_REGISTER;
+pub use self::fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
+pub use self::kind::Kind;
 pub use self::scheme::Scheme;
-pub use self::ty::{
-    CompTy, CompTyVar, Field, Label, Presence, PresenceVar, Row, RowVar, Ty, TyVar,
-};
+#[cfg(feature = "test-util")]
+pub(crate) use self::scheme::WeakVars;
+pub use self::ty::{CompTy, CompTyVar, Label, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
-use self::generalize::generalize;
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) use self::generalize::has_result_only_var;
+use self::generalize::{FreeVars, generalize, settle_weak};
+pub(crate) use self::generalize::{instantiate, reseed_weak};
 use crate::ir::{Comp, Phrase, Toplevel};
 use std::sync::Arc;
 
@@ -42,8 +45,7 @@ use std::sync::Arc;
 ///
 /// An rc file's top-level keys, a plugin manifest's fields, a capability
 /// profile's dimensions.  `&'static`, so a host crate with a table of its own
-/// passes it here — having first held it to
-/// [`check_one_optional_type`](contract::check_one_optional_type).
+/// passes it here.
 pub type ReturnContract = &'static Table;
 
 /// The seed of a run's check, read off the live session by
@@ -99,7 +101,11 @@ impl SessionSchemes {
 /// in first, so a user arm installed over one shadows it here as it does at
 /// runtime — and it is not removable by `unalias`, there being no frame under
 /// it to fall back to.
-fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
+fn seed_env(
+    env: &mut TyEnv,
+    schemes: SessionSchemes,
+    u: &mut Unifier,
+) -> Vec<(String, Arc<Scheme>)> {
     env.builtins = schemes.builtins;
     let frames: Vec<(String, Scheme)> = env
         .builtins
@@ -109,13 +115,23 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     for (name, scheme) in frames {
         env.bind_handler(name, scheme, false);
     }
+    let mut residuals = Vec::new();
     for (name, scheme) in schemes.bindings {
-        let scheme = scheme.unwrap_or_else(|| Arc::new(Scheme::mono(u.fresh_ty())));
+        let scheme = match scheme {
+            Some(scheme) => reseed_weak(u, scheme),
+            None => Arc::new(Scheme::mono(u.fresh_ty())),
+        };
+        // A block's results are admitted by the sites in its own IR; a data
+        // binding's value is here, to be admitted against this unit's uses.
+        if !scheme.weak.is_empty() && !matches!(scheme.ty, Ty::Thunk(_)) {
+            residuals.push((name.clone(), Arc::clone(&scheme)));
+        }
         env.bind(name, scheme);
     }
     for (name, scheme) in schemes.aliases {
-        env.bind_handler(name, scheme, true);
+        env.bind_handler(name, reseed_weak(u, scheme), true);
     }
+    residuals
 }
 
 /// Build a fresh `(InferCtx, TyEnv)` pair seeded from `schemes` — the common
@@ -123,7 +139,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
 fn seeded_session(schemes: SessionSchemes) -> (InferCtx, TyEnv) {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
+    ctx.residuals = seed_env(&mut env, schemes, &mut ctx.unifier);
     (ctx, env)
 }
 
@@ -152,9 +168,16 @@ fn close_thunk_scheme(
     invariant: &'static str,
 ) -> Scheme {
     let thunk_ty = Ty::Thunk(Box::new(cty));
-    inferencer.ctx.solve_and_finalize();
-    let scheme = generalize(&mut inferencer.ctx.unifier, &TyEnv::new(), &thunk_ty);
-    self::generalize::debug_assert_scheme_closed(&mut inferencer.ctx.unifier, &scheme, invariant);
+    inferencer.ctx.settle_pending_indexes();
+    inferencer.ctx.settle_pending_labels(None);
+    let scheme = generalize(
+        &inferencer.ctx.unifier,
+        &TyEnv::new(),
+        &FreeVars::new(),
+        &thunk_ty,
+    );
+    let scheme = Arc::unwrap_or_clone(settle_weak(&inferencer.ctx.unifier, Arc::new(scheme)));
+    self::generalize::debug_assert_scheme_closed(&inferencer.ctx.unifier, &scheme, invariant);
     scheme
 }
 
@@ -167,12 +190,12 @@ fn close_thunk_scheme(
 /// restart at zero, so an open scheme from run *N* would alias run
 /// *N+1*'s fresh variables.
 ///
-/// A [`ReturnContract`] additionally holds `top`'s own last phrase to the
-/// declared table's row — the same rule `within`/`grant` options get, over a
-/// program's own return value.  The *inferred* row is what is checked, so a
-/// key misspelled inside a spread is caught with one written out.  A return
-/// carrying no row (a `Map`, a plugin factory's `return { |opts| … }`) stays
-/// on the caller's own runtime door, which dispatches off the same table.
+/// A [`ReturnContract`] additionally ascribes the declared table to `top`'s
+/// own return value, once inference has finished (`contract::ascribe`).  The
+/// *inferred* type is what is checked, so a key misspelled inside a spread is
+/// caught with one written out.  A return typed at a variable, and a plugin
+/// factory's `return { |opts| … }`, stay on the caller's own runtime door,
+/// which dispatches off the same table.
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
@@ -183,28 +206,24 @@ pub fn typecheck(
     schemes: SessionSchemes,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, Vec<TypeError>> {
-    // The door onto the declared tables: while two of them disagree at one
-    // label, the order two constraints arrive in decides the verdict and no
-    // check in this build is trustworthy — so every check refuses, not merely
-    // the first.
-    if let Err(clash) = contract::condition() {
-        return Err(vec![TypeError {
-            pos: None,
-            kind: TypeErrorKind::ContractClash {
-                label: clash.label,
-                forms: clash.forms,
-            },
-            reason: None,
-        }]);
-    }
     let (mut ctx, mut env) = seeded_session(schemes);
 
-    let phrase_schemes = infer::infer_toplevel(&mut ctx, &mut env, top, contract);
-    ctx.solve_and_finalize();
+    let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, top);
+    ctx.settle_pending_indexes();
+    ctx.settle_pending_labels(None);
+    if ctx.errors.is_empty()
+        && let Some(table) = contract
+    {
+        contract::ascribe(&mut ctx, top.phrases.last(), tail, table);
+    }
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
     }
+    for (_, scheme) in phrase_schemes.iter_mut().flatten() {
+        *scheme = settle_weak(&ctx.unifier, Arc::clone(scheme));
+    }
 
+    ctx.snapshot_sites();
     Ok(annotate::annotate_toplevel(top, &mut ctx, phrase_schemes))
 }
 
@@ -255,22 +274,20 @@ pub fn bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
 ///
 /// The arm is inferred under the runtime handler calling convention — a
 /// lambda arm receives the argv list — and closed against its own unifier
-/// so a later run's check can be seeded with it.  Pinning constrains the
-/// arm's payload route against the head's, and — where that pin grounds
-/// `Bytes` — the arm's value against `Unit` (WF-2).
+/// so a later run's check can be seeded with it.  The arm stands in for the
+/// head it names, so its result is that head's (`Inferencer::stands_in`).
 ///
 /// # Errors
-/// The arm's route disagrees with the head's, or a byte-routed pin leaves
-/// the arm still returning a value.
+/// The arm's result is not what its head returns.
 pub(crate) fn alias_arm_scheme(
     head: &str,
     param: &crate::ir::IrPattern,
     body: &Comp,
     schemes: SessionSchemes,
-) -> Result<Scheme, PinFailure> {
+) -> Result<Scheme, Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
         let cty = inferencer.infer_alias_arm(Some(param), body);
-        inferencer.pin_arm_to_head(head, &cty)?;
+        inferencer.stands_in(head, &cty)?;
         Ok(close_thunk_scheme(
             inferencer,
             cty,
@@ -279,20 +296,21 @@ pub(crate) fn alias_arm_scheme(
     })
 }
 
-/// The computed catch-all's route vet — `within [handler: $k]`, where the
-/// arm is a runtime value with no literal thunk for the checker to have
-/// already pinned via [`infer::Inferencer::infer_catch_all`]. Closed against
-/// its own unifier, the way [`alias_arm_scheme`] is; no scheme persists, a
-/// catch-all frame not outliving its run.
+/// The computed catch-all's vet — `within [handler: $k]`, where the arm is a
+/// runtime value with no literal thunk for the checker to have already held
+/// to [`infer::Inferencer::infer_catch_all`]'s shape. Closed against its own
+/// unifier, the way [`alias_arm_scheme`] is; no scheme persists, a catch-all
+/// frame not outliving its run.
 ///
 /// # Errors
-/// It still returns a value; `Err` carries that value's type.
-pub(crate) fn catch_all_emits_bytes(body: &Comp, schemes: SessionSchemes) -> Result<(), Ty> {
+/// The catch-all, which stands in for every command, returns something but `()`.
+pub(crate) fn catch_all_stands_in(
+    body: &Comp,
+    schemes: SessionSchemes,
+) -> Result<(), Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
         let cty = inferencer.infer_catch_all(body);
-        let arm_body = inferencer.alias_arm_body(&cty);
-        let (value, route) = inferencer.extract_return(&arm_body);
-        inferencer.check_bytes_route(route, &value)
+        inferencer.catch_all_stands_in(&cty)
     })
 }
 

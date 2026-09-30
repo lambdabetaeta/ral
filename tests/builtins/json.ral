@@ -60,7 +60,7 @@ echo !{to-line 1}
 echo !{to-lines ['a', 'b']}
 echo !{to-json [a: 1]}
 echo !{to-jsonl [[a: 1]]}
-echo !{to-csv [[a: 1]]}
+echo !{to-csv [[:, a: '1']]}
 to-lines [1, 2] | grep .
 
 echo 'json tests done'

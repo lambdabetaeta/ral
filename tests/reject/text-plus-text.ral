@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: this is text (String), but a number (Int or Float) is needed
+# contains: to join text, interpolate
+let joined = $["a" + "b"]

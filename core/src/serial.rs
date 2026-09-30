@@ -735,9 +735,9 @@ mod tests {
 
     /// The child reads the checker's verdicts off the node rather than
     /// re-inferring, so a lambda's comp must carry its interior annotations
-    /// across the wire — a pipeline's yield marker, and the `Capture` node a
-    /// byte-payload `Bind` RHS elaborates to. There is no thunk-root
-    /// annotation, so those interior slots are the whole of it.
+    /// across the wire — the `Capture` node a `let` of a command elaborates to.
+    /// There is no thunk-root annotation, so those interior slots are the whole
+    /// of it.
     fn annotated_lambda_node() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
@@ -767,7 +767,10 @@ mod tests {
             } => find_lam_node(rhs).or_else(|| find_lam_node(rest)),
             CompKind::App { head, .. } => find_lam_node(head),
             CompKind::If { then, else_, .. } => {
-                find_lam_node(then).or_else(|| find_lam_node(else_))
+                [then, else_].into_iter().find_map(|arm| match &arm.item {
+                    crate::ir::Val::Thunk(node) => find_lam_node(node.shape()),
+                    _ => None,
+                })
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => find_lam_node(node.shape()),
@@ -792,8 +795,11 @@ mod tests {
             }
             CompKind::App { head, .. } => sub(head),
             CompKind::If { then, else_, .. } => {
-                sub(then);
-                sub(else_);
+                for arm in [then, else_] {
+                    if let crate::ir::Val::Thunk(node) = &arm.item {
+                        walk_comp(node.shape(), visit);
+                    }
+                }
             }
             CompKind::Force(crate::ir::Val::Thunk(node))
             | CompKind::Return(crate::ir::Val::Thunk(node)) => walk_comp(node.shape(), visit),
@@ -802,34 +808,24 @@ mod tests {
         }
     }
 
-    /// `(a unit-yielding pipeline, a `Capture` node)`. The elaborator never
-    /// emits either, so finding one is proof the checker wrote it.
-    fn interior_annotations(body: &Comp) -> (bool, bool) {
-        let (mut unit_yield, mut capture) = (false, false);
-        walk_comp(body, &mut |c| match &c.item {
-            CompKind::Pipeline {
-                yields: crate::ir::PipeYield::Unit,
-                ..
-            } => {
-                unit_yield = true;
+    /// Whether a `Capture` node is in the tree.  The elaborator never emits one,
+    /// so finding it is proof the checker wrote it.
+    fn has_capture(body: &Comp) -> bool {
+        let mut capture = false;
+        walk_comp(body, &mut |c| {
+            if matches!(c.item, CompKind::Capture(_)) {
+                capture = true;
             }
-            CompKind::Capture(_) => capture = true,
-            _ => {}
         });
-        (unit_yield, capture)
+        capture
     }
 
     #[test]
     fn lambda_body_round_trips_with_interior_annotations() {
         let node = annotated_lambda_node();
-        let (unit_yield, capture) = interior_annotations(&node);
         assert!(
-            unit_yield,
-            "body's pipeline yields unit, not its last value"
-        );
-        assert!(
-            capture,
-            "body's byte-payload bind RHS carries a Capture node"
+            has_capture(&node),
+            "body's let of a command carries a Capture node"
         );
 
         let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
@@ -848,9 +844,60 @@ mod tests {
             *back.comp, *node,
             "the deserialised comp must equal the original, annotations and all"
         );
-        let (unit_yield, capture) = interior_annotations(&back.comp);
-        assert!(unit_yield, "the pipeline's yield survives the round-trip");
-        assert!(capture, "the Capture node survives the round-trip");
+        assert!(
+            has_capture(&back.comp),
+            "the Capture node survives the round-trip"
+        );
+    }
+
+    /// Every boundary `Exec` under `comp`, in walk order.
+    fn boundary_sites(comp: &Comp) -> Vec<Arc<crate::types::Site>> {
+        let mut sites = Vec::new();
+        walk_comp(comp, &mut |c| {
+            if let CompKind::Exec(exec) = &c.item
+                && let Some(site) = &exec.site
+            {
+                sites.push(Arc::clone(site));
+            }
+        });
+        sites
+    }
+
+    /// The child admits as the parent would: a thunk ships the sites of its
+    /// IR, and the sites of one unit meet the one `Fixings` there, so two
+    /// decodes the program compares still agree in the engine child.
+    #[test]
+    fn a_thunk_ships_its_boundary_sites_and_their_shared_fixings() {
+        let src = "let f = { |p|\n  let a = from-json < $p\n  let b = from-json < $p\n  return $[$a[x] < $b[x]]\n}";
+        let ast = crate::parse(src).expect("parse");
+        let top = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
+        let annotated =
+            crate::typecheck(&top, crate::SessionSchemes::default(), None).expect("typecheck");
+        let [phrase] = annotated.phrases.as_slice() else {
+            panic!("expected one phrase, got {:?}", annotated.phrases);
+        };
+        let crate::ir::Phrase::Define { comp, .. } = &phrase.item else {
+            panic!("expected a Define phrase, got {:?}", phrase.item);
+        };
+        let node = find_lam_node(comp).expect("lambda in annotated comp");
+        let sent = boundary_sites(&node);
+        assert_eq!(sent.len(), 2, "each decode carries its site");
+
+        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+            comp: Arc::clone(&node),
+            env: SerialEnvSnapshot { bindings: 0 },
+        }));
+        let json = serde_json::to_vec(&lambda).expect("serialise lambda");
+        let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
+        let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
+            panic!("round-trip changed the value variant");
+        };
+        assert_eq!(*back.comp, *node, "sites survive the wire");
+        let received = boundary_sites(&back.comp);
+        assert!(
+            received[0].shares_fixings_with(&received[1]),
+            "the unit's sites meet one Fixings in the child"
+        );
     }
 
     /// A reference past the end of the table is out of range, not a cycle:

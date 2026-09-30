@@ -21,16 +21,16 @@ argument list. The calling convention is fixed by the surface position, not the
 value's runtime shape: a bare block `{ … }`, a non-lambda value, or a lambda of
 the wrong arity is rejected at install time.
 
-**A handler reinterprets an operation; it cannot re-declare its type.** Every
-name a handler installs over already has the OS's own signature, `List String →
-Bytes` — a handler substitutes a new body for that operation, not a new type.
-So every user handler arm, per-name or catch-all alike, has exactly one type,
-`List String → F[Bytes] Unit`: the command world is argv in, bytes out,
-uniformly. A value-returning, variable-arity command is therefore not
-expressible; that capability belongs to the value world instead, as a binding
-of fixed arity taking a list — `let f = { |xs| … }; f [a, b, c]`. A name is a
-value or it is handled; if it is handled, it is a command, and a command
-writes.
+**A handler reinterprets an operation; it cannot re-declare its type.** An arm
+stands in for the head it is installed under: its type is that of the base
+frame or arm already in force there, and `List String → F Unit` for any other
+command. So an arm for `curl`, per-name or under the catch-all, writes and
+returns `()`; an arm for `detach` returns what `detach` returns. The command
+world is argv in, bytes out, uniformly. A value-returning, variable-arity
+command is therefore not expressible; that capability belongs to the value
+world instead, as a binding of fixed arity taking a list —
+`let f = { |xs| … }; f [a, b, c]`. A name is a value or it is handled; if it is handled, it is a command, and a command
+writes ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
 ral's handlers are the **tail-resumptive fragment** of algebraic-effect handlers,
 along three axes — the first two recorded in

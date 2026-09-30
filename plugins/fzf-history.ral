@@ -48,7 +48,7 @@ return { |options|
             let picks = filter { |p| return $[not !{is-empty $p}] } !{re-split "\0" $r[output]}
             let cleaned = map { |p| return !{re-replace "\n*\$" "" $p} } $picks
             let joined = intercalate "\n" $cleaned
-            _ed-set [text: $joined, cursor: !{length $joined}]
+            _ed-set [text: `set $joined, cursor: `set !{length $joined}]
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }

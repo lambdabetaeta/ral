@@ -14,6 +14,12 @@ superseded_by: decisions/260921_a-field-is-a-flag-and-a-type
 > Write the put — `[...$dflt, ...]` with the given fields written out, or a
 > block, whose merge is application — and over a record whose fields are not
 > known where the merge is written, absence still travels as a variant.
+>
+> **Superseded again** by
+> [[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]:
+> the literal is an *update*, not a put. The spread comes first and adds no
+> field, so `[...$dflt, k: v]` replaces fields `$dflt` has and is refused for
+> a `k` it lacks.
 
 **A missing field is filled by merging in a record that supplies it, not by
 attaching a fallback expression to the pattern that reads it.** Two changes

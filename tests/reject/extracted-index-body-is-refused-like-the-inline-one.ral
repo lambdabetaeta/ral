@@ -1,0 +1,4 @@
+# codes: T0062
+# contains: index a value of type Integer
+let f = { |x| $x[$x] }
+map $f [1]

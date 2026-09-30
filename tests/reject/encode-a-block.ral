@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: a block has no equality and no encoding
+let f = { |x| $x }
+to-json $f

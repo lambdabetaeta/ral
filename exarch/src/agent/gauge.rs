@@ -77,7 +77,7 @@ fn pressure_message(detail: &str, planned: Option<&[u64]>) -> String {
                 "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
                  leave your context; they stay readable with `exarch-transcript`. To leave your \
                  future self a line, run `exarch-context `evict [turns: !{{range {first} \
-                 {last_plus_one}}}, note: '…']` now — a prompt whose exchange is still in \
+                 {last_plus_one}}}, note: `some '…']` now — a prompt whose exchange is still in \
                  hand stays on its own; otherwise nothing is required of you."
             )
         }

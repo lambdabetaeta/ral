@@ -95,6 +95,11 @@ pub struct HandleInner {
     /// `builtins::concurrency`.  Cancelling or listing never renews it.
     pub last_observed: Arc<Mutex<std::time::Instant>>,
     pub cmd: std::string::String,
+    /// Where an observer checks the value the worker settles with, set by
+    /// `service-handle`: what the worker returns was decided by another unit,
+    /// so the unit that reacquires its handle admits it against the type it
+    /// uses it at.  Each `service-handle` call is a site of its own.
+    pub site: Option<Arc<super::Site>>,
     /// The worker's own scope — a `DurableRoot::worker()` child of the
     /// *session* root, not of the spawning run, so a foreground interrupt
     /// cannot collaterally kill it.  `cancel` and `race`'s losers fire it, and
@@ -129,6 +134,7 @@ pub(crate) fn idle_handle() -> Value {
         joined: Arc::new(Mutex::new(false)),
         last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
         cmd: "<test>".into(),
+        site: None,
         cancel: crate::process::CancelScope::default(),
     }))
 }

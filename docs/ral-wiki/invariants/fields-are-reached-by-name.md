@@ -29,10 +29,11 @@ row forces every caller to supply it. Absence therefore travels as a variant
 
 The rule holds across the harness wire too. A family tag's record — `` exarch-agents
 `start ``'s spec, `` exarch-context `evict ``, `` exarch-transcript `grep `` — crosses to the
-desk by field name and is read there through `Fields` (`exarch/src/fleet/desk.rs`),
-which is constructed with the complete list of names the tag reads and refuses
-any other: `` `exarch-transcript `grep`: unknown field `turn` — the payload takes
-`pattern` and `turns` — did you mean `turns`? ``. An open shell-side row cannot
+desk by field name and is decoded through `Datum` (`core/src/serial/datum.rs`):
+`record!` (or a hand-written decode over `exact_keys`) reads each named field and refuses
+any other, so the complete list of names the tag reads is
+the struct's own: `` `exarch-transcript `grep`: unknown field `turn — did you mean `turns? ``.
+An open shell-side row cannot
 state an optional field's absence, so without this a misspelt optional field
 would be read by nobody and silently change the call's meaning — a `grep` over
 the whole transcript where a narrowing was meant.

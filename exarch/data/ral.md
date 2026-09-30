@@ -25,7 +25,9 @@ Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **
 
 Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = cat notes.txt` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
 
-Top-level value names may not collide with commands reachable on `PATH`. Avoid names such as `head`, `tail`, `test`, and `date`; prefer descriptive names such as `commit-sha`, `tag-lines`, and `release-date`.
+A `let` captures the command that produces its value; a function, block or handle in that position binds what it returns, and `| from-line` turns what it writes into a value: with `let f = { hostname }`, `let x = f` prints the host name and binds `()`, and `let host = f | from-line` binds it.
+
+A binding shadows a command of the same name; `^name` reaches the command.
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
 
@@ -75,7 +77,9 @@ There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that 
 
 Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
-A decoder ends the byte pipeline: its value never travels down a further `|`. Do not write `git log --oneline | from-lines | head -n5`, which hands `head` an empty pipe; bind the list, then `take 5 $commits`.
+`from-json` and `from-jsonl` results are checked against how the script uses the value: a read of a field the file lacks, or a number used as text, fails at the decode, naming the JSON pointer (`/items/3/size`) and the line of the use. To read one value out of a document, `from-json-at ['items', '3', 'size'] < $file` takes the path as a list of keys and indexes, never as a spliced string.
+
+A decoder ends the byte pipeline: its value never travels down a further `|`, so `git log --oneline | from-lines | head -n5` is refused — a stage feeds the next by writing, and `from-lines` returns a list. Bind the list, then `take 5 $commits`.
 
 ## Audit
 
@@ -111,7 +115,7 @@ When what you want is the merged text of every step, put the block on the byte c
     let text  = !$steps | from-string     # every step's stdout, as one String
     !$steps > log.txt                     # or straight to a file
 
-Beware: `let text = !$steps` only binds the *final* command's stdout (i.e. `wc -l sorted.txt`), dropping the stdout of earlier steps. Reach for `| from-string` whenever a block has more than one part.
+Beware: `let text = !$steps` binds `()`, the block's value, and the steps write as they always do; `!$steps | from-string` binds everything they write.
 
 In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
@@ -132,7 +136,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << #'…'#` (space after `<<` required) feeds the string to `cmd`'s stdin (a stored string works too: `cmd << $body`). One newline at the very front of the string is dropped, so the body can start on the line under the command. Write a file with `echo #'…'# > path`.
-- There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr. Those, with `< f`, `<< str`, `> f`, `>> f` and `>~ f`, are the whole of ral's fd vocabulary: there is no fd plumbing, so `1< f`, `0> f` and any fd past 2 are parse errors rather than something quietly reinterpreted.
+- There is no `1>&2`. Say it with `warn "…"`, which puts one line on stderr and returns unit: a note for the human, off the byte channel a caller may be binding. `2> f` and `2>&1` are unchanged, for an external command's own stderr. Those, with `< f`, `<< str`, `> f`, `>> f` and `>~ f`, are the whole of ral's fd vocabulary: there is no fd plumbing, so `1< f`, `0> f` and any fd past 2 are parse errors rather than something quietly reinterpreted. Each stream takes at most one redirect (`cmd > a > b` and `2> e 2>&1` are parse errors), and `2>&1` means "stderr goes wherever stdout goes" whichever side of `> f` it is written.
 
 Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT USE ESCAPES `\|`):
 
@@ -148,7 +152,7 @@ A bare word that looks like a number IS that number, in every position — argum
 
 Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. Note that boolean negation is `not` (`!` forces). An operand may be any value — `$[$s == 'quit']` compares strings, and `==` is structural on every kind — but arithmetic and `<`/`>` want numbers. Such blocks do not nest; one layer suffices.
 
-`if` takes a Boolean value and blocks:
+`if` takes a Boolean value and blocks, written out or in hand:
 
     if !{equal $s #'quit'#} { #'bye'# } else { #'continuing'# }  # WARNING: ! HERE IS NOT NEGATION, IT IS FORCING A BLOCK
     if    $[$x == 0] { #'zero'#     }
@@ -172,7 +176,7 @@ Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g.
 
 A map is not a record: its keys are runtime data and its values all share one type. A literal is a map if it opens with `[:` — `[:]` is the empty one, `[:, a: 1, b: 2]` a map on keys written out — or if any key is computed (`[$k: 1]`); otherwise static keys make a record. Only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`, and only a map is read by a computed key (`$m[$k]`); a bare key like `$r[host]` always reads a record field. 
 
-When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit_mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return [:, edit_mode: 'vi']` is a map, not a record, and there is no empty-record literal to fall back to (`[]` is the empty *list*), so a config emptied down to nothing has nowhere to go but `[:]`. That still gets checked — an unknown key or a bad value refuses the whole file either way — but only once the file has already run and the returned value is applied, not before.
+When you write an rc file, a plugin manifest, or a capability profile — anything whose terminal `return` a host checks against a fixed keyset — write a record: `return [edit_mode: 'vi']`. A misspelled key is then a type error before the file runs at all. `return [:, edit_mode: 'vi']` is a map, not a record, and `[]` is the empty *list*; both are type errors too. A file with nothing to set returns `()`.
 
 A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 
@@ -190,7 +194,7 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       `file:   { |f| "$path: file, $f[bytes] bytes" }
     ]
 
-A nullary tag still binds a value (`()`) — ignore it with `_`. An arm's body may be any expression, not only `{ |p| … }`: naming a function (`` `dir: $describe ``) applies it to the payload, and types and behaves exactly as `` `dir: { |d| $describe $d } `` does. 
+A nullary tag still binds a value (`()`) — ignore it with `_`. An arm is a block `{ |p| … }` or a name holding a function: naming a function (`` `dir: $describe ``) applies it to the payload, and types and behaves exactly as `` `dir: { |d| $describe $d } `` does. Nothing else may stand in an arm, or in an `if` branch, because it would run before the form chose.
 
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 
@@ -275,7 +279,7 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
 A per-command `handlers:` entry is a one-arg function receiving argvs. Like `case`'s arms, the `handlers:` list is syntax: it is written out in place, because each name in it is bound in the body — a table held in a variable is a parse error, though an individual arm may be. The catch-all `handler:` is a two-arg function that intercepts EVERY external command, and is ordinary data, so it may be written out or bound. A handler stands in for a bare command name and writes what the command would write; `^name` runs the binary regardless. A handler is a stub, not a sandbox.
 
-`within`'s and `grant`'s brackets are the forms' own, not collection literals: `[]` is the empty option set (so `grant [] { … }` is the empty grant), `[:]` names no options at all, and an option bundle computed elsewhere — `let o = [dir: …, env: …]; within $o { … }` — is checked against the same options, at a field set fixed where it is built. A misspelled option is a static error naming the form's own list. `grant`'s own keys are `exec`, `fs`, `net`, `detach`, `editor` and `shell`, each optional and each only ever narrowing what the surrounding frame already holds — the same record a sub-agent's `` grant: `restrict `` takes.
+`within`'s and `grant`'s brackets are the forms' own, not collection literals: `[]` is the empty option set (so `grant [] { … }` is the empty grant), `[:]` names no options at all, and the option names are always written in the bracket — a bundle bound elsewhere (`within $o { … }`) or spread in is a parse error — while their values may be computed: `within [dir: $d] { … }`. A misspelled option is a static error naming the form's own list. `grant`'s own keys are `exec`, `fs`, `net`, `detach`, `editor` and `shell`, each optional and each only ever narrowing what the surrounding frame already holds — the same record a sub-agent's `` grant: `restrict `` takes.
 
 Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
 

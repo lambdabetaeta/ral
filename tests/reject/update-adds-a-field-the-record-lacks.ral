@@ -1,0 +1,4 @@
+# contains: `$cfg` has no field `total` to update
+# contains: nest it (`[cfg: $cfg, total: …]`), or use a map (`[:, ...$cfg, total: …]`)
+let cfg = [host: 'h']
+return [...$cfg, total: 3]

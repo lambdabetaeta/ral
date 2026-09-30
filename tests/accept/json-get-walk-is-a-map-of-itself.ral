@@ -1,0 +1,4 @@
+let [path, dotted] = $ARGS
+let doc = from-json < $path
+let leaf = fold { |node key| return $node[$key] } $doc !{re-split '\.' $dotted}
+to-json $leaf

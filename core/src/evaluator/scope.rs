@@ -6,7 +6,7 @@
 use crate::process::{CommandFailure, SpawnFailure};
 use crate::types::{
     CallSite, Cwd, Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled,
-    Shell, Status, Value, as_map, sig, site_value, validate_handler_arity,
+    Shell, Status, Value, as_map, refused_arm, sig, site_value, validate_handler_arity,
 };
 
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
     Outcome {
         status: e.status.clone(),
         message: e.message.clone(),
-        cmd: e.command.clone().unwrap_or_else(|| "<runtime>".into()),
+        cmd: e.command.as_deref().unwrap_or("<runtime>").to_owned(),
         site: shell.site_of(e.span).or_else(|| shell.call_site()),
     }
 }
@@ -121,7 +121,9 @@ impl WithinScope {
                     catch_all = Some(parse_catch_all(&v, env, shell)?);
                     saw_handlers = true;
                 }
-                _ => return Err(sig(format!("within: unknown key '{k}'"))),
+                _ => unreachable!(
+                    "within's options are syntax; the checker admits only declared keys"
+                ),
             }
         }
 
@@ -229,23 +231,15 @@ fn parse_handlers(
         .collect()
 }
 
-/// `handler:` — the catch-all, which stands in for *every* external command
-/// and so must emit bytes rather than return a value.
+/// `handler:` — the catch-all, which stands in for *every* command and so
+/// writes and returns `()`.
 fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
     validate_handler_arity(v, 2, "within handler: catch-all")?;
     let Value::Thunk(closure) = v else {
         unreachable!("validate_handler_arity guarantees a lambda");
     };
-    crate::typecheck::catch_all_emits_bytes(closure.comp(), handler_schemes(env, shell)).map_err(
-        |actual| {
-            sig(format!(
-                "within handler: catch-all reinterprets every external command, whose payload is \
-                 its stdout, so its body has no separate value to return; its return type must be \
-                 Unit, and the body returns {}",
-                crate::typecheck::fmt_ty(&actual),
-            ))
-        },
-    )?;
+    crate::typecheck::catch_all_stands_in(closure.comp(), handler_schemes(env, shell))
+        .map_err(|error| refused_arm("within handler", &error, closure.comp().span))?;
     Ok(v.clone())
 }
 
@@ -359,7 +353,7 @@ mod tests {
 
     fn panic_now_scheme(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
@@ -467,5 +461,18 @@ mod tests {
         let out = crate::evaluator::run_source(src, &mut shell)
             .expect("a captured block's within must vet its arm exactly as it would at top level");
         assert_eq!(out, Value::Unit);
+    }
+
+    /// A key the table declares but the door lacks an arm for would reach
+    /// the door's `unreachable!`, so walking the table is what turns "new
+    /// key, no arm" into a test failure.
+    #[test]
+    fn every_declared_within_key_is_handled_by_parse() {
+        use crate::typecheck::contract::{Form, declared};
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        for key in declared(Form::Within).keys {
+            let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
+            let _ = WithinScope::parse(&opts, None, &Env::default(), &mut shell);
+        }
     }
 }

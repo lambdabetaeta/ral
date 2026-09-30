@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e43ce37
-generated_at_date: 2026-09-23
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
@@ -60,20 +60,20 @@ dispatch, builtins included.
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
   the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) surfaces **when
   its outcome becomes knowable**, which is one of two moments:
-  - *A ral body* — builtin, closure, or a `> file` scope — runs inside the frame
-    combinators (`evaluator/redirect.rs`): the open records a `WriteIntent` on
-    the `RedirectFrame` and `settle_writes` emits when the **frame settles**,
-    with the outcome the site alone can know — `committed` (body ok, an atomic
-    `>` only once its commit succeeds), `aborted` (the body did not reach the
-    commit), or `failed` (open or commit failed).
-  - *An external command* fuses its redirects into the spawn instead
-    (`wire_stdout_file` / `wire_stderr`, `runtime/command/stdio.rs`). A
-    non-atomic target — `>>`, `>~`, a `>` outside the atomic recipe, any `2>`
-    (`stderr_mode` coerces it to streaming) — has no later commit step, so it
-    emits **eagerly at the open**, `committed`, no snapshots; a failed open
-    surfaces nothing at all. Only an atomic `>` defers, settling post-`wait()`
-    in `command::run`: `committed` with snapshots, `failed` on a broken rename,
-    `aborted` when the child did not succeed and the staged temp is discarded.
+  - *A streaming target* — `>>`, `>~`, any `2>` (`2>` is always streaming) — has
+    no later commit step: `RedirectState` (`evaluator/redirect.rs`) observes it
+    `committed` **at the open**, whether the target is fused into an external or
+    carries a block, and whatever the body later does; a failed open is `failed`.
+  - *An atomic `>`* records a `WriteIntent` and surfaces when the frame settles,
+    with the outcome the site alone can know — `committed` (body ok, commit
+    succeeded), `aborted` (the body did not reach the commit), or `failed`
+    (commit failed). Only this target can be `aborted`.
+  Every entry a redirect makes — read, write, refusal, settled write — carries
+  the redirect's own site (`RedirectState` holds the node's span and runs each
+  step under `Shell::at_site`), not what its body dispatched last.
+
+  One interpreter opens the targets in a fixed order — stdin, stdout, stderr — so
+  the trail reads the same for a block and an external.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
   plus the content snapshots, each whole or `` `none `` and never a prefix,

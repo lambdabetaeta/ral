@@ -1,7 +1,6 @@
 //! Pipeline resolve: freeze each stage's launch decision and the terminal
 //! handoff.  No process is created and no pipe opened; launch reads everything
-//! this phase produces.  The form's `PipeYield` comes committed in the checked
-//! IR and never passes through here.
+//! this phase produces.
 
 use super::super::command::CommandIdentity;
 use super::super::command_call;

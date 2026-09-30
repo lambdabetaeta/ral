@@ -2,7 +2,8 @@
 
 **A `Scheme` leaves the unifier that minted it only if it is closed** — every
 variable in its body is either ground or bound by the quantifier (or is a
-cyclic-binding root, which the ∀-prefix carries as a μ-equation). A scheme that
+cyclic-binding root, which the ∀-prefix carries as a μ-equation, or a marked
+*weak* residual, below). A scheme that
 still mentions a *residual* variable — one free in the minting unifier — must
 not cross out of that unifier's lifetime.
 
@@ -29,6 +30,13 @@ prelude bake harvests the schemes off the annotated prelude's `Bind` nodes
 (`typecheck::bake_prelude`), and the serial scope tables carry the installed
 `(value, scheme)` pairs across the pipeline-stage helper wire
 (`serial::SerialBinding`).
+
+A weak residual is the one variable a scheme may carry unquantified, because it
+is marked: `Scheme.weak` lists it, `seed_env` re-seeds each listed variable as a
+fresh weak variable of the next unifier — with the kind it had, so a residual
+refuses in the next unit what it refused in its own — and a `Define` scheme is
+settled before it is stored, so no foreign id is ever read
+([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
 
 One consequence: α-equivalence is **not** quotiented. `Scheme`'s `PartialEq` is
 derived, hence structural on the listed ids, so two schemes minted by different

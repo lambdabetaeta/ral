@@ -131,53 +131,40 @@ fn on_exit_runs() {
 }
 
 /// `$STATUS` is not a name any longer: a failure carries its status in the
-/// `Err` record `try` binds, so reading the register fails like any other
-/// undefined name — and the hint says where the status went.
+/// `Err` record `try` binds, so reading the register is refused statically
+/// like any other unbound name — and the hint says where the status went.
 #[test]
-fn status_is_an_undefined_variable_that_names_its_replacement() {
+fn status_is_an_unbound_variable_that_names_its_replacement() {
     let Err(Break::Error(e)) = eval("return $STATUS") else {
         panic!("$STATUS must not resolve");
     };
-    assert_eq!(e.message, "undefined variable: $STATUS");
-    let hint = e
-        .hint
-        .expect("the miss must say what replaced the register");
-    assert!(hint.contains("try"), "hint should point at `try`: {hint}");
+    assert!(
+        e.message.contains("undefined variable: $STATUS"),
+        "unexpected diagnostic: {}",
+        e.message
+    );
+    assert!(
+        e.message.contains("`try`"),
+        "the diagnostic must point at `try`: {}",
+        e.message
+    );
 }
 
-/// The PATH-shadow vet guards both session-scope binders — `eval_bind`'s
-/// pattern check and `eval_letrec`'s group install — so all three spellings
-/// of a `let` naming a PATH-reachable command must be refused with the same
-/// diagnostic.  Inside a block frame the very same `let` is legal, which is
-/// what makes the refusal a scope rule rather than a ban on the name.
+/// A session `let` shadows the command of the same name, in every binder:
+/// plain, recursive, and destructuring.
 #[cfg(unix)]
 #[test]
-fn session_scope_let_may_not_shadow_a_path_command() {
-    for src in [
-        "let cat = 1",
-        "let cat = { |x| if $[$x <= 0] { return 0 } else { cat $[$x - 1] } }",
-        "let [cat, other] = [1, 2]",
-    ] {
-        match eval(src) {
-            Err(Break::Error(e)) => {
-                assert!(
-                    e.message.contains("cannot bind `cat`")
-                        && e.message.contains("reachable on PATH"),
-                    "wrong refusal for {src:?}: {e:?}"
-                );
-                assert!(
-                    e.hint
-                        .as_deref()
-                        .is_some_and(|h| h.contains("value and command names disjoint")),
-                    "refusal for {src:?} must hint at the namespace rule: {e:?}"
-                );
-            }
-            other => panic!("session-scope {src:?} must be refused, got {other:?}"),
-        }
-    }
+fn session_scope_let_shadows_a_path_command() {
+    assert_eq!(must_succeed("let cat = 1\nreturn $cat"), Value::Int(1));
     assert_eq!(
-        must_succeed("return !{ let cat = 1; return $cat }"),
-        Value::Int(1)
+        must_succeed(
+            "let cat = { |x| if $[$x <= 0] { return 0 } else { cat $[$x - 1] } }\nreturn !{cat 3}"
+        ),
+        Value::Int(0)
+    );
+    assert_eq!(
+        must_succeed("let [cat, other] = [1, 2]\nreturn $[$cat + $other]"),
+        Value::Int(3)
     );
 }
 
@@ -362,8 +349,11 @@ fn elaborator_never_wraps_exec_in_redirect() {
                 }
             }
             CompKind::If { then, else_, .. } => {
-                walk(then, saw_exec_with_redirects);
-                walk(else_, saw_exec_with_redirects);
+                for arm in [then, else_] {
+                    if let ral_core::ir::Val::Thunk(node) = &arm.item {
+                        walk(node.shape(), saw_exec_with_redirects);
+                    }
+                }
             }
             _ => {}
         }

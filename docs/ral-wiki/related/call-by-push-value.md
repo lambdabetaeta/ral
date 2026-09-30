@@ -1,6 +1,6 @@
 ---
-verified_at_commit: fffa63b2
-verified_at_date: 2026-09-26
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 
@@ -26,7 +26,8 @@ touches the world ([[design/cbpv|cbpv]],
   a command is Levy's `M to x. N`. Generalisation at `Bind` needs **no value
   restriction** precisely because CBPV sequences the effect *before* binding —
   the thing generalised is always a value whose effect has already happened
-  ([[design/types|types]]). The substrate does real type-theoretic work.
+  ([[design/types|types]]); the variables of data of an undecided shape are
+  weak instead, and a `let` leaves them alone. The substrate does real type-theoretic work.
 - **The subsumption is live, not historical.** Eager application is the
   call-by-value image; passing a `{M}` thunk recovers a call-by-name call site
   term-by-term. Both disciplines are expressible and neither is baked in —
@@ -43,20 +44,22 @@ touches the world ([[design/cbpv|cbpv]],
 
 ## Divergences (extensions, mostly)
 
-- **`F` carries one annotation, and it is not a grade.** ral's returner is
-  `F[ρ] A`, where `ρ ∈ {Value, Bytes}` says which of a computation's two
-  products a *value boundary* observes — the returned `A`, or the stdout it
-  wrote ([[design/types|types]]). It bounds no effect, licenses nothing, and
-  does not multiply along a bind: `M to x. N` simply takes `N`'s route. The
-  formation rule `ρ = Bytes ⇒ A = Unit` is the whole of its theory. Strip the
-  annotation and what is left is Levy's calculus unchanged
-  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+- **`F` carries its value type and nothing else; a command is `F Unit`.** ral's
+  returner is Levy's `F A`. A command — an external, a builtin that writes, a
+  handler arm standing in for one — writes to stdout and returns `()`, as `cd`
+  does, so `{ echo hi }` is `{Command Unit}` and `{ 'hi' }` is `{Command String}`.
+  That `let x = hostname` binds the text `hostname` writes is no fact about
+  types: it is the capture coercion `cap M to d. decode d`, which the checker
+  wraps around the command a `let` can see, decided from syntax before any
+  type is inferred
+  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+  [[design/types|types]]). The calculus under it is Levy's unchanged.
 - **The pipe is a new computation combinator, and it is not a typing fact.**
   CBPV composes computations by sequencing and application only. ral adds `|`,
-  whose static rule says just that both sides are computations — `Γ ⊢ M : F[ρ] A`
-  and `Γ ⊢ N : F[σ] B` give `Γ ⊢ M | N : F[σ] B`. What the combinator *does* is
-  operational: it connects `M`'s stdout to `N`'s stdin with an
-  operating-system pipe and discards `M`'s returned value. A ral-written
+  whose static rule says just that a stage feeds the next by writing — `Γ ⊢ M : F Unit`
+  and `Γ ⊢ N : F B` give `Γ ⊢ M | N : F B`, the value the final stage's. What the
+  combinator *does* is operational: it connects `M`'s stdout to `N`'s stdin with an
+  operating-system pipe. A ral-written
   stage runs its own CEK machine on an OS thread, in a child `Shell` seeded
   from the parent's session; only an external command is a process, and
   only externals are members of the pipeline's process group, which the
@@ -67,7 +70,7 @@ touches the world ([[design/cbpv|cbpv]],
   λ-calculus, and the honest
   reading is that the shell's one composition operator lives outside the
   calculus rather than being encoded into it.
-- **No computation products.** ral's computation types are `F[ρ] A` and
+- **No computation products.** ral's computation types are `F A` and
   `A → C`, full stop; Levy's `Πᵢ Bᵢ` is absent. Where it would be used, a
   record of thunks — a value product of `U`s — serves.
 - **The effect interface is fixed.** Levy's calculus is effect-agnostic; ral

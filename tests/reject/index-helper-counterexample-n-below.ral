@@ -1,0 +1,8 @@
+# codes: T0010
+# contains: shared by every use in its unit
+let run = { |i|
+  let h = { |c| $c[$i] }
+  let n = $[$i + 1]
+  h [1]
+  h ['x']
+}

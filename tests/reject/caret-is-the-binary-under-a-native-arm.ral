@@ -1,2 +1,2 @@
-# contains: couldn't match
+# contains: but a number (Int or Float) is needed
 within [handlers: [length: { |xs| echo mocked }]] { let r = !{^length hello}; return $[$r + 0] }

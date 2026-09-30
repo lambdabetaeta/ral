@@ -15,7 +15,7 @@ let none = `none
 echo !{case $none [`none: { |_| return absent }, `some: { |_| return present }]}
 
 # An arm naming a handler binds the payload as surely as an inline one
-let h = { |p| echo b }
+let h = { |p| return b }
 let named = case `some () [`some: $h, `none: { |p| echo z }]
 let inline = case `some () [`some: { |p| $h $p }, `none: { |p| echo z }]
 echo "got [$named] [$inline]"

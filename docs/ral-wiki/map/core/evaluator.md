@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e1bace22
-generated_at_date: 2026-09-26
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -10,8 +10,8 @@ covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 (`machine.rs`) — the full narrative is
 [[internals/evaluator-machine|the evaluator machine]]. **Evaluation is
 entered only through framed run doors; the machine's own verbs are
-crate-private.** Four reach outside the module — `evaluate`, `apply`, its
-argument-free twin `force`, and `apply_handler`:
+crate-private.** Three reach outside the module — `evaluate`, `apply`, and its
+argument-free twin `force`:
 
 - `machine::evaluate(comp, env, mooring, shell)` (`pub(crate)`) — inject the
   computation closure ⟨M, ρ⟩ over the empty stack and step until it is empty.
@@ -72,21 +72,34 @@ Internals:
   per `Frame` each — the two frame-table columns). `Focus::Eval` and
   `Terminal::Lambda` hold a computation closure `{ comp, env }`, a type apart
   from the thunk value's `Closure`; `Frame::To` alone carries an `Env`, and
-  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` swaps
-  `shell.io.stdout` for a fresh buffer and pushes `Frame::Capture`, which
-  returns the collected bytes exactly, as `Value::Bytes`; the
-  checker binds that value to a fresh name and composes a `Decode` node over
-  it, which — since
+  `Apply`, `Try` and `Guard` none. `CompKind::Capture(body)` pushes
+  `Frame::Capture`, which holds the sink it replaced, and swaps a fresh buffer
+  in as `shell.io.stdout`; on return it restores the sink and yields the buffer
+  exactly, as `Value::Bytes`, ignoring the body's own value (`cap : F Unit → F
+  Bytes`), and a buffer that overflowed `SINK_BUFFER_CAP` is
+  `capture_overflowed`; on a halt it flushes what the body wrote to the sink it
+  replaced (`Shell::write_sink`) and propagates the halt. The checker binds that
+  value to a fresh name and composes a `Decode` node over it, which — since
   the kernel's `decode` takes a value, not a computation — has no frame of
   its own: `step_eval` closes the bound variable, drops the bind's scope so
   the buffer is unshared and moves into the string uncopied, and reads it as
-  the text a value boundary wants inline, no name and no frame a session can
-  intercept
-  ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
-  [[design/types|types]]). `CompKind::Bind` swaps `shell.io.stdout` to the
-  ambient sink before its left computation runs (`Frame::To` carries the prior
-  sink to restore), so a `Capture` node one level in only ever drains its own
-  tail's bytes. `CompKind::Rec { group: Arc<GroupNode>, index }` unfolds the
+  text after dropping one trailing terminator, strictly, or fails with
+  "captured output is not valid UTF-8 text"
+  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+  [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
+  [[design/types|types]]). `CompKind::Bind` pushes `Frame::To` and evaluates
+  its right-hand side; a discarded statement writes to whatever `shell.io.stdout`
+  is, a capture's buffer inside a capture.
+  `CompKind::If` and `step_case` force the arm they choose in place
+  (`Machine::force_val`: a literal thunk runs in the current environment,
+  closing nothing; any other value is forced as a value); `step_case` first
+  pushes a `Frame::Apply` carrying the payload (`Unit` for a nullary tag), so
+  the arm, a thunk of a function of the payload, receives it, and its store
+  effects outlive the `case` as an `if` body's do
+  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+  The unmatched-tag error is unreachable from source — the checker has proved
+  coverage — and remains for a variant that arrives untyped.
+  `CompKind::Rec { group: Arc<GroupNode>, index }` unfolds the
   n-ary recursive group: `group.occ()` — the union of every member's
   mentions, computed once when the elaborator built the node — restricts ρ
   once, and every sibling's thunk shares that restricted ρ; the member in
@@ -104,14 +117,7 @@ Internals:
   `CompKind::Exec` classifies the head through the lexical environment and
   dispatches into [[map/core/runtime|runtime]]'s `command_call`.
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
-  ([[map/core/runtime|runtime]]). `step_case` selects the arm carrying the
-  scrutinee's tag, binds the payload (`Unit` for a nullary tag) to that arm's
-  pattern, extending the `case`'s environment, and evaluates the arm's body there — a
-  branch, not a function applied to the payload, so its store effects outlive
-  the `case` as an `if` body's do
-  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-  The unmatched-tag error is unreachable from source — the checker has proved
-  coverage — and remains for a variant that arrives untyped.
+  ([[map/core/runtime|runtime]]).
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
   and the five [[design/control-operators|control operators]] (`WithinScope`,
   `error_record`, and `classify`, which flattens a failed `try`/`guard`/`audit`
@@ -142,10 +148,12 @@ Internals:
   `Rec` group's fixpoint pre-install binds unobserved
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 - `capture.rs` — `with_capture` for output capture; `redirect.rs` — the
-  redirect-frame open/route/restore lifecycle (`RedirectState`), entered
-  directly by `machine.rs`'s `Frame::Redirect` and by `with_redirects` for a
-  base-frame native's synchronous call, distinct from the external-command
-  fd machinery in [[map/core/runtime|runtime]]'s `command/redirect.rs`.
+  redirect-frame open/route/restore lifecycle (`RedirectState`), the one
+  interpreter of a `Redirects` list: entered by `machine.rs`'s `Frame::Redirect`,
+  by `with_redirects` for a base-frame native's synchronous call, and for a
+  fused external, whose child then reads the installed sinks in
+  [[map/core/runtime|runtime]]'s `command/stdio.rs`. Targets open stdin, stdout,
+  stderr; a streaming write is observed at its open, an atomic `>` at settle.
 - `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
   CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
   forms its payload, `thunk M` builds `⟨M, ρ|occ(M)⟩` through `Closure::new`
@@ -171,7 +179,6 @@ Internals:
   reaches by dispatching an `Exec` node through `command_call::classify_command`
   → `run_base_frame` / `run_external`, and at
   `PipeNode::launch`/`join`; runtime re-enters the machine only through
-  `machine::apply_handler` (`cfg(unix)`, `detach`'s one-shot handler call) and
   `machine::evaluate` (a stage's `(comp, env)`, from `pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
   body in process, OS confinement being per-child in `build_command`

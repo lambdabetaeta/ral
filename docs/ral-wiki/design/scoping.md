@@ -33,6 +33,15 @@ Each dynamic frame nests by its own algebra:
 A tail-recursive call inside a `within` or `grant` block stays under that scope
 across every tail landing.
 
+**A scoping form's body is a thunk the form forces.** `within` and `grant` take
+a thunk `U C` — a literal `{ … }`, or a name holding one — and run it inside the
+frame they push; `guard`, `try` and `?` take theirs the same way, as `if` and
+`case` take their arms. A literal block is forced in place with the current
+environment (`Machine::force_val`), closing nothing. An atom that would be
+hoisted, and so run before the form chose, is refused at elaboration: bind it
+first. The type of the form is the type of the body, so no arm rule is
+specific to scoping ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+
 ## Two layers: lexical scope vs fork inheritance
 
 The lexical scoping above is one mechanism; *crossing a shell boundary* is a

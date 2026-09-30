@@ -136,4 +136,3 @@ fn a_polymorphic_argument_is_left_to_the_spawn() {
         "a spread is not gated"
     );
 }
-

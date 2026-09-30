@@ -1,0 +1,3 @@
+# codes: T0011
+# contains: a stage feeds the next by writing, and `from-json` returns
+cat data.json | from-json | wc -l

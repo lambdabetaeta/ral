@@ -748,9 +748,8 @@ mod chokepoint_tests {
 
     /// A pruned name leaves scope *and* the next run's type seed together —
     /// `unset` drops the whole `Binding`, value and scheme in one act — so a
-    /// later reference is an ordinary undefined variable, not a stale-scheme
-    /// surprise. The checker admits any reference and only evaluation
-    /// resolves it, so the symptom is a `Ran` error, not a `Static` one.
+    /// later reference is an ordinary unbound variable, refused statically,
+    /// not a stale-scheme surprise.
     #[test]
     fn prune_removes_name_and_type_seed() {
         let mut shell = armed_shell(2);
@@ -781,23 +780,15 @@ mod chokepoint_tests {
             desk: None,
             fork: None,
         }) {
-            RunReport::Ran { ending, .. } => {
-                let err = ending
-                    .into_result()
-                    .expect_err("a pruned name must read as undefined");
-                let msg = match err {
-                    crate::types::Break::Error(e) => e.message,
-                    other @ crate::types::Break::Escape(_) => {
-                        panic!("expected an Error break, got {other:?}")
-                    }
-                };
+            RunReport::Static { diagnostics } => {
+                let msg = crate::diagnostic::format_static_diagnostics(&diagnostics).0;
                 assert!(
                     msg.contains("undefined variable: $prune_x"),
                     "expected an undefined-variable diagnostic, got: {msg}"
                 );
             }
-            RunReport::Static { .. } => {
-                panic!("an unbound variable reference is a runtime error, not a static one")
+            RunReport::Ran { .. } => {
+                panic!("a pruned name must be refused before it runs")
             }
         }
     }

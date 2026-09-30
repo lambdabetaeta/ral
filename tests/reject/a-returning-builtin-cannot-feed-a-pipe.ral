@@ -1,0 +1,5 @@
+# codes: T0011
+# contains: `length` returns an Int instead
+# contains: Did you mean `echo !{length …} | cat`
+let xs = [1, 2]
+length $xs | cat

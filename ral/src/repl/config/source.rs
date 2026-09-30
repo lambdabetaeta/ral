@@ -3,7 +3,7 @@
 //!
 //! Each kind of file has one contract on its return value: a profile is a
 //! script sourced for its effects and returns `()`; the rc is a
-//! configuration expression returning a record or a map. An `exit` in either
+//! configuration expression returning a record, or `()` for nothing to set. An `exit` in either
 //! ends the session with its status. Any other failure is reported and the
 //! boot goes on — a broken startup file must not strand the user at no shell.
 
@@ -102,9 +102,10 @@ fn rc_config(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<Map, St
     let contract = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Rc);
     match evaluate(path, Some(contract), mooring, shell)? {
         Value::Map(pairs) => Ok(pairs),
+        Value::Unit => Ok(Map::new()),
         other => Err(Stop::Failed(format!(
-            "{path}: rc file must return a record or a map, e.g. `[edit_mode: 'vi']` or `[:]`; \
-             got {} — does the file end with `return [...]`?",
+            "{path}: rc file must return a record, a map, or `()` for nothing to set, \
+             e.g. `[edit_mode: 'vi']`; got {} — does the file end with `return [...]`?",
             other.type_name()
         ))),
     }
@@ -227,22 +228,27 @@ mod tests {
         assert_eq!(profile("exit 7\n"), Err(Stop::Exit(7)));
     }
 
+    /// `()` is an rc with nothing to set, and so is a last phrase that is a
+    /// `let`, which yields `Unit` as `return ()` does.
     #[test]
-    fn rc_returning_unit_is_rejected() {
-        let err = failure(rc("return ()\n"));
-        assert!(
-            err.contains("rc file must return a record or a map") && err.contains("got Unit"),
-            "{err}"
-        );
+    fn rc_returning_unit_sets_nothing() {
+        for src in ["return ()\n", "let x = 1\n"] {
+            assert!(rc(src).unwrap().is_empty(), "{src}");
+        }
     }
 
-    /// A last phrase that is a `let` yields `Unit`, as `return ()` does: the
-    /// easy accident of forgetting the `return`.
+    /// The first-run skeleton is an rc that sets nothing.
     #[test]
-    fn rc_ending_in_let_is_rejected() {
-        let err = failure(rc("let x = 1\n"));
+    fn the_default_rc_sets_nothing() {
+        assert!(rc(super::super::DEFAULT_RC).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_decoded_rc_that_is_no_map_is_rejected() {
+        let err = failure(rc("return !{echo '\"vi\"' | from-json}\n"));
         assert!(
-            err.contains("rc file must return a record or a map") && err.contains("got Unit"),
+            err.contains("rc file must return a record, a map, or `()`")
+                && err.contains("got String"),
             "{err}"
         );
     }

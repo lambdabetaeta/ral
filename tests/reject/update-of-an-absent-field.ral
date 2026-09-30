@@ -1,0 +1,4 @@
+# contains: `$cfg` has no field `tokne` to update
+# contains: did you mean `token`?
+let cfg = [token: 'x']
+return [...$cfg, tokne: 'y']

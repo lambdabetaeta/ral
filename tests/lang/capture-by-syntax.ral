@@ -1,0 +1,131 @@
+# Test: a `let` captures the command that produces its value — decided by the
+# syntax of its right-hand side and the class of each head, never by a type.
+
+let assert_eq = { |name expected actual|
+    if !{equal $expected $actual} {} else {
+        warn "FAIL: $name expected: $expected actual: $actual"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+let assert_unit = { |name actual|
+    if !{equal () $actual} {} else {
+        warn "FAIL: $name expected: nothing"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+# A block's tail command is the value; the statements before it write where
+# they always do
+let x = !{ echo a; echo b }
+assert_eq 'tail' b $x
+let y = !{ let inner = echo a; echo b }
+assert_eq 'inner let' b $y
+
+# A function's writes are never a bind's value; `| from-line` asks for them
+let f = { |n| echo $n; echo done }
+let z = f 1
+assert_unit 'function binds ()' $z
+let w = f 2 | from-line
+assert_eq 'function piped' "2\ndone" $w
+
+# A wrapper runs what it is given and returns what that returns
+let time = { |t| let r = !$t; $r }
+time { echo hi }
+assert_eq 'wrapper of a value' hi !{time { return hi }}
+
+# A block in hand is not the command it holds, but a literal one is
+let t = { echo held }
+let held = !$t
+assert_unit 'block in hand' $held
+let lit = !{ echo literal }
+assert_eq 'literal block' literal $lit
+
+# A pipeline's value is its final stage's, and the `let` enters that stage
+let grepped = echo abc | grep b
+assert_eq 'final stage' abc $grepped
+let p = 'b'
+let hoisted = echo abc | grep "a$p"
+assert_eq 'through the hoist' abc $hoisted
+let noted = echo a | !{ echo note; cat }
+assert_eq 'statement in a stage' a $noted
+let g = { cat }
+let by_name = echo a | !$g
+assert_unit 'final stage in hand' $by_name
+let lines = echo x | map-lines { |l| return "$l!" }
+assert_unit 'wrapper stage' $lines
+let mapped = echo x | map-lines { |l| return "$l!" } | from-line
+assert_eq 'wrapper piped' "x!" $mapped
+
+# An encoder written out is a command; an encoder held is a function
+let j = to-json [a: 1]
+assert_eq 'encoder called' '{"a":1}' $j
+let enc = to-json
+let ej = enc 7
+assert_unit 'encoder held' $ej
+
+# Every arm of a branching form is a position its result comes from
+let c = true
+let big = if $c { echo big } else { echo small }
+assert_eq 'if then' big $big
+let either = if $c { echo yes } else { return none }
+assert_eq 'command or value' yes $either
+let recovered = try { ^false } { |e| echo failed }
+assert_eq 'try handler' failed $recovered
+let okay = try { echo fine } { |e| echo failed }
+assert_eq 'try body' fine $okay
+let cased = case `a 1 [`a: { |n| echo arm }, `b: { |n| echo other }]
+assert_eq 'case arm' arm $cased
+let d = temp-dir
+echo file > "$d/entry"
+let listed = within [dir: $d] { ls }
+assert_eq 'within body' entry $listed
+let guarded = guard { echo body } { echo cleanup }
+assert_eq 'guard body' body $guarded
+
+# `let _` captures and drops
+let _ = echo secret
+
+# A fused redirect is the command's own: a stdout redirect wins over the capture
+let saved = echo hi > "$d/out"
+assert_eq 'fused redirect' '' $saved
+assert_eq 'what it wrote' hi !{cat "$d/out"}
+# ...but a redirect around a block is not the command
+let framed = !{ echo hi } > "$d/out"
+assert_unit 'redirected block' $framed
+# a fused stdin redirect still captures
+let upper = tr a-z A-Z < "$d/entry"
+assert_eq 'fused stdin' FILE $upper
+
+# An encoder's bytes are Bytes when a decoder is not asked for
+let raw = echo hi | from-bytes
+assert_eq 'bytes' 3 !{length $raw}
+
+# An interpolated `!{…}` is a hoisted `let`, so it captures too
+let n = { return 5 }
+assert_eq 'interpolated command' "n: 5" "n: !{n}"
+assert_eq 'interpolated writer' "e: entry" "e: !{within [dir: $d] { ls entry }}"
+
+# A `{ … }` is a thunk everywhere: an arm in hand is forced by the form
+let aaah = { return chosen }
+let baaah = { return other }
+assert_eq 'arm in hand' chosen !{if true $aaah else $baaah}
+let inert = if true $aaah else $baaah
+assert_eq 'arm in hand, bound' chosen $inert
+
+# A stand-in writes as the command it stands in for does, all of it
+within [handlers: [curl: { |a| echo note; echo body }]] {
+    let both = curl
+    assert_eq 'stand-in chatter' "note\nbody" $both
+}
+within [handlers: [curl: { |a| echo '{"ok":1}' }]] {
+    let direct = curl | from-json
+    assert_eq 'stand-in as a stage' 1 $direct[ok]
+}
+
+# A collection callback's writes are effects; `map` still binds what it returns
+let mapped_each = map { |e| echo $e } [a, b]
+assert_eq 'map of writers' 2 !{length $mapped_each}
+assert_unit 'first result' $mapped_each[0]
+
+echo 'capture by syntax done'

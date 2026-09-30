@@ -24,13 +24,13 @@ echo $zs
 # Aliasing: $xs must be unchanged after [0, ...$xs] / [...$xs, 99]
 echo $xs
 
-# Spread in map literal (explicit entries take priority)
+# A spread first, then entries that replace its fields
 let base_opts = [host: localhost, port: 8080]
-let config = [port: 9090, ...$base_opts]
+let config = [...$base_opts, port: 9090]
 echo $config[port]
 echo $config[host]
 
-# An explicit field beats a spread, wherever it sits
+# An update leaves the base's other fields alone
 let front = [...$base_opts, port: 1]
 echo $front[port]
 echo $front[host]

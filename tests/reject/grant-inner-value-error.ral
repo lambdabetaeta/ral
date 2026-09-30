@@ -1,2 +1,2 @@
-# contains: couldn't match type Bool with type Integer
+# contains: this is a Bool, but a number (Int or Float) is needed
 grant [exec: [git: $[true + 1]]] { echo hi }

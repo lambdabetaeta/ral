@@ -1,1 +1,0 @@
-let o = [dir: "/tmp", env: [KEY: "val"]]; within $o { return "ok" }

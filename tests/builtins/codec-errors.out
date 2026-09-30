@@ -6,7 +6,5 @@ c
 from-jsonl: line 3, column 5: EOF while parsing a value
 from-json: integer 18446744073709551615 is outside the supported range
 from-jsonl: line 2: integer 18446744073709551615 is outside the supported range
-to-jsonl: element at index 1: Block has no JSON representation
-to-json: Block has no JSON representation
 ints-to-bytes: byte at index 0 out of range: 256
 codec error tests done

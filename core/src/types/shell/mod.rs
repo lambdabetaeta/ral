@@ -236,6 +236,28 @@ impl Shell {
         })
     }
 
+    /// A call's span becomes the dispatch site, unless it lies outside the
+    /// session's sources — the baked prelude's — so that `defer`'s inner
+    /// `spawn` is stamped where the user wrote `defer`.
+    pub(crate) fn stamp_call_site(&mut self, span: Option<Span>) {
+        if let Some(span) = span
+            && self.session.sources.get(span.file).is_some()
+        {
+            self.local.audit.call_site = Some(span);
+        }
+    }
+
+    /// Run `f` with `span` as the dispatch site, then restore the old one:
+    /// what `f` observes is stamped by the syntax that asked for it, not by
+    /// whatever a body dispatched last.
+    pub(crate) fn at_site<R>(&mut self, span: Option<Span>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.local.audit.call_site;
+        self.stamp_call_site(span);
+        let r = f(self);
+        self.local.audit.call_site = saved;
+        r
+    }
+
     /// [`Self::site_of`] applied to the dispatch register [`Audit`] carries.
     /// Returned by value so the caller may hold `&mut audit` alongside it.
     /// `pub`, not `pub(crate)`: a host door that builds its own
@@ -324,16 +346,6 @@ impl Shell {
         Self::write_sink(&mut self.io.stdout, bytes, "stdout")
     }
 
-    /// Write `bytes` to the ambient sink — the visible stream a discarded
-    /// statement's or a Capture's overflowed prefix reaches for directly,
-    /// bypassing whatever `stdout` currently is.
-    ///
-    /// # Errors
-    /// See [`Self::write_sink`].
-    pub(crate) fn write_ambient(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.ambient, bytes, "the surrounding stream")
-    }
-
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
     /// own diagnostics land, and what `2> f` rebinds.
     ///
@@ -346,7 +358,7 @@ impl Shell {
     /// The one place a dead interior edge becomes the reader-gone break.
     /// `BrokenPipe` is a clean shutdown, as for a Unix tool dying silently on
     /// `SIGPIPE`: the reader closed its end (`fzf` took a selection).
-    fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8], what: &str) -> Settled<()> {
+    pub(crate) fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8], what: &str) -> Settled<()> {
         match sink.write_all(bytes) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),

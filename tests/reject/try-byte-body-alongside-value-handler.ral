@@ -1,2 +1,2 @@
-# contains: payload route
+# contains: one outcome runs `echo`
 try { echo hi } { |_| return 's' }

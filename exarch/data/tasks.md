@@ -6,7 +6,7 @@ Every tag of `exarch-tasks` answers the task list after the transition — a mut
   exarch-tasks `add "do second thing"
   exarch-tasks `status [id: 1, status: `doing]   # before you begin
   exarch-tasks `status [id: 1, status: `done]
-  exarch-tasks `remove [id: 2]                    # task no longer necessary
+  exarch-tasks `remove 2                          # task no longer necessary
   exarch-tasks `list                              # the tasks, as ral records
 
     exarch-tasks `add <desc> / `remove <id> / `clear / `list
@@ -16,7 +16,7 @@ Every tag of `exarch-tasks` answers the task list after the transition — a mut
 
 Schema: `[ id: Int, desc: String, status: `open | `doing | `blocked | `done, tags: [String], notes: String ]`. An invalid `status` `warn`s and answers the list unchanged.
 
-Anything bespoke — a field this kit does not surface, a one-off inspection — reads straight off the register: `` exarch-pins `read "tasks" `` answers the card itself, `()` when the list is empty. Normally, though, `` exarch-tasks `list `` is how you get records, and the kit deliberately ships no query functions: query with `filter`/`first` over it, e.g. `filter { |t| equal $t[status] \`doing } !{exarch-tasks \`list}`.
+Anything bespoke — a field this kit does not surface, a one-off inspection — reads straight off the register: `` exarch-pins `read "tasks" `` answers `` `some `` the card itself, `` `none `` when the list is empty. Normally, though, `` exarch-tasks `list `` is how you get records, and the kit deliberately ships no query functions: query with `filter`/`first` over it, e.g. `filter { |t| equal $t[status] \`doing } !{exarch-tasks \`list}`.
 
 ## Goal
 

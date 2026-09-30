@@ -1,4 +1,4 @@
-# contains: couldn't match
+# contains: but a number (Int or Float) is needed
 let h = hello
 let f = { |x| return $[$x + $h] }
 return !{f 1}

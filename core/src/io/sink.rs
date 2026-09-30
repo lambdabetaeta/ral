@@ -75,10 +75,9 @@ pub enum Sink {
     Terminal,
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
-    /// Redirect target, opened by `evaluator::redirect`. `Arc` so a nested
-    /// `swap_ambient_stdout` under a redirect clones the sink rather than `dup`ing
-    /// the fd — a `dup` shares the file offset anyway, so nothing about
-    /// where bytes land changes.
+    /// Redirect target, opened by `evaluator::redirect`.  `Arc` so a nested frame
+    /// under a redirect clones the sink rather than `dup`ing the fd — a `dup`
+    /// shares the file offset anyway, so nothing about where bytes land changes.
     File(Arc<std::fs::File>),
     /// In-memory capture, as under `let x = cmd` or a spawned handle.
     Buffer(ByteBuffer),
@@ -215,16 +214,60 @@ impl Sink {
     }
 
     /// The shared tail of `child_stdout`/`child_stderr` once inheriting is
-    /// ruled out: a `Pipe` hands the child the fd directly, everything else
-    /// is pumped.
-    fn child_stdio_plan(&self) -> io::Result<ChildStdioPlan> {
-        if let Self::Pipe { writer, .. } = self {
-            return Ok(ChildStdioPlan {
-                stdio: crate::process::StdioSpec::from_pipe_writer(writer.try_clone()?),
-                pump: None,
-            });
+    /// ruled out: a `File` or `Pipe` hands the child the fd directly,
+    /// everything else is pumped.
+    pub(crate) fn child_stdio_plan(&self) -> io::Result<ChildStdioPlan> {
+        let stdio = match self {
+            Self::File(f) => crate::process::StdioSpec::from_file(f.try_clone()?),
+            Self::Pipe { writer, .. } => {
+                crate::process::StdioSpec::from_pipe_writer(writer.try_clone()?)
+            }
+            _ => return Ok(ChildStdioPlan::for_sink(self)),
+        };
+        Ok(ChildStdioPlan { stdio, pump: None })
+    }
+
+    /// Do both sinks deliver to one destination?  Decides whether a child's
+    /// two streams may share a single descriptor.
+    pub(crate) fn same_destination(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Terminal, Self::Terminal) | (Self::Stderr, Self::Stderr) => true,
+            (Self::File(a), Self::File(b)) => Arc::ptr_eq(a, b),
+            (Self::Buffer(a), Self::Buffer(b)) => Arc::ptr_eq(a, b),
+            (Self::Pipe { writer: a, .. }, Self::Pipe { writer: b, .. }) => Arc::ptr_eq(a, b),
+            (
+                Self::Watch {
+                    deferred: da,
+                    label: la,
+                    ..
+                },
+                Self::Watch {
+                    deferred: db,
+                    label: lb,
+                    ..
+                },
+            ) => {
+                la == lb
+                    && match (da, db) {
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            }
+            (Self::Tee(a1, a2), Self::Tee(b1, b2)) => {
+                a1.same_destination(b1) && a2.same_destination(b2)
+            }
+            (
+                Self::Terminal
+                | Self::Stderr
+                | Self::File(_)
+                | Self::Buffer(_)
+                | Self::Tee(..)
+                | Self::Watch { .. }
+                | Self::Pipe { .. },
+                _,
+            ) => false,
         }
-        Ok(ChildStdioPlan::for_sink(self))
     }
 
     /// Spawn a thread draining `reader` into this sink, flushing its tail at
@@ -287,20 +330,13 @@ impl Clone for Sink {
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
     let buf = ByteBuffer::default();
-    let sink = tee_into(base, &buf);
+    let sink = Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base));
     (sink, buf)
-}
-
-/// The same tee, into a [`ByteBuffer`] that already exists: two conduits
-/// recorded as one stream, which is what `audit` wants of a command's stdout
-/// and the ambient sink beside it.
-pub(crate) fn tee_into(base: Sink, buf: &ByteBuffer) -> Sink {
-    Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base))
 }
 
 /// A fresh [`ByteBuffer`] and the sink that writes into it: callers wire the
 /// sink onto `shell.io` and keep the arc to drain later.  Every `Sink::Buffer`
-/// is minted here or in [`tee_into`], so nothing writes into a capture buffer
+/// is minted here or in [`tee_with_buffer`], so nothing writes into a capture buffer
 /// past [`write_capped`].
 pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
     let buf = ByteBuffer::default();
@@ -445,6 +481,7 @@ impl Write for Sink {
 mod tests {
     use super::{Edge, Sink, terminator_len};
     use crate::process::Wake;
+    use std::sync::Arc;
 
     #[test]
     fn terminator_len_is_the_one_line_rule() {
@@ -523,7 +560,6 @@ mod tests {
     #[test]
     fn pipe_reader_eof_waits_for_sink_and_child() {
         use std::io::Read;
-        use std::sync::Arc;
         use std::time::Duration;
 
         let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
@@ -557,5 +593,51 @@ mod tests {
         drop(sink);
         drop(writer);
         assert_eq!(handle.join().expect("join"), b"hi\n");
+    }
+
+    fn file_sink() -> Sink {
+        Sink::File(Arc::new(tempfile::tempfile().expect("anonymous file")))
+    }
+
+    #[test]
+    fn same_destination_is_identity_of_the_target() {
+        let f = file_sink();
+        assert!(f.same_destination(&f.clone()));
+        assert!(!f.same_destination(&file_sink()));
+
+        let b = Sink::Buffer(Arc::default());
+        assert!(b.same_destination(&b.clone()));
+        assert!(!b.same_destination(&Sink::Buffer(Arc::default())));
+
+        assert!(Sink::Terminal.same_destination(&Sink::Terminal));
+        assert!(Sink::Stderr.same_destination(&Sink::Stderr));
+        assert!(!Sink::Terminal.same_destination(&Sink::Stderr));
+        assert!(!f.same_destination(&Sink::Terminal));
+    }
+
+    #[test]
+    fn same_destination_compares_a_tee_branchwise() {
+        let f = file_sink();
+        let tee = |a: &Sink, b: &Sink| Sink::Tee(Box::new(a.clone()), Box::new(b.clone()));
+        assert!(tee(&f, &Sink::Stderr).same_destination(&tee(&f, &Sink::Stderr)));
+        assert!(!tee(&f, &Sink::Stderr).same_destination(&tee(&file_sink(), &Sink::Stderr)));
+        assert!(!tee(&f, &Sink::Stderr).same_destination(&f));
+    }
+
+    #[test]
+    fn same_destination_of_watch_needs_the_same_label() {
+        let watch = |label: &str| Sink::Watch {
+            deferred: None,
+            label: label.into(),
+            pending: Vec::new(),
+        };
+        assert!(watch("a").same_destination(&watch("a")));
+        assert!(!watch("a").same_destination(&watch("b")));
+    }
+
+    #[test]
+    fn a_file_plan_hands_over_the_fd_with_no_pump() {
+        let plan = file_sink().child_stdout(false).expect("plan");
+        assert!(plan.pump.is_none());
     }
 }

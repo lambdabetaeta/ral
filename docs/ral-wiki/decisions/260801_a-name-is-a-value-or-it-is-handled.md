@@ -42,7 +42,7 @@ value is having no function type to inhabit.
 > `fixed_arity` classifies nothing; it answers a `usize` for every entry left in
 > the table, and the argv half has no arity at all. §6's derive-do-not-assert
 > discipline is not weakened by that but finished, there being no longer one
-> table to be read two ways.
+> table to be read two ways. It is about arity only: which rows write to stdout is declared per row (`BuiltinEntry::output`), because a body's writing is not in its signature.
 
 `BuiltinEntry::fixed_arity` (`core/src/types/builtin.rs:79`) is the whole
 classification, derived rather than declared: a `Sig`'s arity is structural

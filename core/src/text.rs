@@ -40,6 +40,23 @@ pub fn char_to_byte(text: &str, cursor: usize) -> usize {
         .map_or(text.len(), |(i, _)| i)
 }
 
+/// Up to `limit` of `candidates` within edit distance 2 of `name`, nearest
+/// first, each once: the likely intents of a misspelling.
+pub fn near_names<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    limit: usize,
+) -> Vec<&'a str> {
+    let mut near: Vec<_> = candidates
+        .into_iter()
+        .map(|c| (strsim::damerau_levenshtein(name, c), c))
+        .filter(|(d, _)| *d <= 2)
+        .collect();
+    near.sort_unstable();
+    near.dedup();
+    near.into_iter().take(limit).map(|(_, c)| c).collect()
+}
+
 /// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
 ///
 /// The matcher is `nucleo`, the Helix team's, and this is its single home: every
@@ -143,6 +160,17 @@ mod tests {
             false,
         );
         assert_eq!(ranked, vec![(1, "x"), (2, "x")]);
+    }
+
+    #[test]
+    fn near_names_ranks_dedups_and_caps() {
+        let pool = ["lenght", "length", "length", "lengths", "xyz", "len"];
+        assert_eq!(
+            near_names("lenght", pool, 3),
+            ["lenght", "length", "lengths"]
+        );
+        assert_eq!(near_names("lenght", pool, 1), ["lenght"]);
+        assert!(near_names("qqqqq", pool, 3).is_empty());
     }
 
     #[test]

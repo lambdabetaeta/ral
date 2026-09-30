@@ -1,0 +1,4 @@
+# codes: T0010
+# contains: one branch runs `echo`, whose output goes to the terminal, so its value is `()`
+# contains: capture it: `echo … | from-line`
+let f = { |c| if $c { echo big } else { 'small' } }

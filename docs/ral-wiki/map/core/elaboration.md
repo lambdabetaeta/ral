@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c1bb993b
-generated_at_date: 2026-09-12
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -77,11 +77,16 @@ whose typing collapses to the external case (`exec_comp_ty` →
 `external_exec_comp_ty`), since a prelude function reaches the checker as a
 bound `App` head, never a bare `Exec`.
 
-A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node carrying two
-annotations the elaborator can only fill with placeholders: a `Ty::Unit` per
-stage for the value type, and a `PipeYield::Last` for the node's yield. Both are
-overwritten by the [[map/core/typecheck|annotation pass]] once it has typed the
-pipeline. The evaluator never reads `stage_types`, which feeds the structural
-REPL's typed spine; it reads the yield only to decide whether the last stage's
-helper reports a value, and the checker runs before every evaluation, so the
-placeholder is never observed.
+A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node carrying one
+annotation the elaborator can only fill with placeholders: a `Ty::Unit` per
+stage for the value type, overwritten by the
+[[map/core/typecheck|annotation pass]] once it has typed the pipeline. The
+evaluator never reads `stage_types`, which feeds the structural REPL's typed
+spine, so the placeholder is never observed.
+
+An arm of `if` and `case` elaborates to a thunk the form forces
+(`Elaborator::elab_arm`): a literal `{ … }` or `{ |p| … }`, or a name holding
+one. Any other atom would be hoisted and run before the form chose, and is a
+parse error; the lone arm of an `else`-less `if` is wrapped as `{ body; () }`
+(`elab_arm_unit`)
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).

@@ -1,0 +1,3 @@
+# codes: T0011
+# contains: a value in stage position writes nothing to the pipe
+'3' | cat

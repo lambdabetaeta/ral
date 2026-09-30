@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: `()` is nothing to print
+let out = cd /tmp
+echo "got $out"

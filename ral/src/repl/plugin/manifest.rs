@@ -1,6 +1,6 @@
 //! Plugin manifest types and parsing.
 //!
-//! A plugin manifest is a Map returned by a plugin's top-level block.  The
+//! A plugin manifest is a record returned by a plugin's top-level block.  The
 //! engine's load door parses it into the first-order [`Manifest`] the host is
 //! told, plus the [`ManifestHandlers`] it registers itself; the host
 //! re-validates the manifest into a [`LoadedPlugin`].
@@ -9,7 +9,7 @@ use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_actio
 use super::{HookHealth, load_err};
 use ral_core::record;
 use ral_core::serial::FOValue;
-use ral_core::types::Error;
+use ral_core::types::{Error, settings_map};
 use ral_core::{Map, Value};
 
 /// Hook events recognised in manifests.  Typos are load errors so a
@@ -139,9 +139,9 @@ pub(super) struct ManifestHandlers {
 /// Parse a plugin manifest value into its first-order part plus the handler
 /// values the engine registers.
 pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> {
-    let Value::Map(map) = val else {
+    let Some(map) = settings_map(val) else {
         return Err(load_err(format!(
-            "plugin manifest: expected Map, got {}",
+            "plugin manifest: expected a record, got {}",
             val.type_name()
         )));
     };
@@ -447,6 +447,17 @@ mod tests {
         assert!(
             err.message.contains("manifest") && err.message.contains("Int"),
             "error should name the manifest shape, got: {}",
+            err.message
+        );
+    }
+
+    /// `()` is a manifest with nothing set, so it lacks `name`.
+    #[test]
+    fn unit_manifest_lacks_a_name() {
+        let err = parse(&Value::Unit).expect_err("a manifest needs a name");
+        assert!(
+            err.message.contains("missing required 'name'"),
+            "{}",
             err.message
         );
     }

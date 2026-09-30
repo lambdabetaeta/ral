@@ -41,7 +41,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("temp-dir", "creates a filesystem object"),
     ("temp-file", "creates a filesystem object"),
     ("source", "reads and evaluates a file"),
-    ("use", "reads and evaluates a file"),
     ("cwd", "reads the shell's logical cwd"),
     ("fold-lines", "drains stdin"),
     ("ask", "reads the controlling terminal"),
@@ -49,8 +48,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("from-string", "reads the byte channel"),
     ("from-line", "reads the byte channel"),
     ("from-lines", "reads the byte channel"),
-    ("from-json", "reads the byte channel"),
-    ("from-jsonl", "reads the byte channel"),
     ("from-csv", "reads the byte channel"),
     ("spawn", "forks a concurrent worker"),
     ("await", "needs a live Handle"),
@@ -123,7 +120,7 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
                 args.push(ral_core::test_access::resolve_ty(u, param));
                 cur = body;
             }
-            CompTy::Return(_, ret) => {
+            CompTy::Return(ret) => {
                 return Some((args, ral_core::test_access::resolve_ty(u, ret)));
             }
             CompTy::Var(_) => return None,

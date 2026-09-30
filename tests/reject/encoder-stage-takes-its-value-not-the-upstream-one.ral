@@ -1,2 +1,2 @@
 # codes: T0050
-[1, 2] | to-lines | grep .
+echo hi | to-lines | grep .

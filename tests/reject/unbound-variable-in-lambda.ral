@@ -1,0 +1,3 @@
+# codes: T0071
+# contains: undefined variable: $y
+let f = { |x| return $[$x + $y] }

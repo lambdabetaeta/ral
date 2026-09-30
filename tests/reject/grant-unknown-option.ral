@@ -1,0 +1,3 @@
+# codes: T0076
+# contains: unknown key 'nett' — `grant` takes exec, fs, net, detach, editor, shell
+grant [nett: false] { return "ok" }

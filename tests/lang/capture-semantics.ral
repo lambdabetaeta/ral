@@ -16,9 +16,10 @@ assert_eq 'block last only' three $xs
 let n = !{ echo hello; length [1, 2, 3] }
 assert_eq 'block mixed modes' 3 $n
 
-# Higher-order capture: call-site mode instantiation resolves Var to Bytes.
+# Higher-order capture: `f` returns what the block returns, `()`, so the text it
+# writes is asked for at the call.
 let f = { |cmd| !$cmd }
-let h = f { printf hello }
+let h = f { printf hello } | from-line
 assert_eq 'higher-order capture' hello $h
 
 # to-json writes JSON bytes to the channel; it no longer returns them, so a

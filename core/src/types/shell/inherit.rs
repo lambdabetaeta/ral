@@ -216,6 +216,7 @@ mod tests {
                 crate::diagnostic::format_runtime_error_ariadne(
                     &child.session.sources,
                     Some(span),
+                    None,
                     "boom",
                     None,
                 )

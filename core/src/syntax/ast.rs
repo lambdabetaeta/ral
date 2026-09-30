@@ -61,13 +61,13 @@ pub enum Ast {
     Call {
         head: Head,
         args: Vec<Spanned<Self>>,
-        redirects: Vec<Redirect<Self>>,
+        redirects: Box<Redirects<Self>>,
     },
     /// `try`/`guard`/`within`/`grant`/`audit`, plus any trailing redirects.
     /// Operand shape is fixed per [`ScopeAst`] variant; the parser checks arity.
     Scope {
         op: ScopeAst,
-        redirects: Vec<Redirect<Self>>,
+        redirects: Box<Redirects<Self>>,
     },
     /// `cmd1 | cmd2 | cmd3`
     Pipeline(Vec<Stmt>),
@@ -139,10 +139,10 @@ pub enum Ast {
 /// One arm of an [`Ast::Case`]: a literal tag and the computation to run when
 /// the scrutinee carries it.
 ///
-/// The *set* of alternatives is syntax; an alternative's body is a
-/// computation, however it is spelled. So `body` is the arm's own
-/// `{ |p| … }` — an [`Ast::Lambda`] — or any other atom, which elaboration
-/// applies to the payload.
+/// The *set* of alternatives is syntax; an alternative's body is a function of
+/// the payload.  So `body` is the arm's own `{ |p| … }` — an [`Ast::Lambda`] —
+/// or a name holding one; elaboration refuses any other atom that would run
+/// before the `case` chose.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub tag: Spanned<String>,
@@ -361,7 +361,15 @@ impl<T> Redirect<T> {
             (0, RedirectOp::Read) => Ok(Self::Stdin(StdinSource::File(word))),
             (0, RedirectOp::HereString) => Ok(Self::Stdin(StdinSource::Here(word))),
             (1, RedirectOp::Write(mode)) => Ok(Self::Stdout(mode, word)),
-            (2, RedirectOp::Write(mode)) => Ok(Self::Stderr(mode, word)),
+            // Stderr streams: staging diagnostics for an atomic commit would
+            // withhold them until the frame settles.
+            (2, RedirectOp::Write(mode)) => Ok(Self::Stderr(
+                match mode {
+                    WriteMode::Write => WriteMode::Stream,
+                    other => other,
+                },
+                word,
+            )),
             (_, RedirectOp::HereString) => {
                 Err("`<<` always feeds stdin — drop the file-descriptor prefix".into())
             }
@@ -390,30 +398,119 @@ impl<T> Redirect<T> {
             )),
         }
     }
+}
 
-    pub(crate) fn operand(&self) -> Option<&T> {
-        match self {
-            Self::Stdin(StdinSource::File(t) | StdinSource::Here(t))
-            | Self::Stdout(_, t)
-            | Self::Stderr(_, t) => Some(t),
-            Self::StderrToStdout => None,
+/// Where standard error goes once its redirect is bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StderrTarget<T> {
+    File(WriteMode, T),
+    /// `2>&1`: wherever standard output goes, position-independently.
+    Stdout,
+}
+
+/// A redirect list, checked: each stream is bound at most once, so there is
+/// one final destination per stream and nothing is opened only to be
+/// overridden.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redirects<T> {
+    pub stdin: Option<StdinSource<T>>,
+    pub stdout: Option<(WriteMode, T)>,
+    pub stderr: Option<StderrTarget<T>>,
+}
+
+impl<T> Default for Redirects<T> {
+    fn default() -> Self {
+        Self {
+            stdin: None,
+            stdout: None,
+            stderr: None,
         }
+    }
+}
+
+impl<T> Redirects<T> {
+    /// Binds `r` to its stream; `Err` says why a second binding is refused.
+    pub(crate) fn bind(&mut self, r: Redirect<T>) -> Result<(), &'static str> {
+        match r {
+            Redirect::Stdin(src) if self.stdin.is_none() => self.stdin = Some(src),
+            Redirect::Stdin(_) => {
+                return Err("standard input is fed twice; which one do you mean? \
+                            A command reads from one source.");
+            }
+            Redirect::Stdout(mode, t) if self.stdout.is_none() => self.stdout = Some((mode, t)),
+            Redirect::Stdout(..) => {
+                return Err(
+                    "standard output is redirected twice; which one do you mean? \
+                            To write to both files, pipe through `tee`.",
+                );
+            }
+            Redirect::Stderr(mode, t) => match self.stderr {
+                None => self.stderr = Some(StderrTarget::File(mode, t)),
+                Some(StderrTarget::File(..)) => {
+                    return Err("standard error is redirected twice; which one do you mean?");
+                }
+                Some(StderrTarget::Stdout) => {
+                    return Err(
+                        "standard error is redirected twice: `2>&1` already sends it \
+                                with standard output; which one do you mean?",
+                    );
+                }
+            },
+            Redirect::StderrToStdout => match self.stderr {
+                None => self.stderr = Some(StderrTarget::Stdout),
+                Some(StderrTarget::File(..)) => {
+                    return Err("standard error is redirected twice: `2>&1` would override \
+                                the `2>` before it; which one do you mean?");
+                }
+                Some(StderrTarget::Stdout) => {
+                    return Err("`2>&1` is written twice; write it once");
+                }
+            },
+        }
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none()
+    }
+
+    /// The operands in opening order: stdin, stdout, stderr.
+    pub(crate) fn operands(&self) -> impl Iterator<Item = &T> {
+        let stdin = self
+            .stdin
+            .iter()
+            .map(|(StdinSource::File(t) | StdinSource::Here(t))| t);
+        let stdout = self.stdout.iter().map(|(_, t)| t);
+        let stderr = self.stderr.iter().filter_map(|e| match e {
+            StderrTarget::File(_, t) => Some(t),
+            StderrTarget::Stdout => None,
+        });
+        stdin.chain(stdout).chain(stderr)
     }
 
     pub(crate) fn try_map<U, E>(
         &self,
         mut f: impl FnMut(&T) -> Result<U, E>,
-    ) -> Result<Redirect<U>, E> {
-        Ok(match self {
-            Self::Stdin(StdinSource::File(t)) => Redirect::Stdin(StdinSource::File(f(t)?)),
-            Self::Stdin(StdinSource::Here(t)) => Redirect::Stdin(StdinSource::Here(f(t)?)),
-            Self::Stdout(mode, t) => Redirect::Stdout(*mode, f(t)?),
-            Self::Stderr(mode, t) => Redirect::Stderr(*mode, f(t)?),
-            Self::StderrToStdout => Redirect::StderrToStdout,
+    ) -> Result<Redirects<U>, E> {
+        Ok(Redirects {
+            stdin: match &self.stdin {
+                Some(StdinSource::File(t)) => Some(StdinSource::File(f(t)?)),
+                Some(StdinSource::Here(t)) => Some(StdinSource::Here(f(t)?)),
+                None => None,
+            },
+            stdout: match &self.stdout {
+                Some((mode, t)) => Some((*mode, f(t)?)),
+                None => None,
+            },
+            stderr: match &self.stderr {
+                Some(StderrTarget::File(mode, t)) => Some(StderrTarget::File(*mode, f(t)?)),
+                Some(StderrTarget::Stdout) => Some(StderrTarget::Stdout),
+                None => None,
+            },
         })
     }
 
-    pub(crate) fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> Redirect<U> {
+    pub(crate) fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> Redirects<U> {
         let Ok(r) = self.try_map(|t| Ok::<_, std::convert::Infallible>(f(t)));
         r
     }
@@ -434,15 +531,18 @@ pub enum ScopeAst {
     /// `handlers:` is not among `opts`: its labels are the names it binds in
     /// `body`, so it is an arm list the form reads, not data the options carry.
     Within {
-        opts: Box<Ast>,
+        opts: Options,
         handlers: Option<Vec<HandlerArm>>,
         body: Box<Ast>,
     },
     /// `grant CAPS BODY` — attenuate active capabilities across `body`.
-    Grant { caps: Box<Ast>, body: Box<Ast> },
+    Grant { caps: Options, body: Box<Ast> },
     /// `audit BODY` — run `body` while recording an audit subtree.
     Audit { body: Box<Ast> },
 }
+
+/// A form's written options: each label is syntax, each value a term.
+pub type Options = Vec<(String, Spanned<Ast>)>;
 
 /// One arm of `within [handlers: …]`: the command name it stands in for, and
 /// the value installed under it.
@@ -462,23 +562,32 @@ pub struct HandlerArm {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Operand {
     Atom,
-    /// `[]`, `[l: v, …]`, `[...b, l: v, …]`, or an atom naming a bundle.
-    /// `arms` marks the form whose options include the `handlers:` arm list.
+    /// `[]` or `[l: v, …]`, the labels written out.  `arms` marks the form
+    /// whose options include the `handlers:` arm list; `example` is an entry
+    /// the refusal of a bound bundle shows.
     Options {
         arms: bool,
+        example: &'static str,
     },
+}
+
+/// What a control operator's operands parsed to, by kind.
+pub(crate) struct Operands {
+    pub atoms: Vec<Ast>,
+    pub options: Options,
+    pub handlers: Option<Vec<HandlerArm>>,
 }
 
 /// Everything the parser needs for one control-operator keyword.
 ///
 /// The surface name, how each operand position is read, a description of the
 /// operands for the arity-mismatch message, and a constructor from the
-/// validated operands and whatever arm list an option bracket lifted out.
+/// validated operands.
 pub(crate) struct ScopeKeyword {
     pub name: &'static str,
     pub(crate) operands: &'static [Operand],
     pub(crate) operand_desc: &'static str,
-    pub(crate) build: fn(Vec<Ast>, Option<Vec<HandlerArm>>) -> ScopeAst,
+    pub(crate) build: fn(Operands) -> ScopeAst,
 }
 
 impl ScopeKeyword {
@@ -496,8 +605,8 @@ impl ScopeAst {
             name: "try",
             operands: &[Operand::Atom, Operand::Atom],
             operand_desc: "body, handler",
-            build: |ops, _| {
-                let [body, handler]: [Ast; 2] = ops.try_into().expect("arity validated");
+            build: |ops| {
+                let [body, handler]: [Ast; 2] = ops.atoms.try_into().expect("arity validated");
                 Self::Try {
                     body: Box::new(body),
                     handler: Box::new(handler),
@@ -508,8 +617,8 @@ impl ScopeAst {
             name: "guard",
             operands: &[Operand::Atom, Operand::Atom],
             operand_desc: "body, cleanup",
-            build: |ops, _| {
-                let [body, cleanup]: [Ast; 2] = ops.try_into().expect("arity validated");
+            build: |ops| {
+                let [body, cleanup]: [Ast; 2] = ops.atoms.try_into().expect("arity validated");
                 Self::Guard {
                     body: Box::new(body),
                     cleanup: Box::new(cleanup),
@@ -518,25 +627,37 @@ impl ScopeAst {
         },
         ScopeKeyword {
             name: "within",
-            operands: &[Operand::Options { arms: true }, Operand::Atom],
+            operands: &[
+                Operand::Options {
+                    arms: true,
+                    example: "dir: $d",
+                },
+                Operand::Atom,
+            ],
             operand_desc: "options, body",
-            build: |ops, handlers| {
-                let [opts, body]: [Ast; 2] = ops.try_into().expect("arity validated");
+            build: |ops| {
+                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
                 Self::Within {
-                    opts: Box::new(opts),
-                    handlers,
+                    opts: ops.options,
+                    handlers: ops.handlers,
                     body: Box::new(body),
                 }
             },
         },
         ScopeKeyword {
             name: "grant",
-            operands: &[Operand::Options { arms: false }, Operand::Atom],
+            operands: &[
+                Operand::Options {
+                    arms: false,
+                    example: "net: $n",
+                },
+                Operand::Atom,
+            ],
             operand_desc: "capabilities, body",
-            build: |ops, _| {
-                let [caps, body]: [Ast; 2] = ops.try_into().expect("arity validated");
+            build: |ops| {
+                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
                 Self::Grant {
-                    caps: Box::new(caps),
+                    caps: ops.options,
                     body: Box::new(body),
                 }
             },
@@ -545,8 +666,8 @@ impl ScopeAst {
             name: "audit",
             operands: &[Operand::Atom],
             operand_desc: "body",
-            build: |ops, _| {
-                let [body]: [Ast; 1] = ops.try_into().expect("arity validated");
+            build: |ops| {
+                let [body]: [Ast; 1] = ops.atoms.try_into().expect("arity validated");
                 Self::Audit {
                     body: Box::new(body),
                 }
@@ -680,12 +801,16 @@ impl ScopeAst {
                 handlers,
                 body,
             } => {
-                let mut ops = vec![opts.as_ref()];
+                let mut ops: Vec<&Ast> = opts.iter().map(|(_, v)| &v.item).collect();
                 ops.extend(handlers.iter().flatten().map(|arm| &arm.value.item));
                 ops.push(body);
                 ops
             }
-            Self::Grant { caps, body } => vec![caps, body],
+            Self::Grant { caps, body } => {
+                let mut ops: Vec<&Ast> = caps.iter().map(|(_, v)| &v.item).collect();
+                ops.push(body);
+                ops
+            }
             Self::Audit { body } => vec![body],
         }
     }

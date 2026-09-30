@@ -1,2 +1,2 @@
 # contains: couldn't match type String
-[key: val, ...'hello']
+[...'hello', key: val]

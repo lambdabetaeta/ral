@@ -1,6 +1,0 @@
-# contains: 'net'
-let f = { |o|
-  grant $o { () }
-  within $o { () }
-}
-f [net: true]

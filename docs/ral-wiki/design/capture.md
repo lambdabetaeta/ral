@@ -1,144 +1,98 @@
-# Capture: a command's value is its stdout
+# Capture: a `let` captures the command that produces its value
 
-**One rule, in three clauses.** A command's value *is* its stdout: an external
-call is typed `F[Bytes] Unit`, its [[design/types|payload route]] sending a
-value boundary to the byte stream rather than to the returned value — one
-payload, never both ([[design/types|WF-2]]). A block's value is its *last*
-statement's value; every earlier statement stands in **statement position**,
-where a value is discarded. And discarding bytes means letting them go where a
-command's bytes go by default: out.
+**A `let` captures the command that produces its value; a function, block or
+handle in that position binds what it returns, and `| from-line` turns what it
+writes into a value.** A command is `F Unit`: it writes and returns nothing
+([[design/types|types]]). So `let x = hostname` binds the text `hostname`
+writes, because the checker wraps that command in the one coercion, `cap M to d.
+decode d`, and it decides so once, from syntax, before any type is inferred
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
 ```ral
 let answer = !{ echo visible ; echo captured }
 # prints "visible"; answer is "captured"
 ```
 
-Nothing here is special-cased for bytes. A discarded `$[1 + 1]` in statement
-position is discarded too. The only difference is what discarding *means* for a
-byte stream rather than for a value, and for stdout it means the terminal.
+**The walk `⟦·⟧` (`capture_sites` in `core/src/typecheck/capture.rs`) follows
+the positions a `let`'s result comes from.** From the right-hand side it
+descends through:
+
+- an `Exec` that writes (`head_writes`: no binding, and no value row unless a
+  `Writes` row applied at its arity) — the site;
+- a pipeline's *final* stage;
+- `Force` of a literal thunk;
+- a `Bind`'s `rest`, hoisted binds included, never its right-hand side;
+- the arms of `If`, `Case`, `Try` (body and handler), `Within` (body), `Grant`
+  (body) and `Guard` (body, not cleanup) when they are literal thunks — for a
+  literal `{ |p| … }` arm, its body.
+
+It stops at `Capture`, `Redirect`, `App`, `Force` of a name, values, `Index`,
+`Interpolation` and `Audit`. So `let x = f` (a function), `let x = !$t`,
+`let x = time { ls }`, `let x = !{ ls } > f` and `let x = a | !$f` bind what the
+thing returns, usually `()`. A redirect fused onto a command stays on its
+`Exec`: `let saved = echo hi > f` binds `""`, and `let x = cmd 2>&1` binds both
+streams. `let _ = cmd` captures and drops.
+
+**A discarded statement is never captured.** `M; N` leaves `M` uncaptured, so
+its bytes go where a command's bytes go: to the run's stdout, which inside a
+capture is that capture's buffer and otherwise the terminal. What a captured
+block writes before its tail is therefore visible, and its tail is the value;
+an inner `let` captures for itself:
+
+```ral
+let x = !{ echo a; echo b }          # prints a; x is "b"
+let y = !{ let z = echo a; echo b }  # prints nothing; y is "b" (z is "a")
+```
+
+A captured *stand-in* is the exception that follows from the rule: an arm for
+`curl` is a command, so every statement of it is captured, and
+`curl: { |a| echo note; echo body }` under `let x = curl` binds `"note\nbody"`.
 
 **Why not slurp the whole block.** `$(setup; work)` in a POSIX shell glues
 setup's noise onto the result, which is why shell scripts are littered with
 `2>/dev/null` and why reading a chatty tool is a research project. Ral needs no
-annotation for it: diagnostics reach the terminal, the payload reaches the
-binding, and the statement boundary does the work a redirect would otherwise do
-by hand. This is the [[design/types|one coercion]] earning its keep — `capture`
-retains the *tail*, not the transcript.
+annotation for it: diagnostics reach the terminal, the tail reaches the binding,
+and the statement boundary does the work a redirect would otherwise do by hand.
 
-**Discarded bytes leave the whole capture chain.** Not one level of it. The
-destination is the nearest enclosing **visible** stream, and a capture buffer is
-not visible: a discarded statement's bytes pass every enclosing capture and
-reach the terminal. Inside a [[design/pipelines|pipeline]] "visible" is
-stage-relative — a non-final stage's own stdout *is* the wire, and a stage runs
-in a fresh child shell with no enclosing capture at all, so a flush there
-bottoms out at the wire rather than escaping the pipeline. `!{ echo a; return
-() } | cat` therefore writes `a` into `cat` by exactly this clause, with no
-pipeline rule involved. The final stage has no wire, so its ambient is the
-*parent's* ambient — whatever visible stream lies outside the whole pipeline —
-and never the parent's stdout, which under `!{ … | … }` is the capture buffer
-this rule exists to pass.
-
-This is the load-bearing clause, and the one an implementation can get subtly
-wrong: routing a discarded write to the *immediately* enclosing sink agrees with
-the rule at one level of capture and diverges at two, where the immediately
-enclosing sink is another buffer.
-
-**Two mechanisms realise the one rule.** Which one applies depends on whether
-the elaborator can see the sequence.
-
-- *Static.* `Capture` insertion is a demand walk that pushes the wrap down to
-  the leaf that owns the payload. A sequence's non-final parts are walked at
-  `Discard` and never wrapped, so they execute against the ambient stdout
-  directly — no flush is involved at all, because those statements were never
-  inside a capture bracket.
-- *Dynamic.* Across a thunk boundary the walk cannot see the sequence: a forced
-  block is opaque, so the wrap lands on the whole force and the sequence really
-  does run inside the bracket. The runtime then flushes at each boundary to the
-  sink saved when the bracket was entered.
-
-The static path is the common one and is correct by construction. The dynamic
-path is the one that must name the *visible* sink rather than the enclosing one.
-
-**Why a statement boundary is a bind whose pattern discards.** A bind at a byte
-payload installs the buffer — that is what having a bound variable to decode
-into means — so `M to x. N` *destroys* `M`'s bytes, and a statement boundary
-must not. Both are `Bind`; the pattern is what separates them. `a; b`
-elaborates to a bind on `IrPattern::Wildcard`, while a surface `_` gets a
-hygienic gensym `Name`, so a discard the *user* wrote is an ordinary binder and
-a statement boundary is not one. Coercion insertion reads exactly that: a
-wildcard RHS carries `Demand::Discard`, so no `Capture` wraps it and the bytes
-leave for the visible stream; every other pattern's RHS carries
-`Demand::Value`. The two shapes share a type — a payload route says where a
-value boundary looks, never whether anything was written, so `F[Value] Unit` is
-honest about a computation that writes and about one that could but doesn't —
-which is why the distinction has to be *syntax the checker reads*, and not a
-verdict the evaluator reaches on its own.
-
-**The node returns bytes; the text is composed.** `capture M : F[Value] Bytes`
-is total and exact — precisely the bytes the handler collected, nothing
-stripped and nothing decoded. Reading them as the `String` a value boundary
-wants is a second step the checker composes over it, `decode (capture M)`, and
-that step owns both things that can go wrong: one trailing terminator is
-dropped, and output that is not valid UTF-8 fails there, naming `| from-bytes`
-as the way to keep it. Each is its own term in the IR, and each is syntax: a
-step the checker writes into a program cannot be a name the program's session
-resolves ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
-[[design/types|types]]).
+**The node returns bytes; the text is composed.** `capture M : F Bytes` is
+total and exact — precisely the bytes `M` wrote, nothing stripped and nothing
+decoded, its body's value ignored. Reading them as a `String` is a second step
+the checker composes over it, `decode (capture M)`, and that step owns both
+things that can go wrong: one trailing terminator is dropped, and output that is
+not valid UTF-8 fails there, naming `| from-bytes` as the way to keep it. Each
+is its own term in the IR (`CompKind::Capture`, `CompKind::Decode`), inserted by
+`annotate` and with no surface syntax, so a step the checker writes into a
+program cannot be a name the program's session resolves
+([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
 
 **Exactness is kept by refusal.** The buffer behind a capture is capped at
 16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a detached
 worker from growing without end ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
 Past the cap it appends a truncation marker and drops the rest — bytes the
 program could not tell from the command's own. So a capture that reaches the
-cap *fails*: the `Frame::Capture` return rule reads the buffer's overflow flag
-once every writer has joined, and refuses rather than bind a prefix. Nothing on
-the write path can raise it — a pump hands back `()` from its own thread —
-which is why the flag rides on the buffer and is read where the bytes become a
-value.
-
-Nothing is destroyed by the refusal. It is a failure like any other, so the
-prefix takes the road the next clause describes — out to the visible stream —
-and the error, which names the cap and asks whether a file was meant, is
+cap *fails*: `Frame::Capture` reads the buffer's overflow flag
+(`capture_overflowed`) once every writer has joined, and refuses rather than bind
+a prefix. The error names the cap and asks whether a file was meant, and is
 catchable by `try`. The human keeps the bytes; the binding does not happen.
 
-**Failure flushes.** If a captured computation fails, bytes it produced before
-failing are flushed visibly rather than lost — a partial write from
-`echo half; exit 3` stays on the terminal. That is handler semantics rather
-than decoding, so it is the node's clause, not the composed step's.
+**Failure flushes.** `Frame::Capture` pushes a fresh buffer as `shell.io.stdout`,
+holding the sink it replaced. On return it restores that sink and yields the
+buffer as `Bytes`; on a halt it writes what the body wrote to the sink it
+replaced (`Shell::write_sink`) and propagates the halt, so whatever a failing
+captured command wrote before it failed stays where it would have gone. Under `!{ … } > f` the file is that
+sink, so the flush lands in `f`.
 
-The kernel model proves the clause as of 2026-08-19. `βflush` in `dev/agda`
-pops the capture frame and writes the buffer *as chatter*, so the flush goes
-where a discarded statement's bytes go — past every enclosing capture, into the
-nearest wire, or out. Writing it as a payload instead would feed one buffer into
-the next, which is the nearest-sink reading this page warns against; nested
-captures cascade, inner buffer first, each under its own remaining stack. The
-theorem is `flush-payload`, the counterpart to the model's tail-scoping one: a
-run that fails escapes whole, so a capture over it reads the same stdin, writes
-the same bytes and reports the same failure as the body alone — nothing is
-retained, because the payload the buffer was collecting is what the failure says
-will not be delivered.
+**The kernel proves the two halves.** `dev/agda` states capture for the
+route-free calculus: a terminating `M` has `capture M` return exactly the bytes
+`M` wrote and write nothing itself (`capture-returns`); a halting one halts with
+the same signal after writing what `M` wrote (`capture-halts`). The kernel
+covers this ruling only — no kinds, rows, weak variables or boundaries.
 
-Where "visibly" points is the enclosing scope's business, and a sink redirect
-moves it. Under `!{ … } > f` the file is the visible stream, so a flush inside
-that scope lands in `f` and not on the terminal — the same entry that sends a
-discarded statement's bytes there, since a redirect's frame takes a word under
-either claim. The model runs that composite: the buffer fills, the flush hands
-it outward as chatter, the redirect takes it, and the word appears in the file
-event the pop fires rather than in what an observer saw.
-
-Both theorems hold of bodies with no handler in them, and that premise is a real
-limit rather than a modelling convenience.
-`let x = !{ guard { cmd } { echo clean } }` buffers `cmd`'s payload, then runs
-the cleanup, which prints `clean` — visibly, after the buffer already has
-content — and then binds the payload. Standalone the two words appear in the
-order `payload`, `clean`; captured, `clean` appears and the payload is kept. So
-what a capture retains is a *suffix* of what the same body writes alone exactly
-when no handler resumes the run mid-flight, and that is the shape both theorems
-state. `dev/agda` records the two runs beside the theorems.
+What a capture retains is what `⟦·⟧` marks, and a cleanup is not marked:
+`let x = !{ guard { cmd } { echo clean } }` binds `cmd`'s output, and `clean`
+goes where a discarded statement's bytes go.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/pipelines|pipelines]], [[design/codecs|codecs]].
 
-Cite: `docs/SPEC.md` §7.2 ("Within a captured block, only the last command's
-byte output becomes the block value"; "Captures nest. Earlier output goes to the
-nearest enclosing visible stream").
+Cite: `docs/SPEC.md` §7.2.

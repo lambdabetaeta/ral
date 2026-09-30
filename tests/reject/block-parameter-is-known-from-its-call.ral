@@ -1,4 +1,4 @@
 # contains: no field named 'nope'
 let vs = [[w: 'n']]
-let o = map { |v| [...$v, n: "x"] } $vs
+let o = map { |v| [...$v, w: "x"] } $vs
 return $o[0][nope]

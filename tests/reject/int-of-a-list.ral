@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: this is a list, but a number or text is needed
+echo !{int [1, 2]}

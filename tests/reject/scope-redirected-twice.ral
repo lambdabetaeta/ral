@@ -1,0 +1,2 @@
+# contains: standard output is redirected twice
+try { echo hi } { |_| echo no } > a > b

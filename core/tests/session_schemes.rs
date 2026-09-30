@@ -71,31 +71,26 @@ fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
     }
 }
 
-// ─── (1) value producer into byte decoder is an ordinary byte pipe ──────────
+// ─── (1) a value producer feeds nothing down a pipe ─────────────────────────
 
-/// `let f = { return 3 }` then `$f | from-json`: `|` is a positional byte
-/// wire that asks nothing about a stage's return value, so `f`'s
-/// returned `3` is discarded and `from-json` reads EOF. The next run's
-/// check accepts it, with the binding's session scheme as the seed.
+/// `let f = { return 3 }` then `f | from-json`: a stage feeds the next by
+/// writing, and `f` returns an Int.  The next run's check refuses it, with the
+/// binding's session scheme as the seed.
 #[test]
-fn value_producer_into_decoder_is_accepted_cross_run() {
+fn value_producer_into_decoder_is_refused_cross_run() {
     let mut sh = shell();
     run(&mut sh, "let f = { return 3 }").unwrap();
-    let errs = check_errors(&sh, "$f | from-json");
-    assert!(
-        errs.is_empty(),
-        "expected a value producer piped into a decoder to typecheck across runs, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
+    let errs = check_errors(&sh, "f | from-json");
+    assert_eq!(
+        errs.iter().map(|e| e.kind.code()).collect::<Vec<_>>(),
+        ["T0011"]
     );
 }
 
 // ─── (2) byte producer into byte consumer typechecks via harvested scheme ────
 
 /// `let f = { echo hi }` then `f | wc -l`: the harvested scheme for `f`
-/// is `F[∅,Bytes]`, so the byte channel connects to `wc`'s byte input.
-/// The checker sees the scheme, not a fresh mode variable.
+/// is `{Command Unit}`, a command, so it may feed `wc`'s input.
 #[test]
 fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
@@ -114,7 +109,7 @@ fn byte_producer_into_byte_consumer_typechecks() {
 
 /// A run-*N* binding used at a clashing value type in run *N+1* is
 /// reported statically: `x` is `String` (the literal `'hello'`), so
-/// `$x + 1` is a String-vs-Int mismatch.  The suite's established clash
+/// `$x + 1` is a String where a number is needed.  The suite's established clash
 /// is `String + Int` (see `typecheck.rs`), not the `Int + "hi"` the ADR
 /// sketches — the language has no string literal inside `$[…]`.
 #[test]
@@ -123,8 +118,7 @@ fn cross_run_value_type_error_is_static() {
     run(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
-        errs.iter()
-            .any(|e| e.kind.render_message().contains("couldn't match")),
+        errs.iter().any(|e| e.kind.code() == "T0074"),
         "expected a cross-run value-type mismatch, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
@@ -148,8 +142,7 @@ fn rebind_retypes_the_name() {
     run(&mut sh, "let xv = 'hello'").unwrap();
     let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
-        errs.iter()
-            .any(|e| e.kind.render_message().contains("couldn't match")),
+        errs.iter().any(|e| e.kind.code() == "T0074"),
         "expected $xv (now String) + 1 to mismatch, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
@@ -224,11 +217,9 @@ fn pattern_binds_generalise_their_own_scheme() {
 
 /// `alias three { |args| echo 3 }` is visible to the next run's check: the
 /// arm's handler scheme persists, so `three` alone is clean and `$three`
-/// (first-classing a handler) is a static error — every arm is byte-routed
-/// alike now (uniform A), so which persists is no longer an *Int-vs-String*
-/// distinction, only a *handler-or-not* one. After `unalias three` the name
-/// falls back to external typing, so `$three` is an unbound reference —
-/// clean again, but for the opposite reason.
+/// (first-classing a handler) is a static error.  After `unalias three` the name
+/// falls back to external typing, so `$three` is an unbound variable, refused
+/// as such rather than as a handler entry.
 #[test]
 fn alias_visible_to_next_run() {
     let mut sh = shell();
@@ -251,10 +242,14 @@ fn alias_visible_to_next_run() {
             .collect::<Vec<_>>()
     );
     run(&mut sh, "unalias three").unwrap();
-    assert!(
-        check_errors(&sh, "return $three").is_empty(),
-        "expected `three` to fall back to an ordinary external name after unalias, \
-         so `$three` is merely unbound, not a handler entry"
+    let codes: Vec<_> = check_errors(&sh, "return $three")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(
+        codes,
+        ["T0071"],
+        "after unalias `$three` is merely unbound, not a handler entry"
     );
 }
 
@@ -319,7 +314,7 @@ fn session_scheme_instantiates_at_two_types() {
     assert!(
         check_errors(&sh, "let ss = !{idf hello}\nreturn $[$ss + 1]")
             .iter()
-            .any(|e| e.kind.render_message().contains("couldn't match")),
+            .any(|e| e.kind.code() == "T0074"),
         "the String instantiation must not admit Int arithmetic"
     );
 }
@@ -375,4 +370,215 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
+}
+
+// ─── (11) a stored weak residual is one type per unit, and never aliased ────
+
+/// What an earlier unit stores for a name of type `[_α]`, `α` being the
+/// number that unit's unifier gave it.
+fn stored_weak_list(alpha: u32) -> ral_core::typecheck::Scheme {
+    let elem = ral_core::typecheck::TyVar(alpha);
+    ral_core::test_access::scheme_with_weak_residuals(
+        vec![elem],
+        ral_core::typecheck::Ty::List(Box::new(ral_core::typecheck::Ty::Var(elem))),
+    )
+}
+
+fn check_with_stored(names: &[&str], src: &str) -> Vec<TypeError> {
+    let stored = names
+        .iter()
+        .map(|name| ((*name).to_string(), stored_weak_list(0)))
+        .collect();
+    let schemes = ral_core::test_access::with_stored_schemes(shell().session_schemes(), stored);
+    match compile_and_typecheck(src, schemes, FileId::DUMMY, "", None) {
+        Ok(_) => Vec::new(),
+        Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
+        Err(CompileError::Types(errs)) => errs,
+    }
+}
+
+const ELEMENT_AS_INT_THEN_BOOL: &str = "
+let [a] = $xs
+let n = $[$a + 1]
+let [b] = $ys
+let m = $[not $b]";
+
+/// Two names stored by different units carry the same residual number.  Each
+/// is re-seeded as its own fresh weak variable, so one is used as a number
+/// and the other as a Bool.
+#[test]
+fn stored_residuals_do_not_alias_across_names() {
+    let errs = check_with_stored(&["xs", "ys"], ELEMENT_AS_INT_THEN_BOOL);
+    assert!(
+        errs.is_empty(),
+        "residuals of two units must stay apart, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// One name's residual is one type for the unit that reads it twice.
+#[test]
+fn a_stored_residual_has_one_type_per_unit() {
+    let errs = check_with_stored(&["xs"], &ELEMENT_AS_INT_THEN_BOOL.replace("$ys", "$xs"));
+    assert!(
+        errs.iter()
+            .any(|e| e.hint().is_some_and(|h| h.contains("another use fixed it"))),
+        "a weak residual must not be instantiated at a number and at a Bool, and the \
+         refusal says why: {errs:?}"
+    );
+}
+
+/// The contrast: a name the defining unit generalised is used at both.
+#[test]
+fn a_generalised_binding_is_used_at_two_types() {
+    let mut sh = shell();
+    run(&mut sh, "let xs = []").unwrap();
+    let errs = check_errors(&sh, &ELEMENT_AS_INT_THEN_BOOL.replace("$ys", "$xs"));
+    assert!(
+        errs.is_empty(),
+        "a generalised binding is polymorphic across runs, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─── kinds ──────────────────────────────────────────────────────────────────
+
+/// A kind survives the run boundary: the stored scheme prints it, and the
+/// next run's instantiation refuses what it excludes.
+#[test]
+fn a_stored_scheme_keeps_its_kinds() {
+    let mut sh = shell();
+    run(&mut sh, "let log = { |n| echo \"n: $n\" }").unwrap();
+    let stored = fmt_scheme(&scheme_of(&sh, "log").expect("log must carry a scheme"));
+    assert!(stored.starts_with("∀α:scalar."), "got: {stored}");
+    assert!(check_errors(&sh, "log 5\nlog text").is_empty());
+    let errs = check_errors(&sh, "log [1, 2]");
+    assert_eq!(
+        errs.iter().map(|e| e.kind.code()).collect::<Vec<_>>(),
+        ["T0074"]
+    );
+}
+
+/// What a bare-label read needs is decided by the kind the target carries,
+/// not by which statement came first.
+#[test]
+fn a_label_read_is_settled_by_a_kind_in_either_order() {
+    let mut sh = shell();
+    run(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
+    run(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
+    let shown = |name: &str| fmt_scheme(&scheme_of(&sh, name).expect("a scheme"));
+    assert_eq!(shown("before"), "∀α. Map α → Command α");
+    assert_eq!(shown("after"), "∀α. Map α → Command Integer");
+}
+
+// ─── checked boundaries ─────────────────────────────────────────────────────
+
+/// The refusal a run ended in, as text.
+fn refusal(result: Settled<Value>) -> String {
+    match result {
+        Err(ral_core::types::Break::Error(e)) => e.message,
+        other => panic!("the run must be refused, got {other:?}"),
+    }
+}
+
+const DECODE_A: &str = r#"let m = !{to-string '{"a": "x"}' | from-json}"#;
+
+/// A later line's use of data decoded on an earlier one is admitted before the
+/// line runs: the refusal comes ahead of its first statement.
+#[test]
+fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
+    let mut sh = shell();
+    run(&mut sh, DECODE_A).unwrap();
+    assert!(check_errors(&sh, "let marker = 1\nlet n = $[$m[a] + 1]").is_empty());
+    let message = refusal(run(&mut sh, "let marker = 1\nlet n = $[$m[a] + 1]"));
+    assert!(
+        message.starts_with("$m: the value at `/a` is text (`'x'`)"),
+        "{message}"
+    );
+    assert!(
+        scheme_of(&sh, "marker").is_none(),
+        "the line's first statement must not have run"
+    );
+}
+
+/// What the defining unit's own uses fixed stays fixed: a residual stays weak
+/// across units, so a later line cannot use the name at another type.
+#[test]
+fn a_later_line_cannot_use_decoded_data_at_a_type_its_unit_did_not() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let m = !{to-string '{\"a\": 1}' | from-json}\nlet n = $[$m[a] + 1]",
+    )
+    .unwrap();
+    assert!(check_errors(&sh, "let k = $[$m[a] * 2]").is_empty());
+    assert!(!check_errors(&sh, "let s = upper $m[a]").is_empty());
+}
+
+/// A session function that returns decoded data keeps the sites in its own IR:
+/// each later line checks statically, and the function's `Fixings` make the
+/// second call agree with the first on what a compared pair is (cost 11).
+#[test]
+fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let f = { |s| let d = !{to-string $s | from-json}; let _ = $[$d[a] < $d[c]]; return $d }",
+    )
+    .unwrap();
+    let first = r#"let x = f '{"a": 1, "c": 2}'"#;
+    let second = r#"let y = f '{"a": "p", "c": "q"}'"#;
+    assert!(check_errors(&sh, first).is_empty());
+    assert!(check_errors(&sh, second).is_empty());
+    run(&mut sh, first).unwrap();
+    let message = refusal(run(&mut sh, second));
+    assert!(message.contains("is a number and"), "{message}");
+    assert!(
+        message.contains("is text, and this script compares them"),
+        "{message}"
+    );
+}
+
+/// A document its own unit fixed to a cycle — json-get's walk is `μα. Map α` —
+/// keeps the cycle across units and has no residual left, so the later unit
+/// uses it at that type and re-admits nothing: the site that decoded it already
+/// held the value to exactly this type.
+#[test]
+fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let doc = !{to-string '{\"a\": {\"b\": {}}}' | from-json}\n\
+         let first = fold { |node key| return $node[$key] } $doc ['a']",
+    )
+    .unwrap();
+    let stored = fmt_scheme(&scheme_of(&sh, "doc").expect("doc must carry a scheme"));
+    assert!(stored.starts_with("μ"), "{stored}");
+    let later = "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']";
+    assert!(check_errors(&sh, later).is_empty());
+    let top = compile_and_typecheck(later, sh.session_schemes(), FileId::DUMMY, "", None)
+        .expect("the later line checks");
+    assert!(top.admits.is_empty(), "nothing is left to admit again");
+    run(&mut sh, later).unwrap();
+}
+
+/// What a unit leaves undecided is admitted again by each unit that uses it,
+/// once, before it runs.
+#[test]
+fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
+    let mut sh = shell();
+    run(&mut sh, DECODE_A).unwrap();
+    let admits = |src: &str| {
+        compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, "", None)
+            .expect("the line checks")
+            .admits
+            .len()
+    };
+    assert_eq!(admits("let k = length $m"), 1);
+    assert_eq!(admits("let k = length $m\nlet j = length $m"), 1);
+    assert_eq!(admits("let k = 1"), 0);
 }

@@ -1,0 +1,4 @@
+# contains: an arm is a block, or a name holding one
+# contains: bind it: `let arm = $arms[a]`
+let n = 7
+case `a () [`a: "v!{$n x}"]

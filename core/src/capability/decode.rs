@@ -14,7 +14,7 @@ use crate::path::NormalizedPrefix;
 use crate::typecheck::contract::{Form as ContractForm, declared};
 use crate::types::{
     Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, List, PolicyError, ShellPolicy,
-    Value, as_map, as_map_ref,
+    Value, as_map, as_map_ref, settings_map,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -180,9 +180,14 @@ pub fn decode_capability_map(
     err_prefix: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
 ) -> Result<Capabilities, PolicyError> {
-    let entries = as_map_ref(value, err_prefix).map_err(PolicyError::from)?;
+    let entries = settings_map(value).ok_or_else(|| {
+        PolicyError::new(format!(
+            "{err_prefix} expects a record or `()`, got {}",
+            value.type_name()
+        ))
+    })?;
     let mut caps = Capabilities::default();
-    for (k, v) in entries {
+    for (k, v) in &*entries {
         match k {
             "exec" => {
                 let raw = decode_exec_grant(&v, &format!("{err_prefix} exec"))?;

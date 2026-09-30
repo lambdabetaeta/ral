@@ -42,6 +42,7 @@ impl Shell {
             local: LocalState::default(),
         };
         shell.install_builtins(crate::builtins::CORE_BUILTINS);
+        shell.install_builtins(crate::builtins::BOUNDARY_BUILTINS);
         shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
         // Language-given names live in Σ, ahead of the prelude.
         Arc::make_mut(&mut shell.sig).install_natives(crate::types::builtin::language_constants());

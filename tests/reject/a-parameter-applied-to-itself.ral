@@ -1,0 +1,3 @@
+# codes: T0073
+# contains: is applied to itself
+let g = { |g| $g $g }

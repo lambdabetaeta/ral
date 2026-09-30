@@ -1,0 +1,17 @@
+let log = { |n| echo "n: $n" }
+log 5
+log text
+log true
+let sum2 = { |a b| return $[$a + $b] }
+echo !{sum2 1 2} !{sum2 1.5 2.5}
+let order = { |a b| return $[$a < $b] }
+echo !{order 1 2} !{order a b}
+let same = { |a b| return $[$a == $b] }
+echo !{same [1] [1]} !{same [a: 1] [a: 1]}
+let measure = { |x| length $x }
+let raw = !{ints-to-bytes [65] | from-bytes}
+echo !{measure text} !{measure [1]} !{measure [:]} !{measure $raw}
+echo !{max a b} !{max 1 2} !{maximum [1.5, 2.5]} !{minimum [a, b]}
+echo !{sort-list [b, a]} !{sort-list [2.5, 1.5]}
+echo !{sort-list-by { |s| length $s } [ccc, a]}
+echo !{str [a: 1]} !{to-json [a: [1, 2]]}

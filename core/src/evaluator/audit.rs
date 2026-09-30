@@ -182,7 +182,7 @@ where
         && e.command.is_none()
         && !cmd.starts_with('_')
     {
-        e.command = Some(cmd.to_string());
+        e.command = Some(cmd.into());
     }
     finish_command(
         shell, mooring, start, cmd, origin, args, &result, stdout, stderr,
@@ -195,6 +195,7 @@ where
 pub(crate) fn run_native(
     entry: &BuiltinEntry,
     args: &[Value],
+    site: Option<&std::sync::Arc<crate::types::Site>>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -204,7 +205,7 @@ pub(crate) fn run_native(
         CommandOrigin::Builtin,
         mooring,
         shell,
-        |shell, frame| entry.call_body(frame, args, mooring, shell),
+        |shell, frame| entry.call_body(frame, args, site, mooring, shell),
     )
 }
 
@@ -215,7 +216,7 @@ impl BuiltinEntry {
     /// # Errors
     /// Propagates a `Break` raised by the body.
     pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        run_native(self, args, mooring, shell)
+        run_native(self, args, None, mooring, shell)
     }
 }
 

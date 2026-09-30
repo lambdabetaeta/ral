@@ -9,53 +9,6 @@ use crate::typecheck::Scheme;
 use crate::types::{Binding, Env, Error, Settled, Shell, Value};
 use std::sync::Arc;
 
-/// Refuse every name a `let` pattern binds that would shadow a PATH command.
-/// `run_phrases`'s `Define` arm alone calls this, under `Mode::Session`: a
-/// nested `Bind`'s pattern is a local lexical name, not a command name, so
-/// it binds one unchecked.
-pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Settled<()> {
-    match pattern {
-        IrPattern::Wildcard => Ok(()),
-        IrPattern::Name(name) => check_path_shadow(name, shell),
-        IrPattern::List { elems, rest } => {
-            for elem in elems {
-                check_pattern_shadow(elem, shell)?;
-            }
-            if let Some(name) = rest {
-                check_path_shadow(name, shell)?;
-            }
-            Ok(())
-        }
-        IrPattern::Map(entries) => {
-            for entry in entries {
-                check_pattern_shadow(&entry.pattern, shell)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Refuse a binding that shadows a command on `PATH`: ral keeps the value
-/// and command namespaces disjoint.  The caller — `run_phrases`'s `Define`
-/// arm, under `Mode::Session` alone — is the only one that ever reaches
-/// this, so every call here is already at session scope; block, lambda and
-/// prelude bindings never enter the command namespace, so they go unchecked
-/// by never calling in.
-pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Settled<()> {
-    if let Some(path) = shell.locate_command(name) {
-        return Err(Error::new(
-            format!(
-                "cannot bind `{name}`: a command named `{name}` is reachable on PATH ({})",
-                path.display()
-            ),
-            1,
-        )
-        .with_hint("ral keeps value and command names disjoint; rename the binding")
-        .into());
-    }
-    Ok(())
-}
-
 /// Destructure `value` against `pattern`, attaching to each bound name the
 /// scheme `schemes` lists for it (empty for a scheme-less bind), and fold the
 /// result into `env`.

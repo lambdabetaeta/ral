@@ -1,9 +1,11 @@
-//! The declared tables, and the one condition a variable flag owes.
+//! The declared tables.
 //!
 //! A form's options and a contract file's return value are the same thing: a
 //! closed set of labels, each held at what its table says.  `within` and
-//! `grant` check theirs as a row at the form; an rc file and a plugin manifest
-//! check theirs as the row their program returns.  The runtime doors —
+//! `grant` check theirs key by written key at the form, the bracket being
+//! syntax (`Inferencer::check_options`); an rc file, a capability profile
+//! and a plugin manifest are ascribed the table once inference has finished,
+//! as ML ascribes a signature (`ascribe`).  The runtime doors —
 //! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — each keep
 //! their own `match` over the values; a table gives them only the *keyset*
 //! and the unknown-key wording, so that much is written once.  A door's own
@@ -15,26 +17,13 @@
 //! `every_declared_rc_key_is_handled_by_apply_rc_key`,
 //! `every_declared_manifest_key_is_handled_by_parse`, and
 //! `every_declared_grant_key_is_handled_by_decode_capability_map`.
-//!
-//! The one-optional-type condition is why they are gathered here rather than
-//! left where they are used: a label may not be optional at two irreconcilable
-//! types within one check.  Two tables that disagree at one label would make
-//! the order two constraints arrive in decide the verdict, and
-//! order-independence is a theorem about the term rules plus this door — so the
-//! door is load-bearing, and must be re-established for every new site that
-//! introduces a variable flag.
-//!
-//! An ordinary program cannot reach the condition — the put rule mints a
-//! variable flag over a *fresh* payload, and every other rule pins `Present` —
-//! so a declared table is the only construct that puts a ground payload beside
-//! a variable flag.  [`check_one_optional_type`] is the refusal at the door,
-//! and [`declared`] is that door.
 
-use std::sync::OnceLock;
-
-use super::error::Reason;
-use super::ty::{CompTy, Ty};
+use super::env::InferCtx;
+use super::error::{Reason, Standing, TypeErrorKind};
+use super::ty::{CompTy, Label, Row, Ty};
 use super::unify::Unifier;
+use crate::ir::{CompKind, Phrase, Val};
+use crate::source::{Span, Spanned};
 
 /// Which declared table.  An enum rather than a name, so a lookup cannot miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +36,7 @@ pub enum Form {
 
 /// What a table holds one of its labels to.
 pub enum Holds {
-    /// Held at this ground type.  Two tables naming one label at two types that
-    /// will not unify is the condition's refusal.
+    /// Held at this ground type.
     At(Ty),
     /// Held at this ground type, and the row must have it.
     Required(Ty),
@@ -72,6 +60,9 @@ pub struct Key {
 pub struct Table {
     pub form: &'static str,
     pub keys: &'static [Key],
+    /// Whether a file may return a function of its options instead of the
+    /// settings, leaving the door to meet what the function returns.
+    pub factory: bool,
 }
 
 impl Table {
@@ -88,11 +79,7 @@ impl Table {
     /// What a runtime door says about a key this table does not name — the
     /// one wording all three doors share, each prefixing its own context.
     pub fn unknown_key(&self, key: &str) -> String {
-        format!(
-            "unknown key '{key}' — `{form}` takes {list}",
-            form = self.form,
-            list = self.offered().join(", "),
-        )
+        unknown_key_message(self.form, key, &self.offered())
     }
 
     /// What this table says about `label`, or `None` for a label it does not
@@ -105,22 +92,11 @@ impl Table {
     }
 }
 
-/// Two tables naming one label at two different ground types: the condition's
-/// refusal, naming both tables so neither author has to guess whose it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Clash {
-    pub label: &'static str,
-    pub forms: [&'static str; 2],
-}
-
 /// `within`'s options.  `env:` is heterogeneous and `parse_env`'s to judge, so
 /// it stays the decoder's.
 ///
-/// The catch-all declares a route *variable* and pins the value at `Unit`:
-/// `bytes_subsumes`' two branches both end in `value ~ Unit` and differ only
-/// in whether the route is left at `Value`, so `Unit` is the whole of WF-2's
-/// subsumption and leaving the route free is the rest.  Declaring `Bytes`
-/// here would commit a bound arm's route one occurrence at a time.
+/// The catch-all stands in for every command, so it is a function of the name
+/// and the argv that writes and returns `()`.
 static WITHIN: Table = Table {
     form: "within",
     keys: &[
@@ -137,9 +113,10 @@ static WITHIN: Table = Table {
         Key {
             label: "handler",
             holds: Holds::Shaped(catch_all_ty),
-            reason: Some(Reason::CatchAllRoutePin),
+            reason: Some(Reason::StandsIn(Standing::EveryCommand)),
         },
     ],
+    factory: false,
 };
 
 /// `grant`'s options, which are also the capability profile's keyset.
@@ -147,7 +124,7 @@ static WITHIN: Table = Table {
 /// Everything but the two flags is `decode_capability_map`'s: a policy value
 /// may be a string or a list, and the two mix within one record.  Typing them
 /// to full depth would put one label at two ground types — `editor.read`
-/// beside `fs.read` — which is the one condition a variable flag owes.
+/// beside `fs.read`.
 static GRANT: Table = Table {
     form: "grant",
     keys: &[
@@ -182,6 +159,7 @@ static GRANT: Table = Table {
             reason: None,
         },
     ],
+    factory: false,
 };
 
 /// The rc file's eleven keys.  `apply_rc_key` dispatches off this table and
@@ -247,6 +225,7 @@ static RC: Table = Table {
             reason: None,
         },
     ],
+    factory: false,
 };
 
 /// The plugin manifest's four keys, and the fifth that is refused.
@@ -288,18 +267,16 @@ static MANIFEST: Table = Table {
             reason: None,
         },
     ],
+    factory: true,
 };
 
-/// Every table this build declares, and the one place a new one is added.
-static DECLARED: &[&Table] = &[&WITHIN, &GRANT, &RC, &MANIFEST];
-
-fn catch_all_ty(u: &mut Unifier) -> Ty {
-    let route = u.fresh_route();
+/// What the catch-all `handler:` is: `String → [String] → F Unit`.
+fn catch_all_ty(_u: &mut Unifier) -> Ty {
     Ty::Thunk(Box::new(CompTy::Fun(
         Box::new(Ty::String),
         Box::new(CompTy::Fun(
             Box::new(Ty::argv()),
-            Box::new(CompTy::Return(route, Box::new(Ty::Unit))),
+            Box::new(CompTy::pure(Ty::Unit)),
         )),
     )))
 }
@@ -314,156 +291,123 @@ pub fn declared(form: Form) -> &'static Table {
     }
 }
 
-/// The one-optional-type condition over the declared set, computed once: within
-/// one check, a label may not be optional at two types that will not unify.
-///
-/// # Errors
-/// The clash, if this build's tables have one.
-pub fn condition() -> Result<(), &'static Clash> {
-    static CHECKED: OnceLock<Result<(), Clash>> = OnceLock::new();
-    match CHECKED.get_or_init(|| check_one_optional_type(DECLARED)) {
-        Ok(()) => Ok(()),
-        Err(clash) => Err(clash),
-    }
+/// What a runtime door says about a key a table does not name.
+pub(super) fn unknown_key_message(form: &str, key: &str, offered: &[&str]) -> String {
+    format!(
+        "unknown key '{key}' — `{form}` takes {list}",
+        list = offered.join(", "),
+    )
 }
 
-/// The one-optional-type condition over an arbitrary set of tables — the check
-/// [`condition`] runs, exposed so a host crate's own table can be held to it too.
+/// The sentence a clash at `key` earns: the key's own, or the table's.
+pub(super) fn field_reason(table: &Table, key: &Key) -> Reason {
+    key.reason.clone().unwrap_or_else(|| Reason::OptionField {
+        form: table.form,
+        key: key.label.to_string(),
+    })
+}
+
+/// Where `label`'s value sits, when the options were written out.
+pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
+    let Val::Record(entries) = opts else {
+        return None;
+    };
+    entries
+        .shape()
+        .iter()
+        .find(|(key, _)| key.as_ref() == label)
+        .and_then(|(_, value)| value.span)
+}
+
+/// Hold a program's own return value to `table`, once inference has finished.
 ///
-/// # Errors
-/// The first label two tables name at two types that will not unify.
-pub fn check_one_optional_type(tables: &[&'static Table]) -> Result<(), Clash> {
-    for (i, table) in tables.iter().enumerate() {
-        for key in table.keys {
-            for other in &tables[i + 1..] {
-                for twin in other.keys.iter().filter(|k| k.label == key.label) {
-                    let mut u = Unifier::new();
-                    let (Some(a), Some(b)) = (
-                        declaration_ty(&mut u, &key.holds),
-                        declaration_ty(&mut u, &twin.holds),
-                    ) else {
-                        continue;
-                    };
-                    if u.unify_ty(&a, &b).is_err() {
-                        return Err(Clash {
-                            label: key.label,
-                            forms: [table.form, other.form],
-                        });
-                    }
-                }
+/// The *inferred* type is what is ascribed, whatever syntax produced it, so a
+/// key misspelled inside a spread is caught as one written out is.  Nothing
+/// constrains the program: the check runs in a scratch copy of the unifier, on
+/// a finished result that flows nowhere else, so the row's open tail is read
+/// as closed.  A return typed at a variable (`from-json`) and, where the table
+/// admits one, a factory stay on the runtime door.
+pub(super) fn ascribe(
+    ctx: &mut InferCtx,
+    tail: Option<&Spanned<Phrase>>,
+    cty: Option<CompTy>,
+    table: &'static Table,
+) {
+    let (Some(phrase), Some(cty)) = (tail, cty) else {
+        return;
+    };
+    let Phrase::Run(comp) = &phrase.item else {
+        return;
+    };
+    let CompTy::Return(value) = ctx.unifier.resolve_comp_ty(&cty) else {
+        return;
+    };
+    let written = match &comp.item {
+        CompKind::Return(record @ Val::Record(_)) => Some(record),
+        _ => None,
+    };
+    let saved = ctx.pos;
+    ctx.pos = phrase.span;
+    match ctx.unifier.resolve_ty(&value) {
+        Ty::Record(row) => ascribe_row(ctx, &row, table, written),
+        Ty::Unit => ascribe_row(ctx, &Row::Empty, table, written),
+        Ty::Var(_) => {}
+        Ty::Thunk(_) if table.factory => {}
+        found => ctx.diagnose(TypeErrorKind::ReturnNotRecord {
+            form: table.form,
+            found,
+            offered: table.offered(),
+        }),
+    }
+    ctx.pos = saved;
+}
+
+/// Each field on `row`'s spine against `table`, then every required key
+/// against the spine.
+fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Option<&Val>) {
+    let mut scratch = ctx.unifier.clone();
+    let phrase_pos = ctx.pos;
+    let mut present = Vec::new();
+    let mut rest = ctx.unifier.resolve_row(row);
+    while let Row::Extend(label, payload, tail) = rest {
+        rest = ctx.unifier.resolve_row(&tail);
+        let Label::Field(label) = label else {
+            continue;
+        };
+        present.push(label.clone());
+        ctx.pos = written.and_then(|w| written_at(w, &label)).or(phrase_pos);
+        scratch.at = ctx.pos;
+        let Some(key) = table.keys.iter().find(|k| k.label == label) else {
+            ctx.diagnose(TypeErrorKind::UnknownKey {
+                form: table.form,
+                key: label,
+                offered: table.offered(),
+            });
+            continue;
+        };
+        let declared = match &key.holds {
+            Holds::At(ty) | Holds::Required(ty) => ty.clone(),
+            Holds::Shaped(mint) => mint(&mut scratch),
+            Holds::Decoded => continue,
+            Holds::Refused(advice) => {
+                ctx.diagnose(TypeErrorKind::RefusedKey {
+                    form: table.form,
+                    key: key.label,
+                    advice,
+                });
+                continue;
             }
+        };
+        if let Err(kind) = scratch.unify_ty(&declared, &payload) {
+            ctx.report(kind, field_reason(table, key));
         }
     }
-    Ok(())
-}
-
-/// What one occurrence of this declaration mints, or `None` for a label that
-/// carries no type at all.  Minting is what makes the comparison right:
-/// `Decoded` and `Shaped` are fresh per occurrence, so two of them meet as the
-/// occurrences would rather than as written text.
-fn declaration_ty(u: &mut Unifier, holds: &Holds) -> Option<Ty> {
-    match holds {
-        Holds::At(ty) | Holds::Required(ty) => Some(ty.clone()),
-        Holds::Decoded => Some(u.fresh_ty()),
-        Holds::Shaped(mint) => Some(mint(u)),
-        Holds::Refused(_) => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_declared_tables_meet_the_condition() {
-        assert_eq!(condition(), Ok(()));
-    }
-
-    #[test]
-    fn one_label_at_two_ground_types_is_refused() {
-        static LEFT: Table = Table {
-            form: "left",
-            keys: &[Key {
-                label: "depth",
-                holds: Holds::At(Ty::Int),
-                reason: None,
-            }],
-        };
-        static RIGHT: Table = Table {
-            form: "right",
-            keys: &[Key {
-                label: "depth",
-                holds: Holds::At(Ty::String),
-                reason: None,
-            }],
-        };
-        let clash = check_one_optional_type(&[&LEFT, &RIGHT]).expect_err("one label, two types");
-        assert_eq!(clash.label, "depth");
-        assert_eq!(clash.forms, ["left", "right"]);
-    }
-
-    #[test]
-    fn a_shared_label_at_one_ground_type_is_no_clash() {
-        static LEFT: Table = Table {
-            form: "left",
-            keys: &[Key {
-                label: "bell",
-                holds: Holds::At(Ty::Bool),
-                reason: None,
-            }],
-        };
-        static RIGHT: Table = Table {
-            form: "right",
-            keys: &[Key {
-                label: "bell",
-                holds: Holds::Required(Ty::Bool),
-                reason: None,
-            }],
-        };
-        assert_eq!(check_one_optional_type(&[&LEFT, &RIGHT]), Ok(()));
-    }
-
-    /// A shape at a label another table holds at a ground type is the same
-    /// order-dependence as two ground types, so the door compares
-    /// unifiability rather than equality and `Shaped` is not exempt.
-    #[test]
-    fn a_shape_against_a_ground_type_is_refused() {
-        static LEFT: Table = Table {
-            form: "left",
-            keys: &[Key {
-                label: "handler",
-                holds: Holds::Shaped(catch_all_ty),
-                reason: None,
-            }],
-        };
-        static RIGHT: Table = Table {
-            form: "right",
-            keys: &[Key {
-                label: "handler",
-                holds: Holds::At(Ty::String),
-                reason: None,
-            }],
-        };
-        let clash = check_one_optional_type(&[&LEFT, &RIGHT]).expect_err("a thunk is not a string");
-        assert_eq!(clash.label, "handler");
-        assert_eq!(clash.forms, ["left", "right"]);
-    }
-
-    /// The labels the four share today — `env` across `within` and the rc,
-    /// `aliases` across the rc and the manifest — are untyped in both, so
-    /// nothing meets.
-    #[test]
-    fn the_shared_labels_are_untyped_in_both() {
-        for (form, label) in [
-            (Form::Within, "env"),
-            (Form::Rc, "env"),
-            (Form::Rc, "aliases"),
-            (Form::Manifest, "aliases"),
-        ] {
-            assert!(matches!(
-                declared(form).holds(label),
-                Some(Holds::Decoded | Holds::Shaped(_))
-            ));
+    ctx.pos = phrase_pos;
+    for key in table.keys {
+        if matches!(key.holds, Holds::Required(_)) && !present.iter().any(|l| l == key.label) {
+            ctx.diagnose(TypeErrorKind::RowMissingField {
+                label: key.label.to_string(),
+            });
         }
     }
 }

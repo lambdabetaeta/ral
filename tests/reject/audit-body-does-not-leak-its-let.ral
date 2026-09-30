@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leak_audit
+audit { let leak_audit = 1 }
+echo $leak_audit

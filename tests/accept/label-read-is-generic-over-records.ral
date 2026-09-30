@@ -1,0 +1,3 @@
+let a_of = { |r| $r[a] }
+echo !{a_of [a: 1]}
+echo !{a_of [a: 'x', b: 2]}

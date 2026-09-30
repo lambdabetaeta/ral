@@ -1,26 +1,12 @@
-# Test: a pipeline has one transport, bytes on a wire; a stage's returned
-# value simply goes nowhere, and a decoder at the tail supplies the value
+# Test: a pipeline has one transport, bytes on a wire: a stage feeds the next by
+# writing, and a decoder at the tail supplies the value
 
 let d = temp-dir
-
-# A returned thunk is a value: never applied, so its body never runs
-5 | { echo hi }
-echo 'thunk stage accepted, never forced'
-
-# An interior value is not serialised: the reader sees EOF
-let quiet = return [1, 2] | { |xs| echo $xs } | from-lines
-echo !{length $quiet}
-# Expected: 0
 
 # An explicit encoder does put bytes on the wire
 let loud = to-json [1, 2] | from-lines
 echo !{length $loud}
 # Expected: 1
-
-# An interior decoder returns its bytes as a value; the next stage gets EOF
-let lost = to-lines ['x marks it', 'and again x'] | from-bytes | from-lines
-echo !{length $lost}
-# Expected: 0
 
 # A producer need not write; a discarded statement's bytes still reach the wire
 let silent = !{ return () } | from-lines
@@ -40,10 +26,9 @@ echo !{length $lines} $lines[0] $lines[1]
 # Expected: 2 a b
 
 # Streaming line combinators: filter keeps lines in order; a reducer's
-# accumulator is discarded mid-pipe and is the value at the tail
+# accumulator is the value at the tail
 let kept = !{printf 'aa\nbb\ncc\ndd\n' | filter-lines { |l| contains ['bb', 'dd'] $l } | from-string}
 echo "[$kept]"
-printf 'a\nb\n' | fold-lines { |acc line| echo $line; return $[$acc + 1] } 0 | cat
 let n = printf 'a\nb\n' | fold-lines { |acc _| return $[$acc + 1] } 0
 echo $n
 # Expected: 2

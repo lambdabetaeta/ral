@@ -15,14 +15,13 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
-use crate::ir::{CaseArm, Comp, Exec, Val};
+use crate::ir::{CaseArm, Exec, Val};
 use crate::typecheck::{Scheme, Ty, TypeError, Unifier};
 use crate::types::{BuiltinEntry, FsProjection, FsRules, Settled, Shell};
 
-/// The computation a case arm runs, whichever way the surface reached it —
-/// an arm's `ArmBody` spelling is core's business, the branch is the test's.
-pub fn case_arm_comp(arm: &CaseArm) -> &std::sync::Arc<Comp> {
-    arm.body.comp()
+/// The thunk a case arm forces: its literal block, or a thunk in hand.
+pub fn case_arm_val(arm: &CaseArm) -> &Val {
+    &arm.body.item
 }
 
 /// Whether an `Exec` carries redirects, which a fuzz invariant asserts it
@@ -102,6 +101,34 @@ pub fn scheme_over_comp_vars(
     }
 }
 
+/// A scheme over `ty` that leaves `weak` type variables unquantified, as a
+/// unit stores a binding that mentions a weak variable.
+pub fn scheme_with_weak_residuals(weak: Vec<crate::typecheck::TyVar>, ty: Ty) -> Scheme {
+    Scheme {
+        weak: crate::typecheck::WeakVars {
+            tys: weak
+                .into_iter()
+                .map(|v| (v, crate::typecheck::Kind::ANY))
+                .collect(),
+            ..Default::default()
+        },
+        ..Scheme::mono(ty)
+    }
+}
+
+/// `schemes` with `stored` added as bindings earlier units left behind.
+pub fn with_stored_schemes(
+    mut schemes: crate::typecheck::SessionSchemes,
+    stored: Vec<(String, Scheme)>,
+) -> crate::typecheck::SessionSchemes {
+    schemes.bindings.extend(
+        stored
+            .into_iter()
+            .map(|(name, scheme)| (name, Some(std::sync::Arc::new(scheme)))),
+    );
+    schemes
+}
+
 /// The peer end of a wire, driven directly: `core/tests/wire_write_stall.rs`
 /// plays the far side of a transport the host would own.
 pub fn wire_from_stream(stream: impl Into<crate::wire::WireStream>) -> crate::wire::WireChannel {
@@ -171,4 +198,26 @@ pub fn grant_depth(
 /// included, for a test watching a worker outlive its engine.
 pub fn workers(transport: &crate::protocol::IdentityTransport) -> Vec<crate::types::WorkerEntry> {
     transport.inspect(Shell::workers)
+}
+
+/// The site of a boundary call whose result the checker solved as `ty`: what a
+/// test hands a door it calls directly, bypassing the checker.
+pub fn site_of(ty: &Ty) -> std::sync::Arc<crate::types::Site> {
+    std::sync::Arc::new(crate::types::Site::snapshot(
+        &Unifier::new(),
+        ty,
+        crate::types::Fixings::new(),
+    ))
+}
+
+/// Whether a scheme quantifies a variable only its result mentions: what the
+/// perimeter test asks of every table a host installs.
+pub fn has_result_only_var(scheme: &Scheme) -> bool {
+    crate::typecheck::has_result_only_var(scheme)
+}
+
+/// Whether a scheme leaves weak variables unquantified — the mark a boundary's
+/// result carries into a stored binding.
+pub fn has_weak_residuals(scheme: &Scheme) -> bool {
+    !scheme.weak.is_empty()
 }

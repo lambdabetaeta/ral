@@ -52,8 +52,7 @@ fn scheme(u: &mut Unifier) -> Scheme {
     ]);
     mk_scheme(
         &[],
-        &[],
-        &[row],
+        &[(row, false)],
         thunk(fun(Ty::Record(Row::Var(row)), pure(settings))),
     )
 }

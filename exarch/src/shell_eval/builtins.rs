@@ -9,16 +9,19 @@ use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
 use ral_core::builtins::util::{as_str, regex_err};
 use ral_core::capability::FsOp;
-use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
+use ral_core::typecheck::builtins::{
+    closed_record, fun, mk_plain_scheme, mk_scheme as scheme, pure, thunk,
+};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, sig,
+    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, Site, sig,
 };
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{Read as _, Write};
+use std::sync::Arc;
 
 mod fff_index;
 #[cfg(target_os = "linux")]
@@ -786,7 +789,6 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(fun(
             Ty::String,
             pure(Ty::List(Box::new(closed_record(&[
@@ -817,7 +819,6 @@ fn scheme_view_range(row: &[(&str, Ty)]) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(fun(
             Ty::String,
             fun(
@@ -831,7 +832,6 @@ fn scheme_view_range(row: &[(&str, Ty)]) -> Scheme {
 /// `edit-hash :: Str → [[hash: Str, line: Str]] → F Unit`
 fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
     scheme(
-        &[],
         &[],
         &[],
         thunk(fun(
@@ -850,7 +850,6 @@ fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
 /// `edit-replace :: Str → Str → Str → F Unit`
 fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
     scheme(
-        &[],
         &[],
         &[],
         thunk(fun(
@@ -879,7 +878,6 @@ fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(fun(Ty::Int, pure(Ty::List(Box::new(Ty::String))))),
     )
 }
@@ -887,13 +885,12 @@ fn scheme_fff(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
-        &[],
         thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
     )
 }
 
 fn scheme_skill(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::String))))
 }
 
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
@@ -947,7 +944,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
 }
 
 fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(Ty::String)))
+    scheme(&[], &[], thunk(pure(Ty::String)))
 }
 
 /// `skill-list` — every discoverable skill, one `name: description` per line,
@@ -990,9 +987,8 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
 fn scheme_service_handle(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     let a = Ty::Var(av);
-    scheme(
+    mk_plain_scheme(
         &[av],
-        &[],
         &[],
         thunk(fun(Ty::Int, pure(Ty::Handle(Box::new(a))))),
     )
@@ -1004,7 +1000,12 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 /// like an unknown one: those are lease-bounded and rediscovered through their
 /// binding, so by-id re-acquisition stays carved out for services rather than
 /// becoming a control plane over every worker.
-fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_service_handle(
+    args: &[Value],
+    site: &Arc<Site>,
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let id = match args[0].as_int() {
         Some(n) if n >= 0 => {
             #[allow(clippy::cast_sign_loss, reason = "guarded n >= 0")]
@@ -1020,7 +1021,9 @@ fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
     };
     match shell.worker_by_id(id) {
         Some(entry) if entry.class == ral_core::types::LeaseClass::Durable => {
-            Ok(Value::Handle(Box::new(entry.handle)))
+            let mut handle = entry.handle;
+            handle.site = Some(Arc::clone(site));
+            Ok(Value::Handle(Box::new(handle)))
         }
         _ => Err(sig(format!(
             "service-handle: no durable service registered with id {} — an ephemeral \
@@ -1093,11 +1096,11 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
         "fff <query>  — fuzzy file-name search (frecency-ranked) over the working tree, returning [String].",
         BuiltinBody::Static(builtin_fff),
     ),
-    BuiltinEntry::new(
+    BuiltinEntry::boundary(
         Cow::Borrowed("service-handle"),
         scheme_service_handle,
         "service-handle <id>  — re-acquire a durable service's live Handle by id (durable services only; an ephemeral spawn/watch id is refused). Compose with an eliminator: `await (service-handle 3)`, `cancel (service-handle 3)`.",
-        BuiltinBody::Static(builtin_service_handle),
+        builtin_service_handle,
     ),
 ];
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &EXARCH_BUILTINS_ARR;
@@ -1227,6 +1230,11 @@ mod tests {
 
     // ── `service-handle` builtin ─────────────────────────────────────────
 
+    /// The site of a `service-handle` call whose handle is used at `Int`.
+    fn handle_site() -> Arc<Site> {
+        ral_core::test_access::site_of(&Ty::Handle(Box::new(Ty::Int)))
+    }
+
     /// A worker body that blocks until cancelled, polling `process::check` so the
     /// thread genuinely stays `Running` rather than settling instantly.  Named
     /// apart from `test-clear-block-forever` in `exarch/src/agent/testkit.rs` so
@@ -1243,7 +1251,7 @@ mod tests {
     }
 
     fn scheme_test_block_forever(_u: &mut Unifier) -> Scheme {
-        scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+        scheme(&[], &[], thunk(pure(Ty::Unit)))
     }
 
     static WORKER_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
@@ -1310,6 +1318,42 @@ mod tests {
                     .map(|e| e.kind.render_message())
                     .collect::<Vec<_>>()
             ),
+        }
+    }
+
+    /// A family door serialises its argument, so a block anywhere in it is
+    /// refused where it is written, and data of any shape is not.
+    #[test]
+    fn a_family_door_refuses_a_block_in_its_argument_statically() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        dress(&mut shell);
+        let codes = |src: &str| -> Vec<&'static str> {
+            match ral_core::compile_and_typecheck(
+                src,
+                shell.session_schemes(),
+                ral_core::source::FileId::DUMMY,
+                "",
+                None,
+            ) {
+                Ok(_) => Vec::new(),
+                Err(ral_core::CompileError::Parse(e)) => panic!("{src:?} must parse, got: {e}"),
+                Err(ral_core::CompileError::Types(errs)) => {
+                    errs.iter().map(|e| e.kind.code()).collect()
+                }
+            }
+        };
+        for refused in [
+            "exarch-agents `reply { return 1 }",
+            "exarch-agents `reply [a: [{ return 1 }]]",
+            "exarch-pins `set [key: 'k', body: `card { return 1 }]",
+        ] {
+            assert_eq!(codes(refused), ["T0074"], "{refused}");
+        }
+        for admitted in [
+            "exarch-agents `reply [a: [1, 2], b: `ok]",
+            "exarch-pins `set [key: 'k', body: `text [spans: []]]",
+        ] {
+            assert!(codes(admitted).is_empty(), "{admitted}");
         }
     }
 
@@ -1381,7 +1425,8 @@ mod tests {
         )]
         let id = entry.id.0 as i64;
         let m = Mooring::adrift();
-        let handle = match builtin_service_handle(&[Value::Int(id)], &m, &mut shell) {
+        let handle = match builtin_service_handle(&[Value::Int(id)], &handle_site(), &m, &mut shell)
+        {
             Ok(Value::Handle(h)) => h,
             other => panic!("service-handle must return a Handle, got {other:?}"),
         };
@@ -1430,7 +1475,8 @@ mod tests {
         )]
         let id = entry.id.0 as i64;
         let m = Mooring::adrift();
-        let handle = match builtin_service_handle(&[Value::Int(id)], &m, &mut shell) {
+        let handle = match builtin_service_handle(&[Value::Int(id)], &handle_site(), &m, &mut shell)
+        {
             Ok(Value::Handle(h)) => h,
             other => panic!("a settled-but-retained service must still resolve, got {other:?}"),
         };
@@ -1450,11 +1496,15 @@ mod tests {
     fn service_handle_errors_on_an_unknown_id() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         dress(&mut shell);
-        let err =
-            match builtin_service_handle(&[Value::Int(999_999)], &Mooring::adrift(), &mut shell) {
-                Err(Break::Error(e)) => e,
-                other => panic!("an unknown id must error, got {other:?}"),
-            };
+        let err = match builtin_service_handle(
+            &[Value::Int(999_999)],
+            &handle_site(),
+            &Mooring::adrift(),
+            &mut shell,
+        ) {
+            Err(Break::Error(e)) => e,
+            other => panic!("an unknown id must error, got {other:?}"),
+        };
         assert!(err.message.contains("no durable service"));
     }
 
@@ -1475,7 +1525,12 @@ mod tests {
             reason = "test WorkerId is small; no i64 wrap"
         )]
         let id = entry.id.0 as i64;
-        let err = match builtin_service_handle(&[Value::Int(id)], &Mooring::adrift(), &mut shell) {
+        let err = match builtin_service_handle(
+            &[Value::Int(id)],
+            &handle_site(),
+            &Mooring::adrift(),
+            &mut shell,
+        ) {
             Err(Break::Error(e)) => e,
             other => panic!("an ephemeral worker's id must be refused, got {other:?}"),
         };
@@ -1502,6 +1557,80 @@ mod tests {
                 .iter()
                 .any(|e| e.name.as_ref() == "service-handle"),
             "service-handle must never be a core builtin"
+        );
+    }
+
+    /// Two `service-handle` calls on one worker are two sites, and each
+    /// `await` admits the worker's value against its own: what one script
+    /// decides about the answer is not what another decides.
+    #[test]
+    fn service_handle_twice_on_one_worker_admits_at_each_site() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        dress(&mut shell);
+        run_top_level(&mut shell, r#"service "answer" { 42 }"#);
+        let entry = shell.workers().pop().expect("the service registered");
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "test WorkerId is small; no i64 wrap"
+        )]
+        let id = entry.id.0 as i64;
+        let m = Mooring::adrift();
+        let at = |ty| ral_core::test_access::site_of(&Ty::Handle(Box::new(ty)));
+        let acquire = |shell: &mut Shell, site| match builtin_service_handle(
+            &[Value::Int(id)],
+            &site,
+            &m,
+            shell,
+        ) {
+            Ok(Value::Handle(h)) => Value::Handle(h),
+            other => panic!("service-handle must return a Handle, got {other:?}"),
+        };
+        let as_number = acquire(&mut shell, at(Ty::Int));
+        let as_text = acquire(&mut shell, at(Ty::String));
+        let await_fn = shell
+            .lookup_builtin("await")
+            .expect("core must register `await`");
+        await_fn
+            .run(&[as_number], &m, &mut shell)
+            .expect("the answer is a number, as the first site uses it");
+        let refused = match await_fn.run(&[as_text], &m, &mut shell) {
+            Err(Break::Error(e)) => e,
+            other => panic!("the second site uses the answer as text, got {other:?}"),
+        };
+        assert!(
+            refused.message.contains("is a whole number") && refused.message.contains("as text"),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// The perimeter test's exarch half: a row whose result only its own call
+    /// determines is a boundary.  `surface`'s open record is an argument as
+    /// well as the answer, so it is no cast.
+    #[test]
+    fn a_result_only_variable_in_the_exarch_tables_is_a_boundary() {
+        for entry in EXARCH_BUILTINS.iter().chain(harness::HARNESS_BUILTINS) {
+            let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
+            assert!(
+                !ral_core::test_access::has_result_only_var(&scheme) || entry.is_boundary(),
+                "{}: a result only its own call determines, and it is no boundary",
+                entry.name
+            );
+        }
+        let boundaries: Vec<&str> = EXARCH_BUILTINS
+            .iter()
+            .chain(harness::HARNESS_BUILTINS)
+            .filter(|entry| entry.is_boundary())
+            .map(|entry| entry.name.as_ref())
+            .collect();
+        assert_eq!(
+            boundaries,
+            [
+                "service-handle",
+                "exarch-agents",
+                "exarch-pins",
+                "exarch-transcript"
+            ]
         );
     }
 
@@ -1650,8 +1779,11 @@ mod tests {
             "a shell that never sourced the agent library must list no Library section, got:\n{bare_out}"
         );
 
-        let mut dressed = Shell::new(ral_core::io::TerminalState::default());
-        dress(&mut dressed);
+        let mut dressed = ral_core::boot::boot_shell(
+            ral_core::io::TerminalState::default(),
+            &crate::shell_eval::PRELUDE,
+            &host_surface(),
+        );
         install_agent_library(&Mooring::adrift(), &mut dressed).expect("embedded agent library");
         let dressed_out = run_help(&mut dressed);
         assert!(

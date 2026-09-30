@@ -1,0 +1,7 @@
+# codes: T0010
+# contains: couldn't match type String with type Integer
+let d = from-json < data.json
+let n = length $d
+let first = $d[0]
+echo $[$first + 1]
+echo !{upper $first}

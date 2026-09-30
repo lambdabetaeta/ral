@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leaked
+let _ = use 'lib/leaks-a-name.ral'
+echo $leaked

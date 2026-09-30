@@ -1,21 +1,19 @@
-//! Stdio routing for a spawned external child: classify the call-site
-//! redirects into a [`RedirectPlan`], then wire stdin, stdout and stderr
-//! into the `Launch` per platform conventions.  Pipeline stages take
-//! `pipeline::launch::wire_stage_stdio` and never come here.
+//! Stdio routing for a spawned external child: wire stdin, stdout and stderr
+//! into the `Launch` from sources and sinks.  The call's redirects are
+//! already installed on the shell's by `evaluator::redirect`, and a pipeline
+//! edge is just another source or sink.
 
-use crate::evaluator::audit::observe;
-use crate::syntax::ast::{Redirect, WriteMode};
-use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, WriteOutcome};
+use crate::io::{Io, Sink, Source};
+use crate::types::{Break, Error, Settled, Shell};
 
-#[cfg(windows)]
+use super::Pumps;
 use super::process::pipe_err;
-use super::redirect::{PendingWrite, open_write, stderr_mode};
 
 /// Capability witness that the parent's fd 0 is safe to inherit into a
 /// spawned child's stdin, mintable only through the issuers below.
 ///
 /// A child whose pgid will not hold the foreground must get
-/// `StdinRoute::Null` instead: hand it the terminal and the kernel SIGTTINs
+/// `/dev/null` instead: hand it the terminal and the kernel SIGTTINs
 /// it on its first read, leaving ral's pump waiting forever.
 pub(crate) struct TtyInputPermit {
     _private: (),
@@ -40,14 +38,14 @@ impl TtyInputPermit {
 }
 
 /// How a child's stdin is wired; `Inherit` costs a [`TtyInputPermit`].
-pub(crate) enum StdinRoute {
+enum StdinRoute {
     Inherit(TtyInputPermit),
     Reader(crate::io::SourceReader),
     Null,
 }
 
 impl StdinRoute {
-    pub(crate) fn into_stdio(self) -> crate::process::StdioSpec {
+    fn into_stdio(self) -> crate::process::StdioSpec {
         match self {
             Self::Inherit(_) => crate::process::StdioSpec::inherit(),
             Self::Reader(r) => r.into(),
@@ -56,222 +54,123 @@ impl StdinRoute {
     }
 }
 
-/// Stdout / stderr routing for a child, derived once from the call-site
-/// redirects.  Both `2>file` and `2>&1` claim fd 2, so `stderr_route` holds
-/// whichever appears *last* in source order, POSIX applying redirects left
-/// to right: `2>&1 2>/dev/null` silences, the reverse does not.
-///
-/// Stdin is deliberately absent — `<file` is opened upstream into
-/// `shell.io.stdin` by `redirect::install_stdin_redirect`, so a native,
-/// external and pipeline stage all read through the same `Source`.
-pub(crate) struct RedirectPlan {
-    pub(crate) stdout_file: Option<(String, WriteMode)>,
-    pub(crate) stderr_route: Option<StderrRoute>,
-}
-
-/// The fd-2 redirect left standing once every call-site redirect applies.
-#[derive(Clone, Debug)]
-pub(crate) enum StderrRoute {
-    File(String, WriteMode),
-    Stdout,
-}
-
 /// Should the child inherit ral's fd 1 directly, so it can detect a TTY?
 ///
-/// Only when nothing redirects stdout, fd 1 was a tty at startup, and the
-/// sink still targets that real fd.  An `audit` capture installs a
-/// `Sink::Tee`, which fails here and so falls through to the pump path
-/// unaided.
-pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
-    plan.stdout_file.is_none()
-        && shell.io.terminal.startup_stdout_tty
-        && matches!(shell.io.stdout, crate::io::Sink::Terminal)
+/// Only when fd 1 was a tty at startup and the sink still targets that real
+/// fd.  A redirect or an `audit` capture installs another sink, which fails
+/// here and so falls through to the pump path unaided.
+pub(super) fn inherit_tty(shell: &Shell) -> bool {
+    shell.io.terminal.startup_stdout_tty && matches!(shell.io.stdout, Sink::Terminal)
 }
 
-/// Classify the call-site redirects into a stdout/stderr plan.
-pub(crate) fn classify_redirects(redirects: &[Redirect<String>]) -> RedirectPlan {
-    let mut plan = RedirectPlan {
-        stdout_file: None,
-        stderr_route: None,
-    };
-    for r in redirects {
-        match r {
-            // Already parked on `shell.io.stdin` by `install_stdin_redirect`.
-            Redirect::Stdin(_) => {}
-            Redirect::Stdout(mode, path) => plan.stdout_file = Some((path.clone(), *mode)),
-            Redirect::Stderr(mode, path) => {
-                plan.stderr_route = Some(StderrRoute::File(path.clone(), *mode));
-            }
-            Redirect::StderrToStdout => plan.stderr_route = Some(StderrRoute::Stdout),
+/// The streams a child's three fds are wired from.
+pub(crate) struct ChildIo<'a> {
+    pub(crate) stdin: &'a Source,
+    pub(crate) stdout: &'a Sink,
+    pub(crate) stderr: &'a Sink,
+}
+
+impl<'a> From<&'a Io> for ChildIo<'a> {
+    fn from(io: &'a Io) -> Self {
+        Self {
+            stdin: &io.stdin,
+            stdout: &io.stdout,
+            stderr: &io.stderr,
         }
     }
-    plan
 }
 
-/// Choose the stdin route for a single-command external job.
-///
-/// Every non-terminal source — a pipeline pipe, a `<file` opened by
-/// `redirect::install_stdin_redirect` — already sits on `shell.io.stdin`;
-/// only the fall-through needs a permit to inherit fd 0.
-pub(super) fn wire_stdin(shell: &Shell) -> Settled<StdinRoute> {
+/// Choose the stdin route: a source with an fd is borrowed, `Empty` is
+/// `/dev/null`, and only the fall-through to fd 0 needs a permit.  `grant` is
+/// what the caller allows when fd 0 is a tty.
+fn wire_stdin(
+    stdin: &Source,
+    startup_stdin_tty: bool,
+    grant: Option<TtyInputPermit>,
+) -> Settled<StdinRoute> {
     // An explicit empty source (an exarch tool run) denies byte input in its
     // own right, so it wires `/dev/null` instead of falling through to fd 0.
-    if matches!(shell.io.stdin, crate::io::Source::Empty) {
+    if matches!(stdin, Source::Empty) {
         return Ok(StdinRoute::Null);
     }
-    let reader = shell.io.stdin.reader().map_err(stdin_error)?;
-    if let Some(r) = reader {
+    if let Some(r) = stdin.reader().map_err(stdin_error)? {
         return Ok(StdinRoute::Reader(r));
     }
-    let permit = if shell.io.terminal.startup_stdin_tty {
-        TtyInputPermit::for_standalone_external()
+    Ok(if startup_stdin_tty {
+        grant.map_or(StdinRoute::Null, StdinRoute::Inherit)
     } else {
-        TtyInputPermit::for_non_tty_stdin()
-    };
-    Ok(StdinRoute::Inherit(permit))
+        StdinRoute::Inherit(TtyInputPermit::for_non_tty_stdin())
+    })
 }
 
-/// Shared by every door that duplicates the shell's stdin — here and
-/// `pipeline::launch::route_parent_stdin`.
+/// Shared by every door that duplicates a stdin source.
 pub(crate) fn stdin_error(e: impl std::fmt::Display) -> Break {
     Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
 }
 
-/// Wire the child's stdout to the plan's redirect file, if any.
+/// Wire the child's stdin, stdout and stderr from `io`, returning the sinks
+/// its piped fds must be pumped into.
 ///
-/// Returns the atomic-commit token (`Some` only for `>` onto a regular file)
-/// plus, on Windows, a stderr handle: lacking `pre_exec` there, `2>&1` must
-/// be dup'd pre-spawn from a clone of this same file.
+/// `grant` admits a tty fd 0 and `inherit_tty` lets a `Stderr` stdout sink
+/// inherit the real fd 1.  A `File` or `Pipe` sink is handed to the child
+/// directly.
 ///
-/// A non-atomic target (`>>`, `>~`, or a `>` the atomic recipe declined) has
-/// no later commit step, so its write door closes at the open and the
-/// observation is recorded here.  An atomic one waits on the rename in
-/// [`super::run`]'s post-wait commit, which records it there.
-pub(super) fn wire_stdout_file(
+/// The one platform split: when both output streams share a destination, Unix
+/// registers a `pre_exec` `dup2` that runs after the kernel wired fd 1, so
+/// fd 2 follows fd 1 wherever it went; Windows, having no `pre_exec`, hands
+/// the child a second handle to that destination.
+///
+/// Audit capture belongs elsewhere: it tees the shell's own sinks at dispatch
+/// level in `evaluator::with_audit_capture`.
+pub(crate) fn wire_stdio(
     command: &mut crate::process::Launch,
-    plan: &RedirectPlan,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<(Option<PendingWrite>, Option<crate::process::StdioSpec>)> {
-    let Some((path, mode)) = &plan.stdout_file else {
-        return Ok((None, None));
-    };
-    let (file, commit) = open_write(path, *mode, shell)?;
-    // Guarded from here: every remaining step can fail, and a staged write
-    // nobody downstream hears about must not outlive this call — `commit`'s
-    // own `Drop` sees to that.
-    if commit.is_none() {
-        observe(
-            shell,
-            mooring,
-            Observed::Write {
-                path: path.clone(),
-                mode: *mode,
-                outcome: WriteOutcome::Committed,
-                new_bytes: None,
-                old_bytes: None,
-            },
-        );
-    }
-    #[cfg(windows)]
-    let stderr_dup = if matches!(plan.stderr_route, Some(StderrRoute::Stdout)) {
-        Some(crate::process::StdioSpec::from_file(
-            file.try_clone().map_err(|e| pipe_err(&e))?,
-        ))
+    shell: &Shell,
+    io: &ChildIo<'_>,
+    grant: Option<TtyInputPermit>,
+    inherit_tty: bool,
+) -> Settled<Pumps<Sink>> {
+    let stdin = wire_stdin(io.stdin, shell.io.terminal.startup_stdin_tty, grant)?;
+    command.stdin(stdin.into_stdio());
+    let out = io
+        .stdout
+        .child_stdout(inherit_tty)
+        .map_err(|e| pipe_err(&e))?;
+    command.stdout(out.stdio);
+    let err_pump = if io.stderr.same_destination(io.stdout) {
+        join_stderr(command, io.stdout)?
     } else {
-        None
+        let err = io.stderr.child_stderr().map_err(|e| pipe_err(&e))?;
+        command.stderr(err.stdio);
+        err.pump
     };
-    #[cfg(not(windows))]
-    let stderr_dup = None;
-    command.stdout(crate::process::StdioSpec::from_file(file));
-    Ok((commit, stderr_dup))
+    Ok(Pumps::new(out.pump, err_pump))
 }
 
-/// Set up the child's stderr from the plan and `shell.io.stderr`, returning
-/// `true` when fd 2 was piped and the caller must drain it into the sink.
-///
-/// `2>&1` splits by platform: Unix registers a `pre_exec` `dup2` that runs
-/// after the kernel wired fd 1, so stderr follows stdout wherever it went;
-/// Windows, having no `pre_exec`, dups pre-spawn from a clone of the handle
-/// about to become stdout — `stdout_file_dup`, a re-clone of
-/// `shell.io.stdout`, or the parent's own stdout handle under inherit-tty.
-///
-/// Audit capture belongs elsewhere: standalone exec tees at dispatch level
-/// in `evaluator::with_audit_capture`, pipeline stages in
-/// `pipeline::launch::wire_stage_stdio`.
-pub(super) fn wire_stderr(
-    command: &mut crate::process::Launch,
-    plan: &RedirectPlan,
-    inherit_tty: bool,
-    stdout_file_dup: Option<crate::process::StdioSpec>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<bool> {
-    match &plan.stderr_route {
-        Some(StderrRoute::Stdout) => {
-            #[cfg(unix)]
-            {
-                let _ = (inherit_tty, stdout_file_dup);
-                command.dup_stdout_to_stderr();
-            }
-            #[cfg(windows)]
-            {
-                let stdio = if let Some(dup) = stdout_file_dup {
-                    dup
-                } else if inherit_tty || matches!(shell.io.stdout, crate::io::Sink::Terminal) {
-                    // The child inherits our fd 1, so clone fd 1 — not fd 2 —
-                    // for its stderr.  The bare inherit below would hand it
-                    // fd 2, routing diagnostics straight past `2>&1`.
-                    use std::os::windows::io::AsHandle;
-                    let owned = std::io::stdout()
-                        .as_handle()
-                        .try_clone_to_owned()
-                        .map_err(|e| pipe_err(&e))?;
-                    crate::process::StdioSpec::from_owned_handle(owned)
-                } else if let crate::io::Sink::Pipe { writer, .. } = &shell.io.stdout {
-                    // A pipeline stage's downstream is a real handle, not one
-                    // `Stdio::piped()` allocates at spawn, so it can be cloned
-                    // the same way a stdout file target is above.
-                    crate::process::StdioSpec::from_pipe_writer(
-                        writer.try_clone().map_err(|e| pipe_err(&e))?,
-                    )
-                } else {
-                    // Every remaining sink pumps child.stdout through a pipe
-                    // that `Stdio::piped()` allocates only at spawn, so stderr
-                    // cannot share it.  Inherit, so diagnostics surface.
-                    crate::process::StdioSpec::inherit()
-                };
-                command.stderr(stdio);
-            }
-            Ok(false)
-        }
-        Some(StderrRoute::File(path, mode)) => {
-            let effective_mode = stderr_mode(*mode);
-            let (file, _) = open_write(path, effective_mode, shell)?;
-            command.stderr(crate::process::StdioSpec::from_file(file));
-            // `stderr_mode` coerces `>` to streaming, so a stderr redirect is
-            // never atomic and its write door closes at the open.
-            observe(
-                shell,
-                mooring,
-                Observed::Write {
-                    path: path.clone(),
-                    mode: effective_mode,
-                    outcome: WriteOutcome::Committed,
-                    new_bytes: None,
-                    old_bytes: None,
-                },
-            );
-            Ok(false)
-        }
-        None if !matches!(shell.io.stderr, crate::io::Sink::Stderr) => {
-            // A non-default sink (audit tee, replay buffer, watch line-framer)
-            // wants the bytes in-process, so pipe fd 2 for the caller to pump.
-            command.stderr(crate::process::StdioSpec::piped());
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+#[cfg(unix)]
+#[allow(clippy::unnecessary_wraps, reason = "the Windows twin can fail")]
+fn join_stderr(command: &mut crate::process::Launch, _stdout: &Sink) -> Settled<Option<Sink>> {
+    command.dup_stdout_to_stderr();
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<Option<Sink>> {
+    let (stdio, pump) = if matches!(shell.io.stdout, Sink::Terminal) {
+        // The child inherits our fd 1, so clone fd 1 — not fd 2 — for its
+        // stderr.  The bare inherit would hand it fd 2, routing diagnostics
+        // straight past `2>&1`.
+        use std::os::windows::io::AsHandle;
+        let owned = std::io::stdout()
+            .as_handle()
+            .try_clone_to_owned()
+            .map_err(|e| pipe_err(&e))?;
+        (crate::process::StdioSpec::from_owned_handle(owned), None)
+    } else {
+        let plan = stdout.child_stdio_plan().map_err(|e| pipe_err(&e))?;
+        (plan.stdio, plan.pump)
+    };
+    command.stderr(stdio);
+    Ok(pump)
 }
 
 #[cfg(test)]
@@ -292,14 +191,20 @@ mod tests {
 
         shell.io.stdin = Source::Empty;
         assert!(
-            matches!(wire_stdin(&shell), Ok(StdinRoute::Null)),
+            matches!(
+                wire_stdin(&shell.io.stdin, shell.io.terminal.startup_stdin_tty, None),
+                Ok(StdinRoute::Null)
+            ),
             "Empty stdin must wire to /dev/null"
         );
 
         shell.io.stdin = Source::Terminal;
         shell.io.terminal.startup_stdin_tty = false;
         assert!(
-            matches!(wire_stdin(&shell), Ok(StdinRoute::Inherit(_))),
+            matches!(
+                wire_stdin(&shell.io.stdin, shell.io.terminal.startup_stdin_tty, None),
+                Ok(StdinRoute::Inherit(_))
+            ),
             "Terminal stdin still inherits fd 0"
         );
     }
@@ -315,7 +220,8 @@ mod tests {
         let wake = Wake::new().expect("wake");
         shell.io.stdin = Source::Reader(SourceReader::pipe(r).interruptible(wake));
 
-        let route = wire_stdin(&shell).expect("wire_stdin");
+        let route = wire_stdin(&shell.io.stdin, shell.io.terminal.startup_stdin_tty, None)
+            .expect("wire_stdin");
         assert!(matches!(route, StdinRoute::Reader(_)));
         let _stdio = route.into_stdio();
 

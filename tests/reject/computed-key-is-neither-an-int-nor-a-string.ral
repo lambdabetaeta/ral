@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: a list takes an Int key and a map a String key; this key is a Bool
+let k = $[1 < 2]
+let f = { |m| $m[$k] }

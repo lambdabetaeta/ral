@@ -6,4 +6,4 @@
 # Combine with `--restrict <FILE>` to "start permissive and
 # attenuate from there": `dangerous ⊓ file = file`.
 
-return [:]
+return ()

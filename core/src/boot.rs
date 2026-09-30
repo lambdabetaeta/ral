@@ -221,14 +221,13 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
 /// The build-script half of the bake: write the two postcard blobs into
 /// the calling host's `OUT_DIR`.
 ///
-/// Name every file that shapes them in a rerun-if-changed line —
-/// absolutely, since the script runs in the host.
-///
 /// postcard carries no schema, so a field added to
 /// [`CompKind`](crate::ir::CompKind), [`Val`](crate::ir::Val),
 /// [`Pattern`](crate::syntax::ast::Pattern), or the scheme's type
-/// vocabulary would silently invalidate an old bake.  Those rerun lines are
-/// the only thing that forces a fresh one.
+/// vocabulary would silently invalidate an old bake.  No rerun line guards
+/// it: `ral-core` is a build-dependency of each host, so a change to it
+/// recompiles the build script, which reruns and bakes afresh.  A file the
+/// script read from disk without core compiling it would need a line.
 ///
 /// # Panics
 /// Panics if the prelude fails to type-check, if `OUT_DIR` is unset, or if
@@ -239,18 +238,6 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
     reason = "[silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."
 )]
 pub fn bake_prelude_to_out_dir() {
-    let core = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for shape_file in [
-        "src/prelude.ral",
-        "src/ir.rs",
-        "src/syntax/ast.rs",
-        "src/mode.rs",
-        "src/typecheck/ty.rs",
-        "src/typecheck/scheme.rs",
-    ] {
-        println!("cargo:rerun-if-changed={}", core.join(shape_file).display());
-    }
-
     let src = include_str!("prelude.ral");
     #[allow(
         clippy::disallowed_methods,

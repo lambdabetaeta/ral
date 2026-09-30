@@ -1,0 +1,6 @@
+let decode = $from-json
+let lines = $from-jsonl
+let load = $use
+let at = from-json-at
+let d = !{to-string '{"a": [1, 2]}' | decode}
+return $d[a]

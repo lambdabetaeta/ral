@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leak_bare
+let forced = !{ let leak_bare = 1 }
+echo $leak_bare

@@ -1,5 +1,0 @@
-let w = { |o| within $o { () } }
-let g = { |o| grant $o { () } }
-let both = [$w, $g]
-let first = $both[0]
-w [dir: "/tmp"]

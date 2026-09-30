@@ -1,12 +1,20 @@
 ---
-verified_at_commit: a2f49715
-verified_at_date: 2026-09-13
-against: [design/row-types, internals/type-inference, design/scoping, decisions/260913_an-open-spread-must-come-last]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+against: [design/row-types, internals/type-inference, design/scoping, decisions/260913_an-open-spread-must-come-last, decisions/260930_a-table-never-enters-the-unifier]
 ---
 
 # Scoped labels — the record calculus ral implements
 
 Leijen, *Extensible records with scoped labels*, TFP 2005.
+
+> **Partly superseded** by
+> [[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]].
+> A record's spread is now an *update* of one base, first in the bracket, and
+> adds no label, so no literal prepends and shadows: the type keeps one slot per
+> label, and `unify_row` still tolerates the duplicate a scoped-label system
+> would build. What stands: selection, the rewrite, the occurs check, the two
+> alphabets, and the variants.
 
 **ral's records are Leijen's calculus taken nearly whole — duplicate labels
 retained in value and type, first-match selection, free extension as
@@ -25,8 +33,10 @@ divergence below traces to that cut.
   — the ambiguity that made Wand's system incomplete, and that Rémy's
   presence/absence flags (`pre`/`abs`) repair at the price of flags in every
   type ([[design/row-types|row-types]]).
-- **Free extension is spread shadowing.** `[...$base, port: 9090]` is iterated
-  `{l = e | r}`: prepend, shadow, never remove.
+- **Update is spread replacement.** `[...$base, port: 9090]` is Leijen's update
+  `{l := x | r}`, typed directly: the base must have a slot at `port`, which the
+  result replaces at the type written. Free extension `{l = e | r}` is not
+  spelled: a spread never adds a label, and a label the base lacks is refused.
 - **The equality and the unification, unchanged.** Rows are equal up to
   permutation of *distinct* labels (*eq-swap* demands `l ≠ l′`), so same-label
   order is preserved and shadowing is coherent. ral's `unify_row` is Leijen's
@@ -63,14 +73,13 @@ divergence below traces to that cut.
 - **A literal may not write one label twice.** Leijen permits duplicates in a
   record term; ral refuses the ones an author wrote into a single literal
   (`T0022`), where they can only be a mistake — the record-side mirror of the
-  parser's refusal of a repeated `case` arm. A duplicate two *spreads* compose
-  stays legal and resolves by position, which is what the merge idiom needs.
+  parser's refusal of a repeated `case` arm. A record literal takes one spread, so
+  no two spreads compose a duplicate; a map's spreads still do, first wins.
 - **Concatenation is refused, not approximated.** Leijen's calculus has no
   record concatenation, and neither has ral's: a literal's row is built by
-  iterated extension, so a spread whose row is still open can have nothing
-  placed behind it and such a literal is rejected
-  ([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
-  Every literal ral accepts it types exactly. The prices the other record
+  an update, so a record literal has one spread and it comes first
+  ([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]
+  for the earlier reading). Every literal ral accepts it types exactly. The prices the other record
   calculi pay to have the operation are read in
   [[related/record-concatenation|record-concatenation]].
 

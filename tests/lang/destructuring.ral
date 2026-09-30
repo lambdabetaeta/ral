@@ -31,9 +31,9 @@ let _ = 42
 let [_, second] = [1, 2]
 echo $second
 
-# A put destructures to each field's winner
-let dflt = [host: 'local', port: 80]
-let [host: hn, port: pn] = [tier: 'a', ...$dflt, host: 'prod']
+# An update destructures to each field's winner
+let dflt = [tier: 'a', host: 'local', port: 80]
+let [host: hn, port: pn] = [...$dflt, host: 'prod']
 echo "$hn $pn"
 
 # A shape mismatch in length is a runtime error

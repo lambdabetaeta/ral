@@ -1,4 +1,4 @@
-# contains: couldn't match
+# contains: a record's spread comes first
 let k = 'flag'
 let m = [$k: 1]
 let r = [ok: true, ...$m]

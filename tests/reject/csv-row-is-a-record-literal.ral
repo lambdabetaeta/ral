@@ -1,0 +1,3 @@
+# codes: T0010
+# contains: Map String
+to-csv [[a: 1]]

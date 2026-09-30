@@ -186,8 +186,7 @@ fn top_level_cd_persists_across_calls() {
         let result = top_level_under(&mut shell, caps, "cwd").expect("cwd should succeed");
         // `Shell::cwd()` returns the canonicalised path; comparing string
         // forms tolerates the macOS `/var` ↔ `/private/var` firmlink.
-        let canon =
-            display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+        let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
         let got = match result {
             Value::String(s) => s.into_string(),
             other => panic!("cwd must return a String, got {other:?}"),
@@ -217,5 +216,9 @@ fn within_dir_restores_the_cell_on_exit() {
         &format!("within [dir: '{}'] {{ cd sub; exit 0 }}", inner.display()),
     );
     assert!(matches!(exited, Err(Break::Escape(_))), "got {exited:?}");
-    assert_eq!(shell.cwd(), Path::new(&outer), "an exit must restore the cell");
+    assert_eq!(
+        shell.cwd(),
+        Path::new(&outer),
+        "an exit must restore the cell"
+    );
 }

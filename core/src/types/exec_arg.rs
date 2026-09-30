@@ -1,7 +1,7 @@
 //! The exec boundary's refused set: the shapes `execve(2)` has no argument
 //! for, and the idiom that lowers each.
 //!
-//! Rendering an argv *inside* the shell is total — [`Value::render_argv`] gives
+//! Rendering an argv *inside* the shell is total but for `()` — [`Value::render_argv`] gives
 //! every value a text form, so `echo [a: 1]` prints a map and a handler arm
 //! receives one as a word.  An operating-system argument is narrower: it is one
 //! word, and the values below have no single word to give.
@@ -20,6 +20,8 @@ use crate::typecheck::Ty;
 /// A shape the exec boundary refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefusedArg {
+    /// Nothing: there is no word to pass, and no text to print.
+    Unit,
     /// Several arguments in the costume of one.
     List,
     /// A map or a record: fields, rather than a word.
@@ -42,8 +44,8 @@ impl RefusedArg {
             Value::Thunk(_) | Value::Native { .. } => Some(Self::Block),
             Value::Handle(_) => Some(Self::Handle),
             Value::Bytes(_) => Some(Self::Bytes),
-            Value::Unit
-            | Value::Bool(_)
+            Value::Unit => Some(Self::Unit),
+            Value::Bool(_)
             | Value::Int(_)
             | Value::Float(_)
             | Value::String(_)
@@ -62,13 +64,8 @@ impl RefusedArg {
             Ty::Thunk(_) => Some(Self::Block),
             Ty::Handle(_) => Some(Self::Handle),
             Ty::Bytes => Some(Self::Bytes),
-            Ty::Unit
-            | Ty::Bool
-            | Ty::Int
-            | Ty::Float
-            | Ty::String
-            | Ty::Variant(_)
-            | Ty::Var(_) => None,
+            Ty::Unit => Some(Self::Unit),
+            Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Variant(_) | Ty::Var(_) => None,
         }
     }
 
@@ -77,6 +74,9 @@ impl RefusedArg {
     /// static error and the pre-spawn one meets one language.
     pub(crate) fn remedy(self, cmd: &str) -> String {
         match self {
+            Self::Unit => {
+                "`()` is nothing, not a word — if the text is meant, write `'()'`".to_string()
+            }
             Self::List => format!("use '...' to spread a list into arguments: {cmd} ...$xs"),
             Self::Map => format!(
                 "a map is fields rather than one word — pass a field, as in \

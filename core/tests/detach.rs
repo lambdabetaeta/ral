@@ -168,19 +168,6 @@ fn settles(holds: impl Fn() -> bool) -> bool {
     holds()
 }
 
-/// The parent pid `/proc` reports for `pid`.  `comm` is parenthesised and
-/// may itself contain spaces and parens, so the fields are counted from the
-/// last `)`: state, then ppid.
-#[cfg(target_os = "linux")]
-fn ppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat[stat.rfind(')')? + 1..]
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
 /// A process this session no longer owns, sent SIGKILL when the guard
 /// leaves scope — on the assertion path and the panic path alike.  A test
 /// that forgot would leak it past the whole run, since by construction

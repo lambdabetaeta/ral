@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: text, bytes, a list or a map is needed
+echo !{is-empty 5}

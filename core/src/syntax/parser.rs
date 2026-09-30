@@ -16,8 +16,8 @@
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
     Ast, BinaryOp, BinaryOpKind, CaseArm, HandlerArm, Head, IfBranch, ListElem, MapEntry,
-    MapPatternEntry, Operand, Pattern, RecordEntry, Redirect, ScopeAst, ScopeKeyword, StdinSource,
-    Stmt, Word, WordLiteral,
+    MapPatternEntry, Operand, Operands, Options, Pattern, RecordEntry, Redirect, Redirects,
+    ScopeAst, ScopeKeyword, StdinSource, Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -458,8 +458,12 @@ impl Parser {
     /// no lowering for — or the form's own option bracket.
     fn parse_control_op(&mut self, kw: &ScopeKeyword) -> Result<Ast, ParseError> {
         self.advance(); // consume the head name
-        let mut operands = Vec::with_capacity(kw.arity());
-        let mut handlers = None;
+        let mut ops = Operands {
+            atoms: Vec::with_capacity(kw.arity()),
+            options: Vec::new(),
+            handlers: None,
+        };
+        let mut seen = 0;
         while !self.at_cmd_end() && !self.at_redirect() {
             if self.peek() == &Token::Spread {
                 return Err(self.error(format!(
@@ -469,39 +473,39 @@ impl Parser {
                     operands_desc = kw.operand_desc,
                 )));
             }
-            match kw.operands.get(operands.len()) {
-                Some(Operand::Options { arms }) => {
-                    let (opts, parsed) = self.parse_options(kw, *arms)?;
-                    handlers = parsed;
-                    operands.push(opts);
+            match kw.operands.get(seen) {
+                Some(Operand::Options { arms, example }) => {
+                    (ops.options, ops.handlers) = self.parse_options(kw, *arms, example)?;
                 }
                 // A surplus operand is an atom, and the arity check below is
                 // what it meets.
-                Some(Operand::Atom) | None => operands.push(self.parse_atom()?),
+                Some(Operand::Atom) | None => ops.atoms.push(self.parse_atom()?),
             }
+            seen += 1;
         }
-        if operands.len() != kw.arity() {
+        if seen != kw.arity() {
             return Err(self.error(format!(
                 "{name} requires {arity} argument{plural} ({operands_desc}); got {got}",
                 name = kw.name,
                 arity = kw.arity(),
                 plural = if kw.arity() == 1 { "" } else { "s" },
                 operands_desc = kw.operand_desc,
-                got = operands.len(),
+                got = seen,
             )));
         }
         let redirects = self.collect_trailing_redirects()?;
-        let op = (kw.build)(operands, handlers);
-        Ok(Ast::Scope { op, redirects })
+        let op = (kw.build)(ops);
+        Ok(Ast::Scope { op, redirects: Box::new(redirects) })
     }
 
-    /// `options = atom | '[' ']' | '[' item (',' item)* ']'`
+    /// `options = '[' ']' | '[' item (',' item)* ']'`
     ///
     /// A form's option bracket, which is the form's syntax and not a
     /// collection literal: `[]` here is the empty option set rather than the
-    /// empty list, and `[:]` — a map — names no options at all.  An atom in
-    /// its place is a bundle computed elsewhere, checked against the same
-    /// options the bracket writes out.
+    /// empty list, and `[:]` — a map — names no options at all.  The values
+    /// may be computed, but the option names are written out, the way `case`
+    /// writes its arms: a bundle assembled elsewhere, a spread and a computed
+    /// key are refused here.
     ///
     /// Where the form takes arms, `handlers:` is lifted out of the bracket:
     /// its labels are the names it binds in the body, so they are syntax and
@@ -510,14 +514,23 @@ impl Parser {
         &mut self,
         kw: &ScopeKeyword,
         arms: bool,
-    ) -> Result<(Ast, Option<Vec<HandlerArm>>), ParseError> {
+        example: &str,
+    ) -> Result<(Options, Option<Vec<HandlerArm>>), ParseError> {
+        let written = || {
+            format!(
+                "`{name}` takes its options written in its own bracket. The values may be \
+                 bound — `{name} [{example}]` — but the option names are written here, \
+                 the way `case` writes its arms.",
+                name = kw.name,
+            )
+        };
         if self.peek() != &Token::LBracket {
-            return Ok((self.parse_atom()?, None));
+            return Err(self.error(written()));
         }
         self.advance(); // consume `[`
         if self.peek() == &Token::RBracket {
             self.advance();
-            return Ok((Ast::Record(Vec::new()), None));
+            return Ok((Vec::new(), None));
         }
         if self.peek() == &Token::Colon {
             return Err(self.error(format!(
@@ -533,11 +546,11 @@ impl Parser {
             Ok(SepFlow::Cont)
         })?;
 
-        let mut entries = Vec::new();
+        let mut options: Options = Vec::new();
         let mut handlers = None;
         for item in items {
             match item {
-                CollectionItem::Spread(base) => entries.push(RecordEntry::Spread(base)),
+                CollectionItem::Spread(base) => return Err(elem_error(&base, &written())),
                 CollectionItem::Entry {
                     key: MapKeyForm::Static(key),
                     value,
@@ -553,7 +566,18 @@ impl Parser {
                 CollectionItem::Entry {
                     key: MapKeyForm::Static(key),
                     value,
-                } => entries.push(RecordEntry::Field { key, value }),
+                } => {
+                    if options.iter().any(|(seen, _)| *seen == key) {
+                        return Err(elem_error(
+                            &value,
+                            &format!(
+                                "`{key}` is written twice in `{name}`'s options; write it once",
+                                name = kw.name,
+                            ),
+                        ));
+                    }
+                    options.push((key, value));
+                }
                 CollectionItem::Entry {
                     key: MapKeyForm::Deref(name),
                     value,
@@ -561,10 +585,9 @@ impl Parser {
                     return Err(elem_error(
                         &value,
                         &format!(
-                            "`{kw_name}` names its options ({operands_desc}), so a key computed \
-                             from `${name}` cannot be one of them; write the option out",
+                            "`{kw_name}`'s options are named in writing, so a key computed from \
+                             `${name}` cannot be one; write the name out, as in `{kw_name} [{example}]`",
                             kw_name = kw.name,
-                            operands_desc = kw.operand_desc,
                         ),
                     ));
                 }
@@ -581,7 +604,7 @@ impl Parser {
                 }
             }
         }
-        Ok((record_literal(entries)?, handlers))
+        Ok((options, handlers))
     }
 
     /// `handlers: [name: arm, …]` — the arm list, read as syntax.  The table
@@ -644,10 +667,10 @@ impl Parser {
 
     /// Only a fixed-arity form can collect redirects at the end like this;
     /// `parse_command` interleaves them, since a command takes them anywhere.
-    fn collect_trailing_redirects(&mut self) -> Result<Vec<Redirect<Ast>>, ParseError> {
-        let mut redirects = Vec::new();
+    fn collect_trailing_redirects(&mut self) -> Result<Redirects<Ast>, ParseError> {
+        let mut redirects = Redirects::default();
         while !self.at_cmd_end() && self.at_redirect() {
-            redirects.extend(self.parse_redirect()?);
+            self.parse_redirect_into(&mut redirects)?;
         }
         Ok(redirects)
     }
@@ -783,7 +806,8 @@ impl Parser {
 
     /// if = 'if' atom atom ('elsif' atom atom)* ('else' atom)?
     ///
-    /// Conditions and bodies are any atom; the typechecker demands the thunks.
+    /// Conditions and bodies are any atom; the elaborator demands that a body be
+    /// a block, or a name holding one.
     /// The leading `if` and every `elsif` collapse into one `branches` vector.
     fn parse_if(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume 'if'
@@ -1145,6 +1169,16 @@ impl Parser {
         }
     }
 
+    /// One redirect, bound into `into`; a clash is reported at the whole
+    /// second redirect.
+    fn parse_redirect_into(&mut self, into: &mut Redirects<Ast>) -> Result<(), ParseError> {
+        let (span, redirect) = self.capture_span(Self::parse_redirect)?;
+        match redirect {
+            Some(r) => into.bind(r).map_err(|m| Self::error_at(span, m)),
+            None => Ok(()),
+        }
+    }
+
     fn at_redirect(&self) -> bool {
         matches!(self.peek(), Token::Redirect { .. } | Token::Dup { .. })
     }
@@ -1192,10 +1226,10 @@ impl Parser {
         }
         let head = self.parse_head()?;
         let mut args: Vec<Spanned<Ast>> = Vec::new();
-        let mut redirects = Vec::new();
+        let mut redirects = Redirects::default();
         while !self.at_cmd_end() {
             if self.at_redirect() {
-                redirects.extend(self.parse_redirect()?);
+                self.parse_redirect_into(&mut redirects)?;
             } else {
                 let (arg_span, arg) = self.capture_span(Self::parse_arg)?;
                 args.push(Spanned::new(arg_span, arg));
@@ -1216,7 +1250,7 @@ impl Parser {
         Ok(Ast::Call {
             head,
             args,
-            redirects,
+            redirects: Box::new(redirects),
         })
     }
 
@@ -1731,25 +1765,31 @@ impl Literal {
     }
 }
 
-/// A record literal is a *put* over one base: the written entries overwrite
-/// that base's fields and the base supplies the rest.  Two bases would be a
-/// merge, and which of two unknown remainders wins is a question the literal
-/// cannot answer.  Shared with a form's option bracket, whose entries are a
-/// record's too.
+/// A record literal with a spread is an *update* of one base: `[...$r, k: v]`
+/// replaces the fields `r` has.  Two bases would be a merge, and which of two
+/// unknown remainders wins is a question the literal cannot answer; a spread
+/// after a field would read as though the field came first.  Shared with a
+/// form's option bracket, whose entries are a record's too.
 fn record_literal(entries: Vec<RecordEntry>) -> Result<Ast, ParseError> {
-    if let Some(second) = entries
-        .iter()
-        .filter_map(|e| match e {
-            RecordEntry::Spread(a) => Some(a),
-            RecordEntry::Field { .. } => None,
-        })
-        .nth(1)
-    {
+    let mut spreads = entries.iter().enumerate().filter_map(|(i, e)| match e {
+        RecordEntry::Spread(a) => Some((i, a)),
+        RecordEntry::Field { .. } => None,
+    });
+    let first = spreads.next();
+    if let Some((_, second)) = spreads.next() {
         return Err(elem_error(
             second,
             "a record can be written over one other record, not two — \
              write out the fields you need from this one, as in \
              `[...$base, y: $other[y]]`, or merge them in a block",
+        ));
+    }
+    if let Some((i, spread)) = first
+        && i > 0
+    {
+        return Err(elem_error(
+            spread,
+            "a record's spread comes first: `[...$r, k: v]`",
         ));
     }
     Ok(Ast::Record(entries))
@@ -1828,7 +1868,7 @@ enum CollectionItem {
 mod tests {
     use super::*;
     use crate::path::tilde::TildePath;
-    use crate::syntax::ast::WriteMode;
+    use crate::syntax::ast::{StderrTarget, WriteMode};
 
     fn plain(s: &str) -> Ast {
         Ast::Word(Word::Plain(s.into()))
@@ -1864,11 +1904,11 @@ mod tests {
         Ast::Call {
             head,
             args: args.into_iter().map(Spanned::synthetic).collect(),
-            redirects: vec![],
+            redirects: Box::default(),
         }
     }
 
-    fn app_redir(head: Head, args: Vec<Ast>, redirects: Vec<Redirect<Ast>>) -> Ast {
+    fn app_redir(head: Head, args: Vec<Ast>, redirects: Box<Redirects<Ast>>) -> Ast {
         Ast::Call {
             head,
             args: args.into_iter().map(Spanned::synthetic).collect(),
@@ -2044,6 +2084,12 @@ mod tests {
         Spanned::synthetic_boxed(strip_one(*node.item))
     }
 
+    fn strip_opts(opts: Options) -> Options {
+        opts.into_iter()
+            .map(|(name, value)| (name, Spanned::synthetic(strip_one(value.item))))
+            .collect()
+    }
+
     fn strip_scope(op: ScopeAst) -> ScopeAst {
         let s = |a: Box<Ast>| Box::new(strip_one(*a));
         match op {
@@ -2060,7 +2106,7 @@ mod tests {
                 handlers,
                 body,
             } => ScopeAst::Within {
-                opts: s(opts),
+                opts: strip_opts(opts),
                 handlers: handlers.map(|arms| {
                     arms.into_iter()
                         .map(|arm| HandlerArm {
@@ -2072,7 +2118,7 @@ mod tests {
                 body: s(body),
             },
             ScopeAst::Grant { caps, body } => ScopeAst::Grant {
-                caps: s(caps),
+                caps: strip_opts(caps),
                 body: s(body),
             },
             ScopeAst::Audit { body } => ScopeAst::Audit { body: s(body) },
@@ -2308,7 +2354,7 @@ mod tests {
         let Ast::Call { redirects, .. } = &ast[0] else {
             panic!("expected a call, got {ast:?}");
         };
-        assert_eq!(redirects.len(), 1);
+        assert!(redirects.stdout.is_some());
     }
 
     /// The bash reflexes `&&` and `||` each earn an error naming ral's own
@@ -2894,6 +2940,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_records_spread_comes_first() {
+        let err = parse("[k: 'v', ...$d]").unwrap_err();
+        assert!(
+            err.message.contains("a record's spread comes first"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_second_spread_in_a_record_is_refused_whatever_the_order() {
+        for src in ["[...$a, ...$b, k: 1]", "[k: 1, ...$a, ...$b]"] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("one other record, not two"),
+                "{src}: {}",
+                err.message
+            );
+        }
+    }
+
     /// The inner `]` of the spread operand must not be read as the outer
     /// collection's close, or `[...[a: 1], b: 2]` would parse as a list.
     #[test]
@@ -3257,7 +3325,7 @@ mod tests {
                 args, redirects, ..
             } => {
                 assert_eq!(args.len(), 1);
-                assert_eq!(redirects.len(), 1);
+                assert!(redirects.stdout.is_some());
             }
             _ => panic!("expected command"),
         }
@@ -3269,10 +3337,8 @@ mod tests {
         match &ast[0] {
             Ast::Call { redirects, .. } => {
                 assert_eq!(
-                    redirects,
-                    &[Redirect::Stdin(StdinSource::Here(Ast::Literal(
-                        "body".into()
-                    )))]
+                    redirects.stdin,
+                    Some(StdinSource::Here(Ast::Literal("body".into())))
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -3286,10 +3352,8 @@ mod tests {
         match &ast[0] {
             Ast::Call { redirects, .. } => {
                 assert_eq!(
-                    redirects,
-                    &[Redirect::Stdin(StdinSource::Here(Ast::Variable(
-                        "body".into()
-                    )))]
+                    redirects.stdin,
+                    Some(StdinSource::Here(Ast::Variable("body".into())))
                 );
             }
             other => panic!("expected command, got {other:?}"),
@@ -3321,18 +3385,67 @@ mod tests {
     /// identity dup picks none.
     #[test]
     fn fd_prefixes_name_streams() {
-        let ast = unwrap_stmts(parse("cmd 1>&1 2>&2 2> e 2>&1 > o").unwrap());
+        let ast = unwrap_stmts(parse("cmd 1>&1 2>&2 2>&1 > o").unwrap());
+        let Ast::Call { redirects, .. } = &ast[0] else {
+            panic!("expected command, got {:?}", ast[0]);
+        };
+        assert!(matches!(redirects.stdout, Some((WriteMode::Write, _))));
+        assert!(matches!(redirects.stderr, Some(StderrTarget::Stdout)));
+        assert!(redirects.stdin.is_none());
+    }
+
+    /// `2>` streams, so the AST states that stderr is never atomic.
+    #[test]
+    fn stderr_write_is_a_stream() {
+        let ast = unwrap_stmts(parse("cmd 2> e").unwrap());
         let Ast::Call { redirects, .. } = &ast[0] else {
             panic!("expected command, got {:?}", ast[0]);
         };
         assert!(matches!(
-            redirects[..],
-            [
-                Redirect::Stderr(WriteMode::Write, _),
-                Redirect::StderrToStdout,
-                Redirect::Stdout(WriteMode::Write, _),
-            ]
+            redirects.stderr,
+            Some(StderrTarget::File(WriteMode::Stream, _))
         ));
+    }
+
+    /// Every stream binds once; each clash says which, and the caret starts at
+    /// the second redirect's operator.
+    #[test]
+    fn a_second_binding_of_a_stream_is_refused() {
+        let cases = [
+            ("cmd < a << #'b'#", "standard input is fed twice"),
+            ("cmd > a >> b", "standard output is redirected twice"),
+            ("cmd 2> a 2> b", "standard error is redirected twice; which"),
+            ("cmd 2> e 2>&1", "`2>&1` would override the `2>` before it"),
+            (
+                "cmd 2>&1 2> e",
+                "`2>&1` already sends it with standard output",
+            ),
+            ("cmd 2>&1 2>&1", "`2>&1` is written twice"),
+            (
+                "try { a } { b } > a > b",
+                "standard output is redirected twice",
+            ),
+        ];
+        for (src, want) in cases {
+            let err = parse(src).expect_err(src);
+            assert!(err.message.contains(want), "{src:?} got: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_clash_span_covers_the_second_redirect() {
+        let src = "cmd > a >> b";
+        let span = parse(src).expect_err(src).span.expect("span");
+        assert_eq!(&src[span.start as usize..span.end as usize], ">> b");
+    }
+
+    /// The same stream through `2>&1` and a file is one clash either way
+    /// round, and distinct streams never clash.
+    #[test]
+    fn distinct_streams_bind_in_any_order() {
+        assert!(parse("cmd < i > o 2> e").is_ok());
+        assert!(parse("cmd 2> e > o < i").is_ok());
+        assert!(parse("cmd 2>&1 > o").is_ok());
     }
 
     /// `<<` always feeds stdin: fd 0 may be spelled out, another standard
@@ -3342,10 +3455,7 @@ mod tests {
         let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
         match &ast[0] {
             Ast::Call { redirects, .. } => {
-                assert!(matches!(
-                    redirects[..],
-                    [Redirect::Stdin(StdinSource::Here(_))]
-                ));
+                assert!(matches!(redirects.stdin, Some(StdinSource::Here(_))));
             }
             other => panic!("expected command, got {other:?}"),
         }
@@ -3730,10 +3840,10 @@ mod tests {
 
     // ── Control operators (try / guard / within / grant / audit) ────────
 
-    fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Vec<Redirect<Ast>>) {
+    fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Redirects<Ast>) {
         let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
         match stripped.as_slice() {
-            [Ast::Scope { op, redirects, .. }] => (op.clone(), redirects.clone()),
+            [Ast::Scope { op, redirects, .. }] => (op.clone(), (**redirects).clone()),
             _ => panic!("expected a single Ast::Scope, got {stripped:?}"),
         }
     }
@@ -3778,7 +3888,7 @@ mod tests {
     #[test]
     fn parse_try_with_trailing_redirect() {
         let (op, redirects) = unwrap_single_scope(parse("try { body } { handler } > out").unwrap());
-        assert_eq!(redirects.len(), 1);
+        assert!(redirects.stdout.is_some());
         match op {
             ScopeAst::Try { body, handler } => {
                 assert!(matches!(*body, Ast::Block(_)));
@@ -3792,7 +3902,8 @@ mod tests {
     fn parse_try_with_two_trailing_redirects() {
         let (op, redirects) =
             unwrap_single_scope(parse("try { body } { handler } > out 2>&1").unwrap());
-        assert_eq!(redirects.len(), 2);
+        assert!(redirects.stdout.is_some());
+        assert!(matches!(redirects.stderr, Some(StderrTarget::Stdout)));
         assert!(matches!(op, ScopeAst::Try { .. }));
     }
 
@@ -3844,7 +3955,7 @@ mod tests {
         let (op, _) = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
         match op {
             ScopeAst::Within { opts, body, .. } => {
-                assert!(matches!(*opts, Ast::Record(_)));
+                assert_eq!(opts.len(), 1);
                 assert!(matches!(*body, Ast::Block(_)));
             }
             _ => panic!("expected ScopeAst::Within, got {op:?}"),
@@ -3855,14 +3966,14 @@ mod tests {
     /// set rather than the empty list, which is what makes `grant [] { … }`
     /// mean what it reads as.
     #[test]
-    fn an_empty_option_bracket_is_an_empty_record() {
+    fn an_empty_option_bracket_is_no_options() {
         for src in ["within [] { body }", "grant [] { body }"] {
             let (op, _) = unwrap_single_scope(parse(src).unwrap());
             let opts = match op {
                 ScopeAst::Within { opts, .. } | ScopeAst::Grant { caps: opts, .. } => opts,
                 other => panic!("expected an option-taking form, got {other:?}"),
             };
-            assert_eq!(*opts, Ast::Record(Vec::new()), "in {src}");
+            assert!(opts.is_empty(), "in {src}");
         }
     }
 
@@ -3881,9 +3992,45 @@ mod tests {
     fn a_computed_option_key_is_refused() {
         let err = parse("within [$k: 1] { body }").unwrap_err();
         assert!(
-            err.message.contains("cannot be one of them"),
+            err.message.contains("are named in writing"),
             "unexpected message: {err}"
         );
+    }
+
+    /// The option names are written in the form's bracket: a bundle bound
+    /// elsewhere and a spread into the bracket both hide them.
+    #[test]
+    fn a_bound_or_spread_option_bundle_is_refused() {
+        for src in [
+            "within $o { body }",
+            "grant $o { body }",
+            "within (mk) { body }",
+            "within [dir: 'x', ...$rest] { body }",
+            "grant [...$rest] { body }",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message
+                    .contains("takes its options written in its own bracket"),
+                "unexpected message for {src}: {err}"
+            );
+        }
+    }
+
+    /// Under a bracket that is no record literal, a repeated label has no
+    /// `DuplicateField` downstream to catch it.
+    #[test]
+    fn a_repeated_option_is_refused() {
+        for src in [
+            "within [dir: 'a', dir: 'b'] { body }",
+            "grant [net: true, net: false] { body }",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("is written twice in"),
+                "unexpected message for {src}: {err}"
+            );
+        }
     }
 
     /// `handlers:` binds the names it lists in the body, so the list is
@@ -3925,10 +4072,7 @@ mod tests {
                     Some(1),
                     "the one arm is lifted out"
                 );
-                let Ast::Record(entries) = *opts else {
-                    panic!("options are a record")
-                };
-                assert_eq!(entries.len(), 1, "only `dir` is left among the options");
+                assert_eq!(opts.len(), 1, "only `dir` is left among the options");
             }
             other => panic!("expected ScopeAst::Within, got {other:?}"),
         }
@@ -3981,7 +4125,7 @@ mod tests {
     fn parse_audit_with_trailing_redirect() {
         let (op, redirects) = unwrap_single_scope(parse("audit { body } > out").unwrap());
         assert!(matches!(op, ScopeAst::Audit { .. }));
-        assert_eq!(redirects.len(), 1);
+        assert!(redirects.stdout.is_some());
     }
 
     // ── Reserved-name binding rejection ─────────────────────────────────

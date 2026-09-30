@@ -1,0 +1,3 @@
+# codes: T0071
+# contains: there is no status register
+try { fail [status: 3, message: boom] } { |_| echo $STATUS }

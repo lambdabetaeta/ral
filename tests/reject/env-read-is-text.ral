@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: text (String)
+let n = $[$ENV[HOME] + 1]

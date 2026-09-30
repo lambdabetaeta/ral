@@ -391,7 +391,7 @@ summed weights, no rendering — and carries the answer as
 `Pressure::Over { detail, planned }`, so the message tells the model which
 *turns* the next boundary would take, rendered as runs, that the material
 stays readable with `exarch-transcript`, and how to make the same cut with a line of
-its own — `` exarch-context `evict [turns: !{range a b}, note: '…'] `` — before they
+its own — `` exarch-context `evict [turns: !{range a b}, note: `some '…'] `` — before they
 go. With nothing old enough to shed, `planned` is `None` and the
 reading alone is the whole message. Durability is the log's job, so the nudge
 never asks the model to write state to files.

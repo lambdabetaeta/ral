@@ -114,24 +114,18 @@ pub(super) fn launch_thread_stage(
     let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
     let mooring = Mooring::for_stage_thread(cx.mooring);
 
-    // A non-final stage's ambient is its own pipe; the final stage's is the
-    // parent's, which `Io::ambient` requires never be a capture buffer.
-    let (stdout, ambient) = match stdout {
-        ByteOut::Downstream(w, edge) => {
-            let sink = Sink::Pipe {
-                writer: Arc::new(w),
-                wake: Arc::clone(&wake),
-                edge,
-            };
-            (sink.clone(), sink)
-        }
-        ByteOut::Parent => (cx.shell.io.stdout.clone(), cx.shell.io.ambient.clone()),
+    let stdout = match stdout {
+        ByteOut::Downstream(w, edge) => Sink::Pipe {
+            writer: Arc::new(w),
+            wake: Arc::clone(&wake),
+            edge,
+        },
+        ByteOut::Parent => cx.shell.io.stdout.clone(),
     };
 
     let io = Io {
         stdin,
         stdout,
-        ambient,
         stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
@@ -258,51 +252,6 @@ mod tests {
         };
         assert_eq!(ix, 0);
         assert!(obs.settled.is_ok(), "echo hi must not fail");
-    }
-
-    /// A final stage's discarded statement writes to the parent's ambient
-    /// sink, never to the parent's stdout — which under a capture is a buffer.
-    #[test]
-    fn a_final_stages_discarded_statement_writes_to_the_parents_ambient() {
-        let mut shell = shell_with_builtins();
-        let (stdout_sink, stdout_buf) = crate::io::new_buffer();
-        let (ambient_sink, ambient_buf) = crate::io::new_buffer();
-        shell.io.stdout = stdout_sink;
-        shell.io.ambient = ambient_sink;
-        let env = shell.env.clone();
-        let group = prepared_group();
-        let stage = compile_one("!{ echo x; echo y }");
-        let spec = spec_for(&stage);
-        let mooring = Mooring::adrift();
-        let cx = LaunchCx {
-            mooring: &mooring,
-            shell: &mut shell,
-            env: &env,
-            group: &group,
-            holds_terminal: false,
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handle = launch_thread_stage(
-            &stage,
-            &spec,
-            ByteIn::Parent,
-            ByteOut::Parent,
-            &cx,
-            Slot { ix: 0, tx },
-        )
-        .expect("launch");
-
-        let super::super::collect::Event::Returned(_, obs) = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the stage sends its own Returned")
-        else {
-            panic!("a thread stage must settle as Event::Returned");
-        };
-        assert!(obs.settled.is_ok(), "the stage must not fail");
-        handle.join_after_settled();
-
-        assert_eq!(crate::io::take_buffer(&stdout_buf), b"y\n");
-        assert_eq!(crate::io::take_buffer(&ambient_buf), b"x\n");
     }
 
     #[test]

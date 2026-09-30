@@ -23,14 +23,13 @@ use super::vet::vet;
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
 /// [`crate::builtins::concurrency`].  The head is an exec image by
-/// definition: scope bindings are not consulted, but a handler frame in
-/// scope — a user frame or a base frame alike — runs and its value is the
-/// `detach`'s; nothing is born, and nothing is spent from the budget.
+/// definition: scope bindings are not consulted, and a handler in scope — a
+/// user arm, the catch-all, or a base frame — runs inside this session, so it
+/// is refused: nothing could be detached.  A stub stands in for `detach`
+/// itself.
 ///
-/// Three judgments follow resolution: the frame's authority over the verb,
-/// then [`vet`], then the session's remaining births.  The verb comes first
-/// because a frame that withheld it is owed no opinion on which program was
-/// named.
+/// Three judgments follow resolution: that refusal, then [`vet`], then the
+/// session's remaining births.
 pub(crate) fn detach(
     desc: &str,
     head: &Value,
@@ -47,22 +46,21 @@ pub(crate) fn detach(
         CommandName::Bare(spelled.into())
     };
     if let CommandName::Bare(bare) = &name {
-        // Every pass of the stack: a catch-all intercepts as a per-name
-        // does, and a base frame runs rather than being spawned.
+        // Every pass of the stack: a catch-all intercepts as a per-name does.
         match shell.lookup_handler(bare) {
-            Some(HandlerLookup::Frame(entry, depth)) => {
-                return crate::evaluator::machine::apply_handler(
-                    &entry, depth, argv, mooring, shell,
-                );
+            Some(HandlerLookup::Frame(..)) => {
+                return Err(sig(format!(
+                    "detach: `{bare}` is handled here — by an arm for it, or by the catch-all — \
+                     and a handler runs inside this session, so nothing can be detached. To \
+                     stub `detach`, stand in for `detach` itself; to run the real program, \
+                     `^{bare}`"
+                )));
             }
-            Some(HandlerLookup::Base(entry)) => {
-                return crate::runtime::command_call::run_base_frame(
-                    &entry,
-                    argv,
-                    &[],
-                    mooring,
-                    shell,
-                );
+            Some(HandlerLookup::Base(_)) => {
+                return Err(sig(format!(
+                    "detach: `{bare}` is ral's own, and runs inside this session; nothing \
+                     can be detached"
+                )));
             }
             None => {}
         }

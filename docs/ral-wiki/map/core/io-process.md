@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c56db236
-generated_at_date: 2026-09-25
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -16,7 +16,8 @@ a held [[map/core/shell-state|TerminalLease]].
 ## IO — `core/src/io/`
 
 `io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
-interactive / terminal / launch_role / capture_outer), and
+interactive / terminal / launch_role), where `stdout` is wherever the running
+computation writes — a capture buffer, inside a capture — and
 *`LaunchRole`* — the process-group role distinguishing the top-level
 orchestrator (`TopLevel`) from a stage's own children
 (`PipelineStage(Membership)`, carrying the group an external spawned anywhere
@@ -29,7 +30,7 @@ group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; anything
 inside a stage joins that stage's pgid) and says whether a child's reader is
 the caller or the next stage — never who may foreground. `pipeline/launch.rs`'s
 `stage_stdin` resolves a stage thread's stdin against its route — the upstream
-edge, or (`stage_stdin_parent`) a duplicate of the parent's own `shell.io.stdin`
+edge, or (`ByteIn::Parent`) a duplicate of the parent's own `shell.io.stdin`
 — never taking or moving it, since `Source::reader` only ever hands out a
 duplicate ([[internals/pipeline-execution|pipeline execution]]).
 
@@ -54,7 +55,8 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   watched worker's line surface (`Watch`, each line a `` `watch [label, line] ``
   batch of one through the deferred sink), a stage thread's pipe edge. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
-  hand. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
+  hand; `same_destination` says whether two sinks deliver to one destination,
+  which decides whether a child's stderr may share stdout's descriptor. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
   beside them the `overflowed` flag `write_capped` raises at
   `SINK_BUFFER_CAP`. The flag exists because the write path cannot report the
   cap — a pump returns `()` from its own thread — so `buffer_overflowed` is
@@ -71,8 +73,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
 
 Redirect reads and writes — `< file`, `> file` and friends — open through the
 `File` source/sink here, and the runtime emits a byte-level I/O door at each:
-the read fires eagerly when stdin is redirected, the write at frame settle with
-its committed / aborted / failed outcome. The event shapes and their card
+the read fires eagerly when stdin is redirected, a streaming write at its open
+(`committed`), an atomic `>` at frame settle with its committed / aborted / failed
+outcome. The event shapes and their card
 rendering belong to [[map/exarch/io-surface|io-surface]].
 
 ## Process — `core/src/process/`

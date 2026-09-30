@@ -1,0 +1,5 @@
+# codes: T0074
+# contains: only text, numbers and `true`/`false` go into a string
+# contains: to-json
+let r = [a: 1]
+echo "r: $r"

@@ -9,13 +9,6 @@ echo !{equal true false}
 echo !{equal hello hello}
 echo !{equal hello world}
 
-# Cross-numeric
-echo !{equal 3 3.0}
-
-# Type mismatch is false, not error
-echo !{equal 42 hello}
-echo !{equal true 1}
-
 # Collections
 echo !{equal [1, 2, 3] [1, 2, 3]}
 echo !{equal [1, 2] [1, 3]}

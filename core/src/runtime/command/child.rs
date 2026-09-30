@@ -31,6 +31,10 @@ impl Pumps<Sink> {
         Self { stdout, stderr }
     }
 
+    pub(crate) const fn pumps_stdout(&self) -> bool {
+        self.stdout.is_some()
+    }
+
     /// Start the planned drainers over `child`'s piped stdout/stderr.
     pub(crate) fn start(self, child: &mut crate::process::ChildHandle) -> Pumps {
         Pumps {

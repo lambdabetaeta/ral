@@ -210,7 +210,7 @@ where the survivor rule needs them and named in no answer
 Every `ral` tool result ends with `TURN: <id>`, the id of the turn it closes,
 so the model has the address before it asks for one.
 
-- **`exarch-context <tag>`** → `∀ρ1 ρ2. <survey | evict [turns: [Int] | ρ1] | ρ2> →
+- **`exarch-context <tag>`** → `∀ρ. <survey | evict [turns: [Int], note: <none | some Str>] | ρ> →
   F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]],
   total-bytes: Int]`.
   One verb per addressable state: the tag selects the transition, and **every**
@@ -232,7 +232,7 @@ so the model has the address before it asks for one.
     departed turns — naming what left and how to read it back
     ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
     `turns` is a list of turn ids however it was built, so
-    `` `evict [turns: !{range 41 43}] `` and `` `evict [turns: [41, 43]] ``
+    `` `evict [turns: !{range 41 43}, note: `none] `` and `` `evict [turns: [41, 43], note: `none] ``
     are addressed alike. Refused by name: a turn the transcript never
     recorded, a turn that has already left, the **unclosed** turn — the one
     being written, which exists only while a turn is open — and a set that
@@ -242,12 +242,10 @@ so the model has the address before it asks for one.
     message. `note` is the model's own line
     to its future self, drawn beneath the rows of the cut that took them; the
     harness's own eviction and `/rewind` are this same edit under another
-    authority and write none. The `evict` row is
-    **open** precisely because `note` is optional and a closed row cannot say
-    so: `context_evict_payload` checks its type at the door, and the desk
-    refuses a note it will not draw — a marker reading
-    `Your note at eviction: ""` is a defect the type should prevent, and
-    making `note` required would invite exactly that. Its size and shape are
+    authority and write none. `note` is `` `none `` or `` `some Str ``, so absence is data and the
+    `evict` record stays closed. The desk refuses a note it will not draw — a
+    marker reading `Your note at eviction: ""` is a defect, which is why an
+    empty `` `some `` is refused and `` `none `` is the spelling of no note. Its size and shape are
     the desk's too — at most `NOTE_CAP` (240) bytes, and no line break, since
     the marker draws one row per departed turn and a note that could add a row
     would unbound the one message an eviction never reclaims.
@@ -257,16 +255,15 @@ so the model has the address before it asks for one.
   as runs — `turns 41–43` (`record::model::runs`). There is no byte-delta
   receipt: the decision-relevant number is `total-bytes` now against the
   budget ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`exarch-transcript <tag>`** → `∀α ρ2 ρ3. <index | read [turns: [Int]] |
-  grep [pattern: Str | ρ2] | ρ3> → F α`. Read-only: no tag records a protocol
+- **`exarch-transcript <tag>`** → `∀α ρ. <index | read [turns: [Int]] |
+  grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`. Read-only: no tag records a protocol
   event, though each
   records a `Display::HarnessCall` for the screen. The answer type is a bare
   `α` because the three tags answer three shapes. Every narrowing is a list of
   turn ids: what the model can read, it can evict, by the same name
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
-  `` `read ``'s row is therefore **closed** on its one required field, which a
-  record row can anchor; `` `grep ``'s stays open, since its `turns` is
-  optional and a closed row cannot say so.
+  Both records are **closed**; `` `grep ``'s `turns` is `` `all `` or
+  `` `only [Int] ``, absence being data.
   - `` `index `` → the survey's own rows over every turn the transcript holds,
     plus `held: Str` — `resident` or `evicted` — oldest first.
     `kind` is `own`, `import`, or `inherited` (an ancestor's). A departed
@@ -283,7 +280,7 @@ so the model has the address before it asks for one.
     ral's own `re-*`
     dialect, compiled at the desk so a bad pattern is refused in the regex
     crate's words — over prompts, programs, results, and reasoning, per line.
-    The narrowing is optional; with none, the whole transcript is searched. At
+    `` `turns: `all `` searches the whole transcript; `` `only `` narrows it. At
     most `GREP_HITS` (100)
     hits, oldest first, each line clipped at 200 bytes, with `total` the true
     count so a large one says *narrow*, not *page*.
@@ -348,7 +345,10 @@ so the model has the address before it asks for one.
   tag's payload keeps its exact type, so the closed record inside `` `start ``
   still makes a missing or misspelled field a static error naming it, while the
   `type`/`grant`/`provider`/`model` rows *inside* that record stay open for the
-  same reason one level down.
+  same reason one level down. Every family door refuses a block or a handle at
+  any depth of its argument (`first_order`), so the type variables its argument
+  mentions are `data` and its row variables deep (`door` in `harness.rs`;
+  [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
   `` `start [prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
@@ -428,12 +428,14 @@ so the model has the address before it asks for one.
   inside `spawn { … }` errors rather than degrading.
   - `` `set [key: Str, body: Card] `` → `Unit`.
   - `` `clear <key> `` → `Unit`.
-  - `` `read <key> `` → `∀α. F α`. The card pinned at `key`, canonically
+  - `` `read <key> `` → `∀α. F α`. `` `some `` the card pinned at `key`, canonically
     re-encoded ([[map/exarch/cards|cards]]) so a kit can destructure it
-    whether or not the bytes it wrote match what comes back; `()` on a miss
-    or an absent register. Typed on the `from-json` precedent — trusted,
-    not checked — because the register is schemaless by design
-    ([[decisions/260803_register-is-read-write|register-is-read-write]]).
+    whether or not the bytes it wrote match what comes back; `` `none `` on a miss
+    or an absent register. Its answer type is the script's to decide, because the
+    register is schemaless by design
+    ([[decisions/260803_register-is-read-write|register-is-read-write]]): a boundary,
+    admitted at the door against how the script uses the card
+    ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
   - `` `list `` → `F [String]`. Silent; the keys currently occupied on the
     caller's register, in `BTreeMap` order — a key names a slot for
     `` `read ``, not its content.

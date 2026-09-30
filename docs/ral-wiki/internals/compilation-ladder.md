@@ -1,7 +1,7 @@
 ---
-verified_at_commit: b1a0f280
-verified_at_date: 2026-09-21
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, stage_types, Capture, captured_string, capture_sites, eta_expand_arrow]
 ---
 
 # The compilation ladder: source to typed IR
@@ -28,27 +28,23 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Run`). What
   it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
-- **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp` tree
-  ([[design/types|types]]). The checker is a transformation, `annotate`. It
-  rebuilds the inferred tree once, carrying a demand at each position. A
-  demand is a value read here, or a value discarded here. The rebuild returns
-  an annotated tree carrying four verdicts.
+- **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp`
+  tree ([[design/types|types]]). The checker is a transformation, `annotate`: a
+  plain structural rebuild of the inferred tree carrying four verdicts.
 
   - Each top-level name-bind carries the generalised `Scheme` it inferred,
     closed against the empty environment so the scheme outlives the per-run
     unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  - Each `Pipeline` carries one `PipeYield`: the checker grounds the last
-    stage's route, with every unification variable defaulted away, and writes
-    down the *answer* — `Last` to report the helper's returned value, `Unit`
-    because a byte payload never crosses the process boundary. The route itself
-    does not survive; every interior edge is a byte pipe allocated from
-    position, so there is nothing per-stage to write
+  - Each `Pipeline` carries `stage_types`, one resolved value type per
+    stage. Only the structural REPL's typed spine reads a stage type. Every
+    interior edge is a byte pipe allocated from position, so there is nothing
+    else per-stage to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
-  - Each `Pipeline` also carries `stage_types`, one resolved value type per
-    stage. Only the structural REPL's typed spine reads a stage type.
-  - The rebuild wraps a node in a `Capture` node wherever a value demand meets
-    a payload route that grounds `Bytes`
+  - Each boundary call carries the `Site` inference recorded for it.
+  - A command the checker recorded as captured is wrapped as
+    `cap M to d. decode d` (`CompKind::Capture`, `CompKind::Decode`, built by
+    `captured_string`)
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
 
   Generalisation happens at each `Bind`, along the SCC structure the
@@ -56,51 +52,37 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   binding point. A mutually recursive group stays monomorphic until its fixed
   point.
 
-  A value demand reaches:
+  An arrow-typed right-hand side is η-expanded into a thunked λ
+  (`eta_expand_arrow`), so every function-typed thunk's body is a syntactic
+  `Lam`.
 
-  - a `Bind`'s RHS, unless its pattern is a wildcard: a discarded statement is
-    a wildcard binder, so its own value is discarded while the ambient demand
-    flows on into the binder's `rest`;
-  - each arm of an `If`, a `Case`, a fallback chain, or a `try`;
-  - the body of a force of a syntactic thunk.
-
-  Every other position is a discard. A discarded value never wraps in
-  `Capture`.
-
-  A join needs one further rule for an arm that grounds `None` at type `Unit`,
-  inside an otherwise byte-payload join. `ArmWalk::Wrap` (`annotate.rs`) wraps
-  that whole arm in `Capture`. Its own payload then reads as the empty string.
-  Its bytes still reach the outer stream as effect. The arm rebuilds at its
-  own, ordinary discard demand inside the wrap.
-
-  A scope's arm is a `Val`, not a `Comp`. It may be opaque. An opaque arm
-  needing a value payload η-expands through `eta_expand_captured`
-  (`annotate.rs`) into `{ |e| capture (force $h e) }`. The expansion is sound
-  because a scope forces its arm exactly once and never returns it. The arm's
-  own identity is therefore never observed, so nothing can compare, print, or
-  send the wrapper elsewhere.
-
-  Demand propagation stops at a leaf, at an opaque force, and at an opaque
-  scope arm. A `case` arm is never one of those stops: arms are syntax, so the
-  demand walks into every one of them
-  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+  Which commands are recorded is decided *before* inference, from syntax alone:
+  `capture_sites` walks the right-hand side of each `let` along the positions
+  its result comes from, and the `Exec` rule of inference answers `F String`
+  for a recorded node after typing the call `F Unit`
+  ([[internals/type-inference|type-inference]],
+  [[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+  The rebuild places a `Capture` by looking a node up in that record.
 
   This rung is the *only* source of `Capture` nodes, and it runs on every
-  evaluated path: no route reaches the evaluator at all — the checker grounds
-  every route here and leaves its verdict as syntax, never re-derived at
-  runtime. A node inference never visited keeps the elaborator's placeholder —
-  `Unit` for a stage type. The verdict rides inside the comp;
-  `CompileError` is unchanged in shape. ([[map/core/typecheck|typecheck]])
+  evaluated path: nothing reaches the evaluator that asks whether to capture,
+  and a capture is never re-derived at runtime. A node inference never visited
+  keeps the elaborator's placeholder — `Unit` for a stage type. The verdict
+  rides inside the comp; `CompileError` is unchanged in shape.
+  ([[map/core/typecheck|typecheck]])
 
 A loading form may also hand this rung a `ReturnContract` — one of the
-declared `typecheck::contract::Table`s — and the checker holds the toplevel's
-own returned *row* to that table's closed keyset. It is one inference under
-one contract: the rc's eleven keys, a plugin manifest's four and a capability
-profile's six are vetted in the same pass, with the same spans, as the rest of
-the file, and the row is what is checked rather than the syntax that built it,
-so a key misspelled inside a spread is caught with one written out. A program
-whose return carries no row — a `Map`, a plugin factory's `Thunk` — is left to
-its loader's runtime door, which dispatches off the same table.
+declared `typecheck::contract::Table`s — and once inference has finished the
+checker ascribes that table's closed keyset to the toplevel's own returned
+type (`contract::ascribe`), in a scratch copy of the unifier, so the table
+never enters inference. The rc's eleven keys, a plugin manifest's four and a
+capability profile's six are vetted with the same spans as the rest of the
+file, and the inferred type is what is checked rather than the syntax that
+built it, so a key misspelled inside a spread is caught with one written out.
+`()` is the empty keyset; a map, a list, a scalar, or (but for a manifest) a
+function is refused with the spelling to use. A program whose return is a
+variable — `from-json` — or a manifest factory's `Thunk` is left to its
+loader's runtime door, which dispatches off the same table.
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one
@@ -110,8 +92,8 @@ so the seed never drifts from the values it describes.
 
 The prelude is baked once at build time as a schema-less `postcard` blob of this
 same IR, so any field added to `Comp`, `Val`, or `Pattern` invalidates every
-emitted blob — a hazard pinned with `cargo:rerun-if-changed` in *one* place,
-`bake_prelude_to_out_dir` (`core/src/boot.rs`), since the only encode site and
+emitted blob — a hazard closed by each host's build-dependency on `ral-core`,
+which reruns `bake_prelude_to_out_dir` (`core/src/boot.rs`), the only encode site, and
 the only decode site (`BakedPrelude`) live there together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`

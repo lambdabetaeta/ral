@@ -26,11 +26,11 @@ revisit.
   Harper–Pierce 1991, Rémy 1992, Gaster–Jones 1996: the record operation ral
   declined. Concatenation has no principal type, and each published way of
   typing it charges a price — compatibility constraints, `lacks` predicates,
-  presence flags — that ral has already refused; a literal's row is iterated
-  extension, exact where the parts are known and refused where they are not.
+  Rémy flags — that ral has already refused; a literal with a spread is an
+  update of one base, which adds no field.
 - [[related/rows-and-handlers|rows-and-handlers]] — Hillerström–Lindley 2016:
   the effect typing ral declined — the same row machinery, extended to every
   arrow; nearly ral's runtime, the inverse of ral's wild/handleable split.
 - [[related/call-by-push-value|call-by-push-value]] — Levy 1999/2003: the
-  substrate taken as surface design; ral tags `F` with a payload route, adds the
+  substrate taken as surface design; ral adds the
   pipe as a combinator outside the calculus, and drops computation products.

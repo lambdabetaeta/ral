@@ -25,9 +25,9 @@ irreducibility:
 - **It is a base computation** — an operation the prelude has no smaller pieces to
   build from: a regex engine, the string transforms, structural comparison
   dispatched on the runtime value, scalar coercion.
-- **Its type cannot be given to an ordinary binding** — the codec routes
-  `F[Value] A` / `A → F[Bytes] Unit` ([[design/codecs|codecs]]) and `fail`'s
-  divergent, open-row result.
+- **Its type cannot be given to an ordinary binding** — a decoder's `F A` for an
+  `A` the stream decides and an encoder's `A → F Unit` that writes
+  ([[design/codecs|codecs]]), and `fail`'s divergent, open-row result.
 
 Filesystem *effects* are deliberately none of these: there is no `copy-file` or
 `make-dir`, because `cp` / `mv` / `rm` / `mkdir` already own that and a second
@@ -39,9 +39,8 @@ spelling would be a second thing to keep capability-checked
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`
-  `range`. Each takes a thunk, and the callback's [[design/types|payload route]]
-  is *universally quantified*: `map { echo $x }` typechecks because the callback
-  may itself be byte-routed while the list operation still returns a value.
+  `range`. Each takes a thunk, and a callback is a plain `F β`: `map { echo $x }`
+  typechecks, `β` being `()`, and what the callback writes goes where writes go.
 - **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
   `re-replace-all` `string-replace` `shell-quote` `shell-split`.
@@ -58,16 +57,16 @@ The core entries group by what they compute:
   non-blocking probe of a handle — total over a finished block, reporting completion
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
-- **Byte writes** — `echo`: every argument rendered through the total
-  `to-string`, single-space intercalation, a trailing newline, typed
-  `List String -> Return(Bytes, Unit)` so a value boundary reads the bytes it
-  wrote. Mixed argument types coexist because the argv boundary renders each
-  element before the list is formed.
+- **Writes** — `echo`: every argument rendered through the total `to-string`,
+  single-space intercalation, a trailing newline, typed `List String -> F Unit`:
+  it writes and returns nothing, like every command. Mixed argument types
+  coexist because the argv boundary renders each element before the list is
+  formed.
 - **Diagnostics** — `warn`: one `String` and a newline to standard error,
-  typed `String -> F[Value] Unit`. Deliberately *not* a byte write — the route
-  stays `Value`, so a caller binding the computation's payload never picks the
-  message up. ral has no redirect pointing standard output at standard error,
-  and this verb is what stands where the bash idiom did
+  typed `String -> F Unit` as a row that *returns*, not one that writes, so a
+  bind capturing it never picks the message up. ral has no redirect pointing
+  standard output at standard error, and this verb is what stands where the
+  bash idiom did
   ([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
@@ -89,13 +88,15 @@ Nullary and divergent are shapes a scheme writes, not a second rule:
 - **Nullary** — `clear`, `reset`, `help`, and the `from-X` codecs, which read
   the byte channel — is a body with no arrow over it.
 - **Divergent** — `fail` and `exit` / `quit`, whose escape unwinds past every
-  binding — quantifies a fresh value *and* route directly, so
+  binding — quantifies a fresh result type directly, so
   `if $c { exit 1 } else { return "x" }` takes its type from the arm that
   returns. `fail` also carries the nonzero-status diagnostic
   ([[design/failure|failure]]), which is a facet of its registry row rather
   than of its type.
-- **Byte-routed** — every encoder returns `Return(Bytes, Unit)`: those bytes
-  belong to whoever consumes the command as a value.
+- **Writing** — every encoder, `help`, `explain` and the terminal controls are
+  `… → F Unit` rows declared `Output::Writes`: the declaration, not the type,
+  tells a bind or a pipeline that the command writes
+  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
 One scheme closes a computation variable, which a written quantifier list
 cannot bind, so it generalises against the empty environment instead: `alias`,
@@ -111,11 +112,13 @@ argument as readily as a builtin's, and one application path serves both
 ([[internals/type-inference|type-inference]]).
 
 `echo` and `detach` are not table entries. They are the two rows of the
-*base-frame manifest*, typed `List String -> Return(Bytes, Unit)` and
-`List String -> F Any` — the argv convention a handler and an external already
+*base-frame manifest*, typed `List String -> F Unit` and
+`List String -> F [pid: Int, desc: String]` — the argv convention a handler and an external already
 share, `List String` inside and bytes at the OS call — and their schemes are
 seeded into the checker's env at boot, so a base frame is looked up as a handler
 is ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+`detach` refuses a head a handler intercepts: a handler runs inside this
+session, so nothing could be detached.
 
 Each codec being its own entry rather than one polymorphic `decode` / `encode`
 is what lets `from-json < file` dispatch straight through the command arm with

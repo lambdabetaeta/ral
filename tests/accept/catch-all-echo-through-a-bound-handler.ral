@@ -1,0 +1,1 @@
+let h = { |n a| echo caught }; within [handler: $h] { zzz }

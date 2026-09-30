@@ -455,7 +455,7 @@ pub(crate) fn builtin_test_clear_block_forever(
 }
 
 pub(crate) fn scheme_test_clear_block_forever(_u: &mut Unifier) -> Scheme {
-    mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
 }
 
 /// Gates `test-clear-block-until-released`: while false it cannot settle inside

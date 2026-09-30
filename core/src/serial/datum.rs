@@ -65,12 +65,7 @@ pub fn exact_keys(v: &FOValue, keys: &[&str]) -> Result<(), String> {
 
 /// Name the key the writer most likely meant, else list them all.
 fn unknown_key(k: &str, keys: &[&str]) -> String {
-    let nearest = keys
-        .iter()
-        .map(|key| (strsim::damerau_levenshtein(k, key), key))
-        .min()
-        .filter(|(d, _)| *d <= 2);
-    if let Some((_, key)) = nearest {
+    if let Some(key) = crate::text::near_names(k, keys.iter().copied(), 1).first() {
         return format!("unknown field `{k} — did you mean `{key}?");
     }
     let known: Vec<String> = keys.iter().map(|k| format!("`{k}")).collect();

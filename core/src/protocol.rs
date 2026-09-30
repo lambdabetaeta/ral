@@ -2017,7 +2017,7 @@ mod durability_tests {
 
     fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(

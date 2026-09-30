@@ -1,0 +1,4 @@
+let before = { |t| if true { echo hi } else { !$t }; let w = !$t; $w }
+let after = { |t| let w = !$t; if true { echo hi } else { !$t }; $w }
+before { echo yo }
+after { return () }

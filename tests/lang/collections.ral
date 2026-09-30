@@ -15,9 +15,9 @@ let config = [db: [host: localhost, port: 5432], app: [workers: 4]]
 echo $config[db][host]
 echo $config[app][workers]
 
-# Spread in maps (override then rest)
+# A spread, then an override
 let base_opts = [host: localhost, port: 8080, workers: 4]
-let custom = [port: 9090, ...$base_opts]
+let custom = [...$base_opts, port: 9090]
 echo $custom[port]
 echo $custom[host]
 

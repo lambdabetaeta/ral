@@ -47,6 +47,8 @@ Redirects look familiar:
     command 2> errors.txt
     command > output.txt 2>&1
 
+Each stream (stdin, stdout, stderr) takes at most one redirect, and `2>&1` sends stderr wherever stdout goes, wherever it is written; `cmd > a > b` and `cmd 2> e 2>&1` are parse errors.
+
 `>` is atomic for regular files: a reader sees the old file or the complete new
 file, never a half-written file. `>~` is the streaming form for live logs and
 FIFOs.
@@ -84,6 +86,14 @@ with one trailing newline removed:
 
     echo "$branch on $host has $count lines of notes"
 
+A `let` captures the command that produces its value. A function, a block in
+hand, or a handle in that position binds what it *returns*; add `| from-line`
+to bind what it writes:
+
+    let f    = { hostname }
+    let x    = f               # prints the host name; x is ()
+    let host = f | from-line   # binds it
+
 A bare word runs a command only at the head of a command. In a list, record,
 argument, or `return`, it is a string:
 
@@ -120,8 +130,8 @@ Inside double quotes, `$name` inserts a binding, `$record[field]` inserts a
 field, `!{command}` runs a command, and `$[…]` computes an expression. The
 usual explicit escapes include `\n`, `\t`, `\\`, `\"`, `\xNN`, and `\u{…}`.
 
-Only scalars interpolate directly. Convert collections, bytes, blocks, and
-handles explicitly:
+Only text, numbers, and `true`/`false` interpolate directly; `()` is nothing to
+print. Convert collections, bytes, blocks, and handles explicitly:
 
     echo "items: !{str $items}"
 
@@ -277,7 +287,8 @@ values of one type:
     let flags = [-l, -a]
     ls ...$flags ...$directories
 
-An explicit record field wins over a spread field wherever it appears.
+A spread of a record comes first, and the fields written after it replace the ones
+it already has; it never adds one.
 
 Patterns take values apart:
 
@@ -365,7 +376,7 @@ Codecs cross between bytes and values:
 | `from-lines` | a list of strings, one per line |
 | `from-json` | a ral value decoded from JSON |
 | `from-jsonl` | a list of values, one per line of JSON |
-| `from-csv` | a list of header-keyed records |
+| `from-csv` | a list of header-keyed maps of text |
 | `from-bytes` | a `Bytes` value |
 
 The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-jsonl`,
@@ -387,14 +398,14 @@ the file directly:
     let config = to-string $text | from-json   # right
     let config = from-json < $path             # right
 
-    let config = $text | from-json             # decodes an empty pipe
+    let config = $text | from-json             # refused
 
-The last line is a legal program that does the wrong thing. `$text` is a
-perfectly good first stage, but it writes no bytes, so `from-json` reads end of
-input and fails when the program runs. The string never reached it.
+The last line is refused before anything runs. `$text` is a value, and a value
+in stage position writes nothing to the pipe, so `from-json` would read end of
+input. The string never reached it.
 
-`|` moves bytes; `let` binds the final stage's payload. The type checker checks
-every stage before a process starts.
+`|` moves bytes: a stage feeds the next by writing, and the pipeline's value is
+its final stage's. The type checker checks every stage before a process starts.
 
 Values compose by application, not by `|`:
 

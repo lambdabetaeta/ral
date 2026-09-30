@@ -1,0 +1,2 @@
+# contains: an `if` arm is a block
+if true 3 else 4

@@ -1,2 +1,2 @@
-# contains: String
+# contains: binds what `t` returns
 let f = { |t| if true { echo hi } else { !$t }; let x = !$t; return $[$x + 1] }

@@ -1,5 +1,0 @@
-let f = { |o|
-  grant $o { () }
-  within $o { () }
-}
-return $f

@@ -139,7 +139,7 @@ fn helper_to_external_pipeline_runs() {
 
 /// `2>&1` inside a pipeline stage.  The stage's stderr must be
 /// duplicated onto whichever target stdout was assigned (here: the
-/// downstream pipe).  Without the Windows arm of `wire_stage_stdio`,
+/// downstream pipe).  Without the Windows arm of `wire_stdio`,
 /// the diagnostic vanishes into the parent.
 #[test]
 fn pipeline_stage_2to1_routes_into_pipe() {

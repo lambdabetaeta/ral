@@ -15,7 +15,8 @@
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
-use crate::types::{Break, Env, Mooring, Settled, Shell, Value, sig};
+use crate::types::{Break, Env, Mooring, Settled, Shell, Site, Value, sig};
+use std::sync::Arc;
 
 use super::util::as_str;
 
@@ -48,9 +49,8 @@ pub fn evaluate_checked(
     // Unlike a nested `use`, this loader's whole point is to install its
     // defines into the running session — rc, a plugin, a capability file,
     // exarch's agent library — so its own `Ran::env` lands in `shell.env`
-    // here, the one write-back `Mode::Local` itself skips (no lease, no
-    // PATH-shadow check: this is host-installed library code, not an
-    // interactive `let`).
+    // here, the one write-back `Mode::Local` itself skips (no lease: this is
+    // host-installed library code, not an interactive `let`).
     shell.env = ran.env;
     ran.outcome
 }
@@ -261,7 +261,12 @@ fn tag_loader_error(e: Break) -> Break {
 /// session environment, `Mode::Module`, never the caller's own block-local
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
 /// name read from `ran.env`.
-pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn builtin_use(
+    args: &[Value],
+    site: &Arc<Site>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let path = as_str(&args[0], "use")?.to_owned();
     let resolved = resolve_relative_to_current_script(&path, shell);
     // `use` falls back to a RAL_PATH search for a bare name.
@@ -287,18 +292,18 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let ran = module_phrases(load, env, Mode::Module, mooring, shell);
 
     let ran = ran.map_err(tag_loader_error)?;
-    ran.outcome
-        .map(|_| {
-            let bindings: Vec<(String, Value)> = ran
-                .defined
-                .iter()
-                // A leading underscore marks a name the module keeps private.
-                .filter(|name| !name.starts_with('_'))
-                .filter_map(|name| ran.env.get(name).map(|v| (name.clone(), v.clone())))
-                .collect();
-            Value::map(bindings)
-        })
-        .map_err(tag_loader_error)
+    ran.outcome.map_err(tag_loader_error)?;
+    let bindings: Vec<(String, Value)> = ran
+        .defined
+        .iter()
+        // A leading underscore marks a name the module keeps private.
+        .filter(|name| !name.starts_with('_'))
+        .filter_map(|name| ran.env.get(name).map(|v| (name.clone(), v.clone())))
+        .collect();
+    let record = Value::map(bindings);
+    site.admit_module(&record, &top.exported_schemes())
+        .map_err(|mismatch| mismatch.refusal("use", shell))?;
+    Ok(record)
 }
 
 /// Resolve `path` against the directory of the innermost load in flight —

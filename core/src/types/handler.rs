@@ -61,9 +61,8 @@ impl HandlerEntry {
     /// order alone is what decides that.
     ///
     /// # Errors
-    /// `thunk` not a unary lambda, its body disagreeing with the head about
-    /// where their payload lives, or — under a byte-routed head — still
-    /// returning a value instead of `Unit`.
+    /// `thunk` not a unary lambda, or its body returning something other than
+    /// what the head it stands in for returns (`Inferencer::stands_in`).
     pub(crate) fn vet(
         name: String,
         thunk: Value,
@@ -79,42 +78,7 @@ impl HandlerEntry {
             unreachable!("validate_handler_arity guarantees a unary lambda");
         };
         let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, session_schemes)
-            .map_err(|failure| {
-                use crate::typecheck::{PinFailure, fmt_route, fmt_ty};
-                let msg = match failure {
-                    PinFailure::Route(m) => format!(
-                        "{label}: `{name}` is already installed, and this body disagrees \
-                         with it about where the result lives — this body's is {}, the \
-                         existing one's is {}; match the existing route, or add a codec",
-                        fmt_route(&m.left),
-                        fmt_route(&m.right),
-                    ),
-                    PinFailure::ByteHeadReturnsValue {
-                        actual,
-                        reinterprets: true,
-                    } => format!(
-                        "{label}: `{name}` is already installed, and its result is its \
-                         stdout, so this body has no separate value to return; its return \
-                         type must be Unit, and `{name}`'s body returns {}",
-                        fmt_ty(&actual),
-                    ),
-                    PinFailure::ByteHeadReturnsValue {
-                        actual,
-                        reinterprets: false,
-                    } => format!(
-                        "{label}: `{name}` is not a name ral already handles, so it \
-                         behaves like an external program — its result is what it writes \
-                         to stdout, not what it returns — and `{name}`'s body returns {} \
-                         instead of Unit; write the result out, or capture it inside the \
-                         body with `!{{...}}`",
-                        fmt_ty(&actual),
-                    ),
-                };
-                match body.span {
-                    Some(span) => super::coerce::sig_at(msg, span),
-                    None => super::coerce::sig(msg),
-                }
-            })?;
+            .map_err(|error| refused_arm(label, &error, body.span))?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
             entry.scheme = Some(Arc::new(scheme));
@@ -144,6 +108,21 @@ impl HandlerRole {
 
     fn persists_scheme(self) -> bool {
         matches!(self, Self::Alias)
+    }
+}
+
+/// A refused arm, in the checker's own sentence, caret on the arm when it has
+/// a span.
+pub(crate) fn refused_arm(
+    label: &str,
+    error: &crate::typecheck::TypeError,
+    span: Option<crate::source::Span>,
+) -> crate::types::Break {
+    let sentence = error.hint().unwrap_or_else(|| error.kind.render_message());
+    let message = format!("{label}: {sentence}");
+    match span {
+        Some(span) => super::coerce::sig_at(message, span),
+        None => super::coerce::sig(message),
     }
 }
 

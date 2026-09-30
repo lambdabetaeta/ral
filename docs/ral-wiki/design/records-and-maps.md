@@ -88,9 +88,10 @@ classification to make.
 
 This is why your two everyday cases land where they do. `audit { … }` returns a
 record — its labels (`kind`, `status`, `stdout`, `value`, …) are fixed in the
-builtin's scheme (`core/src/typecheck/builtins.rs`). `from-json` returns an
-*unconstrained* result — a quantified type variable in its scheme — and a JSON
-object decodes to the `Map` carrier
+builtin's scheme (`core/src/typecheck/builtins.rs`). `from-json` returns a
+result the script decides — a weak type variable, one per unit, checked at the
+decode ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]])
+— and a JSON object decodes to the `Map` carrier
 at run time (`json_to_value`, `core/src/builtins/util.rs`). The decoded value's
 *type* is then fixed by how you use it: index it with a computed key and it
 pins to `Map<α>`; read a literal field off it and it pins toward `Record`.
@@ -100,25 +101,29 @@ pins to `Map<α>`; read a literal field off it and it pins toward `Record`.
 The projection rule splits on *how the key is given*, not only on the target
 (`core/src/typecheck/infer.rs`):
 
-- **Static label** — `$r[host]` — is field selection *whatever the target is*:
-  it unifies the target with `[host: α | ρ]` and returns that field's own type
-  `α`. The key's form decides before the target's type is read, so a literal
-  read and the same read extracted into a block (`{ |r| $r[host] } $x`) cannot
-  reach different verdicts. A target already known to be a map is refused, with
-  the way to read it: *"`host` is a field name, and this is a map — read a map's
-  key with `get $m host <default>`, or bind the key and write `$m[$k]`."*
-- **Computed key** — `$m[$k]` — is well-typed against `Map<α>`, returns the
-  uniform `α`, and is the one place the target's own type still selects the
-  rule: a `List` takes an `Int`, a `Map` a `String`, and a still-free target is
-  pinned by the key's type. Indexing a concretely-known scalar by a runtime key
-  is a type error: *"only lists (key: Integer) and maps (key: String) accept a
-  key computed at runtime — for a record field, use a static name."*
+- **Static label** — `$r[host]` — is a deferred constraint over the target's
+  head, `c = [host: α | ρ] ∨ c = Map α`. A record target reads the field at its
+  own type; a map target reads that key at the map's element type; a target
+  still unknown waits, and is read as a record where the binding that owns it
+  is generalised, or at the end of the unit. Only the head decides, never
+  statement order: `{ |m| $m[a]; keys $m }` and its transpose are both
+  `Map α → Command α`, while `{ |r| $r[host] }` is generic over records and is
+  refused when given a map.
+- **Integer literal** — `$xs[0]` — indexes a list, `c = [α]`, with no
+  constraint, so `first = { |xs| $xs[0] }` is generic over element types.
+- **Computed key** — `$m[$k]` — is `c = [α] ∧ k = Int ∨ c = Map α ∧ k = String`,
+  returning the uniform `α`. The target's head, the key's head, or either's
+  kind picks the disjunct; nothing else does, so the verdict is the same under
+  any order of statements. The three types are weak for the whole unit: a helper
+  `{ |m k| $m[$k] }` has one container type per program, accepted at the one
+  type its program uses and refused, *"is `$m` a list or a map?"*, when nothing
+  fixes which. Indexing a concretely-known scalar by a runtime key is a type
+  error: *"only lists (key: Integer) and maps (key: String) accept a key
+  computed at runtime — for a record field, use a static name."*
 
-So `$ENV[$name]` is sound precisely because the computed key pins `$ENV` to a
-`Map`: every value shares one type, so a key you don't know until run time
-still has a known result type. `$ENV[HOME]` pins that occurrence to a record
-with a `HOME` field instead — each `$ENV` types on its own, the register
-carrying no scheme of its own (`core/src/typecheck/infer.rs`).
+`$ENV` is `Map String`, so `$ENV[$name]` and `$ENV[HOME]` alike are `String`:
+every value shares one type, and a key you don't know until run time still has
+a known result type.
 
 ## Neither stands in for the other
 
@@ -135,16 +140,18 @@ way in, as in `if c { [:, k: $v] } else { [k: ''] }`, where the fix is `[:]`
 for the empty map, there being no empty-record literal. A map type prints as
 `Map α`, so the diagnosis names the two kinds before the help does.
 
-**A form's options are fields, so a map is not one.** `within` and `grant`
-declare their options as a closed row — `dir`, `env` and `handler`; `exec`,
-`fs`, `net`, `detach`, `editor` and `shell` — and the bundle they are handed is
-unified against it, written out or arriving bound. A genuine map, one off
-`from-json` or a plugin's configuration, has no labels to meet that row, and
-gets its own sentence rather than a row-against-`Map α` mismatch:
-*`within` takes named options — dir, env, handler — not a map of keys.* The
-runtime still takes a `Map`, records being maps at run time; this is a
-statement about the type, and it is the price of giving a computed bundle a
-verdict at all.
+**A form's options are names, so a map is not one.** `within` and `grant`
+declare their options — `dir`, `env` and `handler`; `exec`, `fs`, `net`,
+`detach`, `editor` and `shell` — and the options are *syntax*: the names are
+written in the form's own bracket and each value is checked at the type its
+name declares, key by written key. A bundle bound elsewhere, a genuine map (one
+off `from-json`, a plugin's configuration), a spread and a repeated name are
+parse errors, each with its own sentence: *`within` takes its options written
+in its own bracket. The values may be bound — `within [dir: $d]` — but the
+option names are written here, the way `case` writes its arms.* The runtime
+still takes a `Map`, records being maps at run time, and the machine builds one
+from the written pairs; what the type system never sees is a record standing
+for the options.
 
 A forgetful `Record → Map` reading is definable — collapse every field type onto
 one element and forget the labels — but it is a *coercion*, and a unifier
@@ -236,6 +243,17 @@ position is an ordinary expression whose value flows through the same
 record/map classification as everywhere else, and giving it a second,
 context-dependent meaning for `[]` would reopen exactly the ambiguity the
 form-bracket exception was built to avoid in the first place, one level up.
+
+**Superseded for contract files.** A contract file's return is now ascribed its
+table after inference, in a scratch copy of the unifier, so `[]` stays the empty
+list everywhere but a list or a map returned at a contract boundary is refused
+statically, with the spelling to use: `[:, k: v]` is a map whose keys are data,
+not the table's labels, and `[]` is not the empty record. A file with nothing
+to set returns `()`, which the checker and each door read as the empty keyset —
+the exception is a value's own, not a second meaning for `[]`. The cliff above
+is closed in the sense that matters: emptying a config no longer opts the file
+out of static checking. A return the checker cannot type — `from-json` — and a
+plugin manifest's factory stay on the runtime door.
 
 **Realised in** [[internals/type-inference|type-inference]] (literal inference
 and the record/map projection split).

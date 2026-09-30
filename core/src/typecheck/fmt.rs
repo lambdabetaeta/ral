@@ -5,15 +5,14 @@
 //! name in both, so callers first build one [`FmtCtx`] over everything they
 //! are about to render: it mints Greek letters in first-appearance order.
 
-use super::scheme::Scheme;
-use super::ty::{CompTy, CompTyVar, Field, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
-use std::collections::HashMap;
+use super::scheme::{Scheme, WeakVars};
+use super::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
+use std::collections::{HashMap, HashSet};
 
 // One alphabet per kind of unification variable, kept disjoint so a letter
 // alone tells the reader which kind it names.
 const TY_LETTERS: &[&str] = &["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ"];
 const COMP_LETTERS: &[&str] = &["ϕ", "χ", "ψ", "ω"];
-const ROUTE_LETTERS: &[&str] = &["μ", "ν", "ξ", "π"];
 const ROW_LETTERS: &[&str] = &["ρ", "σ", "τ", "υ"];
 
 fn pick(letters: &[&str], idx: usize) -> String {
@@ -34,8 +33,100 @@ fn pick(letters: &[&str], idx: usize) -> String {
 pub struct FmtCtx {
     pub(crate) ty_names: HashMap<TyVar, String>,
     pub(crate) comp_names: HashMap<CompTyVar, String>,
-    pub(crate) route_names: HashMap<PayloadVar, String>,
     pub(crate) row_names: HashMap<RowVar, String>,
+    cycles: Cycles,
+}
+
+/// Cyclic roots with their bindings: a back-edge `Var(root)` stands for its
+/// binding, so the types over them are regular trees.
+#[derive(Default)]
+struct Cycles {
+    tys: Vec<(TyVar, Ty)>,
+    comps: Vec<(CompTyVar, CompTy)>,
+}
+
+/// Node pairs already assumed equal.  Bisimilarity is a greatest fixed point
+/// and every obligation is a conjunct, so an assumption is sound; the graphs
+/// are finite, so the walk ends.
+#[derive(Default)]
+struct Assumed {
+    tys: HashSet<(*const Ty, *const Ty)>,
+    comps: HashSet<(*const CompTy, *const CompTy)>,
+}
+
+impl Cycles {
+    /// The root whose binding is the same regular tree as `ty`.
+    fn ty_root(&self, ty: &Ty) -> Option<&(TyVar, Ty)> {
+        self.tys
+            .iter()
+            .find(|(_, binding)| self.ty_eq(ty, binding, &mut Assumed::default()))
+    }
+
+    fn comp_root(&self, cty: &CompTy) -> Option<&(CompTyVar, CompTy)> {
+        self.comps
+            .iter()
+            .find(|(_, binding)| self.comp_eq(cty, binding, &mut Assumed::default()))
+    }
+
+    fn ty_binding(&self, v: TyVar) -> Option<&Ty> {
+        self.tys.iter().find(|(root, _)| *root == v).map(|(_, b)| b)
+    }
+
+    fn comp_binding(&self, v: CompTyVar) -> Option<&CompTy> {
+        self.comps
+            .iter()
+            .find(|(root, _)| *root == v)
+            .map(|(_, b)| b)
+    }
+
+    fn ty_eq(&self, a: &Ty, b: &Ty, seen: &mut Assumed) -> bool {
+        if !seen.tys.insert((a, b)) {
+            return true;
+        }
+        match (a, b) {
+            (Ty::Var(v), _) if let Some(a) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
+            (_, Ty::Var(v)) if let Some(b) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
+            (Ty::List(x), Ty::List(y))
+            | (Ty::Map(x), Ty::Map(y))
+            | (Ty::Handle(x), Ty::Handle(y)) => self.ty_eq(x, y, seen),
+            (Ty::Record(x), Ty::Record(y)) | (Ty::Variant(x), Ty::Variant(y)) => {
+                self.row_eq(x, y, seen)
+            }
+            (Ty::Thunk(x), Ty::Thunk(y)) => self.comp_eq(x, y, seen),
+            _ => a == b,
+        }
+    }
+
+    fn comp_eq(&self, a: &CompTy, b: &CompTy, seen: &mut Assumed) -> bool {
+        if !seen.comps.insert((a, b)) {
+            return true;
+        }
+        match (a, b) {
+            (CompTy::Var(v), _) if let Some(a) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
+            (_, CompTy::Var(v)) if let Some(b) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
+            (CompTy::Return(x), CompTy::Return(y)) => self.ty_eq(x, y, seen),
+            (CompTy::Fun(p, x), CompTy::Fun(q, y)) => {
+                self.ty_eq(p, q, seen) && self.comp_eq(x, y, seen)
+            }
+            _ => a == b,
+        }
+    }
+
+    fn row_eq(&self, a: &Row, b: &Row, seen: &mut Assumed) -> bool {
+        match (a, b) {
+            (Row::Extend(l, f, x), Row::Extend(m, g, y)) => {
+                l == m && self.ty_eq(f, g, seen) && self.row_eq(x, y, seen)
+            }
+            _ => a == b,
+        }
+    }
+}
+
+/// A cyclic root whose `μ` encloses the node being printed.
+#[derive(Clone, Copy, PartialEq)]
+enum Open {
+    Ty(TyVar),
+    Comp(CompTyVar),
 }
 
 impl FmtCtx {
@@ -51,8 +142,22 @@ impl FmtCtx {
             .cloned()
             .unwrap_or_else(|| "_".into())
     }
-    fn route_name(&self, v: PayloadVar) -> Option<String> {
-        self.route_names.get(&v).cloned()
+
+    /// A weak variable is named after the quantified ones, with a leading `_`:
+    /// it is one type for the whole unit, not a binder.
+    fn name_weak(&mut self, weak: &WeakVars) {
+        for v in weak.tys.keys() {
+            let name = format!("_{}", pick(TY_LETTERS, self.ty_names.len()));
+            self.ty_names.insert(*v, name);
+        }
+        for v in &weak.comps {
+            let name = format!("_{}", pick(COMP_LETTERS, self.comp_names.len()));
+            self.comp_names.insert(*v, name);
+        }
+        for v in weak.rows.keys() {
+            let name = format!("_{}", pick(ROW_LETTERS, self.row_names.len()));
+            self.row_names.insert(*v, name);
+        }
     }
 
     /// Name every unification variable in `types`, in first-appearance order.
@@ -89,10 +194,7 @@ impl FmtCtx {
                     self.comp_names.insert(*v, pick(COMP_LETTERS, idx));
                 }
             }
-            CompTy::Return(route, a) => {
-                self.absorb_route(*route);
-                self.absorb_ty(a);
-            }
+            CompTy::Return(a) => self.absorb_ty(a),
             CompTy::Fun(a, b) => {
                 self.absorb_ty(a);
                 self.absorb_comp(b);
@@ -109,21 +211,10 @@ impl FmtCtx {
                     self.row_names.insert(*v, pick(ROW_LETTERS, idx));
                 }
             }
-            Row::Extend(_, f, rest) => {
-                if let Some(ty) = f.payload() {
-                    self.absorb_ty(ty);
-                }
+            Row::Extend(_, ty, rest) => {
+                self.absorb_ty(ty);
                 self.absorb_row(rest);
             }
-        }
-    }
-
-    pub(super) fn absorb_route(&mut self, route: PayloadRoute) {
-        if let PayloadRoute::Var(v) = route
-            && !self.route_names.contains_key(&v)
-        {
-            let idx = self.route_names.len();
-            self.route_names.insert(v, pick(ROUTE_LETTERS, idx));
         }
     }
 }
@@ -133,6 +224,26 @@ pub fn fmt_ty(ty: &Ty) -> String {
 }
 
 pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
+    fmt_ty_in(ty, ctx, &mut Vec::new())
+}
+
+/// A node equal to a cyclic root prints as the root's name inside its `μ`,
+/// and as its `μ` outside.
+fn fmt_ty_in(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
+    let Some(&(root, ref binding)) = ctx.cycles.ty_root(ty) else {
+        return fmt_ty_node(ty, ctx, open);
+    };
+    let name = ctx.ty_name(root);
+    if open.contains(&Open::Ty(root)) {
+        return name;
+    }
+    open.push(Open::Ty(root));
+    let body = fmt_ty_node(binding, ctx, open);
+    open.pop();
+    format!("μ{name}. {body}")
+}
+
+fn fmt_ty_node(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
     match ty {
         Ty::Unit => "Unit".into(),
         Ty::Bytes => "Bytes".into(),
@@ -140,41 +251,35 @@ pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
         Ty::Int => "Integer".into(),
         Ty::Float => "Float".into(),
         Ty::String => "String".into(),
-        Ty::Handle(a) => format!("Handle {}", fmt_ty_ctx(a, ctx)),
+        Ty::Handle(a) => format!("Handle {}", fmt_ty_in(a, ctx, open)),
         Ty::Var(v) => ctx.ty_name(*v),
-        Ty::List(a) => format!("[{}]", fmt_ty_ctx(a, ctx)),
-        Ty::Map(a) => format!("Map {}", fmt_ty_ctx(a, ctx)),
-        Ty::Record(r) => format!("[{}]", fmt_row_ctx(r, ctx)),
-        Ty::Variant(r) => format!("[{}]", fmt_variant_row_ctx(r, ctx)),
-        Ty::Thunk(b) => format!("{{{}}}", fmt_comp_ty_ctx(b, ctx)),
+        Ty::List(a) => format!("[{}]", fmt_ty_in(a, ctx, open)),
+        Ty::Map(a) => format!("Map {}", fmt_ty_in(a, ctx, open)),
+        Ty::Record(r) => format!("[{}]", fmt_row_in(r, ctx, open)),
+        Ty::Variant(r) => format!("[{}]", fmt_variant_row_in(r, ctx, open)),
+        Ty::Thunk(b) => format!("{{{}}}", fmt_comp_ty_in(b, ctx, open)),
     }
 }
 
 /// Variant rows use `|` between arms and a backtick on every tag, including an
 /// open tail. Records and variants both render inside `[…]`.
-pub(crate) fn fmt_variant_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
-    fmt_row_with_sep(row, ctx, " | ", "`")
+fn fmt_variant_row_in(row: &Row, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
+    fmt_row_with_sep(row, ctx, open, " | ", "`")
 }
 
-pub(crate) fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
-    fmt_row_with_sep(row, ctx, ", ", "")
-}
-
-/// Whether a row ends in a tail variable rather than `Empty`.
-fn row_ends_open(row: &Row) -> bool {
-    let mut cur = row;
-    loop {
-        match cur {
-            Row::Empty => return false,
-            Row::Var(_) => return true,
-            Row::Extend(_, _, rest) => cur = rest,
-        }
-    }
+fn fmt_row_in(row: &Row, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
+    fmt_row_with_sep(row, ctx, open, ", ", "")
 }
 
 /// Shared body for record and variant rows. `tail_sigil` marks an open tail as
 /// belonging to that row kind; a named tail appends its row variable.
-fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> String {
+fn fmt_row_with_sep(
+    row: &Row,
+    ctx: &FmtCtx,
+    open: &mut Vec<Open>,
+    sep: &str,
+    tail_sigil: &str,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut tail: Option<String> = None;
@@ -189,23 +294,11 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> Str
                 });
                 break;
             }
-            // `l: τ` present, `l?: τ` present-or-not, nothing at all for an
-            // absent field before `Empty` — which is the equation
-            // `(l : Absent ; Empty) = Empty`.  Before an open tail that
-            // equation does not hold and no rule produces the shape, so it is
-            // printed `l: ∅` where a bug would otherwise be invisible.
-            Row::Extend(l, f, rest) => {
+            Row::Extend(l, ty, rest) => {
                 // Row unification walks the spine head-first and matches the
                 // first occurrence of a label, so show only that one.
                 if seen.insert(l.clone()) {
-                    match f {
-                        Field::Present(ty) => parts.push(format!("{l}: {}", fmt_ty_ctx(ty, ctx))),
-                        Field::Var(_, ty) => {
-                            parts.push(format!("{l}?: {}", fmt_ty_ctx(ty, ctx)));
-                        }
-                        Field::Absent if row_ends_open(rest) => parts.push(format!("{l}: ∅")),
-                        Field::Absent => {}
-                    }
+                    parts.push(format!("{l}: {}", fmt_ty_in(ty, ctx, open)));
                 }
                 cur = rest;
             }
@@ -220,28 +313,33 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> Str
 }
 
 pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
+    fmt_comp_ty_in(cty, ctx, &mut Vec::new())
+}
+
+/// [`fmt_ty_in`] for a computation.
+fn fmt_comp_ty_in(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
+    let Some(&(root, ref binding)) = ctx.cycles.comp_root(cty) else {
+        return fmt_comp_ty_node(cty, ctx, open);
+    };
+    let name = ctx.comp_name(root);
+    if open.contains(&Open::Comp(root)) {
+        return name;
+    }
+    open.push(Open::Comp(root));
+    let body = fmt_comp_ty_node(binding, ctx, open);
+    open.pop();
+    format!("μ{name}. {body}")
+}
+
+fn fmt_comp_ty_node(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
     match cty {
         CompTy::Var(v) => ctx.comp_name(*v),
-        CompTy::Fun(a, b) => format!("{} → {}", fmt_ty_ctx(a, ctx), fmt_comp_ty_ctx(b, ctx)),
-        CompTy::Return(PayloadRoute::Bytes, _) => "Command captured from stdout".into(),
-        CompTy::Return(_, a) => format!("Command {}", fmt_ty_ctx(a, ctx)),
-    }
-}
-
-/// Format a payload route on its own, outside any type — the mismatch
-/// renderer's one use, since a route otherwise prints as nothing inside a
-/// `Command` type (see [`fmt_comp_ty_ctx`]).
-pub fn fmt_route(route: &PayloadRoute) -> String {
-    fmt_route_ctx(route, &FmtCtx::default())
-}
-
-/// Like [`fmt_route`], but a route variable takes its name from `ctx` when it
-/// has one there.
-pub fn fmt_route_ctx(route: &PayloadRoute, ctx: &FmtCtx) -> String {
-    match route {
-        PayloadRoute::Value => "a returned value".into(),
-        PayloadRoute::Bytes => "captured from stdout".into(),
-        PayloadRoute::Var(v) => ctx.route_name(*v).unwrap_or_else(|| "_".into()),
+        CompTy::Fun(a, b) => format!(
+            "{} → {}",
+            fmt_ty_in(a, ctx, open),
+            fmt_comp_ty_in(b, ctx, open)
+        ),
+        CompTy::Return(a) => format!("Command {}", fmt_ty_in(a, ctx, open)),
     }
 }
 
@@ -259,12 +357,10 @@ fn names_in_order<V: Copy + Eq + std::hash::Hash>(
 /// Format a scheme with its ∀ prefix, naming variables by their position in
 /// the scheme's quantifier lists.
 ///
-/// Route variables are named but never quantified: an open route prints as
-/// nothing inside a `Command` type, so its binder would dangle.  The outer
-/// `Thunk` is stripped, so a command reads `Command …`, not `{Command …}`.
+/// The outer `Thunk` is stripped, so a command reads `Command …`, not `{Command …}`.
 pub fn fmt_scheme(scheme: &Scheme) -> String {
-    // Roots of cyclic bindings are quantified too, after the plain vars.
-    let mut ty_order: Vec<TyVar> = scheme.ty_vars.clone();
+    // Roots of cyclic bindings are named after the plain vars; they bind by `μ`, not `∀`.
+    let mut ty_order: Vec<TyVar> = scheme.ty_vars.iter().map(|&(v, _)| v).collect();
     for (root, _) in &scheme.ty_bindings {
         let v = TyVar(*root);
         if !ty_order.contains(&v) {
@@ -279,22 +375,53 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
         }
     }
 
-    let ctx = FmtCtx {
+    let mut ctx = FmtCtx {
         ty_names: names_in_order(&ty_order, TY_LETTERS),
         comp_names: names_in_order(&comp_order, COMP_LETTERS),
-        route_names: names_in_order(&scheme.route_vars, ROUTE_LETTERS),
-        row_names: names_in_order(&scheme.row_vars, ROW_LETTERS),
+        row_names: names_in_order(
+            &scheme.row_vars.iter().map(|&(v, _)| v).collect::<Vec<_>>(),
+            ROW_LETTERS,
+        ),
+        cycles: Cycles {
+            tys: scheme
+                .ty_bindings
+                .iter()
+                .map(|(root, binding)| (TyVar(*root), binding.clone()))
+                .collect(),
+            comps: scheme
+                .comp_ty_bindings
+                .iter()
+                .map(|(root, binding)| (CompTyVar(*root), binding.clone()))
+                .collect(),
+        },
     };
+    ctx.name_weak(&scheme.weak);
 
-    // Presence variables are quantified but deliberately unnamed: a flag has
-    // no structure to say anything about, and `l?: τ` already reads "a τ, if
-    // it is there".  Where sharing between two instantiations matters, the
-    // test asserts on unifier roots rather than on this text.
-    let quant_parts: Vec<String> = ty_order
+    let quant_parts: Vec<String> = scheme
+        .ty_vars
         .iter()
-        .map(|v| ctx.ty_names[v].clone())
-        .chain(comp_order.iter().map(|v| ctx.comp_names[v].clone()))
-        .chain(scheme.row_vars.iter().map(|v| ctx.row_names[v].clone()))
+        .map(|(v, kind)| {
+            let name = &ctx.ty_names[v];
+            if kind.is_any() {
+                name.clone()
+            } else {
+                format!("{name}:{kind}")
+            }
+        })
+        .chain(
+            scheme
+                .comp_ty_vars
+                .iter()
+                .map(|v| ctx.comp_names[v].clone()),
+        )
+        .chain(scheme.row_vars.iter().map(|(v, deep)| {
+            let name = &ctx.row_names[v];
+            if *deep {
+                format!("{name}^d")
+            } else {
+                name.clone()
+            }
+        }))
         .collect();
 
     let prefix = if quant_parts.is_empty() {
@@ -313,24 +440,53 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::kind::Kind;
+    use super::super::ty::Label;
     use super::*;
 
     #[test]
-    fn fmt_scheme_quantifies_cyclic_ty_roots() {
+    fn fmt_scheme_binds_cyclic_ty_roots_by_mu() {
         let root = TyVar(17);
         let scheme = Scheme {
-            ty_vars: vec![],
-            comp_ty_vars: vec![],
-            route_vars: vec![],
-            row_vars: vec![],
-            presence_vars: vec![],
-            ty: Ty::List(Box::new(Ty::Var(root))),
-            comp_ty_bindings: vec![],
             ty_bindings: vec![(root.0, Ty::List(Box::new(Ty::Var(root))))],
-            cached_fv: None,
+            ..Scheme::mono(Ty::List(Box::new(Ty::Var(root))))
         };
         let rendered = fmt_scheme(&scheme);
-        assert_eq!(rendered, "∀α. [α]");
+        assert_eq!(rendered, "μα. [α]");
+    }
+
+    #[test]
+    fn a_node_unrolled_below_its_root_prints_as_the_root() {
+        let root = TyVar(17);
+        let list = Ty::List(Box::new(Ty::Var(root)));
+        let deep = (0..9).fold(list.clone(), |ty, _| Ty::List(Box::new(ty)));
+        let scheme = Scheme {
+            ty_bindings: vec![(root.0, list)],
+            ..Scheme::mono(deep)
+        };
+        assert_eq!(fmt_scheme(&scheme), "μα. [α]");
+    }
+
+    #[test]
+    fn fmt_scheme_names_a_weak_residual_after_the_binders() {
+        let (bound, weak) = (TyVar(3), TyVar(4));
+        let scheme = Scheme {
+            ty_vars: vec![(bound, Kind::ANY)],
+            weak: WeakVars {
+                tys: [(weak, Kind::ANY)].into(),
+                ..WeakVars::default()
+            },
+            ..Scheme::mono(Ty::Record(Row::Extend(
+                Label::Field("a".into()),
+                Box::new(Ty::Var(bound)),
+                Box::new(Row::Extend(
+                    Label::Field("b".into()),
+                    Box::new(Ty::Var(weak)),
+                    Box::new(Row::Empty),
+                )),
+            )))
+        };
+        assert_eq!(fmt_scheme(&scheme), "∀α. [a: α, b: _β]");
     }
 
     #[test]

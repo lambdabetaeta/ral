@@ -5,9 +5,6 @@ let d = temp-dir
 echo note > "$d/notes.txt"
 echo line > "$d/input.txt"
 
-# A producer need not write; the reader sees EOF
-return hello | echo
-
 # guard: cleanup bytes are ambient (here, the pipe); either arm may read
 guard { return () } { echo cleanup } | cat
 echo one | guard { from-string } { return () }
@@ -42,10 +39,10 @@ echo "[$got]"
 cat "$d/input.txt" | { from-line }
 
 # A branch's writes belong to the stage, not to its returned value
-if true { echo hi; return 1 } else { return 2 } | cat
-if true { echo a; return 1 } else { echo b; return 2 } | cat
+if true { echo hi; return () } else { return () } | cat
+if true { echo a; return () } else { echo b; return () } | cat
 !{ let bound = !{ echo inner; return 5 }; return () } | cat
-!{ let held = echo swallowed; length $held } | from-string
+!{ let held = echo swallowed; return () } | from-string
 echo 'binding kept its bytes out of the pipe'
 
 # A frame routes a pipeline as bytes
@@ -63,7 +60,7 @@ let nums = [1, 2]
 let rec = [a: 1]
 /bin/echo $rec[a]
 /bin/echo !{to-json $rec}
-let blk = { echo hi }
+let blk = { return hi }
 /bin/echo !{!$blk}
 let hd = spawn { return 1 }
 let res = await $hd

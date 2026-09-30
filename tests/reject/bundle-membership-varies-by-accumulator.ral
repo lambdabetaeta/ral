@@ -1,4 +1,4 @@
-# contains: 'dir'
+# contains: `within` takes its options written in its own bracket
 let step = { |acc x| return [...$acc, dir: "/tmp"] }
 let o = fold $step [env: [:]] [1]
 within $o { return "ok" }

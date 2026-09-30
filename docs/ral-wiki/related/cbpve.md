@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a2d120d2
-verified_at_date: 2026-09-11
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
 against: [design/types, design/cbpv, design/capture]
 ---
 
@@ -12,27 +12,29 @@ Dylan McDermott, *Grading Call-By-Push-Value, Explicitly and Implicitly*, FSCD
 type with a grade: `F_e A` is the type of computations returning `A` with
 behavioural grade `e`. It is the natural reference to read ral's computation
 types against, and the reading is a negative one: **ral is not a graded CBPV.
-Its returner carries an annotation, and that annotation is not a grade.**
+Its returner carries no annotation at all: `F A` is Levy's, and a command is `F Unit`.**
 
-## What ral's annotation is, in the paper's own terms
+## What ral's returner is, in the paper's own terms
 
 CBPVE assumes grades form an **ordered monoid** `(E, ≤, 1, ·)`: `1` is the grade
 of a computation with no effects, `d·e` grades running `d` then `e`, and `d ≤ e`
-means `e` is more permissive. Three of those four pieces have no counterpart in
-ral's `F[ρ] A`:
+means `e` is more permissive. None of those pieces has a counterpart in ral's
+`F A`:
 
-- **No `1`.** `Value` is not "no effects" — a `Value`-routed computation may
-  write unboundedly to stdout. `ρ` says which product a value boundary reads,
-  never what the computation may do ([[design/types|types]]).
+- **No `1`.** A command is `F Unit`, and so is `cd`: writing is not in the type.
+  What a computation may do to the world is the business of the grant that
+  admits it, never of its type ([[design/types|types]]).
 - **No `·`.** A sequence does not multiply its parts' annotations; it takes its
-  tail's, discarding every earlier one. `!{ echo a; return () }` is
-  `F[Value] Unit` however loudly the head wrote.
-- **No `≤` in the paper's sense.** ral has one subsumption instance,
-  `F[Value] Unit ⊑ F[Bytes] Unit`, and it fires only where a branch's arms must
-  agree — not as a general permissiveness order carried through the type system.
+  tail's type, discarding every earlier one. `!{ echo a; return () }` is
+  `F Unit` however loudly the head wrote.
+- **No `≤`.** Arms that must agree are joined by unifying the values they
+  return, not by a permissiveness order carried through the type system.
 
-What ral has is a **tag on the returner**, discriminating two products of one
-computation. The paper itself supplies the sharpest way to see this. Its bind
+The one place a computation's writing matters to a program is `let`, and there
+it is syntax: the checker wraps the command a `let` can see in the capture
+coercion, `cap M to x. decode x`, before it infers any type
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+The paper itself supplies the sharpest way to see that nothing is graded. Its bind
 rule
 
 ```
@@ -43,10 +45,8 @@ rule
 
 applies a **grade action** `⟨⟨d⟩⟩` to the continuation's type, which is exactly
 the move a grade must license: the operand's behaviour is not forgotten when the
-tail is function-shaped. ral's bind performs no action. It reads `M`'s route to
-decide whether to insert `Capture`, then hands back `N`'s type untouched. An
-annotation that a bind may simply drop is not a grade; it is metadata about a
-boundary that has already been crossed.
+tail is function-shaped. ral's bind performs no action: it hands back `N`'s type
+untouched, and there is no `d` for it to act with.
 
 ## The grading that was, and why it went
 
@@ -99,18 +99,16 @@ Three restrictions, each currently sound and each worth knowing before the
 calculus grows:
 
 - **No value subtyping.** CBPVE relates value types (`U C <: U D`, and
-  componentwise at products and sums); ral's one instance relates computation
-  types only.
+  componentwise at products and sums); ral has no subtyping relation at all.
 - **Hence no `U C ≼ U D`** — a thunk holding a computation with slack cannot be
   re-typed. Nothing in ral needs it today.
 - **Hence the arrow is invariant in its domain.** CBPVE's is *contravariant*:
   `A→C <: B→D` from `B <: A` and `C <: D`. ral's invariance is not a separate
   choice; it is the first restriction seen at the arrow.
 
-And where CBPVE has a general `coerce_D M` over the whole of `<:`, ral has
-[[design/types|one subsumption instance]] — a computation returning `Unit` may
-be read as one whose payload is its stdout — realised as the single coercion
-`capture` moving the other way.
+And where CBPVE has a general `coerce_D M` over the whole of `<:`, ral has one
+coercion, `capture`, a term the checker writes at a `let` ([[design/types|types]]),
+not a step of a subtyping derivation.
 
 ## What ral could borrow
 
@@ -118,8 +116,8 @@ The graded-monad semantics of §5 interprets `F_e A` as `e∗ F T⟦A⟧` over a
 of a graded monad. Nothing in ral needs it while `F` is ungraded, but it is the
 shape a denotational model would take the day the shell wants a real effect
 discipline over its syscall signature
-([[design/syscalls-are-effects|syscalls-are-effects]]) rather than a boundary
-tag. The `⊤⊤`-lifting logical relation of §6.1 — varying-arity, indexed by
+([[design/syscalls-are-effects|syscalls-are-effects]]) rather than a capture
+coercion. The `⊤⊤`-lifting logical relation of §6.1 — varying-arity, indexed by
 contexts — is the technique a relational model of ral would want either way, and
 is the reason a substitution kit and a well-formedness predicate are the *first*
 things such a development needs.

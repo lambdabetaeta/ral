@@ -126,7 +126,10 @@ One call:
   written by the child's avatar alone) until the parent fetches it with
   `` exarch-agents `read <name> ``
   ([[decisions/260826_reply-parks|reply-parks]],
-  [[decisions/260827_agent-and-avatar|agent-and-avatar]]).
+  [[decisions/260827_agent-and-avatar|agent-and-avatar]]). The reply is a boundary:
+  the `` `read `` admits it against the fields the parent's script projects, so a
+  reply missing `verdict` fails there, naming `/reply/verdict`
+  ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
 
 The spawn's **`type`** field chooses the child's **model memory**, not its shell
 isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
@@ -211,7 +214,7 @@ the binding to an `` `amnemon `` child:
 ```ral
 let ctx = exarch-transcript `read [turns: !{range 4 9}]
 let handoff = take 12 $ctx[0][messages]
-exarch-context `evict [turns: !{range 4 9}, note: 'handed to `researcher`']
+exarch-context `evict [turns: !{range 4 9}, note: `some 'handed to `researcher`']
 exarch-agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",
   name: 'researcher',

@@ -1,0 +1,3 @@
+# codes: T0010
+# contains: couldn't match type [String] with type Integer
+let h = { |n a| let bad = $a[$a]; return () }; within [handler: $h] { zzz }

@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260930_a-binding-shadows-a-command
 ---
 
 # Deny `let` bindings that shadow a PATH command

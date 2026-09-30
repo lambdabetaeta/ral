@@ -12,11 +12,11 @@
   greet: alias
 
   length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α. α → Command Integer
+  ∀α:sized. α → Command Integer
   length: builtin
 
   length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α. α → Command Integer
+  ∀α:sized. α → Command Integer
   length: builtin
   shadows: handler
 

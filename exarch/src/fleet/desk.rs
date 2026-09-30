@@ -933,14 +933,22 @@ impl ExarchDesk {
         FOValue::Unit
     }
 
-    /// `` `read `` — the card stored under `key` on this agent's own
-    /// register, canonically re-encoded, or `()` on a miss. Read-after-write
-    /// within one run is sound: `` `set ``/`` `clear `` write the mirror
-    /// synchronously, on this same enquiry desk.
+    /// `` `read `` — `` `some `` the card stored under `key` on this agent's
+    /// own register, canonically re-encoded, or `` `none `` on a miss.
+    /// Read-after-write within one run is sound: `` `set ``/`` `clear ``
+    /// write the mirror synchronously, on this same enquiry desk.
     fn pin_read(&self, key: &str) -> FOValue {
         let m = self.services.agent.pins.lock_ignore_poison();
-        m.get(key)
-            .map_or(FOValue::Unit, |digest| encode_card(&digest.card))
+        match m.get(key) {
+            Some(digest) => FOValue::Variant {
+                label: "some".into(),
+                payload: Some(Box::new(encode_card(&digest.card))),
+            },
+            None => FOValue::Variant {
+                label: "none".into(),
+                payload: None,
+            },
+        }
     }
 
     /// `` `list `` — the keys currently occupied on this agent's own
@@ -1820,7 +1828,7 @@ mod tests {
             .expect_err("an empty note is not a note");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note: must not be empty — omit it to leave none"
+            "`exarch-context `evict`: `note: text must not be empty — `none leaves no note"
         );
     }
 
@@ -1840,7 +1848,7 @@ mod tests {
             .expect_err("241 bytes is over the 240-byte cap");
         assert_eq!(
             err.message,
-            "`exarch-context `evict`: `note: is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+            "`exarch-context `evict`: `note: text is 241 bytes; the marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
         );
     }
 
@@ -1861,7 +1869,7 @@ mod tests {
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`exarch-context `evict`: `note: must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
+                "`exarch-context `evict`: `note: text must be a single line — the marker draws one row per turn the cut takes, and a line break in a note reads as one of them."
             );
         }
     }
@@ -1928,6 +1936,18 @@ mod tests {
         Request::Pins(Pins::Read(key.to_string()))
     }
 
+    /// What a read answered: the card of a `some`, or `None` for a `none`.
+    fn slot(answer: FOValue) -> Option<FOValue> {
+        match answer {
+            FOValue::Variant { label, payload } if label == "some" => payload.map(|card| *card),
+            FOValue::Variant {
+                label,
+                payload: None,
+            } if label == "none" => None,
+            other => panic!("a read answers `some or `none, got {other:?}"),
+        }
+    }
+
     /// A pin written through `` `exarch-pins `set `` comes back from
     /// `` `exarch-pins `read `` as the canonical card — the readback and the
     /// pinned mark agree on shape, which is the whole point of a readable
@@ -1938,7 +1958,8 @@ mod tests {
         d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
 
-        let answer = d.ask(pin_read_req("tasks")).expect("a hit must answer Ok");
+        let answer = slot(d.ask(pin_read_req("tasks")).expect("a hit must answer Ok"))
+            .expect("a pinned key reads `some");
         let card =
             crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
         assert!(
@@ -1958,15 +1979,17 @@ mod tests {
         let d = desk();
 
         assert!(
-            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
-            "an unset key must answer unit"
+            slot(d.ask(pin_read_req("tasks")).expect("a read answers")).is_none(),
+            "an unset key must read `none"
         );
 
         d.ask(pin_set_req("tasks", "hi"))
             .expect("`exarch-pins `set` must answer Ok");
-        let answer = d
-            .ask(pin_read_req("tasks"))
-            .expect("a set key must read back");
+        let answer = slot(
+            d.ask(pin_read_req("tasks"))
+                .expect("a set key must read back"),
+        )
+        .expect("a set key reads `some");
         let card =
             crate::bus::card::value_to_card(&answer).expect("the readback must decode as a card");
         assert!(
@@ -1981,20 +2004,20 @@ mod tests {
         d.ask(pin_clear_req("tasks"))
             .expect("`exarch-pins `clear` must answer Ok");
         assert!(
-            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            slot(d.ask(pin_read_req("tasks")).expect("a read answers")).is_none(),
             "`clear` must empty the slot `set` wrote"
         );
     }
 
     /// A key never pinned, and a key unpinned after being pinned, both answer
-    /// `()` — a miss and a clear are the same absence to `` `exarch-pins `read ``.
+    /// `` `none `` — a miss and a clear are the same absence to `` `exarch-pins `read ``.
     #[test]
-    fn pin_read_answers_unit_on_miss_and_after_unpin() {
+    fn pin_read_answers_none_on_miss_and_after_unpin() {
         let d = desk();
 
         assert!(
-            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
-            "a key never pinned must answer unit"
+            slot(d.ask(pin_read_req("tasks")).expect("a read answers")).is_none(),
+            "a key never pinned must read `none"
         );
 
         d.ask(pin_set_req("tasks", "hi"))
@@ -2002,8 +2025,8 @@ mod tests {
         d.ask(pin_clear_req("tasks"))
             .expect("`exarch-pins `clear` must answer Ok");
         assert!(
-            matches!(d.ask(pin_read_req("tasks")), Ok(FOValue::Unit)),
-            "an unpinned key must answer unit"
+            slot(d.ask(pin_read_req("tasks")).expect("a read answers")).is_none(),
+            "an unpinned key must read `none"
         );
     }
 

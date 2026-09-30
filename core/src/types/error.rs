@@ -12,9 +12,13 @@ pub struct Error {
     /// enclosing node's span.
     pub span: Option<Span>,
     pub hint: Option<String>,
+    /// A second place in the source the message points at: the use that imposed
+    /// what a value failed to meet.  Boxed, like `command`: `Error` rides in
+    /// every `Settled`, and a larger one trips `result_large_err`.
+    pub witness: Option<Box<Span>>,
     /// The shown name of the command whose failure this is; `None` until
     /// `evaluator::audit`'s `frame_call` stamps the innermost dispatch.
-    pub(crate) command: Option<String>,
+    pub(crate) command: Option<Box<str>>,
 }
 
 /// An error's exit status: one constructor per fact, whichever door reported it.
@@ -61,6 +65,7 @@ impl Error {
             status: Status::Raised(status),
             span: None,
             hint: None,
+            witness: None,
             command: None,
         }
     }
@@ -74,6 +79,7 @@ impl Error {
             status: Status::Cancelled(cause),
             span: None,
             hint: None,
+            witness: None,
             command: None,
         }
     }
@@ -103,6 +109,7 @@ impl Error {
             status: Status::Process(failure),
             span: None,
             hint: None,
+            witness: None,
             command: None,
         }
     }
@@ -122,6 +129,7 @@ impl Error {
             status: Status::Process(failure),
             span: None,
             hint,
+            witness: None,
             command: None,
         }
     }
@@ -133,6 +141,11 @@ impl Error {
 
     pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    pub(crate) fn with_witness(mut self, witness: Option<Span>) -> Self {
+        self.witness = witness.map(Box::new);
         self
     }
 

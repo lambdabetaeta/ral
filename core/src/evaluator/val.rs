@@ -9,16 +9,16 @@
 
 use std::sync::Arc;
 
-use crate::ir::Val;
+use crate::ir::{OptionsV, Val};
 use crate::types::{Closure, Env, Error, List, Map, Signature, Value};
 
 /// Renders one interpolation piece for `machine::eval_rules`'s
 /// `CompKind::Interpolation` rule.
 pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
     match v {
-        Value::Unit | Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
-            Ok(v.to_string())
-        }
+        Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => Ok(v.to_string()),
+        Value::Unit => Err(Error::new("cannot interpolate Unit in string", 1)
+            .with_hint("`()` is nothing to print; to print the text, write '()'")),
         Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string", 1)
             .with_hint("render with str (lossy UTF-8), or decode with from-string")),
         _ => Err(
@@ -46,11 +46,7 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
             .cloned()
             .ok_or_else(|| {
                 let hint = match name.as_ref() {
-                    "STATUS" => {
-                        "there is no status register: a failure raises an error \
-                         record that carries its own status — catch it with `try` \
-                         and read `$err[status]` from the handler's argument"
-                    }
+                    "STATUS" => crate::typecheck::NO_STATUS_REGISTER,
                     _ => "check spelling, or ensure the variable is defined before this line",
                 };
                 Error::new(format!("undefined variable: ${name}"), 1).with_hint(hint)
@@ -103,6 +99,15 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
             })
         }
     }
+}
+
+/// A form's written options, each value formed, as the map the form's door reads.
+pub(crate) fn form_options(opts: &OptionsV, env: &Env, sig: &Signature) -> Result<Value, Error> {
+    let pairs = opts
+        .iter()
+        .map(|(key, value)| Ok((key.to_string(), form(&value.item, env, sig)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(Value::map(pairs))
 }
 
 /// Whether every direct name `val` mentions — a `Variable`, through variant

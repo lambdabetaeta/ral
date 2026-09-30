@@ -1,9 +1,16 @@
 ---
-status: active
+status: superseded
 generated_at_commit: f06a5056
+superseded_by: decisions/260930_a-table-never-enters-the-unifier
 ---
 
 # Unitarity lives in the term rules
+
+> **Superseded** by
+> [[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]].
+> Confinement and the one-optional-type door guarded flags; with the flags
+> gone the row algebra is unitary on its own, and `check_one_optional_type`,
+> `ContractClash` and their gate are deleted. The page below is history.
 
 **The assignment `Δ` is withdrawn.** An absent field is absent, full stop: it
 carries no type, and retiring a field imposes no equation on the payload that

@@ -308,6 +308,7 @@ impl Shell {
                 }
 
                 self.run_built(req, foreground, wall, single_command, root, |m, s| {
+                    crate::evaluator::readmit(&top, s)?;
                     crate::evaluator::run_phrases(
                         &top.phrases,
                         s.env.clone(),
@@ -540,16 +541,12 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
     let mut run_io = Io {
         stdin,
         stdout: shell.io.stdout.clone(),
-        ambient: shell.io.ambient.clone(),
         stderr: shell.io.stderr.clone(),
         interactive: shell.io.interactive,
         terminal: shell.io.terminal,
         launch_role: shell.io.launch_role.clone(),
     };
     if let Some((stdout, stderr)) = capture {
-        // The run's buffer is the whole of what the world sees of it, so it is
-        // the visible stream as well as the payload sink.
-        run_io.ambient = stdout.clone();
         run_io.stdout = stdout;
         run_io.stderr = stderr;
     }
@@ -696,7 +693,7 @@ pub(crate) mod tests {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
         let entry = crate::types::BuiltinEntry::new(
             std::borrow::Cow::Borrowed(name),
-            |_| mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit))),
+            |_| mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit))),
             "test-only: act from inside the run.",
             crate::types::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
                 act(mooring, shell);
@@ -1315,7 +1312,7 @@ pub(crate) mod tests {
 
     fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
         use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
     }
 
     static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
@@ -1542,7 +1539,9 @@ pub(crate) mod tests {
     fn a_lambda_faults_against_the_run_that_compiled_it() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(matches!(
-            shell.run(capture_req("let boom = { |x| $undefined_name }")),
+            shell.run(capture_req(
+                "let boom = { |x| fail [status: 1, message: nope] }"
+            )),
             RunReport::Ran {
                 ending: Ending::Settled { .. },
                 ..
@@ -1550,7 +1549,7 @@ pub(crate) mod tests {
         ));
         let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
         assert!(
-            rendered.contains("$undefined_name }"),
+            rendered.contains("message: nope] }"),
             "the caret must be drawn into the defining run's text:\n{rendered}"
         );
     }

@@ -1,0 +1,7 @@
+let machine = { |n|
+    return [state: $n, next: { machine $[$n + 1] }]
+}
+let run = { |m k|
+    if $[$k <= 0] { return $m[state] } else { run !$m[next] $[$k - 1] }
+}
+echo !{run !{machine 0} 3}

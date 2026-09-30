@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: did you mean `$total`
+let total = 3
+echo $totl

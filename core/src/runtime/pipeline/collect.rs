@@ -5,7 +5,6 @@
 use super::super::command;
 use super::stage::StageHandle;
 use crate::evaluator::audit::{command_fact, observe_stamped};
-use crate::ir::PipeYield;
 use crate::process::{
     CancelCause, CancelWatch, Group, Pgid, TerminalLoan, WaitOutcome, Watch, watch_cancel,
 };
@@ -532,12 +531,7 @@ impl CollectState {
     /// broadcast before the verdict is ranked, so a failing stage still
     /// contributes what it observed.  The loan drops with `self`, returning
     /// the terminal and striking the frame whatever the verdict.
-    pub(super) fn fold(
-        mut self,
-        mooring: &Mooring,
-        shell: &mut Shell,
-        yields: PipeYield,
-    ) -> Settled<Value> {
+    pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         #[cfg(unix)]
         self.hear_out();
         let pressed = self.pressed();
@@ -566,16 +560,7 @@ impl CollectState {
                 Ok(v) => last = v,
             }
         }
-        verdict.map_or_else(
-            || match yields {
-                PipeYield::Last => Ok(last),
-                PipeYield::Unit if matches!(last, Value::Unit) => Ok(Value::Unit),
-                PipeYield::Unit => Err(Break::Error(
-                    crate::evaluator::machine::bytes_promise_broken(&last),
-                )),
-            },
-            Err,
-        )
+        verdict.map_or(Ok(last), Err)
     }
 }
 
@@ -693,7 +678,7 @@ mod tests {
         drop(tx);
 
         collect.drive();
-        match collect.fold(&mooring, &mut shell, PipeYield::Unit) {
+        match collect.fold(&mooring, &mut shell) {
             Err(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
             other => panic!("expected the final stage's exit to fold in, got {other:?}"),
         }
@@ -861,10 +846,7 @@ mod tests {
         });
 
         assert!(
-            matches!(
-                collect.fold(&mooring, &mut shell, PipeYield::Unit),
-                Err(Break::Error(_))
-            ),
+            matches!(collect.fold(&mooring, &mut shell), Err(Break::Error(_))),
             "a killed stage must fold in an error, not a quiet ok"
         );
         drop(owner);
@@ -1066,7 +1048,7 @@ mod tests {
             ),
         );
 
-        match state.fold(&mooring, &mut shell, PipeYield::Unit) {
+        match state.fold(&mooring, &mut shell) {
             Err(Break::Error(e)) => assert_eq!(
                 e.cancelled_by(),
                 Some(CancelCause::Explicit),
@@ -1124,17 +1106,14 @@ mod tests {
             .cancel(CancelCause::ReaderGone);
         let _ = step(&mut forgiven, Event::Ended(0, kill));
         assert!(
-            forgiven.fold(&mooring, &mut shell, PipeYield::Unit).is_ok(),
+            forgiven.fold(&mooring, &mut shell).is_ok(),
             "a reader-gone kill must be forgiven, not folded in as a failure"
         );
 
         let mut kept = state_with(1);
         let _ = step(&mut kept, Event::Ended(0, kill));
         assert!(
-            matches!(
-                kept.fold(&mooring, &mut shell, PipeYield::Unit),
-                Err(Break::Error(_))
-            ),
+            matches!(kept.fold(&mooring, &mut shell), Err(Break::Error(_))),
             "the very same death, unsent, must be kept as a real failure"
         );
     }
@@ -1159,7 +1138,7 @@ mod tests {
             Event::Returned(0, StageObservation::failure(Error::new("boom", 3))),
         );
 
-        match state.fold(&mooring, &mut shell, PipeYield::Unit) {
+        match state.fold(&mooring, &mut shell) {
             Err(Break::Error(e)) => assert_eq!(e.exit_code(), 3),
             other => panic!("expected the writer's own exit 3 to survive, got {other:?}"),
         }
@@ -1183,7 +1162,7 @@ mod tests {
             ),
         );
 
-        let folded = state.fold(&mooring, &mut shell, PipeYield::Unit);
+        let folded = state.fold(&mooring, &mut shell);
         assert!(
             folded.is_ok(),
             "a writer the reader-gone cancel actually ended must be forgiven: {folded:?}"
@@ -1273,7 +1252,7 @@ mod tests {
         collect.drive();
         let _ = handle.join();
 
-        match collect.fold(&mooring, &mut shell, PipeYield::Unit) {
+        match collect.fold(&mooring, &mut shell) {
             Err(Break::Error(_)) => {}
             other => panic!("expected the panic to fold in as an Error, got {other:?}"),
         }

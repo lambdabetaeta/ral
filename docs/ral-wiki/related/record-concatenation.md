@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a2f49715
-verified_at_date: 2026-09-13
-against: [design/row-types, invariants/fields-are-reached-by-name, decisions/260913_an-open-spread-must-come-last]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+against: [design/row-types, invariants/fields-are-reached-by-name, decisions/260913_an-open-spread-must-come-last, decisions/260930_a-table-never-enters-the-unifier]
 ---
 
 # Record concatenation — the operation ral declined
@@ -10,10 +10,11 @@ Wand 1991; Harper–Pierce 1991; Rémy 1992; Gaster–Jones 1996; Leijen 2005.
 
 **Concatenation is the one record operation ral does not have, and every
 published way of typing it charges a price ral has already declined to pay.**
-A literal's row is iterated *extension*: where the parts' fields are known that
-construction *is* their concatenation, and where they are not, ral refuses the
-literal rather than approximating it
-([[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]).
+A literal with a spread is an *update* of one base, which replaces fields the
+base has and adds none, so it is neither concatenation nor extension
+([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]];
+[[decisions/260913_an-open-spread-must-come-last|an-open-spread-must-come-last]]
+for the earlier reading, which iterated extension).
 
 ## The obstruction is the literature's, not this implementation's
 
@@ -44,9 +45,9 @@ literal rather than approximating it
   are not known where the merge is written. Absence over such a record travels
   as a variant instead
   ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- **The direction is reversible.** Every program ral accepts stays accepted if
-  flags are ever adopted, so the restriction can be lifted without breaking a
-  program; a weaker typing could only ever be withdrawn.
+- **The direction is reversible.** Every program ral accepts stays accepted if a
+  richer row calculus is ever adopted, so the restriction can be lifted without
+  breaking a program; a weaker typing could only ever be withdrawn.
 
 ## Why no deletion rescues the idiom
 

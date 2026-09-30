@@ -3,11 +3,7 @@
 //!
 //! The discipline is call-by-push-value — `Ty` classifies data at rest, `CompTy`
 //! effectful processes, and the two meet at `Thunk` (CBPV's `U`) and `Return`
-//! (`F`).  The payload route is [`super::route`]'s, re-exported here so that
-//! `typecheck`'s surface carries it.
-
-pub(in crate::typecheck) use super::route::GroundRoute;
-pub use super::route::{PayloadRoute, PayloadVar};
+//! (`F`).
 
 use crate::syntax::tag::TAG_PREFIX;
 
@@ -22,21 +18,6 @@ pub struct TyVar(pub u32);
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub struct RowVar(pub u32);
-
-/// Unification variable for a field's presence flag.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct PresenceVar(pub u32);
-
-/// Whether a presence variable turned out to name a field that is there.
-/// Two constants: a variable standing for another variable is the store's
-/// business, not this type's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Presence {
-    Present,
-    Absent,
-}
 
 /// Unification variable for computation types.
 #[derive(
@@ -83,44 +64,13 @@ impl Ty {
 /// `Unifier::unify_row` follows the Rémy (1989) rewrite: two `Extend` nodes
 /// with different labels are swapped past each other into a shared fresh tail.
 ///
-/// `Empty` says *every label not on the spine is absent*, full stop — the same
-/// sentence [`Field::Absent`] makes about one label.
+/// `Empty` says *every label not on the spine is absent*.  The field type is
+/// boxed because `Ty → Row → Ty` has no indirection anywhere else on the cycle.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
-    Extend(Label, Field, Box<Self>),
+    Extend(Label, Box<Ty>, Box<Self>),
     Var(RowVar),
-}
-
-/// A slot on a row: whether the record has this label, and what it holds.
-///
-/// `Absent` stores nothing because nothing can read it: no rule looks under an
-/// absent flag, so there is no payload beside an absent field to read, key,
-/// quantify or occurs-check.  A field whose presence is still unknown does
-/// carry its type: `Var(θ, τ)` reads "a `τ`, if it is there".
-///
-/// The payload is boxed because `Ty → Row → Field → Ty` has no indirection
-/// anywhere else on the cycle.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Field {
-    Present(Box<Ty>),
-    Absent,
-    Var(PresenceVar, Box<Ty>),
-}
-
-impl Field {
-    /// The one field every term rule builds: one the program wrote down.
-    pub fn present(ty: Ty) -> Self {
-        Self::Present(Box::new(ty))
-    }
-
-    /// What the field holds, or `None` for an absent one, which holds nothing.
-    pub fn payload(&self) -> Option<&Ty> {
-        match self {
-            Self::Present(t) | Self::Var(_, t) => Some(t),
-            Self::Absent => None,
-        }
-    }
 }
 
 /// A row label together with the alphabet it is drawn from.
@@ -157,9 +107,9 @@ impl std::fmt::Display for Label {
 /// Computation types (`B` in CBPV).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CompTy {
-    /// `F[ρ] A` — an effectful command returning `A`, whose payload a value
-    /// boundary reads by the route `ρ`.
-    Return(PayloadRoute, Box<Ty>),
+    /// `F A` — a computation returning `A`.  A command is `F Unit`: it writes,
+    /// and returns nothing.
+    Return(Box<Ty>),
     /// `A -> B`.
     Fun(Box<Ty>, Box<Self>),
     /// Unification variable.
@@ -167,16 +117,8 @@ pub enum CompTy {
 }
 
 impl CompTy {
-    /// A computation whose payload is its returned value.
+    /// A computation returning `ty`.
     pub fn pure(ty: Ty) -> Self {
-        Self::Return(PayloadRoute::Value, Box::new(ty))
-    }
-
-    /// The one byte-routed computation WF-2 admits: captured from stdout,
-    /// returning `Unit`.  Landing on the byte side of any decision means
-    /// unifying with this whole, so the `Bytes`/`Unit` pairing travels
-    /// structurally and no grounding site carries half of it from memory.
-    pub(crate) fn bytes() -> Self {
-        Self::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
+        Self::Return(Box::new(ty))
     }
 }

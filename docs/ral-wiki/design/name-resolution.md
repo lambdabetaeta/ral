@@ -55,6 +55,10 @@ under that spelling. From most reserved to most peripheral:
 Coreutils running in-process beside the structured primitives is what lets ral be
 a [[invariants/single-binary|single binary]] with no sibling helpers.
 
+A binding shadows a command of the same name, at any scope, and resolution
+reads no host state to decide it; `^name` reaches the external command
+([[decisions/260930_a-binding-shadows-a-command|a-binding-shadows-a-command]]).
+
 ## The principle: which layer a capability belongs to
 
 Three rules decide the placement, and they are not interchangeable:

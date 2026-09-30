@@ -3,8 +3,8 @@
 let assert_eq = { |name expected actual|
     if $[not !{equal $expected $actual}] {
         warn "FAIL: $name"
-        warn "  expected: $expected"
-        warn "  actual:   $actual"
+        warn "  expected: !{to-json $expected}"
+        warn "  actual:   !{to-json $actual}"
         fail [status: 1, message: "assertion failed: $name"]
     }
 }

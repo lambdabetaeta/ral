@@ -20,6 +20,8 @@ exarch-agents `read <name> ``. Bind it and project
     let r = exarch-agents `read 'plan-review'
     if !{equal $r[reply][verdict] `ok} { … } else { for $r[reply][issues] { |i| … } }
 
+The reply is checked at `` `read `` against the fields you project: if the agent's reply has no `verdict`, the call fails there, saying `/reply/verdict` is missing, rather than when a later step reads it.
+
 Example:
 
     let chunks = map { |f| from-string < $f } !{glob #'notes/*.md'#}
@@ -43,7 +45,7 @@ DO NOT POLL AGENTS. Wait to be notified of their completion.
 
 `` exarch-agents `message [to: <name>, text: <text>] `` messages an agent. An agent that has replied remains idle for an hour, and can still be messaged to have its context re-used, if a similar task has come in. Any live agent may be messaged by name — a child of yours, a sibling, or whoever started you — and `` `list `` names them all, so you can reach anyone you can see.
 
-There are two types of agents. `` `amnemon `` is the default; it begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
+There are two types of agents, and `type` is required. `` `amnemon `` begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
 
 Every tag but `` `list `` and `` `read `` answers `[live: Int, replied: Int]` afterwards: how many other agents are alive around you, and how many of the agents you started are parked holding a value you have not fetched. A non-zero `replied` means go and `` `read ``.
 

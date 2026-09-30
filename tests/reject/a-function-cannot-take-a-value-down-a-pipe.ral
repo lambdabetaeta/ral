@@ -1,0 +1,3 @@
+# contains: a value in stage position writes nothing to the pipe
+let f = { |xs| echo $xs }
+[1, 2, 3] | f

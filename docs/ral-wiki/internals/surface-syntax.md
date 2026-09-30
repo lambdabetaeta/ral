@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 703628d7
-verified_at_date: 2026-09-10
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
 anchors: [lex, parse, Head, DelimKind, scan_token_group, scan_splice, WordLiteral::classify, is_bare_word]
 ---
 
@@ -86,11 +86,12 @@ own `incomplete` verdict; `join_continuation` folds lines in with `'\n'`). A
 newline *before* `?` is allowed too, so `cmd\n? fallback` and `cmd ?\nfallback`
 both parse. A `;` never continues anything.
 
-**Redirects are the three standard streams.** `parse_redirect` eliminates the
+**Redirects are the three standard streams.** `parse_redirect_into` eliminates the
 lexer's `Redirect` and `Dup` tokens, fd numbers and all, into the sum
 `Redirect<Ast>` through `Redirect::word` and `Redirect::dup`, which refuse any
 fd that names no stream — so no fd number exists anywhere downstream
-([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]).
+([[invariants/redirects-are-the-three-standard-streams|redirects-are-the-three-standard-streams]]). Each is then bound into `Redirects<Ast>` by `Redirects::bind`, which refuses a second binding of a stream with a caret on the second redirect
+([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat
 enums ([[decisions/260530_ast-stays-flat|ast-stays-flat]]); no desugaring happens

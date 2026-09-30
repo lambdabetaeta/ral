@@ -105,30 +105,6 @@ fn bake_inserts_an_interior_capture() {
     );
 }
 
-/// The other interior annotation: a `Pipeline`'s yield.  A focused fixture
-/// stands in — the bake path is identical, and the probe does not hinge on
-/// incidental prelude content.
-#[test]
-fn bake_annotates_a_pipelines_yield() {
-    use ral_core::ir::PipeYield;
-    let ast =
-        ral_core::syntax::parser::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
-    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-        .expect("elaborate");
-    let (annotated, _) = ral_core::bake_prelude(&top);
-    let mut yields = Vec::new();
-    walk_toplevel(&annotated, &mut |c| {
-        if let CompKind::Pipeline { yields: y, .. } = &c.item {
-            yields.push(*y);
-        }
-    });
-    assert_eq!(
-        yields,
-        vec![PipeYield::Unit],
-        "an external tail is captured from stdout — the bake's checked pass writes that yield"
-    );
-}
-
 /// The schemes `bake_prelude` returns are the ones written onto the
 /// annotated toplevel's `Phrase::Define`s — one harvest, not a separate
 /// `TyEnv` walk.  Comparing the toplevel's defines to the returned list

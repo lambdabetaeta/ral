@@ -889,7 +889,7 @@ mod tests {
     }
 
     fn scheme_t2_cancel_now(_u: &mut Unifier) -> Scheme {
-        mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+        mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
     }
 
     thread_local! {

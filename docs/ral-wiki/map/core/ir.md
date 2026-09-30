@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5652477a
-generated_at_date: 2026-09-26
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -71,41 +71,42 @@ annotated ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]])
 — the slots are not optional: "the checker has not run yet" is not a
 representable state.
 
-- `CompKind::Pipeline` is a struct variant
-  `{ stages, stage_types: Vec<Ty>, yields: PipeYield }`. `stage_types` holds one
-  value type per stage, parallel to `stages`, as typing metadata for the
-  structural REPL rather than a transport channel; the elaborator fills it with
-  `Unit` placeholders the annotation pass overwrites. `PipeYield { Last, Unit }`
-  says what the form hands back — the last stage's reported value, or unit
-  because that stage's payload stayed on the byte channel and so never crossed
-  the process boundary. It is a *choice of former*, not a route: the checker
-  reads the last stage's ground route once and writes the answer down, and no
-  route survives into the node. There is nothing per-stage to annotate, because
-  every interior edge is an operating-system byte pipe allocated from stage
-  position and no rule relates one stage's type to its neighbour's
+- `CompKind::Pipeline` is a struct variant `{ stages, stage_types: Vec<Ty> }`.
+  `stage_types` holds one value type per stage, parallel to `stages`, as typing
+  metadata for the structural REPL rather than a transport channel; the
+  elaborator fills it with `Unit` placeholders the annotation pass overwrites.
+  The form's value is its final stage's. There is nothing per-stage to
+  annotate, because every interior edge is an operating-system byte pipe
+  allocated from stage position and no rule relates one stage's type to its
+  neighbour's
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]],
   [[map/core/typecheck|typecheck]]).
+- `CompKind::If { cond, then, else_ }` and `CaseArm { tag, body }` carry their
+  arms as `Spanned<Val>`: a thunk the form forces if it chooses it. A literal
+  `{ … }` is that thunk, and so is a name holding one, so both are forced the
+  same way; the elaborator refuses any other atom in arm position
+  (`Elaborator::elab_arm`).
 - `CompKind::Case { scrutinee, arms: Vec<CaseArm> }` is Levy's sum eliminator:
-  a `CaseArm` is a tag, the `IrPattern` its payload binds, and the computation
-  to run, so the alternatives are a list fixed at parse time and every arm body
-  is a node the checker can annotate — an `if` with as many branches as the
-  row has labels ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
-  An `ArmBody` is `Inline` or `Applied` — the branch the user wrote out, or the
-  handler they named applied to the payload. Both are the same branch and are
-  typed alike; the distinction exists so a handler that is not a function is
-  faulted as an *arm*.
+  a `CaseArm` is a tag and the thunk of a function of its payload to run, so
+  the alternatives are a list fixed at parse time and every arm is a node the
+  checker can annotate — an `if` with as many branches as the row has labels
+  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+- `Exec { head, args, redirects, site }` is an external or builtin call;
+  `site` is the type the checker solved at a boundary call, which that door
+  admits its value against, and `None` for every other head.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
-  payload coercion: run the body, capture its stdout, return those bytes
-  exactly — total and lossless. `CompKind::Decode(Val)` is the other half:
-  read that `Bytes` value as text, one trailing terminator dropped and a
-  strict UTF-8 decode, which is the partial, lossy step — the kernel's
-  `decode` takes a value, so it reads a bound variable rather than nesting a
-  `Comp`. Neither has surface syntax; [[map/core/typecheck|typecheck]]'s
-  `annotate` pass composes them as `Capture(body) to x. Decode(x)` by demand
-  propagation, and `Mentions`' walk descends into the `Capture` and
-  the `Bind`. The reading is a node and not a command so that its meaning is
-  fixed where the checker writes it
-  ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
+  coercion: run the body, which is `F Unit`, collect what it writes, and return
+  those bytes exactly — total and lossless. `CompKind::Decode(Val)` is the
+  other half: read that `Bytes` value as text, one trailing terminator dropped
+  and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
+  takes a value, so it reads a bound variable rather than nesting a `Comp`.
+  Neither has surface syntax; [[map/core/typecheck|typecheck]]'s `annotate`
+  composes them as `Capture(body) to x. Decode(x)` around each command
+  `capture_sites` recorded, and `Mentions`' walk descends into the `Capture`
+  and the `Bind`. The reading is a node and not a command so that its meaning
+  is fixed where the checker writes it
+  ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+  [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
 
 - `CompKind::Rec { group: Arc<GroupNode>, index }` is the `index`-th member of
@@ -116,13 +117,8 @@ representable state.
   `Arc`, and `annotate` (`typecheck/annotate.rs`) preserves the sharing by
   memoizing its rebuild per source `Arc`'s identity.
 
-The route types live in `core/src/typecheck/route.rs`, a private module of the
-checker, and no name from them is reachable from `ir`, `evaluator`, or
-`runtime`: the module boundary is the proof that the checked IR is route-free.
-Every verdict the evaluator needs is explicit syntax — a `PipeYield`, a
-`Capture`/`Decode` pair. The elaborator's placeholder yield is `PipeYield::Last`, which
-is what an unconstrained route defaults to anyway, and unreachable in practice
-since the checker runs before every evaluation.
+Every verdict
+the evaluator needs from the checker is explicit syntax: a `Capture`/`Decode` pair, a site, a scheme.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
 `TildePath`); `written()` gives it back as the source spelled it, `~`

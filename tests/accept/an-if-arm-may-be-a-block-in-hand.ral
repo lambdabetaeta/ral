@@ -1,0 +1,4 @@
+let aaah = { echo chosen }
+let baaah = { echo other }
+if true $aaah else $baaah
+let x = if true $aaah else $baaah

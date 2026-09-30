@@ -5,6 +5,8 @@ superseded_by: decisions/260809_pipes-are-positional-byte-wires
 
 # Pipeline modes are equality-constrained, in one shared definition
 
+> Also superseded by [[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]: a command is `F Unit`, and there is no mode.
+
 A pipeline stage has a computation type `F[I,O] A`; connecting two stages
 requires `O_left = I_right`, and a value cannot silently cross a byte edge
 (`docs/SPEC.md` §7.1, §17.4). Modes are therefore *equality*-constrained:

@@ -93,10 +93,9 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 
 /// A malformed *literal* rc key is a type error, caught before the file
 /// runs at all: the whole rc is skipped, not merely that one key — the
-/// keys around it do not survive either. `rc_computed_bad_key_fails_the_whole_file`,
-/// below, is the same mistake through a computed rc; `rc_unknown_key_in_a_mapped_rc_fails_the_whole_file`
-/// is the same mistake again through a *map* rc, where the checker has no row
-/// to hold and the runtime door refuses the file instead.
+/// keys around it do not survive either.  A *map* rc is refused the same way,
+/// statically; the same mistake through a decoded rc, whose type the checker
+/// cannot see, is the runtime door's (`rc_unknown_key_in_a_decoded_rc_fails_the_whole_file`).
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
     let (_dir, env) = rc_home("return [edit_mode: 42, bindings: [okname: 'yes']]");
@@ -118,7 +117,8 @@ fn rc_bad_literal_key_fails_the_whole_file() {
 /// through a spread, which a literal-only rule would wave through.
 #[test]
 fn rc_unknown_key_behind_a_spread_is_a_static_error() {
-    let (_dir, env) = rc_home("let extra = [surfase: 'minimal']\nreturn [...$extra, env: [:]]");
+    let (_dir, env) =
+        rc_home("let extra = [surfase: 'minimal', env: [:]]\nreturn [...$extra, env: [:]]");
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
@@ -133,14 +133,35 @@ fn rc_unknown_key_behind_a_spread_is_a_static_error() {
     );
 }
 
-/// An rc returning a *map* has no row to check, so the same keyset is met at
-/// `apply_rc_config` instead: the key is named, the list is offered — and,
-/// agreeing with the record spelling above, the whole rc is refused rather
-/// than the keys around the bad one landing first. The shell still starts,
-/// with defaults, and the refusal says so.
+/// An rc returning a *map* is refused before it runs: its keys are the table's
+/// labels, so it is written as a record.
 #[test]
-fn rc_unknown_key_in_a_mapped_rc_fails_the_whole_file() {
+fn rc_returning_a_map_is_a_static_error() {
     let (_dir, env) = rc_home("return [:, surfase: 'minimal', edit_mode: 'vi']");
+
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("takes a record of settings")
+            && out.stderr.contains("skipped due to type errors"),
+        "a map rc must be refused statically: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("alive"),
+        "a broken rc must not strand the user at no shell: {}",
+        out.stdout
+    );
+}
+
+/// An rc typed at a variable — here decoded from JSON — has no type for the
+/// checker to ascribe, so the keyset is met at `apply_rc_config` instead: the
+/// key is named, the list is offered, and the whole rc is refused rather than
+/// the keys around the bad one landing first.  The shell still starts, with
+/// defaults, and the refusal says so.
+#[test]
+fn rc_unknown_key_in_a_decoded_rc_fails_the_whole_file() {
+    let (_dir, env) =
+        rc_home(r#"return !{echo '{"surfase": "minimal", "edit_mode": "vi"}' | from-json}"#);
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
@@ -165,12 +186,13 @@ fn rc_unknown_key_in_a_mapped_rc_fails_the_whole_file() {
     );
 }
 
-/// A malformed *value* on a known key, through a mapped rc, refuses the
+/// A malformed *value* on a known key, through a decoded rc, refuses the
 /// whole file exactly as an unknown key does — agreeing with the record
 /// spelling, which fails the same way statically on the same mistake.
 #[test]
-fn rc_bad_value_in_a_mapped_rc_fails_the_whole_file() {
-    let (_dir, env) = rc_home("return [:, edit_mode: 3, recursion_limit: 4096]");
+fn rc_bad_value_in_a_decoded_rc_fails_the_whole_file() {
+    let (_dir, env) =
+        rc_home(r#"return !{echo '{"edit_mode": 3, "recursion_limit": 4096}' | from-json}"#);
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(

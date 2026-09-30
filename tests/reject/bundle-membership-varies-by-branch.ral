@@ -1,4 +1,0 @@
-# contains: 'dir'
-let c = true
-let o = if $c { return [dir: "/tmp", env: [:]] } else { return [env: [:]] }
-within $o { return "ok" }

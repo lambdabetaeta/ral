@@ -230,10 +230,8 @@ where
     let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
     let (_join, cancel) = shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
-            // A worker's visible stream *is* its handle buffer: nobody is
-            // watching it until `await` drains one, so both conduits land
-            // there and a discarded statement is held rather than interleaved.
-            child.io.ambient = stdout.clone();
+            // A worker's stdout is its handle buffer: nobody is watching it
+            // until `await` drains one.
             child.io.stdout = stdout;
             child.io.stderr = stderr;
             // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin
@@ -283,6 +281,7 @@ where
         joined,
         last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
         cmd: cmd.clone(),
+        site: None,
         cancel,
     };
     let id = WorkerId::mint();
@@ -384,8 +383,8 @@ fn worker_body(
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
 ///
-/// Buffered: stdout/stderr accumulate in per-handle buffers and drain to the
-/// caller's sinks on `await`.  The worker's own `Shell` is the only one the
+/// Buffered: stdout/stderr accumulate in per-handle buffers and come back as
+/// the `stdout`/`stderr` fields of `await`'s record.  The worker's own `Shell` is the only one the
 /// body touches, so "blocks discard their state" falls out of the thread's
 /// lifecycle with no boundary ceremony.
 pub(crate) fn builtin_spawn(
@@ -613,10 +612,27 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mo
     }
 }
 
+/// Admit the value a worker settled with against the site its handle was
+/// reacquired at, if it was: observers of one worker at two sites check it
+/// at each.
+fn admit_handled(handle: &HandleInner, value: &Value, shell: &Shell) -> Settled<()> {
+    match &handle.site {
+        Some(site) => site
+            .admit_handled(value)
+            .map_err(|mismatch| mismatch.refusal("service-handle", shell)),
+        None => Ok(()),
+    }
+}
+
 /// Project a finished block's outcome to the `await`/`race` record, re-raising
 /// an `Err` verbatim.
-fn project_completed(completed: CompletedHandle) -> Settled<Value> {
+fn project_completed(
+    completed: CompletedHandle,
+    handle: &HandleInner,
+    shell: &Shell,
+) -> Settled<Value> {
     let value = completed.outcome?;
+    admit_handled(handle, &value, shell)?;
     Ok(Value::map(vec![
         ("value".into(), value),
         ("stdout".into(), Value::bytes(completed.stdout)),
@@ -667,7 +683,7 @@ pub(super) fn await_handle(
     let (_, completed) = wait_first_settled(&[handle], mooring)?;
     shell.local.workers.remove(handle);
     replay_deferred_surface(handle, &completed, mooring);
-    project_completed(completed)
+    project_completed(completed, handle, shell)
 }
 
 /// `await <handle>` -- wait for a concurrent block to complete and return its result record.
@@ -703,7 +719,10 @@ pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         // A settled poll observes as `await` does, so it removes the entry too.
         shell.local.workers.remove(handle);
         let outcome = match completed.outcome {
-            Ok(value) => variant("ok", Some(Box::new(value))),
+            Ok(value) => {
+                admit_handled(handle, &value, shell)?;
+                variant("ok", Some(Box::new(value)))
+            }
             Err(e) => variant("err", Some(Box::new(break_record(&e, shell)))),
         };
         let settled = Value::map(vec![
@@ -752,7 +771,7 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
         }
     }
     replay_deferred_surface(winner, &completed, mooring);
-    project_completed(completed)
+    project_completed(completed, winner, shell)
 }
 
 /// An `Escape`'s exit code: `exit code`'s own.
@@ -858,6 +877,7 @@ mod tests {
             joined: Arc::new(Mutex::new(false)),
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
+            site: None,
             cancel: crate::process::CancelScope::default(),
         }
     }
@@ -1042,6 +1062,7 @@ mod tests {
             joined: Arc::new(Mutex::new(false)),
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
+            site: None,
             cancel: worker_scope.clone(),
         };
 
@@ -1714,53 +1735,44 @@ mod tests {
         assert_eq!(status(multiline), 1);
     }
 
-    /// A head a handler intercepts runs that handler, per name and by catch-all
-    /// alike, birthing nothing: the zero budget is the witness.  The arm is a
-    /// command, so what reached it is read off what it wrote — the argv after
-    /// the head, and the head's own name for a catch-all — and its value is
-    /// `Unit`, which is what an intercepted `detach` reports.
+    /// A head a handler intercepts is refused, per name and by catch-all alike:
+    /// a handler runs inside this session, so nothing could be detached.  A stub
+    /// stands in for `detach` itself.
     #[cfg(unix)]
     #[test]
-    fn detach_runs_a_handler_that_intercepts_its_head() {
-        let mut shell = detach_test_shell(0);
-        let (by_name, out) = run_captured(
-            &mut shell,
+    fn detach_refuses_a_head_a_handler_intercepts() {
+        let mut shell = detach_test_shell(4);
+        for src in [
             r#"within [handlers: [my-server: { |args| echo ...$args }]] { detach "a server" my-server up now }"#,
-            None,
-        );
-        assert_eq!(
-            by_name.expect("a per-name handler runs in place of the birth"),
-            Value::Unit
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&out),
-            "up now\n",
-            "the handler receives the argv after the head, as an ordinary call would"
-        );
-
-        let (catch_all, out) = run_captured(
-            &mut shell,
             r#"within [handler: { |n _a| echo $n }] { detach "a server" my-server }"#,
-            None,
-        );
-        assert_eq!(
-            catch_all.expect("a catch-all handler intercepts the head too"),
-            Value::Unit
-        );
-        assert_eq!(String::from_utf8_lossy(&out), "my-server\n");
+        ] {
+            let err = run_captured(&mut shell, src, None)
+                .0
+                .expect_err("a handled head is no program to detach");
+            let Break::Error(e) = err else {
+                panic!("an error expected, got {err:?}");
+            };
+            assert!(
+                e.message.contains("`my-server` is handled here"),
+                "{}",
+                e.message
+            );
+        }
     }
 
-    /// A base frame's name runs the frame in place of a birth, so it spends no
-    /// budget.  The witness is the contrast with `detach_refuses_past_its_budget`
-    /// directly below: the same exhausted budget refuses `/bin/echo`, a process
-    /// image, and admits `echo`, a frame — only the head's kind differs.
+    /// A base frame's name is ral's own, and runs inside this session: refused,
+    /// the budget untouched.
     #[cfg(unix)]
     #[test]
-    fn detach_reaches_a_base_frame_instead_of_spawning_it() {
-        let mut shell = detach_test_shell(0);
-        run_captured(&mut shell, r#"detach "a server" echo hi"#, None)
+    fn detach_refuses_a_base_frames_name() {
+        let mut shell = detach_test_shell(4);
+        let err = run_captured(&mut shell, r#"detach "a server" echo hi"#, None)
             .0
-            .expect("a base frame's name runs the frame, not a birth");
+            .expect_err("a base frame is no program to detach");
+        let Break::Error(e) = err else {
+            panic!("an error expected, got {err:?}");
+        };
+        assert!(e.message.contains("`echo` is ral's own"), "{}", e.message);
     }
 
     /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.
@@ -1847,6 +1859,7 @@ mod tests {
             joined: Arc::new(Mutex::new(false)),
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
+            site: None,
             cancel: crate::process::CancelScope::default(),
         };
 

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 39934600
-verified_at_date: 2026-09-06
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, swap_ambient_stdout]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, write_sink, buffer_overflowed]
 ---
 
 # Output capture and detachment
@@ -14,44 +14,45 @@ server is the canonical instance: run inline it stalls the call to the deadline
 and is killed with its tree; spawned it returns instantly and survives, reaped
 only for neglect — or never, if born a `service`.
 
-## The `Capture` node: a computation's own byte payload
+## The capture frame: a computation's own bytes
 
 **This section names a different mechanism from the drain-to-EOF story
 below, though both swap in a `Sink::Buffer`.** The evaluator's `Capture` node
-is inserted by [[internals/compilation-ladder|annotate]] wherever a value
-demand meets a byte [[design/types|payload route]]. A command substitution is
-the canonical example: `let v = echo hi`. It does not inspect the operand's
-produced value. The operand's type already routes its payload to stdout, so
-there is nothing left to discriminate.
+is written by the checker, and only by it: `⟦·⟧`, the elaboration of `let`,
+wraps a command that writes in `cap M to d. decode d` wherever the right-hand
+side's result comes from it (`let v = echo hi`; see
+[[internals/type-inference|type-inference]] and
+[[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+A command is an `F Unit` computation — it writes and returns nothing — so the
+frame inspects no produced value: `cap : F Unit → F Bytes`.
 
 - `CompKind::Capture` pushes `Frame::Capture` (`core/src/evaluator/machine.rs`,
   [[internals/evaluator-machine|evaluator-machine]]) and swaps `shell.io.stdout`
-  to a fresh `Sink::Buffer` for the run of its operand.
-- On success, `Frame::Capture`'s return rule takes the buffer exactly, as
-  `Value::Bytes`. The text a value boundary reads comes from the `Decode`
-  node the checker binds over it — no frame of its own, since the kernel's
-  `decode` takes a value and `step_eval` reads it inline: one trailing
-  terminator stripped, then `decode_utf8_strict`, over the bytes closing the
-  bound variable gives back — the bind's scope dropped first, so the buffer
-  moves into the string rather than being copied. A decode failure names `| from-bytes` as the
-  route for output that is not valid UTF-8.
-- On failure, `Frame::Capture`'s halt rule releases whatever bytes the
-  operand already wrote to the outer stream, before the error propagates. A
-  failed operand's partial output is therefore not silently lost.
+  to a fresh `Sink::Buffer` for the run of its operand, the frame holding the
+  sink it replaced.
+- On success, `Frame::Capture`'s return rule restores that sink and takes the
+  buffer exactly, as `Value::Bytes`; the operand's own value is ignored. The
+  text a value boundary reads comes from the `Decode` node the checker binds
+  over it — no frame of its own, since the kernel's `decode` takes a value and
+  `step_eval` reads it inline: one trailing terminator stripped, then
+  `decode_utf8_strict`, the bind's scope dropped first so the buffer moves into
+  the string rather than being copied. A decode failure names `| from-bytes` as
+  the route for output that is not valid UTF-8.
+- On a halt, `Frame::Capture`'s halt rule flushes whatever bytes the operand
+  already wrote to the sink it replaced (`Shell::write_sink`), then propagates
+  the halt. A failed operand's partial output is therefore not silently lost.
 - An operand may contain an external child. That child's stdout still drains
   through the ordinary pump-to-EOF machinery below. It lands in the
   `Capture` buffer rather than in the terminal.
 
-**Flush-through routes a non-final write past the innermost buffer.** A
-block is a right-nested `Bind`, `a; b` being `a to _. b`
-([[internals/evaluator-machine|evaluator-machine]]), and stepping a `Bind`
-swaps `shell.io.stdout` to the ambient sink (`swap_ambient_stdout`,
-`core/src/evaluator/machine.rs`) before evaluating its left-hand computation,
-restoring the prior sink when the `To` frame it pushed returns. Every
-non-final part therefore writes to the sink one level out; only the
-sequence's tail is its payload. This is what keeps a syntactic thunk and an
-opaque one in agreement: `!{M}` and `let b = {M}; !$b` observe the same
-bytes in a capturing context. They differ only in buffering latency.
+**A discarded statement writes to `stdout`, wherever that is.** A block is a
+right-nested `Bind`, `a; b` being `a to _. b`
+([[internals/evaluator-machine|evaluator-machine]]), and stepping it touches no
+sink. Inside a capture `stdout` is the buffer, so what a block writes before its
+tail is captured with the tail unless an inner `let` takes it: `let x = !{ echo
+a; echo b }` prints `a` and binds `b`, because `⟦·⟧` follows only the block's
+result, while `let x = !{ let y = echo a; echo b }` prints nothing and binds
+`b`. A captured stand-in's every statement is captured.
 
 ## Capture is a drain to EOF
 
@@ -228,7 +229,8 @@ of the child's pgid.
 - Everything up to the birth is the ordinary external-command machinery —
   identity, `vet`, `build_command` (`core/src/runtime/command/detach.rs`), so the
   grant judges the call exactly as it judges any exec and a head a handler in
-  scope intercepts runs that handler instead, birthing nothing. Only the last
+  scope intercepts is refused, birthing nothing: a handler runs inside this
+  session, so there is nothing to detach (to run the real program, `^name`). Only the last
   act differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
   once and hands the grandchild's pid back over a pipe, so no `RunningChild` ever
   records the pgid both kill paths address. Reaching the same lifetime by hiding
@@ -240,8 +242,8 @@ of the child's pgid.
   fd 0, fd 1, fd 2 all on `/dev/null`. There is no pump, so none of the
   drain-to-EOF story above applies, and no `SINK_BUFFER_CAP` — there is nothing
   to buffer.
-- What comes back is a **receipt** — `{ pid, desc }`, a record rather than a
-  `Value::Handle` — and nothing is written anywhere. So there is nothing for a
+- What comes back is a **receipt** — `{ pid, desc }`, an `F [pid: Int, desc: String]`
+  record rather than a `Value::Handle` — and nothing is written anywhere. So there is nothing for a
   `LeaseClass` to grade, nothing for `cancel_all` to reach, and no exit status:
   the session never waited and cannot. The survivor is *mute*: a program worth
   outliving a session keeps its own log, and the only way to learn whether it is

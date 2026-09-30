@@ -1,0 +1,1 @@
+let h = { |n a| fail [status: 1, message: 'unhandled command'] }; within [handler: $h] { zzz }

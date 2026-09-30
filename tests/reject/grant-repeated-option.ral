@@ -1,0 +1,2 @@
+# contains: `net` is written twice in `grant`'s options; write it once
+grant [net: true, net: false] { return "ok" }

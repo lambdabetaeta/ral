@@ -1,0 +1,2 @@
+# contains: standard input is fed twice
+cat < a << #'b'#

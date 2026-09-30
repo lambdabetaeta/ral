@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'active; who places the coercion is superseded by [[decisions/260930_capture-is-decided-by-syntax]] — the coercion is unchanged, but `⟦·⟧` on a `let` places it, not a demand walk.'
 ---
 
 # A coercion is syntax, or it is not a coercion

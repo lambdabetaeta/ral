@@ -28,7 +28,7 @@ let names = map { |f| !{basename $f '.ral' | from-string} } $files
 echo $names
 
 # reduce has no initial value, so an empty list has nothing to reduce
-try { reduce { |a b| return $[$a + $b] } [] } { |_| echo 'empty reduce' }
+try { reduce { |a b| return $[$a + $b] } []; return () } { |_| echo 'empty reduce' }
 
 # A native applied to a prefix of its arguments is a function of the rest
 let part = $round 1.4

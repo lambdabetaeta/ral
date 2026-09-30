@@ -28,9 +28,4 @@ let total = { |strm|
 }
 echo !{total !{smap { |n| return $[$n * 10] } !{count 3}}}
 
-# Piped whole, a stream is a value like any other: a non-final stage's value
-# goes nowhere, so the program is silent rather than wrong
-let one-cell = `more [head: 1, tail: { return `done }]
-$one-cell | { |e| return $[$e + 1] } | { |r| return $[$r * 10] }
-
 echo 'streams done'

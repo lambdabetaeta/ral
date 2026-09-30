@@ -1,0 +1,6 @@
+let drain = { |strm|
+    case !$strm [
+        `more: { |cell| echo $cell[head]; echo $cell[head]; drain $cell[tail] },
+        `done: { |_| return () }
+    ]
+}

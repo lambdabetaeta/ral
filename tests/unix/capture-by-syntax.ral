@@ -1,0 +1,36 @@
+# Test: what a `let` captures of an external command, and what it leaves alone
+
+let assert_eq = { |name expected actual|
+    if !{equal $expected $actual} {} else {
+        warn "FAIL: $name expected: $expected actual: $actual"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+# A fused `2>&1` is the command's own: the capture takes both streams
+let both = sh -c 'echo err >&2; echo out' 2>&1
+assert_eq 'fused dup' "err\nout" $both
+
+# A redirect around a block is not: the block's writes go where they always do,
+# and the `let` binds what the block returns
+let noisy = { sh -c 'echo err >&2; echo out' }
+let dup = noisy 2>&1
+assert_eq 'framed dup' true !{equal () $dup}
+
+# Bound externals and functions differ only at the call
+let ls-dir = { |d| ls $d; echo done }
+let d = temp-dir
+echo entry > "$d/entry"
+let streamed = ls-dir $d
+assert_eq 'streamed' true !{equal () $streamed}
+let listed = ls-dir $d | from-line
+assert_eq 'listed' "entry\ndone" $listed
+
+# `cat … | grep …` captures through the hoist an interpolation adds
+let who = 'ntr'
+let found = cat "$d/entry" | grep "e$who"
+assert_eq 'hoisted stage' entry $found
+let starred = printf 'a\n*b\n' | grep '*'
+assert_eq 'plain stage' '*b' $starred
+
+echo 'unix capture done'

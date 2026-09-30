@@ -1,2 +1,2 @@
-# contains: takes named options
+# contains: `within` takes its options written in its own bracket
 let m = [:, dir: "/tmp"]; within $m { return "ok" }

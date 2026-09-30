@@ -1,5 +1,0 @@
-# contains: is a field name
-# contains: read a map's key with `get $m a <default>`
-let k = 'a'
-let m = [$k: 1]
-return $m[a]

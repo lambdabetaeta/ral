@@ -427,6 +427,7 @@ mod tests {
                 joined: Arc::new(Mutex::new(false)),
                 last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
                 cmd: cmd.to_string(),
+                site: None,
                 cancel: crate::process::CancelScope::default(),
             },
         }

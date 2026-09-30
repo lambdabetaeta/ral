@@ -20,9 +20,9 @@ echo !{up hello}
 # Expected: hello
 
 # Unit is a value
-echo !{return ()}
+echo !{str !{return ()}}
 let m = [done: ()]
-echo $m[done]
+echo !{str $m[done]}
 
 # $NPROC is a positive integer
 echo $[$NPROC > 0]

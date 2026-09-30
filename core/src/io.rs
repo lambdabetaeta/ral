@@ -12,8 +12,8 @@ mod terminal;
 pub(crate) use edge::{DeadEdge, Edge};
 pub use sink::{ByteBuffer, CapturedBytes, Sink};
 pub(crate) use sink::{
-    SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, take_buffer, tee_into,
-    tee_with_buffer, terminator_len,
+    SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, take_buffer, tee_with_buffer,
+    terminator_len,
 };
 pub use source::{Source, SourceReader};
 pub use terminal::{InteractiveMode, TerminalState};
@@ -58,12 +58,8 @@ impl LaunchRole {
 /// All pipeline-stage IO state for a single Shell.
 pub(crate) struct Io {
     pub stdin: Source,
-    /// Where the running computation's own payload goes.
+    /// Where the running computation writes.
     pub stdout: Sink,
-    /// The nearest enclosing *visible* stream: where a discarded statement
-    /// writes.  Never a capture buffer, so however deep the brackets nest
-    /// there is no rule about which one wins.
-    pub(crate) ambient: Sink,
     /// `spawn` installs a buffer sink here, so a worker's errors are held in
     /// its handle and drained on `await`, never interleaved with the parent's.
     pub stderr: Sink,
@@ -74,23 +70,11 @@ pub(crate) struct Io {
     pub(crate) launch_role: LaunchRole,
 }
 
-impl Io {
-    /// Swap `stdout` for the ambient sink, returning what `stdout` was.
-    /// `with_ambient_stdout` is a bracket over this; the `Bind` rule of a
-    /// binder's RHS is the other caller — the RHS's bytes are effect, so
-    /// they go where a discarded statement's do, and the frame that pushed
-    /// this swap restores it from the value handed back.
-    pub(crate) fn swap_ambient_stdout(&mut self) -> Sink {
-        std::mem::replace(&mut self.stdout, self.ambient.clone())
-    }
-}
-
 impl Default for Io {
     fn default() -> Self {
         Self {
             stdin: Source::Terminal,
             stdout: Sink::Terminal,
-            ambient: Sink::Terminal,
             stderr: Sink::Stderr,
             interactive: false,
             terminal: TerminalState::default(),

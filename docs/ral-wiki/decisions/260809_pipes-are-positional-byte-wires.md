@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'active; its route-survival and WF-2 paragraphs are superseded by [[decisions/260930_capture-is-decided-by-syntax]] — pipes stay positional; a stage writes.'
 supersedes: decisions/260601_modes-equality-constrained-shared, decisions/260603_ir-pipespec-annotation, decisions/260603_unconditional-mode-pass, decisions/260606_alias-head-defines-its-modes, decisions/260609_pure-pipe-equation, decisions/260610_value-edge-locality, decisions/260628_non-final-bytes-are-effects, decisions/260809_byte-only-pipelines
 ---
 
@@ -13,6 +13,8 @@ supersedes: decisions/260601_modes-equality-constrained-shared, decisions/260603
 > decision recorded here — one route per pipeline, no per-stage `Wire` — is
 > unaffected; only the shape of that one route's runtime carrier changed.
 > Read `final_route` below as `PipeYield`.
+
+> Superseded in part by [[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]: the route-survival and WF-2 paragraphs, `PipeYield` and `final_route` are gone. Pipes stay positional; a stage writes, and the pipeline's value is its final stage's.
 
 ## Decision
 

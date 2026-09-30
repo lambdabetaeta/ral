@@ -266,7 +266,7 @@ let minimum = { |xs|
 ## record in `f` to mix element types — lists are homogeneous — and to chain
 ## into higher dimensions; this is the meshgrid of a benchmark matrix:
 ##   let grid = cross $progs $strats { |p s| [prog: $p, strat: $s] }
-##   cross $grid !{range 1 4} { |row r| [...$row, rep: $r] }
+##   cross $grid !{range 1 4} { |row r| [row: $row, rep: $r] }
 let cross = { |a b f| flat-map { |x| map { |y| $f $x $y } $b } $a }
 
 ## Partition `xs` into a map from string key to the list of elements that
@@ -352,17 +352,8 @@ let concat = { |xss|
 }
 
 # Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
-# and `filter-lines` are ergonomic wrappers around it.
-#
-# Each `echo` below is its callback's *tail*, not a statement before one, and
-# that is what makes these stages produce bytes rather than chatter: a
-# statement's write escapes to the visible stream, a tail's write is the
-# computation's payload and so is what a downstream stage reads.
-#
-# `filter-lines` spells its empty branch out for that reason.  An `if` with no
-# `else` is a statement form — it runs its branch for effect and returns unit —
-# so the `echo` would be chatter, and a filter whose output escapes instead of
-# riding the payload cannot feed a downstream stage.
+# and `filter-lines` are ergonomic wrappers around it, whose callbacks `echo`
+# because a stage feeds the next by writing.
 ## Map a function over stdin lines, echoing results.
 let map-lines = { |f|
     fold-lines { |_ line| echo !{$f $line} } ()

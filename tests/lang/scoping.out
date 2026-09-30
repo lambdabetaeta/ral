@@ -3,19 +3,10 @@
 inner
 outer
 6
-undefined caught
 6
 shadowed
 native restored
 42
 42
-grant: no leak
-within: no leak
-try: no leak
-guard cleanup
-guard: no leak
-audit: no leak
-forced block: no leak
 42
-sibling block does not see it
 scoping tests done

@@ -1,8 +1,11 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260930_capture-is-decided-by-syntax
 ---
 
 # Modes get a solver: joins are deferred, and a boundary solves only what it owns
+
+> Superseded by [[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]: there is no route to solve.
 
 The type checker is graded CBPV. The CBPV half — equi-recursive unification,
 rows by Rémy rewrite, cycle-snapshotting schemes — has been quiet since June.

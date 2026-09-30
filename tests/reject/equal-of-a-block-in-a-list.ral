@@ -1,0 +1,3 @@
+# codes: T0074
+# contains: this is a block
+echo !{equal [{ return 1 }] [{ return 1 }]}

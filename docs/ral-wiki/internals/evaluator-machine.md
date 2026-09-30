@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e1bace22
-verified_at_date: 2026-09-26
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, apply_handler, launch_thread_stage, Assemble]
+verified_at_commit: 8d868e18
+verified_at_date: 2026-09-30
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -12,9 +12,8 @@ Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
 `&Mooring`. Nothing else in the crate constructs a state or sees the stack;
 the module's doors are `evaluate(comp, env, …)` — inject ⟨M, E⟩ over the
 empty stack and step until it is empty — `apply(f, args, …)`, the same
-from a closed value meeting arguments, its argument-free twin `force(v, …)`,
-and `apply_handler`, `detach`'s one-shot handler call. All return
-`Settled<Value>`.
+from a closed value meeting arguments, and its argument-free twin
+`force(v, …)`. All return `Settled<Value>`.
 
 **What is in focus is a computation closure.** `Focus::Eval { comp, env }`
 pairs a [[map/core/ir|computation]] with the whole environment it was reached
@@ -43,7 +42,11 @@ capture
 nothing, so `force(thunk M) = M` and a forced block's `cd` persists exactly
 as a lambda's does ([[design/scoping|scoping]]). A literal `!{ … }` takes
 that equation as a rule (U-β): `Force(Val::Thunk(node))` puts `node.shape()`
-in focus under the current environment, closing nothing. Whether a thunk "is
+in focus under the current environment, closing nothing (`Machine::force_val`).
+Every form that suspends a command — `if`, `case`, `try`, `?`, `guard`,
+`within`, `grant` — holds its arms as thunks and forces the one it chooses the
+same way: `if true $aaah else $baaah` runs `$aaah`, and `case` pushes an
+`Apply` with the variant's payload before forcing the arm. Whether a thunk "is
 a lambda" is read off the body's shape by `Comp::arrow`, never stored.
 
 **A list, record or map literal is a value closure too.** `form(val, env,
@@ -61,7 +64,7 @@ literal eagerly instead, forming each element with `sig`. Inspecting a
 
 **`step` is the tables.** `Machine::step` dispatches on the focus:
 `eval_rules` has one match arm per `CompKind` (the ξ-rules: `Return` closes
-its value, `Bind` swaps stdout to the ambient sink and pushes `To`, `App`
+its value, `Bind` pushes `To`, `App`
 closes its arguments then pushes `Apply` and evaluates the head, `Rec`
 unfolds the n-ary group, `Exec` classifies the head through the lexical
 environment, `Pipeline` launches and joins its node, the six handler forms
@@ -85,7 +88,7 @@ and `step_exec` are rules under the same discipline and return the same
 stamp and cancelling a recursive definition rendered without a caret.)
 
 **`To` holds its environment, which is what makes extent structural.** `M to
-x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M
+x. N` pushes `To { bind, env: E }` *before* M runs; when M
 returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
 scopes over `N` and nothing else whatever M did. It is the only frame with
 syntax to close over, so the only one carrying an `Env`. `Cleanup` is
@@ -93,11 +96,24 @@ the kernel's `to _` with a settled rest: it drops the cleanup's value and
 resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
+the one interpreter of a redirect list (stdin, stdout, stderr open in that order; a
+streaming write is observed at its open, an atomic `>` when the body settles),
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Audit`
 closes its trail scope and restores the capture policy; `Try` holds only its
 handler. `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect` and `Unmask` are boxed).
+
+**`Capture` holds the sink it replaced.** `cap M` pushes a fresh buffer as
+`shell.io.stdout` and keeps the previous sink in the frame. A discarded statement
+writes to `stdout`, which is wherever the run's stdout is, so inside a capture
+it is the buffer. On return the frame
+restores the sink and yields the buffer as `Bytes`, ignoring the body's value
+(`cap : F Unit → F Bytes`); a buffer past `SINK_BUFFER_CAP` halts
+(`capture_overflowed`). On a halt it flushes what the body wrote to the sink it
+replaced (`Shell::write_sink`) and propagates the halt. Which commands a `let`
+wraps in it is decided by the checker, not here
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
 
 `a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
 `_؟_`, `Core.Derived`), right-associated so the last arm stays in tail
@@ -151,7 +167,7 @@ sees it, and a run that halts has installed exactly the `Define`s that ran.
 A block is a right-nested `Bind` chain, `a; b` being `a to _. b`, so a `let`
 inside a block scopes over the rest of the block by structure. `run_phrases`
 takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
-decides leases and the PATH-shadow check.
+decides leases.
 
 **Boundaries.** Three things start a fresh machine over the empty stack: a
 run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
@@ -169,8 +185,8 @@ a process in the pipeline's group, and a ral-written stage is a thread
 (`launch_thread_stage` via `Shell::spawn_thread`) whose shell starts from the
 parent's session and runs `machine::evaluate(comp, env, …)` — the stage's
 subterm under the node's own environment — over the empty stack. The parent's
-`Pipeline` rule holds a `PipeNode` — the process group, the running stages,
-the yield mode — which it `launch`es and `join`s (collect, then finish) in one
+`Pipeline` rule holds a `PipeNode` — the process group and the running stages,
+which it `launch`es and `join`s (collect, then finish) in one
 step: no frame, because nothing runs beneath the node; the outcome climbs the
 parent's frames like any other rule's terminal. **No frame ever crosses**: not
 to a stage, whose stack is empty by construction, nor to a hatched engine,

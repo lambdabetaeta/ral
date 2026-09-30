@@ -1,0 +1,7 @@
+# codes: T0074
+# contains: what `from-json` reads has one type for the whole unit
+let read = { |p| from-json < $p }
+let a = read 'a.json'
+let b = read 'b.json'
+let n = $[$a + 1]
+let m = length $b

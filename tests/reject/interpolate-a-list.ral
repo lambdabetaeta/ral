@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: intercalate
+let xs = [1, 2]
+echo "xs: $xs"

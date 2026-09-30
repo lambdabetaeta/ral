@@ -1,0 +1,4 @@
+# codes: T0074
+# contains: this is a list, but a number or text is needed
+# contains: sort-list-by
+let before = $[[1] < [2]]

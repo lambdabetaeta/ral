@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fffa63b2
-generated_at_date: 2026-09-26
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -9,8 +9,7 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/]
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
 per-child confinement choice. It re-enters evaluation only through
-`evaluator::machine::apply_handler` (`detach`'s one-shot handler call, from
-`command/detach.rs`) and `evaluator::machine::evaluate` (a stage's
+`evaluator::machine::evaluate` (a stage's
 `(comp, env)`, from `pipeline/thread.rs`) — stages carry computation
 closures, so the mutual recursion is irreducible; the evaluator reaches it at
 `PipeNode::launch`/`join` and, dispatching an `Exec` node, at
@@ -35,7 +34,9 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `command.rs` — the External arm: vet the resolved identity, choose its
-  *exec image*, wire stdio per the call's redirects, spawn, and reap.
+  *exec image*, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
+  `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
+  `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
   Submodules: `identity.rs` (`CommandIdentity`, the classify-once
   name/shown/resolved triple), `vet.rs` (existence → argv shape → grant policy,
   yielding a `SpawnPlan` with its `ExecImage`), `process.rs`, `child.rs`,
@@ -66,7 +67,10 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     parent-death tie, so the survivor's authority is frozen as that frame
     left it and no later frame can widen it — it cannot name the process at
     all ([[map/core/capabilities|capabilities]]). All three of its standard
-    descriptors are `/dev/null`.
+    descriptors are `/dev/null`. `detach` refuses a head a handler intercepts
+    (an arm, the catch-all, or a base frame): a handler runs inside this
+    session, so nothing could be detached; its scheme is
+    `[String] → F [pid: Int, desc: String]`.
   - **A bundled coreutils/diffutils/ripgrep head is an `ExecImage::BundledTool`,
     always run as a `ral --ral-bundled-tool <tool>` child** — its inherited
     stdio, env, cwd, process group, and sandbox are the execution context, so it
@@ -85,7 +89,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     `SIGCONT` inline, by whoever waits on it, the same rule everywhere
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
-    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]).
+    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `evaluator::redirect::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     Child stdio routing — the `(Stdio, pump)` plan for a spawned child's
     stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
     the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
@@ -119,12 +123,10 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   the anchor is waited on. `resolve.rs` freezes each stage's launch decision once as
   `StageLaunch` (`Direct { id, args }` | `Thread`) from the head's resolution,
   its redirects, and whether a `!{…}` audit captures bytes, so launch reads a
-  decision rather than re-deriving a dispatch gate. **No route enters that decision**: a
-  stage's dispatch may not depend on where its payload lives, or the choice
-  would stop being observationally transparent. **No route enters anywhere
-  else, either**: the IR's own `PipeYield` — the pipeline's only
-  value-transport question — never passes through resolve at all, riding on
-  `PipeNode` and read once in the fold.
+  decision rather than re-deriving a dispatch gate. A stage with redirects is a `Thread` stage run through that same `RedirectState`; a `Direct` stage has none, and `wire_stdio` wires its stage pipes without interpreting a redirect list. **Nothing about a stage's value enters that decision**: a
+  stage's dispatch may not depend on what its neighbours return, or the choice
+  would stop being observationally transparent. The pipeline's value is its final stage's,
+  read once in the fold.
   `route.rs`'s `open_stage_routes` allocates every interior edge as an
   operating-system byte pipe from **stage position alone** — the zip of
   `Parent : ins` against `outs ++ [Parent]` — and no
@@ -151,8 +153,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     onto the collector. The routes are a local declared *after* the node, so an
     error part-way through closes whatever the loop never consumed before the
     node tears down and a half-wired neighbour sees EOF. `launch.rs` wires one
-    stage's byte endpoints (`route_parent_stdin`, `stage_stdin`,
-    `wire_stage_stdio`)
+    stage's byte endpoints (`stage_stdin`, then the shared `wire_stdio`)
     and dispatches it on its frozen `StageLaunch` (`spawn_stage`,
     `launch_external_stage_direct`); `stage.rs` holds
     `StageHandle`, which dispatches `cancel`/`cut`/`watch`/`arm` over
@@ -212,10 +213,11 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     `Slot { ix, tx }`, wrapped in a `SettleOnDrop` — builds its own
     `StageObservation` and sends `Event::Returned(ix, obs)` as its last act,
     the guard armed until then so an unwind reports in its place. A non-final
-    stage's `stdout` and `ambient` are both its own edge; a **final** stage's
-    are the parent's `stdout` and the parent's `ambient` respectively, so a
-    discarded statement in the final stage leaves an enclosing capture rather
-    than landing in its buffer ([[design/capture|capture]]).
+    stage's `stdout` is its own edge; a **final** stage's is the parent's, so a
+    discarded statement in the final stage writes where an enclosing capture's
+    buffer (`shell.io.stdout`) is ([[design/capture|capture]]). A captured final
+    stage is a `Capture` node, so it runs as a thread stage: its stdin the
+    pipe, its buffer taking what the command writes.
     `ThreadStage` is the collector's handle onto the running thread: `cancel`
     cancels its scope and fires its wake — on Windows also retrying
     `CancelSynchronousIo` until the wake is acknowledged or the thread has
@@ -261,7 +263,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `while live() { recv; step; run }`, no interval and
     no backoff, returning when every stage is observed;
-    `PipeNode::join` is `drive()`, then `fold(mooring, shell, yields)`, the
+    `PipeNode::join` is `drive()`, then `fold(mooring, shell)`, the
     group dropped after). `helper.rs` is the hidden
     `--ral-pipeline-anchor` / `--ral-bundled-tool` child entrypoints — the only
     two multicall flags here, a ral-written stage running on a thread of the

@@ -33,7 +33,7 @@ pub(crate) use exec_arg::RefusedArg;
 mod handler;
 pub(crate) use handler::{
     FrameHandle, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, HandlerRole,
-    HandlerStack, validate_handler_arity,
+    HandlerStack, refused_arm, validate_handler_arity,
 };
 
 // The shared state behind `Value::Handle`.
@@ -43,8 +43,14 @@ pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;
 pub use handle::{CompletedHandle, HandleInner, HandleState, SurfaceBuffer};
 
+// A boundary's checked type, and what a door admits against it.
+mod site;
+pub use site::{Fixings, Mismatch, Site};
+pub(crate) use site::pointer_token;
+
 mod builtin;
-pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable, Convention};
+pub(crate) use builtin::LANGUAGE_CONSTANTS;
+pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable, Convention, Output};
 
 // The inner of `Value::List`.
 mod list;
@@ -75,7 +81,7 @@ pub use flow::{Break, Escape, PolicyError, Settled};
 // `sig` rides along with the coercions: both sit below the builtins and the
 // capability layer, which reach them without importing each other.
 mod coerce;
-pub use coerce::{as_list, as_map, sig};
+pub use coerce::{as_list, as_map, settings_map, sig};
 pub(crate) use coerce::{as_map_ref, sig_hint};
 
 pub use shell::modules::Modules;

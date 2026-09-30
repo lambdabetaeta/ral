@@ -1,2 +1,2 @@
-# contains: couldn't match
+# contains: but a number (Int or Float) is needed
 alias greet { |args| echo 41 }; unalias greet; let r = !{greet}; return $[$r + 0]

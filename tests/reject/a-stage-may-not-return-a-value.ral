@@ -1,0 +1,3 @@
+# codes: T0011
+# contains: a value in stage position writes nothing to the pipe
+return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }

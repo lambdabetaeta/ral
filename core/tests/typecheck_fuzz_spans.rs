@@ -143,9 +143,9 @@ fn span_cases() -> Vec<SpanCase> {
             "map-elem-value",
         ),
         c(
-            "let n = 42\nlet m = [a: 1, ...$n]",
+            "let n = 42\nlet m = [...$n, a: 1]",
             "$n",
-            "map-spread-operand",
+            "record-spread-operand",
         ),
         // A bad stage *early* in a 3-stage pipeline must underline that
         // stage, not the last one.  The lambda still wants an argument, so
@@ -270,7 +270,7 @@ fn span_is_well_formed_for_every_scenario() {
         "surface `card [`text [spans: [[role: \"code\", text: \"x\"], [text: \"y\"]]]]",
         "within [dir: 7] { echo hi }",
         "let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]",
-        "let n = 42\nlet m = [a: 1, ...$n]",
+        "let n = 42\nlet m = [...$n, a: 1]",
         "let n = 42\nkeys $n",
     ];
     for src in probes {

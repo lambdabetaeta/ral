@@ -1,0 +1,5 @@
+let d = "/tmp"
+let e = [KEY: "val"]
+let h = { |n a| echo caught }
+within [dir: $d, env: $e, handler: $h] { return "ok" }
+grant [net: !{ return true }, fs: [read: [$d]]] { return "ok" }

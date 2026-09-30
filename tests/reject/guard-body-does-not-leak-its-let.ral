@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leak_guard
+guard { let leak_guard = 1 } { echo 'guard cleanup' }
+echo $leak_guard

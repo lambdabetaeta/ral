@@ -8,14 +8,16 @@
 //! resolution is env → handlers → external — and it admits no names: a user
 //! handler installs under any.
 //!
-//! [`BuiltinEntry::new`] and [`BuiltinEntry::base_frame`] are the only
-//! constructors, one per half: `BuiltinBody` has no bodiless variant, so no
-//! entry is expressible without a live body.
+//! [`BuiltinEntry::new`], [`BuiltinEntry::boundary`] and
+//! [`BuiltinEntry::base_frame`] are the only constructors — the value half's
+//! two kinds of row, and the argv half's: `BuiltinBody` has no bodiless
+//! variant, so no entry is expressible without a live body.
 
 use super::flow::Settled;
+use super::site::Site;
 use super::value::Value;
 use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule, scheme_curry_depth};
-use crate::typecheck::{CompTy, PayloadRoute, Scheme, Ty, Unifier};
+use crate::typecheck::{CompTy, Scheme, Ty, Unifier};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
@@ -32,10 +34,16 @@ pub(crate) type CapturedBuiltinFn = Arc<
 ///
 /// The [`Mooring`](crate::types::Mooring) is borrowed, not owned: the run's
 /// fixed frame stays disjoint from the `&mut Shell` a body mutates.
+/// A door: handed the [`Site`] the checker solved at its call, which it
+/// admits the value it lets in against.
+pub type BoundaryFn =
+    fn(&[Value], &Arc<Site>, &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>;
+
 #[derive(Clone)]
 pub enum BuiltinBody {
     Static(fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
     Captured(CapturedBuiltinFn),
+    Boundary(BoundaryFn),
 }
 
 impl fmt::Debug for BuiltinBody {
@@ -43,6 +51,7 @@ impl fmt::Debug for BuiltinBody {
         match self {
             Self::Static(_) => f.write_str("BuiltinBody::Static(<fn>)"),
             Self::Captured(_) => f.write_str("BuiltinBody::Captured(<closure>)"),
+            Self::Boundary(_) => f.write_str("BuiltinBody::Boundary(<fn>)"),
         }
     }
 }
@@ -64,12 +73,21 @@ pub enum Convention {
     Argv,
 }
 
+/// What a row does with stdout, declared per row because a body's writing is
+/// not in its signature.  A `Writes` row answers `Unit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    Returns,
+    Writes,
+}
+
 /// A builtin command binding; `doc` is the line `help` and `explain` print.
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
     pub convention: Convention,
     pub(crate) type_rule: BuiltinTypeRule,
     pub doc: &'static str,
+    pub output: Output,
     /// Extra non-typing behaviour the checker's application path reads: which
     /// diagnostic an over-application or a literal misuse earns.  `None` for
     /// the overwhelming majority of rows.
@@ -97,11 +115,28 @@ impl BuiltinEntry {
             convention: Convention::Value,
             type_rule,
             doc,
+            output: Output::Returns,
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
             unit_cache: OnceLock::new(),
         }
+    }
+
+    /// A value row that is a boundary: its result enters typed code through
+    /// `body`, which admits it against the checker's [`Site`].
+    pub const fn boundary(
+        name: Cow<'static, str>,
+        type_rule: BuiltinTypeRule,
+        doc: &'static str,
+        body: BoundaryFn,
+    ) -> Self {
+        Self::new(name, type_rule, doc, BuiltinBody::Boundary(body))
+    }
+
+    /// Whether the row is a boundary, so a call of it carries a [`Site`].
+    pub fn is_boundary(&self) -> bool {
+        matches!(self.body, BuiltinBody::Boundary(_))
     }
 
     /// A base-frame row, typed by the scheme `argv` names.  A signature of
@@ -118,11 +153,19 @@ impl BuiltinEntry {
             convention: Convention::Argv,
             type_rule: argv,
             doc,
+            output: Output::Returns,
             diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
             unit_cache: OnceLock::new(),
         }
+    }
+
+    /// Declare what the row does with stdout — a builder, so the common case
+    /// (`Returns`) names nothing.
+    pub const fn with_output(mut self, output: Output) -> Self {
+        self.output = output;
+        self
     }
 
     /// Attach a diagnostic facet to an otherwise-built entry — a builder
@@ -145,16 +188,14 @@ impl BuiltinEntry {
             .get_or_init(|| scheme_curry_depth(self.type_rule))
     }
 
-    /// Whether this row's declared scheme settles at `Unit` — `F Unit`, the
-    /// value route, as read off the type rule's curry spine and cached like
-    /// [`Self::fixed_arity`].  A byte-routed `F[bytes] Unit` is not this: its
-    /// payload comes from stdout, not from the body's answer.
+    /// Whether the row's declared scheme settles at `Unit`, read off the type
+    /// rule's curry spine and cached like [`Self::fixed_arity`].
     fn settles_at_unit(&self) -> bool {
         *self.unit_cache.get_or_init(|| {
-            fn settled(ct: &CompTy) -> Option<(&PayloadRoute, &Ty)> {
+            fn settled(ct: &CompTy) -> Option<&Ty> {
                 match ct {
                     CompTy::Fun(_, body) => settled(body),
-                    CompTy::Return(route, ty) => Some((route, ty)),
+                    CompTy::Return(ty) => Some(ty),
                     CompTy::Var(_) => None,
                 }
             }
@@ -162,7 +203,7 @@ impl BuiltinEntry {
             let Ty::Thunk(inner) = &scheme.ty else {
                 return false;
             };
-            matches!(settled(inner), Some((PayloadRoute::Value, Ty::Unit)))
+            matches!(settled(inner), Some(Ty::Unit))
         })
     }
 
@@ -175,12 +216,20 @@ impl BuiltinEntry {
         &self,
         _frame: &crate::evaluator::audit::Frame,
         args: &[Value],
+        site: Option<&Arc<Site>>,
         mooring: &crate::types::Mooring,
         shell: &mut crate::types::Shell,
     ) -> Settled<Value> {
-        let value = match &self.body {
-            BuiltinBody::Static(f) => f(args, mooring, shell),
-            BuiltinBody::Captured(f) => f(args, mooring, shell),
+        let value = match (&self.body, site) {
+            (BuiltinBody::Static(f), _) => f(args, mooring, shell),
+            (BuiltinBody::Captured(f), _) => f(args, mooring, shell),
+            (BuiltinBody::Boundary(f), Some(site)) => f(args, site, mooring, shell),
+            // `annotate` gives every boundary call a site; only a host calling
+            // a door outside a checked program reaches this.
+            (BuiltinBody::Boundary(_), None) => Err(crate::types::sig(format!(
+                "{}: reached without a checked site",
+                self.name
+            ))),
         }?;
         // The declared scheme is the authority on what a row settles to, so a
         // body cannot put an inhabitant of another type under `F Unit` — which
@@ -208,6 +257,7 @@ impl Clone for BuiltinEntry {
             convention: self.convention,
             type_rule: self.type_rule,
             doc: self.doc,
+            output: self.output,
             diagnostic: self.diagnostic,
             body: self.body.clone(),
             arity_cache: self.arity_cache.clone(),
@@ -293,6 +343,13 @@ impl BuiltinTable {
             .filter(|entry| entry.convention == Convention::Argv)
     }
 
+    /// Names a `$name` reference reaches: the value rows.
+    pub(crate) fn value_names(&self) -> impl Iterator<Item = &str> {
+        self.rows()
+            .filter(|entry| entry.convention == Convention::Value)
+            .map(|entry| entry.name.as_ref())
+    }
+
     /// Names of installed builtins, newest installed set first.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.rows().map(|entry| entry.name.as_ref())
@@ -300,12 +357,14 @@ impl BuiltinTable {
 }
 
 /// `true` and `false` — language-given names in every base scope, live and
-/// hydrated alike, though they are not manifest entries.
-pub(crate) fn language_constants() -> [(String, Value); 2] {
-    [
-        ("true".to_string(), Value::Bool(true)),
-        ("false".to_string(), Value::Bool(false)),
-    ]
+/// hydrated alike, though they are not manifest entries.  The checker types
+/// them `Bool`.
+pub(crate) const LANGUAGE_CONSTANTS: [(&str, bool); 2] = [("true", true), ("false", false)];
+
+pub(crate) fn language_constants() -> impl Iterator<Item = (String, Value)> {
+    LANGUAGE_CONSTANTS
+        .into_iter()
+        .map(|(name, b)| (name.to_string(), Value::Bool(b)))
 }
 
 /// A value row's `Value::Native`, unapplied.  Shared by boot and wire
@@ -347,4 +406,100 @@ fn check_builtin_collisions(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtins::{
+        BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SERVICE_BUILTIN, SURFACE_BUILTIN,
+        WATCH_BUILTIN,
+    };
+    fn result(ct: &CompTy) -> Option<&Ty> {
+        match ct {
+            CompTy::Fun(_, body) => result(body),
+            CompTy::Return(ty) => Some(ty),
+            CompTy::Var(_) => None,
+        }
+    }
+
+    /// The soundness perimeter: a value of a type the program did not decide
+    /// enters typed code only through a boundary.  A row whose scheme
+    /// quantifies a variable only its result mentions is such a door, so each
+    /// must be a boundary or diverge.  The enumeration is not the whole
+    /// perimeter: two casts lived in term rules rather than in Σ — `$ENV`,
+    /// typed `Map String`, and a bound head that is not a block, refused as
+    /// `HeadBoundToValue` — and `tests/reject` pins those.  The exarch and
+    /// plugin tables are swept by their own crates through the same predicate
+    /// (`test_access::has_result_only_var`).
+    #[test]
+    fn a_result_only_variable_is_a_boundary_or_divergence() {
+        const DIVERGENT: [&str; 3] = ["fail", "exit", "quit"];
+        let sets: [&[BuiltinEntry]; 6] = [
+            CORE_BUILTINS,
+            BOUNDARY_BUILTINS,
+            CORE_BASE_FRAMES,
+            WATCH_BUILTIN,
+            SERVICE_BUILTIN,
+            SURFACE_BUILTIN,
+        ];
+        #[cfg(unix)]
+        let detach = crate::builtins::DETACH_BUILTIN;
+        #[cfg(not(unix))]
+        let detach: &[BuiltinEntry] = &[];
+        for entry in sets.into_iter().flatten().chain(detach) {
+            let name = entry.name.as_ref();
+            let scheme = (entry.type_rule)(&mut Unifier::new());
+            let casts = crate::typecheck::has_result_only_var(&scheme);
+            let allowed = entry.is_boundary() || DIVERGENT.contains(&name);
+            assert!(
+                !casts || allowed,
+                "{name}: a result only its own call determines, and it is no boundary"
+            );
+            assert!(
+                casts || !entry.is_boundary() || name == "_ed-state",
+                "{name}: a boundary whose result is decided by its arguments is no door"
+            );
+        }
+    }
+
+    /// Every boundary says so in its scheme: marked boundaries are exactly the
+    /// core rows whose result the program did not decide.
+    #[test]
+    fn the_core_boundaries_are_the_decoders_and_use() {
+        let names: Vec<&str> = BOUNDARY_BUILTINS.iter().map(|e| e.name.as_ref()).collect();
+        assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
+        assert!(CORE_BUILTINS.iter().all(|e| !e.is_boundary()));
+    }
+
+    /// `Writes` is declared, not derived; this is what keeps the declaration
+    /// honest: a row that writes answers `Unit`.
+    #[test]
+    fn a_writing_row_answers_unit() {
+        let sets: [&[BuiltinEntry]; 6] = [
+            CORE_BUILTINS,
+            BOUNDARY_BUILTINS,
+            CORE_BASE_FRAMES,
+            WATCH_BUILTIN,
+            SERVICE_BUILTIN,
+            SURFACE_BUILTIN,
+        ];
+        #[cfg(unix)]
+        let detach = crate::builtins::DETACH_BUILTIN;
+        #[cfg(not(unix))]
+        let detach: &[BuiltinEntry] = &[];
+        for entry in sets.into_iter().flatten().chain(detach) {
+            let scheme = (entry.type_rule)(&mut Unifier::new());
+            let Ty::Thunk(inner) = &scheme.ty else {
+                panic!("{}: a row's scheme is a thunk", entry.name);
+            };
+            if entry.output == Output::Writes {
+                assert!(
+                    matches!(result(inner), Some(Ty::Unit)),
+                    "{}: a writing row's result is `F Unit`",
+                    entry.name
+                );
+            }
+        }
+    }
 }

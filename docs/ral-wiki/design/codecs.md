@@ -2,37 +2,26 @@
 
 **The `from-X` / `to-X` builtins name the typed crossing between stdin bytes
 and structured values.** A decoder reads stdin and returns a value. An encoder
-takes one value and writes the encoded bytes, and those bytes are what a value
-boundary sees:
+takes one value and writes the encoded bytes:
 
-- every decoder has the computation type `from-X : F[Value] A`;
-- every encoder has the type `to-X : A → F[Bytes] Unit`.
+- every decoder has the computation type `from-X : F A`;
+- every encoder has the type `to-X : A → F Unit`.
 
-The encoder's [[design/types|payload route]] is `Bytes`, so by WF-2 its return
-type is `Unit`. The two types are inverse: an encoder writes what the matching
-decoder reads.
+The two types are inverse: an encoder writes what the matching decoder reads.
 
-## The route makes the crossing legible
+## The crossing is a name
 
-A codec's declaration says which of its two products a value boundary should
-observe, and nothing more ([[design/types|types]]). Three shapes classify the
-builtins:
-
-- `F[Value] A` — a pure value builtin, and also a decoder: its answer is its
-  returned value.
-- `F[Bytes] Unit` — an external command, a byte filter, or an encoder: its
-  answer is what it wrote.
-- `F[ρ] A` with `ρ` forwarded from a supplied thunk — the streaming reducer.
-
-`ret` and `ret_bytes` in `core/src/typecheck/builtins.rs` build the two ground
-shapes, and `external_exec_comp_ty` in `core/src/typecheck/infer.rs` gives every
-external command the second. Nothing about the [[design/pipelines|pipe]] reads
-these: a `|` is a positional byte wire, and asks of a stage only that it be a
-computation ready to run, never what its route is. What the
-route buys is the *boundary*: `let x = cat f` binds captured text, while
-`let x = cat f | from-bytes` binds the bytes exactly, and the ordinary return
-type alone cannot tell those apart. A program crosses between bytes and values
-only when it names a codec. A misspelled codec fails at command lookup
+A command is a computation of type `F Unit`: it writes and returns nothing,
+like `cd`. An encoder is a command with an argument, a builtin row with
+`Output::Writes`; an external command is `[String] → F Unit` too. A decoder is
+a value row that returns. Whether a bind sees what a command wrote is not in
+its type but in its syntax: `let x = cat f` binds captured text because its
+right-hand side is a command
+([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]],
+[[design/capture|capture]]), while `let x = cat f | from-bytes` binds the bytes
+exactly, because the decoder is where the pipeline's value comes from. A
+program crosses between bytes and values only when it names a codec. A
+misspelled codec fails at command lookup
 ([[design/builtins|why each codec is its own builtin]]).
 
 ## The two directions
@@ -49,19 +38,36 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
 - `from-bytes` → `Bytes`; the bytes pass through with no decode;
 - `from-string` → `String`, **strict** UTF-8;
 - `from-line` → `String`, strict, with one trailing `\n` / `\r\n` stripped;
-- `from-json` → a decoded value: strict UTF-8, then JSON;
+- `from-json` → a decoded value: strict UTF-8, then JSON; a *boundary*
+  ([[decisions/260930_a-boundary-is-checked-against-its-type|checked at the
+  door]]);
 - `from-jsonl` → a list, one `from-json` value per non-blank line split by the
-  line rule; each line parses alone, so a failure names the input's line;
-- `from-csv` → a list of records keyed by the header row; every field is a
+  line rule, also a boundary; each line parses alone, so a failure names the
+  input's line;
+- `from-json-at tokens` → the value at a path of RFC 6901 reference tokens (an
+  object member by exact key, an array element by decimal), decoded and
+  checked like `from-json`; a path given as tokens, never as a pointer string,
+  so no key needs escaping;
+- `from-csv` → a list of maps keyed by the header row, `[Map String]` and so not
+  a boundary: its shape is decided; every field is a
   `String`, because CSV is untyped — coerce with `int` / `float`; the reader
   handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
-**A decoder is the natural pipeline tail.** `cat data.json | from-json` returns
-a decoded value. Putting a stage *after* a decoder is legal and useless: the
-decoded value goes nowhere, and the next stage reads the EOF the decoder left
-behind. Bind the decoder's result and apply the next function to it instead —
-`let document = cat data.json | from-json` followed by `length $document`.
+**A decoder of undecided shape is checked.** `from-json`'s type is `∀α. F α`,
+and its `α` would be a cast. It is instead weak (one type per unit) and the
+decoder admits the value it read against the type the checker solved for it, so
+what fails is the decode, naming the pointer and the line of the use that
+needed the shape: `the value at /items/3/size is text, but this script uses it
+as a number`. The decoder never converts: a JSON `3` is an `Int` and `2.5` a
+`Float`, and `float` at the use accepts both.
+
+**A decoder is the pipeline's last stage.** `cat data.json | from-json` returns
+a decoded value, the pipeline's value being its final stage's. A decoder before
+the last stage is refused: a stage feeds the next by writing, and a decoder
+returns ([[design/pipelines|pipelines]]). Bind the decoder's result and apply
+the next function to it instead — `let document = cat data.json | from-json`
+followed by `length $document`.
 
 An encoder takes one value and writes its encoded form to stdout.
 `to-bytes` (a `Bytes` value, passed through unchanged), `ints-to-bytes` (a list
@@ -69,13 +75,13 @@ of `Int`, each 0 through 255 — ral has no byte literal, so this is how bytes a
 written by number), `to-string`, `to-lines` (each element followed by `\n`),
 `to-json`, `to-jsonl` (each element as `to-json` writes it, then `\n`),
 `to-csv`, and `to-line` (the line writer that `echo` uses) all
-return `Unit`; the written bytes are the payload (`write_encoded` in
+write the encoded bytes and return `Unit` (`write_encoded` in
 `core/src/builtins/codecs.rs`). Each encoder names one operand type, so
 `to-bytes 3` and `to-bytes hello` are ordinary unification failures rather than
 a union the checker has to resolve; the operand-prefixed name is what
 distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the write feeds the wire:
 `to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
-[[design/types|capture]] coercion applies: `let e = to-json $x` binds the
+[[design/capture|capture]] coercion applies: `let e = to-json $x` binds the
 encoded text as a `String`.
 
 `to-csv` takes a list of records and writes a header row plus one row for each
@@ -101,16 +107,12 @@ that producer. So the one codec that streams is a fold, whose callback runs
 while the pipe is open, and it is the way to process unbounded input without
 holding it:
 
-- `fold-lines <fn> <init>` folds over stdin line by line, forwarding its
-  callback's boundary behaviour:
-  `fold-lines : ∀ α ρ. U (α → String → F[ρ] α) → α → F[ρ] α`.
-  A value-returning fold returns its accumulator. A callback that emits per
-  line makes the fold byte-routed, so a value boundary captures the emitted
-  lines instead — which is what `map-lines` is. `each-line` deliberately
-  returns `Unit`, leaving its callback's writes visible. The one route variable
-  is the caller's, read off the supplied thunk and handed back paired with the
-  value type it came with; the inferencer needs no declaration
+- `fold-lines <fn> <init>` folds over stdin line by line:
+  `fold-lines : ∀ α. U (α → String → F α) → α → F α`
   (`scheme::fold_lines` in `core/src/typecheck/builtins.rs`).
+  It returns its accumulator; a callback is an ordinary `F α`, and what it
+  writes goes where writes go. A fold is a value row that returns, so it may
+  end a pipeline and may not precede the last stage.
 
 ## One line rule
 
@@ -144,7 +146,7 @@ terminator.
 
 ## Strict values, lossy lines
 
-The structured decoders and an [[design/types|external command captured by
+The structured decoders and an [[design/capture|external command captured by
 `let`]] are **strict**: invalid UTF-8 is an error that points at `from-bytes`,
 because a `String` or JSON value you will compute with must not silently carry a
 replacement character. `from-lines` alone is **lossy, hence total**: scanning

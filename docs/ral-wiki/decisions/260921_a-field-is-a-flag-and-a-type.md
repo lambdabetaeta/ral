@@ -1,9 +1,16 @@
 ---
-status: active
+status: superseded
 generated_at_commit: f06a5056
+superseded_by: decisions/260930_a-table-never-enters-the-unifier
 ---
 
 # A field is a flag and a type
+
+> **Superseded** by
+> [[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]].
+> Once no declared table reaches the unifier, a flag types nothing: rows carry
+> no presence flags, a record's literal with a spread is an *update* of one
+> base that adds no field, and the page below is history.
 
 **A record field is a presence flag paired with a type, and the flag may be a
 variable.** A form's options are then sayable in a type, so `within $o` has a

@@ -33,7 +33,7 @@ return { |options|
         }
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
             _ed-push
-            _ed-set [text: "cd !{shell-quote $r[output]}", cursor: 0]
+            _ed-set [text: `set "cd !{shell-quote $r[output]}", cursor: `set 0]
             _ed-accept
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "zoxide: $r[output]"]

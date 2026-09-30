@@ -1,1 +1,1 @@
-let w = { |o| within $o { () } }; w [handler: { |name args| cd ~ }]
+let w = { |h| within [handler: $h] { () } }; w { |name args| cd ~ }

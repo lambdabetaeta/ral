@@ -84,10 +84,10 @@ within [env: [MY_VAR: scoped], handlers: [mycmd: { |args| echo "env=$ENV[MY_VAR]
     mycmd
 }
 
-# A bundle computed elsewhere is checked and installed exactly as a written
-# one is; the empty option set is the form's own bracket.
-let opts = [env: [BOUND_VAR: bound]]
-within $opts {
+# An option's value may be computed elsewhere; the empty option set is the
+# form's own bracket.
+let bound_env = [BOUND_VAR: bound]
+within [env: $bound_env] {
     printenv BOUND_VAR
 }
 

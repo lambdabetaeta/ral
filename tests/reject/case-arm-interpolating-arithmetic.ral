@@ -1,0 +1,2 @@
+# contains: an arm is a block, or a name holding one
+case `a () [`a: "v$[1 + 1]"]

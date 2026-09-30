@@ -72,12 +72,12 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         }
         CompKind::App { head, .. } => sub(head),
         CompKind::If { then, else_, .. } => {
-            sub(then);
-            sub(else_);
+            walk_val(&then.item, visit);
+            walk_val(&else_.item, visit);
         }
         CompKind::Case { arms, .. } => arms
             .iter()
-            .for_each(|arm| sub(ral_core::test_access::case_arm_comp(arm))),
+            .for_each(|arm| walk_val(ral_core::test_access::case_arm_val(arm), visit)),
         CompKind::Rec { group, .. } => group.shape().iter().for_each(|(_, m)| sub(m)),
         CompKind::Force(Val::Thunk(node)) | CompKind::Return(Val::Thunk(node)) => {
             walk_comp(node.shape(), visit);
@@ -90,18 +90,25 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         | CompKind::Guard {
             body: a,
             cleanup: b,
-        }
-        | CompKind::Grant { caps: a, body: b } => {
+        } => {
             for v in [a, b] {
                 walk_val(v, visit);
             }
+        }
+        CompKind::Grant { caps, body } => {
+            for (_, v) in caps {
+                walk_val(&v.item, visit);
+            }
+            walk_val(body, visit);
         }
         CompKind::Within {
             opts,
             handlers,
             body,
         } => {
-            walk_val(opts, visit);
+            for (_, v) in opts {
+                walk_val(&v.item, visit);
+            }
             for arm in handlers.iter().flatten() {
                 walk_val(&arm.value.item, visit);
             }

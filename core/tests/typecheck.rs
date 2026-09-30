@@ -8,7 +8,9 @@
 
 mod common;
 
-use ral_core::typecheck::{CompTy, CompTyVar, Ty, fmt_scheme};
+use ral_core::ir::{Comp, CompKind, IrPattern, Phrase, Toplevel, Val};
+use ral_core::typecheck::contract::declared;
+use ral_core::typecheck::{CompTy, CompTyVar, Form, Ty, fmt_scheme};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
@@ -83,15 +85,16 @@ fn fmt_scheme_shows_quantified_comp_vars() {
 }
 
 #[test]
-fn fmt_scheme_quantifies_cyclic_comp_roots() {
+fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
     let root = CompTyVar(29);
+    let binding = CompTy::pure(Ty::List(Box::new(Ty::Thunk(Box::new(CompTy::Var(root))))));
     let scheme = ral_core::test_access::scheme_over_comp_vars(
         vec![],
-        Ty::Thunk(Box::new(CompTy::Var(root))),
-        vec![(root.0, CompTy::pure(Ty::Unit))],
+        Ty::Thunk(Box::new(binding.clone())),
+        vec![(root.0, binding)],
     );
     let rendered = fmt_scheme(&scheme);
-    assert_eq!(rendered, "∀ϕ. ϕ");
+    assert_eq!(rendered, "μϕ. Command [{ϕ}]");
 }
 
 #[test]
@@ -135,172 +138,23 @@ fn detach_is_a_base_frame_not_a_value() {
     assert_eq!(codes, ["T0042"]);
 }
 
-// ─── IR route annotation ──────────────────────────────────────────────────────
-//
-// The annotation pass writes the checker's ground verdicts into a rebuilt IR
-// as explicit syntax: one `PipeYield` per pipeline, and a `Capture` node
-// wherever a value boundary meets a byte route.  Schemes stay on the
-// top-level spine only; the yields and the captures go everywhere, at any
-// depth.
-
-use ral_core::ir::{Comp, CompKind, IrPattern, Phrase, PipeYield, Toplevel, Val};
-
-/// Compile `src` to an annotated toplevel, asserting it type-checks.
-fn annotated(src: &str) -> Toplevel {
-    let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let top = elaborate(&ast, std::collections::HashSet::default(), "")
-        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
-    typecheck(
-        &top,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
-        None,
+/// An arm for `detach` stands in for ral's own `detach`, so it returns the
+/// receipt `detach` returns — not a command's `()`, and not anything else.
+#[cfg(unix)]
+#[test]
+fn an_arm_for_detach_returns_its_receipt() {
+    ok_against(
+        "within [handlers: [detach: { |a| return [pid: 1, desc: 'stub'] }]] { return () }",
+        &detach_surface(),
+    );
+    let codes: Vec<_> = errors_against(
+        "within [handlers: [detach: { |a| return 3 }]] { return () }",
+        &detach_surface(),
     )
-    .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
-}
-
-/// Visit every `Comp` reachable from an annotated toplevel's phrases —
-/// [`common::walk_comp`] from each phrase's own root.
-fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&Comp)) {
-    for phrase in &top.phrases {
-        match &phrase.item {
-            Phrase::Define { comp, .. } | Phrase::Run(comp) => common::walk_comp(comp, visit),
-        }
-    }
-}
-
-/// Every `Pipeline` node's stage count and yield, anywhere in the tree.
-fn all_pipeline_yields(top: &Toplevel) -> Vec<(usize, PipeYield)> {
-    let mut out = Vec::new();
-    walk_toplevel(top, &mut |c| {
-        if let CompKind::Pipeline { stages, yields, .. } = &c.item {
-            out.push((stages.len(), *yields));
-        }
-    });
-    out
-}
-
-/// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
-fn all_pipeline_stage_types(top: &Toplevel) -> Vec<(usize, Vec<Ty>)> {
-    let mut out = Vec::new();
-    walk_toplevel(top, &mut |c| {
-        if let CompKind::Pipeline {
-            stages,
-            stage_types,
-            ..
-        } = &c.item
-        {
-            out.push((stages.len(), stage_types.clone()));
-        }
-    });
-    out
-}
-
-#[test]
-fn top_level_pipeline_retains_per_stage_value_types() {
-    let comp = annotated(r"/bin/echo hi | /bin/cat");
-    let pipelines = all_pipeline_stage_types(&comp);
-    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
-    let (stage_count, types) = &pipelines[0];
-    assert_eq!(*stage_count, 2, "two-stage pipeline");
-    assert_eq!(types.len(), *stage_count, "one value type per stage");
-    // Each stage's value type is `Unit`, its bytes being the `result`.
-    assert_eq!(types[0], Ty::Unit, "stage 0 value type retained");
-    assert_eq!(types[1], Ty::Unit, "stage 1 value type retained");
-}
-
-#[test]
-fn a_pipeline_carries_one_yield() {
-    // One annotation for the whole pipeline, not one per stage: only the
-    // final stage's route is ever read, and every interior edge is allocated
-    // from position.  An external tail is captured from stdout, so the form
-    // has nothing to hand back.
-    assert_eq!(
-        all_pipeline_yields(&annotated(r"/bin/echo hi | /bin/cat")),
-        vec![(2, PipeYield::Unit)]
-    );
-    // A decoder tail returns its value instead, so the same shape of
-    // pipeline yields that value.
-    assert_eq!(
-        all_pipeline_yields(&annotated(r"/bin/echo hi | from-string")),
-        vec![(2, PipeYield::Last)]
-    );
-}
-
-#[test]
-fn pipeline_inside_thunk_body_is_annotated() {
-    // The pipeline lives in a lambda body under a `let`; the pass must
-    // descend past the spine to reach it.
-    assert_eq!(
-        all_pipeline_yields(&annotated(r"let f = { |x| /bin/echo $x | /bin/cat }")),
-        vec![(2, PipeYield::Unit)]
-    );
-}
-
-/// Whether the `x` bind of `src` had its RHS captured — the whole observable
-/// content of a `Bytes` route at a value boundary.
-fn bind_x_is_captured(src: &str) -> bool {
-    let top = annotated(src);
-
-    // A join's byte-side arms are captured individually (per-arm, not at
-    // the join's own node), so the verdict is "any Capture in the RHS
-    // subtree", not "the RHS itself is one".
-    fn has_capture(rhs: &Comp) -> bool {
-        let mut found = false;
-        common::walk_comp(rhs, &mut |c| {
-            if let CompKind::Capture(_) = &c.item {
-                found = true;
-            }
-        });
-        found
-    }
-
-    let mut found = None;
-    // `x` bound at the top level is a `Phrase::Define`; nested under a
-    // block it is a `CompKind::Bind`, reached by `walk_toplevel`.
-    for phrase in &top.phrases {
-        if let Phrase::Define { pattern, comp, .. } = &phrase.item
-            && let IrPattern::Name(name) = pattern.as_ref()
-            && name.as_ref() == "x"
-        {
-            found = Some(has_capture(comp));
-        }
-    }
-    walk_toplevel(&top, &mut |c| {
-        if let CompKind::Bind {
-            comp: rhs, pattern, ..
-        } = &c.item
-            && let IrPattern::Name(name) = pattern.as_ref()
-            && name.as_ref() == "x"
-        {
-            found = Some(has_capture(rhs));
-        }
-    });
-    found.expect("a bind named `x`")
-}
-
-#[test]
-fn a_bind_reads_its_rhs_route_through_the_store() {
-    // The join grounds `t`'s route to `Bytes` before the binder is reached,
-    // so `extract_return` hands the pin a route that is a `Var` in shape and
-    // `Bytes` in the store — it destructures a head-canonical `Return` and
-    // resolves no further.  Reading the shape unifies a settled `Bytes` with
-    // `Value`; reading the store captures, and `x` is the decoded `String`.
-    assert!(bind_x_is_captured(
-        "let f = { |t| if true { echo hi } else { !$t }; let x = !$t; return $x }"
-    ));
-}
-
-/// A decoder tail carries its payload as a returned value, so the pipeline
-/// it ends yields that value to the parent.
-#[test]
-fn a_decoder_tail_yields_the_pipelines_value() {
-    assert_eq!(
-        all_pipeline_yields(&annotated("echo hi | from-json")),
-        vec![(2, PipeYield::Last)]
-    );
+    .iter()
+    .map(|e| e.kind.code())
+    .collect();
+    assert_eq!(codes, ["T0011"]);
 }
 
 // ─── Toplevel phrase typechecking ─────────────────────────────────────────
@@ -398,6 +252,148 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
     );
 }
 
+// ─── Computed indexes: one relation, settled at the unit's end ─────────────
+
+/// The scheme the `let` at phrase `index` closed with, as `explain` prints it.
+fn scheme_at(top: &Toplevel, index: usize) -> String {
+    let Phrase::Define { schemes, .. } = &top.phrases[index].item else {
+        panic!(
+            "expected a Define at {index}, got {:?}",
+            top.phrases[index].item
+        );
+    };
+    fmt_scheme(&schemes[0].1)
+}
+
+fn codes(src: &str) -> Vec<&'static str> {
+    raw_errors(src).iter().map(|e| e.kind.code()).collect()
+}
+
+#[test]
+fn a_computed_index_nothing_decides_is_refused_at_the_units_end() {
+    let src = "let pick = { |m k| $m[$k] }\nreturn ()";
+    assert_eq!(codes(src), ["T0075"]);
+    has_error(src, "is `$m` a list or a map?");
+}
+
+#[test]
+fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses() {
+    let top = toplevel_ok(
+        "let pick = { |m k| $m[$k] }\n\
+         let a = pick [:, x: 1] 'x'\n\
+         let b = pick [:, y: 2] 'y'\n\
+         return ()",
+    );
+    assert_eq!(scheme_at(&top, 0), "Map Integer → String → Command Integer");
+}
+
+#[test]
+fn a_computed_index_helper_used_on_a_list_and_a_map_is_a_mismatch() {
+    let src = "let pick = { |m k| $m[$k] }\n\
+               let a = pick [1, 2] 0\n\
+               let b = pick [:, y: 2] 'y'\n\
+               return ()";
+    let errs = raw_errors(src);
+    assert_eq!(codes(src), ["T0010"], "{errs:?}");
+    let note = errs[0].hint().expect("a mismatch on a weak type is noted");
+    assert!(note.contains("shared by every use"), "{note}");
+}
+
+#[test]
+fn a_literal_key_is_the_list_rule_and_stays_generic() {
+    let top = toplevel_ok(
+        "let first = { |xs| $xs[0] }\n\
+         let a = first [1, 2]\n\
+         let b = first ['x']\n\
+         return ()",
+    );
+    assert_eq!(scheme_at(&top, 0), "∀α. [α] → Command α");
+}
+
+#[test]
+fn a_computed_key_makes_the_helper_monomorphic_for_the_unit() {
+    let src = "let nth = { |xs i| $xs[$i] }\n\
+               let a = nth [1, 2] 0\n\
+               let b = nth ['x'] 0\n\
+               return ()";
+    assert_eq!(codes(src), ["T0010"]);
+    // Its own body fixing the key changes nothing: cost 19.
+    let src = "let nth = { |xs i| let j = $[$i + 1]; $xs[$j] }\n\
+               let a = nth [1, 2] 0\n\
+               let b = nth ['x'] 0\n\
+               return ()";
+    assert_eq!(codes(src), ["T0010"]);
+}
+
+/// Whether a helper is generic must not depend on where an independent
+/// `let` stands.
+#[test]
+fn the_verdict_on_an_index_helper_is_independent_of_statement_order() {
+    let body = |n_first: bool, second: &str| {
+        let n = "let n = $[$i + 1]\n";
+        let h = "let h = { |c| $c[$i] }\n";
+        let (first, then) = if n_first { (n, h) } else { (h, n) };
+        format!("let run = {{ |i|\n{first}{then}h [1]\nh {second}\n}}\nreturn ()")
+    };
+    for n_first in [true, false] {
+        let refused = body(n_first, "['x']");
+        assert_eq!(codes(&refused), ["T0010"], "n first: {n_first}");
+        assert!(
+            errors(&body(n_first, "[2]")).is_empty(),
+            "n first: {n_first}"
+        );
+    }
+    let schemes: Vec<String> = [true, false]
+        .map(|n_first| scheme_at(&toplevel_ok(&body(n_first, "[2]")), 0))
+        .into();
+    assert_eq!(schemes[0], schemes[1]);
+}
+
+/// A helper that indexes is not generic in its container: an Int is refused.
+#[test]
+fn a_computed_index_on_an_integer_is_refused() {
+    let src = "let pick = { |m k| $m[$k] }\nlet x = pick 5 5\nreturn ()";
+    assert_eq!(codes(src), ["T0062"]);
+}
+
+/// Walking a value of unknown shape by computed keys makes it a map of
+/// itself.
+#[test]
+fn a_walk_down_a_decoded_value_is_a_map_of_itself() {
+    let top = toplevel_ok(
+        "let walk = { |doc keys| fold { |node key| return $node[$key] } $doc $keys }\n\
+         let leaf = walk [:] ['a']\n\
+         return ()",
+    );
+    assert_eq!(
+        scheme_at(&top, 0),
+        "μα. Map α → [String] → Command μα. Map α"
+    );
+}
+
+#[test]
+fn a_key_of_number_kind_settles_the_index_as_a_list() {
+    let top = toplevel_ok("let f = { |xs k| let j = $[$k + 1]; $xs[$k] }\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "[_α] → Integer → Command _α");
+}
+
+#[test]
+fn a_target_of_comparable_kind_is_refused_with_the_kind_sentence() {
+    let src = "let f = { |c d k| let b = $[$c < $d]; $c[$k] }\nreturn ()";
+    assert_eq!(codes(src), ["T0074"]);
+    has_error(src, "nothing is both");
+}
+
+#[test]
+fn a_key_that_is_neither_an_int_nor_a_string_is_refused() {
+    let src = "let k = $[1 < 2]\nlet f = { |m| $m[$k] }\nreturn ()";
+    assert_eq!(codes(src), ["T0074"]);
+    has_error(
+        src,
+        "but an Int key for a list or a String key for a map is needed",
+    );
+}
+
 // ─── The return contract: a contract file's returned row ─────────────────────
 
 /// A host's own table, held to the same condition the declared four are.
@@ -415,6 +411,7 @@ static TEST_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
             reason: None,
         },
     ],
+    factory: false,
 };
 
 /// A table with a key the row must have and a key it knows and refuses — the
@@ -438,6 +435,7 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
             reason: None,
         },
     ],
+    factory: false,
 };
 
 fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
@@ -454,6 +452,10 @@ fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec
     )
     .err()
     .unwrap_or_default()
+}
+
+fn codes_of(errs: &[TypeError]) -> Vec<&'static str> {
+    errs.iter().map(|e| e.kind.code()).collect()
 }
 
 fn schema_errors(src: &str) -> Vec<TypeError> {
@@ -502,10 +504,10 @@ fn return_schema_checks_a_computed_return_value() {
 /// through.
 #[test]
 fn return_schema_catches_a_key_misspelled_behind_a_spread() {
-    let errs = schema_errors("let extra = [nn: 1]\nreturn [...$extra, loose: 1]");
+    let errs = schema_errors("let extra = [nn: 1, loose: 0]\nreturn [...$extra, loose: 1]");
     assert!(
-        errs.iter().any(|e| e.kind.code() == "T0020"),
-        "expected T0020, got: {errs:?}"
+        errs.iter().any(|e| e.kind.code() == "T0076"),
+        "expected T0076, got: {errs:?}"
     );
 }
 
@@ -526,12 +528,85 @@ fn return_schema_keeps_a_refused_keys_own_sentence() {
     assert_eq!(errs.len(), 1, "and it is not also an unknown key: {errs:?}");
 }
 
-/// A return with no row — the empty `[:]` — has nothing to check, and stays
-/// on the runtime door that dispatches off the same table.
+/// A key the table does not name is said in the table's own wording, the one
+/// the runtime doors use.
 #[test]
-fn return_schema_leaves_a_map_to_the_runtime_door() {
-    let errs = schema_errors("return [:, nn: 1]");
-    assert!(errs.is_empty(), "a map carries no row, got: {errs:?}");
+fn return_schema_names_an_unknown_key_in_the_tables_words() {
+    let errs = schema_errors("return [nn: 1]");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(errs[0].kind.code(), "T0076");
+    assert_eq!(errs[0].kind.render_message(), TEST_TABLE.unknown_key("nn"),);
+}
+
+/// A map has keys where the table has labels, so the spelling is refused.
+#[test]
+fn return_schema_refuses_a_map() {
+    for form in [Form::Rc, Form::Grant, Form::Manifest] {
+        let errs = contract_errors(declared(form), "return [:, nn: 1]");
+        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
+        let hint = errs[0].hint().unwrap();
+        assert!(hint.contains("not `[:, "), "{hint}");
+    }
+}
+
+/// `[]` is the empty list; `()` is how a file says it has nothing to set.
+#[test]
+fn return_schema_refuses_a_list_and_points_at_unit() {
+    for form in [Form::Rc, Form::Grant] {
+        let errs = contract_errors(declared(form), "return []");
+        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
+        assert!(errs[0].hint().unwrap().contains("returns `()`"));
+    }
+}
+
+#[test]
+fn return_schema_refuses_a_function_unless_the_table_admits_a_factory() {
+    let factory = "return { |options| [name: 'p'] }";
+    for form in [Form::Rc, Form::Grant] {
+        let errs = contract_errors(declared(form), factory);
+        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
+    }
+    assert!(contract_errors(declared(Form::Manifest), factory).is_empty());
+}
+
+#[test]
+fn return_schema_refuses_a_scalar() {
+    let errs = contract_errors(declared(Form::Rc), "return 3");
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+}
+
+/// `()` is the empty keyset: fine for a table with nothing required, and a
+/// missing `name` for the manifest.
+#[test]
+fn return_schema_reads_unit_as_nothing_to_set() {
+    assert!(contract_errors(declared(Form::Rc), "return ()").is_empty());
+    assert!(contract_errors(declared(Form::Grant), "return ()").is_empty());
+    let errs = contract_errors(declared(Form::Manifest), "return ()");
+    assert_eq!(codes_of(&errs), ["T0021"], "{errs:?}");
+}
+
+/// A return typed at a variable is the runtime door's.
+#[test]
+fn return_schema_leaves_a_decoded_value_to_the_runtime_door() {
+    assert!(contract_errors(declared(Form::Rc), "return !{from-json}").is_empty());
+}
+
+/// Ascription reads a finished result, so the order of independent statements
+/// decides nothing.
+#[test]
+fn return_schema_gives_one_verdict_in_either_statement_order() {
+    let one = "let a = [surfase: 1]\nlet b = [bell: 2]\nreturn [...$a, ...$b]";
+    let two = "let b = [bell: 2]\nlet a = [surfase: 1]\nreturn [...$a, ...$b]";
+    let render = |src| {
+        let mut msgs: Vec<_> = contract_errors(declared(Form::Rc), src)
+            .iter()
+            .map(|e| e.kind.render_message())
+            .collect();
+        msgs.sort();
+        msgs
+    };
+    assert_eq!(render(one).len(), 2);
+    assert_eq!(render(one), render(two));
 }
 
 /// `$x` is bound by an earlier top-level `let` — a separate `Phrase::Define`
@@ -544,4 +619,89 @@ fn return_schema_resolves_an_earlier_top_level_let() {
         errs.is_empty(),
         "an earlier top-level let must resolve, got: {errs:?}"
     );
+}
+
+// ─── IR capture annotation ────────────────────────────────────────────────────
+//
+// The annotation pass wraps each command a `let` captures in a `Capture` node,
+// at any depth, and nothing else: a statement, a bound function, a forced
+// block in hand are left as they are.
+
+/// Compile `src` to an annotated toplevel, asserting it type-checks.
+fn annotated(src: &str) -> Toplevel {
+    toplevel_ok(src)
+}
+
+/// Visit every `Comp` reachable from an annotated toplevel's phrases —
+/// [`common::walk_comp`] from each phrase's own root.
+fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&Comp)) {
+    for phrase in &top.phrases {
+        match &phrase.item {
+            Phrase::Define { comp, .. } | Phrase::Run(comp) => common::walk_comp(comp, visit),
+        }
+    }
+}
+
+/// How many `Capture` nodes the checker wrote, anywhere in the tree.
+fn captures(src: &str) -> usize {
+    let mut found = 0;
+    walk_toplevel(&annotated(src), &mut |c| {
+        if matches!(c.item, CompKind::Capture(_)) {
+            found += 1;
+        }
+    });
+    found
+}
+
+/// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
+fn all_pipeline_stage_types(top: &Toplevel) -> Vec<(usize, Vec<Ty>)> {
+    let mut out = Vec::new();
+    walk_toplevel(top, &mut |c| {
+        if let CompKind::Pipeline {
+            stages,
+            stage_types,
+        } = &c.item
+        {
+            out.push((stages.len(), stage_types.clone()));
+        }
+    });
+    out
+}
+
+#[test]
+fn top_level_pipeline_retains_per_stage_value_types() {
+    let comp = annotated(r"/bin/echo hi | /bin/cat");
+    let pipelines = all_pipeline_stage_types(&comp);
+    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
+    let (stage_count, types) = &pipelines[0];
+    assert_eq!(*stage_count, 2, "two-stage pipeline");
+    assert_eq!(types.len(), *stage_count, "one value type per stage");
+    // A command returns nothing: it writes.
+    assert_eq!(types[0], Ty::Unit, "stage 0 value type retained");
+    assert_eq!(types[1], Ty::Unit, "stage 1 value type retained");
+}
+
+#[test]
+fn a_let_captures_the_command_that_produces_its_value() {
+    assert_eq!(captures("let x = echo hi"), 1);
+    assert_eq!(captures("let f = { let x = echo hi; $x }"), 1);
+}
+
+#[test]
+fn a_statement_captures_nothing() {
+    assert_eq!(captures("echo hi"), 0);
+    assert_eq!(captures("let f = { echo hi; echo there }"), 0);
+}
+
+#[test]
+fn a_bound_function_and_a_block_in_hand_are_never_captured() {
+    assert_eq!(captures("let f = { echo hi }; let x = f"), 0);
+    assert_eq!(captures("let t = { echo hi }; let x = !$t"), 0);
+}
+
+#[test]
+fn a_let_enters_the_final_stage_of_a_pipeline_and_the_arms_of_a_form() {
+    assert_eq!(captures("let x = echo hi | cat"), 1);
+    assert_eq!(captures("let x = if true { echo a } else { echo b }"), 2);
+    assert_eq!(captures("let x = try { echo a } { |e| echo b }"), 2);
 }

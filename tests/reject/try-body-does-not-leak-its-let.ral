@@ -1,0 +1,4 @@
+# codes: T0071
+# contains: undefined variable: $leak_try
+try { let leak_try = 1 } { |_e| let _ignore = 0 }
+echo $leak_try

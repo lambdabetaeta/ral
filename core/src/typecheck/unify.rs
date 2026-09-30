@@ -1,18 +1,33 @@
-//! Union-find unifier over four variable kinds: type, computation type, route, row.
+//! Union-find unifier over three variable kinds: type, computation type, row.
 //!
 //! Value and computation types are both *equi-recursive* — a slot may be bound
-//! to a structure containing its own variable — so neither needs an occurs
-//! check.  Instead every traversal carries a [`Visited`] of the roots it is
+//! to a structure containing its own variable — provided every cycle crosses
+//! data (a list, map, record or variant): binding refuses a structure that
+//! reaches its own variable along `U`, `→`, `F` and `Handle` alone.  Every
+//! traversal carries a [`Visited`] of the roots it is
 //! expanding, turning a cycle into a back-edge, and unification carries a
 //! co-inductive [`Pairs`], so two cyclic types reach a fixed point.
 
-use super::error::{CompDiff, TypeErrorKind};
-use super::route::RouteMismatch;
-use super::ty::{
-    CompTy, CompTyVar, Field, Label, PayloadRoute, PayloadVar, Presence, PresenceVar, Row, RowVar,
-    Ty, TyVar,
-};
-use std::collections::HashSet;
+use super::error::{CycleVia, KindFound, TypeErrorKind};
+use super::generalize::{FreeVars, free_ty};
+use super::kind::{Head, Kind};
+use super::scheme::WeakVars;
+use super::ty::{CompTy, CompTyVar, Label, Row, RowVar, Ty, TyVar};
+use crate::source::Span;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+/// What made a variable weak, so a mismatch on it can say which use shares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WeakSource {
+    /// A computed index `$c[$k]`.
+    Index,
+    /// The result of a boundary, named as the program spells it.
+    Boundary(Arc<str>),
+    /// A residual an earlier unit stored, whose own source is gone.
+    Residual,
+}
 
 /// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
 /// `generalize.rs`.  `tys`/`comps` are a stack for `apply_*` and a set for
@@ -26,6 +41,29 @@ pub(super) struct Visited {
     pub(crate) comps: HashSet<u32>,
     cyclic_tys: HashSet<u32>,
     cyclic_comps: HashSet<u32>,
+    /// Leave a weak variable as itself instead of what it was fixed to.
+    keep_weak: bool,
+}
+
+/// The free variables a `data` obligation lands on.
+#[derive(Default)]
+struct Owed {
+    tys: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+/// The variable a binding must not reach again without crossing data.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    Ty(u32),
+    Comp(u32),
+}
+
+/// Where the data-free search starts: the structure about to be bound.
+#[derive(Clone, Copy)]
+enum Reach<'a> {
+    Ty(&'a Ty),
+    Comp(&'a CompTy),
 }
 
 /// Equality obligations already in progress; re-entering one is an immediate
@@ -84,7 +122,7 @@ enum TyKey {
 /// Fingerprint of a computation type.  See [`TyKey`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum CompTyKey {
-    Return(PayloadRoute, Box<TyKey>),
+    Return(Box<TyKey>),
     Fun(Box<TyKey>, Box<Self>),
     Var(u32),
 }
@@ -94,33 +132,23 @@ enum CompTyKey {
 enum RowKey {
     Empty,
     Var(u32),
-    Extend(Label, FieldKey, Box<Self>),
+    Extend(Label, Box<TyKey>, Box<Self>),
 }
 
-/// Fingerprint of a field.  Taken *after* [`Unifier::resolve_field`], so a raw
-/// `Field::Var(θ, τ)` and the `Absent` its applied form becomes key alike —
-/// `unify_ty_inner` keys before it resolves and `Pairs` retains what it gets,
-/// so a slot keying one way while the flag lives and another once it is dead
-/// would stop the guard recognising two types the field rule calls equal.
-/// That is the *resolution* half; the depth half is a resource bound no key
-/// closes, and `retiring_a_payload_past_the_ceiling_is_a_resource_bound` says
-/// so.
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum FieldKey {
-    Present(Box<TyKey>),
-    Absent,
-    Var(u32, Box<TyKey>),
-}
-
+#[derive(Clone)]
 enum Slot<T> {
     Free,
     Bound(T),
     Parent(u32),
 }
 
+#[derive(Clone)]
 struct Store<T> {
     slots: Vec<Slot<T>>,
     next: u32,
+    /// Roots that are weak: permanent for the unit, and inherited by whatever
+    /// a weak variable is united with.
+    weak: HashMap<u32, WeakSource>,
 }
 
 /// A sort with variables in a union-find store: `as_var` projects the id out of
@@ -154,18 +182,6 @@ impl Unifiable for CompTy {
     }
 }
 
-impl Unifiable for PayloadRoute {
-    fn as_var(&self) -> Option<u32> {
-        match self {
-            Self::Var(PayloadVar(i)) => Some(*i),
-            _ => None,
-        }
-    }
-    fn from_root(root: u32) -> Self {
-        Self::Var(PayloadVar(root))
-    }
-}
-
 impl Unifiable for Row {
     fn as_var(&self) -> Option<u32> {
         match self {
@@ -183,6 +199,7 @@ impl<T: Clone> Store<T> {
         Self {
             slots: Vec::new(),
             next: 0,
+            weak: HashMap::new(),
         }
     }
 
@@ -209,13 +226,17 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    fn get(&mut self, i: u32) -> Option<T> {
-        if i as usize >= self.slots.len() {
-            return None;
+    /// [`Self::find`] without path compression, for the read-only traversals.
+    fn root(&self, mut i: u32) -> u32 {
+        while let Some(&Slot::Parent(p)) = self.slots.get(i as usize) {
+            i = p;
         }
-        let r = self.find(i);
-        match &self.slots[r as usize] {
-            Slot::Bound(t) => Some(t.clone()),
+        i
+    }
+
+    fn get_ref(&self, i: u32) -> Option<&T> {
+        match self.slots.get(self.root(i) as usize)? {
+            Slot::Bound(t) => Some(t),
             _ => None,
         }
     }
@@ -253,34 +274,63 @@ impl<T: Clone> Store<T> {
         let br = self.find(b);
         if ar != br {
             self.union(ar, br);
+            if let Some(source) = self.weak.get(&ar).cloned() {
+                self.weak.entry(br).or_insert(source);
+            }
         }
+    }
+
+    fn mark_weak(&mut self, i: u32, source: WeakSource) {
+        let root = self.find(i);
+        self.weak.entry(root).or_insert(source);
+    }
+
+    fn weak_source(&self, i: u32) -> Option<&WeakSource> {
+        self.weak.get(&self.root(i))
+    }
+
+    fn is_weak(&self, i: u32) -> bool {
+        self.weak_source(i).is_some()
     }
 }
 
 impl<T: Unifiable> Store<T> {
     /// Follow a variable chain to canonical form.  The walk stops at the first
     /// non-variable head, so variables nested inside it — a cyclic binding's
-    /// back-edges — survive untouched.
-    fn resolve(&mut self, x: &T) -> T {
+    /// back-edges — survive untouched.  The head is borrowed; only a free
+    /// variable is rebuilt, at its root.
+    fn resolve<'a>(&'a self, x: &'a T) -> Cow<'a, T> {
         match x.as_var() {
-            Some(i) => match self.get(i) {
-                Some(b) => self.resolve(&b),
-                None => T::from_root(self.find(i)),
+            Some(i) => match self.get_ref(i) {
+                Some(b) => self.resolve(b),
+                None => Cow::Owned(T::from_root(self.root(i))),
             },
-            None => x.clone(),
+            None => Cow::Borrowed(x),
         }
     }
 }
 
+/// The kind a free type variable carries, and the span that narrowed it.
+#[derive(Clone, Copy)]
+pub(crate) struct Kinded {
+    pub(crate) kind: Kind,
+    pub(crate) witness: Option<Span>,
+}
+
+#[derive(Clone)]
 pub struct Unifier {
     tys: Store<Ty>,
     ctys: Store<CompTy>,
-    routes: Store<PayloadRoute>,
     rows: Store<Row>,
-    /// Flags are a two-point union-find; `Presence` has no variable
-    /// constructor, so this store is read through `resolve_presence` rather
-    /// than the `Unifiable` chase the other four share.
-    presences: Store<Presence>,
+    /// The kind of each free type-variable root, where not `any`.
+    kinds: HashMap<u32, Kinded>,
+    /// The free row-variable roots that are deep, with the span that made them so.
+    deep_rows: HashMap<u32, Option<Span>>,
+    /// The span in force when a type-variable root was first bound to a
+    /// structure: the use that imposed it.
+    bound_at: HashMap<u32, Span>,
+    /// The span in force: the witness of any kind a unification narrows.
+    pub(crate) at: Option<Span>,
 }
 
 impl Unifier {
@@ -288,9 +338,11 @@ impl Unifier {
         Self {
             tys: Store::new(),
             ctys: Store::new(),
-            routes: Store::new(),
             rows: Store::new(),
-            presences: Store::new(),
+            kinds: HashMap::new(),
+            deep_rows: HashMap::new(),
+            bound_at: HashMap::new(),
+            at: None,
         }
     }
 
@@ -299,15 +351,6 @@ impl Unifier {
     }
     pub(crate) fn fresh_ty(&mut self) -> Ty {
         Ty::Var(self.fresh_tyvar())
-    }
-
-    pub fn fresh_routevar(&mut self) -> PayloadVar {
-        PayloadVar(self.routes.fresh())
-    }
-    /// The unconstrained `F[μ] _`, for a head whose route is not yet known —
-    /// a signature nobody declared, so it must constrain nothing.
-    pub(crate) fn fresh_route(&mut self) -> PayloadRoute {
-        PayloadRoute::Var(self.fresh_routevar())
     }
 
     pub(crate) fn fresh_comp_ty(&mut self) -> CompTy {
@@ -320,42 +363,376 @@ impl Unifier {
         Row::Var(self.fresh_row_var())
     }
 
-    pub fn fresh_presence_var(&mut self) -> PresenceVar {
-        PresenceVar(self.presences.fresh())
-    }
-
-    /// Canonical presence-var root under union-find.  Mirror of `ty_root`.
-    pub(crate) fn presence_root(&mut self, i: u32) -> u32 {
-        self.presences.find(i)
-    }
-
-    /// What a flag has turned out to be, or `None` while it is still open.
-    pub(crate) fn resolve_presence(&mut self, v: PresenceVar) -> Option<Presence> {
-        self.presences.get(v.0)
-    }
-
-    /// A field's presence resolves exactly as a row's spine does: the twin of
-    /// [`Self::resolve_row`], called from the same places.
-    pub(crate) fn resolve_field(&mut self, field: &Field) -> Field {
-        match field {
-            Field::Var(v, ty) => match self.presences.get(v.0) {
-                Some(Presence::Present) => Field::Present(ty.clone()),
-                Some(Presence::Absent) => Field::Absent,
-                None => Field::Var(PresenceVar(self.presences.find(v.0)), ty.clone()),
+    /// A fresh variable of `kind`, narrowed at the span in force.
+    pub(crate) fn fresh_kinded_var(&mut self, kind: Kind) -> TyVar {
+        let v = self.fresh_tyvar();
+        self.install_kind(
+            v.0,
+            Kinded {
+                kind,
+                witness: self.at,
             },
-            other => other.clone(),
+        );
+        v
+    }
+
+    pub(crate) fn fresh_kinded(&mut self, kind: Kind) -> Ty {
+        Ty::Var(self.fresh_kinded_var(kind))
+    }
+
+    pub(crate) fn fresh_deep_row_var(&mut self, deep: bool) -> RowVar {
+        let v = self.fresh_row_var();
+        if deep {
+            self.deep_rows.insert(v.0, self.at);
+        }
+        v
+    }
+
+    /// The kind a free variable carries, and the span that narrowed it.
+    pub(crate) fn kinded(&self, v: TyVar) -> Kinded {
+        self.kind_at(self.tys.root(v.0))
+    }
+
+    fn kind_at(&self, root: u32) -> Kinded {
+        self.kinds.get(&root).copied().unwrap_or(Kinded {
+            kind: Kind::ANY,
+            witness: None,
+        })
+    }
+
+    pub(crate) fn is_deep_row(&self, v: RowVar) -> bool {
+        self.deep_rows.contains_key(&self.rows.root(v.0))
+    }
+
+    /// The use that fixed the structure a type-variable root stands for.
+    pub(crate) fn bound_witness(&self, root: u32) -> Option<Span> {
+        self.bound_at.get(&root).copied()
+    }
+
+    /// Record `kinded` on a free root.  A meet that leaves one nullary head
+    /// makes the variable that type.
+    fn install_kind(&mut self, root: u32, kinded: Kinded) {
+        match kinded.kind.pin() {
+            Some(ty) => {
+                self.kinds.remove(&root);
+                self.tys.bind(root, ty);
+            }
+            None if kinded.kind.is_any() => {
+                self.kinds.remove(&root);
+            }
+            None => {
+                self.kinds.insert(root, kinded);
+            }
+        }
+    }
+
+    fn unite_tys(&mut self, a: u32, b: u32) -> Result<(), TypeErrorKind> {
+        let (ar, br) = (self.tys.find(a), self.tys.find(b));
+        if ar == br {
+            return Ok(());
+        }
+        let (ka, kb) = (self.kind_at(ar), self.kind_at(br));
+        let Some(kind) = ka.kind.meet(kb.kind) else {
+            return Err(TypeErrorKind::KindMismatch {
+                found: KindFound::Used {
+                    kind: ka.kind,
+                    witness: ka.witness,
+                },
+                kind: kb.kind,
+                witness: kb.witness,
+            });
+        };
+        let witness = if kind == ka.kind {
+            ka.witness
+        } else {
+            kb.witness
+        };
+        self.tys.unite(ar, br);
+        self.kinds.remove(&ar);
+        self.install_kind(br, Kinded { kind, witness });
+        Ok(())
+    }
+
+    fn unite_rows(&mut self, a: u32, b: u32) {
+        let (ar, br) = (self.rows.find(a), self.rows.find(b));
+        if ar == br {
+            return;
+        }
+        let deep = self.deep_rows.remove(&ar);
+        self.rows.unite(ar, br);
+        if let Some(witness) = deep {
+            self.deep_rows.entry(br).or_insert(witness);
+        }
+    }
+
+    /// Narrow a free variable to the meet of its kind and `kind`.
+    fn narrow(
+        &mut self,
+        root: u32,
+        kind: Kind,
+        witness: Option<Span>,
+    ) -> Result<(), TypeErrorKind> {
+        let root = self.tys.find(root);
+        let current = self.kind_at(root);
+        let Some(meet) = current.kind.meet(kind) else {
+            return Err(TypeErrorKind::KindMismatch {
+                found: KindFound::Used {
+                    kind: current.kind,
+                    witness: current.witness,
+                },
+                kind,
+                witness,
+            });
+        };
+        if meet != current.kind {
+            self.install_kind(
+                root,
+                Kinded {
+                    kind: meet,
+                    witness,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn kind_error(&self, found: &Ty, kind: Kind, witness: Option<Span>) -> TypeErrorKind {
+        TypeErrorKind::KindMismatch {
+            found: KindFound::Type(Box::new(self.apply_ty(found))),
+            kind,
+            witness,
+        }
+    }
+
+    /// Whether `val` may become the structure `root` stands for: its head is
+    /// one the kind admits, and a deep kind's components are data.
+    fn admit(&mut self, root: u32, val: &Ty, depth: u32) -> Result<(), TypeErrorKind> {
+        let Some(Kinded { kind, witness }) = self.kinds.get(&root).copied() else {
+            return Ok(());
+        };
+        if Head::of(val).is_some_and(|head| !kind.admits(head)) {
+            return Err(self.kind_error(val, kind, witness));
+        }
+        if kind.is_deep() {
+            let mut owed = Owed::default();
+            let mut seen = HashSet::from([root]);
+            self.data_ty(val, witness, &mut seen, &mut owed, depth)?;
+            self.impose_data(owed, witness)?;
+        }
+        self.kinds.remove(&root);
+        Ok(())
+    }
+
+    /// The same, for a deep row variable about to become `val`.
+    fn admit_row(&mut self, root: u32, val: &Row, depth: u32) -> Result<(), TypeErrorKind> {
+        let Some(&witness) = self.deep_rows.get(&root) else {
+            return Ok(());
+        };
+        let mut owed = Owed::default();
+        self.data_row(val, witness, &mut HashSet::new(), &mut owed, depth)?;
+        self.impose_data(owed, witness)?;
+        self.deep_rows.remove(&root);
+        Ok(())
+    }
+
+    /// Walk `ty` as data: refuse a block or handle, and collect the free
+    /// variables the obligation lands on.  `seen` carries the roots expanded,
+    /// so a cyclic type ends.
+    fn data_ty(
+        &self,
+        ty: &Ty,
+        witness: Option<Span>,
+        seen: &mut HashSet<u32>,
+        owed: &mut Owed,
+        depth: u32,
+    ) -> Result<(), TypeErrorKind> {
+        if let Ty::Var(TyVar(i)) = ty
+            && !seen.insert(self.tys.root(*i))
+        {
+            return Ok(());
+        }
+        let depth = deeper(depth)?;
+        match &*self.head_ty(ty) {
+            Ty::Var(v) => owed.tys.push(v.0),
+            Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {}
+            Ty::List(a) | Ty::Map(a) => self.data_ty(a, witness, seen, owed, depth)?,
+            Ty::Record(r) | Ty::Variant(r) => self.data_row(r, witness, seen, owed, depth)?,
+            found @ (Ty::Thunk(_) | Ty::Handle(_)) => {
+                return Err(self.kind_error(found, Kind::DATA, witness));
+            }
+        }
+        Ok(())
+    }
+
+    fn data_row(
+        &self,
+        row: &Row,
+        witness: Option<Span>,
+        seen: &mut HashSet<u32>,
+        owed: &mut Owed,
+        depth: u32,
+    ) -> Result<(), TypeErrorKind> {
+        match &*self.head_row(row) {
+            Row::Empty => Ok(()),
+            Row::Var(v) => {
+                owed.rows.push(v.0);
+                Ok(())
+            }
+            Row::Extend(_, ty, rest) => {
+                self.data_ty(ty, witness, seen, owed, depth)?;
+                self.data_row(rest, witness, seen, owed, depth)
+            }
+        }
+    }
+
+    fn impose_data(&mut self, owed: Owed, witness: Option<Span>) -> Result<(), TypeErrorKind> {
+        for root in owed.tys {
+            self.narrow(root, Kind::DATA, witness)?;
+        }
+        for root in owed.rows {
+            let root = self.rows.find(root);
+            self.deep_rows.entry(root).or_insert(witness);
+        }
+        Ok(())
+    }
+
+    /// Make every variable free in `ty` weak: one type for the whole unit,
+    /// never quantified, and inherited by whatever it is united with.
+    pub(crate) fn mark_weak(&mut self, ty: &Ty, source: &WeakSource) {
+        let mut fvs = FreeVars::new();
+        free_ty(self, ty, &mut fvs);
+        for v in &fvs.tys {
+            self.tys.mark_weak(v.0, source.clone());
+        }
+        for v in &fvs.comps {
+            self.ctys.mark_weak(v.0, source.clone());
+        }
+        for v in &fvs.rows {
+            self.rows.mark_weak(v.0, source.clone());
+        }
+    }
+
+    pub(crate) fn mark_weak_vars(&mut self, weak: &WeakVars) {
+        for v in weak.tys.keys() {
+            self.tys.mark_weak(v.0, WeakSource::Residual);
+        }
+        for v in &weak.comps {
+            self.ctys.mark_weak(v.0, WeakSource::Residual);
+        }
+        for v in weak.rows.keys() {
+            self.rows.mark_weak(v.0, WeakSource::Residual);
+        }
+    }
+
+    fn weak_var(&self, ty: &Ty) -> Option<WeakSource> {
+        match ty {
+            Ty::Var(v) => self.tys.weak_source(v.0).cloned(),
+            _ => None,
+        }
+    }
+
+    fn weak_row_var(&self, row: &Row) -> Option<WeakSource> {
+        match row {
+            Row::Var(v) => self.rows.weak_source(v.0).cloned(),
+            _ => None,
+        }
+    }
+
+    fn weak_comp_var(&self, cty: &CompTy) -> Option<WeakSource> {
+        match cty {
+            CompTy::Var(v) => self.ctys.weak_source(v.0).cloned(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_weak_ty(&self, v: TyVar) -> bool {
+        self.tys.is_weak(v.0)
+    }
+
+    pub(crate) fn is_weak_comp(&self, v: CompTyVar) -> bool {
+        self.ctys.is_weak(v.0)
+    }
+
+    pub(crate) fn is_weak_row(&self, v: RowVar) -> bool {
+        self.rows.is_weak(v.0)
+    }
+
+    /// Whether a weak variable stands anywhere in `ty`, bound ones included:
+    /// a mismatch with the type a weak variable was fixed to is a mismatch on it.
+    pub(crate) fn reaches_weak(&self, ty: &Ty) -> bool {
+        self.weak_source_in_ty(ty).is_some()
+    }
+
+    /// What made the first weak variable in `ty` weak, bound ones included.
+    pub(crate) fn weak_source_in_ty(&self, ty: &Ty) -> Option<WeakSource> {
+        self.weak_in_ty(ty, &mut Visited::default())
+    }
+
+    pub(crate) fn weak_source_in_comp(&self, cty: &CompTy) -> Option<WeakSource> {
+        self.weak_in_comp(cty, &mut Visited::default())
+    }
+
+    fn weak_in_ty(&self, ty: &Ty, seen: &mut Visited) -> Option<WeakSource> {
+        match ty {
+            Ty::Var(v) => {
+                let root = self.tys.root(v.0);
+                self.tys.weak_source(root).cloned().or_else(|| {
+                    seen.tys
+                        .insert(root)
+                        .then(|| self.tys.get_ref(root))
+                        .flatten()
+                        .and_then(|b| self.weak_in_ty(b, seen))
+                })
+            }
+            Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => self.weak_in_ty(a, seen),
+            Ty::Record(r) | Ty::Variant(r) => self.weak_in_row(r, seen),
+            Ty::Thunk(b) => self.weak_in_comp(b, seen),
+            Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => None,
+        }
+    }
+
+    fn weak_in_comp(&self, cty: &CompTy, seen: &mut Visited) -> Option<WeakSource> {
+        match cty {
+            CompTy::Var(v) => {
+                let root = self.ctys.root(v.0);
+                self.ctys.weak_source(root).cloned().or_else(|| {
+                    seen.comps
+                        .insert(root)
+                        .then(|| self.ctys.get_ref(root))
+                        .flatten()
+                        .and_then(|b| self.weak_in_comp(b, seen))
+                })
+            }
+            CompTy::Return(a) => self.weak_in_ty(a, seen),
+            CompTy::Fun(a, b) => self
+                .weak_in_ty(a, seen)
+                .or_else(|| self.weak_in_comp(b, seen)),
+        }
+    }
+
+    fn weak_in_row(&self, row: &Row, seen: &mut Visited) -> Option<WeakSource> {
+        match row {
+            Row::Empty => None,
+            Row::Var(v) => self.rows.weak_source(v.0).cloned().or_else(|| {
+                self.rows
+                    .get_ref(v.0)
+                    .and_then(|b| self.weak_in_row(b, seen))
+            }),
+            Row::Extend(_, ty, rest) => self
+                .weak_in_ty(ty, seen)
+                .or_else(|| self.weak_in_row(rest, seen)),
         }
     }
 
     /// Canonical comp-var root under union-find, for the cycle-aware traversals
     /// in `generalize.rs`.
-    pub(crate) fn comp_root(&mut self, i: u32) -> u32 {
-        self.ctys.find(i)
+    pub(crate) fn comp_root(&self, i: u32) -> u32 {
+        self.ctys.root(i)
     }
 
     /// Canonical ty-var root under union-find.  Mirror of `comp_root`.
-    pub(crate) fn ty_root(&mut self, i: u32) -> u32 {
-        self.tys.find(i)
+    pub(crate) fn ty_root(&self, i: u32) -> u32 {
+        self.tys.root(i)
     }
 
     /// A fresh comp-var slot, as a root id.  Instantiation mints one per cyclic
@@ -384,16 +761,16 @@ impl Unifier {
     /// the root*, never the stored body: one level below the anchor unrolls the
     /// cycle before the back-edge fires, so the snapshot comes out off by a
     /// level and leaks the original union-find slot there.
-    pub(crate) fn resolved_comp_root_binding(&mut self, root: u32) -> Option<CompTy> {
-        match self.ctys.get(root) {
+    pub(crate) fn resolved_comp_root_binding(&self, root: u32) -> Option<CompTy> {
+        match self.ctys.get_ref(root) {
             Some(CompTy::Var(_)) | None => None,
             Some(_) => Some(self.apply_comp_ty(&CompTy::Var(CompTyVar(root)))),
         }
     }
 
     /// Mirror of `resolved_comp_root_binding`; the same anchor-quoting applies.
-    pub(crate) fn resolved_ty_root_binding(&mut self, root: u32) -> Option<Ty> {
-        match self.tys.get(root) {
+    pub(crate) fn resolved_ty_root_binding(&self, root: u32) -> Option<Ty> {
+        match self.tys.get_ref(root) {
             Some(Ty::Var(_)) | None => None,
             Some(_) => Some(self.apply_ty(&Ty::Var(TyVar(root)))),
         }
@@ -403,7 +780,7 @@ impl Unifier {
     /// the traversal's tags, not its output: a mid-cycle root is tagged on
     /// detection but need not surface as a back-edge.  One walk populates both
     /// tag sets, so `generalize` asks once and reads both.
-    pub(super) fn cyclic_roots_in_ty(&mut self, ty: &Ty) -> (Vec<u32>, Vec<u32>) {
+    pub(super) fn cyclic_roots_in_ty(&self, ty: &Ty) -> (Vec<u32>, Vec<u32>) {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);
         let mut comps: Vec<u32> = visited.cyclic_comps.into_iter().collect();
@@ -413,36 +790,41 @@ impl Unifier {
         (comps, tys)
     }
 
-    pub(crate) fn resolve_ty(&mut self, ty: &Ty) -> Ty {
+    pub(crate) fn head_ty<'a>(&'a self, ty: &'a Ty) -> Cow<'a, Ty> {
         self.tys.resolve(ty)
     }
 
-    pub(crate) fn resolve_comp_ty(&mut self, cty: &CompTy) -> CompTy {
+    pub(crate) fn head_comp_ty<'a>(&'a self, cty: &'a CompTy) -> Cow<'a, CompTy> {
         self.ctys.resolve(cty)
     }
 
-    pub(crate) fn resolve_route(&mut self, route: PayloadRoute) -> PayloadRoute {
-        self.routes.resolve(&route)
-    }
-
     /// Canonicalize the head; variables nested in the result stay unresolved.
-    pub(crate) fn resolve_row(&mut self, row: &Row) -> Row {
+    pub(crate) fn head_row<'a>(&'a self, row: &'a Row) -> Cow<'a, Row> {
         self.rows.resolve(row)
     }
 
-    /// Every `Extend` label, unsorted, paired with whether the field is *live*
-    /// — a resolved `Absent` sits on the spine but names nothing a program
-    /// could read — and the terminal: `Some(v)` for an open row, `None` for
-    /// one closed by `Empty`.  The loop needs no cycle guard: the occurs check
-    /// rejects a cyclic row binding before it is installed.
-    fn row_spine(&mut self, row: &Row) -> (Vec<(Label, bool)>, Option<RowVar>) {
+    pub(crate) fn resolve_ty(&self, ty: &Ty) -> Ty {
+        self.head_ty(ty).into_owned()
+    }
+
+    pub(crate) fn resolve_comp_ty(&self, cty: &CompTy) -> CompTy {
+        self.head_comp_ty(cty).into_owned()
+    }
+
+    pub(crate) fn resolve_row(&self, row: &Row) -> Row {
+        self.head_row(row).into_owned()
+    }
+
+    /// Every `Extend` label, unsorted, and the terminal: `Some(v)` for an open
+    /// row, `None` for one closed by `Empty`.  The loop needs no cycle guard:
+    /// the occurs check rejects a cyclic row binding before it is installed.
+    fn row_spine(&self, row: &Row) -> (Vec<Label>, Option<RowVar>) {
         let mut labels = Vec::new();
         let mut cur = self.resolve_row(row);
         loop {
             match cur {
-                Row::Extend(l, f, rest) => {
-                    let live = !matches!(self.resolve_field(&f), Field::Absent);
-                    labels.push((l, live));
+                Row::Extend(l, _, rest) => {
+                    labels.push(l);
                     cur = self.resolve_row(&rest);
                 }
                 Row::Var(v) => return (labels, Some(v)),
@@ -451,22 +833,32 @@ impl Unifier {
         }
     }
 
-    pub(crate) fn apply_ty(&mut self, ty: &Ty) -> Ty {
+    pub(crate) fn apply_ty(&self, ty: &Ty) -> Ty {
         let mut visited = Visited::default();
         self.apply_ty_inner(ty, &mut visited)
     }
 
-    pub(crate) fn apply_comp_ty(&mut self, cty: &CompTy) -> CompTy {
+    /// [`Self::apply_ty`], except that a weak variable stays a variable: a
+    /// scheme or binding that mentions one keeps mentioning it after it is fixed.
+    pub(crate) fn apply_ty_keeping_weak(&self, ty: &Ty) -> Ty {
+        let mut visited = Visited {
+            keep_weak: true,
+            ..Visited::default()
+        };
+        self.apply_ty_inner(ty, &mut visited)
+    }
+
+    pub(crate) fn apply_comp_ty(&self, cty: &CompTy) -> CompTy {
         let mut visited = Visited::default();
         self.apply_comp_ty_inner(cty, &mut visited)
     }
 
-    pub(crate) fn apply_row(&mut self, row: &Row) -> Row {
+    pub(crate) fn apply_row(&self, row: &Row) -> Row {
         let mut visited = Visited::default();
         self.apply_row_inner(row, &mut visited)
     }
 
-    pub(super) fn apply_ty_inner(&mut self, ty: &Ty, visited: &mut Visited) -> Ty {
+    pub(super) fn apply_ty_inner(&self, ty: &Ty, visited: &mut Visited) -> Ty {
         // In CBPV every productive recursive value type closes through a
         // `Thunk` — μ values are finite, the recursion lives in the ν
         // computations — so a ty-back-edge onto `Thunk(Var(c))` with `c` on the
@@ -476,7 +868,7 @@ impl Unifier {
         // cycle truly anchored at a ty-var reaches a `Variant`, not a `Thunk`,
         // and takes the plain fallback.
         let root = match ty {
-            Ty::Var(TyVar(i)) => Some(self.tys.find(*i)),
+            Ty::Var(TyVar(i)) => Some(self.tys.root(*i)),
             _ => None,
         };
         if let Some(r) = root {
@@ -486,10 +878,10 @@ impl Unifier {
             if visited.tys.contains(&r) {
                 // Match the raw binding, not `resolve_comp_ty` of it: the
                 // anchor is `C`'s root, not whatever `C` resolves to now.
-                if let Some(Ty::Thunk(b)) = self.tys.get(r)
-                    && let CompTy::Var(CompTyVar(ci)) = *b
+                if let Some(Ty::Thunk(b)) = self.tys.get_ref(r)
+                    && let CompTy::Var(CompTyVar(ci)) = **b
                 {
-                    let c_root = self.ctys.find(ci);
+                    let c_root = self.ctys.root(ci);
                     if visited.comps.contains(&c_root) {
                         visited.cyclic_comps.insert(c_root);
                         return Ty::Thunk(Box::new(CompTy::Var(CompTyVar(c_root))));
@@ -499,21 +891,29 @@ impl Unifier {
                 return Ty::Var(TyVar(r));
             }
         }
-        let resolved = self.resolve_ty(ty);
-        if matches!(&resolved, Ty::Var(_)) {
-            return resolved;
+        if visited.keep_weak
+            && let Some(r) = root
+            && self.tys.is_weak(r)
+        {
+            return Ty::Var(TyVar(r));
+        }
+        let resolved = self.head_ty(ty);
+        if matches!(&*resolved, Ty::Var(_)) {
+            return resolved.into_owned();
         }
         if let Some(r) = root {
             visited.tys.insert(r);
         }
-        let out = match resolved {
-            Ty::List(a) => Ty::List(Box::new(self.apply_ty_inner(&a, visited))),
-            Ty::Map(a) => Ty::Map(Box::new(self.apply_ty_inner(&a, visited))),
-            Ty::Handle(a) => Ty::Handle(Box::new(self.apply_ty_inner(&a, visited))),
-            Ty::Record(r) => Ty::Record(self.apply_row_inner(&r, visited)),
-            Ty::Variant(r) => Ty::Variant(self.apply_row_inner(&r, visited)),
-            Ty::Thunk(b) => Ty::Thunk(Box::new(self.apply_comp_ty_inner(&b, visited))),
-            ground @ (Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String) => ground,
+        let out = match &*resolved {
+            Ty::List(a) => Ty::List(Box::new(self.apply_ty_inner(a, visited))),
+            Ty::Map(a) => Ty::Map(Box::new(self.apply_ty_inner(a, visited))),
+            Ty::Handle(a) => Ty::Handle(Box::new(self.apply_ty_inner(a, visited))),
+            Ty::Record(r) => Ty::Record(self.apply_row_inner(r, visited)),
+            Ty::Variant(r) => Ty::Variant(self.apply_row_inner(r, visited)),
+            Ty::Thunk(b) => Ty::Thunk(Box::new(self.apply_comp_ty_inner(b, visited))),
+            ground @ (Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String) => {
+                ground.clone()
+            }
             // Enumerated so a new constructor fails the build here rather than
             // falling through unsubstituted.
             Ty::Var(_) => unreachable!("unbound var early-returned; resolved is non-Var here"),
@@ -526,12 +926,12 @@ impl Unifier {
         out
     }
 
-    fn apply_comp_ty_inner(&mut self, cty: &CompTy, visited: &mut Visited) -> CompTy {
+    fn apply_comp_ty_inner(&self, cty: &CompTy, visited: &mut Visited) -> CompTy {
         // The anchor may sit on either side of the ty/comp boundary, but the
         // cycle traverses both, so every root currently expanding belongs to it
         // and must enter its bindings list to be given a fresh id later.
         let root = match cty {
-            CompTy::Var(CompTyVar(i)) => Some(self.ctys.find(*i)),
+            CompTy::Var(CompTyVar(i)) => Some(self.ctys.root(*i)),
             _ => None,
         };
         if let Some(r) = root {
@@ -543,21 +943,24 @@ impl Unifier {
                 return CompTy::Var(CompTyVar(r));
             }
         }
-        let resolved = self.resolve_comp_ty(cty);
-        if matches!(&resolved, CompTy::Var(_)) {
-            return resolved;
+        if visited.keep_weak
+            && let Some(r) = root
+            && self.ctys.is_weak(r)
+        {
+            return CompTy::Var(CompTyVar(r));
+        }
+        let resolved = self.head_comp_ty(cty);
+        if matches!(&*resolved, CompTy::Var(_)) {
+            return resolved.into_owned();
         }
         if let Some(r) = root {
             visited.comps.insert(r);
         }
-        let out = match resolved {
-            CompTy::Return(route, a) => CompTy::Return(
-                self.resolve_route(route),
-                Box::new(self.apply_ty_inner(&a, visited)),
-            ),
+        let out = match &*resolved {
+            CompTy::Return(a) => CompTy::Return(Box::new(self.apply_ty_inner(a, visited))),
             CompTy::Fun(a, b) => CompTy::Fun(
-                Box::new(self.apply_ty_inner(&a, visited)),
-                Box::new(self.apply_comp_ty_inner(&b, visited)),
+                Box::new(self.apply_ty_inner(a, visited)),
+                Box::new(self.apply_comp_ty_inner(b, visited)),
             ),
             CompTy::Var(_) => {
                 unreachable!("var early-returned above; resolved is non-Var here")
@@ -571,22 +974,20 @@ impl Unifier {
         out
     }
 
-    fn apply_row_inner(&mut self, row: &Row, visited: &mut Visited) -> Row {
-        match self.resolve_row(row) {
+    fn apply_row_inner(&self, row: &Row, visited: &mut Visited) -> Row {
+        if visited.keep_weak
+            && let Row::Var(RowVar(i)) = row
+            && self.rows.is_weak(*i)
+        {
+            return Row::Var(RowVar(self.rows.root(*i)));
+        }
+        match &*self.head_row(row) {
             Row::Empty => Row::Empty,
-            Row::Var(v) => Row::Var(v),
-            Row::Extend(l, f, rest) => {
-                // The rewrite drops a payload; it never invents one.  No rule
-                // reads under an absent flag, so dropping it loses nothing.
-                let f2 = match self.resolve_field(&f) {
-                    Field::Present(ty) => {
-                        Field::Present(Box::new(self.apply_ty_inner(&ty, visited)))
-                    }
-                    Field::Var(v, ty) => Field::Var(v, Box::new(self.apply_ty_inner(&ty, visited))),
-                    Field::Absent => Field::Absent,
-                };
-                let rest2 = self.apply_row_inner(&rest, visited);
-                Row::Extend(l, f2, Box::new(rest2))
+            Row::Var(v) => Row::Var(*v),
+            Row::Extend(l, ty, rest) => {
+                let ty2 = self.apply_ty_inner(ty, visited);
+                let rest2 = self.apply_row_inner(rest, visited);
+                Row::Extend(l.clone(), Box::new(ty2), Box::new(rest2))
             }
         }
     }
@@ -597,46 +998,40 @@ impl Unifier {
     // descends through both, carrying a `Visited` because a field type may
     // legitimately be cyclic.
 
-    fn row_occurs(&mut self, v: RowVar, row: &Row, depth: u32) -> Result<bool, TypeErrorKind> {
+    fn row_occurs(&self, v: RowVar, row: &Row, depth: u32) -> Result<bool, TypeErrorKind> {
         let mut visited = Visited::default();
         self.row_occurs_inner(v, row, &mut visited, depth)
     }
 
     fn row_occurs_inner(
-        &mut self,
+        &self,
         v: RowVar,
         row: &Row,
         visited: &mut Visited,
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
-        match self.resolve_row(row) {
+        match &*self.head_row(row) {
             Row::Empty => Ok(false),
-            Row::Var(u) => Ok(u == v),
+            Row::Var(u) => Ok(*u == v),
             // Through the payload, not only along the spine: a spine-only
             // check admits a cycle anchored at no type or computation
             // variable, which nothing here could apply, snapshot or re-anchor.
-            // A dead payload has none to descend into.
-            Row::Extend(_, f, rest) => {
-                let live = match self.resolve_field(&f) {
-                    Field::Present(ty) | Field::Var(_, ty) => {
-                        self.ty_occurs_row(v, &ty, visited, deeper(depth)?)?
-                    }
-                    Field::Absent => false,
-                };
-                Ok(live || self.row_occurs_inner(v, &rest, visited, depth)?)
+            Row::Extend(_, ty, rest) => {
+                let inside = self.ty_occurs_row(v, ty, visited, deeper(depth)?)?;
+                Ok(inside || self.row_occurs_inner(v, rest, visited, depth)?)
             }
         }
     }
 
     fn ty_occurs_row(
-        &mut self,
+        &self,
         v: RowVar,
         ty: &Ty,
         visited: &mut Visited,
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
         let root = match ty {
-            Ty::Var(TyVar(i)) => Some(self.tys.find(*i)),
+            Ty::Var(TyVar(i)) => Some(self.tys.root(*i)),
             _ => None,
         };
         if let Some(r) = root
@@ -644,12 +1039,12 @@ impl Unifier {
         {
             return Ok(false);
         }
-        match self.resolve_ty(ty) {
+        match &*self.head_ty(ty) {
             Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => {
-                self.ty_occurs_row(v, &a, visited, deeper(depth)?)
+                self.ty_occurs_row(v, a, visited, deeper(depth)?)
             }
-            Ty::Record(r) | Ty::Variant(r) => self.row_occurs_inner(v, &r, visited, deeper(depth)?),
-            Ty::Thunk(c) => self.comp_occurs_row(v, &c, visited, deeper(depth)?),
+            Ty::Record(r) | Ty::Variant(r) => self.row_occurs_inner(v, r, visited, deeper(depth)?),
+            Ty::Thunk(c) => self.comp_occurs_row(v, c, visited, deeper(depth)?),
             // Enumerated rather than caught: a future row-embedding
             // constructor skipped here lets a cyclic row install undetected.
             Ty::Var(_) | Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {
@@ -659,14 +1054,14 @@ impl Unifier {
     }
 
     fn comp_occurs_row(
-        &mut self,
+        &self,
         v: RowVar,
         cty: &CompTy,
         visited: &mut Visited,
         depth: u32,
     ) -> Result<bool, TypeErrorKind> {
         let root = match cty {
-            CompTy::Var(CompTyVar(i)) => Some(self.ctys.find(*i)),
+            CompTy::Var(CompTyVar(i)) => Some(self.ctys.root(*i)),
             _ => None,
         };
         if let Some(r) = root
@@ -674,11 +1069,11 @@ impl Unifier {
         {
             return Ok(false);
         }
-        match self.resolve_comp_ty(cty) {
+        match &*self.head_comp_ty(cty) {
             CompTy::Var(_) => Ok(false),
-            CompTy::Return(_, a) => self.ty_occurs_row(v, &a, visited, deeper(depth)?),
-            CompTy::Fun(a, b) => Ok(self.ty_occurs_row(v, &a, visited, deeper(depth)?)?
-                || self.comp_occurs_row(v, &b, visited, deeper(depth)?)?),
+            CompTy::Return(a) => self.ty_occurs_row(v, a, visited, deeper(depth)?),
+            CompTy::Fun(a, b) => Ok(self.ty_occurs_row(v, a, visited, deeper(depth)?)?
+                || self.comp_occurs_row(v, b, visited, deeper(depth)?)?),
         }
     }
 
@@ -707,10 +1102,7 @@ impl Unifier {
 
     fn comp_key(&mut self, cty: &CompTy, depth: u32) -> Result<CompTyKey, TypeErrorKind> {
         Ok(match cty {
-            CompTy::Return(route, t) => CompTyKey::Return(
-                self.resolve_route(*route),
-                Box::new(self.ty_key(t, deeper(depth)?)?),
-            ),
+            CompTy::Return(t) => CompTyKey::Return(Box::new(self.ty_key(t, deeper(depth)?)?)),
             CompTy::Fun(a, b) => CompTyKey::Fun(
                 Box::new(self.ty_key(a, deeper(depth)?)?),
                 Box::new(self.comp_key(b, deeper(depth)?)?),
@@ -723,19 +1115,11 @@ impl Unifier {
         Ok(match row {
             Row::Empty => RowKey::Empty,
             Row::Var(RowVar(i)) => RowKey::Var(self.rows.find(*i)),
-            Row::Extend(l, f, rest) => RowKey::Extend(
+            Row::Extend(l, ty, rest) => RowKey::Extend(
                 l.clone(),
-                self.field_key(f, deeper(depth)?)?,
+                Box::new(self.ty_key(ty, deeper(depth)?)?),
                 Box::new(self.row_key(rest, depth)?),
             ),
-        })
-    }
-
-    fn field_key(&mut self, field: &Field, depth: u32) -> Result<FieldKey, TypeErrorKind> {
-        Ok(match self.resolve_field(field) {
-            Field::Present(t) => FieldKey::Present(Box::new(self.ty_key(&t, depth)?)),
-            Field::Absent => FieldKey::Absent,
-            Field::Var(v, t) => FieldKey::Var(v.0, Box::new(self.ty_key(&t, depth)?)),
         })
     }
 
@@ -775,24 +1159,25 @@ impl Unifier {
             _ => {}
         }
 
+        let (a_weak, b_weak) = (self.weak_var(a), self.weak_var(b));
         let a = self.resolve_ty(a);
         let b = self.resolve_ty(b);
 
         if let (Ty::Var(TyVar(ai)), Ty::Var(TyVar(bi))) = (&a, &b) {
-            self.tys.unite(*ai, *bi);
-            return Ok(());
+            return self.unite_tys(*ai, *bi);
         }
+        // Unified with a weak variable, even one already fixed, is weak.
         if let Ty::Var(TyVar(vi)) = &a {
-            // No occurs check: a cyclic binding is sound under the cycle-aware
-            // traversals above.
-            let r = self.tys.find(*vi);
-            self.tys.bind(r, b);
-            return Ok(());
+            if let Some(source) = b_weak {
+                self.tys.mark_weak(*vi, source);
+            }
+            return self.bind_ty(*vi, b, depth);
         }
         if let Ty::Var(TyVar(vi)) = &b {
-            let r = self.tys.find(*vi);
-            self.tys.bind(r, a);
-            return Ok(());
+            if let Some(source) = a_weak {
+                self.tys.mark_weak(*vi, source);
+            }
+            return self.bind_ty(*vi, a, depth);
         }
         let depth = deeper(depth)?;
         match (a, b) {
@@ -835,6 +1220,122 @@ impl Unifier {
         }
     }
 
+    /// Bind `v`'s root to the structure `val`, unless `val` reaches it without
+    /// crossing data.  Var–var unions cannot close a cycle, so binding is the
+    /// only place one can form.
+    fn bind_ty(&mut self, v: u32, val: Ty, depth: u32) -> Result<(), TypeErrorKind> {
+        let root = self.tys.find(v);
+        self.refuse_data_free_cycle(Anchor::Ty(root), Reach::Ty(&val), depth)?;
+        self.admit(root, &val, depth)?;
+        if let Some(source) = self.tys.weak_source(root).cloned() {
+            self.mark_weak(&val, &source);
+        }
+        if let Some(at) = self.at {
+            self.bound_at.entry(root).or_insert(at);
+        }
+        self.tys.bind(root, val);
+        Ok(())
+    }
+
+    /// A weak row variable bound to a spine: what the spine mentions is weak too.
+    fn weaken_row(&mut self, root: u32, spine: &Row) {
+        if let Some(source) = self.rows.weak_source(root).cloned() {
+            self.mark_weak(&Ty::Record(spine.clone()), &source);
+        }
+    }
+
+    fn bind_comp_ty(&mut self, v: u32, val: CompTy, depth: u32) -> Result<(), TypeErrorKind> {
+        let root = self.ctys.find(v);
+        self.refuse_data_free_cycle(Anchor::Comp(root), Reach::Comp(&val), depth)?;
+        if let Some(source) = self.ctys.weak_source(root).cloned() {
+            self.mark_weak(&Ty::Thunk(Box::new(val.clone())), &source);
+        }
+        self.ctys.bind(root, val);
+        Ok(())
+    }
+
+    fn refuse_data_free_cycle(
+        &self,
+        anchor: Anchor,
+        from: Reach<'_>,
+        depth: u32,
+    ) -> Result<(), TypeErrorKind> {
+        let mut visited = Visited::default();
+        let via = match from {
+            Reach::Ty(ty) => self.ty_reaches(anchor, ty, CycleVia::Returns, &mut visited, depth)?,
+            Reach::Comp(cty) => {
+                self.comp_reaches(anchor, cty, CycleVia::Returns, &mut visited, depth)?
+            }
+        };
+        via.map_or(Ok(()), |via| Err(TypeErrorKind::CyclicType { via }))
+    }
+
+    /// Whether `anchor` is reachable from `ty` along `U`, `→`, `F` and
+    /// `Handle` alone, and by which edge.  Data edges are not crossed, so the
+    /// search is finite over the acyclic non-data graph and a visited set keyed
+    /// by root is sound.
+    fn ty_reaches(
+        &self,
+        anchor: Anchor,
+        ty: &Ty,
+        via: CycleVia,
+        visited: &mut Visited,
+        depth: u32,
+    ) -> Result<Option<CycleVia>, TypeErrorKind> {
+        if let Ty::Var(TyVar(i)) = ty {
+            let root = self.tys.root(*i);
+            if anchor == Anchor::Ty(root) {
+                return Ok(Some(via));
+            }
+            if !visited.tys.insert(root) {
+                return Ok(None);
+            }
+        }
+        match &*self.head_ty(ty) {
+            Ty::Thunk(c) => self.comp_reaches(anchor, c, via, visited, deeper(depth)?),
+            Ty::Handle(a) => self.ty_reaches(anchor, a, via, visited, deeper(depth)?),
+            Ty::List(_) | Ty::Map(_) | Ty::Record(_) | Ty::Variant(_) => Ok(None),
+            Ty::Var(_) | Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {
+                Ok(None)
+            }
+        }
+    }
+
+    fn comp_reaches(
+        &self,
+        anchor: Anchor,
+        cty: &CompTy,
+        via: CycleVia,
+        visited: &mut Visited,
+        depth: u32,
+    ) -> Result<Option<CycleVia>, TypeErrorKind> {
+        if let CompTy::Var(CompTyVar(i)) = cty {
+            let root = self.ctys.root(*i);
+            if anchor == Anchor::Comp(root) {
+                return Ok(Some(via));
+            }
+            if !visited.comps.insert(root) {
+                return Ok(None);
+            }
+        }
+        let depth = deeper(depth)?;
+        match &*self.head_comp_ty(cty) {
+            CompTy::Var(_) => Ok(None),
+            CompTy::Return(a) => self.ty_reaches(anchor, a, CycleVia::Returns, visited, depth),
+            CompTy::Fun(a, b) => {
+                let arg_via = if matches!(a.as_ref(), Ty::Var(_)) {
+                    CycleVia::Applied
+                } else {
+                    CycleVia::Argument
+                };
+                match self.ty_reaches(anchor, a, arg_via, visited, depth)? {
+                    Some(via) => Ok(Some(via)),
+                    None => self.comp_reaches(anchor, b, CycleVia::Returns, visited, depth),
+                }
+            }
+        }
+    }
+
     /// Row unification using the Rémy rewrite rule.
     ///
     /// # Errors
@@ -858,7 +1359,7 @@ impl Unifier {
     /// label is the one whose own labels lack it, and either side can be that
     /// record.
     fn name_alternatives(
-        &mut self,
+        &self,
         a: &Row,
         b: &Row,
         result: Result<(), TypeErrorKind>,
@@ -869,14 +1370,7 @@ impl Unifier {
         if !known.is_empty() {
             return Err(TypeErrorKind::RowExtraField { label, known });
         }
-        // Only live fields are on offer: a label the row resolved to absent is
-        // not one the reader could have meant.
-        let names = |ls: Vec<(Label, bool)>| {
-            ls.iter()
-                .filter(|(_, live)| *live)
-                .map(|(l, _)| l.to_string())
-                .collect::<Vec<_>>()
-        };
+        let names = |ls: Vec<Label>| ls.iter().map(Label::to_string).collect::<Vec<_>>();
         let a_names = names(self.row_spine(a).0);
         let known = if a_names.contains(&label) {
             names(self.row_spine(b).0)
@@ -897,51 +1391,61 @@ impl Unifier {
         pairs: &mut Pairs,
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
+        let mut entry_weak = (self.weak_row_var(a), self.weak_row_var(b));
         let mut a = self.resolve_row(a);
         let mut b = self.resolve_row(b);
         loop {
+            // Only the rows as given can be weak variables fixed to a spine.
+            let (a_weak, b_weak) = std::mem::take(&mut entry_weak);
             if let (Row::Var(RowVar(ai)), Row::Var(RowVar(bi))) = (&a, &b) {
-                self.rows.unite(*ai, *bi);
+                self.unite_rows(*ai, *bi);
                 return Ok(());
             }
             if let Row::Var(RowVar(vi)) = &a {
                 let vi = *vi;
+                if let Some(source) = b_weak {
+                    self.rows.mark_weak(vi, source);
+                }
                 if self.row_occurs(RowVar(vi), &b, depth)? {
                     return Err(TypeErrorKind::RecursiveRow);
                 }
                 let r = self.rows.find(vi);
+                self.admit_row(r, &b, depth)?;
+                self.weaken_row(r, &b);
                 self.rows.bind(r, b);
                 return Ok(());
             }
             if let Row::Var(RowVar(vi)) = &b {
                 let vi = *vi;
+                if let Some(source) = a_weak {
+                    self.rows.mark_weak(vi, source);
+                }
                 if self.row_occurs(RowVar(vi), &a, depth)? {
                     return Err(TypeErrorKind::RecursiveRow);
                 }
                 let r = self.rows.find(vi);
+                self.admit_row(r, &a, depth)?;
+                self.weaken_row(r, &a);
                 self.rows.bind(r, a);
                 return Ok(());
             }
 
             match (a, b) {
                 (Row::Empty, Row::Empty) => return Ok(()),
-                // `Empty` says every label off the spine is absent, so these two
-                // arms are a *peel*, not an error: they retire the field and
-                // carry on.  They are the symmetric pair a one-sided edit would
-                // leave half-done.
-                (Row::Empty, Row::Extend(l, f, rest)) => {
-                    self.unify_field(&l, &Field::Absent, &f, pairs, depth)?;
-                    b = self.resolve_row(&rest);
-                    a = Row::Empty;
+                (Row::Empty, Row::Extend(l, ..)) => {
+                    return Err(TypeErrorKind::RowExtraField {
+                        label: l.to_string(),
+                        known: Vec::new(),
+                    });
                 }
-                (Row::Extend(l, f, rest), Row::Empty) => {
-                    self.unify_field(&l, &f, &Field::Absent, pairs, depth)?;
-                    a = self.resolve_row(&rest);
-                    b = Row::Empty;
+                (Row::Extend(l, ..), Row::Empty) => {
+                    return Err(TypeErrorKind::RowMissingField {
+                        label: l.to_string(),
+                    });
                 }
-                (Row::Extend(l1, f1, r1), Row::Extend(l2, f2, r2)) => {
+                (Row::Extend(l1, t1, r1), Row::Extend(l2, t2, r2)) => {
                     if l1 == l2 {
-                        self.unify_field(&l1, &f1, &f2, pairs, depth)?;
+                        self.unify_ty_inner(&t1, &t2, pairs, deeper(depth)?)?;
                         // In place, not a deeper frame: a wide row is O(1) stack.
                         a = self.resolve_row(&r1);
                         b = self.resolve_row(&r2);
@@ -954,10 +1458,10 @@ impl Unifier {
                         return Err(TypeErrorKind::TyMismatch {
                             expected: Box::new(Ty::Record(Row::Extend(
                                 l1,
-                                f1,
+                                t1,
                                 Box::new(Row::Empty),
                             ))),
-                            actual: Box::new(Ty::Record(Row::Extend(l2, f2, Box::new(Row::Empty)))),
+                            actual: Box::new(Ty::Record(Row::Extend(l2, t2, Box::new(Row::Empty)))),
                         });
                     }
                     // Scoped-labels side condition (Gaster–Jones, Leijen): two
@@ -967,18 +1471,12 @@ impl Unifier {
                     // each turn.  The disagreement can sit below the head, so
                     // compare whole spines; a permutation does have a solution
                     // and must still take it.
-                    let (left_spine, left_tail) = self.row_spine(&r1);
-                    let (right_spine, right_tail) = self.row_spine(&r2);
-                    // Every label, live or not: absence before a *variable*
-                    // tail is no equation here (exclusion is an invariant of
-                    // row introduction, not data on the variable), so an
-                    // absent field still counts against the multiset.
-                    let mut left: Vec<Label> = left_spine.into_iter().map(|(l, _)| l).collect();
-                    let mut right: Vec<Label> = right_spine.into_iter().map(|(l, _)| l).collect();
+                    let (mut left, left_tail) = self.row_spine(&r1);
+                    let (mut right, right_tail) = self.row_spine(&r2);
                     left.push(l1.clone());
                     right.push(l2.clone());
-                    if let (Some(t1), Some(t2)) = (left_tail, right_tail)
-                        && t1 == t2
+                    if let (Some(lt), Some(rt)) = (left_tail, right_tail)
+                        && lt == rt
                     {
                         left.sort();
                         right.sort();
@@ -987,8 +1485,8 @@ impl Unifier {
                         }
                     }
                     let rho = self.fresh_row_var();
-                    let new_r1 = Row::Extend(l2, f2, Box::new(Row::Var(rho)));
-                    let new_r2 = Row::Extend(l1, f1, Box::new(Row::Var(rho)));
+                    let new_r1 = Row::Extend(l2, t2, Box::new(Row::Var(rho)));
+                    let new_r2 = Row::Extend(l1, t1, Box::new(Row::Var(rho)));
                     self.unify_row_inner(&r1, &new_r1, pairs, depth)?;
                     return self.unify_row_inner(&new_r2, &r2, pairs, depth);
                 }
@@ -996,57 +1494,6 @@ impl Unifier {
                     unreachable!("Row::Var pairs are handled by the early-return blocks above")
                 }
             }
-        }
-    }
-
-    /// The field rule: unify the flags, then the payloads when both sides have
-    /// one.  Dropping a payload whose partner is absent loses nothing, because
-    /// no rule reads under an absent flag; order-independence is then a theorem
-    /// about the term rules (confinement) plus the one-optional-type door in
-    /// `contract.rs`, not a property of this equation alone.
-    ///
-    /// `Present` against `Absent` has no solution, and this frame owns the
-    /// message because it is the one holding `label`.
-    fn unify_field(
-        &mut self,
-        label: &Label,
-        a: &Field,
-        b: &Field,
-        pairs: &mut Pairs,
-        depth: u32,
-    ) -> Result<(), TypeErrorKind> {
-        let a = self.resolve_field(a);
-        let b = self.resolve_field(b);
-        // The record that lacks the label is the one the message is about.
-        let clash = |absent_left: bool| {
-            if absent_left {
-                Err(TypeErrorKind::RowExtraField {
-                    label: label.to_string(),
-                    known: Vec::new(),
-                })
-            } else {
-                Err(TypeErrorKind::RowMissingField {
-                    label: label.to_string(),
-                })
-            }
-        };
-        match (&a, &b) {
-            (Field::Present(_), Field::Absent) => return clash(false),
-            (Field::Absent, Field::Present(_)) => return clash(true),
-            (Field::Var(v, _), Field::Var(w, _)) => self.presences.unite(v.0, w.0),
-            (Field::Var(v, _), Field::Present(_)) | (Field::Present(_), Field::Var(v, _)) => {
-                let r = self.presences.find(v.0);
-                self.presences.bind(r, Presence::Present);
-            }
-            (Field::Var(v, _), Field::Absent) | (Field::Absent, Field::Var(v, _)) => {
-                let r = self.presences.find(v.0);
-                self.presences.bind(r, Presence::Absent);
-            }
-            (Field::Present(_), Field::Present(_)) | (Field::Absent, Field::Absent) => {}
-        }
-        match (a.payload(), b.payload()) {
-            (Some(t1), Some(t2)) => self.unify_ty_inner(t1, t2, pairs, deeper(depth)?),
-            _ => Ok(()),
         }
     }
 
@@ -1084,6 +1531,7 @@ impl Unifier {
             _ => {}
         }
 
+        let (a_weak, b_weak) = (self.weak_comp_var(a), self.weak_comp_var(b));
         let a = self.resolve_comp_ty(a);
         let b = self.resolve_comp_ty(b);
 
@@ -1092,45 +1540,34 @@ impl Unifier {
             return Ok(());
         }
         if let CompTy::Var(CompTyVar(vi)) = &a {
-            // No occurs check, for the same reason as `unify_ty_inner`.
-            let r = self.ctys.find(*vi);
-            self.ctys.bind(r, b);
-            return Ok(());
+            if let Some(source) = b_weak {
+                self.ctys.mark_weak(*vi, source);
+            }
+            return self.bind_comp_ty(*vi, b, depth);
         }
         if let CompTy::Var(CompTyVar(vi)) = &b {
-            let r = self.ctys.find(*vi);
-            self.ctys.bind(r, a);
-            return Ok(());
+            if let Some(source) = a_weak {
+                self.ctys.mark_weak(*vi, source);
+            }
+            return self.bind_comp_ty(*vi, a, depth);
         }
         let depth = deeper(depth)?;
         match (a, b) {
-            (CompTy::Return(ra, ta), CompTy::Return(rb, tb)) => {
-                let mut diffs: Vec<CompDiff> = Vec::new();
-                if self.unify_route(ra, rb).is_err() {
-                    diffs.push(CompDiff::Route {
-                        expected: self.resolve_route(ra),
-                        actual: self.resolve_route(rb),
-                    });
-                }
-                // A return-type disagreement folds into the rich `Return` diff,
-                // but a spent depth budget is exhaustion rather than
-                // disagreement, so it propagates verbatim.
+            (CompTy::Return(ta), CompTy::Return(tb)) => {
+                // A spent depth budget is exhaustion rather than disagreement, and
+                // a kind refusal is not a disagreement between two types at all,
+                // so both propagate verbatim.
                 match self.unify_ty_inner(&ta, &tb, pairs, depth) {
-                    Ok(()) => {}
-                    Err(TypeErrorKind::TypeTooDeep) => return Err(TypeErrorKind::TypeTooDeep),
-                    Err(_) => diffs.push(CompDiff::ReturnType {
-                        expected: self.apply_ty(&ta),
-                        actual: self.apply_ty(&tb),
+                    Ok(()) => Ok(()),
+                    Err(
+                        e @ (TypeErrorKind::TypeTooDeep
+                        | TypeErrorKind::CyclicType { .. }
+                        | TypeErrorKind::KindMismatch { .. }),
+                    ) => Err(e),
+                    Err(_) => Err(TypeErrorKind::CompTyMismatch {
+                        expected: CompTy::pure(self.apply_ty(&ta)),
+                        actual: CompTy::pure(self.apply_ty(&tb)),
                     }),
-                }
-                if diffs.is_empty() {
-                    Ok(())
-                } else {
-                    Err(TypeErrorKind::CompTyMismatch {
-                        expected: self.apply_return(ra, &ta),
-                        actual: self.apply_return(rb, &tb),
-                        diffs,
-                    })
                 }
             }
             (CompTy::Fun(a1, b1), CompTy::Fun(a2, b2)) => {
@@ -1141,71 +1578,9 @@ impl Unifier {
                 Err(TypeErrorKind::CompTyMismatch {
                     expected: a,
                     actual: b,
-                    diffs: Vec::new(),
                 })
             }
         }
-    }
-
-    /// Rebuild a `CompTy::Return` post-substitution, for mismatch diagnostics.
-    fn apply_return(&mut self, route: PayloadRoute, ty: &Ty) -> CompTy {
-        CompTy::Return(self.resolve_route(route), Box::new(self.apply_ty(ty)))
-    }
-
-    /// Unify two payload routes by *equality*: two variables unite, a
-    /// variable and a ground route bind, two ground routes must agree.  A
-    /// route names where a value boundary reads a computation's payload,
-    /// never what it writes, so `Value` and `Bytes` never unify silently.
-    ///
-    /// No caller passes a bare `Bytes` in here: WF-2 admits exactly one
-    /// byte-routed computation, so a decision that lands on the byte side
-    /// unifies with [`CompTy::bytes`] whole, and the `Unit` pairing travels
-    /// with the route instead of resting on the caller's memory.  Ground
-    /// `Bytes` reaches this function only riding a type (`unify_comp_ty`)
-    /// or already resolved on both sides.
-    ///
-    /// # Errors
-    /// [`RouteMismatch`] for distinct ground routes, which each caller maps
-    /// onto its own diagnostic.
-    pub(crate) fn unify_route(
-        &mut self,
-        a: PayloadRoute,
-        b: PayloadRoute,
-    ) -> Result<(), RouteMismatch> {
-        let a = self.resolve_route(a);
-        let b = self.resolve_route(b);
-        match (a, b) {
-            (PayloadRoute::Var(PayloadVar(va)), PayloadRoute::Var(PayloadVar(vb))) => {
-                self.routes.unite(va, vb);
-                Ok(())
-            }
-            (PayloadRoute::Var(PayloadVar(v)), g) | (g, PayloadRoute::Var(PayloadVar(v))) => {
-                let r = self.routes.find(v);
-                self.routes.bind(r, g);
-                Ok(())
-            }
-            (PayloadRoute::Value, PayloadRoute::Value)
-            | (PayloadRoute::Bytes, PayloadRoute::Bytes) => Ok(()),
-            (left, right) => Err(RouteMismatch { left, right }),
-        }
-    }
-
-    /// Does `(route, value)` land on `Bytes`? WF-2's one subsumption,
-    /// `Value Unit ⊑ Bytes`: a ground `Value` route stands for `Bytes`
-    /// without moving, so long as its value unifies with `Unit`; anything
-    /// else — `Var` or already `Bytes` — must unify with `Bytes` outright,
-    /// and having landed there, its value must be `Unit` too.
-    ///
-    /// The one judgement every site that lands on the byte side goes through:
-    /// the head pin (`pin_arm_to_head`), the arm-result join's byte side
-    /// (`conclude_byte_side`), and the catch-all's static and install vets
-    /// (`infer_within_opts`, `catch_all_emits_bytes`).
-    pub(crate) fn bytes_subsumes(&mut self, route: PayloadRoute, value: &Ty) -> bool {
-        if matches!(self.resolve_route(route), PayloadRoute::Value) {
-            return self.unify_ty(value, &Ty::Unit).is_ok();
-        }
-        self.unify_route(route, PayloadRoute::Bytes).is_ok()
-            && self.unify_ty(value, &Ty::Unit).is_ok()
     }
 }
 
@@ -1237,24 +1612,25 @@ fn guard_expansion<K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::FileId;
 
     /// ``Variant{`more: {head: String, tail: Thunk(tail)}, `done: Unit}``.
     fn step(tail: CompTy) -> Ty {
         let payload = Ty::Record(Row::Extend(
             Label::Field("head".into()),
-            Field::present(Ty::String),
+            Box::new(Ty::String),
             Box::new(Row::Extend(
                 Label::Field("tail".into()),
-                Field::present(Ty::Thunk(Box::new(tail))),
+                Box::new(Ty::Thunk(Box::new(tail))),
                 Box::new(Row::Empty),
             )),
         ));
         Ty::Variant(Row::Extend(
             Label::Case("more".into()),
-            Field::present(payload),
+            Box::new(payload),
             Box::new(Row::Extend(
                 Label::Case("done".into()),
-                Field::present(Ty::Unit),
+                Box::new(Ty::Unit),
                 Box::new(Row::Empty),
             )),
         ))
@@ -1282,39 +1658,60 @@ mod tests {
             .expect("equi-recursive stream types unify regardless of anchor");
     }
 
-    /// The one-sided obligation guard keys a variable root against a
-    /// *fingerprint* of the other side, so two obligations that differ only in
-    /// payload route must land on two different keys.  Before this change the
-    /// fingerprint carried `input` and `output` and not the route; deleting
-    /// those two without installing the route in their place compiles
-    /// perfectly and silently coarsens what a `CompTy::Var` obligation can
-    /// tell apart, which is why this is a test and not a reading.
+    /// `α ≐ {α → Command Unit}`: a function taking itself.
     #[test]
-    fn a_one_sided_obligation_distinguishes_the_payload_route() {
+    fn a_cycle_through_arrows_alone_is_refused() {
         let mut u = Unifier::new();
-        let CompTy::Var(CompTyVar(root)) = u.fresh_comp_ty() else {
-            unreachable!("fresh_comp_ty yields a Var")
-        };
-        let captured = u
-            .comp_key(&CompTy::Return(PayloadRoute::Bytes, Box::new(Ty::Unit)), 0)
-            .expect("a ground key");
-        let returned = u
-            .comp_key(&CompTy::Return(PayloadRoute::Value, Box::new(Ty::Unit)), 0)
-            .expect("a ground key");
+        let t = u.fresh_tyvar();
+        let body = Ty::Thunk(Box::new(CompTy::Fun(
+            Box::new(Ty::Var(t)),
+            Box::new(CompTy::pure(Ty::Unit)),
+        )));
+        let err = u
+            .unify_ty(&Ty::Var(t), &body)
+            .expect_err("a type reaching itself through U and → alone must not bind");
         assert!(
-            captured != returned,
-            "a captured-from-stdout command and a Unit-returning one are not the same obligation"
+            matches!(
+                err,
+                TypeErrorKind::CyclicType {
+                    via: CycleVia::Applied
+                }
+            ),
+            "expected CyclicType, got {err:?}"
         );
+    }
 
-        let mut seen = HashSet::new();
+    /// `γ ≐ Command {γ}`: a computation returning a thunk of itself.
+    #[test]
+    fn a_computation_returning_itself_is_refused() {
+        let mut u = Unifier::new();
+        let c = u.fresh_comp_ty();
+        let body = CompTy::pure(Ty::Thunk(Box::new(c.clone())));
+        let err = u
+            .unify_comp_ty(&c, &body)
+            .expect_err("a computation returning itself must not bind");
         assert!(
-            !guard_expansion(&mut seen, root, captured),
-            "the first obligation is new"
+            matches!(
+                err,
+                TypeErrorKind::CyclicType {
+                    via: CycleVia::Returns
+                }
+            ),
+            "expected CyclicType, got {err:?}"
         );
-        assert!(
-            !guard_expansion(&mut seen, root, returned),
-            "an obligation differing only in route must not be discharged as one already in progress"
-        );
+    }
+
+    /// `α ≐ [{α → Command Unit}]`: the same cycle, but through a list.
+    #[test]
+    fn a_cycle_through_data_is_accepted() {
+        let mut u = Unifier::new();
+        let t = u.fresh_tyvar();
+        let body = Ty::List(Box::new(Ty::Thunk(Box::new(CompTy::Fun(
+            Box::new(Ty::Var(t)),
+            Box::new(CompTy::pure(Ty::Unit)),
+        )))));
+        u.unify_ty(&Ty::Var(t), &body)
+            .expect("a cycle through a list is a legitimate recursive type");
     }
 
     /// A `List(List(… Int …))` spine: no variable, so nothing to memoize.
@@ -1382,7 +1779,7 @@ mod tests {
             let rho = u.fresh_row_var();
             let row = Row::Extend(
                 Label::Field("x".into()),
-                Field::present(deep_list(MAX_UNIFY_DEPTH + 100)),
+                Box::new(deep_list(MAX_UNIFY_DEPTH + 100)),
                 Box::new(Row::Empty),
             );
             let err = u.unify_row(&Row::Var(rho), &row).expect_err(
@@ -1399,7 +1796,7 @@ mod tests {
         fields.iter().rev().fold(Row::Empty, |rest, (l, t)| {
             Row::Extend(
                 Label::Field((*l).into()),
-                Field::present(t.clone()),
+                Box::new(t.clone()),
                 Box::new(rest),
             )
         })
@@ -1409,21 +1806,19 @@ mod tests {
         fields.iter().rev().fold(Row::Var(tail), |rest, (l, t)| {
             Row::Extend(
                 Label::Field((*l).into()),
-                Field::present(t.clone()),
+                Box::new(t.clone()),
                 Box::new(rest),
             )
         })
     }
 
-    fn resolved_fields(u: &mut Unifier, row: &Row) -> std::collections::HashMap<String, Ty> {
+    fn resolved_fields(u: &Unifier, row: &Row) -> std::collections::HashMap<String, Ty> {
         let mut out = std::collections::HashMap::new();
         let mut cur = u.apply_row(row);
         loop {
             match cur {
-                Row::Extend(l, f, rest) => {
-                    if let Some(t) = f.payload() {
-                        out.insert(l.to_string(), t.clone());
-                    }
+                Row::Extend(l, t, rest) => {
+                    out.insert(l.to_string(), *t);
                     cur = *rest;
                 }
                 _ => return out,
@@ -1488,7 +1883,7 @@ mod tests {
         let closed = record_row(&[("a", Ty::Int), ("b", Ty::String)]);
         u.unify_row(&open, &closed)
             .expect("open row absorbs the extra field");
-        let fields = resolved_fields(&mut u, &Row::Var(rho));
+        let fields = resolved_fields(&u, &Row::Var(rho));
         assert_eq!(
             fields.get("b"),
             Some(&Ty::String),
@@ -1502,11 +1897,7 @@ mod tests {
     fn a_missing_field_is_reported_whatever_the_label_order() {
         let closed = |fields: &[&str]| {
             fields.iter().rev().fold(Row::Empty, |rest, l| {
-                Row::Extend(
-                    Label::Field((*l).into()),
-                    Field::present(Ty::Int),
-                    Box::new(rest),
-                )
+                Row::Extend(Label::Field((*l).into()), Box::new(Ty::Int), Box::new(rest))
             })
         };
         let wanted = closed(&["p", "q", "r"]);
@@ -1614,237 +2005,147 @@ mod tests {
         );
     }
 
-    /// A row with one slot at a variable flag over `ty`.
-    fn optional_row(label: &str, flag: PresenceVar, ty: Ty, rest: Row) -> Row {
-        Row::Extend(
-            Label::Field(label.into()),
-            Field::Var(flag, Box::new(ty)),
-            Box::new(rest),
-        )
+    fn kind_refusal(result: Result<(), TypeErrorKind>) -> (KindFound, Kind) {
+        match result {
+            Err(TypeErrorKind::KindMismatch { found, kind, .. }) => (found, kind),
+            other => panic!("expected a kind refusal, got {other:?}"),
+        }
     }
 
-    /// Retire `x` by `sides`: the flag dies and the payload beside it is left
-    /// exactly as it was, an unbound root nothing constrained.  Nothing can
-    /// read under an absent flag, so the payload equation is not merely
-    /// unnecessary — imposing one would be the only thing making a retirement
-    /// observable.
-    fn retirement_kills_the_flag_and_spares_the_payload(sides: fn(PresenceVar, Ty) -> (Row, Row)) {
-        let mut u = Unifier::new();
-        let flag = u.fresh_presence_var();
-        let alpha = u.fresh_ty();
-        let Ty::Var(TyVar(i)) = alpha else {
-            unreachable!("fresh_ty is a variable")
+    fn kind_of(u: &Unifier, ty: &Ty) -> Kind {
+        let Ty::Var(v) = u.resolve_ty(ty) else {
+            panic!("expected a free variable, got {ty:?}")
         };
-        let (a, b) = sides(flag, alpha.clone());
-        u.unify_row(&a, &b).expect("retiring a field succeeds");
-        assert_eq!(
-            u.resolve_presence(flag),
-            Some(Presence::Absent),
-            "retirement resolves the flag to absent"
-        );
-        assert_eq!(u.ty_root(i), i, "the dead payload is still its own root");
-        assert_eq!(u.apply_ty(&alpha), alpha, "and is still unbound");
-    }
-
-    /// Retirement is one equation from three sides: a field peeled off the
-    /// right, one peeled off the left, and one meeting an `Absent` at a
-    /// matched label.  All three must spare the payload alike, which is what a
-    /// one-sided edit would leave half-done.
-    #[test]
-    fn a_field_retired_from_the_right_spares_its_payload() {
-        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
-            (Row::Empty, optional_row("x", f, t, Row::Empty))
-        });
+        u.kinded(v).kind
     }
 
     #[test]
-    fn a_field_retired_from_the_left_spares_its_payload() {
-        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
-            (optional_row("x", f, t, Row::Empty), Row::Empty)
-        });
-    }
-
-    #[test]
-    fn a_field_meeting_an_absent_spares_its_payload() {
-        retirement_kills_the_flag_and_spares_the_payload(|f, t| {
-            (
-                optional_row("x", f, t, Row::Empty),
-                Row::Extend(
-                    Label::Field("x".into()),
-                    Field::Absent,
-                    Box::new(Row::Empty),
-                ),
-            )
-        });
-    }
-
-    /// Two instantiations of one optional field get independent flags:
-    /// resolving one to absent must erase no other's payload.  `Store::unite`
-    /// does not by itself protect a bound root, so this is asserted and not
-    /// attributed to union-find in general.
-    #[test]
-    fn independent_flags_do_not_share_a_resolution() {
+    fn two_variables_unite_at_the_meet_of_their_kinds() {
         let mut u = Unifier::new();
-        let (one, two) = (u.fresh_presence_var(), u.fresh_presence_var());
-        let alpha = u.fresh_ty();
-        let left = optional_row("x", one, Ty::Int, Row::Empty);
-        let right = optional_row("x", two, alpha.clone(), Row::Var(u.fresh_row_var()));
-        u.unify_row(&Row::Empty, &left).expect("retire the first");
-        assert_eq!(u.resolve_presence(one), Some(Presence::Absent));
-        assert_eq!(
-            u.resolve_presence(two),
-            None,
-            "an unrelated flag stays open when another resolves"
-        );
-        let fields = resolved_fields(&mut u, &right);
-        assert_eq!(
-            fields.get("x"),
-            Some(&u.apply_ty(&alpha)),
-            "the other instance keeps its payload"
-        );
+        let a = u.fresh_kinded(Kind::COMPARABLE);
+        let b = u.fresh_kinded(Kind::NUMBER);
+        u.unify_ty(&a, &b).expect("a number is comparable");
+        assert_eq!(kind_of(&u, &a), Kind::NUMBER);
+        assert_eq!(kind_of(&u, &b), Kind::NUMBER);
+        u.unify_ty(&a, &Ty::Int).expect("Int is a number");
+        assert_eq!(u.resolve_ty(&b), Ty::Int);
     }
 
-    /// A key fingerprints the term *before* the operands resolve, so a field
-    /// whose flag later dies must key as the `Absent` its applied form becomes:
-    /// `unify_ty_inner` calls `ty_key` ahead of resolving its operands and
-    /// `Pairs::ty_expansions` retains what it gets, so a slot keying one way
-    /// while the flag lives and another once it is dead would stop the
-    /// co-inductive guard recognising two types the field rule calls equal.
     #[test]
-    fn a_field_keys_as_the_absence_it_resolves_to() {
+    fn a_meet_with_one_nullary_head_binds_the_variable() {
         let mut u = Unifier::new();
-        let flag = u.fresh_presence_var();
-        let row = optional_row("x", flag, Ty::List(Box::new(Ty::Int)), Row::Empty);
-        let absent = u
-            .row_key(
-                &Row::Extend(
-                    Label::Field("x".into()),
-                    Field::Absent,
-                    Box::new(Row::Empty),
-                ),
-                0,
-            )
-            .expect("an absent field keys without a payload");
-
-        let before = u.row_key(&row, 0).expect("a live payload keys");
-        assert!(
-            before != absent,
-            "while the flag lives the slot is its own obligation, payload and all"
-        );
-
-        u.unify_row(&Row::Empty, &row).expect("retire the field");
-        let after = u
-            .row_key(&row, 0)
-            .expect("keys again once the flag is dead");
-        assert!(
-            after == absent,
-            "the raw slot and the `Absent` it resolves to are one obligation"
-        );
-        // And the applied row, which is what a storeless consumer sees, keys
-        // with them: resolution is the only difference between the three.
-        let applied = u.apply_row(&row);
-        assert!(
-            u.row_key(&applied, 0).expect("an applied row keys") == absent,
-            "applying the row changes nothing the guard can see"
-        );
+        let a = u.fresh_kinded(Kind::SIZED);
+        let b = u.fresh_kinded(Kind::COMPARABLE);
+        u.unify_ty(&a, &b).expect("text is both");
+        assert_eq!(u.resolve_ty(&a), Ty::String);
+        assert_eq!(u.resolve_ty(&b), Ty::String);
     }
 
-    /// Retirement erases a *flag*, never a type: a payload the dying field
-    /// shared with a live one is still there to be constrained afterwards.
     #[test]
-    fn a_payload_shared_with_a_live_field_survives_the_retirement() {
+    fn an_empty_meet_is_refused_citing_both_witnesses() {
         let mut u = Unifier::new();
-        let flag = u.fresh_presence_var();
-        let alpha = u.fresh_ty();
-        let shared = Row::Extend(
-            Label::Field("x".into()),
-            Field::Var(flag, Box::new(alpha.clone())),
-            Box::new(record_row(&[("y", alpha.clone())])),
-        );
-        u.unify_row(&shared, &record_row(&[("y", Ty::Int)]))
-            .expect("`x` retires against a row that does not have it");
-        assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
-        assert_eq!(
-            u.apply_ty(&alpha),
-            Ty::Int,
-            "the live field pins the payload the dead one shared"
-        );
-        let fields = resolved_fields(&mut u, &shared);
-        assert_eq!(fields.get("y"), Some(&Ty::Int));
-        assert_eq!(fields.get("x"), None, "a dead field offers no payload");
-    }
-
-    /// Retiring a field is one presence equation and no type equation, so the
-    /// payload's depth is never walked: a payload nested far past the ceiling
-    /// retires as cheaply as a shallow one.  The budget stays order-sensitive
-    /// elsewhere — that is the standing resource bound
-    /// `deeply_nested_ty_key_is_too_deep_not_a_stack_overflow` pins — but a
-    /// retirement does not spend any of it.
-    #[test]
-    fn retiring_a_field_spends_no_depth_on_its_payload() {
-        on_deep_stack(|| {
-            let mut u = Unifier::new();
-            let flag = u.fresh_presence_var();
-            let row = optional_row("x", flag, deep_list(MAX_UNIFY_DEPTH + 100), Row::Empty);
-            u.unify_row(&Row::Empty, &row)
-                .expect("a retirement reads no payload, however deep");
-            assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
-        });
-    }
-
-    /// The equation the design turns on: `(x: θ·α)` against `(x: θ'·String)`.
-    /// It has two solutions, and which one an eager algorithm reaches depends
-    /// on the order — but they differ only in the binding of a *dead* payload,
-    /// which is not an observable.  What can be observed is asserted: both
-    /// flags, and both rows as applied.
-    #[test]
-    fn the_deciding_equation_agrees_on_observables_in_either_order() {
-        let solve = |kill_first: bool| {
-            let mut u = Unifier::new();
-            let (t, tp) = (u.fresh_presence_var(), u.fresh_presence_var());
-            let alpha = u.fresh_ty();
-            let left = optional_row("x", t, alpha, Row::Empty);
-            let right = optional_row("x", tp, Ty::String, Row::Empty);
-            if kill_first {
-                u.unify_row(&Row::Empty, &left).expect("kill the field");
-                u.unify_row(&left, &right).expect("then equate the rows");
-            } else {
-                u.unify_row(&left, &right).expect("equate the rows");
-                u.unify_row(&Row::Empty, &left)
-                    .expect("then kill the field");
+        let (first, second) = (Span::synthetic(), Span::new(FileId::DUMMY, 3, 9));
+        u.at = Some(first);
+        let a = u.fresh_kinded(Kind::NUMBER);
+        u.at = Some(second);
+        let b = u.fresh_kinded(Kind::SIZED);
+        match u.unify_ty(&a, &b) {
+            Err(TypeErrorKind::KindMismatch {
+                found: KindFound::Used { kind, witness },
+                kind: required,
+                witness: later,
+            }) => {
+                assert_eq!((kind, witness), (Kind::NUMBER, Some(first)));
+                assert_eq!((required, later), (Kind::SIZED, Some(second)));
             }
-            (
-                u.resolve_presence(t),
-                u.resolve_presence(tp),
-                u.apply_row(&left),
-                u.apply_row(&right),
-            )
-        };
-        assert_eq!(
-            solve(true),
-            solve(false),
-            "the two orders agree on everything a later rule can read"
-        );
-        assert_eq!(
-            solve(true).0,
-            Some(Presence::Absent),
-            "both fields are retired either way"
-        );
+            other => panic!("expected an empty meet, got {other:?}"),
+        }
     }
 
-    /// Absence before `Empty` is the equation `(l: Absent ; Empty) = Empty`,
-    /// so two ground rows differing only in a retired field's type are equal:
-    /// an absence has one spelling, carrying nothing, and there is no second
-    /// for a third row to disagree with.
     #[test]
-    fn rows_differing_only_beside_a_resolved_absence_are_equal() {
+    fn binding_a_kinded_variable_checks_the_head_and_keeps_the_kind_on_refusal() {
         let mut u = Unifier::new();
-        let flag = u.fresh_presence_var();
-        let left = optional_row("x", flag, Ty::Int, record_row(&[("y", Ty::Bool)]));
-        u.unify_row(&left, &record_row(&[("y", Ty::Bool)]))
-            .expect("a row without `x` retires it in the row that has it");
-        assert_eq!(u.resolve_presence(flag), Some(Presence::Absent));
-        u.unify_row(&left, &record_row(&[("y", Ty::Bool)]))
-            .expect("and the two stay equal afterwards");
+        let a = u.fresh_kinded(Kind::NUMBER);
+        let (found, kind) = kind_refusal(u.unify_ty(&a, &Ty::String));
+        assert!(matches!(found, KindFound::Type(ty) if *ty == Ty::String));
+        assert_eq!(kind, Kind::NUMBER);
+        assert_eq!(kind_of(&u, &a), Kind::NUMBER);
+        u.unify_ty(&a, &Ty::Float).expect("Float is a number");
+    }
+
+    #[test]
+    fn a_deep_kind_reaches_a_list_element() {
+        let mut u = Unifier::new();
+        let data = u.fresh_kinded(Kind::DATA);
+        let elem = u.fresh_ty();
+        u.unify_ty(&data, &Ty::List(Box::new(elem.clone())))
+            .expect("a list of something");
+        assert_eq!(kind_of(&u, &elem), Kind::DATA);
+        let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Int)));
+        let (found, kind) = kind_refusal(u.unify_ty(&elem, &block));
+        assert!(matches!(found, KindFound::Type(ty) if matches!(*ty, Ty::Thunk(_))));
+        assert_eq!(kind, Kind::DATA);
+    }
+
+    #[test]
+    fn a_deep_kind_refuses_a_block_in_what_it_is_bound_to() {
+        let mut u = Unifier::new();
+        let data = u.fresh_kinded(Kind::DATA);
+        let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Int)));
+        kind_refusal(u.unify_ty(&data, &Ty::List(Box::new(block))));
+    }
+
+    #[test]
+    fn a_deep_kind_reaches_a_records_fields_and_its_open_tail() {
+        let mut u = Unifier::new();
+        let data = u.fresh_kinded(Kind::DATA);
+        let (field, tail) = (u.fresh_ty(), u.fresh_row_var());
+        u.unify_ty(&data, &Ty::Record(open_row(&[("a", field.clone())], tail)))
+            .expect("a record with a field of something");
+        assert_eq!(kind_of(&u, &field), Kind::DATA);
+        assert!(u.is_deep_row(tail));
+
+        let block = Ty::Thunk(Box::new(CompTy::pure(Ty::Int)));
+        let later = record_row(&[("b", block)]);
+        kind_refusal(u.unify_row(&Row::Var(tail), &later));
+
+        let fine = record_row(&[("b", Ty::Int)]);
+        u.unify_row(&Row::Var(tail), &fine)
+            .expect("an Int field is data");
+    }
+
+    #[test]
+    fn a_deep_kind_reaches_a_variants_payloads() {
+        let mut u = Unifier::new();
+        let data = u.fresh_kinded(Kind::DATA);
+        let (payload, tail) = (u.fresh_ty(), u.fresh_row_var());
+        let tag = Row::Extend(
+            Label::Case("ok".into()),
+            Box::new(payload.clone()),
+            Box::new(Row::Var(tail)),
+        );
+        u.unify_ty(&data, &Ty::Variant(tag))
+            .expect("a variant with a payload of something");
+        assert_eq!(kind_of(&u, &payload), Kind::DATA);
+        assert!(u.is_deep_row(tail));
+    }
+
+    #[test]
+    fn a_deep_kind_over_a_data_cycle_terminates() {
+        let mut u = Unifier::new();
+        let data = u.fresh_kinded(Kind::DATA);
+        u.unify_ty(&data, &Ty::Map(Box::new(data.clone())))
+            .expect("a map of itself is data all the way down");
+        let other = u.fresh_kinded(Kind::DATA);
+        u.unify_ty(&other, &data).expect("the same tree, twice");
+    }
+
+    #[test]
+    fn two_deep_rows_unite_deep_and_a_shallow_one_becomes_so() {
+        let mut u = Unifier::new();
+        let (deep, shallow) = (u.fresh_deep_row_var(true), u.fresh_row_var());
+        u.unify_row(&Row::Var(shallow), &Row::Var(deep))
+            .expect("two row variables unite");
+        assert!(u.is_deep_row(shallow) && u.is_deep_row(deep));
     }
 }

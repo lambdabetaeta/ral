@@ -3,9 +3,8 @@
 //! Order is env → handlers → external for a bare name; `^name` and a path
 //! head are the external directly, consulting neither the env nor the stack.
 //! `evaluator::machine`'s `Exec` rule is the entry that classifies and runs
-//! every arm; pipeline staging and `command::detach` reach
-//! `resolve_command_word`/`classify_command` and `machine::apply_handler`
-//! directly.
+//! every arm; pipeline staging reaches
+//! `resolve_command_word`/`classify_command` directly.
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
@@ -16,7 +15,8 @@ use crate::types::{
 use super::command::{self, CommandIdentity};
 use crate::evaluator::audit;
 use crate::evaluator::redirect::with_redirects;
-use crate::syntax::ast::Redirect;
+use crate::source::Span;
+use crate::syntax::ast::Redirects;
 
 // ── Resolution ─────────────────────────────────────────────────────────
 
@@ -110,64 +110,59 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
 /// Run a base handler frame directly with the argv slice — no adapter, no
 /// masking: a native body never self-forwards.
 ///
-/// The values arrive unrendered, unlike a ral arm's (`machine::apply_handler`):
+/// The values arrive unrendered, unlike a ral arm's (`render_handler_args`):
 /// a native body renders what it writes and vets what it launches, and the
 /// exec boundary's refusal is a judgement on the value's shape.
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
-    redirects: &[Redirect<String>],
+    redirects: &Redirects<String>,
+    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    run_host_thunk(
+    run_framed(
         &entry.name,
-        args,
-        redirects,
-        mooring,
-        shell,
-        |a, s, frame| entry.call_body(frame, a, mooring, s),
-    )
-}
-
-fn run_host_thunk(
-    name: &str,
-    args: &[Value],
-    redirects: &[Redirect<String>],
-    mooring: &Mooring,
-    shell: &mut Shell,
-    f: impl FnOnce(&[Value], &mut Shell, &audit::Frame) -> Settled<Value>,
-) -> Settled<Value> {
-    audit::frame_call(
-        name,
-        args,
         CommandOrigin::Builtin,
+        args,
+        (redirects, span),
         mooring,
         shell,
-        |shell, frame| with_redirects(redirects, mooring, shell, |shell| f(args, shell, frame)),
+        |shell, frame| entry.call_body(frame, args, None, mooring, shell),
     )
 }
 
-/// Run an external command.  No `with_redirects` frame, unlike the host arms:
-/// the child's redirects are wired onto its own fds, and a `<file` stdin is
-/// parked in `shell.io.stdin` for the spawn to collect.
 pub(crate) fn run_external(
-    id: CommandIdentity,
+    id: &CommandIdentity,
     args: &[Value],
-    redirects: &[Redirect<String>],
+    redirects: &Redirects<String>,
+    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
-    let shown = id.shown.clone();
-    let result = audit::frame_call(
-        &shown,
-        args,
+    run_framed(
+        &id.shown,
         CommandOrigin::External,
+        args,
+        (redirects, span),
         mooring,
         shell,
-        move |shell, _| command::run(&id, args, redirects, mooring, shell),
-    );
-    stdin_guard.restore(shell);
-    result
+        |shell, _| command::run(id, args, mooring, shell),
+    )
+}
+
+/// The audit frame of one synchronous call, with its redirects installed
+/// inside it.
+fn run_framed(
+    name: &str,
+    origin: CommandOrigin,
+    args: &[Value],
+    (redirects, span): (&Redirects<String>, Option<Span>),
+    mooring: &Mooring,
+    shell: &mut Shell,
+    body: impl FnOnce(&mut Shell, &audit::Frame) -> Settled<Value>,
+) -> Settled<Value> {
+    audit::frame_call(name, args, origin, mooring, shell, |shell, frame| {
+        with_redirects(redirects, span, mooring, shell, |shell| body(shell, frame))
+    })
 }

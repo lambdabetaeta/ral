@@ -1,0 +1,2 @@
+# contains: `2>&1` would override the `2>` before it
+echo hi 2> e 2>&1

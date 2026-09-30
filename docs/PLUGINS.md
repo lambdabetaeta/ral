@@ -90,17 +90,17 @@ needs to know.
 | `_ed-cursor` | `F Int` | current cursor offset |
 | `_ed-keymap` | `F Str` | current keymap name |
 | `_ed-lbuffer` | `F Str` | text left of cursor |
-| `_ed-set` | `[text?: Str, cursor?: Int] → F Unit` | partial buffer update |
+| `_ed-set` | `[text: `keep\|`set Str, cursor: `keep\|`set Int] → F Unit` | partial buffer update |
 | `_ed-set-lbuffer` | `Str → F Unit` | replace left-of-cursor, preserve right |
 | `_ed-insert` | `Str → F Unit` | insert at cursor, advance |
 | `_ed-push` | `F Unit` | save buffer, clear |
 | `_ed-accept` | `F Unit` | run buffer on return |
-| `_ed-tui` | `{F α} → F [output: Str, status: Int]` | suspend editor, run body, capture stdout |
+| `_ed-tui` | `{F Unit} → F [output: Str, status: Int]` | suspend editor, run body, capture stdout |
 | `_ed-history` | `Str → Int → F [Str]` | prefix search (limit 0 = all) |
 | `_ed-parse` | `F [words: [Str], current: Int, offset: Int]` | tokenise buffer |
 | `_ed-ghost` | `Str → F Unit` | set suggestion after cursor |
 | `_ed-highlight` | `[[start: Int, end: Int, style: Str]] → F Unit` | set spans |
-| `_ed-state` | `α → {α → F α} → F α` | per-plugin persistent cell |
+| `_ed-state` | `α:data → {α → F α} → F α` | per-plugin persistent cell |
 
 Indices are character indices, consistent with `length` and `slice`.
 
@@ -112,9 +112,9 @@ if the user had pressed Enter. The pair implements zsh-style
 
 **`_ed-tui`.** The body runs with the line editor suspended and
 stdout captured. On success the return record's `status` is 0 and
-`output` is either the body's non-`Unit` return value or — when the
-body returns `Unit` — the captured stdout (one trailing newline
-stripped). When the body fails, `status` carries the exit code and
+`output` is the captured stdout, decoded lossily, one trailing newline
+stripped.  The body is a command: it writes and returns `()`, and the call
+displays a terminal selection rather than computing with it. When the body fails, `status` carries the exit code and
 `output` carries the error message; the call never raises, so plugins
 can discriminate cancellation (fzf 1 = no match, 130 = Esc) from real
 errors without wrapping in `try`. Nested `_ed-tui` is reported as
@@ -156,6 +156,12 @@ _ed-state $default { |s| return $s }
 ```
 
 State is per-plugin and is cleared on unload.
+
+The cell is a boundary: a value in it was written by an earlier run, so its
+shape is not one this handler decided. The call admits the stored value against
+the type the handler uses it at, before the updater runs, and refuses one that
+does not fit (a stale cell from an older version of the plugin), naming the
+field.
 
 ## 4 `load-plugin` / `unload-plugin`
 
@@ -508,7 +514,7 @@ return { |options|
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
             let resolved = absolute-path $r[output]
             _ed-push
-            _ed-set [text: "cd !{shell-quote $resolved}", cursor: 0]
+            _ed-set [text: `set "cd !{shell-quote $resolved}", cursor: `set 0]
             _ed-accept
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
@@ -573,7 +579,7 @@ return { |options|
             let picks = filter { |p| return $[not !{is-empty $p}] } !{re-split "\0" $r[output]}
             let cleaned = map { |p| return !{re-replace "\n*\$" "" $p} } $picks
             let joined = intercalate "\n" $cleaned
-            _ed-set [text: $joined, cursor: !{length $joined}]
+            _ed-set [text: `set $joined, cursor: `set !{length $joined}]
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }

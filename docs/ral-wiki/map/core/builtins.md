@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d369a2c0
-generated_at_date: 2026-09-26
+generated_at_commit: 8d868e18
+generated_at_date: 2026-09-30
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -12,12 +12,18 @@ binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
 `BuiltinEntry::fixed_arity` derives it from the type rule and caches it, a
-`usize` for every entry in the table. Settling at `Unit` is derived the same
-way and enforced at the same door: `BuiltinEntry::settles_at_unit` reads the
-declared result off the curry spine, and a row whose scheme says `F Unit`
-answers unit from `call_body` whatever its Rust body computed, so no builtin
-can hand a value of another type to a name the checker believes is `Unit` —
-`each` did, before the audit. The manifest is *authored as two*, and
+`usize` for every entry in the table. What a row does with stdout is
+*declared*, not derived: `BuiltinEntry::output`
+is `Output::Returns` (the default) or `Output::Writes` (the encoders, `echo`,
+`help`, `explain`, `clear`, `reset`, `ints-to-bytes`), which is what
+`typecheck/capture.rs` reads to decide whether a call is a command a `let`
+captures, and a drift test holds a `Writes` row's scheme to a result of `F Unit`.
+Settling at `Unit` is enforced at the same door as arity:
+`BuiltinEntry::settles_at_unit` reads the declared result off the curry spine,
+and a row whose scheme says `F Unit` answers unit from `call_body`
+whatever its Rust body computed, so no builtin
+can hand a value of another type to a name the checker believes is `Unit`.
+The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
 `Value::Native` in the base scope, a base-frame row seeds a base handler frame
 (`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
@@ -30,8 +36,8 @@ with state to carry — so the run's mooring arrives beside the shell
 enquires, or starts a nested run parented under the run that called it. The
 type-rule facet is a `BuiltinTypeRule`, which is a scheme factory —
 `fn(&mut Unifier) -> Scheme` — and nothing else. The streaming reducer
-`fold-lines` is an ordinary one whose factory writes its forwarded
-[[design/types|payload route]] directly ([[map/core/typecheck|typecheck]]);
+`fold-lines` is an ordinary one whose factory (`scheme::fold_lines`) is a
+plain scheme ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. Beside it sits an optional diagnostic facet,
 which is not a typing rule: it carries what a misuse this verb has a name for
 earns — a decoder handed an argument, `fail` handed a literal zero status
@@ -46,6 +52,10 @@ scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must seed through `install_builtins` or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
+`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`) also sits
+outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose
+body takes the `Site` the checker solved at the call and admits the value it
+lets in against it ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
 Four entries sit *outside* the macro, implemented in core but installed by a
 host. Two are a pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
@@ -81,12 +91,12 @@ Bodies are grouped by concern, one submodule each:
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
   rendered through the total `to-string` — `Value`'s `Display`, mapped over the
-  argv — single-space intercalation, a newline to the byte channel.
+  argv — single-space intercalation, a newline to stdout.
   `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
   `Value::Unit`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
   `to-lines`, `to-json`, and `to-jsonl` are writers: each types
-  `A → F[Bytes] Unit` at its own operand type, and its encoded bytes are its
-  sole payload. `to-bytes` takes `Bytes` and `ints-to-bytes` takes `[Int]` —
+  `A → F Unit` at its own operand type, and its encoded bytes are what it
+  writes. `to-bytes` takes `Bytes` and `ints-to-bytes` takes `[Int]` —
   two names, no union in the table. `builtin_from_jsonl` reads through
   `util::stdin_lines` and parses each line alone, so an error names the input's
   line. Each JSON direction has one typed refusal, worded by each codec in its
@@ -194,7 +204,9 @@ Bodies are grouped by concern, one submodule each:
   *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)
   rather than a generic failure
   ([[internals/capability-enforcement|capability-enforcement]]);
-- `modules.rs` — the cacheless `use` loader, and the host loading door every
+- `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
+  record and admits it with `Site::admit_module`, holding each function to the
+  scheme the module was checked at),  and the host loading door every
   runtime script load shares. `evaluate_source` is the shared parse +
   elaborate + evaluate core — `check_source` compiles against the live
   session, peeking the `FileId` its own registration will mint so the

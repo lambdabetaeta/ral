@@ -162,7 +162,7 @@ fn whereabouts(hole: &[Turn]) -> String {
     };
     format!(
         "They are still readable: `exarch-transcript `read [turns: !{{range {from} {past}}}]` {reads}, \
-         `exarch-transcript `grep [pattern: 're']` searches every turn ever recorded, and \
+         `exarch-transcript `grep [pattern: 're', turns: `all]` searches every turn ever recorded, and \
          `exarch-transcript `index` lists them."
     )
 }
