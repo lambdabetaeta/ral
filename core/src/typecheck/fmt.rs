@@ -6,7 +6,7 @@
 //! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::{Scheme, WeakVars};
-use super::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Ty, TyVar};
 use std::collections::{HashMap, HashSet};
 
 // One alphabet per kind of unification variable, kept disjoint so a letter
@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 const TY_LETTERS: &[&str] = &["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ"];
 const COMP_LETTERS: &[&str] = &["ϕ", "χ", "ψ", "ω"];
 const ROW_LETTERS: &[&str] = &["ρ", "σ", "τ", "υ"];
+const GRADE_LETTERS: &[&str] = &["ν", "ξ", "ο", "π"];
 
 fn pick(letters: &[&str], idx: usize) -> String {
     if idx < letters.len() {
@@ -34,6 +35,7 @@ pub struct FmtCtx {
     pub(crate) ty_names: HashMap<TyVar, String>,
     pub(crate) comp_names: HashMap<CompTyVar, String>,
     pub(crate) row_names: HashMap<RowVar, String>,
+    pub(crate) grade_names: HashMap<GradeVar, String>,
     cycles: Cycles,
 }
 
@@ -104,7 +106,7 @@ impl Cycles {
         match (a, b) {
             (CompTy::Var(v), _) if let Some(a) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
             (_, CompTy::Var(v)) if let Some(b) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
-            (CompTy::Return(x), CompTy::Return(y)) => self.ty_eq(x, y, seen),
+            (CompTy::Return(g, x), CompTy::Return(h, y)) => g == h && self.ty_eq(x, y, seen),
             (CompTy::Fun(p, x), CompTy::Fun(q, y)) => {
                 self.ty_eq(p, q, seen) && self.comp_eq(x, y, seen)
             }
@@ -138,6 +140,12 @@ impl FmtCtx {
     }
     fn comp_name(&self, v: CompTyVar) -> String {
         self.comp_names
+            .get(&v)
+            .cloned()
+            .unwrap_or_else(|| "_".into())
+    }
+    fn grade_name(&self, v: GradeVar) -> String {
+        self.grade_names
             .get(&v)
             .cloned()
             .unwrap_or_else(|| "_".into())
@@ -194,7 +202,15 @@ impl FmtCtx {
                     self.comp_names.insert(*v, pick(COMP_LETTERS, idx));
                 }
             }
-            CompTy::Return(a) => self.absorb_ty(a),
+            CompTy::Return(grade, a) => {
+                if let Grade::Var(v) = grade
+                    && !self.grade_names.contains_key(v)
+                {
+                    let idx = self.grade_names.len();
+                    self.grade_names.insert(*v, pick(GRADE_LETTERS, idx));
+                }
+                self.absorb_ty(a);
+            }
             CompTy::Fun(a, b) => {
                 self.absorb_ty(a);
                 self.absorb_comp(b);
@@ -339,7 +355,11 @@ fn fmt_comp_ty_node(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String 
             fmt_ty_in(a, ctx, open),
             fmt_comp_ty_in(b, ctx, open)
         ),
-        CompTy::Return(a) => format!("Command {}", fmt_ty_in(a, ctx, open)),
+        CompTy::Return(Grade::Output, _) => "Command".into(),
+        CompTy::Return(Grade::Value, a) => format!("Returns {}", fmt_ty_in(a, ctx, open)),
+        CompTy::Return(Grade::Var(v), a) => {
+            format!("{} {}", ctx.grade_name(*v), fmt_ty_in(a, ctx, open))
+        }
     }
 }
 
@@ -357,7 +377,7 @@ fn names_in_order<V: Copy + Eq + std::hash::Hash>(
 /// Format a scheme with its ∀ prefix, naming variables by their position in
 /// the scheme's quantifier lists.
 ///
-/// The outer `Thunk` is stripped, so a command reads `Command …`, not `{Command …}`.
+/// The outer `Thunk` is stripped, so a command reads `Command`, not `{Command}`.
 pub fn fmt_scheme(scheme: &Scheme) -> String {
     // Roots of cyclic bindings are named after the plain vars; they bind by `μ`, not `∀`.
     let mut ty_order: Vec<TyVar> = scheme.ty_vars.iter().map(|&(v, _)| v).collect();
@@ -382,6 +402,7 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
             &scheme.row_vars.iter().map(|&(v, _)| v).collect::<Vec<_>>(),
             ROW_LETTERS,
         ),
+        grade_names: names_in_order(&scheme.grade_vars, GRADE_LETTERS),
         cycles: Cycles {
             tys: scheme
                 .ty_bindings
@@ -414,6 +435,7 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
                 .iter()
                 .map(|v| ctx.comp_names[v].clone()),
         )
+        .chain(scheme.grade_vars.iter().map(|v| ctx.grade_names[v].clone()))
         .chain(scheme.row_vars.iter().map(|(v, deep)| {
             let name = &ctx.row_names[v];
             if *deep {

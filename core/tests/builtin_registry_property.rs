@@ -120,7 +120,7 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
                 args.push(ral_core::test_access::resolve_ty(u, param));
                 cur = body;
             }
-            CompTy::Return(ret) => {
+            CompTy::Return(_, ret) => {
                 return Some((args, ral_core::test_access::resolve_ty(u, ret)));
             }
             CompTy::Var(_) => return None,

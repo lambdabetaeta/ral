@@ -22,7 +22,7 @@ from-json: the value at `/n` is text (`'four'`), but this script uses it as an I
 3
 5
 lib
-use: the value at `/inc` is a block of type Integer → Command Integer, but this script uses it as {String → Command _}
+use: the value at `/inc` is a block of type Integer → Returns Integer, but this script uses it as {String → Returns _}
 use: the value has no field `missing`, which this script reads
 use: the value at `/inc` is a block, but this script uses it as text, bytes, a list or a map — line 113
 use: the value at `/label` is text (`'lib'`), but this script uses it as an Int — line 118

@@ -104,12 +104,32 @@ impl std::fmt::Display for Label {
     }
 }
 
+/// Unification variable for grades.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct GradeVar(pub u32);
+
+/// What an `F` produces: a value, or its output.  Atomic — a variable binds
+/// only to `Value` or `Output` — so grades need no occurs check and no kind.
+///
+/// Invariant, kept by the rules rather than the representation: `Output` is
+/// only ever paired with `Unit`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum Grade {
+    Value,
+    Output,
+    Var(GradeVar),
+}
+
 /// Computation types (`B` in CBPV).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CompTy {
-    /// `F A` — a computation returning `A`.  A command is `F Unit`: it writes,
-    /// and returns nothing.
-    Return(Box<Ty>),
+    /// `F A` under a grade: `F^p A` returns a value `A`; `F^w Unit` is a
+    /// command, whose value is its output.
+    Return(Grade, Box<Ty>),
     /// `A -> B`.
     Fun(Box<Ty>, Box<Self>),
     /// Unification variable.
@@ -119,6 +139,11 @@ pub enum CompTy {
 impl CompTy {
     /// A computation returning `ty`.
     pub fn pure(ty: Ty) -> Self {
-        Self::Return(Box::new(ty))
+        Self::Return(Grade::Value, Box::new(ty))
+    }
+
+    /// A command: it produces output and nothing else.
+    pub fn command() -> Self {
+        Self::Return(Grade::Output, Box::new(Ty::Unit))
     }
 }

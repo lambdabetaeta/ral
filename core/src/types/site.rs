@@ -11,7 +11,7 @@
 
 use crate::source::Span;
 use crate::sync::LockExt as _;
-use crate::typecheck::{CompTy, Kind, Label, Row, Scheme, Ty, Unifier, fmt_scheme, fmt_ty};
+use crate::typecheck::{CompTy, Grade, Kind, Label, Row, Scheme, Ty, Unifier, fmt_scheme, fmt_ty};
 use crate::types::{Break, Error, Map, Shell, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,9 +43,34 @@ enum Shape {
     Variant(Fields),
     Thunk(Id),
     Free { var: u32, kind: Kind },
-    Return(Id),
+    Return(GradeShape, Id),
     Fun(Id, Id),
     FreeComp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum GradeShape {
+    Value,
+    Output,
+    Free,
+}
+
+impl GradeShape {
+    fn of(grade: Grade) -> Self {
+        match grade {
+            Grade::Value => Self::Value,
+            Grade::Output => Self::Output,
+            Grade::Var(_) => Self::Free,
+        }
+    }
+
+    fn instantiate(self, u: &mut Unifier) -> Grade {
+        match self {
+            Self::Value => Grade::Value,
+            Self::Output => Grade::Output,
+            Self::Free => u.fresh_grade(),
+        }
+    }
 }
 
 /// A row's labels in first-appearance order, and how it ends.
@@ -508,8 +533,9 @@ impl Site {
                     let free = u.fresh_comp_ty();
                     u.bind_comp_root(comps[&id], free);
                 }
-                Shape::Return(inner) => {
-                    u.bind_comp_root(comps[&id], CompTy::Return(Box::new(ty(*inner))));
+                Shape::Return(grade, inner) => {
+                    let grade = grade.instantiate(u);
+                    u.bind_comp_root(comps[&id], CompTy::Return(grade, Box::new(ty(*inner))));
                 }
                 Shape::Fun(arg, body) => {
                     u.bind_comp_root(
@@ -662,7 +688,9 @@ impl Build<'_> {
         }
         let shape = match &*u.head_comp_ty(cty) {
             CompTy::Var(_) => Shape::FreeComp,
-            CompTy::Return(a) => Shape::Return(self.ty(a)),
+            CompTy::Return(grade, a) => {
+                Shape::Return(GradeShape::of(u.resolve_grade(*grade)), self.ty(a))
+            }
             CompTy::Fun(a, b) => Shape::Fun(self.ty(a), self.comp(b)),
         };
         self.nodes[id].shape = shape;

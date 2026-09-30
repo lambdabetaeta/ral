@@ -64,6 +64,7 @@ pub fn mk_scheme(ty_vars: &[(TyVar, Kind)], row_vars: &[(RowVar, bool)], ty: Ty)
         ty_vars: ty_vars.to_vec(),
         comp_ty_vars: vec![],
         row_vars: row_vars.to_vec(),
+        grade_vars: vec![],
         ty,
         comp_ty_bindings: vec![],
         ty_bindings: vec![],

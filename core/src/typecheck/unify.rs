@@ -1,4 +1,5 @@
-//! Union-find unifier over three variable kinds: type, computation type, row.
+//! Union-find unifier over four variable kinds: type, computation type, row,
+//! grade.
 //!
 //! Value and computation types are both *equi-recursive* — a slot may be bound
 //! to a structure containing its own variable — provided every cycle crosses
@@ -12,7 +13,7 @@ use super::error::{CycleVia, KindFound, TypeErrorKind};
 use super::generalize::{FreeVars, free_ty};
 use super::kind::{Head, Kind};
 use super::scheme::WeakVars;
-use super::ty::{CompTy, CompTyVar, Label, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 use crate::source::Span;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -119,10 +120,11 @@ enum TyKey {
     Var(u32),
 }
 
-/// Fingerprint of a computation type.  See [`TyKey`].
+/// Fingerprint of a computation type.  See [`TyKey`].  The grade is stored
+/// resolved, a variable at its root.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum CompTyKey {
-    Return(Box<TyKey>),
+    Return(Grade, Box<TyKey>),
     Fun(Box<TyKey>, Box<Self>),
     Var(u32),
 }
@@ -191,6 +193,18 @@ impl Unifiable for Row {
     }
     fn from_root(root: u32) -> Self {
         Self::Var(RowVar(root))
+    }
+}
+
+impl Unifiable for Grade {
+    fn as_var(&self) -> Option<u32> {
+        match self {
+            Self::Var(GradeVar(i)) => Some(*i),
+            _ => None,
+        }
+    }
+    fn from_root(root: u32) -> Self {
+        Self::Var(GradeVar(root))
     }
 }
 
@@ -322,6 +336,8 @@ pub struct Unifier {
     tys: Store<Ty>,
     ctys: Store<CompTy>,
     rows: Store<Row>,
+    /// Grades are atomic and never weak: no kind, no cycle, no `weak` entry.
+    grades: Store<Grade>,
     /// The kind of each free type-variable root, where not `any`.
     kinds: HashMap<u32, Kinded>,
     /// The free row-variable roots that are deep, with the span that made them so.
@@ -339,6 +355,7 @@ impl Unifier {
             tys: Store::new(),
             ctys: Store::new(),
             rows: Store::new(),
+            grades: Store::new(),
             kinds: HashMap::new(),
             deep_rows: HashMap::new(),
             bound_at: HashMap::new(),
@@ -361,6 +378,40 @@ impl Unifier {
     }
     pub(crate) fn fresh_row(&mut self) -> Row {
         Row::Var(self.fresh_row_var())
+    }
+
+    pub(crate) fn fresh_grade_var(&mut self) -> GradeVar {
+        GradeVar(self.grades.fresh())
+    }
+    pub(crate) fn fresh_grade(&mut self) -> Grade {
+        Grade::Var(self.fresh_grade_var())
+    }
+
+    pub(crate) fn resolve_grade(&self, grade: Grade) -> Grade {
+        self.grades.resolve(&grade).into_owned()
+    }
+
+    /// Bind a free grade variable.  Its root is taken here, so the caller
+    /// may hand in any variable of the class.
+    pub(crate) fn bind_grade(&mut self, v: GradeVar, grade: Grade) {
+        let root = self.grades.find(v.0);
+        self.grades.bind(root, grade);
+    }
+
+    /// Unify two grades; `false` when they are distinct constants.  Atomic,
+    /// so there is no structure to descend and nothing to report but the two.
+    fn unify_grade(&mut self, a: Grade, b: Grade) -> bool {
+        match (self.resolve_grade(a), self.resolve_grade(b)) {
+            (Grade::Var(x), Grade::Var(y)) => {
+                self.grades.unite(x.0, y.0);
+                true
+            }
+            (Grade::Var(v), grade) | (grade, Grade::Var(v)) => {
+                self.bind_grade(v, grade);
+                true
+            }
+            (a, b) => a == b,
+        }
     }
 
     /// A fresh variable of `kind`, narrowed at the span in force.
@@ -703,7 +754,7 @@ impl Unifier {
                         .and_then(|b| self.weak_in_comp(b, seen))
                 })
             }
-            CompTy::Return(a) => self.weak_in_ty(a, seen),
+            CompTy::Return(_, a) => self.weak_in_ty(a, seen),
             CompTy::Fun(a, b) => self
                 .weak_in_ty(a, seen)
                 .or_else(|| self.weak_in_comp(b, seen)),
@@ -807,8 +858,12 @@ impl Unifier {
         self.head_ty(ty).into_owned()
     }
 
+    /// [`Self::head_comp_ty`], owned, with a `Return`'s grade resolved too.
     pub(crate) fn resolve_comp_ty(&self, cty: &CompTy) -> CompTy {
-        self.head_comp_ty(cty).into_owned()
+        match self.head_comp_ty(cty).into_owned() {
+            CompTy::Return(grade, ty) => CompTy::Return(self.resolve_grade(grade), ty),
+            other => other,
+        }
     }
 
     pub(crate) fn resolve_row(&self, row: &Row) -> Row {
@@ -957,7 +1012,10 @@ impl Unifier {
             visited.comps.insert(r);
         }
         let out = match &*resolved {
-            CompTy::Return(a) => CompTy::Return(Box::new(self.apply_ty_inner(a, visited))),
+            CompTy::Return(grade, a) => CompTy::Return(
+                self.resolve_grade(*grade),
+                Box::new(self.apply_ty_inner(a, visited)),
+            ),
             CompTy::Fun(a, b) => CompTy::Fun(
                 Box::new(self.apply_ty_inner(a, visited)),
                 Box::new(self.apply_comp_ty_inner(b, visited)),
@@ -1071,7 +1129,7 @@ impl Unifier {
         }
         match &*self.head_comp_ty(cty) {
             CompTy::Var(_) => Ok(false),
-            CompTy::Return(a) => self.ty_occurs_row(v, a, visited, deeper(depth)?),
+            CompTy::Return(_, a) => self.ty_occurs_row(v, a, visited, deeper(depth)?),
             CompTy::Fun(a, b) => Ok(self.ty_occurs_row(v, a, visited, deeper(depth)?)?
                 || self.comp_occurs_row(v, b, visited, deeper(depth)?)?),
         }
@@ -1102,7 +1160,10 @@ impl Unifier {
 
     fn comp_key(&mut self, cty: &CompTy, depth: u32) -> Result<CompTyKey, TypeErrorKind> {
         Ok(match cty {
-            CompTy::Return(t) => CompTyKey::Return(Box::new(self.ty_key(t, deeper(depth)?)?)),
+            CompTy::Return(grade, t) => CompTyKey::Return(
+                self.resolve_grade(*grade),
+                Box::new(self.ty_key(t, deeper(depth)?)?),
+            ),
             CompTy::Fun(a, b) => CompTyKey::Fun(
                 Box::new(self.ty_key(a, deeper(depth)?)?),
                 Box::new(self.comp_key(b, deeper(depth)?)?),
@@ -1321,7 +1382,7 @@ impl Unifier {
         let depth = deeper(depth)?;
         match &*self.head_comp_ty(cty) {
             CompTy::Var(_) => Ok(None),
-            CompTy::Return(a) => self.ty_reaches(anchor, a, CycleVia::Returns, visited, depth),
+            CompTy::Return(_, a) => self.ty_reaches(anchor, a, CycleVia::Returns, visited, depth),
             CompTy::Fun(a, b) => {
                 let arg_via = if matches!(a.as_ref(), Ty::Var(_)) {
                     CycleVia::Applied
@@ -1553,7 +1614,14 @@ impl Unifier {
         }
         let depth = deeper(depth)?;
         match (a, b) {
-            (CompTy::Return(ta), CompTy::Return(tb)) => {
+            (CompTy::Return(ga, ta), CompTy::Return(gb, tb)) => {
+                let mismatch = |u: &Self| TypeErrorKind::CompTyMismatch {
+                    expected: u.apply_comp_ty(&CompTy::Return(ga, ta.clone())),
+                    actual: u.apply_comp_ty(&CompTy::Return(gb, tb.clone())),
+                };
+                if !self.unify_grade(ga, gb) {
+                    return Err(mismatch(self));
+                }
                 // A spent depth budget is exhaustion rather than disagreement, and
                 // a kind refusal is not a disagreement between two types at all,
                 // so both propagate verbatim.
@@ -1564,10 +1632,7 @@ impl Unifier {
                         | TypeErrorKind::CyclicType { .. }
                         | TypeErrorKind::KindMismatch { .. }),
                     ) => Err(e),
-                    Err(_) => Err(TypeErrorKind::CompTyMismatch {
-                        expected: CompTy::pure(self.apply_ty(&ta)),
-                        actual: CompTy::pure(self.apply_ty(&tb)),
-                    }),
+                    Err(_) => Err(mismatch(self)),
                 }
             }
             (CompTy::Fun(a1, b1), CompTy::Fun(a2, b2)) => {
@@ -1658,7 +1723,7 @@ mod tests {
             .expect("equi-recursive stream types unify regardless of anchor");
     }
 
-    /// `α ≐ {α → Command Unit}`: a function taking itself.
+    /// `α ≐ {α → Returns Unit}`: a function taking itself.
     #[test]
     fn a_cycle_through_arrows_alone_is_refused() {
         let mut u = Unifier::new();
@@ -1681,7 +1746,7 @@ mod tests {
         );
     }
 
-    /// `γ ≐ Command {γ}`: a computation returning a thunk of itself.
+    /// `γ ≐ Returns {γ}`: a computation returning a thunk of itself.
     #[test]
     fn a_computation_returning_itself_is_refused() {
         let mut u = Unifier::new();
@@ -1701,7 +1766,7 @@ mod tests {
         );
     }
 
-    /// `α ≐ [{α → Command Unit}]`: the same cycle, but through a list.
+    /// `α ≐ [{α → Returns Unit}]`: the same cycle, but through a list.
     #[test]
     fn a_cycle_through_data_is_accepted() {
         let mut u = Unifier::new();

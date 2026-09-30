@@ -404,7 +404,7 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
 /// `unify.rs` blames no component when the two heads differ in shape —
 /// `Return` against `Fun`.
 fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
-    let (CompTy::Return(expected), CompTy::Return(actual)) = (expected, actual) else {
+    let (CompTy::Return(_, expected), CompTy::Return(_, actual)) = (expected, actual) else {
         return "two computations have incompatible shapes — one is a function, the other is not"
             .into();
     };
@@ -421,8 +421,8 @@ fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
 fn returns_of(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
     match kind {
         TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(expected),
-            actual: CompTy::Return(actual),
+            expected: CompTy::Return(_, expected),
+            actual: CompTy::Return(_, actual),
         } => Some((expected, actual)),
         _ => None,
     }

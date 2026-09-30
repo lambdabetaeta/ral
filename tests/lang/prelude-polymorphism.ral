@@ -9,13 +9,13 @@ let assert_eq = { |name expected actual|
     }
 }
 
-# id :: ∀α. α → Command α
+# id :: ∀α. α → Returns α
 let n = !{id 41}
 let s = !{id hello}
 assert_eq 'id at Int' 42 $[$n + 1]
 assert_eq 'id at String' hello $s
 
-# reverse :: ∀α. [α] → Command [α] — the element type flows through the
+# reverse :: ∀α. [α] → Returns [α] — the element type flows through the
 # instantiation, so the arithmetic below is legal only at [Int].
 let rev_ints = !{reverse [1, 2, 3]}
 let rev_strs = !{reverse [a, b]}

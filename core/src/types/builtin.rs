@@ -195,7 +195,7 @@ impl BuiltinEntry {
             fn settled(ct: &CompTy) -> Option<&Ty> {
                 match ct {
                     CompTy::Fun(_, body) => settled(body),
-                    CompTy::Return(ty) => Some(ty),
+                    CompTy::Return(_, ty) => Some(ty),
                     CompTy::Var(_) => None,
                 }
             }
@@ -418,7 +418,7 @@ mod tests {
     fn result(ct: &CompTy) -> Option<&Ty> {
         match ct {
             CompTy::Fun(_, body) => result(body),
-            CompTy::Return(ty) => Some(ty),
+            CompTy::Return(_, ty) => Some(ty),
             CompTy::Var(_) => None,
         }
     }

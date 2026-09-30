@@ -4,7 +4,7 @@
 //! fresh unification variables at each use site, giving let-polymorphism.
 
 use super::kind::Kind;
-use super::ty::{CompTy, CompTyVar, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, GradeVar, RowVar, Ty, TyVar};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The free variables a scheme did *not* quantify, being already free in the
@@ -17,6 +17,7 @@ pub struct CachedFreeVars {
     #[serde(default)]
     pub(crate) comp_fv: BTreeSet<CompTyVar>,
     pub(crate) row_fv: BTreeSet<RowVar>,
+    pub(crate) grade_fv: BTreeSet<GradeVar>,
 }
 
 /// The weak variables a scheme mentions and did not quantify: one type per
@@ -36,9 +37,9 @@ impl WeakVars {
     }
 }
 
-/// A polymorphic type scheme: `forall (alpha_1:k_1) ... (alpha_n:k_n), gamma_1 ... gamma_l, rho_1 ... rho_k. A`.
+/// A polymorphic type scheme: `forall (alpha_1:k_1) ... (alpha_n:k_n), gamma_1 ... gamma_l, rho_1 ... rho_k, epsilon_1 ... epsilon_m. A`.
 ///
-/// Quantifies value types, computation types and rows at once.
+/// Quantifies value types, computation types, rows and grades at once.
 ///
 /// A variable caught in a cycle cannot be a plain quantifier, so
 /// `comp_ty_bindings` and `ty_bindings` snapshot it as `(original root id,
@@ -50,6 +51,7 @@ pub struct Scheme {
     #[serde(default)]
     pub(crate) comp_ty_vars: Vec<CompTyVar>,
     pub(crate) row_vars: Vec<(RowVar, bool)>,
+    pub(crate) grade_vars: Vec<GradeVar>,
     pub(crate) ty: Ty,
     #[serde(default)]
     pub(crate) comp_ty_bindings: Vec<(u32, CompTy)>,
@@ -71,6 +73,7 @@ impl Scheme {
             ty_vars: vec![],
             comp_ty_vars: vec![],
             row_vars: vec![],
+            grade_vars: vec![],
             ty,
             comp_ty_bindings: vec![],
             ty_bindings: vec![],
@@ -84,6 +87,7 @@ impl Scheme {
         !self.ty_vars.is_empty()
             || !self.comp_ty_vars.is_empty()
             || !self.row_vars.is_empty()
+            || !self.grade_vars.is_empty()
             || !self.comp_ty_bindings.is_empty()
             || !self.ty_bindings.is_empty()
     }

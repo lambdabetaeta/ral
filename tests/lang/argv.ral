@@ -38,7 +38,7 @@ echo
 # The manifest row survives: explain still reads it, and answers with the builtin
 let doc = explain echo
 re-find-match 'write one line' $doc
-re-find-match 'Command' $doc
+re-find-match '\[String\] →' $doc
 re-find-match 'echo: builtin' $doc
 
 echo 'argv tests done'

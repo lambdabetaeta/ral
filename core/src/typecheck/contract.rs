@@ -339,7 +339,7 @@ pub(super) fn ascribe(
     let Phrase::Run(comp) = &phrase.item else {
         return;
     };
-    let CompTy::Return(value) = ctx.unifier.resolve_comp_ty(&cty) else {
+    let CompTy::Return(_, value) = ctx.unifier.resolve_comp_ty(&cty) else {
         return;
     };
     let written = match &comp.item {

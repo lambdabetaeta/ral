@@ -94,7 +94,7 @@ fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
         vec![(root.0, binding)],
     );
     let rendered = fmt_scheme(&scheme);
-    assert_eq!(rendered, "μϕ. Command [{ϕ}]");
+    assert_eq!(rendered, "μϕ. Returns [{ϕ}]");
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses()
          let b = pick [:, y: 2] 'y'\n\
          return ()",
     );
-    assert_eq!(scheme_at(&top, 0), "Map Integer → String → Command Integer");
+    assert_eq!(scheme_at(&top, 0), "Map Integer → String → Returns Integer");
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn a_literal_key_is_the_list_rule_and_stays_generic() {
          let b = first ['x']\n\
          return ()",
     );
-    assert_eq!(scheme_at(&top, 0), "∀α. [α] → Command α");
+    assert_eq!(scheme_at(&top, 0), "∀α. [α] → Returns α");
 }
 
 #[test]
@@ -367,14 +367,14 @@ fn a_walk_down_a_decoded_value_is_a_map_of_itself() {
     );
     assert_eq!(
         scheme_at(&top, 0),
-        "μα. Map α → [String] → Command μα. Map α"
+        "μα. Map α → [String] → Returns μα. Map α"
     );
 }
 
 #[test]
 fn a_key_of_number_kind_settles_the_index_as_a_list() {
     let top = toplevel_ok("let f = { |xs k| let j = $[$k + 1]; $xs[$k] }\nreturn ()");
-    assert_eq!(scheme_at(&top, 0), "[_α] → Integer → Command _α");
+    assert_eq!(scheme_at(&top, 0), "[_α] → Integer → Returns _α");
 }
 
 #[test]

@@ -90,7 +90,7 @@ fn value_producer_into_decoder_is_refused_cross_run() {
 // ─── (2) byte producer into byte consumer typechecks via harvested scheme ────
 
 /// `let f = { echo hi }` then `f | wc -l`: the harvested scheme for `f`
-/// is `{Command Unit}`, a command, so it may feed `wc`'s input.
+/// is `{Returns Unit}`, a command, so it may feed `wc`'s input.
 #[test]
 fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
@@ -471,8 +471,8 @@ fn a_label_read_is_settled_by_a_kind_in_either_order() {
     run(&mut sh, "let before = { |m| length $m; $m[a] }").unwrap();
     run(&mut sh, "let after = { |m| $m[a]; length $m }").unwrap();
     let shown = |name: &str| fmt_scheme(&scheme_of(&sh, name).expect("a scheme"));
-    assert_eq!(shown("before"), "∀α. Map α → Command α");
-    assert_eq!(shown("after"), "∀α. Map α → Command Integer");
+    assert_eq!(shown("before"), "∀α. Map α → Returns α");
+    assert_eq!(shown("after"), "∀α. Map α → Returns Integer");
 }
 
 // ─── checked boundaries ─────────────────────────────────────────────────────

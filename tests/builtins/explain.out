@@ -1,5 +1,5 @@
   idf
-  ∀α. α → Command α
+  ∀α. α → Returns α
   idf: session
 
   words
@@ -12,11 +12,11 @@
   greet: alias
 
   length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α:sized. α → Command Integer
+  ∀α:sized. α → Returns Integer
   length: builtin
 
   length: length <val>  — number of elements in a string, bytes, list, or map.
-  ∀α:sized. α → Command Integer
+  ∀α:sized. α → Returns Integer
   length: builtin
   shadows: handler
 

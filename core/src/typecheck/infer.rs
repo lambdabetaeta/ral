@@ -355,7 +355,7 @@ impl Inferencer<'_> {
     /// [`Self::extract_return`], reported under a caller-chosen [`Reason`] —
     /// the pipeline stage forcer wants its own hint, not the generic one.
     fn force_return_shape(&mut self, cty: &CompTy, why: Reason) -> Ty {
-        if let CompTy::Return(ty) = self.ctx.unifier.resolve_comp_ty(cty) {
+        if let CompTy::Return(_, ty) = self.ctx.unifier.resolve_comp_ty(cty) {
             *ty
         } else {
             let ty = self.ctx.unifier.fresh_ty();
@@ -461,7 +461,9 @@ impl Inferencer<'_> {
             self.ctx.unifier.resolve_comp_ty(got),
             self.ctx.unifier.resolve_comp_ty(shared),
         ) {
-            (CompTy::Return(a), CompTy::Return(b)) => self.ctx.unify_ty(&b, &a, why.clone()),
+            (CompTy::Return(_, a), CompTy::Return(_, b)) => {
+                self.ctx.unify_ty(&b, &a, why.clone());
+            }
             (CompTy::Fun(p, a), CompTy::Fun(q, b)) => {
                 self.ctx.unify_ty(&q, &p, why.clone());
                 self.unify_arm(&a, &b, why);
@@ -486,7 +488,7 @@ impl Inferencer<'_> {
     fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
         loop {
             match self.ctx.unifier.resolve_comp_ty(&cty) {
-                CompTy::Return(ty) => match self.ctx.unifier.resolve_ty(&ty) {
+                CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                     Ty::Thunk(inner) => cty = *inner,
                     // A still-free head must become a thunk: the machine's
                     // `apply` rule forces a block-shaped `Value::Thunk` callee
@@ -677,7 +679,7 @@ impl Inferencer<'_> {
     /// name `'foo' bar baz` before the general unifier mismatch fires.
     fn command_non_function_ty(&self, head_ty: &CompTy) -> Option<Ty> {
         match self.ctx.unifier.resolve_comp_ty(head_ty) {
-            CompTy::Return(ty) => match self.ctx.unifier.resolve_ty(&ty) {
+            CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                 Ty::Thunk(_) | Ty::Var(_) => None,
                 concrete => Some(concrete),
             },
@@ -1016,7 +1018,7 @@ impl Inferencer<'_> {
         loop {
             match cur {
                 CompTy::Fun(_, body) => cur = self.ctx.unifier.resolve_comp_ty(&body),
-                CompTy::Return(ty) => return Some(*ty),
+                CompTy::Return(_, ty) => return Some(*ty),
                 CompTy::Var(_) => return None,
             }
         }

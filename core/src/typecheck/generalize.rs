@@ -7,17 +7,18 @@
 use super::env::TyEnv;
 use super::kind::Kind;
 use super::scheme::{Scheme, WeakVars};
-use super::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Ty, TyVar};
 use super::unify::{Unifier, Visited};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// All three variable kinds, collected in one traversal.
+/// All four variable kinds, collected in one traversal.
 #[derive(Clone)]
 pub(crate) struct FreeVars {
     pub(crate) tys: HashSet<TyVar>,
     pub(crate) comps: HashSet<CompTyVar>,
     pub(crate) rows: HashSet<RowVar>,
+    pub(crate) grades: HashSet<GradeVar>,
 }
 
 impl FreeVars {
@@ -26,6 +27,7 @@ impl FreeVars {
             tys: HashSet::new(),
             comps: HashSet::new(),
             rows: HashSet::new(),
+            grades: HashSet::new(),
         }
     }
 
@@ -33,12 +35,14 @@ impl FreeVars {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);
         self.rows.extend(&cached.row_fv);
+        self.grades.extend(&cached.grade_fv);
     }
 
     pub(crate) fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
         target.rows.extend(self.rows);
+        target.grades.extend(self.grades);
     }
 
     /// The weak variables among these.
@@ -84,6 +88,9 @@ impl FreeVars {
         for (v, _) in &s.row_vars {
             self.rows.remove(v);
         }
+        for v in &s.grade_vars {
+            self.grades.remove(v);
+        }
     }
 
     /// The *residual* free vars — mentioned by `env`, so left unquantified.
@@ -92,6 +99,7 @@ impl FreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
             row_fv: self.rows.intersection(&env.rows).copied().collect(),
+            grade_fv: self.grades.intersection(&env.grades).copied().collect(),
         }
     }
 }
@@ -154,7 +162,12 @@ fn free_comp_inner(u: &Unifier, cty: &CompTy, out: &mut FreeVars, visited: &mut 
         CompTy::Var(v) => {
             out.comps.insert(*v);
         }
-        CompTy::Return(a) => free_ty_inner(u, a, out, visited),
+        CompTy::Return(grade, a) => {
+            if let Grade::Var(v) = u.resolve_grade(*grade) {
+                out.grades.insert(v);
+            }
+            free_ty_inner(u, a, out, visited);
+        }
         CompTy::Fun(a, b) => {
             free_ty_inner(u, a, out, visited);
             free_comp_inner(u, b, out, visited);
@@ -194,6 +207,8 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         .difference(&env_fvs.rows)
         .map(|&v| (v, u.is_deep_row(v)))
         .collect();
+    let mut grade_vars: Vec<GradeVar> = fvs.grades.difference(&env_fvs.grades).copied().collect();
+    grade_vars.sort_unstable();
 
     // Cached so later `env_free_vars` calls read the sets instead of re-walking
     // this scheme's type tree.  Empty for top-level bindings.
@@ -238,6 +253,7 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         ty_vars,
         comp_ty_vars,
         row_vars,
+        grade_vars,
         ty: u.apply_ty_keeping_weak(ty),
         comp_ty_bindings,
         ty_bindings,
@@ -319,6 +335,7 @@ pub(crate) fn scheme_is_closed(u: &Unifier, scheme: &Scheme) -> bool {
         .rows
         .iter()
         .all(|v| scheme.row_vars.iter().any(|(q, _)| q == v) || scheme.weak.rows.contains_key(v))
+        && fvs.grades.iter().all(|v| scheme.grade_vars.contains(v))
 }
 
 /// Whether `scheme` quantifies a variable that its curried body's result
@@ -338,7 +355,7 @@ pub(crate) fn has_result_only_var(scheme: &Scheme) -> bool {
                 free_ty(&u, arg, &mut args);
                 cur = rest;
             }
-            CompTy::Return(result) => break result,
+            CompTy::Return(_, result) => break result,
             CompTy::Var(_) => return false,
         }
     };
@@ -434,6 +451,7 @@ pub(crate) fn reseed_weak(u: &mut Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
         rm,
         cm,
         tcm: HashMap::new(),
+        gm: HashMap::new(),
     };
     Arc::new(Scheme {
         ty: sm.ty(&scheme.ty),
@@ -481,6 +499,11 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
             .collect(),
         cm: cm.clone(),
         tcm: tcm.clone(),
+        gm: scheme
+            .grade_vars
+            .iter()
+            .map(|&v| (v, u.fresh_grade_var()))
+            .collect(),
     };
     // Re-binding the fresh roots is what carries the cycle across instantiation.
     for (old, binding) in &scheme.comp_ty_bindings {
@@ -496,13 +519,14 @@ pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     sm.ty(&scheme.ty)
 }
 
-/// Simultaneous substitution over all three variable kinds.  `cm` and `tcm`
+/// Simultaneous substitution over all four variable kinds.  `cm` and `tcm`
 /// carry the cyclic back-edge roots — empty for non-recursive schemes.
 struct SubstMap {
     tm: HashMap<TyVar, TyVar>,
     rm: HashMap<RowVar, RowVar>,
     cm: HashMap<u32, u32>,
     tcm: HashMap<u32, u32>,
+    gm: HashMap<GradeVar, GradeVar>,
 }
 
 impl SubstMap {
@@ -544,8 +568,15 @@ impl SubstMap {
                 let id = *self.cm.get(i).unwrap_or(i);
                 CompTy::Var(CompTyVar(id))
             }
-            CompTy::Return(a) => CompTy::Return(Box::new(self.ty(a))),
+            CompTy::Return(grade, a) => CompTy::Return(self.grade(*grade), Box::new(self.ty(a))),
             CompTy::Fun(a, b) => CompTy::Fun(Box::new(self.ty(a)), Box::new(self.comp(b))),
+        }
+    }
+
+    fn grade(&self, grade: Grade) -> Grade {
+        match grade {
+            Grade::Var(v) => self.gm.get(&v).map_or(grade, |&f| Grade::Var(f)),
+            _ => grade,
         }
     }
 }
@@ -698,7 +729,7 @@ mod tests {
         assert_eq!(scheme.ty_vars, vec![(v, Kind::NUMBER)]);
         assert_eq!(
             super::super::fmt::fmt_scheme(&scheme),
-            "∀α:number. α → Command α"
+            "∀α:number. α → Returns α"
         );
         let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
             panic!("a function scheme instantiates to a thunk")

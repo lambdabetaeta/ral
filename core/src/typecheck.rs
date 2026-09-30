@@ -30,7 +30,7 @@ pub use self::kind::Kind;
 pub use self::scheme::Scheme;
 #[cfg(feature = "test-util")]
 pub(crate) use self::scheme::WeakVars;
-pub use self::ty::{CompTy, CompTyVar, Label, Row, RowVar, Ty, TyVar};
+pub use self::ty::{CompTy, CompTyVar, Grade, GradeVar, Label, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
 #[cfg(any(test, feature = "test-util"))]
