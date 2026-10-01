@@ -17,7 +17,26 @@ use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
 use crate::bus::{Mailbox, Post, Read, Rewrite};
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
-pub(super) struct SlashCommand {
+/// The slash commands, by name.  The one list behind the prompt-box
+/// highlight, the completion, the `/help` listing, and the routing: adding a
+/// command is adding a variant, and [`Verb::meta`], [`Verb::parse`] and
+/// [`run`] each match it exhaustively.
+macro_rules! verbs {
+    ($($verb:ident),* $(,)?) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub(super) enum Verb { $($verb),* }
+        impl Verb {
+            pub(super) const ALL: &'static [Verb] = &[$(Verb::$verb),*];
+        }
+    };
+}
+
+verbs! {
+    Help, Legend, Thinking, Clear, Copy, Export, Model, Login, Limits, Branch,
+    Close, Focus, Evict, Context, Rewind, Resources, Quit,
+}
+
+pub(super) struct Meta {
     pub(super) name: &'static str,
     pub(super) aliases: &'static [&'static str],
     /// The trailing argument, e.g. `Some("<path>")` for `/export`; `None` marks
@@ -25,154 +44,207 @@ pub(super) struct SlashCommand {
     pub(super) arg: Option<&'static str>,
     /// Whether the command runs wherever it is typed.  A command that reaches
     /// the session inbox belongs to the trunk's context and is refused off
-    /// it; one that touches only the view runs on any tab.  Declared here
-    /// rather than hand-listed in [`route_submit`], so a command cannot be
-    /// added without saying which it is.
+    /// it; one that touches only the view runs on any tab.
     pub(super) any_tab: bool,
     pub(super) help: &'static str,
 }
 
-/// The one registry behind the prompt-box highlight, the routing match, and the
-/// `/help` listing, so the three cannot drift.
-pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        name: "/help",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "List the available commands.",
-    },
-    SlashCommand {
-        name: "/legend",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Decode the rail, bars, grain, and fidelity treatments.",
-    },
-    SlashCommand {
-        name: "/thinking",
-        aliases: &[],
-        arg: None,
-        any_tab: true,
-        help: "Collapse or expand thinking, on screen and to come.",
-    },
-    SlashCommand {
-        name: "/clear",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Forget the conversation and clear the screen.",
-    },
-    SlashCommand {
-        name: "/copy",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Copy the latest reply to the clipboard.",
-    },
-    SlashCommand {
-        name: "/export",
-        aliases: &[],
-        arg: Some("<path>"),
-        any_tab: false,
-        help: "Write the user view to a file.",
-    },
-    SlashCommand {
-        name: "/model",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Switch the model or provider.",
-    },
-    SlashCommand {
-        name: "/login",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Sign in with ChatGPT — adds a plan-backed provider.",
-    },
-    SlashCommand {
-        name: "/limits",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Show what is left of each subscription's ration.",
-    },
-    SlashCommand {
-        name: "/branch",
-        aliases: &[],
-        arg: Some("[name]"),
-        any_tab: false,
-        help: "Fork this conversation into a new tab (same context).",
-    },
-    SlashCommand {
-        name: "/close",
-        aliases: &[],
-        arg: None,
-        any_tab: true,
-        help: "Close this branch (its tab and any agents it spawned).",
-    },
-    SlashCommand {
-        name: "/focus",
-        aliases: &[],
-        arg: Some("<name>"),
-        any_tab: true,
-        help: "Attach to a live agent by name.",
-    },
-    SlashCommand {
-        name: "/evict",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Evict the older half of the context; it stays readable to the model.",
-    },
-    SlashCommand {
-        name: "/context",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Survey the model context without changing it.",
-    },
-    SlashCommand {
-        name: "/rewind",
-        aliases: &[],
-        arg: Some("<turn>"),
-        any_tab: false,
-        help: "Evict a turn and every turn after it; descendants and the shell are untouched.",
-    },
-    SlashCommand {
-        name: "/resources",
-        aliases: &[],
-        arg: None,
-        any_tab: false,
-        help: "Show the agent's resource probes: workers, inbox, log, disk.",
-    },
-    SlashCommand {
-        name: "/quit",
-        aliases: &["/exit"],
-        arg: None,
-        any_tab: false,
-        help: "Leave exarch.",
-    },
-];
+const fn meta(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    arg: Option<&'static str>,
+    any_tab: bool,
+    help: &'static str,
+) -> Meta {
+    Meta {
+        name,
+        aliases,
+        arg,
+        any_tab,
+        help,
+    }
+}
+
+impl Verb {
+    pub(super) const fn meta(self) -> Meta {
+        match self {
+            Self::Help => meta("/help", &[], None, false, "List the available commands."),
+            Self::Legend => meta(
+                "/legend",
+                &[],
+                None,
+                false,
+                "Decode the rail, bars, grain, and fidelity treatments.",
+            ),
+            Self::Thinking => meta(
+                "/thinking",
+                &[],
+                None,
+                true,
+                "Collapse or expand thinking, on screen and to come.",
+            ),
+            Self::Clear => meta(
+                "/clear",
+                &[],
+                None,
+                false,
+                "Forget the conversation and clear the screen.",
+            ),
+            Self::Copy => meta(
+                "/copy",
+                &[],
+                None,
+                false,
+                "Copy the latest reply to the clipboard.",
+            ),
+            Self::Export => meta(
+                "/export",
+                &[],
+                Some("<path>"),
+                false,
+                "Write the user view to a file.",
+            ),
+            Self::Model => meta("/model", &[], None, false, "Switch the model or provider."),
+            Self::Login => meta(
+                "/login",
+                &[],
+                None,
+                false,
+                "Sign in with ChatGPT — adds a plan-backed provider.",
+            ),
+            Self::Limits => meta(
+                "/limits",
+                &[],
+                None,
+                false,
+                "Show what is left of each subscription's ration.",
+            ),
+            Self::Branch => meta(
+                "/branch",
+                &[],
+                Some("[name]"),
+                false,
+                "Fork this conversation into a new tab (same context).",
+            ),
+            Self::Close => meta(
+                "/close",
+                &[],
+                None,
+                true,
+                "Close this branch (its tab and any agents it spawned).",
+            ),
+            Self::Focus => meta(
+                "/focus",
+                &[],
+                Some("<name>"),
+                true,
+                "Attach to a live agent by name.",
+            ),
+            Self::Evict => meta(
+                "/evict",
+                &[],
+                None,
+                false,
+                "Evict the older half of the context; it stays readable to the model.",
+            ),
+            Self::Context => meta(
+                "/context",
+                &[],
+                None,
+                false,
+                "Survey the model context without changing it.",
+            ),
+            Self::Rewind => meta(
+                "/rewind",
+                &[],
+                Some("<turn>"),
+                false,
+                "Evict a turn and every turn after it; descendants and the shell are untouched.",
+            ),
+            Self::Resources => meta(
+                "/resources",
+                &[],
+                None,
+                false,
+                "Show the agent's resource probes: workers, inbox, log, disk.",
+            ),
+            Self::Quit => meta("/quit", &["/exit"], None, false, "Leave exarch."),
+        }
+    }
+
+    const REWIND_USAGE: &str =
+        "usage: /rewind <turn> — name a turn still in your context; it and every later turn leave";
+
+    /// Type the trailing argument, or say how it is malformed — the usage
+    /// hints live here, so [`run`] receives only well-formed commands.
+    fn parse(self, arg: &str) -> Result<Command, String> {
+        Ok(match self {
+            Self::Help => Command::Help,
+            Self::Legend => Command::Legend,
+            Self::Thinking => Command::Thinking,
+            Self::Clear => Command::Clear,
+            Self::Copy => Command::Copy,
+            Self::Model => Command::Model,
+            Self::Login => Command::Login,
+            Self::Limits => Command::Limits,
+            Self::Close => Command::Close,
+            Self::Evict => Command::Evict,
+            Self::Context => Command::Context,
+            Self::Resources => Command::Resources,
+            Self::Quit => Command::Quit,
+            Self::Branch => Command::Branch((!arg.is_empty()).then(|| arg.to_string())),
+            Self::Export if arg.is_empty() => return Err("usage: /export <path>".into()),
+            Self::Export => Command::Export(arg.to_string()),
+            Self::Focus if arg.is_empty() => return Err("usage: /focus <name>".into()),
+            Self::Focus => Command::Focus(arg.to_string()),
+            Self::Rewind if arg.is_empty() => return Err(Self::REWIND_USAGE.into()),
+            Self::Rewind => Command::Rewind(arg.parse().map_err(|_| {
+                format!("/rewind expects one non-negative turn number, got `{arg}`")
+            })?),
+        })
+    }
+}
+
+/// A typed command, ready to run.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum Command {
+    Help,
+    Legend,
+    Thinking,
+    Clear,
+    Copy,
+    Export(String),
+    Model,
+    Login,
+    Limits,
+    Branch(Option<String>),
+    Close,
+    Focus(String),
+    Evict,
+    Context,
+    Rewind(u64),
+    Resources,
+    Quit,
+}
 
 /// The command a token names, by its own name or by one of its aliases.
-fn by_token(token: &str) -> Option<&'static SlashCommand> {
-    SLASH_COMMANDS
-        .iter()
-        .find(|c| c.name == token || c.aliases.contains(&token))
+fn by_token(token: &str) -> Option<Verb> {
+    Verb::ALL.iter().copied().find(|v| {
+        let m = v.meta();
+        m.name == token || m.aliases.contains(&token)
+    })
 }
 
 /// The command named by `trimmed`'s first token, with the trimmed remainder as
 /// its argument.  An argument-less command matches only when typed alone, so
 /// `/copy this` declines and the line proceeds to the model as a prompt.
-pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &str)> {
+pub(super) fn lookup_command(trimmed: &str) -> Option<(Verb, &str)> {
     let (head, rest) = split_head(trimmed);
-    let cmd = by_token(head)?;
-    if cmd.arg.is_none() && !rest.is_empty() {
+    let verb = by_token(head)?;
+    if verb.meta().arg.is_none() && !rest.is_empty() {
         return None;
     }
-    Some((cmd, rest))
+    Some((verb, rest))
 }
 
 /// Whether `line` is still a bare command token: a `/` and the characters a
@@ -196,20 +268,21 @@ pub(super) fn command_candidates(line: &str) -> Vec<Candidate> {
     if !composing_command(line) {
         return Vec::new();
     }
-    let tokens: Vec<&'static str> = SLASH_COMMANDS
+    let tokens: Vec<&'static str> = Verb::ALL
         .iter()
-        .flat_map(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()))
+        .map(|v| v.meta())
+        .flat_map(|m| std::iter::once(m.name).chain(m.aliases.iter().copied()))
         .collect();
     ral_core::text::rank(line, tokens, false)
         .into_iter()
         .map(|token| {
-            let cmd = by_token(token);
+            let meta = by_token(token).map(Verb::meta);
             Candidate {
-                display: match cmd.and_then(|c| c.arg) {
+                display: match meta.as_ref().and_then(|m| m.arg) {
                     Some(arg) => format!("{token} {arg}"),
                     None => token.to_string(),
                 },
-                detail: cmd.map(|c| c.help.to_string()),
+                detail: meta.map(|m| m.help.to_string()),
                 replacement: token.to_string(),
             }
         })
@@ -254,8 +327,9 @@ pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
 /// listing is one block with the card's own column alignment rather than a
 /// column of notes.
 pub(super) fn cmd_help(app: &mut App) {
-    let rows = SLASH_COMMANDS
+    let rows = Verb::ALL
         .iter()
+        .map(|v| v.meta())
         .map(|c| {
             let mut label = c.name.to_string();
             if let Some(arg) = c.arg {
@@ -312,10 +386,6 @@ pub(super) fn cmd_copy(app: &mut App) {
 /// file.  The copy goes through [`scrollback::export_log`], the I/O door.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.root();
-    if arg.is_empty() {
-        app.push_error(id, "usage: /export <path>");
-        return;
-    }
     let dest = resolve_export_path(arg, info.cwd);
     if dest.exists() {
         app.push_error(id, &format!("refusing to overwrite {}", dest.display()));
@@ -338,10 +408,6 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// renewed: attention alone must not keep a child alive.
 pub(super) fn cmd_focus(app: &mut App, arg: &str) {
     let id = app.tabs.focused();
-    if arg.is_empty() {
-        app.push_error(id, "usage: /focus <name>");
-        return;
-    }
     match app.tabs.by_name(arg) {
         Some(target) => app.tabs.set_focus(target),
         None => app.push_error(id, &format!("no live tab named {arg}")),
@@ -368,101 +434,31 @@ pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
 }
 
 /// The one submit path for every tab: parse once, then act on the parse and the
-/// focused tab.  A view command (`/help`, `/legend`, `/copy`, `/export`,
-/// `/model`, `/login`, `/limits`, `/thinking`) touches only the App, clipboard,
-/// file, or picker, so it runs here on the UI thread; a session command is
-/// parsed here into its [`Read`] or [`Rewrite`] and rides the trunk's inbox to
-/// the attend thread, which owns the context.  A command typed on a sub-agent
-/// tab is therefore refused rather than misfired — the trunk's inbox would act
-/// on the wrong session — save those the registry marks `any_tab`, which touch
-/// no inbox.  A plain line steers the focused tab instead.  Errors land on the
-/// focused tab, where the user typed.
+/// focused tab.  A command typed on a sub-agent tab is refused rather than
+/// misfired — the trunk's inbox would act on the wrong session — save those
+/// the registry marks `any_tab`, which touch no inbox.  A plain line steers
+/// the focused tab instead.  Errors land on the focused tab, where the user
+/// typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
     mailbox: &Mailbox,
     ctx: &super::tui_loop::CommandCtx<'_>,
 ) -> io::Result<()> {
-    let info = ctx.info;
     let trimmed = text.trim();
     let root = tui.app.tabs.root();
     let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
-        Some((cmd, _)) if focused != root && !cmd.any_tab => {
+        Some((verb, _)) if focused != root && !verb.meta().any_tab => {
             tui.app.push_error(
                 focused,
-                &format!("{} is not available on this tab", cmd.name),
+                &format!("{} is not available on this tab", verb.meta().name),
             );
         }
-        Some((cmd, arg)) => match cmd.name {
-            "/close" => {
-                if focused == root {
-                    tui.app
-                        .push_error(root, "nothing to close here; /quit ends the session");
-                } else if !tui.app.tabs.is_branch(focused) {
-                    tui.app
-                        .push_error(focused, "/close closes a branch, not this tab");
-                } else if let Some(agent) = tui.app.tabs.focused_agent() {
-                    agent.cancel_tree(ral_core::process::CancelCause::Explicit);
-                } else {
-                    tui.app.push_error(
-                        focused,
-                        "this branch has already ended; its tab fades on its own",
-                    );
-                }
-            }
-            "/focus" => cmd_focus(&mut tui.app, arg),
-            "/thinking" => cmd_thinking(&mut tui.app),
-            "/help" => cmd_help(&mut tui.app),
-            "/legend" => cmd_legend(&mut tui.app),
-            "/copy" => cmd_copy(&mut tui.app),
-            "/export" => cmd_export(&mut tui.app, arg, info),
-            "/model" => {
-                pick_model(tui, ctx);
-            }
-            "/login" => login::login(tui, ctx),
-            "/limits" => cmd_limits(&mut tui.app, ctx),
-            // Cancel before blanking: tokens already in flight would otherwise
-            // paint into the cleared scrollback until the worker's next poll, and
-            // what the bus still holds `App::handle`'s clear-drain drops.
-            // Descendants only — a terminate-class cause on the trunk's own
-            // token is permanent, and `/clear` rebuilds the trunk in place.
-            // The pre-blank cancel reaches a foreground external child too.
-            "/clear" => {
-                crate::agent::cancel::raise_interrupt();
-                if let Some(agent) = tui.app.tabs.agent(root) {
-                    agent.interrupt();
-                    agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
-                }
-                tui.app.clear(info, tui.guard.term())?;
-                mailbox.push(Post::Rewrite(Rewrite::Clear));
-            }
-            "/evict" => mailbox.push(Post::Rewrite(Rewrite::Evict)),
-            "/quit" => mailbox.push(Post::Rewrite(Rewrite::Quit)),
-            "/rewind" => match arg {
-                "" => tui.app.push_error(
-                    focused,
-                    "usage: /rewind <turn> — name a turn still in your context; \
-                     it and every later turn leave",
-                ),
-                turn => match turn.parse() {
-                    Ok(anchor) => mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor))),
-                    Err(_) => tui.app.push_error(
-                        focused,
-                        &format!("/rewind expects one non-negative turn number, got `{turn}`"),
-                    ),
-                },
-            },
-            "/branch" => mailbox.push(Post::Read(Read::Branch(
-                (!arg.is_empty()).then(|| arg.to_string()),
-            ))),
-            "/context" => mailbox.push(Post::Read(Read::Context)),
-            "/resources" => mailbox.push(Post::Read(Read::Resources)),
-            name => tui.app.push_error(
-                focused,
-                &format!("{name} is registered but not routed — is its arm missing?"),
-            ),
+        Some((verb, arg)) => match verb.parse(arg) {
+            Ok(command) => run(command, tui, mailbox, ctx)?,
+            Err(usage) => tui.app.push_error(focused, &usage),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.
@@ -496,10 +492,75 @@ pub(super) fn route_submit(
     Ok(())
 }
 
+/// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
+/// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
+/// clipboard, file, or picker, so it runs here on the UI thread; a session
+/// command becomes its [`Read`] or [`Rewrite`] and rides the trunk's inbox to
+/// the attend thread, which owns the context.
+fn run(
+    command: Command,
+    tui: &mut Tui,
+    mailbox: &Mailbox,
+    ctx: &super::tui_loop::CommandCtx<'_>,
+) -> io::Result<()> {
+    let info = ctx.info;
+    let root = tui.app.tabs.root();
+    let focused = tui.app.tabs.focused();
+    match command {
+        Command::Close => {
+            if focused == root {
+                tui.app
+                    .push_error(root, "nothing to close here; /quit ends the session");
+            } else if !tui.app.tabs.is_branch(focused) {
+                tui.app
+                    .push_error(focused, "/close closes a branch, not this tab");
+            } else if let Some(agent) = tui.app.tabs.focused_agent() {
+                agent.cancel_tree(ral_core::process::CancelCause::Explicit);
+            } else {
+                tui.app.push_error(
+                    focused,
+                    "this branch has already ended; its tab fades on its own",
+                );
+            }
+        }
+        Command::Focus(name) => cmd_focus(&mut tui.app, &name),
+        Command::Thinking => cmd_thinking(&mut tui.app),
+        Command::Help => cmd_help(&mut tui.app),
+        Command::Legend => cmd_legend(&mut tui.app),
+        Command::Copy => cmd_copy(&mut tui.app),
+        Command::Export(path) => cmd_export(&mut tui.app, &path, info),
+        Command::Model => pick_model(tui, ctx),
+        Command::Login => login::login(tui, ctx),
+        Command::Limits => cmd_limits(&mut tui.app, ctx),
+        // Cancel before blanking: tokens already in flight would otherwise
+        // paint into the cleared scrollback until the worker's next poll, and
+        // what the bus still holds `App::handle`'s clear-drain drops.
+        // Descendants only — a terminate-class cause on the trunk's own
+        // token is permanent, and `/clear` rebuilds the trunk in place.
+        // The pre-blank cancel reaches a foreground external child too.
+        Command::Clear => {
+            crate::agent::cancel::raise_interrupt();
+            if let Some(agent) = tui.app.tabs.agent(root) {
+                agent.interrupt();
+                agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
+            }
+            tui.app.clear(info, tui.guard.term())?;
+            mailbox.push(Post::Rewrite(Rewrite::Clear));
+        }
+        Command::Evict => mailbox.push(Post::Rewrite(Rewrite::Evict)),
+        Command::Quit => mailbox.push(Post::Rewrite(Rewrite::Quit)),
+        Command::Rewind(anchor) => mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor))),
+        Command::Branch(name) => mailbox.push(Post::Read(Read::Branch(name))),
+        Command::Context => mailbox.push(Post::Read(Read::Context)),
+        Command::Resources => mailbox.push(Post::Read(Read::Resources)),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SLASH_COMMANDS, command_candidates, lookup_command, resolve_export_path,
+        Command, Verb, command_candidates, lookup_command, resolve_export_path,
         unrecognized_command,
     };
 
@@ -511,7 +572,11 @@ mod tests {
     }
 
     fn dispatch(input: &str) -> Option<(&'static str, String)> {
-        lookup_command(input).map(|(c, arg)| (c.name, arg.to_string()))
+        lookup_command(input).map(|(v, arg)| (v.meta().name, arg.to_string()))
+    }
+
+    fn parse(input: &str) -> Option<Result<Command, String>> {
+        lookup_command(input).map(|(v, arg)| v.parse(arg))
     }
 
     #[test]
@@ -533,10 +598,12 @@ mod tests {
             dispatch("/export   /tmp/a.txt  "),
             Some(("/export", "/tmp/a.txt".to_string()))
         );
-        assert_eq!(dispatch("/rewind 7"), Some(("/rewind", "7".to_string())));
-        // A bare command matches; its handler turns the empty argument into the
-        // usage hint.
+        assert_eq!(parse("/rewind 7"), Some(Ok(Command::Rewind(7))));
+        // A bare command matches; the parse turns the empty argument into the
+        // usage hint rather than letting the line fall through to the model.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
+        assert!(matches!(parse("/export"), Some(Err(usage)) if usage.starts_with("usage:")));
+        assert!(matches!(parse("/rewind x"), Some(Err(e)) if e.contains("`x`")));
     }
 
     #[test]
@@ -545,14 +612,17 @@ mod tests {
             dispatch("/focus scout"),
             Some(("/focus", "scout".to_string()))
         );
-        assert_eq!(dispatch("/focus"), Some(("/focus", String::new())));
+        assert!(matches!(parse("/focus"), Some(Err(usage)) if usage.starts_with("usage:")));
     }
 
     #[test]
     fn branch_matches_bare_and_with_prompt_and_close_resolves() {
         // An optional argument admits trailing text an argless one declines.
-        assert_eq!(dispatch("/branch"), Some(("/branch", String::new())));
-        assert_eq!(dispatch("/branch hi"), Some(("/branch", "hi".to_string())));
+        assert_eq!(parse("/branch"), Some(Ok(Command::Branch(None))));
+        assert_eq!(
+            parse("/branch hi"),
+            Some(Ok(Command::Branch(Some("hi".to_string()))))
+        );
         assert_eq!(dispatch("/close"), Some(("/close", String::new())));
     }
 
@@ -577,7 +647,7 @@ mod tests {
 
     #[test]
     fn a_bare_slash_offers_every_command_and_alias() {
-        let all: usize = SLASH_COMMANDS.iter().map(|c| c.aliases.len() + 1).sum();
+        let all: usize = Verb::ALL.iter().map(|v| v.meta().aliases.len() + 1).sum();
         assert_eq!(replacements("/").len(), all);
     }
 

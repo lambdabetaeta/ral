@@ -54,10 +54,6 @@ impl Context {
         )
     }
 
-    pub(crate) fn is_awaiting_steering(&self) -> bool {
-        matches!(self.state, State::AwaitingAssistantAfterToolResults)
-    }
-
     pub(crate) fn pending_tool_results(&self) -> Option<Vec<String>> {
         match &self.state {
             State::AwaitingToolResults { pending_ids } => Some(pending_ids.clone()),

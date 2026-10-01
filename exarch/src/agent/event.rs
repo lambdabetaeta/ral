@@ -785,13 +785,14 @@ impl AgentLog {
     }
 
     /// Append a user message between a complete tool-result batch and the next
-    /// provider request.  The only mid-turn user ingress there is, which is
-    /// why it admits the tool-results-awaited phase alone.
+    /// provider request — the only mid-turn user ingress there is.  One record
+    /// per message, so a run of arrivals keeps the order it was typed in; the
+    /// provider reads consecutive user messages as one turn.
     ///
     /// # Errors
     /// The tool-result batch is incomplete, or recording the prompt failed.
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
-        if !self.context.is_awaiting_steering() {
+        if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "tool results must be complete before accepting a steering prompt; the session is {}",
                 self.context.waiting_for()

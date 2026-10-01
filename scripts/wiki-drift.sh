@@ -3,7 +3,7 @@
 # Implements the Lint procedure from docs/ral-wiki/AGENTS.md; costs no tokens.
 # Output: one line per finding, tab-separated, suitable as a work-list.
 #   MAP	<page>	<stamp>	<n-commits>	<covers_paths>
-#   ANCHOR	<page>	<stamp>	<missing anchors, comma-separated>
+#   ANCHOR	<page>	<stamp>	<missing anchors, comma-separated>   (internals/, and active decisions/)
 #   RELATED	<page>	<stamp>	<n new decisions since stamp>
 #   SPEC	docs/SPEC.md	<stamp|none>	<n-commits since stamp over core/ ral/ exarch/>
 set -euo pipefail
@@ -50,8 +50,11 @@ find "$wiki/map" -name '*.md' | sort | while read -r page; do
   [[ $n -gt 0 ]] && printf 'MAP\t%s\t%s\t%s\t%s\n' "$page" "$stamp" "$n" "${parr[*]}" || true
 done
 
-# --- internals/: anchors must still exist in the source ---
-find "$wiki/internals" -name '*.md' | sort | while read -r page; do
+# --- internals/, and active decisions/: anchors must still exist in the source ---
+# A decision's reasoning is history and never rewritten, but a `## Where`
+# naming code is a live pointer; an active page declares those as anchors.
+{ find "$wiki/internals" -name '*.md'; find "$wiki/decisions" -name '*.md'; } | sort | while read -r page; do
+  [[ $page == */decisions/* && $(frontmatter_field "$page" status) != active ]] && continue
   stamp=$(frontmatter_field "$page" verified_at_commit)
   anchors=$(frontmatter_field "$page" anchors)
   [[ -z $anchors ]] && continue

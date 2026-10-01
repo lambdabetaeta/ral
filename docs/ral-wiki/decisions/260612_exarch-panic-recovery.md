@@ -1,5 +1,8 @@
 ---
 status: active
+verified_at_commit: c848c533
+verified_at_date: 2026-10-01
+anchors: [IoGuard, run_shell, run_turn, catch_unwind]
 ---
 
 # Exarch's panic-recovery contract for the persistent shell

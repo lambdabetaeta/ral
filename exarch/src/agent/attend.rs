@@ -159,13 +159,16 @@ impl Avatar {
             Next::Item(item) => item,
         };
         self.heard(item);
-        // Only a genuine boundary clears the latches and a prior exchange's
-        // Esc; a self-nudge is the same exchange continuing.
+        // Only a genuine boundary clears the latches, a prior exchange's Esc,
+        // and any nudge still queued behind it — that nudge continued the
+        // exchange this one closes.  A self-nudge is the same exchange
+        // continuing.
         if item.opens_exchange() {
             if let Some(nudges) = &mut self.nudges {
                 nudges.reset();
             }
             self.agent.cancel.reset();
+            self.inbox.drop_nudges();
         }
         announce(item, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
@@ -371,8 +374,8 @@ impl Avatar {
     }
 
     /// Every standing condition newly climbed, told: the user's lines noted,
-    /// the model's reminders returned for the one steering message the
-    /// protocol admits after a tool batch.
+    /// the model's reminders returned as the steering that trails a tool
+    /// batch's arrivals.
     ///
     /// # Errors
     /// The engine's severance, from the disk probe.

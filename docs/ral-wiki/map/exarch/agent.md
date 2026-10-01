@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 23cea9f6
+generated_at_commit: c848c533
 generated_at_date: 2026-10-01
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -370,8 +370,8 @@ completion, self-posted as `Post::Nudge` and committed by `append_user` inside
 the same exchange, gated on `quiet` — no standing reply, no detached shell
 work, no busy children, the one condition those kinds share.
 `Nudges::remind` is the other entry point, reached from `Avatar::warnings` at
-a *tool* boundary, where a gauge's text joins the one steering message the
-protocol admits after a batch: an agentic run takes one prompt and then two
+a *tool* boundary, where a gauge's text lands as steering trailing the
+batch's arrivals: an agentic run takes one prompt and then two
 hundred tool turns, so a warning that waited for the next completion would
 arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
 

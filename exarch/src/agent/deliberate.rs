@@ -14,7 +14,7 @@ use crate::agent::cancel;
 use crate::agent::digest::{EVICT_THRESHOLD, suffix_keep_budget};
 use crate::agent::event::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
 use crate::agent::seat::EngineLost;
-use crate::bus::{AgentState, Emitter, Item};
+use crate::bus::{AgentState, Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
 use ral_core::serial::FOValue;
@@ -267,27 +267,32 @@ impl Avatar {
             if token.is_cancelled() {
                 return Ok(self.cancelled());
             }
-            // The reads run against the context as the batch left it; the
-            // deliveries coalesce with the warnings into the one steering
-            // message the protocol admits after a batch, `announce` drawing
-            // each arrival's own chrome.
-            let (reads, items) = self.inbox.drain_mid_exchange();
-            for read in &reads {
-                self.read(read, emit);
+            // The arrivals are taken in the order typed: a read runs against
+            // the context as it stands at its place in the queue, a delivery
+            // lands as a steering line of its own, `announce` drawing each
+            // arrival's chrome.  The warnings trail them.
+            for next in self.inbox.drain_mid_exchange() {
+                match next {
+                    Next::Read(read) => self.read(&read, emit),
+                    Next::Item(item) => {
+                        self.heard(&item);
+                        announce(&item, &recorder);
+                        self.log
+                            .lock()
+                            .append_steering(item.text())
+                            .map_err(ProviderError::Other)?;
+                    }
+                    Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
+                }
             }
-            for item in &items {
-                self.heard(item);
-                announce(item, &recorder);
-            }
-            let mut steering: Vec<String> = items.iter().map(Item::text).collect();
-            match self.warnings(provider) {
-                Ok(warnings) => steering.extend(warnings),
+            let warnings = match self.warnings(provider) {
+                Ok(warnings) => warnings,
                 Err(s) => return Ok(Outcome::Severed(s)),
-            }
-            if !steering.is_empty() {
+            };
+            if !warnings.is_empty() {
                 self.log
                     .lock()
-                    .append_steering(steering.join("\n"))
+                    .append_steering(warnings.join("\n"))
                     .map_err(ProviderError::Other)?;
             }
             // A `reply` in the fully drained batch ends the run here, not at
@@ -697,8 +702,8 @@ mod tests {
         assert!(session.is_ready());
     }
 
-    /// Context pressure reaches the model at a tool boundary, on the one
-    /// steering message the protocol admits after a batch: an agentic run may
+    /// Context pressure reaches the model at a tool boundary, as steering
+    /// trailing the batch's arrivals: an agentic run may
     /// take two hundred tool turns before the next exchange, by which time the
     /// cut has long since happened.  Edge-triggered, so two boundaries under
     /// one excursion carry one reminder.
@@ -1101,6 +1106,61 @@ mod tests {
             .expect("the batch's results are in the context");
         assert!(tool_result < position("queued prompt"));
         assert!(position("queued prompt") < position("answered"));
+    }
+
+    /// The arrivals keep the order typed: a read queued *after* a prompt at
+    /// the same boundary runs after that prompt has landed, so a `/branch`
+    /// typed beside a prompt forks with it.
+    #[test]
+    fn a_read_queued_after_a_prompt_runs_after_it_lands() {
+        let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![
+                    ral_call("c1", "t2-queue-prompt"),
+                    ral_call("c2", "t2-queue-read"),
+                ]))
+                .then(Reply::text("answered"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok")),
+        ));
+        session.seed("go".into());
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        session.attend(&emit);
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
+
+        let signals: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let prompt = signals
+            .iter()
+            .position(|sig| {
+                matches!(
+                    sig,
+                    crate::bus::Signal::Fact(_, rec) if matches!(
+                        rec.value(),
+                        crate::record::Record::Display(
+                            crate::record::Display::Prompt { text }
+                        ) if text == "queued prompt"
+                    )
+                )
+            })
+            .expect("the prompt's arrival is announced");
+        let fold = signals
+            .iter()
+            .position(|sig| {
+                matches!(
+                    sig,
+                    crate::bus::Signal::Transient(_, Transient::Resources { .. })
+                )
+            })
+            .expect("the read ran and published its fold");
+        assert!(
+            prompt < fold,
+            "the read runs after the prompt typed before it"
+        );
     }
 
     /// A worker delivers before it retires, so a result that settled across a

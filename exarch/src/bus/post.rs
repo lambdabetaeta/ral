@@ -239,18 +239,20 @@ pub(crate) enum Source {
     Agent,
     Message,
     Nudge,
-    Command,
+    Read,
+    Rewrite,
     Surface,
 }
 
 impl Source {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::User,
         Self::Schedule,
         Self::Agent,
         Self::Message,
         Self::Nudge,
-        Self::Command,
+        Self::Read,
+        Self::Rewrite,
         Self::Surface,
     ];
 
@@ -268,7 +270,8 @@ impl std::fmt::Display for Source {
             Self::Agent => "agent",
             Self::Message => "message",
             Self::Nudge => "nudge",
-            Self::Command => "command",
+            Self::Read => "read",
+            Self::Rewrite => "rewrite",
             Self::Surface => "surface",
         })
     }
@@ -281,7 +284,8 @@ impl Post {
             Self::Stamped { kind, .. } => kind.source(),
             Self::AgentMessage(_) => Source::Message,
             Self::Nudge { .. } => Source::Nudge,
-            Self::Read(_) | Self::Rewrite(_) => Source::Command,
+            Self::Read(_) => Source::Read,
+            Self::Rewrite(_) => Source::Rewrite,
         }
     }
 }

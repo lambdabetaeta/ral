@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 23cea9f6
+generated_at_commit: c848c533
 generated_at_date: 2026-10-01
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -44,11 +44,11 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   agents, surfaces, peer messages, nudges — is a delivery and drains at the
   next boundary in order. So the variant alone decides the drain point:
   `drain_mid_exchange` (from `agent::deliberate`, after each tool batch)
-  yields `(Vec<Read>, Vec<Item>)` and stops at a rewrite; `next_or_idle` pops
-  anything. Within one tool boundary the reads run first, against the context
-  as the batch left it, and the deliveries then land as the one steering
-  message the log admits per batch — so a `/branch` typed beside a prompt at
-  the same boundary forks without it. The attend thread runs the commands
+  yields the reads and deliveries in the order typed and stops at a rewrite;
+  `next_or_idle` pops anything. Within one tool boundary each arrival is taken
+  at its place: a read runs against the context as it then stands, a delivery
+  lands as a steering line of its own — so a `/branch` typed beside a prompt
+  forks with it or without it exactly as typed. The attend thread runs the commands
   itself (`Avatar::read`, `Avatar::rewrite` in `agent/command.rs`); there is
   no frontend hook ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],

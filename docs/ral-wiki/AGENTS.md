@@ -37,7 +37,10 @@ the supersession in `decisions/`. No staleness stamp.
 significant decision, named `YYMMDD_slug.md`. Frontmatter carries
 `status: proposed | active | fixed | superseded | rejected | open`. When a
 decision is superseded, set its status and link forward; never delete the old
-page and never rewrite history into it.
+page and never rewrite history into it. The one live part of a decision page is
+a `## Where` naming code: an `active` page that has one declares those symbols
+as `anchors` (with `verified_at_commit`), and the drift lint checks them as it
+does an `internals/` page's; the reasoning above it stays as written.
 
 **Volatile — `map/`.** The *where*. Thin per-subsystem pages (the core engine,
 the exarch attend loop, the capability sandbox, the REPL, the prelude). A map page
@@ -202,10 +205,11 @@ Run it first and reserve judgement for what it cannot decide.
   `git log <generated_at_commit>..HEAD -- <covers_paths>`. Non-empty output means
   the page may be stale; re-ingest it. Never silently trust an unstamped or
   drifted map page.
-- *Internals drift (semantic):* for each `internals/` page, confirm its
-  `anchors` still exist in the code and that no `decisions/` page supersedes the
-  narrative. A file move alone does not flag the page — a vanished anchor or a
-  superseding decision does. On confirmation, bump `verified_at_commit`.
+- *Internals drift (semantic):* for each `internals/` page, and each `active`
+  `decisions/` page with `anchors`, confirm its `anchors` still exist in the
+  code and that no `decisions/` page supersedes the narrative. A file move
+  alone does not flag the page — a vanished anchor or a superseding decision
+  does. On confirmation, bump `verified_at_commit`.
 - *Related drift (semantic):* for each `related/` page, confirm no `decisions/`
   page supersedes a design page in its `against` list. On confirmation, bump
   `verified_at_commit`.

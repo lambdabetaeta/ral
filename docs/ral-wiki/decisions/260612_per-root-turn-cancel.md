@@ -1,5 +1,8 @@
 ---
 status: active
+verified_at_commit: c848c533
+verified_at_date: 2026-10-01
+anchors: [boot_shell, mint_root, RootGuard, run_turn, Tool::dispatch]
 ---
 
 # A per-root-turn cancellation token for exarch

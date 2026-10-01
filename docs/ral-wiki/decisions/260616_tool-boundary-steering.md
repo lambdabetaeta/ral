@@ -1,5 +1,8 @@
 ---
 status: active
+verified_at_commit: c848c533
+verified_at_date: 2026-10-01
+anchors: [drain_mid_exchange, next_or_idle, append_steering, append_tool_results]
 ---
 
 # Tool-boundary steering for the prompt queue
@@ -21,8 +24,8 @@ the next assistant step, not inside the provider's pending `tool_use` block.**
 - Sub-agents do not consume the root queue.
 - Any prompt not drained mid-turn still reaches the model at the exchange boundary (`Inbox::next_or_idle`), coalesced oldest-first.
 - A session *read* (`/branch`, `/context`, `/resources`) drains at the same
-  tool boundary, in the order typed, and runs before the steering lands; a
-  *rewrite* (`/clear`, `/evict`, `/rewind`, `/quit`) waits for the exchange
+  tool boundary and runs at its place in the typed order, each delivery
+  around it landing as a steering line of its own; a *rewrite* (`/clear`, `/evict`, `/rewind`, `/quit`) waits for the exchange
   boundary and holds everything typed after it. The three command classes
   are the [[map/exarch/frontend|frontend]] page's.
 
@@ -54,13 +57,14 @@ it steers the next assistant step.
 
 ## Where
 
-- **`exarch/src/bus/inbox.rs`** — `drain_mid_exchange` (the tool-boundary drain: reads and deliveries, stopping at a rewrite) and `next_or_idle` (the exchange boundary).
-- **`exarch/src/agent/event.rs`** — `append_steering` admits a user message only after a complete tool-result batch, and only one per batch.
-- **`exarch/src/agent/deliberate.rs`** — after `append_tool_results`, runs the drained reads, then appends the drained deliveries as the one steering message.
+- **`exarch/src/bus/inbox.rs`** — `drain_mid_exchange` (the tool-boundary drain: reads and deliveries in typed order, stopping at a rewrite) and `next_or_idle` (the exchange boundary).
+- **`exarch/src/agent/event.rs`** — `append_steering` admits a user message only while an assistant reply is awaited, one record per message.
+- **`exarch/src/agent/deliberate.rs`** — after `append_tool_results`, walks the drained arrivals in order: a read runs, a delivery is appended as steering.
 
 ## Covered
 
 - `deliberate::tests::a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step` — a `/resources` and a prompt queued from inside a batch: the fold precedes the next assistant step, and the prompt lands as steering at that boundary.
+- `deliberate::tests::a_read_queued_after_a_prompt_runs_after_it_lands` — the reverse order holds too: the arrivals are taken as typed.
 - `deliberate::tests::a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context` — a cancelled batch admits nothing.
 - `bus::inbox::tests::inbox_mid_exchange_drain_takes_reads_in_order_and_holds_at_a_rewrite`.
 

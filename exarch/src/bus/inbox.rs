@@ -11,7 +11,7 @@
 //! its result) — so a delivery can never lose to the verdict it should wake.
 
 use super::post::{Minted, Source, Stamped};
-use super::{Item, Next, Post, Read};
+use super::{Item, Next, Post};
 use crate::agent::cancel;
 use crate::fleet::schedule::ScheduleId;
 use ral_core::sync::LockExt;
@@ -384,29 +384,26 @@ impl Inbox {
     }
 
     /// Mid-exchange drain at a tool-call boundary: the reads to run and the
-    /// deliveries to hand the model, each in the order typed.  The reads run
-    /// first, against the context as the batch left it, because the log admits
-    /// one steering message per batch and the deliveries become it: a `/branch`
-    /// typed beside a prompt at the same boundary forks without that prompt.
+    /// deliveries to hand the model, in the one order they were typed.
     ///
     /// The scan stops at a rewrite, which drains only at the exchange boundary
-    /// and holds everything typed after it.
-    pub(crate) fn drain_mid_exchange(&self) -> (Vec<Read>, Vec<Item>) {
+    /// and holds everything typed after it; a [`Next::Rewrite`] is therefore
+    /// never among the results.
+    pub(crate) fn drain_mid_exchange(&self) -> Vec<Next> {
         let mut guard = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        let (mut reads, mut items) = (Vec::new(), Vec::new());
+        let mut arrivals = Vec::new();
         while let Some(next) = pop_next(&mut guard.posts, epoch) {
             match next {
-                Next::Read(r) => reads.push(r),
-                Next::Item(i) => items.push(i),
                 Next::Rewrite(r) => {
                     guard.posts.push_front(Post::Rewrite(r));
                     break;
                 }
+                read_or_item => arrivals.push(read_or_item),
             }
         }
         drop(guard);
-        (reads, items)
+        arrivals
     }
 
     /// The next exchange-boundary deliverable.  Never blocks —
@@ -482,45 +479,40 @@ impl Inbox {
     }
 
     /// Drop queued self-nudges while preserving user, command, and worker
-    /// messages. A rewind makes a nudge for its removed exchange stale.
+    /// messages.  A nudge continues the exchange it was decided in, so a
+    /// rewind that removes that exchange, or a new exchange opening ahead of
+    /// it, makes it stale.
     pub(crate) fn drop_nudges(&self) {
-        self.shared
-            .lock()
-            .posts
-            .retain(|msg| !matches!(msg, Post::Nudge { .. }));
+        remove_where(&mut self.shared.lock().posts, |msg| {
+            matches!(msg, Post::Nudge { .. })
+        });
     }
 }
 
-/// Pop the front of a locked queue.  A leading run of steering coalesces into
-/// one [`Item::Human`], matching the push-time merge; everything else is
-/// delivered on its own.  Stale stamped posts are fenced first, against the
-/// caller's read of the clear-epoch taken under this same lock.
-pub(super) fn pop_next(q: &mut VecDeque<Post>, epoch: u64) -> Option<Next> {
-    q.retain(|m| !m.stale(epoch));
-    if matches!(q.front()?, Post::UserSteering(_)) {
-        return Some(Next::Item(coalesce_steering(q)));
+/// Remove every entry matching `pred`, then restore [`enqueue`]'s invariant:
+/// no two steering entries adjacent.  A removal from the middle is the one
+/// thing that can break it.
+fn remove_where(q: &mut VecDeque<Post>, pred: impl Fn(&Post) -> bool) {
+    let before = q.len();
+    q.retain(|m| !pred(m));
+    if q.len() == before {
+        return;
     }
+    let mut merged: VecDeque<Post> = VecDeque::with_capacity(q.len());
+    for msg in q.drain(..) {
+        enqueue(&mut merged, msg);
+    }
+    *q = merged;
+}
+
+/// Pop the front of a locked queue.  Stale stamped posts are fenced first,
+/// against the caller's read of the clear-epoch taken under this same lock.
+pub(super) fn pop_next(q: &mut VecDeque<Post>, epoch: u64) -> Option<Next> {
+    remove_where(q, |m| m.stale(epoch));
     q.pop_front().map(to_next)
 }
 
-/// Pop the leading run of consecutive [`Post::UserSteering`] entries and join
-/// them one per line.  Both callers enter with a steering at the front, so one
-/// always pops.
-fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
-    let mut text = String::new();
-    while let Some(Post::UserSteering(_)) = q.front() {
-        let Some(Post::UserSteering(s)) = q.pop_front() else {
-            unreachable!("front just checked to be user steering")
-        };
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&s);
-    }
-    Item::Human(text)
-}
-
-/// Convert one already-fenced, non-steering post into what it delivers.
+/// Convert one already-fenced post into what it delivers.
 fn to_next(msg: Post) -> Next {
     match msg {
         Post::Stamped { kind, .. } => Next::Item(match kind {
@@ -537,19 +529,31 @@ fn to_next(msg: Post) -> Next {
         Post::Nudge { prompt, text } => Next::Item(Item::Nudge { prompt, text }),
         Post::Read(r) => Next::Read(r),
         Post::Rewrite(r) => Next::Rewrite(r),
-        Post::UserSteering(_) => unreachable!("user steering coalesced by the caller"),
+        Post::UserSteering(s) => Next::Item(Item::Human(s)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Inbox, Item, Minted, Next, ParkMode, Post, Read, Source, Stamped};
+    use super::{Inbox, Item, Minted, Next, ParkMode, Post, Source, Stamped};
     use crate::agent::cancel;
-    use crate::bus::Rewrite;
     use crate::bus::{AgentMessage, AgentOutcome, AgentResult};
+    use crate::bus::{Read, Rewrite};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
+
+    /// The deliveries of one mid-exchange drain, for tests that queue no reads.
+    fn drained(inbox: &Inbox) -> Vec<Item> {
+        inbox
+            .drain_mid_exchange()
+            .into_iter()
+            .map(|next| match next {
+                Next::Item(item) => item,
+                other => panic!("expected a delivery, got {other:?}"),
+            })
+            .collect()
+    }
 
     /// Epoch 0 is a fresh [`Inbox`]'s own; `id` matters only to the dedupe tests.
     fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Post {
@@ -798,7 +802,7 @@ mod tests {
 
         assert!(
             matches!(
-                inbox.drain_mid_exchange().1.as_slice(),
+                drained(&inbox).as_slice(),
                 [Item::Human(h), Item::Wakeup(w)]
                     if h == "steer"
                         && w == "[scheduled 'nightly' · 0 3 * * *] run the tests",
@@ -819,7 +823,7 @@ mod tests {
 
         assert!(
             matches!(
-                inbox.drain_mid_exchange().1.as_slice(),
+                drained(&inbox).as_slice(),
                 [Item::Wakeup(_), Item::Human(s)] if s == "redirect now\nand also this",
             ),
             "the async wakeup and the coalesced steering both drain, in order",
@@ -837,7 +841,7 @@ mod tests {
         }));
 
         assert!(matches!(
-            inbox.drain_mid_exchange().1.as_slice(),
+            drained(&inbox).as_slice(),
             [Item::Message(m)]
                 if m.from == 7
                     && m.from_name == "review"
@@ -860,10 +864,10 @@ mod tests {
         inbox.push_user("after the rewind".into());
 
         assert!(matches!(
-            inbox.drain_mid_exchange().1.as_slice(),
+            drained(&inbox).as_slice(),
             [Item::Human(b), Item::Wakeup(_)] if b == "before"
         ));
-        assert!(inbox.drain_mid_exchange().1.is_empty());
+        assert!(drained(&inbox).is_empty());
         assert!(matches!(
             inbox.next_item(),
             Some(Next::Rewrite(Rewrite::Rewind(7)))
@@ -885,11 +889,11 @@ mod tests {
         inbox.push(Post::Rewrite(Rewrite::Evict));
         inbox.push_user("b".into());
 
-        let (reads, items) = inbox.drain_mid_exchange();
-        assert_eq!(reads, vec![Read::Resources]);
-        assert!(matches!(items.as_slice(), [Item::Human(s)] if s == "a"));
-        let (reads, items) = inbox.drain_mid_exchange();
-        assert!(reads.is_empty() && items.is_empty(), "the rewrite holds");
+        assert!(matches!(
+            inbox.drain_mid_exchange().as_slice(),
+            [Next::Read(Read::Resources), Next::Item(Item::Human(s))] if s == "a"
+        ));
+        assert!(inbox.drain_mid_exchange().is_empty(), "the rewrite holds");
         assert!(matches!(
             inbox.next_item(),
             Some(Next::Rewrite(Rewrite::Evict))
@@ -1001,13 +1005,13 @@ mod tests {
         inbox.push(surface(inbox.mailbox().epoch()));
         inbox.clear();
         assert!(
-            inbox.drain_mid_exchange().1.is_empty(),
+            drained(&inbox).is_empty(),
             "a /clear drops the queued batch"
         );
 
         inbox.push(surface(inbox.mailbox().epoch()));
         assert!(matches!(
-            inbox.drain_mid_exchange().1.as_slice(),
+            drained(&inbox).as_slice(),
             [Item::Surface { id, .. }] if *id == 0
         ));
     }
@@ -1228,5 +1232,24 @@ mod tests {
             matches!(inbox.next_item(), Some(Next::Item(Item::Nudge { text, .. })) if text == "different"),
             "the newest nudge is the one delivered"
         );
+    }
+
+    /// Dropping the nudge between two steering lines leaves them adjacent, and
+    /// the inbox restores the push-time merge rather than deliver them apart.
+    #[test]
+    fn inbox_drop_nudges_remerges_the_steering_it_leaves_adjacent() {
+        let inbox = Inbox::new();
+        inbox.push_user("first".into());
+        inbox.push(Post::Nudge {
+            prompt: 1,
+            text: "retry".into(),
+        });
+        inbox.push_user("second".into());
+        inbox.drop_nudges();
+        assert_eq!(depth_of(&inbox, Source::User), 1);
+        assert!(
+            matches!(inbox.next_item(), Some(Next::Item(Item::Human(text))) if text == "first\nsecond")
+        );
+        assert!(inbox.is_empty());
     }
 }

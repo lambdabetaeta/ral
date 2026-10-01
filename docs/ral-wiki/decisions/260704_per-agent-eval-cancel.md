@@ -1,5 +1,8 @@
 ---
 status: active
+verified_at_commit: c848c533
+verified_at_date: 2026-10-01
+anchors: [Shell::face_signals, Shell::cancel_handle, eval_root, terminate_entry, AgentRegistry::interrupt, Seat::eval_reach, register_self, register_self_named]
 ---
 
 # Per-agent eval-layer cancel; only the trunk publishes the signal slots
