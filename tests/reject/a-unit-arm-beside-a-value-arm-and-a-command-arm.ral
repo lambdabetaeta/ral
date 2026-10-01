@@ -1,0 +1,7 @@
+# codes: T0010
+# contains: couldn't match type String with type Unit
+# contains: exactly one arm happens
+# A join with a value arm captures the command arm, and the `()` arm must
+# then produce that value too: it stands as a command only where the join is one.
+let v = `c ()
+let x = case $v [`a: { |_| return 'five' }, `b: { |_| echo hi }, `c: { |_| return () }]

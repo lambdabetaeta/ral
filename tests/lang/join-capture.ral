@@ -37,4 +37,11 @@ let arm = { echo indirect }
 let indirect = try $arm { |_| return () } | from-line
 assert_eq 'eta-expanded arm' indirect $indirect
 
+# A handler whose arrow is not written, `{ !$h }`, is captured as a whole —
+# η-expanded around the forced call — so the error still reaches `h` under
+# the capture.
+let h = { |e| echo "handled $e[message]" }
+let handled = try { fail [status: 1, message: 'boom'] } { !$h }
+assert_eq 'handler under an unwritten arrow' 'handled boom' $handled
+
 echo 'join capture done'

@@ -270,15 +270,14 @@ static MANIFEST: Table = Table {
     factory: true,
 };
 
+/// The catch-all's shape around what it produces: the name, then the argv.
+pub(super) fn catch_all_shape(body: CompTy) -> CompTy {
+    CompTy::arrows([Ty::String, Ty::argv()], body)
+}
+
 /// What the catch-all `handler:` is: `String → [String] → Command`.
 fn catch_all_ty(_u: &mut Unifier) -> Ty {
-    Ty::Thunk(Box::new(CompTy::Fun(
-        Box::new(Ty::String),
-        Box::new(CompTy::Fun(
-            Box::new(Ty::argv()),
-            Box::new(CompTy::command()),
-        )),
-    )))
+    Ty::Thunk(Box::new(catch_all_shape(CompTy::command())))
 }
 
 /// The table `form` declares.

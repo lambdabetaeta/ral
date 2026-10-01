@@ -18,9 +18,10 @@
 //! `within [dir: d] { hostname }` is, is a command.
 
 use super::builtins::{audit_record, try_error_record};
-use super::contract::{Form, Holds, Table, declared, field_reason};
+use super::contract::{Form, Holds, Table, catch_all_shape, declared, field_reason};
 use super::error::{Reason, TypeErrorKind};
-use super::infer::{Inferencer, JoinArm};
+use super::grade::JoinArm;
+use super::infer::Inferencer;
 use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use crate::ir::{HandlerArmV, OptionsV, Val};
@@ -59,11 +60,7 @@ impl Inferencer<'_> {
                 // its producer is what stands in.
                 value => {
                     let ty = self.infer_val(value);
-                    let result = self.ctx.unifier.fresh_comp_ty();
-                    let shape = CompTy::Fun(
-                        Box::new(Ty::String),
-                        Box::new(CompTy::Fun(Box::new(Ty::argv()), Box::new(result))),
-                    );
+                    let shape = catch_all_shape(self.ctx.unifier.fresh_comp_ty());
                     self.ctx
                         .unify_ty(&ty, &Ty::Thunk(Box::new(shape.clone())), Reason::HandlerArm);
                     shape

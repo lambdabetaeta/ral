@@ -54,9 +54,9 @@ pub fn prelude_schemes() -> &'static [(String, Scheme)] {
 }
 
 /// Visit every `Comp` in a tree, descending past the top-level spine into
-/// thunk bodies, lambda bodies, branches, and pipeline stages — so the
-/// nodes the annotation pass writes at any depth (a `Pipeline`'s wires, a
-/// `Capture` node) are all reached.
+/// thunk bodies, lambda bodies, branches, call arguments, and pipeline
+/// stages — so the nodes the annotation pass writes at any depth (a
+/// `Pipeline`'s wires, a `Capture` node) are all reached.
 pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     use ral_core::ir::{CompKind, Val};
     visit(comp);
@@ -70,7 +70,11 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(rhs);
             sub(rest);
         }
-        CompKind::App { head, .. } => sub(head),
+        CompKind::App { head, .. } => {
+            sub(head);
+            walk_args(comp, visit);
+        }
+        CompKind::Exec(_) => walk_args(comp, visit),
         CompKind::If { then, else_, .. } => {
             walk_val(&then.item, visit);
             walk_val(&else_.item, visit);
@@ -116,6 +120,12 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         }
         CompKind::Audit { body } => walk_val(body, visit),
         _ => {}
+    }
+}
+
+fn walk_args(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
+    for arg in ral_core::test_access::call_args(comp) {
+        walk_val(arg, visit);
     }
 }
 

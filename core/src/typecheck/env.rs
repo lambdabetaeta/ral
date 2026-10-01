@@ -6,6 +6,7 @@ use super::kind::Kind;
 use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use super::unify::{Unifier, WeakSource};
+use crate::ir::{Comp, Val};
 use crate::source::Span;
 use crate::types::{Fixings, Site};
 use std::collections::{HashMap, HashSet};
@@ -163,12 +164,12 @@ impl TyEnv {
 
 /// The key of a node in [`InferCtx`]'s side tables: its address in the one
 /// live tree both passes walk.
-pub(super) fn comp_key(comp: &crate::ir::Comp) -> usize {
-    std::ptr::from_ref::<crate::ir::Comp>(comp) as usize
+pub(super) fn comp_key(comp: &Comp) -> usize {
+    std::ptr::from_ref::<Comp>(comp) as usize
 }
 
-pub(super) fn val_key(val: &crate::ir::Val) -> usize {
-    std::ptr::from_ref::<crate::ir::Val>(val) as usize
+pub(super) fn val_key(val: &Val) -> usize {
+    std::ptr::from_ref::<Val>(val) as usize
 }
 
 /// A boundary builtin used as a value: what `annotate` rebuilds into the block
@@ -391,10 +392,40 @@ impl InferCtx {
         }
     }
 
+    /// Unify two computation types at the span in force, handing a mismatch
+    /// back rather than reporting it.
+    pub(crate) fn try_unify_comp_ty(
+        &mut self,
+        a: &CompTy,
+        b: &CompTy,
+    ) -> Result<(), TypeErrorKind> {
+        self.unifier.at = self.pos;
+        self.unifier.unify_comp_ty(a, b)
+    }
+
+    /// [`Self::unify_comp_ty`], a mismatch reported between `shown` —
+    /// `(expected, actual)`, the two the reader wrote — rather than the two
+    /// unified.
+    pub(crate) fn unify_comp_ty_as(
+        &mut self,
+        a: &CompTy,
+        b: &CompTy,
+        shown: (CompTy, CompTy),
+        why: Reason,
+    ) {
+        if self.try_unify_comp_ty(a, b).is_err() {
+            let (expected, actual) = shown;
+            let kind = TypeErrorKind::CompTyMismatch {
+                expected: self.unifier.apply_comp_ty(&expected),
+                actual: self.unifier.apply_comp_ty(&actual),
+            };
+            self.report(kind, why);
+        }
+    }
+
     /// Unify two computation types, reporting a mismatch under `why`.
     pub(crate) fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy, why: Reason) {
-        self.unifier.at = self.pos;
-        if let Err(kind) = self.unifier.unify_comp_ty(a, b) {
+        if let Err(kind) = self.try_unify_comp_ty(a, b) {
             let weak = self
                 .unifier
                 .weak_source_in_comp(a)

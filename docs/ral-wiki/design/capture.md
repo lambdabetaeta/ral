@@ -28,7 +28,9 @@ let answer = !{ echo first ; echo second }
 - *Argument.* In `apply_args_capped`, an argument whose type ends, after its own
   parameters, in `F^w Unit`, passed where the callee's parameter ends in
   `F^p β` at the same arity, sets `β := String` and is coerced: a literal block
-  has its innermost body wrapped, a block in hand is η-wrapped. So
+  that writes every one of its arrows has its body wrapped under them; a block
+  in hand, or a literal that does not — `{ !$f }` — is η-wrapped whole, so the
+  argument still reaches the lambda the wrap would otherwise stand between. So
   `map { |f| echo $f } [1, 2]` is `["1", "2"]` and prints nothing.
 - *Join.* An `F^w Unit` arm of an `if`/`case`/`try` whose join settles on `F^p`
   is wrapped like an argument ([[design/types|types]]): `try { fetch } { |e|

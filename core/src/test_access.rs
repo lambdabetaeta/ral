@@ -15,13 +15,24 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
-use crate::ir::{CaseArm, Exec, Val};
+use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
 use crate::typecheck::{Scheme, Ty, TypeError, Unifier};
 use crate::types::{BuiltinEntry, FsProjection, FsRules, Settled, Shell};
 
 /// The thunk a case arm forces: its literal block, or a thunk in hand.
 pub fn case_arm_val(arm: &CaseArm) -> &Val {
     &arm.body.item
+}
+
+/// The arguments of a call — an `Exec`'s argv or an `App`'s — in order,
+/// spread and single alike; empty for any other node.
+pub fn call_args(comp: &Comp) -> impl Iterator<Item = &Val> {
+    let args: &[ValListElem] = match &comp.item {
+        CompKind::Exec(exec) => &exec.args,
+        CompKind::App { args, .. } => args,
+        _ => &[],
+    };
+    args.iter().map(|elem| &elem.slot().item)
 }
 
 /// Whether an `Exec` carries redirects, which a fuzz invariant asserts it

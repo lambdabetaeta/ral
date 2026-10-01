@@ -121,49 +121,34 @@ pub fn graded(grades: &[GradeVar], scheme: Scheme) -> Scheme {
 
 macro_rules! scheme {
     // scheme!(help: writes);
-    ($name:ident: writes) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(command()))
-        }
-    };
+    ($name:ident: writes) => { scheme!(@ $name: [] => command()); };
     // scheme!(temp_path: pure Ty::String);
-    ($name:ident: pure $ret:expr) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(pure($ret)))
-        }
-    };
+    ($name:ident: pure $ret:expr) => { scheme!(@ $name: [] => pure($ret)); };
     // scheme!(to_bytes: [Ty::Bytes] -> writes);
-    ($name:ident: [$($p:expr),*] -> writes) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => command())))
-        }
-    };
+    ($name:ident: [$($p:expr),*] -> writes) => { scheme!(@ $name: [$($p),*] => command()); };
     // scheme!(str_to_str: [Ty::String] -> Ty::String);
-    ($name:ident: [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(curry!($($p),* => pure($ret))))
-        }
-    };
+    ($name:ident: [$($p:expr),*] -> $ret:expr) => { scheme!(@ $name: [$($p),*] => pure($ret)); };
     // scheme!(to_line<av: Kind::DATA>: [Ty::Var(av)] -> writes);
     ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> writes) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let $tv = u.fresh_tyvar();
-            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => command())))
-        }
+        scheme!(@ $name<$tv: $kind>: [$($p),*] => command());
     };
     // scheme!(length<av: Kind::SIZED>: [Ty::Var(av)] -> Ty::Int);
     ($name:ident<$tv:ident: $kind:path>: [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let $tv = u.fresh_tyvar();
-            mk_scheme(&[($tv, $kind)], &[], thunk(curry!($($p),* => pure($ret))))
+        scheme!(@ $name<$tv: $kind>: [$($p),*] => pure($ret));
+    };
+    // The two expansions: `tail` past the curried parameters, under no type
+    // variable, or one of the kind declared.
+    (@ $name:ident: [$($p:expr),*] => $tail:expr) => {
+        pub fn $name(_u: &mut Unifier) -> Scheme {
+            mk_plain_scheme(&[], &[], thunk(CompTy::arrows([$($p),*], $tail)))
         }
     };
-}
-
-/// Right-fold parameters into `fun(p₁, fun(p₂, …, tail))`.
-macro_rules! curry {
-    ($p:expr => $tail:expr) => { fun($p, $tail) };
-    ($p:expr, $($rest:expr),+ => $tail:expr) => { fun($p, curry!($($rest),+ => $tail)) };
+    (@ $name:ident<$tv:ident: $kind:path>: [$($p:expr),*] => $tail:expr) => {
+        pub fn $name(u: &mut Unifier) -> Scheme {
+            let $tv = u.fresh_tyvar();
+            mk_scheme(&[($tv, $kind)], &[], thunk(CompTy::arrows([$($p),*], $tail)))
+        }
+    };
 }
 
 /// A record type over a row of fields ending in `tail`.

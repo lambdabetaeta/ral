@@ -9,25 +9,26 @@ use super::kind::Kind;
 use super::scheme::{Scheme, WeakVars};
 use super::ty::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Ty, TyVar};
 use super::unify::{Unifier, Visited};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// All four variable kinds, collected in one traversal.
+/// All four variable kinds, collected in one traversal.  Ordered, so a
+/// scheme — and the letters it prints under — is a function of the type.
 #[derive(Clone)]
 pub(crate) struct FreeVars {
-    pub(crate) tys: HashSet<TyVar>,
-    pub(crate) comps: HashSet<CompTyVar>,
-    pub(crate) rows: HashSet<RowVar>,
-    pub(crate) grades: HashSet<GradeVar>,
+    pub(crate) tys: BTreeSet<TyVar>,
+    pub(crate) comps: BTreeSet<CompTyVar>,
+    pub(crate) rows: BTreeSet<RowVar>,
+    pub(crate) grades: BTreeSet<GradeVar>,
 }
 
 impl FreeVars {
     pub fn new() -> Self {
         Self {
-            tys: HashSet::new(),
-            comps: HashSet::new(),
-            rows: HashSet::new(),
-            grades: HashSet::new(),
+            tys: BTreeSet::new(),
+            comps: BTreeSet::new(),
+            rows: BTreeSet::new(),
+            grades: BTreeSet::new(),
         }
     }
 
@@ -207,8 +208,7 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         .difference(&env_fvs.rows)
         .map(|&v| (v, u.is_deep_row(v)))
         .collect();
-    let mut grade_vars: Vec<GradeVar> = fvs.grades.difference(&env_fvs.grades).copied().collect();
-    grade_vars.sort_unstable();
+    let grade_vars: Vec<GradeVar> = fvs.grades.difference(&env_fvs.grades).copied().collect();
 
     // Cached so later `env_free_vars` calls read the sets instead of re-walking
     // this scheme's type tree.  Empty for top-level bindings.

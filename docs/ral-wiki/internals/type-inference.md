@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-30
-anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, head_writes, stands_in, unify_arm, stage_writes]
+verified_at_commit: 0055ee6f
+verified_at_date: 2026-10-01
+anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, stands_in, join_arms, adapt, coerce, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -123,10 +123,11 @@ the annotate walk ([[decisions/260930_graded-f|graded-f]]).
   into `Return(Value, fresh)`. `force_return_shape` opens a variable into a fresh
   *grade*, never `Value`: only the bind rule decides `p`.
 - `apply_args_capped` coerces an argument ending in `Return(Output, Unit)` where
-  the callee's parameter ends in `Return(Value, β)` at the same arity
-  (`producer_after_params` reads the tail), recording a literal block's body
-  address in `captured` or a value in hand in `InferCtx.captured_vals` with its
-  arity.
+  the callee's parameter ends in `Return(Value, β)` at the same arity (`spine`
+  reads the parameters and the `Producer` past them), recording a literal
+  block's body address in `captured` when the block writes every lambda of
+  that arity, else the block itself in `InferCtx.captured_vals` with its
+  arity, as a value in hand.
 - `discharge` applies to the `Exec` and `Redirect` rules when stdout is
   redirected: `Return(_, a)` becomes `Return(Value, a)`, through `Fun` results.
 - `annotate` is a structural rebuild (`annotate_comp`, `annotate_val_at`) that
@@ -223,8 +224,10 @@ is guaranteed throughout is a graceful `TypeTooDeep` rather than a blown stack.
 
 **Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
 the inferencer takes the type's free variables minus those still free in the
-environment and closes over the difference into a `Scheme`; `instantiate`
-refreshes a scheme's bound variables at each use. Generalisation walks the
+environment and closes over the difference into a `Scheme`, each quantifier
+list sorted by variable id so a scheme — and the letters `fmt_scheme` prints it
+under — is a function of the type alone; `instantiate` refreshes a scheme's
+bound variables at each use. Generalisation walks the
 type structurally and unbudgeted, where unification charges a depth ceiling:
 the walks are linear in a type the source built one constructor per statement,
 and only unification descends past what the parser saw

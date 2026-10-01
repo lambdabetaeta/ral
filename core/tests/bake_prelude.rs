@@ -142,7 +142,7 @@ fn prelude_schemes_carry_their_grades() {
     assert_eq!(shown("retry"), "∀α ν. Integer → {ν α} → ν α");
     assert_eq!(shown("attempt"), "∀α ν. {ν α} → Returns Unit");
     assert_eq!(shown("succeeds"), "∀α ν. {ν α} → Returns Bool");
-    assert_eq!(shown("for"), "∀α β ν. [β] → {β → ν α} → Returns Unit");
+    assert_eq!(shown("for"), "∀α β ν. [α] → {α → ν β} → Returns Unit");
     assert_eq!(
         shown("par"),
         "∀α β. {α → Returns β} → [α] → Integer → Returns [β]"

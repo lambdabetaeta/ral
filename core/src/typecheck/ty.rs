@@ -146,4 +146,62 @@ impl CompTy {
     pub fn command() -> Self {
         Self::Return(Grade::Output, Box::new(Ty::Unit))
     }
+
+    /// `Fun(p₁, Fun(p₂, …, tail))`.
+    pub fn arrows(
+        params: impl IntoIterator<Item = Ty, IntoIter: DoubleEndedIterator>,
+        tail: Self,
+    ) -> Self {
+        params.into_iter().rev().fold(tail, |body, param| {
+            Self::Fun(Box::new(param), Box::new(body))
+        })
+    }
+}
+
+/// A computation type's curry spine: its parameters, and what is past them.
+#[derive(Debug, Clone)]
+pub(crate) struct Spine {
+    pub(crate) params: Vec<Ty>,
+    pub(crate) tail: CompTy,
+}
+
+impl Spine {
+    pub(crate) fn arity(&self) -> usize {
+        self.params.len()
+    }
+
+    /// What is produced once every parameter is supplied, if that is settled.
+    pub(crate) fn producer(&self) -> Option<Producer> {
+        Producer::of(&self.tail)
+    }
+
+    /// The same parameters over another tail.
+    pub(crate) fn over(self, tail: CompTy) -> CompTy {
+        CompTy::arrows(self.params, tail)
+    }
+}
+
+/// A `Return` taken apart: the grade, and the value past it.
+#[derive(Debug, Clone)]
+pub(crate) struct Producer {
+    pub(crate) grade: Grade,
+    pub(crate) ty: Ty,
+}
+
+impl Producer {
+    pub(crate) fn of(cty: &CompTy) -> Option<Self> {
+        match cty {
+            CompTy::Return(grade, ty) => Some(Self {
+                grade: *grade,
+                ty: (**ty).clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl From<Producer> for CompTy {
+    fn from(Producer { grade, ty }: Producer) -> Self {
+        Self::Return(grade, Box::new(ty))
+    }
 }

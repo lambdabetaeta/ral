@@ -64,8 +64,8 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx) -> Comp {
     annotate_comp(comp, ctx, false)
 }
 
-/// Rebuild the right-hand side of a `Bind`, `Define` or tail `Run`, then
-/// η-expand it by the arity recorded for the *original* `rhs`'s address in
+/// Rebuild the right-hand side of a `Bind` or `Define`, then η-expand it by
+/// the arity recorded for the *original* `rhs`'s address in
 /// `ctx.rhs_arrow_arity`.  `Bind` never generalises a scheme — that lives on
 /// `Phrase::Define` alone, one per bound name.
 fn annotate_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
@@ -432,10 +432,10 @@ fn annotate_options(opts: &OptionsV, ctx: &mut InferCtx) -> OptionsV {
         .collect()
 }
 
-/// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
-/// true`, so η-expansion applies throughout.  A `Define`'s RHS and the tail
-/// `Run`'s are read for their value; a `Run`'s own writes are never captured
-/// into its report.  `schemes`, parallel to `top.phrases`, is
+/// Rebuild a checked [`Toplevel`]: every phrase is walked at `eta = true`,
+/// so η-expansion applies throughout, and a `Define`'s RHS is read for its
+/// value.  A `Run` is a statement, held ready to run, so nothing η-expands
+/// it and nothing captures it.  `schemes`, parallel to `top.phrases`, is
 /// [`infer::infer_toplevel`](super::infer::infer_toplevel)'s per-`Define`
 /// harvest, written straight onto the rebuilt `Phrase::Define` — `Bind`
 /// never carries a scheme, on any path.
@@ -444,22 +444,17 @@ pub(super) fn annotate_toplevel(
     ctx: &mut InferCtx,
     schemes: Vec<DefineSchemes>,
 ) -> Toplevel {
-    let tail_index = top.phrases.len().saturating_sub(1);
     let phrases = top
         .phrases
         .iter()
         .zip(schemes)
-        .enumerate()
-        .map(|(index, (phrase, names))| {
+        .map(|(phrase, names)| {
             let item = match &phrase.item {
                 Phrase::Define { pattern, comp, .. } => Phrase::Define {
                     pattern: Arc::clone(pattern),
                     comp: annotate_rhs(comp, ctx, true),
                     schemes: names,
                 },
-                Phrase::Run(comp) if index == tail_index => {
-                    Phrase::Run(annotate_rhs(comp, ctx, true))
-                }
                 Phrase::Run(comp) => Phrase::Run(Arc::new(annotate_comp(comp, ctx, true))),
             };
             Spanned::with_span(phrase.span, item)

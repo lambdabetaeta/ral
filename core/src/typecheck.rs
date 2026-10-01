@@ -11,6 +11,7 @@ mod error;
 mod explain;
 mod fmt;
 mod generalize;
+mod grade;
 mod index;
 pub(crate) mod infer;
 mod kind;

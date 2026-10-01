@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1776d222
-generated_at_date: 2026-09-30
+generated_at_commit: 0055ee6f
+generated_at_date: 2026-10-01
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -80,6 +80,13 @@ monomorphic to keep generalisation sound.
 Internals:
 
 - `infer.rs` — the `Inferencer`; `infer_comp`;
+- `grade.rs` — the grade rules, as one `impl Inferencer`: the bind rule
+  (`rhs_bound_ty`), a block meeting a demand of the other producer kind
+  (`adapt` to an `Adaptation`, `coerce`), the join of a form's arms
+  (`join_arms`; `join_target` takes the greatest `Verdict`), and a stdout
+  redirect's `discharge`. `spine` reads a `CompTy` as a `Spine` (`ty.rs`:
+  parameters and tail; `producer()` the `Producer` past them, `over` the
+  same parameters on another tail; `CompTy::arrows` is the constructor);
 - `index.rs` — the deferred reads `Lbl` (a bare label) and `Idx` (a computed key):
   owns `InferCtx::pending_labels` and `pending_indexes` and their settlement.
   A pending label is closed as a record at the boundary that owns it; an `Idx`'s
@@ -198,13 +205,23 @@ a bare head the class the runtime's lookup order gives it: `Binding`,
 `Value(entry)` (a builtin row), `Arm` (a handler or base frame standing in for
 a head), or `External`. No separate pass decides capture.
 
-`rhs_bound_ty` (the `Bind` and `Phrase::Define` right-hand side) is the bind rule:
-`Return(Output, _)` records the right-hand side's address in `InferCtx::captured`
-and binds `String`, `Return(Value, a)` binds `a`, and `Return(Var(g), a)` binds
-`g := Value` and `a`. `apply_args_capped` records a coerced argument — a literal
-block's body in `captured`, a value in hand in `InferCtx::captured_vals` with its
-arity — and `join_arms` records coerced arms the same way. `discharge` turns a
-redirected stdout's grade to `Value`.
+`grade.rs` holds the grade rules. `rhs_bound_ty` (the `Bind` and
+`Phrase::Define` right-hand side) is the bind rule: `Return(Output, _)` records
+the right-hand side's address in `InferCtx::captured` and binds `String`,
+`Return(Value, a)` binds `a`, and `Return(Var(g), a)` binds `g := Value` and
+`a`. `adapt` says how a block meets a demand of the other producer kind — a
+command where a value is wanted is `Adaptation::Capture`, a `()` producer
+where a command is wanted is `Adaptation::Upcast` — and `coerce` records a
+captured block and unifies the type it is read at with the demand, reporting
+a failure between what the two produce past their parameters
+(`InferCtx::unify_comp_ty_as`). `capture_block` records a literal block by
+its body under *exactly* its arity of written lambdas in `captured`; anything
+else — a value in hand, or a literal whose arrows are not all written, `map {
+!$f } $xs` — goes in `InferCtx::captured_vals` with its arity and is η-wrapped
+whole, since a `Capture` frame between a lambda and its pending argument would
+drop the lambda. `apply_args_capped` applies the two to a block argument, and
+`join_arms` to each arm against the join. `discharge` turns a redirected
+stdout's grade to `Value`.
 
 `annotate.rs` is a plain structural rebuild (`annotate_comp`, `annotate_val_at`).
 It wraps each recorded node through the one constructor `captured_string`,
@@ -223,10 +240,14 @@ syntactic `Lam`.
 
 `{ … }` is a thunk in every position: `if` and `case` carry `Spanned<Val>`
 arms ([[map/core/ir|ir]]), and `check_arm` types the one it is handed against
-the type its form's arms share. `join_arms` (for `if`) and `infer_case` join
-arms in two passes (`join_arms`; `infer_case` and `infer_try` route through it):
-each arm is inferred against a fresh result, then the join settles on `F^p τ`,
-`F^w Unit` or plain unification and records the arms it coerces. A disagreement
+the type its form's arms share. `join_arms` (`grade.rs`; `if`, `infer_case`
+and `infer_try` all route through it) joins arms in two passes: each arm is
+inferred against a fresh result, then `join_target` settles the join on the
+greatest of the arms' `Verdict`s — `Value` (`F^p τ`), `Command` (`F^w Unit`)
+or `Open` (plain unification) — and each arm meets it as a block meets a
+demand (`adapt`, `coerce`), command arms last so a disagreement is reported
+against the value the other arms fixed; a `()` arm stands as a command only
+where the join is one. A disagreement
 is `T0010` / `T0020` between two values; `T0011` is a disagreement of shape or
 grade. The join reasons — `IfBranches`, `CaseArms`, `TryArms` (shared by `try`
 and `?`, which elaborates to nested `try`) — carry no writer: `explain.rs`
