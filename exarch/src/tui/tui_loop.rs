@@ -17,8 +17,8 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Avatar, Control, Verdict, cancel},
-    bus::{BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
+    agent::{Agent, Avatar, cancel},
+    bus::{BusReceiver, FleetBus, Inbox, Pass, Post, Rewrite, Signal},
     provider::{Bureau, Provider},
     record::Emitter as Recorder,
 };
@@ -49,88 +49,6 @@ impl Tui {
         let guard = TerminalGuard::enter(stderr_log)?;
         let app = App::new(root, vi, append_log, inbox);
         Ok(Self { guard, app })
-    }
-}
-
-/// The session-mutating slash commands, run by [`Avatar::attend`] at the
-/// exchange boundary where the attend thread owns the agent; every other
-/// command is served UI-side and never arrives here.  Only the trunk attends
-/// with this `Control` — sub-agents run under
-/// [`NoControl`](crate::agent::NoControl) — so a command always lands on the
-/// trunk's own context.
-pub struct ReplControl;
-
-impl Control for ReplControl {
-    fn command(&mut self, raw: &str, session: &mut Avatar, emit: &Emitter) -> Verdict {
-        let trimmed = raw.trim();
-        let (head, rest) = commands::split_head(trimmed);
-        if head == "/branch" {
-            let name = (!rest.is_empty()).then_some(rest);
-            match crate::shell_eval::tools::spawn_branch(session, name, emit) {
-                Ok(child) => session.note(format!(
-                    "branch {} started (agent {})",
-                    child.name, child.id
-                )),
-                Err(e) => session.note_error(format!("could not start branch: {e}")),
-            }
-            return Verdict::Continue;
-        }
-        if head == "/rewind" {
-            let anchor = match rest {
-                "" => {
-                    session.note_error(
-                        "usage: /rewind <turn> — name a turn still in your context; \
-                         it and every later turn leave"
-                            .into(),
-                    );
-                    return Verdict::Continue;
-                }
-                text => {
-                    if let Ok(anchor) = text.parse::<u64>() {
-                        anchor
-                    } else {
-                        session.note_error(format!(
-                            "/rewind expects one non-negative turn number, got `{text}`"
-                        ));
-                        return Verdict::Continue;
-                    }
-                }
-            };
-            if let Err(error) = session.rewind(anchor, emit) {
-                session.note_error(error);
-            }
-            return Verdict::Continue;
-        }
-        match trimmed {
-            "/clear" => {
-                let result = session.clear();
-                session
-                    .recorder()
-                    .transient(crate::record::Transient::Cleared);
-                if let Err(error) = result {
-                    session.note_error(format!("clear failed: {error}"));
-                }
-                Verdict::Continue
-            }
-            "/evict" => {
-                let p = session.current_provider();
-                let token = session.cancel_token().clone();
-                session.evict(&p, true, &token);
-                Verdict::Continue
-            }
-            // Surveyed on the thread that owns the shell the rows describe,
-            // and emitted as one bus event — never a model turn.
-            "/resources" => {
-                session.emit_resources(&session.recorder());
-                Verdict::Continue
-            }
-            "/context" => {
-                session.emit_context_survey();
-                Verdict::Continue
-            }
-            "/quit" | "/exit" => Verdict::Quit,
-            _ => Verdict::Continue,
-        }
     }
 }
 
@@ -176,7 +94,6 @@ pub fn run(
     // way out is the only thing that lets the UI loop's next drain say `Stop`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let mut control = ReplControl;
     // The worker crosses the thread boundary with an emitter, not the bus:
     // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
     // an `Emitter` is `Send` and is all the worker needs.
@@ -229,7 +146,7 @@ pub fn run(
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn_scoped(scope, move || {
-                let out = session.attend(&mut control, &worker_emit);
+                let out = session.attend(&worker_emit);
                 done_ref.store(true, Ordering::Release);
                 out
             })
@@ -237,7 +154,7 @@ pub fn run(
 
         let r = ui_loop(&mut tui, &bus, done_ref, &cmd_ctx);
         if r.is_err() {
-            quit_mailbox.push(Post::Barrier("/quit".into()));
+            quit_mailbox.push(Post::Rewrite(Rewrite::Quit));
         }
         let _ = worker.join();
         r.map_err(|e| e.to_string())
@@ -537,85 +454,5 @@ pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
         KeyAction::Submit
     } else {
         KeyAction::Edit
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
-mod tests {
-    use super::*;
-    use crate::record::{Forensic, Record};
-
-    /// `/resources` travels the `/clear` route — inbox, exchange boundary,
-    /// [`ReplControl`] — and folds into exactly one event with no provider
-    /// round-trip.
-    #[test]
-    fn resources_command_routes_through_attend_and_emits_once() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session.mailbox().push(Post::Command("/resources".into()));
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
-        let mut control = ReplControl;
-        let _ = session.attend(&mut control, &emit);
-
-        // The fold is a transient; the session's own head bookend rides the
-        // same channel, so the claim below is about the live half alone.
-        let mut transients =
-            std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|sig| match sig {
-                crate::bus::Signal::Transient(_, t) => Some(t),
-                crate::bus::Signal::Fact(..) => None,
-            });
-        match transients
-            .next()
-            .expect("the /resources command must publish its fold")
-        {
-            crate::record::Transient::Resources { rows, card } => {
-                assert!(!rows.is_empty(), "the agent half of the fold has rows");
-                assert!(
-                    rows.iter().any(|r| r.name == "workers.running"),
-                    "the registry chapter is surveyed"
-                );
-                assert_eq!(card.marks().len(), 2, "a heading and one matrix");
-            }
-            other => panic!("expected Transient::Resources, got {other:?}"),
-        }
-        // The park the loop settles into announces itself, and nothing else
-        // follows: a command is not a turn, so no state ran before the fold.
-        assert!(
-            matches!(
-                transients.next(),
-                Some(crate::record::Transient::State(
-                    crate::bus::AgentState::Ready
-                ))
-            ),
-            "the fold is followed by the ready-boundary state alone"
-        );
-        assert!(
-            transients.next().is_none(),
-            "one /resources command, exactly one fold"
-        );
-    }
-
-    #[test]
-    fn rewind_command_with_argument_reaches_attend_control() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session.mailbox().push(Post::Barrier("/rewind 7".into()));
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
-        let mut control = ReplControl;
-        let _ = session.attend(&mut control, &emit);
-
-        assert!(
-            crate::bus::drain_records(&rx).iter().any(|rec| matches!(
-                rec,
-                Record::Forensic(Forensic::Error { text }) if text.contains("turn 7")
-            )),
-            "a /rewind past the last turn reports the bad anchor"
-        );
     }
 }

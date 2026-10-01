@@ -794,7 +794,7 @@ impl Drop for Avatar {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::{Emitter, Item, Post};
+    use crate::bus::{Emitter, Item, Next, Post};
     use crate::provider::scripted::Script;
     use genai::chat::ChatMessage;
     use std::fs;
@@ -1152,7 +1152,7 @@ mod tests {
         worker.report(crate::bus::AgentOutcome::Stopped("done".into()));
 
         assert!(
-            matches!(trunk.inbox.next_item(), Some(Item::Agent(_))),
+            matches!(trunk.inbox.next_item(), Some(Next::Item(Item::Agent(_)))),
             "the branch's /clear must not poison the trunk's delivery"
         );
     }
@@ -1273,7 +1273,10 @@ mod tests {
             "the rewind removes the whole suffix"
         );
         assert!(
-            !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
+            !matches!(
+                session.inbox.next_item(),
+                Some(Next::Item(Item::Nudge { .. }))
+            ),
             "a queued nudge for a rewound prompt must not commit"
         );
         // The eviction applied above published its own record once the first

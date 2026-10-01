@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c51fae36
-generated_at_date: 2026-09-25
+generated_at_commit: 23cea9f6
+generated_at_date: 2026-10-01
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -27,26 +27,30 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   recorded as a `Display` commit by the commit producer (`record/commit.rs`)
   and drawn by one generic interpreter ([[map/exarch/cards|cards]]).
 - `Inbox` (`bus/inbox.rs`) is the typed inbound twin — a per-session queue of
-  `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
-  steering drains mid-exchange at a
-  tool boundary (`drain_steering`); a scheduled wakeup or a settled async agent
-  drains at the exchange boundary as its own marked `Item` (`next_item`). An
-  **exchange** on this page is a human round — what the fleet's clock counts,
-  what a boundary ends and a key interrupts — never a unit of the context,
-  which has only turns, each with a role
+  `Post`s (`bus/post.rs`). A pull yields a `Next`: an `Item` for the model, a
+  `Read`, or a `Rewrite`. An **exchange** on this page is a human round — what
+  the fleet's clock counts, what a boundary ends and a key interrupts — never
+  a unit of the context, which has only turns, each with a role
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
-  The boundary is three-valued, because *waiting for a settled session* and
-  *being owed an audience first* are different debts: a `Boundary::Exchange`
-  post — a session command that only reads the context (`/branch`, `/context`,
-  `/resources`) — waits for the exchange boundary, but `drain_steering` passes
-  *over* it to the prompts queued behind, which it changes nothing about.
-  A `Boundary::Barrier` post stops the scan dead, because there the order the
-  human typed is part of what they said: a command that rewrites or ends the
-  context (`Post::Barrier` — `/clear`, `/evict`, `/rewind`, `/quit`), or a
-  slash-prefixed steering line, which is itself prompt text and so must reach
-  the model ahead of the prompt text typed after it. Without that split a
-  `/branch` typed mid-turn corked every prompt behind it until the turn ended
-  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
+  A typed line is one of three classes, decided once at submit on the UI
+  thread (`tui/commands.rs::route_submit`): an **immediate** view command
+  (`/help`, `/copy`, `/model`, …) acts there and is never posted; a **read**
+  (`Post::Read` — `/branch`, `/context`, `/resources`) drains at the *next*
+  boundary of any kind, tool or exchange, in the order typed; a **rewrite**
+  (`Post::Rewrite` — `/clear`, `/evict`, `/rewind`, `/quit`) drains only at
+  the exchange boundary and holds everything typed after it, because there the
+  order typed is part of what was said. Everything else — prompt text,
+  including a slash-shaped line that names no command, wakeups, settled
+  agents, surfaces, peer messages, nudges — is a delivery and drains at the
+  next boundary in order. So the variant alone decides the drain point:
+  `drain_mid_exchange` (from `agent::deliberate`, after each tool batch)
+  yields `(Vec<Read>, Vec<Item>)` and stops at a rewrite; `next_or_idle` pops
+  anything. Within one tool boundary the reads run first, against the context
+  as the batch left it, and the deliveries then land as the one steering
+  message the log admits per batch — so a `/branch` typed beside a prompt at
+  the same boundary forks without it. The attend thread runs the commands
+  itself (`Avatar::read`, `Avatar::rewrite` in `agent/command.rs`); there is
+  no frontend hook ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
 - a `FleetBus` (`bus/emitter.rs`) owns the channel and the inbox; `pump`
@@ -401,11 +405,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  on the UI thread; `/help` answers with a framed card of `(command, gloss)`
  rows, and `/copy` answers where every copy does — the transient corner
  toast of `gesture::Toast`, never a block in the transcript;
- session commands (`/branch`, `/context`, `/resources`, `/clear`,
- `/evict`, `/rewind`, `/quit`) enter the focused
- agent's inbox as `Command` items and run in `ReplControl`; the registry's
- `rewrites` field is what says which of those is a barrier in the queue and
- which the prompts behind it may pass over. `/branch [name]`
+ session commands are parsed at submit into a `Read` (`/branch`,
+ `/context`, `/resources`) or a `Rewrite` (`/clear`, `/evict`, `/rewind`,
+ `/quit`) and enter the trunk's inbox; a `/rewind` with a bad turn is refused
+ there, at once. `/branch [name]`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]], named by the human
  or by a minted `branch-{N}`, and parked for them rather than seeded with a
@@ -504,7 +507,7 @@ SIGINT after `/clear` still raises cancel. `prompt/host.rs` snapshots the machin
 user, home, git state, exarch's log directory) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade: module declarations, re-exports, `LINGER`, `DEMOTE_IDLE`
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
-        - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
+        - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s four tail rules (an effect walks back to its call, a write is a barrier, a surfaced diff tail-merges, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer

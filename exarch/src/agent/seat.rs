@@ -650,7 +650,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         match item {
-            crate::bus::Item::Surface { id, values, .. } => {
+            crate::bus::Next::Item(crate::bus::Item::Surface { id, values, .. }) => {
                 assert_eq!(id, root_id, "stamped with the root session id");
                 // Not a singleton: a `sleep 1` worker's batch also carries its
                 // own exec-summary record ahead of the completion marker, so

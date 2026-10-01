@@ -450,9 +450,6 @@ pub fn run(
     // A headless trunk is a returning agent that does not park, so `attend`
     // runs this seeded work and returns once idle.
     session.seed(prompt);
-    // No slash commands here, so `Control` is a no-op; declared out here so its
-    // `&mut` borrow outlives the closure `pump` runs on its scoped thread.
-    let mut control = crate::agent::NoControl;
     let root_id = session.agent.id;
     let recorder = session.recorder();
     // This is the process's trunk — a fact of the launch, not of any position
@@ -460,7 +457,7 @@ pub fn run(
     // attends.
     let _signals = crate::agent::cancel::face(&session.agent);
     let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
-        session.attend(&mut control, emit)
+        session.attend(emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
     // `reply`.  A panic arrives as `Ok(None)`, already latched by the sink.
@@ -637,11 +634,7 @@ pub fn converse_settled<S: Sink>(
     // signal reaching this process must reach it.
     let _signals = crate::agent::cancel::face(&session.agent);
     let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
-        session.attend_with(
-            &mut crate::agent::NoControl,
-            emit,
-            crate::agent::quiesce_when_childless,
-        )
+        session.attend_with(emit, crate::agent::quiesce_when_childless)
     });
     exchange_ending(session, outcome)
 }

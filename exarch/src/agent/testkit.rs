@@ -8,8 +8,7 @@
 
 use crate::agent::cancel::InterruptTarget;
 use crate::agent::{
-    Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
-    cancel,
+    Agent, Avatar, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel,
 };
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
@@ -433,7 +432,7 @@ pub(crate) fn drive_peer(
             }
         })
     };
-    let settled = child.attend(&mut NoControl, &emit);
+    let settled = child.attend(&emit);
     attending.store(false, Ordering::Release);
     watcher.join().expect("the watcher thread must not panic");
     settled

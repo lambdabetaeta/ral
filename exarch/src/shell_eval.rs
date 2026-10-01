@@ -1083,7 +1083,7 @@ keep-bottom
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
-            Some(crate::bus::Item::Surface { id, .. }) => {
+            Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
                 assert_eq!(
                     id, agent.id,
                     "the batch is stamped with the root session id"
@@ -2123,7 +2123,12 @@ return !{{length $hits}}"
         let path = display_no_trailing_sep(&dir.path().join("out"));
 
         let (r, records) = run_capturing(&engine, &format!("!{{ echo a; true }} > '{path}'"));
-        assert_eq!(r.exit, 0, "stderr was {:?}", String::from_utf8_lossy(&r.stderr));
+        assert_eq!(
+            r.exit,
+            0,
+            "stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
 
         let write = records
             .iter()
@@ -2136,9 +2141,12 @@ return !{{length $hits}}"
             .find(|o| matches!(o.what, Observed::Write { .. }))
             .expect("the redirect settles one write");
         let site = write.site.expect("the write carries a site");
-        assert_eq!((site.line, site.col), (1, 1), "the redirect's, not `true`'s");
+        assert_eq!(
+            (site.line, site.col),
+            (1, 1),
+            "the redirect's, not `true`'s"
+        );
     }
-
 
     /// Code loading is not turn-time data I/O: `use` reads through `std::fs`
     /// below the redirect frame, so it raises no io card.  Only the loaded

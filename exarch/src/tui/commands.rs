@@ -14,7 +14,7 @@ use super::scrollback;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Span};
-use crate::bus::{Mailbox, Post};
+use crate::bus::{Mailbox, Post, Read, Rewrite};
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
@@ -29,16 +29,6 @@ pub(super) struct SlashCommand {
     /// rather than hand-listed in [`route_submit`], so a command cannot be
     /// added without saying which it is.
     pub(super) any_tab: bool,
-    /// Whether the command rewrites or ends the session, as against merely
-    /// reading it.  A rewrite rides the inbox as a [`Post::Barrier`] and holds
-    /// every prompt queued behind it at the exchange boundary, since it changes
-    /// what those prompts would mean; a read (`/branch` forks a projection of
-    /// the context, `/context` and `/resources` survey it) lets them pass and
-    /// reach the model mid-exchange.  Read only of a command that reaches the
-    /// inbox at all — `any_tab` above is what says which those are — but
-    /// declared for every one, here rather than hand-listed in [`route_submit`],
-    /// so a command cannot be added without saying which it is.
-    pub(super) rewrites: bool,
     pub(super) help: &'static str,
 }
 
@@ -49,7 +39,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/help",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "List the available commands.",
     },
@@ -57,7 +46,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/legend",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
     },
@@ -65,7 +53,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/thinking",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: true,
         help: "Collapse or expand thinking, on screen and to come.",
     },
@@ -73,7 +60,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/clear",
         aliases: &[],
         arg: None,
-        rewrites: true,
         any_tab: false,
         help: "Forget the conversation and clear the screen.",
     },
@@ -81,7 +67,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/copy",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Copy the latest reply to the clipboard.",
     },
@@ -89,7 +74,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/export",
         aliases: &[],
         arg: Some("<path>"),
-        rewrites: false,
         any_tab: false,
         help: "Write the user view to a file.",
     },
@@ -97,7 +81,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/model",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Switch the model or provider.",
     },
@@ -105,7 +88,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/login",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Sign in with ChatGPT — adds a plan-backed provider.",
     },
@@ -113,7 +95,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/limits",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Show what is left of each subscription's ration.",
     },
@@ -121,7 +102,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/branch",
         aliases: &[],
         arg: Some("[name]"),
-        rewrites: false,
         any_tab: false,
         help: "Fork this conversation into a new tab (same context).",
     },
@@ -129,7 +109,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/close",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: true,
         help: "Close this branch (its tab and any agents it spawned).",
     },
@@ -137,7 +116,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/focus",
         aliases: &[],
         arg: Some("<name>"),
-        rewrites: false,
         any_tab: true,
         help: "Attach to a live agent by name.",
     },
@@ -145,7 +123,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/evict",
         aliases: &[],
         arg: None,
-        rewrites: true,
         any_tab: false,
         help: "Evict the older half of the context; it stays readable to the model.",
     },
@@ -153,7 +130,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/context",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Survey the model context without changing it.",
     },
@@ -161,7 +137,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/rewind",
         aliases: &[],
         arg: Some("<turn>"),
-        rewrites: true,
         any_tab: false,
         help: "Evict a turn and every turn after it; descendants and the shell are untouched.",
     },
@@ -169,7 +144,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/resources",
         aliases: &[],
         arg: None,
-        rewrites: false,
         any_tab: false,
         help: "Show the agent's resource probes: workers, inbox, log, disk.",
     },
@@ -177,7 +151,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/quit",
         aliases: &["/exit"],
         arg: None,
-        rewrites: true,
         any_tab: false,
         help: "Leave exarch.",
     },
@@ -249,8 +222,8 @@ pub(super) fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
 
-/// Split off the first whitespace-delimited token — the head/rest shape both
-/// [`lookup_command`] and the worker's `ReplControl::command` parse into.
+/// Split off the first whitespace-delimited token — the head/rest shape
+/// [`lookup_command`] parses into.
 pub(super) fn split_head(trimmed: &str) -> (&str, &str) {
     match trimmed.split_once(char::is_whitespace) {
         Some((h, r)) => (h, r.trim()),
@@ -394,28 +367,16 @@ pub(super) fn cmd_limits(app: &mut App, ctx: &super::tui_loop::CommandCtx<'_>) {
     }
 }
 
-impl SlashCommand {
-    /// The typed `line` as an inbox post, under the boundary this command
-    /// declares.
-    fn post(&self, line: String) -> Post {
-        if self.rewrites {
-            Post::Barrier(line)
-        } else {
-            Post::Command(line)
-        }
-    }
-}
-
 /// The one submit path for every tab: parse once, then act on the parse and the
 /// focused tab.  A view command (`/help`, `/legend`, `/copy`, `/export`,
-/// `/model`, `/login`, `/limits`, `/thinking`) touches only the App, clipboard, file, or picker, so it
-/// runs here on the UI thread; the rest ride the session inbox to the worker's
-/// `ReplControl`, which owns the trunk's context.  A command typed on a sub-agent
-/// tab is therefore refused rather than misfired — a sub-agent attends under
-/// `NoControl`, and the trunk's inbox would act on the wrong session — save
-/// those the registry marks `any_tab`, which touch no inbox.  A plain line
-/// steers the focused tab instead.  Errors land on the focused tab, where the
-/// user typed.
+/// `/model`, `/login`, `/limits`, `/thinking`) touches only the App, clipboard,
+/// file, or picker, so it runs here on the UI thread; a session command is
+/// parsed here into its [`Read`] or [`Rewrite`] and rides the trunk's inbox to
+/// the attend thread, which owns the context.  A command typed on a sub-agent
+/// tab is therefore refused rather than misfired — the trunk's inbox would act
+/// on the wrong session — save those the registry marks `any_tab`, which touch
+/// no inbox.  A plain line steers the focused tab instead.  Errors land on the
+/// focused tab, where the user typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -475,9 +436,33 @@ pub(super) fn route_submit(
                     agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
                 }
                 tui.app.clear(info, tui.guard.term())?;
-                mailbox.push(cmd.post("/clear".into()));
+                mailbox.push(Post::Rewrite(Rewrite::Clear));
             }
-            _ => mailbox.push(cmd.post(text.clone())),
+            "/evict" => mailbox.push(Post::Rewrite(Rewrite::Evict)),
+            "/quit" => mailbox.push(Post::Rewrite(Rewrite::Quit)),
+            "/rewind" => match arg {
+                "" => tui.app.push_error(
+                    focused,
+                    "usage: /rewind <turn> — name a turn still in your context; \
+                     it and every later turn leave",
+                ),
+                turn => match turn.parse() {
+                    Ok(anchor) => mailbox.push(Post::Rewrite(Rewrite::Rewind(anchor))),
+                    Err(_) => tui.app.push_error(
+                        focused,
+                        &format!("/rewind expects one non-negative turn number, got `{turn}`"),
+                    ),
+                },
+            },
+            "/branch" => mailbox.push(Post::Read(Read::Branch(
+                (!arg.is_empty()).then(|| arg.to_string()),
+            ))),
+            "/context" => mailbox.push(Post::Read(Read::Context)),
+            "/resources" => mailbox.push(Post::Read(Read::Resources)),
+            name => tui.app.push_error(
+                focused,
+                &format!("{name} is registered but not routed — is its arm missing?"),
+            ),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.

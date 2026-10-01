@@ -19,9 +19,12 @@ the next assistant step, not inside the provider's pending `tool_use` block.**
   dispatch drains the root prompt queue. A drained prompt is appended as a
   model-visible user message before the next provider request.
 - Sub-agents do not consume the root queue.
-- Any prompt not drained mid-turn still flows through `Repl::drive` at the ordinary turn boundary, coalesced oldest-first.
-- Slash-prefixed prompts remain queued for `Repl::drive`; frontend commands such
-  as `/clear` are not consumed as steering.
+- Any prompt not drained mid-turn still reaches the model at the exchange boundary (`Inbox::next_or_idle`), coalesced oldest-first.
+- A session *read* (`/branch`, `/context`, `/resources`) drains at the same
+  tool boundary, in the order typed, and runs before the steering lands; a
+  *rewrite* (`/clear`, `/evict`, `/rewind`, `/quit`) waits for the exchange
+  boundary and holds everything typed after it. The three command classes
+  are the [[map/exarch/frontend|frontend]] page's.
 
 ## Why this shape
 
@@ -51,20 +54,18 @@ it steers the next assistant step.
 
 ## Where
 
-- **`exarch/src/bus.rs`** — `PromptQueue`, `Sink::prompt_queue`, and `Emitter::drain_prompt_queue` form the frontend→worker back-channel.
-- **`exarch/src/tui.rs`** — `App::queue`, `App::enqueue` / `App::take_queue`, the busy Enter arm, and the pending strip.
-- **`exarch/src/event.rs`** — `SessionLog::append_steering` admits a user message only after a complete tool-result batch.
-- **`exarch/src/session.rs`** — `dispatch` stages the whole batch, joins `Staged::Spawned` before the next provider request, and appends drained steering after the complete result batch.
+- **`exarch/src/bus/inbox.rs`** — `drain_mid_exchange` (the tool-boundary drain: reads and deliveries, stopping at a rewrite) and `next_or_idle` (the exchange boundary).
+- **`exarch/src/agent/event.rs`** — `append_steering` admits a user message only after a complete tool-result batch, and only one per batch.
+- **`exarch/src/agent/deliberate.rs`** — after `append_tool_results`, runs the drained reads, then appends the drained deliveries as the one steering message.
 
 ## Covered
 
-- `session_apply::queued_prompt_steers_after_current_tool_batch` — a prompt queued while the first tool sleeps is committed before the next assistant step; the second already-issued tool call still runs.
-- `bus::tests::prompt_queue_steering_drain_stops_before_slash_command` — slash
-  commands stay queued for the REPL path while earlier steering text drains.
-- `tui::tests::enqueue_coalesces_in_order_then_drains_empty` and `tui::line::queued_prompt_*` — the pending strip and boundary coalescing still work for prompts not drained mid-turn.
+- `deliberate::tests::a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step` — a `/resources` and a prompt queued from inside a batch: the fold precedes the next assistant step, and the prompt lands as steering at that boundary.
+- `deliberate::tests::a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context` — a cancelled batch admits nothing.
+- `bus::inbox::tests::inbox_mid_exchange_drain_takes_reads_in_order_and_holds_at_a_rewrite`.
 
 ## The hard rule
 
-A queued prompt reaches the model at the first safe boundary: after all currently pending tool ids have results. It is never inserted between an assistant tool-call message and the required tool responses, and slash-prefixed prompts are left to the REPL command path.
+A queued prompt reaches the model at the first safe boundary: after all currently pending tool ids have results. It is never inserted between an assistant tool-call message and the required tool responses. A slash-shaped line that names no command is prompt text like any other.
 
 See also [[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]].

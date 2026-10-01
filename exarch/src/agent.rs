@@ -39,6 +39,7 @@
 mod attend;
 mod build;
 pub mod cancel;
+mod command;
 pub mod deliberate;
 mod dial;
 pub mod digest;
@@ -52,7 +53,6 @@ mod shell;
 pub(crate) mod testkit;
 
 pub(crate) use attend::quiesce_when_childless;
-pub use attend::{Control, NoControl, Verdict};
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
@@ -751,7 +751,7 @@ impl Avatar {
 
     /// For a test polling an async spawn's settle without a full deliberation.
     #[cfg(test)]
-    pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Item> {
+    pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Next> {
         self.inbox.next_item()
     }
 }

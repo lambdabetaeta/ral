@@ -249,7 +249,7 @@ mod tests {
     use crate::agent::cancel::Token;
     use crate::agent::testkit::source_run;
     use crate::agent::testkit::{TestAgentSpec, bare_transport, test_agent};
-    use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, ParkMode, Post, Stamped};
+    use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, Next, ParkMode, Post, Stamped};
     use ral_core::protocol::{IdentityTransport, Transport as _};
     use std::time::Instant;
 
@@ -583,7 +583,7 @@ mod tests {
             .expect("a proper descendant is reachable");
         trunk.message(&to, "check the lexer".into());
 
-        let Some(Item::Message(msg)) = inbox.next_item() else {
+        let Some(Next::Item(Item::Message(msg))) = inbox.next_item() else {
             panic!("expected a peer message");
         };
         assert_eq!(msg.from, trunk.id);
@@ -848,7 +848,7 @@ mod tests {
             "idle resets to (near) zero right after a steer"
         );
 
-        let Some(Item::Human(text)) = inbox.next_item() else {
+        let Some(Next::Item(Item::Human(text))) = inbox.next_item() else {
             panic!("expected the steered text to have actually landed");
         };
         assert_eq!(text, "hi", "a steer delivers as well as stamping");
@@ -895,7 +895,7 @@ mod tests {
 
         let token = Token::new();
         assert!(
-            matches!(inbox.next_or_idle(park, &token), Some(Item::Agent(r)) if r.name == "child"),
+            matches!(inbox.next_or_idle(park, &token), Some(Next::Item(Item::Agent(r))) if r.name == "child"),
             "a quiescing fleet still hands over the result it was already owed"
         );
         assert!(

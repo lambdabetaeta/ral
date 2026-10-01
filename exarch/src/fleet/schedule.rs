@@ -556,7 +556,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{Inbox, Item};
+    use crate::bus::{Inbox, Item, Next};
     use jiff::civil::date;
 
     fn sched(expr: &str) -> CronSchedule {
@@ -772,11 +772,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let item = fired.expect("a one-shot `after` schedule must fire");
-        assert!(
-            matches!(&item, Item::Wakeup(_)),
-            "delivered tagged as a wakeup item, got {item:?}"
-        );
-        let text = item.text();
+        let Next::Item(Item::Wakeup(text)) = item else {
+            panic!("delivered tagged as a wakeup item, got {item:?}")
+        };
         assert!(text.contains("ping"), "delivered the prompt: {text}");
         assert!(text.starts_with("[scheduled"), "marked wakeup: {text}");
         assert!(

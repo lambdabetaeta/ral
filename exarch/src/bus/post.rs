@@ -1,6 +1,6 @@
-//! The inbox's vocabulary: a [`Post`] is what a producer queues, each with the
-//! [`Boundary`] at which it may reach the model; draining reduces it to an
-//! [`Item`] for the attend loop to render.  The queue itself is `bus::inbox`.
+//! The inbox's vocabulary: a [`Post`] is what a producer queues; a pull at a
+//! boundary yields a [`Next`] — an [`Item`] for the model, or a command for
+//! the attend loop.  The queue itself is `bus::inbox`.
 
 use crate::fleet::schedule::ScheduleId;
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
@@ -19,23 +19,48 @@ pub fn elapsed_phrase(elapsed: Duration) -> String {
     PRINTER.unsigned_duration_to_string(&Duration::from_secs(elapsed.as_secs()))
 }
 
-/// When a message may be drained into the model's context — per message, not a
-/// global rule.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Boundary {
-    /// Mid-exchange, as soon as the current tool batch settles.
-    Tool,
-    /// Only where the session is `ReadyForUser`: a command that merely *reads*
-    /// the session.  A tool-boundary drain passes *over* it to what is queued
-    /// behind — waiting for a settled session is not the same as being owed an
-    /// audience first.
-    Exchange,
-    /// As [`Self::Exchange`], and before anything queued behind it, because
-    /// here the order the human typed is part of what they said: a command that
-    /// rewrites or ends the very context a later prompt would land in, or a
-    /// slash-prefixed line that is itself prompt text and so must reach the
-    /// model ahead of the prompt text typed after it.
-    Barrier,
+/// A session command that reads or forks the trunk's context, never changing
+/// it.  Drains at the next boundary of any kind — a tool batch settling or the
+/// exchange ending — in the order typed, alongside every delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Read {
+    Branch(Option<String>),
+    Context,
+    Resources,
+}
+
+/// A session command that rewrites or ends the context.  Drains only at the
+/// exchange boundary, and holds everything typed after it: a `/rewind` then a
+/// prompt must not answer the prompt in the context the rewind is about to
+/// drop, so here the order typed is part of what was said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rewrite {
+    Clear,
+    Evict,
+    Rewind(u64),
+    Quit,
+}
+
+impl std::fmt::Display for Read {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Branch(Some(name)) => write!(f, "/branch {name}"),
+            Self::Branch(None) => f.write_str("/branch"),
+            Self::Context => f.write_str("/context"),
+            Self::Resources => f.write_str("/resources"),
+        }
+    }
+}
+
+impl std::fmt::Display for Rewrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clear => f.write_str("/clear"),
+            Self::Evict => f.write_str("/evict"),
+            Self::Rewind(turn) => write!(f, "/rewind {turn}"),
+            Self::Quit => f.write_str("/quit"),
+        }
+    }
 }
 
 /// How an async agent ended the exchange, as the one line the parent reads.
@@ -126,10 +151,8 @@ impl AgentMessage {
 /// is unconstructable here by type.
 #[derive(Clone, Debug)]
 pub(crate) enum Post {
-    /// The user typed a prompt mid-exchange.  A slash-prefixed line waits for
-    /// the exchange boundary alongside [`Self::Command`] yet is still delivered
-    /// as ordinary prompt text ([`Item::Human`]), never interpreted: only
-    /// [`Self::Command`] reaches [`Control`](crate::agent::Control).
+    /// The user typed a prompt mid-exchange.  Prompt text, verbatim: a
+    /// slash-shaped line that named no command is prompt text too.
     UserSteering(String),
     /// A message whose producer cannot judge its own staleness — composing
     /// and pushing are two steps a `/clear` can fall between.  Only
@@ -149,16 +172,10 @@ pub(crate) enum Post {
         prompt: u64,
         text: String,
     },
-    /// A session command that only *reads* the session (`/branch` forks a
-    /// projection of it, `/context` and `/resources` survey it), raw.  The
-    /// attend loop owns the session, so it hands the line to its
-    /// [`Control`](crate::agent::Control); view-only commands (`/help`,
-    /// `/copy`, …) are served frontend-side and never reach here.
-    Command(String),
-    /// A session command that rewrites or ends the context (`/clear`,
-    /// `/evict`, `/rewind`, `/quit`), raw — otherwise its sibling above in
-    /// every respect but the one [`Boundary::Barrier`] names.
-    Barrier(String),
+    /// View-only commands (`/help`, `/copy`, …) are served frontend-side and
+    /// never reach here; these two are the session's own, parsed at submit.
+    Read(Read),
+    Rewrite(Rewrite),
 }
 
 /// Proof an epoch was minted by the destination ([`super::Mailbox::stamp`]):
@@ -169,7 +186,7 @@ pub(crate) struct Minted(pub(super) u64);
 
 /// The messages that cannot judge their own staleness, each sent only
 /// through a [`Stamp`](super::Stamp) and fenced at the destination's pop.
-/// All drain at [`Boundary::Tool`].
+/// All drain at the next boundary.
 #[derive(Clone, Debug)]
 pub(crate) enum Stamped {
     /// A cron or `after` wakeup fired, delivered as a marked injection.
@@ -207,20 +224,11 @@ impl Stamped {
 }
 
 impl Post {
-    pub(super) fn boundary(&self) -> Boundary {
-        match self {
-            Self::Barrier(_) => Boundary::Barrier,
-            Self::Command(_) => Boundary::Exchange,
-            Self::UserSteering(s) if is_slash(s) => Boundary::Barrier,
-            _ => Boundary::Tool,
-        }
+    /// Whether a stamped post's minted epoch has fallen behind the inbox's —
+    /// composed before a `/clear`, pushed after it.
+    pub(super) fn stale(&self, epoch: u64) -> bool {
+        matches!(self, Self::Stamped { epoch: Minted(minted), .. } if *minted != epoch)
     }
-}
-
-/// Whether `s` is a slash command line.  The inbox's steering merge reads it
-/// too: a slash line never folds into an adjacent run, so its boundary lives on.
-pub(super) fn is_slash(s: &str) -> bool {
-    s.trim_start().starts_with('/')
 }
 
 /// Which producer a post came from — the axis `Inbox::source_depths` folds on.
@@ -273,7 +281,7 @@ impl Post {
             Self::Stamped { kind, .. } => kind.source(),
             Self::AgentMessage(_) => Source::Message,
             Self::Nudge { .. } => Source::Nudge,
-            Self::Command(_) | Self::Barrier(_) => Source::Command,
+            Self::Read(_) | Self::Rewrite(_) => Source::Command,
         }
     }
 }
@@ -292,13 +300,20 @@ fn surface_notice(values: &[FOValue]) -> String {
     format!("{settled}. Await its handle for the value.")
 }
 
-/// What a drain yields: the model-facing text *and* its source, so the attend
-/// loop can render it in its honest medium — a prompt as the user's turn, a
-/// wakeup as marked chrome — while the model receives [`Self::text`] unchanged.
+/// What a pull from the inbox yields at a boundary.
+#[derive(Clone, Debug)]
+pub(crate) enum Next {
+    Item(Item),
+    Read(Read),
+    Rewrite(Rewrite),
+}
+
+/// A delivery to the model: its text *and* its source, so the attend loop can
+/// render it in its honest medium — a prompt as the user's turn, a wakeup as
+/// marked chrome — while the model receives [`Self::text`] unchanged.
 #[derive(Clone, Debug)]
 pub(crate) enum Item {
-    /// A coalesced run of human prompts, verbatim; a slash-prefixed line never
-    /// joins the run, and is always its own `Human` item.
+    /// A coalesced run of human prompts, verbatim.
     Human(String),
     /// A scheduled wakeup, rendered as marked chrome rather than a prompt-echo.
     /// Its text is never read as a command, even when it starts with `/`.
@@ -310,8 +325,6 @@ pub(crate) enum Item {
     /// The agent's continuation of the prompt in hand: no human chrome, and it
     /// opens no new exchange.
     Nudge { prompt: u64, text: String },
-    /// A raw slash command for the attend loop's [`Control`](crate::agent::Control).
-    Command(String),
     /// A detached `spawn` worker's deferred `surface` batch.  Staleness is
     /// already settled at the pop; `agent::attend::announce` decodes `values`
     /// into the *root* scrollback exactly as a live tool run would, and
@@ -329,7 +342,7 @@ impl Item {
     /// The text the model sees when this item drains into context.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::Human(s) | Self::Wakeup(s) | Self::Command(s) => s.clone(),
+            Self::Human(s) | Self::Wakeup(s) => s.clone(),
             Self::Nudge { text, .. } => text.clone(),
             Self::Agent(r) => r.render(),
             Self::Message(m) => m.render(),

@@ -1402,7 +1402,7 @@ mod tests {
 
     /// Poll `inbox` for the next exchange-boundary item — a spawned child's
     /// settled [`crate::bus::AgentResult`] lands here.
-    fn wait_for_settle(inbox: &Inbox) -> crate::bus::Item {
+    fn wait_for_settle(inbox: &Inbox) -> crate::bus::Next {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if let Some(item) = inbox.next_item() {
@@ -2223,7 +2223,7 @@ mod tests {
         );
 
         match wait_for_settle(&parent_inbox) {
-            crate::bus::Item::Agent(result) => {
+            crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
                 assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Replied),
                     "the child's reply notice must reach the parent's inbox, got: {:?}",
@@ -2691,7 +2691,7 @@ mod tests {
 
         for _ in 0..3 {
             match wait_for_settle(&parent_inbox) {
-                crate::bus::Item::Agent(result) => assert!(
+                crate::bus::Next::Item(crate::bus::Item::Agent(result)) => assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Replied),
                     "every sibling must settle by replying, got: {:?}",
                     result.outcome
@@ -3149,7 +3149,7 @@ mod tests {
         std::thread::spawn(move || {
             let (tx, _rx) = crate::bus::channel();
             let emit = Emitter::new(tx, id);
-            let (outcome, _payload) = child.attend(&mut crate::agent::NoControl, &emit);
+            let (outcome, _payload) = child.attend(&emit);
             child.settle(outcome);
         })
     }
@@ -3216,7 +3216,7 @@ mod tests {
 
         child_agent.mailbox().steer("second message".into());
         match wait_for_settle(&parent.inbox()) {
-            crate::bus::Item::Agent(result) => {
+            crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
                 assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Replied),
                     "the second steer's reply must notify the parent, got: {:?}",
@@ -3264,7 +3264,7 @@ mod tests {
         let handle = attend_and_deliver(child);
 
         match wait_for_settle(&parent.inbox()) {
-            crate::bus::Item::Agent(result) => {
+            crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
                 assert!(
                     matches!(result.outcome, crate::bus::AgentOutcome::Cancelled),
                     "a never-renewed lease reaps mid-exchange with Cancelled, got {:?}",
@@ -3636,13 +3636,13 @@ mod wire_tests {
             .expect("the parent may message its wire-reach descendant");
 
         match identity_inbox.next_item() {
-            Some(crate::bus::Item::Message(m)) => {
+            Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
                 assert_eq!(m.text, "note for identity");
             }
             other => panic!("expected an AgentMessage item, got {other:?}"),
         }
         match wire_inbox.next_item() {
-            Some(crate::bus::Item::Message(m)) => {
+            Some(crate::bus::Next::Item(crate::bus::Item::Message(m))) => {
                 assert_eq!(m.text, "note for wire");
             }
             other => panic!("expected an AgentMessage item, got {other:?}"),

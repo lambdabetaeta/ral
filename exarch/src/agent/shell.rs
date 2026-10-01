@@ -253,8 +253,8 @@ mod tests {
 
     use super::*;
     use crate::agent::cancel;
+    use crate::agent::deliberate;
     use crate::agent::testkit::*;
-    use crate::agent::{NoControl, deliberate};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
@@ -339,7 +339,7 @@ mod tests {
         session.seed("compute then crash".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let _ = session.attend(&mut NoControl, &emit);
+        let _ = session.attend(&emit);
 
         // No grant frame leaked out of the panicking call's
         // `with_capabilities`.  Read before the scope probe below, which is
@@ -548,7 +548,7 @@ mod tests {
         );
         session.agent.provider.swap(provider);
         session.seed("compute then crash".into());
-        let _ = session.attend(&mut NoControl, &emit);
+        let _ = session.attend(&emit);
 
         // `survives_y` first: each probe ticks the armed idle bound of 2, and
         // reading a name renews it, so the second probe cannot prune it.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0714e80c
-generated_at_date: 2026-09-29
+generated_at_commit: 23cea9f6
+generated_at_date: 2026-10-01
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -192,8 +192,8 @@ Three nested loops, the same for trunk and child alike:
   `take_up`, the per-item step shared with `attend`'s bounded
   twin `attend_backlog` (converse's per-exchange drain): every item reaching
   here already survived the inbox's own pop-time fence, so what is left is the
-  exchange-boundary latch reset, a session command's dispatch to `Control`, the
-  `deliberate` call itself, and the nudge reaction. A genuine
+  exchange-boundary latch reset, a session command's run (`Avatar::read`,
+  `Avatar::rewrite`), the `deliberate` call itself, and the nudge reaction. A genuine
   exchange boundary resets the nudge budget and clears the sticky cancel token
   (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
   self-nudge is the same exchange continuing and resets neither. A child's
@@ -311,9 +311,9 @@ run-entry checkpoint orders after any prior boundary's prune, so a later
 panic rollback can never resurrect a name a pass just pruned.
 
 `/resources` is the probe fold over the same accumulators
-([[invariants/probe-convention|probe-convention]]): routed exactly as
-`/clear` — an `Item::Command` drained at the exchange boundary, handled by
-the TUI's `Control` against the agent the attend loop owns —
+([[invariants/probe-convention|probe-convention]]): a `Read` drained at the
+next boundary, tool or exchange, and run by `Avatar::read` on the attend
+thread that owns the agent —
 `Avatar::resource_rows` surveys what this thread may legally read — the worker
 registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* over the transport's probe rail
@@ -722,9 +722,8 @@ turn from that id on — evicted at
 `/context` surveys the context without editing it — `emit_context_survey`
 posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
 groups them off their roles at draw time, one field per prompt with the
-resident turn range answering it and its weight — the read-only sibling
-`ReplControl::command` serves alongside `/clear`, `/evict`, `/branch`, and
-`/quit`.
+resident turn range answering it and its weight — a `Read` beside
+`/resources` and `/branch` (`agent/command.rs`).
 
 `Avatar::disk_warning` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.

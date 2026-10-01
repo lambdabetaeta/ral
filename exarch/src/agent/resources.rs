@@ -483,9 +483,9 @@ impl Avatar {
 
     /// Publish the fold as one [`Transient::Resources`]: the agent rows
     /// beside the card rendering them, drawn live and never recorded — a
-    /// probe fold is an interactive diagnostic, not a session fact. Called
-    /// from `ReplControl` in `tui/tui_loop.rs`, at the exchange boundary
-    /// where `/clear` runs; transcript and TUI only, never model-facing.
+    /// probe fold is an interactive diagnostic, not a session fact. Run by
+    /// `Avatar::read` at whichever boundary drains the `/resources`;
+    /// transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, recorder: &crate::record::Emitter) {
         let rows = match self.resource_rows() {
             Ok(rows) => rows,

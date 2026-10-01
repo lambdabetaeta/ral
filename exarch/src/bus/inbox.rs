@@ -1,7 +1,7 @@
 //! A session's typed, multi-producer inbound queue: [`Inbox`] is the owned
 //! consumer end, [`Mailbox`] the cloneable sender end.  Idempotent pushes
 //! coalesce; the attend loop drains mid-exchange at a tool boundary
-//! ([`Inbox::drain_steering`]) and parks at the exchange boundary
+//! ([`Inbox::drain_mid_exchange`]) and parks at the exchange boundary
 //! ([`Inbox::next_or_idle`]).
 //!
 //! The park verdict is computed *under the queue mutex* and *before* the pop.
@@ -10,8 +10,8 @@
 //! changes only *after* a delivery into this queue (a child dies after posting
 //! its result) — so a delivery can never lose to the verdict it should wake.
 
-use super::post::{Boundary, Minted, Source, Stamped, is_slash};
-use super::{Item, Post};
+use super::post::{Minted, Source, Stamped};
+use super::{Item, Next, Post, Read};
 use crate::agent::cancel;
 use crate::fleet::schedule::ScheduleId;
 use ral_core::sync::LockExt;
@@ -58,7 +58,7 @@ struct Shared {
     /// message — one whose producer cannot judge its own staleness — is
     /// composed elsewhere and pushed as a second step, with a `/clear` free
     /// to fall between, so it arrives through a [`Stamp`] minted at
-    /// composition and [`pop_item`] compares that against this counter under
+    /// composition and [`pop_next`] compares that against this counter under
     /// the lock `clear` holds: a push landing before the bump is swept with
     /// the queue, one landing after is refused as stale.  A single `/clear`
     /// gesture may bump this more than once — the TUI's pre-drain
@@ -125,30 +125,23 @@ impl Shared {
 /// The push rule.  The idempotent sources coalesce: a wakeup
 /// replaces a still-queued one for the same schedule id, a `Nudge` replaces a
 /// still-queued nudge (a second means a fresher continuation superseded the
-/// first, not that both are owed), and `UserSteering` joins a non-slash tail
-/// entry on a new line — never across a slash line, whose exchange-boundary
-/// classification ([`Post::boundary`]) must survive the merge.  Every other
-/// source queues: each is posted at most once per child, worker, or human
-/// keystroke, so the fuel and admission caps that bound those already bound
-/// the queue.
+/// first, not that both are owed), and `UserSteering` joins a steering tail
+/// entry on a new line.  Every other source queues: each is posted at most
+/// once per child, worker, or human keystroke, so the fuel and admission caps
+/// that bound those already bound the queue.
 fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
     match msg {
         Post::Stamped {
             kind: Stamped::Wakeup { id, .. },
             ..
         } => replace_or_push(q, msg, |m| queued_wakeup_for(m, id)),
-        Post::UserSteering(text) => {
-            let merge =
-                !is_slash(&text) && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
-            if merge {
-                if let Some(Post::UserSteering(s)) = q.back_mut() {
-                    s.push('\n');
-                    s.push_str(&text);
-                }
-            } else {
-                q.push_back(Post::UserSteering(text));
+        Post::UserSteering(text) => match q.back_mut() {
+            Some(Post::UserSteering(s)) => {
+                s.push('\n');
+                s.push_str(&text);
             }
-        }
+            _ => q.push_back(Post::UserSteering(text)),
+        },
         Post::Nudge { .. } => replace_or_push(q, msg, |m| matches!(m, Post::Nudge { .. })),
         other => q.push_back(other),
     }
@@ -266,7 +259,7 @@ pub(crate) struct Stamp {
 
 impl Stamp {
     /// Deliver to the minting mailbox, judged against the minted epoch at
-    /// that inbox's own pop ([`pop_item`]).
+    /// that inbox's own pop ([`pop_next`]).
     pub(crate) fn post(&self, kind: Stamped) {
         self.mailbox.push(Post::Stamped {
             epoch: Minted(self.epoch),
@@ -290,7 +283,7 @@ impl Stamp {
 
 /// A session's inbox: the owned **consumer** the attend loop pulls from, with
 /// senders minted by [`Self::mailbox`].  Tool-boundary messages drain
-/// mid-exchange ([`Self::drain_steering`], from `agent::deliberate`), the rest
+/// mid-exchange ([`Self::drain_mid_exchange`], from `agent::deliberate`), the rest
 /// at the exchange boundary ([`Self::next_or_idle`]).
 #[derive(Clone)]
 pub(crate) struct Inbox {
@@ -353,17 +346,19 @@ impl Inbox {
     /// Everything the human typed and is still waiting on, oldest first, for
     /// the TUI's queue strip: prompts and the commands queued among them, in
     /// the one order they were typed.  A command earns its place because it can
-    /// be the reason the rest are waiting — a [`Boundary::Barrier`] holds the
-    /// queue behind it, and a strip that showed only prompts would leave that
-    /// wait with no visible cause.  Other deliveries stay invisible: they are
-    /// work, not queued human text.
+    /// be the reason the rest are waiting — a rewrite holds the queue behind
+    /// it, and a strip that showed only prompts would leave that wait with no
+    /// visible cause.  Other deliveries stay invisible: they are work, not
+    /// queued human text.
     pub(crate) fn queued_human_messages(&self) -> Vec<String> {
         self.shared
             .lock()
             .posts
             .iter()
             .filter_map(|msg| match msg {
-                Post::UserSteering(s) | Post::Command(s) | Post::Barrier(s) => Some(s.clone()),
+                Post::UserSteering(s) => Some(s.clone()),
+                Post::Read(r) => Some(r.to_string()),
+                Post::Rewrite(r) => Some(r.to_string()),
                 _ => None,
             })
             .collect()
@@ -388,62 +383,38 @@ impl Inbox {
         (!prompts.is_empty()).then_some(prompts)
     }
 
-    /// Mid-exchange drain at a tool-call boundary: the tool-boundary messages
-    /// that may reach the model now, in order, each tagged with its source so
-    /// the attend loop renders it in its honest medium.  A consecutive run of
-    /// user steering coalesces into one [`Item::Human`].
+    /// Mid-exchange drain at a tool-call boundary: the reads to run and the
+    /// deliveries to hand the model, each in the order typed.  The reads run
+    /// first, against the context as the batch left it, because the log admits
+    /// one steering message per batch and the deliveries become it: a `/branch`
+    /// typed beside a prompt at the same boundary forks without that prompt.
     ///
-    /// A [`Boundary::Exchange`] entry — a session-reading command — is left
-    /// where it lies for [`Self::next_or_idle`] and the scan goes *on past* it:
-    /// it changes nothing about what a prompt behind it means, so making that
-    /// prompt wait out the whole exchange buys nothing and costs the human the
-    /// turn they were trying to steer.
-    ///
-    /// The scan stops at the first [`Boundary::Barrier`], where the human's
-    /// ordering is the meaning: `/rewind` then a prompt must not answer the
-    /// prompt in the context the rewind is about to drop.
-    ///
-    /// # Panics
-    /// Never: every removal follows a same-iteration check of the same entry.
-    pub(crate) fn drain_steering(&self) -> Vec<Item> {
+    /// The scan stops at a rewrite, which drains only at the exchange boundary
+    /// and holds everything typed after it.
+    pub(crate) fn drain_mid_exchange(&self) -> (Vec<Read>, Vec<Item>) {
         let mut guard = self.shared.lock();
-        let q = &mut guard.posts;
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        let mut items = Vec::new();
-        // Rebuilt rather than popped: a passed-over entry stays queued, so what
-        // this takes is not always a prefix.
-        let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
-        while let Some(front) = q.front() {
-            match front.boundary() {
-                Boundary::Barrier => break,
-                Boundary::Exchange => {
-                    kept.push_back(q.pop_front().expect("front present"));
-                }
-                Boundary::Tool => {
-                    if matches!(front, Post::UserSteering(_)) {
-                        items.push(coalesce_steering(q));
-                    } else {
-                        let msg = q.pop_front().expect("front present and tool-boundary");
-                        if let Some(item) = to_item(msg, epoch) {
-                            items.push(item);
-                        }
-                    }
+        let (mut reads, mut items) = (Vec::new(), Vec::new());
+        while let Some(next) = pop_next(&mut guard.posts, epoch) {
+            match next {
+                Next::Read(r) => reads.push(r),
+                Next::Item(i) => items.push(i),
+                Next::Rewrite(r) => {
+                    guard.posts.push_front(Post::Rewrite(r));
+                    break;
                 }
             }
         }
-        while let Some(msg) = kept.pop_back() {
-            q.push_front(msg);
-        }
         drop(guard);
-        items
+        (reads, items)
     }
 
     /// The next exchange-boundary deliverable.  Never blocks —
     /// [`Self::next_or_idle`] is the parking variant the attend loop uses.
-    pub(crate) fn next_item(&self) -> Option<Item> {
+    pub(crate) fn next_item(&self) -> Option<Next> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        pop_item(&mut q.posts, epoch)
+        pop_next(&mut q.posts, epoch)
     }
 
     /// The attend loop's exchange-boundary pull: the next deliverable, or, on
@@ -462,7 +433,7 @@ impl Inbox {
         &self,
         park: impl Fn(bool) -> ParkMode,
         cancel: &cancel::Token,
-    ) -> Option<Item> {
+    ) -> Option<Next> {
         let mut q = self.shared.lock();
         loop {
             let mode = park(q.last_exchange.is_some());
@@ -473,11 +444,11 @@ impl Inbox {
                 return None;
             }
             let epoch = self.shared.epoch.load(Ordering::Acquire);
-            if let Some(item) = pop_item(&mut q.posts, epoch) {
+            if let Some(next) = pop_next(&mut q.posts, epoch) {
                 self.shared
                     .waiting_for_input
                     .store(false, Ordering::Release);
-                return Some(item);
+                return Some(next);
             }
             if mode == ParkMode::Quiesce {
                 self.shared
@@ -520,42 +491,24 @@ impl Inbox {
     }
 }
 
-/// Pop the next exchange-boundary item from a locked queue, tagged with its
-/// source.  A leading run of *non-slash* steering coalesces into one
-/// [`Item::Human`], matching the push-time never-merge rule
-/// ([`Shared::try_push`]) — a slash line is always delivered alone, as ordinary
-/// prompt text — and every other source is delivered on its own.
-///
-/// `epoch` is the caller's read of the clear-epoch, taken under the lock this
-/// runs under ([`Shared::epoch`]); a stale `ScheduledWakeup` is dropped rather
-/// than converted, so the loop just tries the next queued message.
-pub(super) fn pop_item(q: &mut VecDeque<Post>, epoch: u64) -> Option<Item> {
-    loop {
-        if let Post::UserSteering(front) = q.front()? {
-            if is_slash(front) {
-                let Some(Post::UserSteering(s)) = q.pop_front() else {
-                    unreachable!("front just checked to be a slash UserSteering")
-                };
-                return Some(Item::Human(s));
-            }
-            return Some(coalesce_steering(q));
-        }
-        let msg = q.pop_front().expect("front checked present");
-        if let Some(item) = to_item(msg, epoch) {
-            return Some(item);
-        }
+/// Pop the front of a locked queue.  A leading run of steering coalesces into
+/// one [`Item::Human`], matching the push-time merge; everything else is
+/// delivered on its own.  Stale stamped posts are fenced first, against the
+/// caller's read of the clear-epoch taken under this same lock.
+pub(super) fn pop_next(q: &mut VecDeque<Post>, epoch: u64) -> Option<Next> {
+    q.retain(|m| !m.stale(epoch));
+    if matches!(q.front()?, Post::UserSteering(_)) {
+        return Some(Next::Item(coalesce_steering(q)));
     }
+    q.pop_front().map(to_next)
 }
 
-/// Pop the leading run of consecutive, non-slash [`Post::UserSteering`] entries
-/// and join them one per line — the coalesce half of the never-merge rule.
-/// Both callers enter with a non-slash steering at the front, so one always pops.
+/// Pop the leading run of consecutive [`Post::UserSteering`] entries and join
+/// them one per line.  Both callers enter with a steering at the front, so one
+/// always pops.
 fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     let mut text = String::new();
-    while let Some(Post::UserSteering(s)) = q.front() {
-        if is_slash(s) {
-            break;
-        }
+    while let Some(Post::UserSteering(_)) = q.front() {
         let Some(Post::UserSteering(s)) = q.pop_front() else {
             unreachable!("front just checked to be user steering")
         };
@@ -567,43 +520,32 @@ fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     Item::Human(text)
 }
 
-/// Convert one non-steering message into the [`Item`] it delivers — or `None`
-/// for a [`Stamped`] message whose minted epoch has since fallen behind
-/// `epoch`, refused rather than converted.  The one fence, stated once, over
-/// the one variant that can carry a stamp.
-fn to_item(msg: Post, epoch: u64) -> Option<Item> {
-    Some(match msg {
-        Post::Stamped {
-            epoch: Minted(stamped),
-            kind,
-        } => {
-            if stamped != epoch {
-                return None;
-            }
-            match kind {
-                Stamped::Wakeup {
-                    label,
-                    trigger,
-                    prompt,
-                    ..
-                } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
-                Stamped::AgentResult(line) => Item::Agent(line),
-                Stamped::Surface { id, values } => Item::Surface { id, values },
-            }
-        }
-        Post::AgentMessage(m) => Item::Message(m),
-        Post::Nudge { prompt, text } => Item::Nudge { prompt, text },
-        Post::Command(s) | Post::Barrier(s) => Item::Command(s),
-        Post::UserSteering(_) => {
-            unreachable!("user steering coalesced by the caller")
-        }
-    })
+/// Convert one already-fenced, non-steering post into what it delivers.
+fn to_next(msg: Post) -> Next {
+    match msg {
+        Post::Stamped { kind, .. } => Next::Item(match kind {
+            Stamped::Wakeup {
+                label,
+                trigger,
+                prompt,
+                ..
+            } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
+            Stamped::AgentResult(line) => Item::Agent(line),
+            Stamped::Surface { id, values } => Item::Surface { id, values },
+        }),
+        Post::AgentMessage(m) => Next::Item(Item::Message(m)),
+        Post::Nudge { prompt, text } => Next::Item(Item::Nudge { prompt, text }),
+        Post::Read(r) => Next::Read(r),
+        Post::Rewrite(r) => Next::Rewrite(r),
+        Post::UserSteering(_) => unreachable!("user steering coalesced by the caller"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Boundary, Inbox, Item, Minted, ParkMode, Post, Source, Stamped};
+    use super::{Inbox, Item, Minted, Next, ParkMode, Post, Read, Source, Stamped};
     use crate::agent::cancel;
+    use crate::bus::Rewrite;
     use crate::bus::{AgentMessage, AgentOutcome, AgentResult};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -653,7 +595,7 @@ mod tests {
             !inbox.waiting_for_input(),
             "posting input wakes the consumer out of the yielded state"
         );
-        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "work"));
+        assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "work"));
         assert!(
             !inbox.waiting_for_input(),
             "draining an item means work has started; yield resumes only at park"
@@ -677,7 +619,7 @@ mod tests {
             "a submitted prompt clears the yielded bit before waking the worker"
         );
         assert!(
-            matches!(handle.join().expect("parked worker joins"), Some(Item::Human(s)) if s == "next"),
+            matches!(handle.join().expect("parked worker joins"), Some(Next::Item(Item::Human(s))) if s == "next"),
             "the wakeup delivered the submitted prompt"
         );
         assert!(
@@ -690,7 +632,10 @@ mod tests {
     fn inbox_waiting_for_input_ignores_non_human_parks() {
         let inbox = Inbox::new();
         inbox.push_user("work".into());
-        assert!(matches!(inbox.next_item(), Some(Item::Human(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Human(_)))
+        ));
         assert!(!inbox.waiting_for_input());
 
         let observed = Arc::new(AtomicBool::new(false));
@@ -733,7 +678,10 @@ mod tests {
     fn non_human_park_survives_an_interrupt() {
         let inbox = Inbox::new();
         inbox.push_user("work".into());
-        assert!(matches!(inbox.next_item(), Some(Item::Human(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Human(_)))
+        ));
 
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = observed.clone();
@@ -761,7 +709,7 @@ mod tests {
         assert!(
             matches!(
                 handle.join().expect("parked worker joins"),
-                Some(Item::Human(s)) if s == "resume"
+                Some(Next::Item(Item::Human(s))) if s == "resume"
             ),
             "the interrupt was ignored; the pushed item released the park"
         );
@@ -804,7 +752,10 @@ mod tests {
     fn held_park_survives_a_terminate_cause() {
         let inbox = Inbox::new();
         inbox.push_user("work".into());
-        assert!(matches!(inbox.next_item(), Some(Item::Human(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Human(_)))
+        ));
 
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = observed.clone();
@@ -832,35 +783,10 @@ mod tests {
         assert!(
             matches!(
                 handle.join().expect("parked worker joins"),
-                Some(Item::Human(s)) if s == "resume"
+                Some(Next::Item(Item::Human(s))) if s == "resume"
             ),
             "a live conversation ignores even a terminate cause"
         );
-    }
-
-    /// A slash-prefixed line waits for the exchange boundary like a real
-    /// [`Post::Command`], yet is delivered as ordinary prompt text.
-    #[test]
-    fn inbox_tool_drain_stops_before_slash_command() {
-        let inbox = Inbox::new();
-        inbox.push_user("steer first".into());
-        inbox.push_user("/clear".into());
-        inbox.push_user("after clear".into());
-
-        assert!(
-            matches!(inbox.drain_steering().as_slice(), [Item::Human(s)] if s == "steer first"),
-            "the non-slash steering drains; the slash line stops the run",
-        );
-        assert!(inbox.drain_steering().is_empty());
-        assert!(
-            matches!(inbox.next_item(), Some(Item::Human(s)) if s == "/clear"),
-            "the slash line is delivered alone, never merged with what follows",
-        );
-        assert!(
-            matches!(inbox.next_item(), Some(Item::Human(s)) if s == "after clear"),
-            "the plain steering behind it is its own item",
-        );
-        assert!(inbox.is_empty());
     }
 
     /// A wakeup reaches the model as soon as the tool batch settles.
@@ -872,7 +798,7 @@ mod tests {
 
         assert!(
             matches!(
-                inbox.drain_steering().as_slice(),
+                inbox.drain_mid_exchange().1.as_slice(),
                 [Item::Human(h), Item::Wakeup(w)]
                     if h == "steer"
                         && w == "[scheduled 'nightly' · 0 3 * * *] run the tests",
@@ -893,7 +819,7 @@ mod tests {
 
         assert!(
             matches!(
-                inbox.drain_steering().as_slice(),
+                inbox.drain_mid_exchange().1.as_slice(),
                 [Item::Wakeup(_), Item::Human(s)] if s == "redirect now\nand also this",
             ),
             "the async wakeup and the coalesced steering both drain, in order",
@@ -911,7 +837,7 @@ mod tests {
         }));
 
         assert!(matches!(
-            inbox.drain_steering().as_slice(),
+            inbox.drain_mid_exchange().1.as_slice(),
             [Item::Message(m)]
                 if m.from == 7
                     && m.from_name == "review"
@@ -930,39 +856,45 @@ mod tests {
         let inbox = Inbox::new();
         inbox.push_user("before".into());
         inbox.push(wakeup(1, "x", "@", "p"));
-        inbox.push(Post::Barrier("/rewind 7".into()));
+        inbox.push(Post::Rewrite(Rewrite::Rewind(7)));
         inbox.push_user("after the rewind".into());
 
         assert!(matches!(
-            inbox.drain_steering().as_slice(),
+            inbox.drain_mid_exchange().1.as_slice(),
             [Item::Human(b), Item::Wakeup(_)] if b == "before"
         ));
-        assert!(inbox.drain_steering().is_empty());
-        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/rewind 7"));
-        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "after the rewind"));
+        assert!(inbox.drain_mid_exchange().1.is_empty());
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Rewrite(Rewrite::Rewind(7)))
+        ));
+        assert!(
+            matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "after the rewind")
+        );
         assert!(inbox.is_empty());
     }
 
-    /// A session-*reading* command waits for the exchange boundary itself, but
-    /// does not make the prompts queued behind it wait too: they reach the
-    /// model at the next tool boundary, and the command keeps its place.
+    /// A read drains mid-exchange in the order typed, beside the prompts; a
+    /// rewrite holds the scan, and everything behind it waits for the exchange
+    /// boundary.
     #[test]
-    fn inbox_tool_drain_passes_over_a_session_reading_command() {
+    fn inbox_mid_exchange_drain_takes_reads_in_order_and_holds_at_a_rewrite() {
         let inbox = Inbox::new();
-        inbox.push(Post::Command("/branch scout".into()));
-        inbox.push_user("look at the parser too".into());
+        inbox.push(Post::Read(Read::Resources));
+        inbox.push_user("a".into());
+        inbox.push(Post::Rewrite(Rewrite::Evict));
+        inbox.push_user("b".into());
 
-        assert!(
-            matches!(
-                inbox.drain_steering().as_slice(),
-                [Item::Human(s)] if s == "look at the parser too",
-            ),
-            "the prompt behind a /branch reaches the model mid-exchange",
-        );
+        let (reads, items) = inbox.drain_mid_exchange();
+        assert_eq!(reads, vec![Read::Resources]);
+        assert!(matches!(items.as_slice(), [Item::Human(s)] if s == "a"));
+        let (reads, items) = inbox.drain_mid_exchange();
+        assert!(reads.is_empty() && items.is_empty(), "the rewrite holds");
         assert!(matches!(
             inbox.next_item(),
-            Some(Item::Command(s)) if s == "/branch scout"
+            Some(Next::Rewrite(Rewrite::Evict))
         ));
+        assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "b"));
         assert!(inbox.is_empty());
     }
 
@@ -974,7 +906,7 @@ mod tests {
         let inbox = Inbox::new();
         inbox.push(wakeup(1, "morning", "@daily", "check"));
         inbox.push_user("first".into());
-        inbox.push(Post::Command("/branch scout".into()));
+        inbox.push(Post::Read(Read::Branch(Some("scout".into()))));
         inbox.push_user("second".into());
 
         assert_eq!(
@@ -985,10 +917,16 @@ mod tests {
                 "second".to_string()
             ]
         );
-        assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
-        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "first"));
-        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/branch scout"));
-        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "second"));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Wakeup(_)))
+        ));
+        assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "first"));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Read(Read::Branch(Some(s)))) if s == "scout"
+        ));
+        assert!(matches!(inbox.next_item(), Some(Next::Item(Item::Human(s))) if s == "second"));
     }
 
     /// A sole wakeup is not the user's draft, so nothing comes back.
@@ -997,7 +935,10 @@ mod tests {
         let inbox = Inbox::new();
         inbox.push(wakeup(1, "x", "@", "p"));
         assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall");
-        assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Wakeup(_)))
+        ));
     }
 
     /// Even prompts sandwiched between non-user deliveries, which keep their
@@ -1010,7 +951,7 @@ mod tests {
         inbox.push(wakeup(1, "x", "@", "p"));
         inbox.push_user("second".into());
         inbox.push_user("third".into());
-        inbox.push(Post::Command("/model".into()));
+        inbox.push(Post::Read(Read::Resources));
         inbox.push_user("fourth".into());
         assert_eq!(
             inbox.pop_back_user_all(),
@@ -1021,8 +962,14 @@ mod tests {
             ]),
             "all user prompts come back oldest-first, past interspersed deliveries",
         );
-        assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
-        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/model"));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Wakeup(_)))
+        ));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Read(Read::Resources))
+        ));
         assert!(inbox.is_empty());
     }
 
@@ -1051,18 +998,16 @@ mod tests {
     #[test]
     fn inbox_surface_drains_at_tool_boundary_and_cleared() {
         let inbox = Inbox::new();
-        assert_eq!(surface(0).boundary(), Boundary::Tool);
-
         inbox.push(surface(inbox.mailbox().epoch()));
         inbox.clear();
         assert!(
-            inbox.drain_steering().is_empty(),
+            inbox.drain_mid_exchange().1.is_empty(),
             "a /clear drops the queued batch"
         );
 
         inbox.push(surface(inbox.mailbox().epoch()));
         assert!(matches!(
-            inbox.drain_steering().as_slice(),
+            inbox.drain_mid_exchange().1.as_slice(),
             [Item::Surface { id, .. }] if *id == 0
         ));
     }
@@ -1131,7 +1076,10 @@ mod tests {
         let inbox = Inbox::new();
         let live = inbox.mailbox().epoch();
         inbox.push(wakeup_at(1, "n", "@", "go", live));
-        assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Wakeup(_)))
+        ));
     }
 
     /// The same one-rule fence, over an `AgentResult` instead of a wakeup.
@@ -1165,7 +1113,10 @@ mod tests {
                 outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: Duration::ZERO,
             }));
-        assert!(matches!(inbox.next_item(), Some(Item::Agent(_))));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Agent(_)))
+        ));
     }
 
     /// The same one-rule fence, over a `Surface` batch instead of a wakeup.
@@ -1187,7 +1138,10 @@ mod tests {
         let inbox = Inbox::new();
         let live = inbox.mailbox().epoch();
         inbox.push(surface(live));
-        assert!(matches!(inbox.next_item(), Some(Item::Surface { .. })));
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Next::Item(Item::Surface { .. }))
+        ));
     }
 
     // ── inbox quotas without silent loss ───────────────────────────────────
@@ -1214,14 +1168,14 @@ mod tests {
             "schedule 1 replaced in place; schedule 2 is its own entry"
         );
         match inbox.next_item() {
-            Some(Item::Wakeup(text)) => assert!(
+            Some(Next::Item(Item::Wakeup(text))) => assert!(
                 text.contains("second") && !text.contains("first"),
                 "the newest wakeup for schedule 1 wins: {text}"
             ),
             _ => panic!("expected schedule 1's (replaced) wakeup first"),
         }
         match inbox.next_item() {
-            Some(Item::Wakeup(text)) => assert!(text.contains("other schedule")),
+            Some(Next::Item(Item::Wakeup(text))) => assert!(text.contains("other schedule")),
             _ => panic!("expected schedule 2's wakeup, arrival order preserved"),
         }
     }
@@ -1238,7 +1192,7 @@ mod tests {
             "consecutive steering merges into one entry at push time"
         );
         match inbox.next_item() {
-            Some(Item::Human(text)) => {
+            Some(Next::Item(Item::Human(text))) => {
                 assert_eq!(
                     text, "first line\nsecond line",
                     "both texts survive in order"
@@ -1246,26 +1200,6 @@ mod tests {
             }
             _ => panic!("expected a merged Human item"),
         }
-    }
-
-    /// In either direction: merging would silently change the slash line's
-    /// boundary ([`Post::boundary`]).
-    #[test]
-    fn inbox_user_steering_never_merges_across_a_slash_command() {
-        let inbox = Inbox::new();
-        inbox.push_user("plain text".into());
-        inbox.push_user("/clear".into());
-        assert_eq!(
-            depth_of(&inbox, Source::User),
-            2,
-            "a slash line is never folded into a preceding plain-text entry"
-        );
-        inbox.push_user("after clear".into());
-        assert_eq!(
-            depth_of(&inbox, Source::User),
-            3,
-            "a plain line is never folded into a preceding slash entry either"
-        );
     }
 
     /// The agent self-pushes a nudge per deliberation, so a second one means a
@@ -1291,7 +1225,7 @@ mod tests {
             "a nudge never grows past one outstanding entry"
         );
         assert!(
-            matches!(inbox.next_item(), Some(Item::Nudge { text, .. }) if text == "different"),
+            matches!(inbox.next_item(), Some(Next::Item(Item::Nudge { text, .. })) if text == "different"),
             "the newest nudge is the one delivered"
         );
     }

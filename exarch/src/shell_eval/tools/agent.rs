@@ -118,7 +118,7 @@ pub(crate) fn spawn_async(
             });
             let (outcome, _payload) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    child.attend(&mut crate::agent::NoControl, &child_emit)
+                    child.attend(&child_emit)
                 }))
                 .unwrap_or_else(|_| {
                     if let Err(error) = recorder.emit(crate::record::Forensic::Error {

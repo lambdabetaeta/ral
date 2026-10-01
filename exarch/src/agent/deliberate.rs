@@ -252,7 +252,7 @@ impl Avatar {
             if truncated {
                 self.note("[Truncated mid-tool-call; continuing]".into());
             }
-            let (results, injected) = self.run_batch(tool_calls, token, emit);
+            let results = self.run_batch(tool_calls, token, emit);
             self.log
                 .lock()
                 .append_tool_results(results)
@@ -262,13 +262,24 @@ impl Avatar {
             if let Some(s) = self.seat.severed() {
                 return Ok(Outcome::Severed(s));
             }
-            // `announce` draws each arrival's own chrome; the texts coalesce
-            // with the warnings into the one steering message the protocol
-            // admits after a batch.
-            for item in &injected {
+            // A cancelled batch admits nothing: a read run or a steer recorded
+            // here would belong to the exchange being dropped.
+            if token.is_cancelled() {
+                return Ok(self.cancelled());
+            }
+            // The reads run against the context as the batch left it; the
+            // deliveries coalesce with the warnings into the one steering
+            // message the protocol admits after a batch, `announce` drawing
+            // each arrival's own chrome.
+            let (reads, items) = self.inbox.drain_mid_exchange();
+            for read in &reads {
+                self.read(read, emit);
+            }
+            for item in &items {
+                self.heard(item);
                 announce(item, &recorder);
             }
-            let mut steering: Vec<String> = injected.iter().map(Item::text).collect();
+            let mut steering: Vec<String> = items.iter().map(Item::text).collect();
             match self.warnings(provider) {
                 Ok(warnings) => steering.extend(warnings),
                 Err(s) => return Ok(Outcome::Severed(s)),
@@ -278,9 +289,6 @@ impl Avatar {
                     .lock()
                     .append_steering(steering.join("\n"))
                     .map_err(ProviderError::Other)?;
-            }
-            if token.is_cancelled() {
-                return Ok(self.cancelled());
             }
             // A `reply` in the fully drained batch ends the run here, not at
             // another round-trip.
@@ -347,14 +355,13 @@ impl Avatar {
 
     /// Run a batch of tool calls in order, short-circuiting the rest to
     /// cancelled results the instant the token trips.  Every call answers
-    /// synchronously — a `spawn` returns a start receipt, not a join handle —
-    /// so this also collects whatever the tool boundary admitted meanwhile.
+    /// synchronously — a `spawn` returns a start receipt, not a join handle.
     fn run_batch(
         &mut self,
         tool_calls: Vec<ToolCall>,
         token: &cancel::Token,
         emit: &Emitter,
-    ) -> (Vec<SessionToolResult>, Vec<Item>) {
+    ) -> Vec<SessionToolResult> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
@@ -374,23 +381,7 @@ impl Avatar {
             }
             results.push(self.invoke(call, emit));
         }
-        // A cancelled batch admits nothing: a steer drained here would be
-        // recorded on the exchange being dropped and never answered, so it
-        // waits in the inbox and opens the next exchange instead.
-        if token.is_cancelled() {
-            return (results, Vec::new());
-        }
-        // The tool-boundary drain, each message tagged with its source; a slash
-        // command is the lone exception, held for the exchange boundary.  A
-        // result that settled across a `/clear` is dropped at the inbox's own
-        // pop, before it ever reaches here.
-        let injected = self
-            .inbox
-            .drain_steering()
-            .into_iter()
-            .inspect(|t| self.heard(t))
-            .collect();
-        (results, injected)
+        results
     }
 
     fn invoke(&mut self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
@@ -527,7 +518,6 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 )]
 mod tests {
     use super::*;
-    use crate::agent::NoControl;
     use crate::agent::cancel::InterruptTarget;
     use crate::agent::testkit::*;
     use crate::bus::{AgentOutcome, Post, Stamped};
@@ -799,7 +789,7 @@ mod tests {
         session.seed("second exchange after error".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, _) = session.attend(&mut NoControl, &emit);
+        let (outcome, _) = session.attend(&emit);
         assert!(
             session.is_ready(),
             "session must be ReadyForUser after a mid-deliberation provider error"
@@ -917,7 +907,25 @@ mod tests {
         Ok(Value::Unit)
     }
 
-    static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 2] = [
+    /// test-only: queues a `/resources` read on the mailbox staged in [`T2_QUEUE`].
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "fixed BuiltinBody::Static signature"
+    )]
+    fn builtin_t2_queue_read(
+        _args: &[Value],
+        _mooring: &Mooring,
+        _shell: &mut Shell,
+    ) -> Settled<Value> {
+        T2_QUEUE.with(|cell| {
+            if let Some(mailbox) = cell.borrow().as_ref() {
+                mailbox.push(Post::Read(crate::bus::Read::Resources));
+            }
+        });
+        Ok(Value::Unit)
+    }
+
+    static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 3] = [
         BuiltinEntry::new(
             Cow::Borrowed("t2-cancel-now"),
             scheme_t2_cancel_now,
@@ -929,6 +937,12 @@ mod tests {
             scheme_t2_cancel_now,
             "test-only: queue a human prompt on the mailbox staged in T2_QUEUE.",
             BuiltinBody::Static(builtin_t2_queue_prompt),
+        ),
+        BuiltinEntry::new(
+            Cow::Borrowed("t2-queue-read"),
+            scheme_t2_cancel_now,
+            "test-only: queue a /resources read on the mailbox staged in T2_QUEUE.",
+            BuiltinBody::Static(builtin_t2_queue_read),
         ),
     ];
     static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &T2_CANCEL_BUILTINS_ARR;
@@ -998,7 +1012,7 @@ mod tests {
         session.seed("go".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        session.attend(&mut NoControl, &emit);
+        session.attend(&emit);
         T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
         T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
@@ -1023,6 +1037,72 @@ mod tests {
         assert!(position("queued prompt") < position("answered"));
     }
 
+    /// A read typed mid-exchange runs at the tool boundary, ahead of the next
+    /// assistant step, and the prompt typed after it lands as steering at that
+    /// same boundary.
+    #[test]
+    fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step() {
+        let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![
+                    ral_call("c1", "t2-queue-read"),
+                    ral_call("c2", "t2-queue-prompt"),
+                ]))
+                .then(Reply::text("answered"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok")),
+        ));
+        session.seed("go".into());
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        session.attend(&emit);
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
+
+        let signals: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let fold = signals
+            .iter()
+            .position(|sig| {
+                matches!(
+                    sig,
+                    crate::bus::Signal::Transient(_, Transient::Resources { .. })
+                )
+            })
+            .expect("the read ran and published its fold");
+        let answer = signals
+            .iter()
+            .position(|sig| {
+                matches!(
+                    sig,
+                    crate::bus::Signal::Fact(_, rec) if matches!(
+                        rec.value(),
+                        crate::record::Record::Protocol(
+                            crate::record::Protocol::AssistantMessage { message, .. }
+                        ) if message.content.first_text() == Some("answered")
+                    )
+                )
+            })
+            .expect("the exchange's answer is recorded");
+        assert!(fold < answer, "the fold precedes the next assistant step");
+
+        let rendered = session.log.lock().history_rendered();
+        let position = |text: &str| {
+            rendered
+                .iter()
+                .position(|m| m.content.first_text() == Some(text))
+                .unwrap_or_else(|| panic!("{text:?} is not in the context"))
+        };
+        let tool_result = rendered
+            .iter()
+            .position(|m| m.role == ChatRole::Tool)
+            .expect("the batch's results are in the context");
+        assert!(tool_result < position("queued prompt"));
+        assert!(position("queued prompt") < position("answered"));
+    }
+
     /// A worker delivers before it retires, so a result that settled across a
     /// `/clear` still reaches the inbox — and its stale epoch must keep it
     /// out of the attend loop entirely.
@@ -1043,7 +1123,7 @@ mod tests {
             .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "a stale result must be dropped, not attended to; got {outcome:?}"
@@ -1076,7 +1156,7 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
             "a live-epoch result must be delivered; got {outcome:?}"
@@ -1106,7 +1186,7 @@ mod tests {
             .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "a stale surface batch must be dropped, not attended to; got {outcome:?}"
@@ -1133,7 +1213,7 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&mut NoControl, &emit);
+        let (outcome, payload) = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
             "a live-epoch surface batch must be delivered; got {outcome:?}"

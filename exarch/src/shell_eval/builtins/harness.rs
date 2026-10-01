@@ -791,7 +791,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(r)) => {
+                Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
                     let notice = r.outcome.marked_item(&r.name, r.elapsed);
                     assert!(
                         notice.contains("exarch-agents `read 'helper'"),
@@ -1022,7 +1022,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Wakeup(text)) => {
+                Some(crate::bus::Next::Item(crate::bus::Item::Wakeup(text))) => {
                     assert!(
                         text.contains("wake"),
                         "the wakeup must carry the prompt, got: {text}"
@@ -1154,7 +1154,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(_)) => break,
+                Some(crate::bus::Next::Item(crate::bus::Item::Agent(_))) => break,
                 Some(_other) => panic!("expected an Agent result item"),
                 None => {
                     assert!(
@@ -1269,7 +1269,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(r)) => {
+                Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
                     assert!(
                         matches!(r.outcome, crate::bus::AgentOutcome::Replied),
                         "the child must have replied, got: {:?}",
@@ -1325,7 +1325,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !matches!(
             session.next_item_for_test(),
-            Some(crate::bus::Item::Agent(_))
+            Some(crate::bus::Next::Item(crate::bus::Item::Agent(_)))
         ) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1375,7 +1375,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(r)) => {
+                Some(crate::bus::Next::Item(crate::bus::Item::Agent(r))) => {
                     assert!(
                         matches!(r.outcome, crate::bus::AgentOutcome::Replied),
                         "the child must have replied, got: {:?}",
@@ -1527,7 +1527,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(_)) => break,
+                Some(crate::bus::Next::Item(crate::bus::Item::Agent(_))) => break,
                 Some(_other) => panic!("expected an Agent result item"),
                 None => {
                     assert!(
@@ -1568,7 +1568,10 @@ mod tests {
             5,
             &emit,
         );
-        assert!(!saved.contains("denied"), "the save must land, got: {saved}");
+        assert!(
+            !saved.contains("denied"),
+            "the save must land, got: {saved}"
+        );
         session.ral(r#"exarch-pins `clear "tasks""#, 5, &emit);
         let (loaded, _) = session.ral(
             &format!(r#"exarch-tasks `load "{}""#, path.display()),

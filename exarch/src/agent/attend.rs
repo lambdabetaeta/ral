@@ -11,17 +11,20 @@ use crate::agent::gauge::{Pressure, Warning, ration};
 use crate::agent::nudge;
 use crate::agent::seat::EngineLost;
 use crate::agent::{Avatar, deliberate, panic_msg};
-use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
+use crate::bus::{
+    AgentOutcome, AgentState, Emitter, Item, Next, ParkMode, Post, WORKER_PANIC_PREFIX,
+};
 use crate::clock;
 use crate::fleet::schedule::Trigger;
 use crate::provider::{Limit, Provider, ProviderError, Recovery};
 use crate::shell_eval;
 use ral_core::protocol::{Severed, reading};
 use ral_core::serial::FOValue;
+use std::ops::ControlFlow;
 
 /// What the surrounding loop does next: `Stop` on `/quit` or a headless root's
 /// `reply`; `Severed` hands the loop the engine's loss to record once it ends.
-enum Flow {
+pub(super) enum Flow {
     Continue,
     Stop,
     Severed(Severed),
@@ -34,46 +37,14 @@ const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 /// The label of the one-shot wakeup armed at a refusal's reset.
 const RESUME_LABEL: &str = "provider-reset";
 
-/// What [`Avatar::attend`] does once [`Control`] has run a slash command.
-pub enum Verdict {
-    Continue,
-    Quit,
-}
-
-/// The frontend hook the attend loop calls for an [`Item::Command`] drained at
-/// the exchange boundary.
-///
-/// A command routes here rather than staying frontend-side only when it
-/// mutates the session, which the attend thread owns; view-only ones and
-/// `/model` (a swap of the shared
-/// [`ProviderHandle`](crate::agent::ProviderHandle)) stay on the UI thread.
-pub trait Control {
-    /// Run the slash-command line `raw` against the agent the loop owns.
-    fn command(&mut self, raw: &str, session: &mut Avatar, emit: &Emitter) -> Verdict;
-}
-
-/// The control for drivers with no slash commands (headless, peers, tests),
-/// where an [`Item::Command`] never arises.
-pub struct NoControl;
-
-impl Control for NoControl {
-    fn command(&mut self, _raw: &str, _session: &mut Avatar, _emit: &Emitter) -> Verdict {
-        Verdict::Continue
-    }
-}
-
 impl Avatar {
     /// The one attend loop, identical for every node: pull the next inbox
     /// item, take it up, and repeat until an empty inbox meets a
     /// [`Self::park_mode`] that does not park, or a cancel ends one that does.
     /// The returned `payload` is the faithful [`FOValue`] a `reply` carried,
     /// left for the consuming edge to render.
-    pub fn attend(
-        &mut self,
-        control: &mut dyn Control,
-        emit: &Emitter,
-    ) -> (AgentOutcome, Option<FOValue>) {
-        self.attend_with(control, emit, |_, mode| mode)
+    pub fn attend(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
+        self.attend_with(emit, |_, mode| mode)
     }
 
     /// [`Self::attend`] with the park verdict reshaped by `policy` before it
@@ -85,7 +56,6 @@ impl Avatar {
     /// [`crate::headless::converse_settled`] runs under instead.
     pub(crate) fn attend_with(
         &mut self,
-        control: &mut dyn Control,
         emit: &Emitter,
         policy: impl Fn(&Self, ParkMode) -> ParkMode,
     ) -> (AgentOutcome, Option<FOValue>) {
@@ -113,14 +83,14 @@ impl Avatar {
             // `next_or_idle` recomputes the park verdict on every wake.  A
             // returning agent that quiesces breaks here, and its outcome
             // reaches its parent through the worker epilogue, not this break.
-            let Some(item) = self.inbox.next_or_idle(
+            let Some(next) = self.inbox.next_or_idle(
                 |engaged| policy(self, self.park_mode(engaged)),
                 &self.agent.cancel,
             ) else {
                 break None;
             };
             self.agent.set_resting(false);
-            match self.take_up(&item, control, emit, &mut final_outcome) {
+            match self.take_up(&next, emit, &mut final_outcome) {
                 Flow::Continue => {}
                 Flow::Stop => break None,
                 Flow::Severed(s) => break Some(s),
@@ -141,21 +111,19 @@ impl Avatar {
     /// any nudge continuation it raises, then return instead of blocking for
     /// the next one.  Only the pull differs — an empty queue ends the exchange
     /// rather than waiting on anything still in flight — so the per-item step
-    /// stays the shared [`Self::take_up`].  [`NoControl`] is right and not an
-    /// oversight: converse posts no [`Item::Command`], so a slash-shaped user
-    /// message reaches the model as ordinary text.
+    /// stays the shared [`Self::take_up`].  Converse posts no command, so a
+    /// slash-shaped user message reaches the model as ordinary text.
     pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
         self.couple(emit);
-        let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         let lost = loop {
             if let Some(s) = self.seat.severed() {
                 break Some(s);
             }
-            let Some(item) = self.inbox.next_item() else {
+            let Some(next) = self.inbox.next_item() else {
                 break None;
             };
-            match self.take_up(&item, &mut control, emit, &mut final_outcome) {
+            match self.take_up(&next, emit, &mut final_outcome) {
                 Flow::Continue => {}
                 Flow::Stop => break None,
                 Flow::Severed(s) => break Some(s),
@@ -165,19 +133,31 @@ impl Avatar {
         final_outcome
     }
 
-    /// Take up one item already drawn from the inbox — the per-item step
-    /// [`Self::attend`] and [`Self::attend_backlog`] share.  `final_outcome`
-    /// is the running `(outcome, payload)` the caller reports once its own
-    /// loop ends; an item that never reaches the deliberation (a command)
-    /// leaves it as it was.  A drawn item is always admissible: staleness is
-    /// settled at the inbox's own pop, against that inbox's clear-epoch.
+    /// Take up one pull from the inbox — the per-item step [`Self::attend`]
+    /// and [`Self::attend_backlog`] share.  `final_outcome` is the running
+    /// `(outcome, payload)` the caller reports once its own loop ends; a
+    /// command never reaches the deliberation and leaves it as it was.  A
+    /// drawn item is always admissible: staleness is settled at the inbox's
+    /// own pop, against that inbox's clear-epoch.
     fn take_up(
         &mut self,
-        item: &Item,
-        control: &mut dyn Control,
+        next: &Next,
         emit: &Emitter,
         final_outcome: &mut (AgentOutcome, Option<FOValue>),
     ) -> Flow {
+        let item = match next {
+            Next::Read(cmd) => {
+                self.read(cmd, emit);
+                return Flow::Continue;
+            }
+            Next::Rewrite(cmd) => {
+                return match self.rewrite(cmd, emit) {
+                    ControlFlow::Break(()) => Flow::Stop,
+                    ControlFlow::Continue(()) => Flow::Continue,
+                };
+            }
+            Next::Item(item) => item,
+        };
         self.heard(item);
         // Only a genuine boundary clears the latches and a prior exchange's
         // Esc; a self-nudge is the same exchange continuing.
@@ -186,12 +166,6 @@ impl Avatar {
                 nudges.reset();
             }
             self.agent.cancel.reset();
-        }
-        if let Item::Command(raw) = item {
-            return match control.command(raw, self, emit) {
-                Verdict::Quit => Flow::Stop,
-                Verdict::Continue => Flow::Continue,
-            };
         }
         announce(item, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
@@ -549,7 +523,7 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
                 }
             }
         }
-        Item::Nudge { .. } | Item::Command(_) => {}
+        Item::Nudge { .. } => {}
     }
 }
 
@@ -783,9 +757,8 @@ mod tests {
         child.couple(&emit);
         child.seed("do more".into());
         let item = child.inbox.next_item().expect("the seeded item");
-        let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        child.take_up(&item, &mut control, &emit, &mut final_outcome);
+        child.take_up(&item, &emit, &mut final_outcome);
 
         assert!(
             child.inbox.next_item().is_none(),
@@ -811,7 +784,7 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         session.seed("crash on this one".into());
-        let (panicked, _) = session.attend(&mut NoControl, &emit);
+        let (panicked, _) = session.attend(&emit);
         assert!(
             matches!(&panicked, AgentOutcome::Failed(m) if m.starts_with(WORKER_PANIC_PREFIX)),
             "the unwind must fail the item, not sink the attend thread: {panicked:?}"
@@ -823,7 +796,7 @@ mod tests {
 
         // Seeded only now: consecutive prompts coalesce into one inbox entry.
         session.seed("but answer this one".into());
-        let (outcome, _) = session.attend(&mut NoControl, &emit);
+        let (outcome, _) = session.attend(&emit);
 
         let signals: Vec<crate::bus::Signal> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
@@ -975,7 +948,7 @@ mod tests {
                 )])),
         ));
         session.seed("get on with it".into());
-        let (outcome, _) = session.attend(&mut NoControl, &emit);
+        let (outcome, _) = session.attend(&emit);
 
         assert!(
             matches!(outcome, AgentOutcome::Replied),
@@ -1017,16 +990,15 @@ mod tests {
         ));
         session.seed("go".into());
         let item = session.inbox.next_item().expect("the seeded item");
-        let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        session.take_up(&item, &mut control, &emit, &mut final_outcome);
+        session.take_up(&item, &emit, &mut final_outcome);
 
         let nudge = session
             .inbox
             .next_item()
             .expect("the first quiet completion must queue one pin reminder");
         assert!(
-            matches!(&nudge, Item::Nudge { text, .. } if text.contains("There is pinned state")),
+            matches!(&nudge, Next::Item(Item::Nudge { text, .. }) if text.contains("There is pinned state")),
             "expected a pin reminder, got {nudge:?}"
         );
 
@@ -1034,7 +1006,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::text("still working")),
         ));
-        session.take_up(&nudge, &mut control, &emit, &mut final_outcome);
+        session.take_up(&nudge, &emit, &mut final_outcome);
 
         assert!(
             session.inbox.next_item().is_none(),
@@ -1182,12 +1154,11 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.couple(&emit);
-        let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         for prompt in ["first", "again"] {
             session.seed(prompt.into());
             let item = session.inbox.next_item().expect("the seeded item");
-            session.take_up(&item, &mut control, &emit, &mut final_outcome);
+            session.take_up(&item, &emit, &mut final_outcome);
         }
         session
     }
