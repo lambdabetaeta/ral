@@ -1,43 +1,45 @@
+quiet
+true
+0
 step one
 step two
 true
 2
-echo
+/bin/echo
 step two
 handled
 continued
 true
 3
-fail
+/bin/sh
 1
-echo
-echo
+/bin/echo
+/bin/echo
 a
 b
 true
-3
-echo
-echo
-each
+2
+a
+b
 false
 3 no index
 outer
 inner
 true
 2
-echo
-echo
+/bin/echo
+/bin/echo
 inside
 1
-echo
+/bin/echo
 inside
 1
-echo
+/bin/echo
 body
 cleanup
 2
-echo
-echo
+/bin/echo
+/bin/echo
 hi
 []
 [/bin/echo]
@@ -47,28 +49,28 @@ false
 hi
 [/bin/echo, /bin/cat]
 hi
-[echo builtin, cat external]
+[cat external]
 helper
-[echo, from-line, /bin/echo]
+[/bin/echo]
 [write write committed a.txt, read a.txt, write append committed a.txt, write stream committed s.txt]
 [write write aborted never.txt, write write failed out.txt]
 false
 [printf external 0]
 hi
-[echo]
+[/bin/echo]
 one
 two
-[echo, spawn, echo]
+[/bin/echo, /bin/echo]
 cleaned
-[echo]
+[/bin/echo]
 cleaned
 7
 audited-from-fn
-[echo]
+[/bin/echo]
 hi
 hi
- echo
-true true
+ /bin/echo
+0 0
 a
 true
 [cat]

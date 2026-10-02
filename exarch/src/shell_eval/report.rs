@@ -10,8 +10,6 @@ use super::{ToolResult, ral_value_to_text};
 use crate::fleet::desk::ActFragment;
 use ral_core::protocol::Ending;
 use ral_core::protocol::reading::WorkerRow;
-use ral_core::serial::FOValue;
-use ral_core::types::{Observation, Observed};
 use std::collections::HashSet;
 
 /// Enough of one call's fan-out to name without crowding the stderr it rides
@@ -23,7 +21,7 @@ const NAMED: usize = 5;
 pub(crate) fn tool_result(
     ending: &Ending,
     captured: Option<ral_core::Captured>,
-    trail: &[FOValue],
+    births: &HashSet<u64>,
     fragment: &ActFragment,
     workers: &[WorkerRow],
     timeout_secs: u64,
@@ -33,7 +31,7 @@ pub(crate) fn tool_result(
         Ending::Settled { value, .. } => ral_value_to_text(value),
         _ => None,
     };
-    let (suffix, exit) = render(ending, trail, fragment, workers, timeout_secs);
+    let (suffix, exit) = render(ending, births, fragment, workers, timeout_secs);
     stderr.extend_from_slice(suffix.as_bytes());
     ToolResult {
         stdout,
@@ -46,14 +44,14 @@ pub(crate) fn tool_result(
 /// Compose a dispatch's ending into the stderr suffix the model reads, and
 /// the exit code its `EXIT:` section carries.
 ///
-/// `trail` and `workers` are read-only, boundary-legal snapshots: the
-/// dispatch's own [`Observed::Worker`] births, and the `` `workers `` probe
+/// `births` and `workers` are read-only, boundary-legal snapshots: the
+/// `Observed::Worker` ids this dispatch's drain heard, and the `` `workers `` probe
 /// taken at the run boundary.  The audit and the orphan sentence never draw
 /// on a [`Ending::Settled`] ending — it leaves the model well able to see
 /// from the transcript what landed.
 fn render(
     ending: &Ending,
-    trail: &[FOValue],
+    births: &HashSet<u64>,
     fragment: &ActFragment,
     workers: &[WorkerRow],
     timeout_secs: u64,
@@ -91,7 +89,7 @@ fn render(
     if let Some(audit) = fragment.audit() {
         out.push_str(&audit);
     }
-    if let Some(orphans) = orphan_note(ending, trail, workers) {
+    if let Some(orphans) = orphan_note(ending, births, workers) {
         out.push_str(&orphans);
     }
     (out, exit)
@@ -132,26 +130,12 @@ fn exit_tip(single_command: bool) -> String {
     tip
 }
 
-/// The [`WorkerId`](ral_core::types::WorkerId)s this dispatch's own trail gave
-/// birth to.
-fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
-    trail
-        .iter()
-        .filter_map(Observation::from_wire)
-        .filter_map(|obs| match obs.what {
-            Observed::Worker { id, .. } => Some(id.0),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The sentence a failed ending owes the model about work that outlived it: a
 /// birth this dispatch made, still present in the registry — running or
 /// settled-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
-fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[WorkerRow]) -> Option<String> {
-    let births = trail_worker_ids(trail);
+fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) -> Option<String> {
     let mut cmds: Vec<String> = workers
         .iter()
         .filter(|w| births.contains(&w.id))
@@ -186,19 +170,11 @@ fn orphan_note(ending: &Ending, trail: &[FOValue], workers: &[WorkerRow]) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::{LeaseClass, WorkerId};
+    use ral_core::serial::FOValue;
+    use ral_core::types::{LeaseClass, Observation, Observed};
 
-    fn worker_birth(id: u64, cmd: &str) -> FOValue {
-        let obs = Observation::instant(
-            None,
-            Some("test".into()),
-            Observed::Worker {
-                id: WorkerId(id),
-                cmd: cmd.into(),
-                class: LeaseClass::Worker,
-            },
-        );
-        obs.to_wire()
+    fn born(ids: &[u64]) -> HashSet<u64> {
+        ids.iter().copied().collect()
     }
 
     fn worker_row(id: u64, cmd: &str, running: bool) -> WorkerRow {
@@ -235,7 +211,7 @@ mod tests {
 
     #[test]
     fn a_returning_call_says_nothing() {
-        let (out, exit) = render(&settled_ending(), &[], &ActFragment::default(), &[], 30);
+        let (out, exit) = render(&settled_ending(), &HashSet::new(), &ActFragment::default(), &[], 30);
         assert!(out.is_empty(), "a settled ending composes nothing: {out:?}");
         assert_eq!(exit, 0);
     }
@@ -254,10 +230,10 @@ mod tests {
             record: FOValue::Unit,
             status: deadline_status(),
         };
-        let trail = vec![worker_birth(1, "sleep 20")];
+        let births = born(&[1]);
         let fragment = ActFragment::from_acts(vec![committed_act("reply", None)]);
         let workers = vec![worker_row(1, "sleep 20", true)];
-        let (out, exit) = render(&ending, &trail, &fragment, &workers, 5);
+        let (out, exit) = render(&ending, &births, &fragment, &workers, 5);
 
         assert_eq!(exit, 124);
         let rendered_at = out.find("error: sleep 30").expect("engine rendering");
@@ -279,7 +255,7 @@ mod tests {
             single_command: true,
             status: 7.into(),
         };
-        let (out, exit) = render(&ending, &[], &ActFragment::default(), &[], 5);
+        let (out, exit) = render(&ending, &HashSet::new(), &ActFragment::default(), &[], 5);
         assert_eq!(exit, 7);
         assert!(out.contains("error: boom"));
         assert!(
@@ -291,9 +267,9 @@ mod tests {
     #[test]
     fn exit_ending_widens_to_name_a_live_orphan() {
         let ending = Ending::Exited(1);
-        let trail = vec![worker_birth(9, "spawn body")];
+        let births = born(&[9]);
         let workers = vec![worker_row(9, "spawn body", true)];
-        let (out, exit) = render(&ending, &trail, &ActFragment::default(), &workers, 5);
+        let (out, exit) = render(&ending, &births, &ActFragment::default(), &workers, 5);
         assert_eq!(exit, 1);
         assert!(
             out.contains("`spawn body`"),
@@ -304,8 +280,8 @@ mod tests {
     #[test]
     fn a_consumed_worker_is_nobodys_orphan() {
         let ending = Ending::Exited(1);
-        let trail = vec![worker_birth(9, "spawn body")];
-        let (out, _) = render(&ending, &trail, &ActFragment::default(), &[], 5);
+        let births = born(&[9]);
+        let (out, _) = render(&ending, &births, &ActFragment::default(), &[], 5);
         assert!(
             !out.contains("spawn body"),
             "absent from the probe means already consumed: {out:?}"
@@ -320,9 +296,9 @@ mod tests {
             rendered: "error: the result is a handle, and a run can return only data\n".into(),
             record: FOValue::Unit,
         };
-        let trail = vec![worker_birth(4, "block at turn 1, line 1")];
+        let births = born(&[4]);
         let workers = vec![worker_row(4, "block at turn 1, line 1", true)];
-        let (out, exit) = render(&ending, &trail, &ActFragment::default(), &workers, 5);
+        let (out, exit) = render(&ending, &births, &ActFragment::default(), &workers, 5);
         assert_eq!(exit, 1);
         assert!(out.starts_with("error: the result is a handle"), "{out:?}");
         assert!(out.contains("lost with the result"), "{out:?}");
@@ -331,15 +307,13 @@ mod tests {
 
     #[test]
     fn overflow_past_named_is_counted_not_dropped() {
-        let trail: Vec<FOValue> = (0..NAMED as u64 + 2)
-            .map(|id| worker_birth(id, "job"))
-            .collect();
+        let births: HashSet<u64> = (0..NAMED as u64 + 2).collect();
         let workers: Vec<WorkerRow> = (0..NAMED as u64 + 2)
             .map(|id| worker_row(id, "job", true))
             .collect();
         let (out, _) = render(
             &Ending::Exited(1),
-            &trail,
+            &births,
             &ActFragment::default(),
             &workers,
             5,
@@ -352,7 +326,7 @@ mod tests {
     /// something to say.
     #[test]
     fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
-        let births = vec![worker_birth(3, "job")];
+        let births = born(&[3]);
         let live = vec![worker_row(3, "job", true)];
         let committed = ActFragment::from_acts(vec![committed_act("spawn", Some("helper"))]);
         let refused = ActFragment::default();
@@ -392,9 +366,9 @@ mod tests {
 
         for (name, ending, want_exit) in &endings {
             let effects_unshown = !matches!(ending, Ending::Settled { .. });
-            for (births_label, trail) in [("present", births.clone()), ("absent", Vec::new())] {
+            for (births_label, births) in [("present", births.clone()), ("absent", HashSet::new())] {
                 for (acts_label, fragment) in [("committed", &committed), ("refused", &refused)] {
-                    let (out, exit) = render(ending, &trail, fragment, &live, 5);
+                    let (out, exit) = render(ending, &births, fragment, &live, 5);
                     assert_eq!(exit, *want_exit, "{name}/{births_label}/{acts_label}");
                     assert_eq!(
                         out.contains("audit:"),

@@ -230,7 +230,7 @@ impl Shell {
         let source = self.session.sources.get(span.file)?;
         let (line, col) = source.byte_to_line_col(span.start as usize);
         Some(CallSite {
-            script: source.name().to_string(),
+            script: source.name().clone(),
             line,
             col,
         })

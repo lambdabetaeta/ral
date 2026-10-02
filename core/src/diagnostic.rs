@@ -10,6 +10,7 @@ use crate::syntax::parser::ParseError;
 use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
 use std::fmt::Write;
+use std::sync::Arc;
 
 // Frontends seed and read the gate through here: `ral::platform` and exarch's
 // bootstrap each call `diagnostic::set_terminal` once at startup.
@@ -21,7 +22,7 @@ pub use ansi::{set_terminal, use_color};
 /// 1-indexed line/column, as it rides out on observations and capability checks.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallSite {
-    pub script: String,
+    pub script: Arc<str>,
     pub line: usize,
     pub col: usize,
 }

@@ -568,9 +568,7 @@ mod tests {
             desk: ExarchDesk {
                 services: wire_host_services(&emit, &trunk),
             },
-            apply: SurfaceApplier {
-                recorder: crate::record::Emitter::none(),
-            },
+            apply: SurfaceApplier::new(crate::record::Emitter::none()),
         });
 
         let report = ral_core::protocol::dispatch_to_report(
@@ -614,9 +612,7 @@ mod tests {
             desk: ExarchDesk {
                 services: wire_host_services(&emit, &trunk),
             },
-            apply: SurfaceApplier {
-                recorder: crate::record::Emitter::none(),
-            },
+            apply: SurfaceApplier::new(crate::record::Emitter::none()),
         });
 
         let report = ral_core::protocol::dispatch_to_report(

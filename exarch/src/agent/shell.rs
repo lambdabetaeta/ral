@@ -166,9 +166,7 @@ impl Avatar {
         };
         let host = Arc::new(desk::RunHost {
             desk: desk::ExarchDesk { services },
-            apply: desk::SurfaceApplier {
-                recorder: self.recorder(),
-            },
+            apply: desk::SurfaceApplier::new(self.recorder()),
         });
         // Stamped with this session's inbox epoch as read now, so a batch
         // from a worker that settles after a `/clear` is dropped.
@@ -187,15 +185,13 @@ impl Avatar {
         // legal at a run boundary and nowhere else.
         let (mut content, failed) = match report {
             Ok(Report::Ran {
-                ending,
-                captured,
-                trail,
+                ending, captured, ..
             }) => match self.seat.read(reading::workers) {
                 Ok(workers) => {
                     let result = shell_eval::report::tool_result(
                         &ending,
                         captured,
-                        &trail,
+                        &host.apply.births(),
                         &host.desk.services.acts,
                         &workers,
                         timeout_secs,

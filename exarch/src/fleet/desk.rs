@@ -27,6 +27,7 @@ use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
 use ral_core::sync::LockExt;
 use ral_core::types::{Error, Observation, Observed};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -1028,9 +1029,23 @@ impl ExarchDesk {
 /// with.
 pub(crate) struct SurfaceApplier {
     pub(crate) recorder: crate::record::Emitter,
+    /// Every `Observed::Worker` this call's drain has heard: the births the
+    /// orphan sentence joins against the run-boundary `workers` probe.
+    births: Mutex<HashSet<u64>>,
 }
 
 impl SurfaceApplier {
+    pub(crate) fn new(recorder: crate::record::Emitter) -> Self {
+        Self {
+            recorder,
+            births: Mutex::default(),
+        }
+    }
+
+    pub(crate) fn births(&self) -> HashSet<u64> {
+        self.births.lock_ignore_poison().clone()
+    }
+
     /// Apply one live [`ral_core::protocol::Event::Surface`] value.
     ///
     /// A shape no surface class recognises at all is the extension law's
@@ -1049,6 +1064,11 @@ impl SurfaceApplier {
                 return;
             }
         };
+        if let Surface::Observation(event) = &surface
+            && let Observed::Worker { id, .. } = &event.what
+        {
+            self.births.lock_ignore_poison().insert(id.0);
+        }
         if let Err(error) = absorb_surface(&self.recorder, &surface) {
             self.recorder.report_fault(&error);
         }
@@ -2087,9 +2107,7 @@ mod tests {
                 tx: tx.downgrade(),
                 meter: crate::bus::UsageMeter::default(),
             });
-        let applier = SurfaceApplier {
-            recorder: d.services.log.lock().record_emitter(),
-        };
+        let applier = SurfaceApplier::new(d.services.log.lock().record_emitter());
 
         let read = ral_core::types::Observation::instant(
             None,

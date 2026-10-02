@@ -73,8 +73,8 @@ impl Drop for AuditCaptureScope<'_> {
 /// Tee every sink this shell can write into buffers while `f` runs, so
 /// `audit { … }` records a command's bytes without hiding them.
 ///
-/// Installed by `frame_call` in `evaluator::audit` around each builtin and
-/// standalone external; direct-spawn pipeline stages never reach here, since
+/// Installed by `call_external` in `evaluator::audit` around each standalone
+/// external; direct-spawn pipeline stages never reach here, since
 /// their stdout is a kernel pipe to the next stage and `pipeline::collect`
 /// synthesises their node with no bytes.
 pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>, Vec<u8>)

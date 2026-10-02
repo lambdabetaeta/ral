@@ -66,9 +66,9 @@ pub struct Audit {
     capture: CapturePolicy,
     /// Where the command now running was dispatched from — the register every
     /// observation resolves its site against, `None` before a run's first
-    /// dispatch.  `step_exec` in `evaluator::machine` skips the write for
-    /// `_`-prefixed names, so a prelude wrapper's observations name the
-    /// user's call rather than the wrapper's; `IoLoan` in `crate::run` clears
+    /// dispatch.  `Shell::stamp_call_site` skips a span outside the session's
+    /// sources — the baked prelude's — so a prelude wrapper's observations
+    /// name the user's call rather than the wrapper's; `IoLoan` in `crate::run` clears
     /// the register per run and restores it on drop.  A redirect runs its own
     /// steps under its span (`Shell::at_site`), restoring this on exit.
     pub(crate) call_site: Option<Span>,

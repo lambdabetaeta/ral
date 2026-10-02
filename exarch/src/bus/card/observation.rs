@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use ral_core::types::{CommandOrigin, Decision, LeaseClass, Observed, WorkerId, WriteOutcome};
+use ral_core::types::{Decision, LeaseClass, Observed, WorkerId, WriteOutcome};
 use std::collections::BTreeMap;
 
 use super::diff::whole_file_hunks;
@@ -50,12 +50,9 @@ pub(crate) enum Landing {
 
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. }
-        | Observed::Grep { .. }
-        | Observed::Command {
-            origin: CommandOrigin::External | CommandOrigin::Detached,
-            ..
-        } => Landing::Effect,
+        Observed::Read { .. } | Observed::Grep { .. } | Observed::Command { .. } => {
+            Landing::Effect
+        }
         Observed::Write { .. } => Landing::Write,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {
@@ -65,10 +62,9 @@ pub(crate) fn landing(what: &Observed) -> Option<Landing> {
         // A birth is the departure a settlement is the arrival of, and reads
         // as that mirror.
         Observed::Worker { .. } => Landing::Announced,
-        // Desk-fed only: an `Act` never reaches the rail from the engine seam.
-        Observed::Command { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
-            return None;
-        }
+        // A flagged check is the trail's alone; an `Act` is desk-fed and never
+        // reaches the rail from the engine seam.
+        Observed::Capability { .. } | Observed::Act { .. } => return None,
     })
 }
 
@@ -352,7 +348,7 @@ fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::AuditIo;
+    use ral_core::types::{AuditIo, CommandOrigin};
 
     /// The card's first [`Mark::Text`] flattened — the on-screen line, roling
     /// dropped.

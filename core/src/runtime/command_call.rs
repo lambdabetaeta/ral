@@ -8,8 +8,7 @@
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, Env, Error, HandlerEntry, HandlerLookup, Mooring, Settled,
-    Shell, Value,
+    Break, BuiltinEntry, Env, Error, HandlerEntry, HandlerLookup, Mooring, Settled, Shell, Value,
 };
 
 use super::command::{self, CommandIdentity};
@@ -121,17 +120,14 @@ pub(crate) fn run_base_frame(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    run_framed(
-        &entry.name,
-        CommandOrigin::Builtin,
-        args,
-        (redirects, span),
-        mooring,
-        shell,
-        |shell, frame| entry.call_body(frame, args, None, mooring, shell),
-    )
+    audit::call_native(&entry.name, shell, |shell, frame| {
+        with_redirects(redirects, span, mooring, shell, |shell| {
+            entry.call_body(frame, args, None, mooring, shell)
+        })
+    })
 }
 
+/// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
     id: &CommandIdentity,
     args: &[Value],
@@ -140,29 +136,9 @@ pub(crate) fn run_external(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    run_framed(
-        &id.shown,
-        CommandOrigin::External,
-        args,
-        (redirects, span),
-        mooring,
-        shell,
-        |shell, _| command::run(id, args, mooring, shell),
-    )
-}
-
-/// The audit frame of one synchronous call, with its redirects installed
-/// inside it.
-fn run_framed(
-    name: &str,
-    origin: CommandOrigin,
-    args: &[Value],
-    (redirects, span): (&Redirects<String>, Option<Span>),
-    mooring: &Mooring,
-    shell: &mut Shell,
-    body: impl FnOnce(&mut Shell, &audit::Frame) -> Settled<Value>,
-) -> Settled<Value> {
-    audit::frame_call(name, args, origin, mooring, shell, |shell, frame| {
-        with_redirects(redirects, span, mooring, shell, |shell| body(shell, frame))
+    audit::call_external(&id.shown, args, mooring, shell, |shell| {
+        with_redirects(redirects, span, mooring, shell, |shell| {
+            command::run(id, args, mooring, shell)
+        })
     })
 }

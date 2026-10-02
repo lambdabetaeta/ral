@@ -598,9 +598,7 @@ impl Avatar {
         services.branch = Some(order.clone());
         let host = Arc::new(crate::fleet::desk::RunHost {
             desk: crate::fleet::desk::ExarchDesk { services },
-            apply: crate::fleet::desk::SurfaceApplier {
-                recorder: self.recorder(),
-            },
+            apply: crate::fleet::desk::SurfaceApplier::new(self.recorder()),
         });
         let report = crate::shell_eval::run_shell(
             self.seat.transport(),

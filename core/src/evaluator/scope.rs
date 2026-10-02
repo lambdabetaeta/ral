@@ -63,7 +63,7 @@ pub(crate) fn reason_value(status: &Status) -> Value {
 /// A failed body's position comes from the error's own span; one outside the
 /// session's sources falls back to the run's call site.  The failing command
 /// is the one the innermost dispatch stamped onto the error
-/// (`evaluator::audit`'s `frame_call`); `<runtime>` names a failure no
+/// (`evaluator::audit`'s `name_failure`); `<runtime>` names a failure no
 /// dispatch owns.
 pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
     Outcome {
@@ -419,12 +419,30 @@ mod tests {
     fn nested_delimiters_flat_merge() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let report = match shell.run(capture_req(
-            "audit { echo one; try { echo two } { |_e| return () }; echo three }",
+            "audit { /bin/echo one; try { /bin/echo two } { |_e| return () }; /bin/echo three }",
         )) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
-        assert_eq!(command_argv0s(&report), ["echo", "echo", "echo"]);
+        assert_eq!(
+            command_argv0s(&report),
+            ["/bin/echo", "/bin/echo", "/bin/echo"]
+        );
+    }
+
+    /// A builtin application is not an observation: `echo` is a base frame
+    /// and `length` a native, and neither leaves a `` `command `` behind.
+    /// Only the external does.
+    #[test]
+    fn builtins_leave_no_command_observation() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let report = match shell.run(capture_req(
+            "audit { echo one; length [1, 2]; /bin/echo two }",
+        )) {
+            RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
+            RunReport::Static { .. } => panic!("well-formed source must run"),
+        };
+        assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
 
     /// `audit { }`'s report envelope: a body that returned gives `` `ok ``,
@@ -432,7 +450,7 @@ mod tests {
     #[test]
     fn audit_reports_ok_over_its_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let report = match shell.run(capture_req("audit { echo hi }")) {
+        let report = match shell.run(capture_req("audit { /bin/echo hi }")) {
             RunReport::Ran { ending, .. } => ending
                 .into_result()
                 .expect("audit { echo hi } must succeed"),
@@ -443,7 +461,7 @@ mod tests {
             Some(Value::Variant { label, .. }) => assert_eq!(label.as_ref(), "ok"),
             other => panic!("a returning body must report `ok, got {other:?}"),
         }
-        assert_eq!(command_argv0s(&report), ["echo"]);
+        assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
 
     /// A session function's scheme is what a `within` vets its arm

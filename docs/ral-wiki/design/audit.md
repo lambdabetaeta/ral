@@ -39,6 +39,22 @@ $report` and `commands $report`, the latter handing back the `` `command ``
 payloads in order. A `case` on `what` is for the reader who cares about the
 other six tags.
 
+**A builtin application is not an observation.** The trail records facts at
+the doors to the world — an external or detached process, a redirect's read
+or write, a worker's birth, a capability check, a host door — and a builtin
+reaches the world only through one of those doors, which records the effect
+there, typed as what it is: `edit-hash` lands as the `` `write `` its
+`atomic_write` commits, `spawn` as its `` `worker ``, a bare `equal` as
+nothing, because the pure fragment performs no effect
+([[design/syscalls-are-effects|syscalls-are-effects]]). The inventory of
+observed doors is the inventory capability enforcement guards —
+`check_fs_op` is asked at the same doors — so a builtin that could change the
+world past both would be a missing door, not a reason to observe its frame.
+The rule is what keeps the trail proportional to effects rather than to
+β-reductions: observing every builtin application once retained a stamped,
+teed, argv-rendered record per application, and a `filter` over a few
+thousand grep hits became millions of them.
+
 Retention is one rule for both byte streams: `stdout` and `stderr` are each
 capped at the same 16 MiB as a worker's buffers, with a truncation marker at
 the cap. Neither is privileged, and neither cap is an I/O limit — every byte
@@ -120,8 +136,9 @@ What builds up the trail is itself scoped:
   `Run.trail: Some` in the transport protocol — and get the extent's trail
   back on the `Report`, each observation in the shared `Observation` map
   shape, with an `` `opaque `` placeholder wherever a value has no wire form;
-  the REPL never asks, and asking costs nothing beyond what the surface rail
-  already builds per command;
+  neither the REPL nor exarch's tool call asks: the surface rail already
+  hears every observation, and a trail would also *retain* each until the
+  run ends;
 - `try` reads nothing. The failing command's name is stamped on the error by
   the dispatch that failed, so the innermost failing dispatch wins the way the
   innermost source span does, and `try` costs no more than its own frame. It

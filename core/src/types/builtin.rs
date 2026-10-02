@@ -190,7 +190,7 @@ impl BuiltinEntry {
     }
 
     /// Invoke the body — reachable only with a proof that a
-    /// [`crate::evaluator::audit::frame_call`] is already open around it.
+    /// [`crate::evaluator::audit::call_native`] frame is already open around it.
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.

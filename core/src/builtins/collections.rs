@@ -1,10 +1,9 @@
 //! List combinators — `each`, `map`, `filter`, `sort-list`, `sort-list-by`,
 //! `fold`, `fold-lines` — and the `range` constructor.
 //!
-//! Every combinator's per-element applications land in the enclosing trail
-//! unwrapped: none of them is an observation in its own right, only the
-//! combinator's own command observation (from `evaluator::audit::frame_call`)
-//! is real.
+//! Neither a combinator nor its per-element applications is an observation:
+//! whatever effects an element's body performs land in the enclosing trail
+//! unwrapped, from the doors that performed them.
 
 use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
 

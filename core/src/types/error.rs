@@ -17,7 +17,7 @@ pub struct Error {
     /// every `Settled`, and a larger one trips `result_large_err`.
     pub witness: Option<Box<Span>>,
     /// The shown name of the command whose failure this is; `None` until
-    /// `evaluator::audit`'s `frame_call` stamps the innermost dispatch.
+    /// `evaluator::audit`'s `name_failure` stamps the innermost dispatch.
     pub(crate) command: Option<Box<str>>,
 }
 

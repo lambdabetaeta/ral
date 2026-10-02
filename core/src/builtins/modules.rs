@@ -316,7 +316,7 @@ fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::P
                 .session
                 .sources
                 .get(shell.session.root_file)
-                .map_or("", crate::source::Source::name)
+                .map_or("", |source| source.name())
         },
         String::as_str,
     );

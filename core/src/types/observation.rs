@@ -34,8 +34,12 @@ pub struct Observation {
     pub what: Observed,
 }
 
-/// What was observed.  A command carries one fact whether it was a builtin,
-/// an external, or a detached spawn; the door it passed through is `origin`.
+/// What was observed.
+///
+/// A command carries one fact whether it was an external or a detached spawn;
+/// the door it passed through is `origin`.  A builtin application is not one:
+/// its effects are observed at the doors they pass through, as the `Write`,
+/// `Read`, or `Worker` they are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
     Command {
@@ -103,7 +107,6 @@ pub enum Observed {
 /// Which door a command came through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOrigin {
-    Builtin,
     External,
     /// A background spawn: the status is 0 by construction, not by
     /// observation, since nothing waits for the child.
@@ -134,7 +137,6 @@ pub enum WriteOutcome {
 impl CommandOrigin {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Builtin => "builtin",
             Self::External => "external",
             Self::Detached => "detached",
         }
@@ -142,7 +144,6 @@ impl CommandOrigin {
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "builtin" => Self::Builtin,
             "external" => Self::External,
             "detached" => Self::Detached,
             _ => return None,
@@ -269,7 +270,7 @@ fn optional(v: Option<FOValue>) -> FOValue {
 pub(crate) fn site_value(site: Option<&CallSite>) -> FOValue {
     optional(site.map(|s| {
         record(vec![
-            ("script", string(s.script.clone())),
+            ("script", string(&*s.script)),
             ("line", int(s.line as i64)),
             ("col", int(s.col as i64)),
         ])
@@ -283,7 +284,7 @@ pub(crate) fn site_value(site: Option<&CallSite>) -> FOValue {
 )]
 fn site_of(v: &FOValue) -> Option<CallSite> {
     Some(CallSite {
-        script: str_at(v, "script")?,
+        script: str_at(v, "script")?.into(),
         line: int_at(v, "line")? as usize,
         col: int_at(v, "col")? as usize,
     })
@@ -652,9 +653,9 @@ mod tests {
             error: Some("spawn failed".into()),
         });
         round_trips(Observed::Command {
-            argv: vec!["len".into()],
+            argv: vec!["serve".into(), "8080".into()],
             status: 0,
-            origin: CommandOrigin::Builtin,
+            origin: CommandOrigin::Detached,
             io: AuditIo::default(),
             error: None,
         });

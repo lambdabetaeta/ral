@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e43ce37
-generated_at_date: 2026-09-23
+generated_at_commit: db591f00
+generated_at_date: 2026-10-02
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -182,9 +182,10 @@ order, and exits 124:
    only *returned* was lost with the result. Which workers outlived the call
    is a different fact from a committed act, so it is its own sentence and the
    desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
-   across the seam: the dispatch's own trail carries an `Observed::Worker`
-   for every birth its extent gave, and `shell_eval/report.rs`'s `render`
-   joins those ids against the `` `workers `` probe, decoded into core's
+   across the seam: every birth its extent gave reaches the host as an
+   `Observed::Worker` on the surface, ordered before the `Report`, and the
+   call's `SurfaceApplier` keeps those ids; `shell_eval/report.rs`'s `render`
+   joins them against the `` `workers `` probe, decoded into core's
    `WorkerRow` by `reading::workers` at the run boundary — legal there on a wire seat
    exactly as on the identity seat, since the registry never crosses. A birth
    still present in the registry, running or settled-unclaimed, is named
@@ -196,12 +197,10 @@ order, and exits 124:
    and counts aloud whatever it does not name — a silent truncation would read
    as "that was all of them".
 
-The per-stage journal exists but goes unrendered: `run_shell` asks with
-`trail: Some(CapturePolicy::Off)`, so every dispatch's `Report::Ran.trail`
-carries a per-command record — including the command a cancel struck — and
-`report::render` currently reads only the `Observed::Worker` births from it.
-"This command completed, that one was cut" is the engine diagnostic's job;
-nothing else in the digest walks the journal yet.
+`run_shell` asks for no trail (`trail: None`). The host already hears every
+observation on the surface, so a trail would only retain, until the run ends,
+records nothing reads. "This command completed, that one was cut" is the
+engine diagnostic's job.
 
 **Surface decoding.** `decode_surface` is the single decoder both delivery
 regimes share: the live path — `dispatch_to_report`'s drain loop calling

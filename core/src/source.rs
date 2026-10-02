@@ -201,7 +201,7 @@ impl Source {
     }
 
     /// The display name.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &Arc<str> {
         &self.name
     }
 

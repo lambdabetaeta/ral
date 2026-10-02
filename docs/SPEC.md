@@ -3367,13 +3367,14 @@ what: `command [argv: [String], status: Int, origin: String,
 `grep` and `act` are raised by host doors — exarch's `grep-files` and its
 committed harness acts — not by any door in core itself.
 
-A `` `command `` observation records a builtin, external, or bundled call:
+A `` `command `` observation records an external or bundled command, or a
+`detach` birth:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `argv` | `[String]` | the shown name first, then its evaluated arguments |
 | `status` | `Int` | the outcome's status: 0 for a command that returned, otherwise its error's exit code |
-| `origin` | `String` | `builtin`, `external`, or `detached` |
+| `origin` | `String` | `external` or `detached` |
 | `stdout` | `Bytes` | raw bytes observed on fd 1 |
 | `stderr` | `Bytes` | raw bytes observed on fd 2 |
 | `error` | `String` | ral's runtime error message, or the empty string |
@@ -3438,24 +3439,28 @@ appends one truncation marker and discards the rest. Neither stream is
 privileged over the other. These are retention rules, not I/O limits: every
 byte still streams to its ordinary destination.
 
-Command observations cover public builtins, external commands, bundled
-commands, and pipeline stages. Arguments are recorded after evaluation and
-rendered to strings as part of `argv`. Internal builtins whose names begin
-with `_` are omitted, so implementation details beneath a public wrapper do
-not masquerade as user commands.
+Command observations cover external commands, bundled commands, pipeline
+stages, and `detach` births. Arguments are recorded after evaluation and
+rendered to strings as part of `argv`.
+
+A builtin application is not an observation. The language's own value
+fragment — builtins, prelude functions, lexical bindings — performs no effect,
+and a builtin that reaches the world does so through a door the trail already
+watches: a redirect, an atomic write, a worker's birth, a capability check. The
+door records the effect there, as the `` `write ``, `` `read ``, `` `worker ``
+or `` `check `` it is, so `equal` applied a million times inside `audit { }`
+adds nothing to the trail and a file edit lands once, as the write it made.
 
 User-function application is transparent. Control forms and scopes, including
 `if`, `case`, `within`, `grant`, `guard`, and `try`, are transparent too.
-Collection iteration does not manufacture a wrapper observation. The public
-builtin call that performs an iteration, such as `each` or `map`, is still a
-real builtin call and is recorded once under the ordinary rule.
+Collection iteration manufactures no wrapper observation, and the builtin that
+performs it records none of its own.
 
 Commands, reads, and writes performed inside a transparent function, form,
 scope, or iteration remain visible. They land in the trail that lexically owns
 them rather than under a synthetic wrapper. A function that only computes and
-returns a value may therefore add no observation at all. A nested `audit`
-returns its own report, while its own observations also merge into an
-enclosing trail.
+returns a value adds no observation at all. A nested `audit` returns its own
+report, while its own observations also merge into an enclosing trail.
 
 `try` does not consult the trail. The name of the failing command is stamped
 on the error by the dispatch that failed, so the innermost failing dispatch
@@ -4354,13 +4359,14 @@ These flags require a script path or `-c`; they are not accepted for a bare inte
 The checker and evaluator receive the same batch builtin surface. A command cannot pass `--check` by being treated as one kind of builtin and then run as another.
 
 The emitted JSON is one report for the whole batch run, its `trail` a flat list
-in settlement order. `` `command `` observations exist only for public builtin
-calls and for external or bundled command executions. Function application,
-control forms such as `if`, `case`, `try`, `guard`, `within`, `grant`, and
-`audit`, and loop iterations record nothing of their own; the calls executed
-inside them land in the open trail directly. Each observation carries its
-evaluated arguments, status, source location, timing, and principal, plus the
-bytes it captured.
+in settlement order. `` `command `` observations exist only for external or
+bundled command executions and `detach` births; a builtin application records
+nothing of its own, its effects landing through the write, read, and worker
+doors (§13.3). Function application, control forms such as `if`, `case`,
+`try`, `guard`, `within`, `grant`, and `audit`, and loop iterations record
+nothing of their own either; the commands executed inside them land in the
+open trail directly. Each observation carries its evaluated arguments, status,
+source location, timing, and principal, plus the bytes it captured.
 
 Batch stdout and stderr remain ordinary byte streams. A program's final ral
 value is not an operating-system pipe protocol: interior pipeline stages
@@ -5243,12 +5249,11 @@ cleanup escape alike take priority over that outcome and propagate.
 the report: the body's outcome, `` `ok `` of its value or `` `err `` of `E`,
 beside the trail. An ordinary body error settles into `` `err ``; an escape
 propagates past the report. Within the trail, `` `command `` observations are
-recorded only for external or bundled commands and for builtin calls.
-User-function application, control scopes, and iteration machinery are
-transparent: they record no observation of their own, while command and builtin
-activity reached inside them remains visible. A builtin that implements
-iteration still records its own one observation; applying its callback does not
-add a function or per-iteration observation.
+recorded only for external or bundled commands and `detach` births; a builtin
+application is not an observation, and its effects are recorded at the doors
+they pass through (§13.3). User-function application, control scopes, and
+iteration machinery are transparent: they record no observation of their own,
+while the commands, reads, and writes reached inside them remain visible.
 
 Observations are appended in settlement order, so a command's own observation
 follows those of everything it ran; the `start`–`end` intervals, not the list

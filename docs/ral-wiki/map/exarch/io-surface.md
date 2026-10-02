@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8d868e18
-generated_at_date: 2026-09-30
+generated_at_commit: db591f00
+generated_at_date: 2026-10-02
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
@@ -52,8 +52,9 @@ either way, as a failed command observation carrying the denial message.
 
 With nobody listening — no sink installed and no trail open — a site builds no
 observation at all, so it pays for neither the `epoch_us()` syscall nor the
-`script` and `principal` clones. With a host attached it pays them per
-dispatch, builtins included.
+`script` and `principal` clones. With a host attached it pays them per door —
+an external's dispatch, a redirect, a birth — and never per builtin
+application, which is no door at all.
 
 - **Redirects** open through `open_file` and `install_stdin_redirect`
   (`runtime/command/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
@@ -83,13 +84,13 @@ dispatch, builtins included.
   stands in the file rather than what it replaced.
 - **Commands** are hooked *after* resolution, at the completion sites, never
   at the call site (where the head may still resolve to a closure or
-  builtin). Every command — builtin, external, or detached — is one
+  builtin). Every external or detached command is one
   `Observed::Command { argv, status, origin, .. }`: `argv` is the shown name
-  first, then its arguments; `origin` is `builtin`, `external`, or `detached`.
+  first, then its arguments; `origin` is `external` or `detached`.
   The external / bundled path — one site for both, since a bundled tool is a
   `ral --ral-bundled-tool` child like any host executable
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
-  — emits from `finish_command` (`evaluator/audit.rs`), which wraps the whole
+  — emits from `call_external` (`evaluator/audit.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
   carries the synthesized 127/126/… code). `detach` (`runtime/command/detach.rs`)
@@ -97,15 +98,14 @@ dispatch, builtins included.
   wait: a surrendered process is never waited for, so its observation carries
   `origin: detached` and status `0` meaning *exec'd*, not *succeeded*. A
   direct external *pipeline stage* is the third: the collector never enters
-  `finish_command`, so its settlement mints the fact itself
+  `call_external`, so its settlement mints the fact itself
   (`runtime/pipeline/collect.rs`). All three assemble their argv through the
   one constructor, `evaluator::audit::command_fact` — the rule that index 0
-  is the shown name lives there and nowhere else. A
-  **builtin** command is recorded into an open trail like any other, and
-  reported on the sink like any other; `origin: builtin` is what the host
-  drops at `decode_surface` — the rail reports the syscalls that reach the
-  world, not
-  evaluation.
+  is the shown name lives there and nowhere else. A **builtin** application
+  is no command observation at all: its frame (`call_native`) stamps nothing
+  and tees nothing, and whatever it did to the world arrives from the door it
+  did it through — `edit-hash` as the `` `write `` its `atomic_write`
+  commits, `spawn` as its `` `worker `` ([[design/audit|audit]]).
 
 Capability checks are different again. An *allowed* check stays off the rail:
 it is the wrong granularity — it over-fires on `use`/`exists`/
@@ -139,7 +139,7 @@ over a row the typechecker closes.
 ```
 what: `read    [path]
       `write   [path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed", new_bytes, old_bytes]   # each snapshot `just or `none
-      `command [argv:[prog, …args], status, origin:"builtin"|"external"|"detached", stdout, stderr, error]
+      `command [argv:[prog, …args], status, origin:"external"|"detached", stdout, stderr, error]
       `grep    [scope, pattern]                        # emitted by the grep builtin
       `check   [resource, decision:"denied"|"flagged", fields]
       `worker  [id, cmd, class:"worker"|"durable"]

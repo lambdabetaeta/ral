@@ -1595,7 +1595,7 @@ pub(crate) mod tests {
     #[test]
     fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let req = capture_req("echo hi");
+        let req = capture_req("/bin/echo hi");
         let report = shell.run(RunRequest {
             run: Run {
                 trail: Some(crate::types::CapturePolicy::Off),

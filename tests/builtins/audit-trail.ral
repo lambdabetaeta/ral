@@ -1,18 +1,24 @@
 # Test: the audit trail (§13.3)
 
+# A builtin application is not an observation: the pure fragment performs no
+# effect, so `echo` and `length` leave the trail empty
+let quiet = audit { echo 'quiet'; length [1, 2] }
+echo !{succeeded $quiet}
+echo !{length $quiet[trail]}
+
 # Basic audit: the report is `[outcome, trail]`, and `commands` picks the
-# `command` observations out of the trail
-let report = audit { echo 'step one'; echo 'step two' }
+# `command` observations — the externals — out of the trail
+let report = audit { /bin/echo 'step one'; /bin/echo 'step two' }
 echo !{succeeded $report}
 echo !{length !{commands $report}}
 echo !{commands $report}[0][argv][0]
 echo !{commands $report}[1][argv][1]
 
-# try is transparent: it observes nothing of its own, so the failing `fail`
-# and the handler's `echo` land directly in the audit's trail
+# try is transparent: it observes nothing of its own, so the failing `sh`
+# and the handler's `/bin/echo` land directly in the audit's trail
 let report2 = audit {
-    try { fail [status: 1, message: 'observed failure'] } { |_| echo 'handled' }
-    echo 'continued'
+    try { /bin/sh -c 'exit 1' } { |_| /bin/echo 'handled' }
+    /bin/echo 'continued'
 }
 echo !{succeeded $report2}
 echo !{length !{commands $report2}}
@@ -21,16 +27,13 @@ echo !{commands $report2}[0][status]
 echo !{commands $report2}[1][argv][0]
 echo !{commands $report2}[2][argv][0]
 
-# for/map are transparent themselves — the loop observes nothing — but
-# `each` (the builtin `for` aliases to in the prelude) is a real builtin
-# call and is observed in its own right, recorded last because settlement
-# order puts a command after everything it ran
-let report3 = audit { for [a, b] { |x| echo $x } }
+# for/map/each are transparent, and so is the builtin that performs the
+# iteration: only the body's commands land, flat, in the trail
+let report3 = audit { for [a, b] { |x| /bin/echo $x } }
 echo !{succeeded $report3}
 echo !{length !{commands $report3}}
-echo !{commands $report3}[0][argv][0]
-echo !{commands $report3}[1][argv][0]
-echo !{commands $report3}[2][argv][0]
+echo !{commands $report3}[0][argv][1]
+echo !{commands $report3}[1][argv][1]
 
 # A failing body settles into `err`, carrying the same record `try` hands a
 # handler; the audit expression itself succeeds
@@ -44,8 +47,8 @@ case $failed[outcome] [
 # Nested audit: the inner audit still returns its own report, but its real
 # commands also flatten into the outer audit's trail
 let outer = audit {
-    echo 'outer'
-    let inner = audit { echo 'inner' }
+    /bin/echo 'outer'
+    let inner = audit { /bin/echo 'inner' }
 }
 echo !{succeeded $outer}
 echo !{length !{commands $outer}}
@@ -54,17 +57,17 @@ echo !{commands $outer}[1][argv][0]
 
 # grant is transparent — its body's command lands directly in the trail,
 # with no grant observation framing it
-let grant_report = audit { grant [exec: [echo: 'allow']] { echo 'inside' } }
+let grant_report = audit { grant [exec: ['/bin/echo': 'allow']] { /bin/echo 'inside' } }
 echo !{length !{commands $grant_report}}
 echo !{commands $grant_report}[0][argv][0]
 
 # within is transparent too
-let within_report = audit { within [dir: $CWD] { echo 'inside' } }
+let within_report = audit { within [dir: $CWD] { /bin/echo 'inside' } }
 echo !{length !{commands $within_report}}
 echo !{commands $within_report}[0][argv][0]
 
 # guard is transparent — both body and cleanup land directly in the trail
-let gr = audit { guard { echo 'body' } { echo 'cleanup' } }
+let gr = audit { guard { /bin/echo 'body' } { /bin/echo 'cleanup' } }
 echo !{length !{commands $gr}}
 echo !{commands $gr}[0][argv][0]
 echo !{commands $gr}[1][argv][0]
@@ -105,7 +108,8 @@ rm -rf $scratch
 # A stage of an external pipeline is observed as a command in its own right
 echo !{argv0s !{audit { /bin/echo hi | /bin/cat }}}
 
-# `^name` reaches the binary, and the observation says so
+# `^name` reaches the binary, and the observation says so; the builtin stage
+# feeding it is no observation at all
 let caret = audit { echo hi | ^cat }
 echo !{map { |c| return "$c[argv][0] $c[origin]" } !{commands $caret}}
 
@@ -147,28 +151,26 @@ echo !{map { |c| return "$c[argv][0] $c[origin] $c[status]" } !{commands !{audit
 
 # An audit that follows a `guard` still records its own commands
 let _ = audit { guard { return () } { return () } }
-echo !{argv0s !{audit { echo hi }}}
+echo !{argv0s !{audit { /bin/echo hi }}}
 
 # A spawn inside an audit leaves the foreground trail whole
-echo !{argv0s !{audit { echo one; spawn { sleep 0.02 }; echo two }}}
+echo !{argv0s !{audit { /bin/echo one; spawn { sleep 0.02 }; /bin/echo two }}}
 
 # A guard's cleanup runs on the normal path, and its body's value survives
-echo !{argv0s !{audit { guard { return 7 } { echo cleaned } }}}
+echo !{argv0s !{audit { guard { return 7 } { /bin/echo cleaned } }}}
 echo !{guard { return 7 } { echo cleaned }}
 
 # A command inside a function body is recorded into the enclosing audit
-let emit = { |_| echo audited-from-fn }
+let emit = { |_| /bin/echo audited-from-fn }
 echo !{argv0s !{audit { emit () }}}
 
 # A command's captured bytes ride beside its argv
-each { |c| echo !{bytes-to-string $c[stdout]} $c[argv][0] } !{commands !{audit { echo hi }}}
+each { |c| echo !{bytes-to-string $c[stdout]} $c[argv][0] } !{commands !{audit { /bin/echo hi }}}
 
-# Forcing an arity-0 native records the same observation as applying it
+# Forcing an arity-0 native is no more an observation than applying it
 let forced = audit { !$cwd }
 let applied = audit { cwd }
-let forced-cmd = !{commands $forced}[0]
-let applied-cmd = !{commands $applied}[0]
-echo !{equal $forced-cmd[argv] $applied-cmd[argv]} !{equal $forced-cmd[status] $applied-cmd[status]}
+echo !{length $forced[trail]} !{length $applied[trail]}
 
 # A pipeline that ends in an audit binds the audit's record, not the piped text
 let piped = echo a | audit { cat }

@@ -48,7 +48,7 @@ fn drop_timings(v: &mut Value) {
     }
 }
 
-const SCRIPT: &str = "echo one; echo two";
+const SCRIPT: &str = "/bin/echo one; /bin/echo two";
 
 #[test]
 fn audit_cli_root_is_the_plain_envelope() {
@@ -66,7 +66,7 @@ fn audit_cli_root_is_the_plain_envelope() {
     let trail = obj["trail"].as_array().expect("trail array");
     assert_eq!(trail.len(), 2, "root: {root}");
     assert_eq!(trail[0]["what"]["tag"], "command");
-    assert_eq!(trail[0]["what"]["payload"]["argv"][0], "echo");
+    assert_eq!(trail[0]["what"]["payload"]["argv"][0], "/bin/echo");
 }
 
 #[test]

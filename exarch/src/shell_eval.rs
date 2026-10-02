@@ -229,7 +229,6 @@ pub(crate) fn run_shell(
     let tool_start = std::time::Instant::now();
 
     use ral_core::protocol::{Program, Run};
-    use ral_core::types::CapturePolicy;
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     let run = Run {
@@ -245,7 +244,9 @@ pub(crate) fn run_shell(
         io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: RunStdin::Empty,
-        trail: Some(CapturePolicy::Off),
+        // No trail: the host hears every observation on the surface, and a
+        // trail would only hold a record per builtin call until the run ends.
+        trail: None,
     };
 
     let report = ral_core::protocol::dispatch_to_report(transport, run, host);
@@ -395,26 +396,22 @@ mod tests {
         timeout_secs: u64,
         recorder: &crate::record::Emitter,
     ) -> ToolResult {
-        let applier = Arc::new(crate::fleet::desk::SurfaceApplier {
-            recorder: recorder.clone(),
-        });
+        let applier = Arc::new(crate::fleet::desk::SurfaceApplier::new(recorder.clone()));
         let outcome = run_shell(
             transport,
             &ral_core::types::GrantStack::of(caps.clone()),
             "turn 1",
             cmd,
             timeout_secs,
-            applier,
+            applier.clone(),
         );
         match outcome {
             Ok(ral_core::protocol::Report::Ran {
-                ending,
-                captured,
-                trail,
+                ending, captured, ..
             }) => report::tool_result(
                 &ending,
                 captured,
-                &trail,
+                &applier.births(),
                 &crate::fleet::desk::ActFragment::default(),
                 &[],
                 timeout_secs,

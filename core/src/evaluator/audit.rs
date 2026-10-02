@@ -8,6 +8,13 @@
 //! stand outside, each reaching only one consumer: `capability::enforce` and
 //! `Shell::audit_deputy_prefixes` have no [`Mooring`].
 //!
+//! A builtin application is not a fact.  The pure fragment performs no
+//! effect, and a builtin that reaches the world does so through a door — a
+//! redirect, `atomic_write`, `spawn_child` — which observes it there, typed as
+//! the effect it is.  Only an external's dispatch is itself a door
+//! ([`call_external`]); a native runs in a frame that stamps nothing and tees
+//! nothing ([`call_native`]).
+//!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
 //! boundaries, not observations: none of them constructs one.  Only `audit`
 //! collects — `evaluator::machine`'s `Audit` arm opens a trail scope before
@@ -26,7 +33,7 @@ use crate::types::{
 };
 use std::collections::BTreeMap;
 
-/// Proof that a native body is running inside [`frame_call`]'s dynamic
+/// Proof that a native body is running inside [`call_native`]'s dynamic
 /// extent — mintable only in this module, so [`BuiltinEntry::call_body`]
 /// cannot be reached unframed.
 pub(crate) struct Frame(());
@@ -114,25 +121,16 @@ pub(crate) fn command_fact(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn finish_command(
     shell: &mut Shell,
     mooring: &Mooring,
     start: AuditStart,
-    cmd: &str,
-    origin: CommandOrigin,
+    shown: &str,
     args: &[Value],
     result: &Settled<Value>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    io: AuditIo,
 ) {
     if !listening(shell, mooring) {
-        return;
-    }
-    // Internal builtins go unrecorded: the prelude wrapper that called one is
-    // the user-visible event, and it holds the dispatch register meanwhile.
-    // Under one emission door this skip governs the rail too.
-    if cmd.starts_with('_') {
         return;
     }
     let (status, error) = match result {
@@ -146,51 +144,63 @@ fn finish_command(
         epoch_us(),
         shell.context.principal(),
         command_fact(
-            cmd,
+            shown,
             Value::render_argv(args),
             status,
-            origin,
-            AuditIo { stdout, stderr },
+            CommandOrigin::External,
+            io,
             error,
         ),
     );
     observe_stamped(shell, mooring, obs);
 }
 
-/// Wrap a command body in the audit lifecycle: stamp the start, tee its
-/// stdout and stderr through the capture, finalize the observation.
-///
-/// It also names the failure: a body that errored without a command yet takes
-/// this dispatch's, so the innermost dispatch wins — the rule `stamp` uses for
-/// a span.  That naming is not an observation, and happens whether or not
-/// anyone is listening: `try`'s record needs it with no trail open.
-pub(crate) fn frame_call<F>(
-    cmd: &str,
-    args: &[Value],
-    origin: CommandOrigin,
-    mooring: &Mooring,
-    shell: &mut Shell,
-    body: F,
-) -> Settled<Value>
-where
-    F: FnOnce(&mut Shell, &Frame) -> Settled<Value>,
-{
-    let start = start(shell, mooring);
-    let (mut result, stdout, stderr) =
-        super::with_audit_capture(shell, |shell| body(shell, &Frame(())));
-    if let Err(Break::Error(e)) = &mut result
+/// Stamp `cmd` on an error that has no command yet, so the innermost dispatch
+/// wins — the rule `stamp` uses for a span.  Not an observation, and it
+/// happens whether or not anyone is listening: `try`'s record needs it with
+/// no trail open.  An `_`-prefixed internal name defers to the public wrapper
+/// that called it.
+fn name_failure(cmd: &str, result: &mut Settled<Value>) {
+    if let Err(Break::Error(e)) = result
         && e.command.is_none()
         && !cmd.starts_with('_')
     {
         e.command = Some(cmd.into());
     }
-    finish_command(
-        shell, mooring, start, cmd, origin, args, &result, stdout, stderr,
-    );
+}
+
+/// Run a native body in its call frame, which only names a failure: a
+/// builtin application is not an observation (see the module doc).
+pub(crate) fn call_native<F>(cmd: &str, shell: &mut Shell, body: F) -> Settled<Value>
+where
+    F: FnOnce(&mut Shell, &Frame) -> Settled<Value>,
+{
+    let mut result = body(shell, &Frame(()));
+    name_failure(cmd, &mut result);
     result
 }
 
-/// Run a native body inside a fresh audit frame — the only way to reach
+/// An external's door: stamp the start, tee its stdout and stderr through
+/// the capture, name a failure, and settle the one [`Observed::Command`].
+pub(crate) fn call_external<F>(
+    shown: &str,
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+    body: F,
+) -> Settled<Value>
+where
+    F: FnOnce(&mut Shell) -> Settled<Value>,
+{
+    let start = start(shell, mooring);
+    let (mut result, stdout, stderr) = super::with_audit_capture(shell, body);
+    name_failure(shown, &mut result);
+    let io = AuditIo { stdout, stderr };
+    finish_command(shell, mooring, start, shown, args, &result, io);
+    result
+}
+
+/// Run a native body inside a fresh call frame — the only way to reach
 /// [`BuiltinEntry::call_body`].
 pub(crate) fn run_native(
     entry: &BuiltinEntry,
@@ -199,19 +209,14 @@ pub(crate) fn run_native(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    frame_call(
-        &entry.name,
-        args,
-        CommandOrigin::Builtin,
-        mooring,
-        shell,
-        |shell, frame| entry.call_body(frame, args, site, mooring, shell),
-    )
+    call_native(&entry.name, shell, |shell, frame| {
+        entry.call_body(frame, args, site, mooring, shell)
+    })
 }
 
 impl BuiltinEntry {
     /// Framed public surface for hosts and tests: the body runs under its
-    /// own audit frame.
+    /// own call frame.
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
