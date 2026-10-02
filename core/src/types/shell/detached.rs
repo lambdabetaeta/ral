@@ -41,7 +41,7 @@ impl DetachPolicy {
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn admit(&self) -> Result<Reservation<'_>, u64> {
         self.births
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < self.budget).then_some(n + 1)
             })
             .map(|_| Reservation { policy: self })

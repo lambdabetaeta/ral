@@ -514,6 +514,10 @@ fn agent_outcome(r: &Result<Outcome, ProviderError>) -> AgentOutcome {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::agent::TestTrunk;

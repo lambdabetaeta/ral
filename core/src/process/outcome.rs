@@ -144,7 +144,7 @@ impl WaitOutcome {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_success(self) -> bool {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }

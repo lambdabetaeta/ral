@@ -1,4 +1,5 @@
 #![allow(clippy::disallowed_methods)]
+#![cfg(unix)]
 
 //! Surface observations: core pushes a plain `Value` onto the run's
 //! `surface` sink at every redirect read/write door and every external
@@ -112,7 +113,6 @@ fn s(v: &str) -> Value {
 
 /// A bare external command (`/usr/bin/true`) emits one command observation
 /// with argv [program], origin "external", status 0.
-#[cfg(unix)]
 #[test]
 fn external_success_emits_command_observation() {
     let mut shell = fresh_shell();

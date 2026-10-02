@@ -424,6 +424,10 @@ mod lost {
 // sibling test in this lib binary is mid-run, and core's lock over those
 // cells is unreachable from here.
 #[cfg(all(test, unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::agent::log::AgentLog;

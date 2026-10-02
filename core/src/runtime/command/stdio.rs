@@ -155,7 +155,7 @@ fn join_stderr(command: &mut crate::process::Launch, _stdout: &Sink) -> Settled<
 
 #[cfg(windows)]
 fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<Option<Sink>> {
-    let (stdio, pump) = if matches!(shell.io.stdout, Sink::Terminal) {
+    let (stdio, pump) = if matches!(stdout, Sink::Terminal) {
         // The child inherits our fd 1, so clone fd 1 — not fd 2 — for its
         // stderr.  The bare inherit would hand it fd 2, routing diagnostics
         // straight past `2>&1`.

@@ -217,6 +217,10 @@ mod hear_tests {
 }
 
 #[cfg(all(test, unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test fs/process scaffolding"
+)]
 mod tests {
     //! Tests for exarch's signal dispositions.
     //!
