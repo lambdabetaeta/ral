@@ -18,8 +18,8 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{Card, Landing, Mark, Span as CardSpan};
+use crate::provider::ProviderError;
 use crate::record::fault::Readout;
 use crate::record::{Seq, Verdict};
 use ral_core::types::Observed;
@@ -46,8 +46,8 @@ pub(super) enum Chrome {
     Note(String),
     StopReason(String),
     Error(String),
-    ProviderError(ProviderErrorRecord),
-    Stalled(ProviderErrorRecord),
+    ProviderError(ProviderError),
+    Stalled(ProviderError),
     /// The turn the human stopped: it wears the `╳` an error does — the work
     /// broke off either way — but stays a separate shape so the matrix's
     /// failure cell keeps reporting failures only.

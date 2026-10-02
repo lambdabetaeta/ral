@@ -2,35 +2,34 @@
 //!
 //! [`Avatar::deliberate`] drives the provider until it stops calling tools,
 //! bounded by [`MAX_TURNS`] since a headless run has no Esc to hand.
-//! Auto-eviction is weighed at every turn boundary, against the policy in
-//! [`digest`](crate::agent::digest); the standing-condition warnings
-//! ([`gauge`](crate::agent::gauge)) ride the steering channel at a tool
-//! boundary.
-//! [`Avatar::attend`] is the loop around this, one call per inbox item.
+//! Auto-eviction is weighed at every turn boundary, against the thresholds in
+//! [`gauge`](crate::agent::gauge); the standing-condition warnings ride the
+//! steering channel at a tool boundary.  [`Avatar::attend`] is the loop around
+//! this, one call per inbox item.
 
 use crate::agent::Avatar;
 use crate::agent::attend::announce;
-use crate::agent::cancel;
-use crate::agent::digest::{EVICT_THRESHOLD, suffix_keep_budget};
-use crate::agent::event::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
-use crate::agent::seat::EngineLost;
+use crate::agent::gauge::{self, EVICT_THRESHOLD, Measure, suffix_keep_budget};
+use crate::agent::log::{EditAuthority, QuiesceReason, ToolResult as SessionToolResult};
 use crate::bus::{AgentState, Emitter, Next};
 use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
+use ral_core::protocol::Severed;
 use ral_core::serial::FOValue;
+use std::io;
 use std::sync::Arc;
 
-/// Outcome of one [`Avatar::deliberate`]; hard failures travel through
-/// [`ProviderError`] instead.  [`Self::Empty`] and [`Self::Stopped`] become
-/// nudges, [`Self::Cancelled`] and [`Self::Capped`] do not.
+/// Outcome of one [`Avatar::deliberate`].  [`Self::Empty`] and
+/// [`Self::Stopped`] become nudges, [`Self::Cancelled`] and [`Self::Capped`]
+/// do not.
 #[derive(Debug)]
 pub enum Outcome {
-    Complete(String),
-    /// A returning agent called `reply`.  The payload stays a value — a child
-    /// deposits it on its own agent, a headless root hands it to its
-    /// sink — and stays distinct from [`Self::Complete`] so the nudge layer
-    /// never re-nudges an agent that already answered.
-    Replied(FOValue),
+    /// The model spoke and called no tool.
+    Complete,
+    /// A returning agent called `reply`: the value is deposited on its agent
+    /// for its consumer to read.  Distinct from [`Self::Complete`] so the
+    /// nudge layer never re-nudges an agent that already answered.
+    Replied,
     Empty,
     Stopped {
         reason: String,
@@ -39,8 +38,38 @@ pub enum Outcome {
     /// Hit [`MAX_TURNS`] without a tool-call-free reply.  Terminal and
     /// nudge-free: re-attending would just spend another [`MAX_TURNS`].
     Capped,
-    /// The engine died mid-deliberation: no further tool call can dispatch.
-    Severed(ral_core::protocol::Severed),
+}
+
+/// Why a deliberation ended short of an [`Outcome`].
+#[derive(Debug)]
+pub enum Fault {
+    /// The provider's own failure, which the attend loop records and may
+    /// nudge over.
+    Provider(ProviderError),
+    /// The engine is gone: no further tool call can dispatch, and the loop
+    /// around this one ends too.
+    Severed(Severed),
+    /// The session log refused or failed an append; the context is left as
+    /// it lay.
+    Log(String),
+}
+
+impl From<ProviderError> for Fault {
+    fn from(error: ProviderError) -> Self {
+        Self::Provider(error)
+    }
+}
+
+impl From<Severed> for Fault {
+    fn from(severed: Severed) -> Self {
+        Self::Severed(severed)
+    }
+}
+
+impl From<io::Error> for Fault {
+    fn from(error: io::Error) -> Self {
+        Self::Log(error.to_string())
+    }
 }
 
 /// Hard ceiling on provider round-trips in one [`Avatar::deliberate`].  The
@@ -50,11 +79,13 @@ const MAX_TURNS: u32 = 250;
 
 impl Avatar {
     /// Run one deliberation: optionally commit `prompt`, then drive the
-    /// provider round-trip loop to quiescence.
+    /// provider round-trip loop to quiescence over `provider`, read once by
+    /// the caller so a `/model` swap lands on the next item rather than
+    /// mid-item.
     ///
     /// # Errors
-    /// Returns `Err` if a provider round-trip fails, or if a session-log
-    /// mutation does and is surfaced as `ProviderError::Other`.
+    /// A provider round-trip failed, the engine was lost, or a session-log
+    /// mutation failed.
     ///
     /// # Panics
     /// Panics if a turn is truncated with no tool calls yet no cut-short cause
@@ -64,22 +95,22 @@ impl Avatar {
         provider: &Arc<Provider>,
         prompt: Option<String>,
         continues: Option<u64>,
-        token: &cancel::Token,
         emit: &Emitter,
-    ) -> Result<Outcome, ProviderError> {
+    ) -> Result<Outcome, Fault> {
         self.couple(emit);
         // The commit producer's handle: answer paragraphs and reasoning runs
-        // record through the seam as they are decided, worker-side.
+        // are recorded as they are decided, worker-side.
         let recorder = self.recorder();
-        // A staged reply must not outlive the batch that staged it when a cancel
-        // or an error lands between `invoke` and the post-batch drain; entry is
-        // the one point every route into a deliberation is guaranteed to cross.
-        self.reply = None;
+        let token = self.agent.token.clone();
+        // A reply staged by a batch a cancel or an error cut short must not
+        // outlive it; entry is the one point every route into a deliberation
+        // is guaranteed to cross.
+        self.reply.take();
         if let Some(p) = prompt {
             self.log
                 .lock()
                 .append_user(p, continues)
-                .map_err(ProviderError::Other)?;
+                .map_err(Fault::Log)?;
         }
         let mut n = 0u32;
         loop {
@@ -90,34 +121,15 @@ impl Avatar {
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand, so there is no point in
             // the loop where the work at issue could leave.
-            self.evict(provider, false, token);
+            self.evict(provider, false);
             // The turn's live row derives from the published `Display::Turn`
             // record, which `record_turn_start` authors alongside the
             // protocol one — so this is the one authoring site.
-            self.log
-                .lock()
-                .record_turn_start(
-                    provider.tuning().clone(),
-                    provider.openrouter_route().map(str::to_owned),
-                )
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
-            #[cfg(debug_assertions)]
-            let t_render = std::time::Instant::now();
-            let messages = self
-                .log
-                .lock()
-                .render_messages()
-                .map_err(ProviderError::Other)?;
-            ral_core::dbg_trace!(
-                "deliberate",
-                "render_messages: {} msgs in {:?}",
-                messages.len(),
-                t_render.elapsed()
-            );
-            #[cfg(debug_assertions)]
-            let t_req = std::time::Instant::now();
-            #[cfg(debug_assertions)]
-            let mut first_token: Option<std::time::Duration> = None;
+            self.log.lock().record_turn_start(
+                provider.tuning().clone(),
+                provider.openrouter_route().map(str::to_owned),
+            )?;
+            let messages = self.log.lock().render_messages().map_err(Fault::Log)?;
             recorder.transient(Transient::State(AgentState::AwaitingModel));
             // One producer per turn, sealed at whichever boundary ends the
             // stream below.  A streaming callback has no error channel of its
@@ -125,24 +137,18 @@ impl Avatar {
             // boundary; nothing commits after it, a half-ordered scrollback
             // being worse than a short one.
             let mut stream = crate::record::commit::Stream::default();
-            let mut unrecorded: Option<std::io::Error> = None;
+            let mut unrecorded: Option<io::Error> = None;
             let taken = {
                 let stream = &mut stream;
                 let unrecorded = &mut unrecorded;
                 provider.complete(
                     &self.agent.system,
                     &messages,
-                    self.agent.tools,
+                    self.fleet.launch.tools,
                     self.agent.search,
                     &mut |delta: Delta<'_>| {
                         match delta {
-                            Delta::Say(t) => {
-                                #[cfg(debug_assertions)]
-                                if first_token.is_none() {
-                                    first_token = Some(t_req.elapsed());
-                                }
-                                recorder.transient(Transient::Token(t.to_string()));
-                            }
+                            Delta::Say(t) => recorder.transient(Transient::Token(t.to_string())),
                             Delta::Think(r) => {
                                 recorder.transient(Transient::Thinking(r.to_string()));
                             }
@@ -153,14 +159,9 @@ impl Avatar {
                             *unrecorded = Some(error);
                         }
                     },
-                    token,
+                    &token,
                 )
             };
-            ral_core::dbg_trace!(
-                "deliberate",
-                "provider.complete: first token {first_token:?}, full {:?}",
-                t_req.elapsed()
-            );
             if token.is_cancelled() {
                 abandon_turn(&mut stream, unrecorded, &recorder);
                 return Ok(self.cancelled());
@@ -179,30 +180,29 @@ impl Avatar {
                 }
                 Err(e) => {
                     abandon_turn(&mut stream, unrecorded, &recorder);
-                    return Err(e);
+                    return Err(e.into());
                 }
             };
-            close_turn(&mut stream, unrecorded, &recorder)
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+            close_turn(&mut stream, unrecorded, &recorder)?;
             // The committed message is the outcome's source of truth, not the
             // streaming accumulator: a provider that returns final text with
             // no `Say` deltas would otherwise read as an empty turn. Read
             // before `admit_assistant` below can replace empty content with
             // its stub.
-            let said = assistant_message
+            let spoke = assistant_message
                 .content
                 .first_text()
-                .unwrap_or_default()
-                .to_string();
+                .is_some_and(|text| !text.is_empty());
             // The live numerator the next `evict` weighs against the window.
-            let input_tokens = usage.input;
             let measured_at = {
                 let mut log = self.log.lock();
-                log.record_usage(usage.into())
-                    .map_err(|e| ProviderError::Other(e.to_string()))?;
-                log.log_len()
+                log.record_usage(usage)?;
+                log.context().log_len()
             };
-            self.last_input = (input_tokens, measured_at);
+            self.readings.measure = Some(Measure {
+                tokens: usage.input,
+                at: measured_at,
+            });
             // Routine boundaries and `MaxTokens` (handled below) stay silent.
             if let Some(reason) = &stop_reason {
                 match reason {
@@ -221,7 +221,7 @@ impl Avatar {
                     tool_ids,
                     stop_reason.as_ref().map(|r| r.raw().to_string()),
                 )
-                .map_err(ProviderError::Other)?;
+                .map_err(Fault::Log)?;
             let truncated = cut_short.is_some();
             // A cut-short turn with no tool calls is final; `Truncated` lets the
             // nudge re-drive it.  With tool calls the session now sits in
@@ -236,7 +236,8 @@ impl Avatar {
                 let cause = cut_short.expect("truncated implies cut_short");
                 return Err(ProviderError::Truncated {
                     cause: Box::new(cause),
-                });
+                }
+                .into());
             }
             if tool_calls.is_empty() {
                 return Ok(match &stop_reason {
@@ -245,22 +246,22 @@ impl Avatar {
                             reason: r.raw().to_string(),
                         }
                     }
-                    _ if said.is_empty() => Outcome::Empty,
-                    _ => Outcome::Complete(said),
+                    _ if spoke => Outcome::Complete,
+                    _ => Outcome::Empty,
                 });
             }
             if truncated {
                 self.note("[Truncated mid-tool-call; continuing]".into());
             }
-            let results = self.run_batch(tool_calls, token, emit);
+            let results = self.run_batch(tool_calls, emit);
             self.log
                 .lock()
                 .append_tool_results(results)
-                .map_err(ProviderError::Other)?;
+                .map_err(Fault::Log)?;
             // A tool call in the batch just run may have found the engine
             // gone; no further dispatch can run once it has.
             if let Some(s) = self.seat.severed() {
-                return Ok(Outcome::Severed(s));
+                return Err(s.into());
             }
             // A cancelled batch admits nothing: a read run or a steer recorded
             // here would belong to the exchange being dropped.
@@ -280,20 +281,17 @@ impl Avatar {
                         self.log
                             .lock()
                             .append_steering(item.text())
-                            .map_err(ProviderError::Other)?;
+                            .map_err(Fault::Log)?;
                     }
                     Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
                 }
             }
-            let warnings = match self.warnings(provider) {
-                Ok(warnings) => warnings,
-                Err(s) => return Ok(Outcome::Severed(s)),
-            };
+            let warnings = self.warnings(provider)?;
             if !warnings.is_empty() {
                 self.log
                     .lock()
                     .append_steering(warnings.join("\n"))
-                    .map_err(ProviderError::Other)?;
+                    .map_err(Fault::Log)?;
             }
             // A `reply` in the fully drained batch ends the run here, not at
             // another round-trip.
@@ -309,19 +307,20 @@ impl Avatar {
     /// newest turn, so this never answers with the work in hand either.
     pub(crate) fn planned_eviction(&self) -> Option<Vec<u64>> {
         let log = self.log.lock();
-        if !log.can_evict() {
-            return None;
-        }
-        let keep = suffix_keep_budget(log.history_bytes());
-        log.plan_eviction(keep)
+        let context = log.context();
+        let plan = context
+            .can_evict()
+            .then(|| context.plan_eviction(suffix_keep_budget(context.history_bytes())));
+        drop(log);
+        plan.flatten()
     }
 
     /// Shed the older half of the context, the harness writing no note of its
     /// own: the model's own `` exarch-context `evict `` is where a note comes from.
-    pub(crate) fn evict(&self, provider: &Arc<Provider>, requested: bool, token: &cancel::Token) {
-        if !self.log.lock().can_evict() {
+    pub(crate) fn evict(&self, provider: &Arc<Provider>, requested: bool) {
+        if !self.log.lock().context().can_evict() {
             if requested {
-                self.note_error("cannot evict while tool results are pending".into());
+                self.note_error("cannot evict while tool results are pending");
             }
             return;
         }
@@ -330,54 +329,50 @@ impl Avatar {
         // An unknown window falls back to the byte heuristic; a manual
         // `/evict` overrides the trigger entirely.
         let due = match provider.context_window() {
-            Some(w) if w > 0 => self.token_eviction_due(w),
-            _ => self.log.lock().history_bytes() >= EVICT_THRESHOLD,
+            Some(window) if window > 0 => self
+                .measured_input()
+                .is_some_and(|tokens| gauge::eviction_due(tokens, window)),
+            _ => self.log.lock().context().history_bytes() >= EVICT_THRESHOLD,
         };
         if !requested && !due {
             return;
         }
         // A boundary Esc leaves the context as it lies; the next boundary
         // weighs it again.
-        if token.is_cancelled() {
+        if self.agent.token.is_cancelled() {
             return;
         }
-        // Keep the recent half verbatim; the older prefix leaves the context.
-        let keep = suffix_keep_budget(self.log.lock().history_bytes());
-        let Some(turns) = self.log.lock().plan_eviction(keep) else {
-            // No turn old enough to shed: a no-op, not an event.
+        // No turn old enough to shed is a no-op, not an event.
+        let Some(turns) = self.planned_eviction() else {
             return;
         };
         self.recorder()
             .transient(Transient::State(AgentState::Evicting));
-        // `evict` records `Evicted` through the seam, and the live row derives
-        // from the published record — there is no separate notification left
-        // to keep in step with it.
+        // `evict` records `Evicted`, and the live row derives from the
+        // published record — there is no separate notification to keep in
+        // step with it.
         let edited = self.log.lock().evict(&turns, None, EditAuthority::Harness);
         if let Err(e) = edited {
-            self.note_error(format!("evict failed: {e}"));
+            self.note_error(&format!("evict failed: {e}"));
         }
     }
 
     /// Run a batch of tool calls in order, short-circuiting the rest to
     /// cancelled results the instant the token trips.  Every call answers
     /// synchronously — a `spawn` returns a start receipt, not a join handle.
-    fn run_batch(
-        &mut self,
-        tool_calls: Vec<ToolCall>,
-        token: &cancel::Token,
-        emit: &Emitter,
-    ) -> Vec<SessionToolResult> {
+    fn run_batch(&mut self, tool_calls: Vec<ToolCall>, emit: &Emitter) -> Vec<SessionToolResult> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut it = tool_calls.into_iter();
         for call in it.by_ref() {
-            if token.is_cancelled() {
+            if self.agent.token.is_cancelled() {
                 results.push(cancelled_result(call.call_id));
                 results.extend(it.map(|r| cancelled_result(r.call_id)));
                 break;
             }
             // A severed seat runs nothing more, so the rest answer its loss.
             if let Some(s) = self.seat.severed() {
-                let lost = EngineLost::running(&s, self.agent.run_dir()).to_string();
+                let lost =
+                    crate::agent::seat::EngineLost::running(&s, self.agent.run_dir()).to_string();
                 results.extend(std::iter::once(call).chain(it).map(|r| SessionToolResult {
                     id: r.call_id,
                     content: lost.clone(),
@@ -393,9 +388,9 @@ impl Avatar {
         // The names this agent recognises are exactly the ones its request
         // advertised.  Every harness verb (`agent`, `reply`, `schedule`, …)
         // is a builtin *inside* `ral`, not a tool of its own.
-        let Some(tool) = self.agent.tools.get(&call.fn_name) else {
+        let Some(tool) = self.fleet.launch.tools.get(&call.fn_name) else {
             let msg = format!("unknown tool `{}`", call.fn_name);
-            self.note_error(msg.clone());
+            self.note_error(&msg);
             return SessionToolResult {
                 id: call.call_id,
                 content: msg,
@@ -404,17 +399,18 @@ impl Avatar {
         tool.run(call.call_id, &call.fn_arguments, self, emit)
     }
 
-    /// The batch carried a `reply`.  The round-trip never asked for a final
-    /// assistant message, so the session sits in
-    /// `AwaitingAssistantAfterToolResults` and is wound back with its own
-    /// breadcrumb; live descendants are cancelled and reaped.  A child then
-    /// parks, deposit and all — only a parentless agent's `attend` loop stops
-    /// here.
+    /// The batch carried a `reply`.  Live descendants are cancelled and
+    /// reaped, the value is deposited for this agent's consumer, and the
+    /// round-trip — which never asked for a final assistant message, so the
+    /// session sits in `AwaitingAssistantAfterToolResults` — is wound back
+    /// with its own breadcrumb.  A child then parks, deposit and all; only a
+    /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agent
             .cancel_descendants(ral_core::process::CancelCause::Explicit);
+        self.agent.deposit_reply(payload);
         self.log.lock().quiesce(QuiesceReason::Replied);
-        Outcome::Replied(payload)
+        Outcome::Replied
     }
 
     /// The log already carries `Cancelled` through `quiesce`'s own
@@ -429,7 +425,7 @@ impl Avatar {
     /// for the attend loop's per-item quiesce to wind back; the [`StopReason`]
     /// reaches the headless JSON so a harness can tell a cap from a completion.
     fn capped(&self) -> Outcome {
-        self.note_error(format!(
+        self.note_error(&format!(
             "turn cap reached ({MAX_TURNS} provider round-trips); ending the deliberation"
         ));
         self.recorder()
@@ -458,9 +454,9 @@ fn cancelled_result(id: String) -> SessionToolResult {
 /// The first commit that failed anywhere in the turn.
 fn close_turn(
     stream: &mut crate::record::commit::Stream,
-    unrecorded: Option<std::io::Error>,
+    unrecorded: Option<io::Error>,
     recorder: &crate::record::Emitter,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let sealed = match unrecorded {
         Some(error) => Err(error),
         None => stream.seal(recorder),
@@ -475,11 +471,11 @@ fn close_turn(
 /// one must not mask it.
 fn abandon_turn(
     stream: &mut crate::record::commit::Stream,
-    unrecorded: Option<std::io::Error>,
+    unrecorded: Option<io::Error>,
     recorder: &crate::record::Emitter,
 ) {
     if let Err(error) = close_turn(stream, unrecorded, recorder) {
-        eprintln!("exarch: a cancelled turn's streamed prefix was not recorded: {error}");
+        recorder.report_fault(&error);
     }
 }
 
@@ -517,15 +513,11 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
     use crate::agent::cancel::InterruptTarget;
     use crate::agent::testkit::*;
-    use crate::bus::{AgentOutcome, Post, Stamped};
+    use crate::bus::{AgentOutcome, Item, Post, Stamped};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -535,8 +527,8 @@ mod tests {
     use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
 
-    /// A sub-agent returns through `reply`: the payload reaches the parent raw,
-    /// it settles `Complete`, and the run ends `ReadyForUser`.
+    /// A sub-agent returns through `reply`: the payload is deposited raw, it
+    /// settles `Replied`, and the run ends `ReadyForUser`.
     #[test]
     fn sub_agent_returns_through_reply() {
         let parent = Avatar::for_test("system").unwrap();
@@ -549,18 +541,18 @@ mod tests {
                 "exarch-agents `reply #'# Report\nline one\nline two'#",
             )])),
         );
-        let (outcome, payload) = drive_peer(&mut child, provider);
+        let outcome = drive_peer(&mut child, provider);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
             "a reply settles Replied, got {outcome:?}"
         );
         assert_eq!(
-            payload.and_then(|v| match v {
+            child.agent.reply().and_then(|v| match v {
                 FOValue::String { value } => Some(value),
                 _ => None,
             }),
             Some("# Report\nline one\nline two".into()),
-            "the markdown payload passes through raw, newlines intact"
+            "the markdown payload is deposited raw, newlines intact"
         );
         assert!(
             child.is_ready(),
@@ -596,11 +588,11 @@ mod tests {
                 "exarch-agents `reply 'done'",
             )])),
         );
-        let (outcome, payload) = drive_peer(&mut child, provider);
+        let outcome = drive_peer(&mut child, provider);
 
         assert!(matches!(outcome, AgentOutcome::Replied));
         assert_eq!(
-            payload,
+            child.agent.reply(),
             Some(FOValue::String {
                 value: "done".into()
             })
@@ -608,7 +600,7 @@ mod tests {
         // The cascade runs inside the deliberation that replied, so it has
         // already landed by the time that reply is the settled outcome.
         assert!(
-            direct.cancel_token().is_cancelled(),
+            direct.token.is_cancelled(),
             "the direct child is cancelled by the reply itself"
         );
         assert!(
@@ -618,17 +610,17 @@ mod tests {
             "the cascade cancels the abandoned child's eval layer too"
         );
         assert!(
-            grandchild.cancel_token().is_cancelled(),
+            grandchild.token.is_cancelled(),
             "grandchild is cancelled recursively"
         );
         assert!(
-            !sibling.cancel_token().is_cancelled(),
+            !sibling.token.is_cancelled(),
             "a sibling outside the replying subtree is untouched"
         );
-        assert_eq!(
-            sibling.consumer(),
-            Some(parent.agent.mailbox().epoch()),
-            "reply must not bump the global epoch and poison siblings"
+        sibling.report(AgentOutcome::Stopped("still delivers".into()));
+        assert!(
+            matches!(parent.inbox.next_item(), Some(Next::Item(Item::Agent(_)))),
+            "reply must not poison a sibling's delivery to their shared parent"
         );
 
         // The abandoned subtree leaves the tree as its holders drop, which in
@@ -661,14 +653,8 @@ mod tests {
         );
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        match session.deliberate(
-            &provider,
-            Some("go".into()),
-            None,
-            &cancel::Token::new(),
-            &emit,
-        ) {
-            Ok(Outcome::Complete(s)) => assert_eq!(s, "ok"),
+        match session.deliberate(&provider, Some("go".into()), None, &emit) {
+            Ok(Outcome::Complete) => {}
             other => panic!("the steering prompt must be admitted mid-exchange, got {other:?}"),
         }
 
@@ -709,7 +695,7 @@ mod tests {
     /// one excursion carry one reminder.
     #[test]
     fn pressure_rides_the_steering_channel_once_per_excursion() {
-        use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
+        use crate::agent::gauge::PRESSURE_THRESHOLD_FALLBACK;
         const EXCHANGES: usize = 6;
         let mut session = Avatar::for_test("system").unwrap();
         // A scripted model has no catalogued context window, so the gauge
@@ -745,14 +731,8 @@ mod tests {
         );
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        match session.deliberate(
-            &provider,
-            Some("go".into()),
-            None,
-            &cancel::Token::new(),
-            &emit,
-        ) {
-            Ok(Outcome::Complete(s)) => assert_eq!(s, "noted"),
+        match session.deliberate(&provider, Some("go".into()), None, &emit) {
+            Ok(Outcome::Complete) => {}
             other => panic!("the run must reach its reply, got {other:?}"),
         }
 
@@ -794,13 +774,13 @@ mod tests {
         session.seed("second exchange after error".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, _) = session.attend(&emit);
+        let outcome = session.attend(&emit);
         assert!(
             session.is_ready(),
             "session must be ReadyForUser after a mid-deliberation provider error"
         );
         assert!(
-            scope_has(&mut session, "x12_a"),
+            scope_has(&session, "x12_a"),
             "a binding from a completed tool call must survive a later provider error"
         );
         match outcome {
@@ -823,22 +803,22 @@ mod tests {
             log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
                 .unwrap();
         }
-        let measured_at = session.log.lock().log_len();
-        session.last_input = (99_000, measured_at);
+        let measured_at = session.log.lock().context().log_len();
+        session.readings.measure = Some(Measure {
+            tokens: 99_000,
+            at: measured_at,
+        });
+        assert_eq!(session.measured_input(), Some(99_000));
         session
             .log
             .lock()
             .evict(&[2], None, EditAuthority::Model)
             .unwrap();
 
-        assert!(
-            !session.token_eviction_due(100_000),
-            "a stale token measure must not trigger an eviction"
-        );
         assert_eq!(
-            session.token_pressure(100_000),
+            session.measured_input(),
             None,
-            "a stale token measure must not warn as high pressure"
+            "a measure taken before an edit says nothing about what is left"
         );
 
         let provider = scripted(
@@ -847,21 +827,15 @@ mod tests {
         );
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let outcome = session.deliberate(
-            &provider,
-            Some("new context".into()),
-            None,
-            &cancel::Token::new(),
-            &emit,
-        );
-        assert!(matches!(outcome, Ok(Outcome::Complete(text)) if text == "fresh completion"));
+        let outcome = session.deliberate(&provider, Some("new context".into()), None, &emit);
+        assert!(matches!(outcome, Ok(Outcome::Complete)));
         assert_eq!(session.measured_input(), Some(0));
     }
 
     thread_local! {
         /// The token [`builtin_t2_cancel_now`] cancels — nothing else lets a
         /// bare builtin reach the token `deliberate` is watching.
-        static T2_CANCEL_TOKEN: std::cell::RefCell<Option<cancel::Token>> =
+        static T2_CANCEL_TOKEN: std::cell::RefCell<Option<crate::agent::cancel::Token>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -958,9 +932,7 @@ mod tests {
     #[test]
     fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
         let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
-
-        let token = cancel::Token::new();
-        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(token.clone()));
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.token.clone()));
 
         let provider = scripted(
             "test-model",
@@ -971,13 +943,18 @@ mod tests {
         );
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        match session.deliberate(&provider, Some("go".into()), None, &token, &emit) {
+        match session.deliberate(&provider, Some("go".into()), None, &emit) {
             Ok(Outcome::Cancelled) => {}
             other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
         }
         T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
+        assert!(
+            session.agent.reply().is_none(),
+            "a reply overtaken by a cancel is never deposited"
+        );
 
-        let token2 = cancel::Token::new();
+        // The exchange boundary the attend loop would cross.
+        session.agent.token.reset();
         // The next deliberation's first batch must itself reach the reply-drain
         // check: a leaked payload hard-terminates exactly there, on `c3`.
         let provider2 = scripted(
@@ -986,8 +963,8 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
                 .then(Reply::text("done")),
         );
-        match session.deliberate(&provider2, Some("continue".into()), None, &token2, &emit) {
-            Ok(Outcome::Complete(s)) => assert_eq!(s, "done"),
+        match session.deliberate(&provider2, Some("continue".into()), None, &emit) {
+            Ok(Outcome::Complete) => {}
             other => panic!(
                 "a reply staged in a cancelled batch must not leak into the next deliberation, got {other:?}"
             ),
@@ -1000,8 +977,8 @@ mod tests {
     #[test]
     fn a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context() {
         let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
-        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.cancel.clone()));
-        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.token.clone()));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
@@ -1022,11 +999,11 @@ mod tests {
         T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
         assert_eq!(
-            session.log.lock().current_prompt(),
+            session.log.lock().context().current_prompt(),
             Some(3),
             "the queued prompt lands as turn 3 after turns 1–2, rather than steering turn 1"
         );
-        let rendered = session.log.lock().history_rendered();
+        let rendered = session.rendered_messages();
         let position = |text: &str| {
             rendered
                 .iter()
@@ -1048,7 +1025,7 @@ mod tests {
     #[test]
     fn a_read_queued_mid_exchange_runs_at_the_tool_boundary_ahead_of_the_next_step() {
         let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
-        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
@@ -1063,7 +1040,7 @@ mod tests {
         ));
         session.seed("go".into());
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
         session.attend(&emit);
         T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
@@ -1093,7 +1070,7 @@ mod tests {
             .expect("the exchange's answer is recorded");
         assert!(fold < answer, "the fold precedes the next assistant step");
 
-        let rendered = session.log.lock().history_rendered();
+        let rendered = session.rendered_messages();
         let position = |text: &str| {
             rendered
                 .iter()
@@ -1114,7 +1091,7 @@ mod tests {
     #[test]
     fn a_read_queued_after_a_prompt_runs_after_it_lands() {
         let mut session = dressed_trunk(|shell| shell.install_builtins(T2_CANCEL_BUILTINS));
-        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.agent.mailbox.clone()));
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
@@ -1129,7 +1106,7 @@ mod tests {
         ));
         session.seed("go".into());
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
         session.attend(&emit);
         T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
 
@@ -1169,7 +1146,7 @@ mod tests {
     #[test]
     fn stale_epoch_agent_result_never_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stamp = session.agent.mailbox().stamp();
+        let stamp = session.agent.mailbox.stamp();
         session.inbox.clear();
         stamp.post(Stamped::AgentResult(crate::bus::AgentResult {
             id: 7,
@@ -1183,12 +1160,12 @@ mod tests {
             .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&emit);
+        let outcome = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "a stale result must be dropped, not attended to; got {outcome:?}"
         );
-        assert!(payload.is_none());
+        assert!(session.agent.reply().is_none());
         assert!(session.is_ready());
     }
 
@@ -1199,7 +1176,7 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         session
             .agent
-            .mailbox()
+            .mailbox
             .stamp()
             .post(Stamped::AgentResult(crate::bus::AgentResult {
                 id: 7,
@@ -1216,13 +1193,13 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&emit);
+        let outcome = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
             "a live-epoch result must be delivered; got {outcome:?}"
         );
         assert_eq!(
-            payload,
+            session.agent.reply(),
             Some(FOValue::String {
                 value: "done".into()
             })
@@ -1234,7 +1211,7 @@ mod tests {
     #[test]
     fn stale_epoch_surface_batch_never_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stamp = session.agent.mailbox().stamp();
+        let stamp = session.agent.mailbox.stamp();
         session.inbox.clear();
         stamp.post(Stamped::Surface {
             id: session.agent.id,
@@ -1246,12 +1223,12 @@ mod tests {
             .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&emit);
+        let outcome = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "a stale surface batch must be dropped, not attended to; got {outcome:?}"
         );
-        assert!(payload.is_none());
+        assert!(session.agent.reply().is_none());
         assert!(session.is_ready());
     }
 
@@ -1260,7 +1237,7 @@ mod tests {
     #[test]
     fn current_epoch_surface_batch_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        session.agent.mailbox().stamp().post(Stamped::Surface {
+        session.agent.mailbox.stamp().post(Stamped::Surface {
             id: session.agent.id,
             values: Vec::new(),
         });
@@ -1273,13 +1250,13 @@ mod tests {
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend(&emit);
+        let outcome = session.attend(&emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
             "a live-epoch surface batch must be delivered; got {outcome:?}"
         );
         assert_eq!(
-            payload,
+            session.agent.reply(),
             Some(FOValue::String {
                 value: "done".into()
             })
@@ -1293,7 +1270,7 @@ mod tests {
     #[test]
     fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
         let parent = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-        let mut child = parent.fork().expect("fork child");
+        let child = parent.fork().expect("fork child");
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());

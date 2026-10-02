@@ -15,8 +15,9 @@ pub struct WorkerRow {
     pub running: bool,
     pub up_secs: u64,
     pub idle_secs: u64,
-    /// The ral-call epoch at which the row was first seen settled.
-    pub settled_epoch: Option<u64>,
+    /// Ral calls until a settled row's retention expires; `None` while it
+    /// runs, or with no retention armed.
+    pub retention_left: Option<u64>,
 }
 
 record!(WorkerRow {
@@ -26,11 +27,11 @@ record!(WorkerRow {
     running: "running",
     up_secs: "up-secs",
     idle_secs: "idle-secs",
-    settled_epoch: "settled-epoch",
+    retention_left: "retention-left",
 });
 
 impl WorkerRow {
-    pub(super) fn of(entry: &WorkerEntry) -> Self {
+    pub(super) fn of(shell: &Shell, entry: &WorkerEntry) -> Self {
         Self {
             id: entry.id.0,
             cmd: entry.cmd.clone(),
@@ -38,7 +39,7 @@ impl WorkerRow {
             running: entry.handle.is_running(),
             up_secs: entry.started.elapsed().unwrap_or_default().as_secs(),
             idle_secs: entry.handle.last_observed().elapsed().as_secs(),
-            settled_epoch: entry.settled_epoch,
+            retention_left: shell.worker_retention_left(entry),
         }
     }
 }

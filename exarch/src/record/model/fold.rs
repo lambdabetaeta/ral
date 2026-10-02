@@ -7,7 +7,7 @@ use super::{
     Context, Held, Turn, into_chat_messages, message_bytes, message_label, message_role,
     not_recorded_refusal_turn, opening_line, runs,
 };
-use crate::agent::event::{Role, TurnKind};
+use crate::agent::log::{Role, TurnKind};
 use crate::record::{Protocol, Record, Recorded, Refusal};
 use std::collections::BTreeSet;
 

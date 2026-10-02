@@ -3,12 +3,13 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, deliberate};
+use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, Trunk, deliberate};
 use exarch::bootstrap::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::record::{self, Blocks, Refusal, View};
+use exarch::shell_eval::tools::Toolset;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -42,25 +43,21 @@ fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
 fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
-    let token = exarch::agent::cancel::Token::new();
-    let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &token, &emit);
-    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
+    let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &emit);
+    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete)));
 }
 
-fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
+fn root_config(run_dir: &Path) -> RootConfig {
     RootConfig {
         system: "system".into(),
         caps: ral_core::types::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
-        resume: resume.then(|| run_dir.to_path_buf()),
-        run_lock: None,
         model: "test-model".into(),
         account: RecordedAccount::for_test("test"),
+        trunk: Trunk::Attended,
+        tools: Toolset::offered(false),
         allow_schedule: false,
         resume_on_reset: false,
-        interactive: true,
-        chat: false,
-        thinking_tool: false,
         disk_warn_bytes: None,
         fuel: 0,
         egress: exarch::egress::Egress::for_test(),
@@ -106,8 +103,8 @@ fn scripted_run_kill_resume_and_continue() {
     child.kill().expect("terminate scripted child");
     let _ = child.wait();
 
-    let mut resumed = Avatar::root(
-        root_config(&child_dir, true),
+    let (mut resumed, _) = Avatar::resume(
+        root_config(&child_dir),
         identity_seat("resume-parent"),
         scripted("test-model", Script::new()),
     )
@@ -212,7 +209,7 @@ fn resume_child() {
     // of this child's own.  A real launch finds its run dir already made.
     std::fs::create_dir_all(&dir).expect("child run dir");
     let mut session = Avatar::root(
-        root_config(&dir, false),
+        root_config(&dir),
         identity_seat("resume-child"),
         scripted("test-model", Script::new()),
     )

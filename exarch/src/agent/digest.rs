@@ -4,7 +4,8 @@
 //! cap, so one oversized stream cannot crowd out the others.  The string the
 //! model reads on later turns is the one the transcript records, so the user
 //! never sees more of a result than the model did.  These caps bound a single
-//! result; the whole history is bounded by eviction ([`eviction_due`]).
+//! result; the whole history is bounded by eviction
+//! ([`gauge`](crate::agent::gauge)).
 
 use crate::shell_eval;
 use std::fmt::Write;
@@ -20,62 +21,15 @@ const STDERR_CAP: usize = 10_000;
 /// section caps: a diagnostic past a few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;
 
-/// Fallback eviction trigger, in serialised model-view bytes, for
-/// `Avatar::evict` — used only when the model's context window is unknown
-/// (a native provider with no fetched catalog).
-///
-/// A known window goes through [`eviction_due`] instead.
-pub const EVICT_THRESHOLD: usize = 500 * 1024;
-
-/// Tokens held back from the window for the next prompt.  Mirrors
-/// oh-my-pi's `effectiveReserveTokens`: 15% of the window, with a floor so a
-/// small window still keeps a usable margin.
-fn reserve_tokens(window: u64) -> u64 {
-    const RESERVE_FLOOR_TOKENS: u64 = 16_384;
-    (window * 15 / 100).max(RESERVE_FLOOR_TOKENS)
-}
-
-/// Whether the live context (`used` input tokens) has grown into the
-/// reserve — i.e. crossed `window − reserve`.
-pub fn eviction_due(used: u64, window: u64) -> bool {
-    used + reserve_tokens(window) > window
-}
-
-/// The token count past which [`eviction_due`] fires, spelled as a gauge
-/// cap for `/resources`.
-pub fn eviction_trigger(window: u64) -> u64 {
-    window.saturating_sub(reserve_tokens(window))
-}
-
-/// The soft line one full reserve ahead of [`eviction_due`]: room enough for
-/// the model to leave itself a note before the older half of its context
-/// goes.
-pub fn pressure_due(used: u64, window: u64) -> bool {
-    used + 2 * reserve_tokens(window) > window
-}
-
-/// Fallback soft line when the window is unknown: three-quarters of
-/// [`EVICT_THRESHOLD`].
-pub const PRESSURE_THRESHOLD_FALLBACK: usize = EVICT_THRESHOLD / 4 * 3;
-
-/// Byte budget for the verbatim suffix kept across an eviction: half the
-/// model-view bytes, the older half being what leaves the window.
-///
-/// Window-agnostic — it splits whatever is in context, which the trigger
-/// bounds.
-pub fn suffix_keep_budget(history_bytes: usize) -> usize {
-    history_bytes / 2
-}
-
 /// The elided bytes are kept nowhere, so re-running the command reproduces
 /// the same cut; the model's only recourse is to ask for less.
 const ELISION_NUDGE: &str = "; narrow the output by using within/filter/take/view-text/tail";
 
-/// Cap `text` at `cap` bytes, measured on the visible text
-/// ([`visible_text`]) rather than the raw bytes, eliding the middle when it
-/// does not fit.
+/// Cap `text` at `cap` bytes, measured on what a terminal would show of it
+/// ([`ral_core::ansi::visible`]) rather than the raw bytes, eliding the
+/// middle when it does not fit.
 pub fn clip(text: &str, cap: usize) -> String {
-    let plain = visible_text(text);
+    let plain = ral_core::ansi::visible(text);
     head_tail(&plain, cap, ELISION_NUDGE).unwrap_or(plain)
 }
 
@@ -151,58 +105,6 @@ fn align_cut_forward(s: &str, idx: usize) -> usize {
     ral_core::text::ceil_char_boundary(s, idx)
 }
 
-/// Reduce `text` to what a terminal would leave on screen: escape sequences
-/// dropped, carriage return rewinding to column zero (a progress meter
-/// collapses to its final frame), backspace rewinding one cell (nroff
-/// overstrike keeps the last glyph).  `ral_core::ansi::strip` does the first
-/// alone; this is the one place cursor motion is replayed.  A cell is one
-/// `char`, not a width-aware grapheme — exact for both, harmless beyond.
-fn visible_text(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut line: Vec<char> = Vec::new();
-    let mut col = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            0x1b => i += ral_core::ansi::escape_seq_len(bytes, i),
-            b'\n' => {
-                #[allow(
-                    clippy::iter_with_drain,
-                    reason = "line buffer capacity must survive across lines"
-                )]
-                out.extend(line.drain(..));
-                out.push('\n');
-                col = 0;
-                i += 1;
-            }
-            b'\r' => {
-                col = 0;
-                i += 1;
-            }
-            0x08 => {
-                col = col.saturating_sub(1);
-                i += 1;
-            }
-            _ => {
-                let ch = text[i..]
-                    .chars()
-                    .next()
-                    .expect("slice starts at char boundary");
-                if col < line.len() {
-                    line[col] = ch;
-                } else {
-                    line.push(ch);
-                }
-                col += 1;
-                i += ch.len_utf8();
-            }
-        }
-    }
-    out.extend(line);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,18 +116,6 @@ mod tests {
             value: value.map(str::to_string),
             exit,
         }
-    }
-
-    #[test]
-    fn pressure_line_sits_a_full_reserve_before_the_trigger() {
-        let w = 200_000;
-        let trigger = eviction_trigger(w);
-        assert!(!eviction_due(trigger, w) && eviction_due(trigger + 1, w));
-        assert!(
-            pressure_due(trigger, w),
-            "eviction due implies pressure due"
-        );
-        assert!(!pressure_due(w / 2, w), "half a window is not pressure");
     }
 
     #[test]
@@ -302,44 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn clip_strips_ansi_before_measuring() {
+    fn clip_measures_the_visible_text() {
         let raw = "\x1b[31m".repeat(2000) + "tiny";
         assert!(raw.len() > 1024);
         assert_eq!(clip(&raw, 1024), "tiny");
-    }
-
-    #[test]
-    fn visible_text_keeps_multibyte_char_after_bare_esc() {
-        assert_eq!(visible_text("\x1bλ tail"), "λ tail");
-    }
-
-    #[test]
-    fn carriage_return_collapses_to_final_frame() {
-        assert_eq!(visible_text("0%\r50%\r100%\n"), "100%\n");
-    }
-
-    #[test]
-    fn crlf_is_a_plain_line_ending() {
-        assert_eq!(visible_text("alpha\r\nbeta\r\n"), "alpha\nbeta\n");
-    }
-
-    #[test]
-    fn overwrite_shorter_than_frame_keeps_the_tail() {
-        // A terminal leaves the unoverwritten cells standing; so do we.
-        assert_eq!(visible_text("loading\rdone"), "doneing");
-    }
-
-    #[test]
-    fn backspace_overstrike_keeps_last_glyph() {
-        // nroff bold (b BS b) and underline (_ BS x); a backspace at column
-        // zero is inert.
-        assert_eq!(visible_text("b\u{8}bo\u{8}o000"), "bo000");
-        assert_eq!(visible_text("_\u{8}x"), "x");
-        assert_eq!(visible_text("\u{8}a"), "a");
-    }
-
-    #[test]
-    fn clip_measures_after_overwrite_simulation() {
         let churn = "spinner\r".repeat(100_000) + "done.  ";
         assert!(churn.len() > STDOUT_CAP);
         assert_eq!(clip(&churn, STDOUT_CAP), "done.  ");

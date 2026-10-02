@@ -202,7 +202,7 @@ Two more `ProviderError` variants never come from `from_genai`:
   record of its own at the point it happened, so a survived stall drew two
   error blocks — one saying the turn resumes, one immediately reading as the
   end of the run. Now the caller's `record_provider_error` writes it once, and
-  `ProviderErrorRecord::stall_cause` is the one place the "survived, not fatal"
+  `ProviderError::stall_cause` is the one place the "survived, not fatal"
   reading is derived: the TUI fold, synod's seam and the headless printer each
   ask it rather than re-matching the shape.
 

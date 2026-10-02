@@ -1,9 +1,10 @@
 //! Token counts and dollar cost for one turn, and the shared rendering of both.
 
 use genai::adapter::AdapterKind;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Usage {
     /// genai's `prompt_tokens`, which already includes both cache counts below;
     /// `ModelPricing::dollars` subtracts them before billing the remainder.

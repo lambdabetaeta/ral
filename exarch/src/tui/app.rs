@@ -11,11 +11,11 @@ use super::palette::AGENT_HUES;
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
+use super::resources::{BusFigures, ScrollbackFigures, frontend_rows};
 use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
 use super::terminal::{Term, osc52_copy};
 use crate::agent::Agent;
-use crate::agent::resources::{BusFigures, ScrollbackFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
@@ -137,7 +137,7 @@ impl App {
     pub(super) fn focused_waiting(&self) -> bool {
         self.tabs
             .focused_agent()
-            .is_none_or(|agent| agent.mailbox().waiting_for_input())
+            .is_none_or(|agent| agent.mailbox.waiting_for_input())
     }
 
     /// Whether matrix navigation owns the keyboard.
@@ -294,7 +294,7 @@ impl App {
         // own — it must survive a tab's retirement, where `Scrollback::usage`
         // reads off the view fold it is stepped alongside below.
         if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
-            let u = Usage::from(usage);
+            let u = *usage;
             if id == self.tabs.root() {
                 self.last_input = u.input;
             }
@@ -360,7 +360,7 @@ impl App {
             .tabs
             .scrollback(id)
             .map_or((0, 0, 0), super::scrollback::Scrollback::probe_figures);
-        let frontend = crate::agent::resources::frontend_rows(
+        let frontend = frontend_rows(
             ScrollbackFigures {
                 blocks,
                 rows,
@@ -584,7 +584,7 @@ mod tests {
     /// only weakly: dropping it here would settle the agent mid-test.
     fn app() -> (App, BusReceiver, Arc<Agent>) {
         let (_tx, rx) = crate::bus::channel();
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh trunk");
         let app = App::new(&root, false, false, Inbox::new());
         (app, rx, root)

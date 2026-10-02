@@ -22,7 +22,7 @@ use super::line::is_blank;
 use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
-use crate::agent::event::EditAuthority;
+use crate::agent::log::EditAuthority;
 use crate::bus::card::{self, Card, Landing, landing, observation_card};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};

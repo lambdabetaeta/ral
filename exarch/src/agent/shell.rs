@@ -8,20 +8,20 @@
 
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
-use crate::agent::event::AgentLog;
+use crate::agent::log::AgentLog;
 use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
-use ral_core::protocol::{Report, Severed, reading};
+use ral_core::protocol::{Report, reading};
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
 use std::fmt::Write;
+use std::io;
 use std::sync::{Arc, Mutex};
 
-/// One `ral` call's reply slot, minted fresh per call so a reply staged and
-/// then abandoned cannot resurface in a later one.  The desk's `reply` handler
-/// is its only writer; [`Avatar::ral`] harvests it into [`Avatar::reply`].
+/// The desk's `reply` slot: within one batch the last write wins, and
+/// [`Avatar::deliberate`] takes it once the batch drains.
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
@@ -38,7 +38,6 @@ impl ReplyCell {
         }
     }
 
-    /// Stage `value` as the return payload; within one call, last write wins.
     pub(crate) fn set(&self, value: FOValue) {
         *self.lock() = Some(value);
     }
@@ -59,7 +58,7 @@ impl LogCell {
         Self(Arc::new(Mutex::new(log)))
     }
 
-    /// The crate's one door onto the log, and it never waits: `WouldBlock`
+    /// The crate's one way onto the log, and it never waits: `WouldBlock`
     /// means a handler asked for a guard its own attend thread already holds.
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, AgentLog> {
         match self.0.try_lock() {
@@ -74,40 +73,44 @@ impl LogCell {
     }
 }
 
+/// What one `ral` call leaves the model: the text it reads, and whether the
+/// run failed — rejected, raised, nonzero, or lost with its engine.
+pub(crate) struct Evaluated {
+    pub text: String,
+    pub failed: bool,
+}
+
 impl Avatar {
-    /// Point this session's record seam at the bus `emit` rides, so every
-    /// fact the log authors is published live as it lands on disk.  Called
-    /// at each entry where a session meets a bus — `attend`, `deliberate`,
-    /// `Avatar::ral`, `rewind` — because the seam outlives any one bus:
+    /// Point this session's recorder at the bus `emit` rides, so every fact
+    /// the log authors is published live as it lands on disk.  Called at each
+    /// entry where a session meets a bus — `attend`, `deliberate`,
+    /// [`Self::ral`], `rewind` — because the recorder outlives any one bus:
     /// idempotent, and re-coupling over a dead per-exchange channel is how a
     /// headless session's next exchange comes back on air.
     pub(crate) fn couple(&self, emit: &Emitter) {
         self.log.lock().record_emitter().attach(emit.fleet_sink());
     }
 
-    /// This session's record seam, for whoever authors a display commit —
-    /// the chopper, the surface buffer, a tool-call row.
+    /// This session's recorder, for whoever authors a display commit — the
+    /// chopper, the surface buffer, a tool-call row.
     pub(crate) fn recorder(&self) -> crate::record::Emitter {
         self.log.lock().record_emitter()
     }
 
-    /// `record_error` is one call through the seam — durable and published in
-    /// the same breath, so there is no second write to keep in step with it.
-    /// Best effort at this last resort alone: the line the user is owed must
-    /// not vanish silently when the log itself is the failure.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the message is consumed by the record on the happy path; the clone only funds the last-resort stderr copy"
-    )]
-    pub(crate) fn note_error(&self, msg: String) {
-        let recorded = self.log.lock().record_error(msg.clone());
+    /// `record_error` is durable and published in one call, so there is no
+    /// second write to keep in step with it.  A log that cannot take it is
+    /// the one failure that cannot go through the log, so the line rides a
+    /// fault transient instead — never lost silently.
+    pub(crate) fn note_error(&self, msg: &str) {
+        let recorded = self.log.lock().record_error(msg.to_string());
         if let Err(error) = recorded {
-            eprintln!("exarch: {msg} (and the error itself was not recorded: {error})");
+            self.recorder()
+                .report_fault(&io::Error::new(error.kind(), format!("{msg} ({error})")));
         }
     }
 
-    /// An operational note: recorded through the seam as a [`Forensic::SystemNote`],
-    /// but with no model-view twin, since the model never saw it.
+    /// An operational note: recorded as a [`Forensic::SystemNote`], with no
+    /// model-view twin, since the model never saw it.
     pub(crate) fn note(&self, text: String) {
         let recorder = self.recorder();
         if let Err(error) = recorder.emit(crate::record::Forensic::SystemNote { text }) {
@@ -116,56 +119,36 @@ impl Avatar {
     }
 
     /// Everything a desk handler may read off `&Avatar`, since the reentrancy
-    /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.  Built
-    /// fresh at each [`Self::ral`] install, so no capture goes stale.
-    ///
-    /// # Errors
-    /// The engine's severance, from the live `cwd` and `home` probes.
-    pub(crate) fn host_services(
-        &self,
-        emit: &Emitter,
-        reply: ReplyCell,
-    ) -> Result<desk::HostServices, Severed> {
-        Ok(desk::HostServices {
+    /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.
+    /// Built fresh at each [`Self::ral`] install, so no capture goes stale.
+    pub(crate) fn host_services(&self, emit: &Emitter) -> desk::HostServices {
+        desk::HostServices {
             fleet: self.fleet.clone(),
             kind: self.seat.kind(),
             agent: self.agent.clone(),
             emit: emit.clone(),
-            cwd: self.cwd()?,
-            home: self.seat.read(reading::home)?,
-            reply,
+            reply: self.reply.clone(),
             log: self.log.clone(),
             branch: None,
-            stamp: self.agent.mailbox().stamp(),
+            stamp: self.agent.mailbox.stamp(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
-        })
+        }
     }
 
-    /// Evaluate one `ral` call: the text the model reads, and whether the run
-    /// failed — rejected, raised, nonzero, or lost with its engine.
-    pub(crate) fn ral(&mut self, cmd: &str, timeout_secs: u64, emit: &Emitter) -> (String, bool) {
+    /// Evaluate one `ral` call.
+    pub(crate) fn ral(&self, cmd: &str, timeout_secs: u64, emit: &Emitter) -> Evaluated {
         self.couple(emit);
-        // At entry, so a call that fails to evaluate still ages the clock.
-        self.ral_epoch += 1;
         // The assistant turn is recorded before its results are built, so this
         // is the id of the turn this result closes — and the call's source name.
-        let turn = self.log.lock().current_turn();
+        let turn = self.log.lock().context().current_turn();
         let source = turn.map_or_else(|| "tool call".to_string(), |turn| format!("turn {turn}"));
-        let reply_cell = ReplyCell::default();
-        let services = match self.host_services(emit, reply_cell.clone()) {
-            Ok(services) => services,
-            Err(s) => {
-                return (
-                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
-                    true,
-                );
-            }
-        };
         let host = Arc::new(desk::RunHost {
-            desk: desk::ExarchDesk { services },
+            desk: desk::ExarchDesk {
+                services: self.host_services(emit),
+            },
             apply: desk::SurfaceApplier::new(self.recorder()),
         });
         // Stamped with this session's inbox epoch as read now, so a batch
@@ -181,9 +164,10 @@ impl Avatar {
             timeout_secs,
             host.clone() as Arc<dyn ral_core::protocol::Host>,
         );
+        let lost = |s| EngineLost::running(&s, self.agent.run_dir()).to_string();
         // Only now, with the dispatch returned: the worker probe below is
         // legal at a run boundary and nowhere else.
-        let (mut content, failed) = match report {
+        let (mut text, failed) = match report {
             Ok(Report::Ran {
                 ending, captured, ..
             }) => match self.seat.read(reading::workers) {
@@ -198,27 +182,15 @@ impl Avatar {
                     );
                     (render(&result), result.exit != 0)
                 }
-                Err(s) => (
-                    EngineLost::running(&s, self.agent.run_dir()).to_string(),
-                    true,
-                ),
+                Err(s) => (lost(s), true),
             },
             Ok(Report::Static { rendered, .. }) => (clip(&rendered, OPAQUE_CAP), true),
-            Err(s) => (
-                EngineLost::running(&s, self.agent.run_dir()).to_string(),
-                true,
-            ),
+            Err(s) => (lost(s), true),
         };
-        // `if let`, not an unconditional overwrite: last-wins is a property of
-        // the batch, so a later call that stages nothing must leave an earlier
-        // call's reply standing.
-        if let Some(payload) = reply_cell.take() {
-            self.reply = Some(payload);
-        }
         if let Some(turn) = turn {
-            let _ = write!(content, "\nTURN: {turn}");
+            let _ = write!(text, "\nTURN: {turn}");
         }
-        (content, failed)
+        Evaluated { text, failed }
     }
 
     /// Every pinned slot's summary joined onto one line, for the periodic
@@ -237,10 +209,6 @@ impl Avatar {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     //! `Avatar::ral`'s call-boundary bookkeeping — binding-lease pruning, the
     //! large-binding warning, worker retention, the audit and the surviving
@@ -248,7 +216,6 @@ mod tests {
     //! rest on.
 
     use super::*;
-    use crate::agent::cancel;
     use crate::agent::deliberate;
     use crate::agent::testkit::*;
     use crate::provider::scripted::{Reply, Script};
@@ -282,7 +249,7 @@ mod tests {
 
     #[test]
     fn let_bound_context_read_does_not_echo_the_transcript() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("material that must stay bound".into(), None)
@@ -298,11 +265,13 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
 
-        let (result, _) = session.ral(
-            "let ctx = exarch-transcript `read [turns: [1, 2]]",
-            5,
-            &emit,
-        );
+        let result = session
+            .ral(
+                "let ctx = exarch-transcript `read [turns: [1, 2]]",
+                5,
+                &emit,
+            )
+            .text;
         assert!(
             !result.contains("material that must stay bound")
                 && !result.contains("the answer stays in the binding"),
@@ -347,7 +316,7 @@ mod tests {
         );
         // The completed call's binding survives the panic.
         assert!(
-            scope_has(&mut session, "a4_x"),
+            scope_has(&session, "a4_x"),
             "a binding from a completed tool call must survive a later call's panic"
         );
         // The attend loop handed the session back ready for a fresh prompt.
@@ -359,9 +328,8 @@ mod tests {
         let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
-        let token = cancel::Token::new();
-        match session.deliberate(&provider2, Some("continue".into()), None, &token, &emit) {
-            Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "ok"),
+        match session.deliberate(&provider2, Some("continue".into()), None, &emit) {
+            Ok(deliberate::Outcome::Complete) => {}
             other => panic!("next exchange on the healed shell must complete, got {other:?}"),
         }
     }
@@ -372,7 +340,7 @@ mod tests {
     /// armed out of reach, so only the size axis is in play.
     #[test]
     fn large_binding_install_warns_on_its_own_run_stderr() {
-        let mut session = dressed_trunk(|shell| {
+        let session = dressed_trunk(|shell| {
             shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1_000_000,
                 large_binding_bytes: 8,
@@ -381,11 +349,13 @@ mod tests {
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        let (result, _) = session.ral(
-            "let large_binding_x = 'well over eight bytes long'",
-            5,
-            &emit,
-        );
+        let result = session
+            .ral(
+                "let large_binding_x = 'well over eight bytes long'",
+                5,
+                &emit,
+            )
+            .text;
 
         let warnings = result.matches("large binding `large_binding_x`").count();
         assert_eq!(warnings, 1, "exactly one warning per offending install");
@@ -397,7 +367,7 @@ mod tests {
         // `return` binds nothing, so no install meets the threshold again.
         let (tx2, _rx2) = crate::bus::channel();
         let emit2 = Emitter::with_mailbox(tx2, session.agent.id, session.inbox.mailbox());
-        let (result2, _) = session.ral("return 1", 5, &emit2);
+        let result2 = session.ral("return 1", 5, &emit2).text;
         assert!(
             !result2.contains("large binding"),
             "nothing newly installed must warn again"
@@ -411,15 +381,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let (result, _) = session.ral(
-            "exarch-agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
-            10,
-            &emit,
-        );
+        let result = session
+            .ral(
+                "exarch-agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
+                10,
+                &emit,
+            )
+            .text;
 
         assert!(
             result.contains("EXIT: 3"),
@@ -448,11 +420,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_wall_names_the_workers_that_survived_it() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let (result, _) = session.ral("let deferred = defer { sleep 20 }\nsleep 20", 2, &emit);
+        let result = session
+            .ral("let deferred = defer { sleep 20 }\nsleep 20", 2, &emit)
+            .text;
 
         assert!(
             result.contains("EXIT: 124"),
@@ -468,11 +442,11 @@ mod tests {
     /// worker is nobody's orphan, so nothing is said about it.
     #[test]
     fn a_call_that_returns_says_nothing_about_its_workers() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let (result, _) = session.ral("let ok = defer { return 1 }", 10, &emit);
+        let result = session.ral("let ok = defer { return 1 }", 10, &emit).text;
 
         assert!(
             !result.contains("`block at tool call, line 1`"),
@@ -486,15 +460,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-        let (result, _) = session.ral(
-            "let deferred = defer { sleep 20 }\n/bin/sh -c 'exit 3'",
-            10,
-            &emit,
-        );
+        let result = session
+            .ral(
+                "let deferred = defer { sleep 20 }\n/bin/sh -c 'exit 3'",
+                10,
+                &emit,
+            )
+            .text;
 
         assert!(
             result.contains("EXIT: 3"),
@@ -528,7 +504,7 @@ mod tests {
         // The probe is itself a call, so it may prune the idle `_spin` names
         // too — nothing below asserts on those.
         assert!(
-            !scope_has(&mut session, "panic_prune_x"),
+            !scope_has(&session, "panic_prune_x"),
             "panic_prune_x must already be pruned before the panicking call"
         );
 
@@ -549,11 +525,11 @@ mod tests {
         // `survives_y` first: each probe ticks the armed idle bound of 2, and
         // reading a name renews it, so the second probe cannot prune it.
         assert!(
-            scope_has(&mut session, "survives_y"),
+            scope_has(&session, "survives_y"),
             "a completed call's binding must survive a later call's panic"
         );
         assert!(
-            !scope_has(&mut session, "panic_prune_x"),
+            !scope_has(&session, "panic_prune_x"),
             "the pruned name must not resurrect across the panic's rollback"
         );
     }
@@ -562,7 +538,7 @@ mod tests {
     /// boot-seeded name is baseline and never ages out.
     #[test]
     fn boot_names_survive_past_the_idle_bound() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
 
@@ -579,7 +555,7 @@ mod tests {
             session.ral("let _boot_spin = 0", 5, &emit);
         }
         assert!(
-            scope_has(&mut session, &boot_name),
+            scope_has(&session, &boot_name),
             "a boot-seeded (baseline) name must survive past the idle bound"
         );
     }
@@ -588,15 +564,14 @@ mod tests {
     /// per dispatched call, a sweep at each ready boundary, and the expiry's
     /// notice riding a later run's surface stream back to the bus.
     #[test]
-    fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
+    fn retention_expiry_renders_through_the_drain() {
         // A tiny bound so the expiry is a couple of calls away; this replaces
         // the production constant the recipe armed.
-        let mut session = dressed_trunk(|shell| shell.arm_worker_retention(1));
+        let session = dressed_trunk(|shell| shell.arm_worker_retention(1));
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         session.ral("spawn { return 1 }", 5, &emit);
-        assert_eq!(session.ral_epoch, 1, "one call, one tick");
 
         // Through the probe rail, not a `ral` call: a boundary read ticks
         // nothing, so the retention arithmetic below stays exact.

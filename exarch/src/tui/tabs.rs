@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use super::resources::ViewFigures;
 use crate::agent::Agent;
-use crate::agent::resources::ViewFigures;
 use crate::bus::AgentId;
 
 use super::block::{AgentSlot, Detail};
@@ -61,7 +61,7 @@ impl Tab {
         }
         let agent = self.live()?;
         let idle = agent.idle();
-        (agent.mailbox().waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
+        (agent.mailbox.waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
     }
 }
 
@@ -103,10 +103,10 @@ impl Tabs {
             tabs: vec![Tab {
                 id: root.id,
                 agent: Arc::downgrade(root),
-                name: root.name().to_string(),
+                name: root.name.clone(),
                 parent: None,
                 scrollback: Scrollback::new(
-                    root.log_dir().join("user.log"),
+                    root.log_dir.join("user.log"),
                     AgentSlot::default(),
                     append,
                     thinking,
@@ -370,7 +370,7 @@ mod tests {
     /// A trunk whose `Weak` upgrades for as long as the returned `Arc` lives,
     /// which is the whole of each test.
     fn trunk(idle: Duration) -> Arc<Agent> {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         test_agent(
             &fleet,
             TestAgentSpec {

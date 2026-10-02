@@ -17,7 +17,7 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Avatar, cancel},
+    agent::{Agent, Avatar},
     bus::{BusReceiver, FleetBus, Inbox, Pass, Post, Rewrite, Signal},
     provider::{Bureau, Provider},
     record::Emitter as Recorder,
@@ -75,7 +75,7 @@ pub fn run(
         &session.agent,
         &stderr_log,
         vi,
-        session.is_resumed(),
+        info.resumed.is_some(),
         session.inbox(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
@@ -103,7 +103,7 @@ pub fn run(
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
     // records through the same seam the worker's own commits use.
     let recorder = session.recorder();
-    if let Some((turns, bytes)) = session.resume_summary() {
+    if let Some(crate::agent::Resumed { turn, bytes }) = info.resumed {
         // Fold the record log into a memo *before* the note below, so the
         // note is the boundary: everything ahead of it is replayed history,
         // everything after is the live session.  The memo becomes the
@@ -127,7 +127,7 @@ pub fn run(
         // not replay a prior resume's note as if it were history.
         tui.app.push_note(
             session.agent.id,
-            &format!("resumed: {turns} turns, {} KB", bytes.div_ceil(1024)),
+            &format!("resumed: {turn} turns, {} KB", bytes.div_ceil(1024)),
         );
     }
     // Without a way to wake the parked worker with a `/quit`, the `join` below
@@ -141,7 +141,7 @@ pub fn run(
     // This is the process's trunk — a fact of the launch, not of any position
     // in the tree — so it is what an OS signal must reach, for as long as it
     // attends.
-    let _signals = crate::agent::cancel::face(&session.agent);
+    let _signals = crate::signals::face(&session.agent);
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
@@ -336,7 +336,7 @@ fn ui_loop(
                                     agent.interrupt();
                                 }
                                 if focused == tui.app.tabs.root() {
-                                    cancel::raise_interrupt();
+                                    crate::signals::raise_interrupt();
                                 }
                             }
                             KeyAction::Submit => {

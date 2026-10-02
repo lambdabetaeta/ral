@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod provider;
 pub mod record;
 pub mod shell_eval;
+pub(crate) mod signals;
 pub mod tui;
 
 use agent::Avatar;
@@ -213,7 +214,8 @@ pub fn run() -> Result<(), String> {
     );
     let (_mode, terminal, _warn) = ral_core::io::TerminalState::probe_from_env();
     bootstrap::face_process_signals(&terminal);
-    let (run_dir, run_lock, resume) = resolve_run(&cwd, c.resume)?;
+    // Held for the whole run: the lock is the launcher's, not the node's.
+    let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
@@ -236,35 +238,42 @@ pub fn run() -> Result<(), String> {
     let engine = Engine::new();
     let bureau = Arc::new(Bureau::Live { engine, holdings });
     let provider = bureau.build(&account, model.clone(), &tuning, route, c.max_tokens)?;
-    let mut session = Avatar::root(
-        agent::RootConfig {
-            system,
-            caps,
-            run_dir: run_dir.clone(),
-            resume,
-            run_lock: Some(run_lock),
-            model,
-            account: recorded_account,
-            allow_schedule: c.allow_schedule,
-            resume_on_reset: !headless,
-            // An interactive trunk parks for the human; a headless one
-            // terminates once its seeded work is idle.
-            interactive: !headless,
-            chat: c.chat,
-            thinking_tool: c.thinking_tool,
-            disk_warn_bytes,
-            fuel: agent::SPAWN_FUEL,
-            egress,
-            dial: None,
-            bureau: Arc::clone(&bureau),
+    let config = agent::RootConfig {
+        system,
+        caps,
+        run_dir: run_dir.clone(),
+        model,
+        account: recorded_account,
+        // An attended trunk parks for the human; a headless one terminates
+        // once its seeded work is idle.
+        trunk: if headless {
+            agent::Trunk::Headless
+        } else {
+            agent::Trunk::Attended
         },
-        agent::RootSeat::Identity {
-            scratch,
-            cwd: cwd_path,
-            terminal,
+        tools: if c.chat {
+            shell_eval::tools::Toolset::default()
+        } else {
+            shell_eval::tools::Toolset::offered(c.thinking_tool)
         },
-        Arc::clone(&provider),
-    )
+        allow_schedule: c.allow_schedule,
+        resume_on_reset: !headless,
+        disk_warn_bytes,
+        fuel: agent::SPAWN_FUEL,
+        egress,
+        dial: None,
+        bureau: Arc::clone(&bureau),
+    };
+    let seat = agent::RootSeat::Identity {
+        scratch,
+        cwd: cwd_path,
+        terminal,
+    };
+    let (mut session, resumed) = if resumes {
+        Avatar::resume(config, seat, Arc::clone(&provider)).map(|(s, r)| (s, Some(r)))
+    } else {
+        Avatar::root(config, seat, Arc::clone(&provider)).map(|s| (s, None))
+    }
     .map_err(|e| format!("session init: {e}"))?;
 
     let info = SessionInfo {
@@ -274,6 +283,7 @@ pub fn run() -> Result<(), String> {
         extend_base: c.extend_base.as_deref(),
         restrict_files: &restrict_files,
         cwd: &cwd,
+        resumed,
     };
     if headless {
         headless::run(&mut session, &info, &provider, seed, c.output_format)
@@ -291,7 +301,8 @@ pub fn run() -> Result<(), String> {
 }
 
 /// Resolve a fresh or resumable run directory, retaining the lock for the
-/// process that owns it.
+/// process that owns it; the flag says whether session 0 is to be resumed
+/// from it.
 #[allow(
     clippy::option_option,
     reason = "the CLI distinguishes absent, bare, and named resume"
@@ -299,14 +310,7 @@ pub fn run() -> Result<(), String> {
 fn resolve_run(
     cwd: &str,
     resume: Option<Option<std::path::PathBuf>>,
-) -> Result<
-    (
-        std::path::PathBuf,
-        bootstrap::RunLock,
-        Option<std::path::PathBuf>,
-    ),
-    String,
-> {
+) -> Result<(std::path::PathBuf, bootstrap::RunLock, bool), String> {
     if let Some(target) = resume {
         let explicit = target.is_some();
         let candidates = match target {
@@ -328,7 +332,7 @@ fn resolve_run(
                 continue;
             }
             match bootstrap::RunLock::try_acquire(&run_dir) {
-                Ok(lock) => return Ok((run_dir.clone(), lock, Some(run_dir))),
+                Ok(lock) => return Ok((run_dir, lock, true)),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if explicit {
                         return Err(format!(
@@ -357,7 +361,7 @@ fn resolve_run(
         .map_err(|error| format!("log dir: {error}"))?;
     let lock = bootstrap::RunLock::try_acquire(&run_dir)
         .map_err(|error| format!("could not lock {}: {error}", run_dir.display()))?;
-    Ok((run_dir, lock, None))
+    Ok((run_dir, lock, false))
 }
 
 /// The account, model, tuning, and `OpenRouter` route a launch opens with.

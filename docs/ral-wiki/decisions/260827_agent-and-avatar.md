@@ -154,6 +154,24 @@ unstamped, stamped from another inbox, or stamped fresh at push time.
 bullet's point, that it must stay a snapshot read at install rather than a
 live read at refusal, is now `Stamp::is_stale` and structural.*
 
+*Amended 2026-10-02: the public half had grown a second kind of field — the
+run's own settings (`interactive`, `allow_schedule`, `resume_on_reset`, the
+`Toolset`, `disk_warn_bytes`, `egress`, `dial`, the `Bureau`, the prompt
+template and its index), each documented "shared verbatim by every fork" and
+copied into every `Agent` through a twenty-three-field `Build`. They are not
+node state; they are the run's, and they now live once on
+`Fleet::launch` (`fleet::Launch`), the `Agent` keeping only what is its own
+(`caps`, `fuel`, `returns`, `search`, `system`, `provider`, `token`) as plain
+`pub(crate)` fields. `interactive` itself was two facts — whether a node
+converses, which is `returns` per node, and whether a human types into the
+run, which is the launch's `attended` — and `RootConfig::trunk: Trunk::{Headless,
+Attended, Embedded}` names the three ways a trunk is driven, so synod's
+embedded trunk parks on its fleet with no policy hook. The trunk-only
+lifecycles left the node too: the run lock is the launcher's, and `--resume`
+is its own constructor, `Avatar::resume`. A reply is deposited on the agent by
+every node alike, roots included, so the loop returns an `AgentOutcome` and
+nothing else.*
+
 ## Supersession
 
 [[decisions/260826_reply-parks|reply-parks]] is **superseded only in the

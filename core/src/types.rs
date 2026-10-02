@@ -45,8 +45,8 @@ pub use handle::{CompletedHandle, HandleInner, HandleState, SurfaceBuffer};
 
 // A boundary's checked type, and what a door admits against it.
 mod site;
-pub use site::{Fixings, Mismatch, Site};
 pub(crate) use site::pointer_token;
+pub use site::{Fixings, Mismatch, Site};
 
 mod builtin;
 pub(crate) use builtin::LANGUAGE_CONSTANTS;

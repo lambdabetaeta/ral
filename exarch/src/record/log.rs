@@ -56,7 +56,7 @@ pub(crate) struct FleetSink {
 /// by a live [`Log::append`] and the backlog [`Log::attach`] delivers.
 fn publish(sink: &FleetSink, recorded: Recorded<Record>) {
     if let Record::Forensic(super::Forensic::UsageDelta { usage }) = recorded.value() {
-        sink.meter.add(usage.into());
+        sink.meter.add(*usage);
     }
     if sink
         .tx

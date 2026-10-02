@@ -150,7 +150,8 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   disk at all. The trunk's fuel is
   `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
-  `Dial` implementation over `Machine::connect_guest` (below), so synod's
+  `Dial` implementation over `Machine::connect_guest` (below), handed to the
+  fleet's `Launch`, so synod's
   office assistant may delegate to helpers that run concurrently in the
   same guest, against the same folder, and in the same report. Only `vz.rs`
   implements `connect_guest`; on Hyper-V a spawn is refused with the trait's
@@ -312,7 +313,7 @@ stream, no animation, nothing entering the transcript. `SubagentDone` — which
 arrives on the *root's* emitter, since `announce` runs in the parent's own
 drain — becomes `SynodEvent::HelperDone { name, ok, elapsed_secs }`, rendered
 as one process line inside the dial's rung; `WaitingOnAgents` maps to a
-status-bar label. `sink.rs` also folds `ProviderErrorRecord` at the seam:
+status-bar label. `sink.rs` also folds `ProviderError` at the seam:
 `SynodEvent::ProviderError`/`Stalled` carry `{ text, severity }` — the
 sentence composed once, where the module's deny reaches the fold — and
 `Transient::Boundary` is carried across as `SynodEvent::Boundary`, which

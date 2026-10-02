@@ -4,7 +4,7 @@
 
 use super::{input_error, required_str};
 use crate::agent::Avatar;
-use crate::agent::event::ToolResult;
+use crate::agent::log::ToolResult;
 use crate::bus::Emitter;
 use crate::record::Display;
 use serde_json::{Value, json};
@@ -57,7 +57,7 @@ pub(crate) fn dispatch(
         }
         Err(reason) => {
             let msg = input_error(&reason);
-            session.note_error(msg.clone());
+            session.note_error(&msg);
             msg
         }
     };

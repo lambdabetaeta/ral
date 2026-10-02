@@ -29,10 +29,12 @@ pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View};
 pub(crate) use log::FleetSink;
 
 use crate::agent::Agent;
-use crate::agent::event::{Cut, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
+use crate::agent::log::{Cut, EditAuthority, ToolResult};
+use crate::agent::nudge::Spent;
 use crate::bus::card::Card;
 use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
+use crate::provider::{ProviderError, Usage};
 use genai::chat::ChatMessage;
 use ral_core::serial::FOValue;
 use serde::{Deserialize, Serialize};
@@ -331,7 +333,7 @@ pub enum Forensic {
         route: Option<String>,
     },
     UsageDelta {
-        usage: UsageDelta,
+        usage: Usage,
     },
     /// Ctrl-C or Esc mid-turn.
     Cancelled,
@@ -339,13 +341,15 @@ pub enum Forensic {
     Error {
         text: String,
     },
+    /// The agent steering itself: a repair spends the per-exchange budget, a
+    /// standing-condition reminder spends nothing.
     Nudge {
-        used: u32,
-        max: u32,
         cause: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spent: Option<Spent>,
     },
     ProviderError {
-        error: ProviderErrorRecord,
+        error: ProviderError,
     },
     /// An operational note the attend loop issued — the model never saw it.
     SystemNote {
@@ -413,7 +417,6 @@ pub enum Transient {
     Cleared,
     /// Drawn, not recorded.
     Resources {
-        rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
     /// Drawn, not recorded.

@@ -3,6 +3,7 @@
 //! is reminded at [`MODEL_HEARS`] on latches of the agent's own.
 
 use super::Warning;
+use crate::agent::nudge::Reminder;
 use crate::latch::Latch;
 use crate::provider::allowance::Allowance;
 use crate::provider::{Account, AccountId};
@@ -38,7 +39,13 @@ impl Ration {
                     .entry((account.id.clone(), a.window))
                     .or_default()
                     .climb(MODEL_HEARS, pct)?;
-                Some(reminder(account, a, pct, resumes))
+                Some(Warning::Model(Reminder::Ration {
+                    service: account.service.name.as_str().to_string(),
+                    label: a.field().label,
+                    pct,
+                    windowed: a.window.is_some(),
+                    resumes,
+                }))
             })
             .collect()
     }
@@ -59,20 +66,6 @@ pub(crate) fn told(account: &Account, climbed: &[Allowance]) -> Vec<Warning> {
         .collect()
 }
 
-fn reminder(account: &Account, allowance: &Allowance, pct: u32, resumes: bool) -> Warning {
-    let service = account.service.name.as_str();
-    let label = allowance.field().label;
-    let outcome = match (allowance.window, resumes) {
-        (Some(_), true) => "If it runs out, this task pauses until it resets and then resumes.",
-        (Some(_), false) => "If it runs out, requests are refused until it resets.",
-        (None, _) => "When it runs out, requests fail until it is topped up.",
-    };
-    Warning::Model {
-        cause: format!("usage {pct}%"),
-        body: format!("Your {service} usage allowance is {pct}% spent ({label}). {outcome}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,56 +83,75 @@ mod tests {
         ration.climb(&Account::built_in("openrouter"), a, resumes)
     }
 
-    fn body(warning: &Warning) -> &str {
-        let Warning::Model { body, .. } = warning else {
+    fn ration(warning: &Warning) -> (u32, bool, bool) {
+        let Warning::Model(Reminder::Ration {
+            pct,
+            windowed,
+            resumes,
+            ..
+        }) = warning
+        else {
             panic!("the model is reminded");
         };
-        body
+        (*pct, *windowed, *resumes)
     }
 
     #[test]
     fn crossing_ninety_reminds_the_model_once_with_the_outcome_by_resumption() {
-        let mut ration = Ration::default();
-        assert!(read(&mut ration, &[window(5, 0.80)], true).is_empty());
-        let warnings = read(&mut ration, &[window(5, 0.91)], true);
-        let [Warning::Model { cause, body: text }] = warnings.as_slice() else {
+        let mut ration_latches = Ration::default();
+        assert!(read(&mut ration_latches, &[window(5, 0.80)], true).is_empty());
+        let warnings = read(&mut ration_latches, &[window(5, 0.91)], true);
+        let [warning] = warnings.as_slice() else {
             panic!("one reminder at 90");
         };
-        assert_eq!(cause, "usage 91%");
-        assert!(
-            text.contains("91% spent") && text.contains("pauses until it resets"),
-            "{text}"
-        );
-        assert!(read(&mut ration, &[window(5, 0.92)], true).is_empty());
+        assert_eq!(ration(warning), (91, true, true));
+        assert!(read(&mut ration_latches, &[window(5, 0.92)], true).is_empty());
 
         let warnings = read(&mut Ration::default(), &[window(5, 0.91)], false);
-        assert!(body(&warnings[0]).contains("requests are refused until it resets"));
+        assert_eq!(ration(&warnings[0]), (91, true, false));
     }
 
     #[test]
     fn windows_latch_apart() {
-        let mut ration = Ration::default();
+        let mut ration_latches = Ration::default();
         assert_eq!(
-            read(&mut ration, &[window(5, 0.91), window(168, 0.91)], true).len(),
+            read(
+                &mut ration_latches,
+                &[window(5, 0.91), window(168, 0.91)],
+                true
+            )
+            .len(),
             2
         );
-        assert!(read(&mut ration, &[window(5, 0.91), window(168, 0.91)], true).is_empty());
+        assert!(
+            read(
+                &mut ration_latches,
+                &[window(5, 0.91), window(168, 0.91)],
+                true
+            )
+            .is_empty()
+        );
         assert_eq!(
-            read(&mut ration, &[window(5, 0.91), window(168, 0.96)], true).len(),
+            read(
+                &mut ration_latches,
+                &[window(5, 0.91), window(168, 0.96)],
+                true
+            )
+            .len(),
             1,
             "only the weekly window climbed"
         );
     }
 
     #[test]
-    fn a_purse_tells_the_model_what_running_out_means() {
+    fn a_purse_is_told_apart_from_a_window() {
         let purse = Allowance {
             window: None,
             used: Consumption::Fraction(0.96),
             resets_at: None,
         };
         let warnings = read(&mut Ration::default(), &[purse], true);
-        assert!(body(&warnings[0]).contains("topped up"));
+        assert_eq!(ration(&warnings[0]), (96, false, true));
     }
 
     #[test]

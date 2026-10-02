@@ -1,7 +1,7 @@
 //! Streaming turns and partial-response projection.
 
 use super::ProviderError;
-use super::error::CutShort;
+use super::error::{CancelSite, CutShort};
 use super::request::{Tuning, complete_options};
 use super::retry::{Attempt, idle_timeout, retry_with_backoff, wait_for_cancel};
 use super::transport::{Engine, Transport};
@@ -56,7 +56,7 @@ impl Engine {
         let options = complete_options(self.cache_key(), max_tokens_override, tuning, route);
 
         self.block_on(retry_with_backoff(
-            "before request",
+            CancelSite::BeforeRequest,
             cancel,
             async |attempt| {
                 let request = manufacture(adapter, system, transcript, &tools).into_request();
@@ -67,7 +67,7 @@ impl Engine {
                     let mut response = tokio::select! {
                         biased;
                         () = wait_for_cancel(cancel) => {
-                            return Err(ProviderError::Cancelled("before request"));
+                            return Err(ProviderError::Cancelled(CancelSite::BeforeRequest));
                         }
                         () = tokio::time::sleep(idle_timeout(attempt)) => {
                             return Err(ProviderError::local_transient(
@@ -87,7 +87,7 @@ impl Engine {
                         let event = tokio::select! {
                             biased;
                             () = wait_for_cancel(cancel) => {
-                                return Err(ProviderError::Cancelled("mid-stream"));
+                                return Err(ProviderError::Cancelled(CancelSite::MidStream));
                             }
                             () = tokio::time::sleep(idle_timeout(attempt)) => {
                                 return Err(ProviderError::local_transient(

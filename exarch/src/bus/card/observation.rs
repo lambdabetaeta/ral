@@ -50,9 +50,7 @@ pub(crate) enum Landing {
 
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. } | Observed::Grep { .. } | Observed::Command { .. } => {
-            Landing::Effect
-        }
+        Observed::Read { .. } | Observed::Grep { .. } | Observed::Command { .. } => Landing::Effect,
         Observed::Write { .. } => Landing::Write,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {

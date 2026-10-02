@@ -2,7 +2,7 @@
 //! `stream.rs`, keyed on the variant `error.rs` classified.
 
 use super::tls::STREAM_IDLE_TIMEOUT;
-use super::{ProviderError, Refusal};
+use super::{CancelSite, ProviderError, Refusal};
 use crate::agent::cancel;
 use crate::clock;
 use jiff::Timestamp;
@@ -93,7 +93,7 @@ pub(super) enum Attempt<T> {
 /// cancellation races the backoff sleep, so a cancel mid-delay never waits it
 /// out.
 pub(super) async fn retry_with_backoff<T>(
-    cancel_site: &'static str,
+    cancel_site: CancelSite,
     cancel: &cancel::Token,
     mut one: impl AsyncFnMut(u32) -> Attempt<T>,
 ) -> Result<T, ProviderError> {
@@ -156,7 +156,7 @@ mod tests {
     fn idle_timeout_before_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
-            "test",
+            CancelSite::BeforeRequest,
             &cancel::Token::new(),
             async |_attempt| {
                 calls.set(calls.get() + 1);
@@ -187,7 +187,7 @@ mod tests {
         ));
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> = runtime().block_on(retry_with_backoff(
-            "test",
+            CancelSite::BeforeRequest,
             &cancel::Token::new(),
             async |_attempt| {
                 calls.set(calls.get() + 1);
@@ -229,7 +229,7 @@ mod tests {
                 cancel_during_wait.cancel(ral_core::process::CancelCause::Interrupt);
             });
             let out: Result<(), ProviderError> =
-                retry_with_backoff("during retry backoff", &cancel, async |_| {
+                retry_with_backoff(CancelSite::Backoff, &cancel, async |_| {
                     Attempt::Failed(ProviderError::Transient {
                         cause: "retry me".into(),
                         attempts: 1,
@@ -240,7 +240,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 out,
-                Err(ProviderError::Cancelled("during retry backoff"))
+                Err(ProviderError::Cancelled(CancelSite::Backoff))
             ));
         });
     }

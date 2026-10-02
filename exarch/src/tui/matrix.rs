@@ -489,7 +489,7 @@ mod tests {
     use std::sync::{Arc, Weak};
 
     fn tree() -> (Arc<crate::agent::Agent>, super::super::tabs::Tabs) {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("fresh trunk");
         let mut tabs = super::super::tabs::Tabs::new(&root, false);
         let a = root.id + 1;

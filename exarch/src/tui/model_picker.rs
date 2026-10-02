@@ -185,7 +185,7 @@ fn apply_model_switch(
             .push_error(focused, "the focused agent is no longer live");
         return;
     };
-    let provider = agent.provider_handle();
+    let provider = agent.provider.clone();
     // The token override is no part of the selection, so it rides across by hand.
     let current_override = provider.current().max_tokens_override();
     let new_provider = match ctx.bureau.build(

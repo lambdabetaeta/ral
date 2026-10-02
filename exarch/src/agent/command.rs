@@ -18,7 +18,7 @@ impl Avatar {
                         "branch {} started (agent {})",
                         child.name, child.id
                     )),
-                    Err(e) => self.note_error(format!("could not start branch: {e}")),
+                    Err(e) => self.note_error(&format!("could not start branch: {e}")),
                 }
             }
             Read::Context => self.emit_context_survey(),
@@ -33,17 +33,16 @@ impl Avatar {
                 let result = self.clear();
                 self.recorder().transient(Transient::Cleared);
                 if let Err(error) = result {
-                    self.note_error(format!("clear failed: {error}"));
+                    self.note_error(&format!("clear failed: {error}"));
                 }
             }
             Rewrite::Evict => {
-                let provider = self.current_provider();
-                let token = self.cancel_token().clone();
-                self.evict(&provider, true, &token);
+                let provider = self.agent.current_provider();
+                self.evict(&provider, true);
             }
             Rewrite::Rewind(anchor) => {
                 if let Err(error) = self.rewind(*anchor, emit) {
-                    self.note_error(error);
+                    self.note_error(&error);
                 }
             }
             Rewrite::Quit => return ControlFlow::Break(()),
@@ -53,10 +52,6 @@ impl Avatar {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use crate::agent::Avatar;
     use crate::bus::{Emitter, Post, Read, Rewrite};
@@ -67,10 +62,10 @@ mod tests {
     #[test]
     fn resources_command_routes_through_attend_and_emits_once() {
         let mut session = Avatar::for_test("system").unwrap();
-        session.mailbox().push(Post::Read(Read::Resources));
+        session.agent.mailbox.push(Post::Read(Read::Resources));
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
         let _ = session.attend(&emit);
 
         // The fold is a transient; the session's own head bookend rides the
@@ -84,13 +79,15 @@ mod tests {
             .next()
             .expect("the /resources command must publish its fold")
         {
-            crate::record::Transient::Resources { rows, card } => {
-                assert!(!rows.is_empty(), "the agent half of the fold has rows");
+            crate::record::Transient::Resources { card } => {
+                assert_eq!(card.marks().len(), 2, "a heading and one matrix");
+                let crate::bus::card::Mark::Fields { rows } = &card.marks()[1] else {
+                    panic!("the second mark is the agent's matrix");
+                };
                 assert!(
-                    rows.iter().any(|r| r.name == "workers.running"),
+                    rows.iter().any(|r| r.label == "workers.running"),
                     "the registry chapter is surveyed"
                 );
-                assert_eq!(card.marks().len(), 2, "a heading and one matrix");
             }
             other => panic!("expected Transient::Resources, got {other:?}"),
         }
@@ -114,10 +111,13 @@ mod tests {
     #[test]
     fn rewind_past_the_last_turn_reports_the_bad_anchor() {
         let mut session = Avatar::for_test("system").unwrap();
-        session.mailbox().push(Post::Rewrite(Rewrite::Rewind(7)));
+        session
+            .agent
+            .mailbox
+            .push(Post::Rewrite(Rewrite::Rewind(7)));
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.agent.mailbox.clone());
         let _ = session.attend(&emit);
 
         assert!(

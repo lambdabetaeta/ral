@@ -1,9 +1,8 @@
 //! A provider failure's shared description: the one presentation-neutral
 //! readout the TUI block and the headless printer both render.
 
-use crate::agent::event::{CutShortRecord, ProviderErrorRecord};
 use crate::clock;
-use crate::provider::{self, Recovery};
+use crate::provider::{self, CutShort, ProviderError, Recovery};
 use serde_json::Value;
 use std::borrow::Cow;
 
@@ -39,9 +38,9 @@ impl Readout {
     /// an ordered field list.  A parsed `body` supplies the fields
     /// ([`body_fields`]); without one the free-text `cause`/`message` is
     /// shown honestly rather than dressed as structure.
-    pub(crate) fn fatal(e: &ProviderErrorRecord) -> Self {
-        let headline = if let ProviderErrorRecord::Cancelled { where_ } = e {
-            format!("cancelled ({where_})")
+    pub(crate) fn fatal(e: &ProviderError) -> Self {
+        let headline = if let ProviderError::Cancelled(site) = e {
+            format!("cancelled ({site})")
         } else {
             e.kind().to_string()
         };
@@ -55,7 +54,7 @@ impl Readout {
     /// gets, under a headline that says so.  The `continuing` field is the
     /// whole distinction — without it the readout would read as the end of
     /// the run, which is precisely what a stall is not.
-    pub(crate) fn stall(e: &ProviderErrorRecord) -> Self {
+    pub(crate) fn stall(e: &ProviderError) -> Self {
         let mut fields = error_fields(e);
         fields.push(text_field("continuing", "partial reply kept"));
         Self {
@@ -66,10 +65,10 @@ impl Readout {
 }
 
 /// The ordered field list under either headline.
-fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
+fn error_fields(e: &ProviderError) -> Vec<Field> {
     match e {
-        ProviderErrorRecord::Cancelled { .. } => Vec::new(),
-        ProviderErrorRecord::Refused(r) => match r.recovery() {
+        ProviderError::Cancelled(_) => Vec::new(),
+        ProviderError::Refused(r) => match r.recovery() {
             Recovery::InPlace(Some(wait)) => Some(Field {
                 label: "retry-after".into(),
                 datum: Datum::Seconds(wait.get().as_secs()),
@@ -84,16 +83,16 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
             &r.cause,
         ))
         .collect(),
-        ProviderErrorRecord::Transient {
+        ProviderError::Transient {
             cause,
             attempts,
             body,
             status,
         } => std::iter::once(text_field("attempts", attempts.to_string()))
             .chain(status.map(status_field))
-            .chain(body_or_cause(body.as_ref(), &[], cause))
+            .chain(body_or_cause(body.as_deref(), &[], cause))
             .collect(),
-        ProviderErrorRecord::Api {
+        ProviderError::Api {
             status,
             model,
             message,
@@ -114,17 +113,17 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<Field> {
         // [`Readout::stall`] with the cause already unwrapped, so the
         // delegation here is what keeps this match total rather than a path
         // either renderer walks.
-        ProviderErrorRecord::Truncated { cause } => match cause {
-            CutShortRecord::OutputCap { stop_reason } => vec![
+        ProviderError::Truncated { cause } => match cause.as_ref() {
+            CutShort::OutputCap { stop_reason } => vec![
                 text_field("stop_reason", stop_reason.clone()),
                 text_field(
                     "remedy",
                     "raise `--max-tokens N` or split the turn into smaller writes",
                 ),
             ],
-            CutShortRecord::Stalled { error } => error_fields(error),
+            CutShort::Stalled(error) => error_fields(error),
         },
-        ProviderErrorRecord::Other { cause } => vec![text_field("cause", prettify(cause))],
+        ProviderError::Other(cause) => vec![text_field("cause", prettify(cause))],
     }
 }
 

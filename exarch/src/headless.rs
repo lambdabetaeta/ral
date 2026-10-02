@@ -7,10 +7,10 @@
 //! [`converse_sink`] with its own [`Sink`], seeing raw `Signal`s rather than
 //! rendered text.
 //! Recording is not this module's concern: every session writes its own
-//! record at the seam, through [`crate::agent::event`].
+//! record at the seam, through [`crate::agent::log`].
 
 use crate::agent::Avatar;
-use crate::agent::event::EditAuthority;
+use crate::agent::log::EditAuthority;
 use crate::bus::card::{self, Card, Mark, Row, landing, observation_card};
 use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
@@ -455,22 +455,21 @@ pub fn run(
     // This is the process's trunk — a fact of the launch, not of any position
     // in the tree — so it is what an OS signal must reach, for as long as it
     // attends.
-    let _signals = crate::agent::cancel::face(&session.agent);
+    let _signals = crate::signals::face(&session.agent);
     let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
         session.attend(emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
-    // `reply`.  A panic arrives as `Ok(None)`, already latched by the sink.
+    // `reply`, deposited on its agent.  A panic arrives as `Ok(None)`, already
+    // latched by the sink.
+    headless.reply = session.agent.reply();
     let mut r: Result<(), String> = match outcome {
-        Ok(Some((agent_outcome, payload))) => {
-            headless.reply = payload;
-            match agent_outcome {
-                AgentOutcome::Replied => Ok(()),
-                AgentOutcome::Stopped(s) => Err(s),
-                AgentOutcome::Cancelled => Err("cancelled".to_string()),
-                AgentOutcome::Failed(e) => Err(e),
-            }
-        }
+        Ok(Some(agent_outcome)) => match agent_outcome {
+            AgentOutcome::Replied => Ok(()),
+            AgentOutcome::Stopped(s) => Err(s),
+            AgentOutcome::Cancelled => Err("cancelled".to_string()),
+            AgentOutcome::Failed(e) => Err(e),
+        },
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
     };
@@ -581,10 +580,10 @@ pub fn converse_sink<S: Sink>(
 /// that went badly: its `Err` is the sentence `EngineLost` settled it with.
 fn exchange_ending(
     session: &Avatar,
-    outcome: io::Result<Option<(AgentOutcome, Option<FOValue>)>>,
+    outcome: io::Result<Option<AgentOutcome>>,
 ) -> Result<(), String> {
     match outcome {
-        Ok(Some((AgentOutcome::Failed(lost), _))) if session.severance().is_some() => Err(lost),
+        Ok(Some(AgentOutcome::Failed(lost))) if session.severance().is_some() => Err(lost),
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
@@ -597,15 +596,14 @@ fn exchange_ending(
 /// announced — the driver `synod` (and any embedder wanting the same
 /// guarantee) runs instead of [`converse_sink`].
 ///
-/// Three differences from [`converse_sink`]: the bus gives a spawned child a
+/// Two differences from [`converse_sink`]: the bus gives a spawned child a
 /// live emitter rather than a muted one
-/// ([`FleetBus::per_exchange_live`](crate::bus::FleetBus::per_exchange_live));
-/// the loop runs under [`crate::agent::quiesce_when_childless`] rather than
-/// the identity policy [`Avatar::attend`](crate::agent::Avatar::attend) uses, so
-/// a conversing trunk holds on a live fleet instead of parking blind to it;
+/// ([`FleetBus::per_exchange_live`](crate::bus::FleetBus::per_exchange_live)),
 /// and it runs the blocking `attend` loop, not `attend_backlog`, since Law B
-/// means the exchange itself must wait out whatever the fleet is still doing.
-/// `converse_sink` stays exactly as it is for exarch's own headless mode.
+/// means the exchange itself must wait out whatever the fleet is still doing
+/// — which an unattended conversing trunk's park does on its own, holding for
+/// live children and quiescing once they settle.  `converse_sink` stays
+/// exactly as it is for exarch's own headless mode.
 ///
 /// # Errors
 /// Refuses at once, before touching the bus or seeding `message`, if
@@ -618,7 +616,7 @@ pub fn converse_settled<S: Sink>(
     message: String,
     sink: &mut S,
 ) -> Result<(), String> {
-    if session.agent.allow_schedule || session.agent.resume_on_reset {
+    if session.fleet.launch.allow_schedule || session.fleet.launch.resume_on_reset {
         return Err(
             "converse_settled ends an exchange only once the fleet quiesces, and an armed \
              self-schedule or reset-resume wakeup may fire again with nothing to wait it out — \
@@ -632,10 +630,8 @@ pub fn converse_settled<S: Sink>(
     let recorder = session.recorder();
     // The embedder's trunk, for the extent of the exchange it drives: an OS
     // signal reaching this process must reach it.
-    let _signals = crate::agent::cancel::face(&session.agent);
-    let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
-        session.attend_with(emit, crate::agent::quiesce_when_childless)
-    });
+    let _signals = crate::signals::face(&session.agent);
+    let outcome = pump(sink, &bus, root_id, &recorder, |emit| session.attend(emit));
     exchange_ending(session, outcome)
 }
 
@@ -646,10 +642,11 @@ pub fn converse_settled<S: Sink>(
 )]
 mod tests {
     use super::*;
-    use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
+    use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, Trunk};
     use crate::bus::{AgentState, Signal};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
+    use crate::shell_eval::tools::Toolset;
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
     use std::sync::Arc;
 
@@ -666,15 +663,12 @@ mod tests {
                 system: "system".into(),
                 caps: ral_core::types::GrantStack::root(),
                 run_dir: dir,
-                resume: None,
-                run_lock: None,
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
+                trunk: Trunk::Embedded,
+                tools: Toolset::offered(false),
                 allow_schedule: false,
                 resume_on_reset: false,
-                interactive: true,
-                chat: false,
-                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
@@ -720,10 +714,10 @@ mod tests {
         session.seed("hello".into());
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let (outcome, payload) = session.attend_backlog(&emit);
+        let outcome = session.attend_backlog(&emit);
         assert!(
-            payload.is_none(),
-            "a conversing trunk carries no reply payload"
+            session.agent.reply().is_none(),
+            "a conversing trunk deposits no reply"
         );
         assert!(
             !matches!(outcome, AgentOutcome::Replied),
@@ -953,6 +947,7 @@ mod tests {
                 extend_base: None,
                 restrict_files: &[],
                 cwd: "/tmp",
+                resumed: None,
             },
             &Provider::scripted("test-model", Script::new()),
             seed,
@@ -1013,15 +1008,12 @@ mod tests {
                 system: "system".into(),
                 caps: ral_core::types::GrantStack::root(),
                 run_dir: dir,
-                resume: None,
-                run_lock: None,
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
+                trunk: Trunk::Embedded,
+                tools: Toolset::offered(false),
                 allow_schedule,
                 resume_on_reset,
-                interactive: true,
-                chat: false,
-                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),

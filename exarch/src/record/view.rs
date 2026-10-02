@@ -9,9 +9,10 @@
 //! record into.
 
 use super::{BlockId, Display, Fold, Forensic, Recorded, Refusal, Seq, TurnRow};
-use crate::agent::event::{Cut, EditAuthority, ProviderErrorRecord};
+use crate::agent::log::{Cut, EditAuthority};
+use crate::agent::nudge::Spent;
 use crate::bus::card::Card;
-use crate::provider::Usage;
+use crate::provider::{ProviderError, Usage};
 use ral_core::serial::FOValue;
 
 pub use super::{DoneOutcome, NoticeFact};
@@ -70,15 +71,14 @@ pub enum BlockKind {
         text: String,
     },
     Nudge {
-        used: u32,
-        max: u32,
         cause: String,
+        spent: Option<Spent>,
     },
     ProviderError {
-        error: ProviderErrorRecord,
+        error: ProviderError,
     },
     Stalled {
-        error: ProviderErrorRecord,
+        error: ProviderError,
     },
     SystemNote {
         text: String,
@@ -318,14 +318,12 @@ impl Blocks {
     fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage } => {
-                self.usage += Usage::from(&usage);
+                self.usage += usage;
                 Delta::Quiet
             }
             Forensic::Cancelled => self.push(seq, BlockKind::Cancelled),
             Forensic::Error { text } => self.push(seq, BlockKind::Error { text }),
-            Forensic::Nudge { used, max, cause } => {
-                self.push(seq, BlockKind::Nudge { used, max, cause })
-            }
+            Forensic::Nudge { cause, spent } => self.push(seq, BlockKind::Nudge { cause, spent }),
             // One record, two blocks: a stall wears the chrome that says the
             // exchange survived it, and draws its cause rather than the
             // truncation wrapping it.

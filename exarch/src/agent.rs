@@ -1,19 +1,21 @@
-//! The uniform agent node: canonical event log, persistent shell, capability
+//! The uniform agent node: canonical record log, persistent shell, capability
 //! set, hot-swappable provider, and the attend loop every node runs.
 //!
 //! A run is a tree of these; [`Fleet`](crate::fleet::Fleet) holds what they
-//! share.
+//! share — the lookup by name, and the [`Launch`](crate::fleet::Launch) fixed
+//! once for the whole run.
 //!
 //! No node is privileged by special-case code — the distinctions reduce to
-//! *position*.  Holding `reply` falls out of `returns`, parking out of
-//! `interactive`.  A child's result is posted up its parent's mailbox by the
-//! spawn site, not by the loop, so the loop is identical for all.
+//! *position*.  Holding `reply` falls out of `returns`, parking out of the
+//! launch's `attended`.  A child's result is posted up its parent's mailbox
+//! by the spawn site, not by the loop, so the loop is identical for all.
 //!
 //! Two types, split along who may touch what.  [`Agent`] is the public half —
-//! identity and immutable config — held behind an `Arc` so the fleet can share
-//! it.  [`Avatar`] is the private half — the log, the seat, the inbox, and
-//! every other field only the attend thread touches — plus the `Arc<Agent>`
-//! it embodies; every method that runs the agent takes `&mut Avatar`.
+//! identity and immutable per-node config — held behind an `Arc` so the fleet
+//! can share it.  [`Avatar`] is the private half — the log, the seat, the
+//! inbox, and every other field only the attend thread touches — plus the
+//! `Arc<Agent>` it embodies; every method that runs the agent takes
+//! `&mut Avatar`.
 //!
 //! An agent is *live* while its avatar holds the `Arc`; nothing deregisters.
 //! The tree that carries that liveness has one direction of strength, and it
@@ -33,8 +35,8 @@
 //! the wakeup.
 //!
 //! This file holds the state; the machinery lives in [`build`], [`attend`],
-//! [`deliberate`], [`shell`], and [`probe`], which reach these private fields
-//! directly rather than through accessors.
+//! [`deliberate`], [`shell`], [`gauge`], and [`resources`], which reach these
+//! private fields directly.
 
 mod attend;
 mod build;
@@ -43,8 +45,8 @@ mod command;
 pub mod deliberate;
 mod dial;
 pub mod digest;
-pub mod event;
 pub(crate) mod gauge;
+pub mod log;
 pub mod nudge;
 pub mod resources;
 pub(crate) mod seat;
@@ -52,14 +54,14 @@ mod shell;
 #[cfg(test)]
 pub(crate) mod testkit;
 
-pub(crate) use attend::quiesce_when_childless;
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
-pub use build::{RecordedAccount, RootConfig, RootSeat};
+pub use build::{RecordedAccount, RootConfig, RootSeat, Trunk};
 pub use dial::Dial;
+pub use log::Resumed;
 pub use seat::{EngineLost, EnginePhase};
-pub(crate) use shell::{LogCell, ReplyCell};
+pub(crate) use shell::{Evaluated, LogCell, ReplyCell};
 
 use crate::agent::cancel::InterruptTarget;
 use crate::agent::seat::Seat;
@@ -69,7 +71,6 @@ use crate::bus::{
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
-use crate::shell_eval::tools::Toolset;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
@@ -80,114 +81,77 @@ use std::time::{Duration, Instant};
 
 /// What the fleet knows an agent as.
 ///
-/// Identity and immutable config, fixed at construction — except
+/// Identity and per-node config, fixed at construction — except
 /// [`Self::status`], the one register the avatar writes as it runs, and
 /// [`Self::children`], which the spawn site pushes onto.  Live exactly while
 /// its [`Avatar`] holds the `Arc`: its parent and the fleet's [`Fleet`] hold
-/// only [`Weak`], and every walk prunes what fails to upgrade.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, resume_on_reset, search); not a candidate for a combined enum"
-)]
+/// only [`Weak`], and every walk prunes what fails to upgrade.  What every
+/// node shares is the fleet's [`Launch`](crate::fleet::Launch), not a field
+/// here.
 pub struct Agent {
     pub id: AgentId,
     /// The tab-bar identity [`crate::fleet::check_name`] validates — unique
     /// among live agents, enforced at [`Fleet::enrol`].
-    name: String,
+    pub(crate) name: String,
     /// Where this agent's own session log is written.
-    log_dir: PathBuf,
+    pub(crate) log_dir: PathBuf,
     started: Instant,
     /// The resolved prompt that reaches the model on every turn.  `Arc<str>`
-    /// so a fork's per-turn read and the desk's own copy are refcount bumps,
-    /// never a re-copy of the ~38 KB template.
+    /// so a fork's per-turn read is a refcount bump, never a re-copy of the
+    /// ~38 KB template.
     pub(crate) system: Arc<str>,
-    /// The template [`Self::system`] came from, still carrying
-    /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]: a child inherits *this*,
-    /// so it resolves for its own grants rather than its parent's.
-    system_base: Arc<str>,
-    /// The fleet-shared builtin index, resolved once at the trunk, so a fork
-    /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
-    index: Arc<crate::prompt::BuiltinIndex>,
-    caps: ral_core::types::GrantStack,
+    pub(crate) caps: ral_core::types::GrantStack,
     /// Strong and upward: `None` ⇔ this agent is a root — the trunk, or a
     /// `/branch` child, which converses and reports to nobody.  A parent
     /// whose avatar has gone is still reachable here, terminated token and
     /// all, so `deposit_reply` and the scope climb never dangle.
-    parent: Option<Arc<Self>>,
+    pub(crate) parent: Option<Arc<Self>>,
     /// Weak and downward, so no cycle exists to reason about: a child that
     /// fails to upgrade has settled, and the walk that found it prunes it.
     children: Mutex<Vec<Weak<Self>>>,
     /// Spawn generations still available below here.  Bounds depth, not
     /// fan-out: a fork spends none of the parent's, only handing the child one
     /// less, and at zero the desk refuses `` exarch-agents `start ``.
-    fuel: u32,
+    pub(crate) fuel: u32,
     /// A `/model` swaps this handle alone; a fork seeds the child's from a
     /// snapshot, so neither disturbs the other.
-    provider: ProviderHandle,
-    /// Whether a human is attached (the TUI).  With no parent it makes the
-    /// trunk converse rather than run one-shot and headless.  Inherited.
-    interactive: bool,
+    pub(crate) provider: ProviderHandle,
     /// One sticky token for this agent's life, so the subtree cascade reaches
     /// the live exchange.  The attend loop
     /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
     /// never bleeds into the next; the process's trunk additionally hears OS
-    /// signals through [`cancel::face`], called by the site that launches it.
-    cancel: cancel::Token,
-    /// `provider.complete` (advertisement) and [`Avatar::invoke`] (dispatch)
-    /// read this one value, so they cannot disagree about whether the call
-    /// they are handling was ever invited.
-    tools: Toolset,
-    /// Whether this agent may ride the provider's hosted web search — the
-    /// network policy's verdict ([`crate::egress::Egress`]), inherited verbatim.
-    search: bool,
-    /// Whether this agent holds `reply`: `!interactive` at the trunk, `true`
-    /// for a fork, `false` for a `/branch`.  The desk's refusal and the
-    /// prompt's builtin index read this same bit.
-    returns: bool,
-    /// Whether this agent holds the self-wakeup family.  `pub(crate)` so the
-    /// schedule harness test can grant it on a [`Avatar::for_test`] trunk,
-    /// which hardcodes it `false`.
-    pub(crate) allow_schedule: bool,
-    /// Whether a refusal until a reset past the in-place wait arms a wakeup
-    /// to resume there: the terminal trunk alone, never a fork.
-    pub(crate) resume_on_reset: bool,
-    /// The operator's ceiling, shared verbatim by every fork — a host setting.
-    /// `None` means [`Avatar::disk_warning`] never walks the dirs at all.
-    disk_warn_bytes: Option<u64>,
-    /// The network policy and its audit ledger — shared verbatim by
-    /// every fork, like [`Self::disk_warn_bytes`].
-    egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk's `` exarch-agents `start `` reaches its
-    /// helpers through; `None` on every identity trunk. Shared verbatim by
-    /// every fork, so a wire child's own `agent` call dials through the same
-    /// seam its parent did.
-    dial: Option<Arc<dyn Dial>>,
-    /// The one owner of provider construction — the engine, credentials, and
-    /// catalog this session mints selections from.  Shared verbatim by every
-    /// fork, so a child that names its own model is built through the same
-    /// door the trunk was.
-    bureau: Arc<crate::provider::Bureau>,
+    /// signals through [`crate::signals::face`], called by the site that
+    /// launches it.
+    pub(crate) token: cancel::Token,
+    /// Whether this agent may ride the provider's hosted web search: the
+    /// network policy's verdict at the trunk, and at most its parent's for a
+    /// fork, which a spawn may narrow and never widen.
+    pub(crate) search: bool,
+    /// Whether this agent holds `reply`: a headless trunk and every fork do, a
+    /// conversing trunk and every `/branch` do not.  The desk's refusal and
+    /// the prompt's builtin index read this same bit.
+    pub(crate) returns: bool,
     /// The seat's own reach into this agent's running eval: the cell its
     /// seat republishes on every rebuild, so it never goes stale.
     reach: InterruptTarget,
     /// The sender end of this agent's own inbox; the [`Inbox`] itself stays on
     /// [`Avatar`], reachable only by the attend thread.
-    mailbox: Mailbox,
+    pub(crate) mailbox: Mailbox,
     /// Live wakeups (cron / after), posted into this agent's own inbox; the
-    /// builtins that arm them gate on `allow_schedule`. Public agent state:
-    /// the desk writes it and other threads read it, so it lives here rather
-    /// than on [`Avatar`].
+    /// builtins that arm them gate on the launch's `allow_schedule`.  Public
+    /// agent state: the desk writes it and other threads read it, so it lives
+    /// here rather than on [`Avatar`].
     pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
     /// Pins flow straight past the session to the frontend; the periodic
     /// [`nudge`] reminder reads this mirror to name what the model has
-    /// pinned. Public agent state, for the same reason as [`Self::schedules`].
+    /// pinned.  Public agent state, for the same reason as [`Self::schedules`].
     pub(crate) pins: shell_eval::PinDigests,
     /// A process publishing its status: written by the avatar alone
     /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::heard`],
-    /// [`Self::message`], [`Self::clear_subtree`]), read by everyone else.
-    /// A reader takes one snapshot and computes nothing under the lock — the
-    /// mutex buys atomicity, nothing more — and a writer drops its guard before
-    /// pushing to any inbox, since a park verdict reads this under one.
+    /// [`Self::message`], [`Self::forget`]), read by everyone else.  A reader
+    /// takes one snapshot and computes nothing under the lock — the mutex buys
+    /// atomicity, nothing more — and a writer drops its guard before pushing
+    /// to any inbox, since a park verdict reads this under one.
     status: Mutex<Status>,
     /// The parent's envelope, minted at this agent's birth: the context a
     /// line posted upward is addressed to, since the parent is who reads it.
@@ -201,10 +165,11 @@ struct Status {
     /// When this agent parked waiting for a message, or `None` while it is
     /// working.  The roster's `idle-s`, and the whole of "not busy".
     rest: Option<Instant>,
-    /// The value this agent last passed to `reply`, held here for its
-    /// parent's `` exarch-agents `read `` to fetch.  Kept apart from [`Self::rest`]
-    /// because it must survive a wake: a messaged agent is busy again with
-    /// its reply still standing, until it replies afresh.
+    /// The value this agent last passed to `reply`, held for whoever consumes
+    /// it: a parent's `` exarch-agents `read ``, or the driver of a root's
+    /// loop.  Kept apart from [`Self::rest`] because it must survive a wake: a
+    /// messaged agent is busy again with its reply still standing, until it
+    /// replies afresh.
     reply: Option<FOValue>,
     /// Direct children this agent has spoken to — spawned or messaged — and
     /// not yet heard back from.  The busy/at-rest bit of the parent–child
@@ -212,6 +177,24 @@ struct Status {
     /// verdict flips exactly when the result is taken up and never reads a
     /// child's own status.
     awaiting: BTreeSet<AgentId>,
+}
+
+/// What an [`Agent`] is born with — the one literal, which [`Agent::new`]
+/// completes with the registers every agent starts empty.
+pub(crate) struct Birth {
+    pub id: AgentId,
+    pub name: String,
+    pub log_dir: PathBuf,
+    pub started: Instant,
+    pub system: Arc<str>,
+    pub caps: ral_core::types::GrantStack,
+    pub parent: Option<Arc<Agent>>,
+    pub fuel: u32,
+    pub provider: ProviderHandle,
+    pub returns: bool,
+    pub search: bool,
+    pub reach: InterruptTarget,
+    pub mailbox: Mailbox,
 }
 
 /// An agent's embodiment in this process: the thread that thinks and acts
@@ -226,43 +209,54 @@ pub struct Avatar {
     /// [`LogCell::lock`] panics on contention rather than blocking — the desk
     /// runs only while the attend thread is parked in `run_shell`.
     log: LogCell,
-    _run_lock: Option<crate::bootstrap::RunLock>,
-    resume_summary: Option<(u64, u64)>,
     /// Every engine-side reach goes through this seat's methods.
     pub(crate) seat: Seat,
     /// Self-nudges and armed wakeups land here; a child's result lands in its
     /// *parent's*, never reaching across into a sibling's.
     inbox: Inbox,
-    /// The repair budget resets on a genuine exchange-boundary item, never on
-    /// a self-nudge, so a nudge sequence runs to completion within one
-    /// exchange; the whole state is reborn with the context on `/clear` and
-    /// `/rewind`.  `None` for a toolless (`--chat`) trunk: every nudge steers
-    /// an agent toward a tool it does not hold, so such a turn is only ever
-    /// reported.
-    nudges: Option<nudge::Nudges>,
-    /// The staged return value, harvested by [`Self::ral`] from that
-    /// call's [`ReplyCell`] as the desk retires, then lifted into a
-    /// [`deliberate::Outcome::Replied`] only once the tool-call batch drains,
-    /// so the session settles with every `call_id` answered.
-    /// [`Self::deliberate`] clears it on entry, so a cancelled or panicking
-    /// deliberation cannot poison the next.
-    reply: Option<FOValue>,
-    /// The fleet itself, `Arc`-shared with every other node: the name a spawn
-    /// claims, and the lease scan.  Not the tree — that is [`Agent::parent`]
-    /// and [`Agent::children`].
+    /// Where the desk's `reply` handler stages the value a `ral` call returns,
+    /// holding no `&mut Avatar` to write it any other way.  Within one batch
+    /// the last write wins; [`Self::deliberate`] takes it once the batch
+    /// drains and empties it on entry, so a reply a cancel or an error cut
+    /// short never poisons the next deliberation.
+    reply: ReplyCell,
+    /// The fleet itself, `Arc`-shared with every other node: the launch, the
+    /// name a spawn claims, and the lease scan.  Not the tree — that is
+    /// [`Agent::parent`] and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
-    /// Input tokens and the event-log position at which that measurement
-    /// landed — the numerator for the eviction trigger and pressure nudge.
-    last_input: (u64, usize),
-    /// The ral-call clock, bumped at the top of every [`Self::ral`] — a
-    /// failed eval is still a call.  The settled-worker sweep, the
-    /// binding-lease ledger, and [`Self::disk_warning`] all read it.  Never
-    /// rewound, not even by `/clear`.
-    ral_epoch: u64,
-    /// The [`Self::ral_epoch`] at which the next disk walk falls due.
-    disk_check_epoch: u64,
-    /// Where each standing condition has last been weighed.
+    /// What this avatar has measured and told about its context.
+    readings: Readings,
+    /// When the disk ceiling was last walked; `None` before the first walk.
+    disk_checked: Option<Instant>,
+}
+
+/// What an avatar has measured and told about one context — the token
+/// measure the gauges weigh, the ladders they have climbed, the nudges owed —
+/// reborn whole with the context on `/clear`, since a rebuilt context has been
+/// told nothing.
+struct Readings {
+    /// The provider's last input-token count and where in the log it landed:
+    /// the numerator for the eviction trigger and the pressure gauge, `None`
+    /// until a completion has reported one.
+    measure: Option<gauge::Measure>,
     gauges: gauge::Gauges,
+    nudges: nudge::Nudges,
+}
+
+impl Readings {
+    /// `steers` is whether the model holds a tool to be steered toward — off
+    /// for a toolless `--chat` trunk, whose turns are only ever reported.
+    fn new(steers: bool) -> Self {
+        Self {
+            measure: None,
+            gauges: gauge::Gauges::default(),
+            nudges: nudge::Nudges::new(steers),
+        }
+    }
+
+    fn reborn(&self) -> Self {
+        Self::new(self.nudges.steers())
+    }
 }
 
 /// The depth budget exarch's trunks start with.
@@ -299,74 +293,56 @@ impl ProviderHandle {
 }
 
 impl Agent {
-    /// Registered by the spawn site, so a `/model` on the child's tab swaps
-    /// the child alone.
-    pub(crate) fn provider_handle(&self) -> ProviderHandle {
-        self.provider.clone()
+    /// The one literal: every register starts empty, and the parent's
+    /// envelope is minted now.  A `/clear` racing this only widens refusal —
+    /// the stamp would fall one epoch further behind — so minting it unlocked
+    /// is safe.
+    pub(crate) fn new(birth: Birth) -> Arc<Self> {
+        let Birth {
+            id,
+            name,
+            log_dir,
+            started,
+            system,
+            caps,
+            parent,
+            fuel,
+            provider,
+            returns,
+            search,
+            reach,
+            mailbox,
+        } = birth;
+        let consumer = parent.as_ref().map(|p| p.mailbox.stamp());
+        Arc::new(Self {
+            id,
+            name,
+            log_dir,
+            started,
+            system,
+            caps,
+            parent,
+            children: Mutex::new(Vec::new()),
+            fuel,
+            provider,
+            token: cancel::Token::new(),
+            search,
+            returns,
+            reach,
+            mailbox,
+            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
+            pins: Arc::default(),
+            status: Mutex::new(Status {
+                rest: None,
+                reply: None,
+                awaiting: BTreeSet::new(),
+            }),
+            consumer,
+        })
     }
 
     pub(crate) fn current_provider(&self) -> Arc<Provider> {
         self.provider.current()
-    }
-
-    pub(crate) fn cancel_token(&self) -> &cancel::Token {
-        &self.cancel
-    }
-
-    pub(crate) fn returns(&self) -> bool {
-        self.returns
-    }
-
-    pub(crate) fn caps(&self) -> &ral_core::types::GrantStack {
-        &self.caps
-    }
-
-    pub(crate) fn fuel(&self) -> u32 {
-        self.fuel
-    }
-
-    pub(crate) fn search(&self) -> bool {
-        self.search
-    }
-
-    pub(crate) fn tools(&self) -> Toolset {
-        self.tools
-    }
-
-    pub(crate) fn interactive(&self) -> bool {
-        self.interactive
-    }
-
-    pub(crate) fn disk_warn_bytes(&self) -> Option<u64> {
-        self.disk_warn_bytes
-    }
-
-    pub(crate) fn egress(&self) -> &crate::egress::Egress {
-        &self.egress
-    }
-
-    pub(crate) fn dial(&self) -> Option<&Arc<dyn Dial>> {
-        self.dial.as_ref()
-    }
-
-    pub(crate) fn bureau(&self) -> &Arc<crate::provider::Bureau> {
-        &self.bureau
-    }
-
-    pub(crate) fn system_base(&self) -> &Arc<str> {
-        &self.system_base
-    }
-
-    pub(crate) fn index(&self) -> &Arc<crate::prompt::BuiltinIndex> {
-        &self.index
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn log_dir(&self) -> &Path {
-        &self.log_dir
     }
 
     /// The whole run's directory — the one a session's `sessions/<id>/` hangs
@@ -377,7 +353,7 @@ impl Agent {
     ///
     /// Derived rather than stored: the layout is `<run>/sessions/<id>`, fixed
     /// by [`App::log_run_dir`](crate::bootstrap::App::log_run_dir) and by
-    /// [`AgentLog`](crate::agent::event::AgentLog) between them, and a second
+    /// [`AgentLog`](crate::agent::log::AgentLog) between them, and a second
     /// copy of the path would be a second thing to keep true.  `None` only
     /// for a log rooted somewhere shallower than that shape, which is the
     /// test fixtures' business and not a run's.
@@ -387,30 +363,6 @@ impl Agent {
 
     pub(crate) fn elapsed(&self) -> Duration {
         self.started.elapsed()
-    }
-
-    /// The sender end of this agent's own inbox.
-    pub(crate) fn mailbox(&self) -> &Mailbox {
-        &self.mailbox
-    }
-
-    /// The epoch of the parent's envelope as minted at this agent's birth —
-    /// test-only convenience for asserting on the fence from outside the
-    /// module; production posts through the envelope itself ([`Self::report`]).
-    #[cfg(test)]
-    pub(crate) fn consumer(&self) -> Option<u64> {
-        self.consumer.as_ref().map(Stamp::epoch)
-    }
-
-    /// Whom this agent reports to, `None` for a root.
-    pub(crate) fn parent(&self) -> Option<&Arc<Self>> {
-        self.parent.as_ref()
-    }
-
-    /// The same edge as an id, for the birth notice the frontend draws a tab
-    /// from.
-    pub(crate) fn parent_id(&self) -> Option<AgentId> {
-        self.parent.as_ref().map(|p| p.id)
     }
 
     pub(crate) fn rest(&self) -> Option<Instant> {
@@ -437,9 +389,10 @@ impl Agent {
         }
     }
 
-    /// Stage `reply` for this agent's parent to fetch, then report
+    /// Stage `reply` for this agent's consumer to fetch, then report
     /// [`AgentOutcome::Replied`] — deposit first, so a parent woken by the
-    /// notice always finds the value already there.
+    /// notice always finds the value already there.  A root reports to
+    /// nobody; its driver reads the deposit off [`Self::reply`].
     pub(crate) fn deposit_reply(&self, reply: FOValue) {
         self.status.lock_ignore_poison().reply = Some(reply);
         self.report(AgentOutcome::Replied);
@@ -464,7 +417,7 @@ impl Agent {
     /// awaited again; anyone else answers their own parent, not us.  Unscoped:
     /// any live agent may be messaged, in any direction across the tree.
     pub(crate) fn message(&self, to: &Self, text: String) {
-        if to.parent_id() == Some(self.id) {
+        if to.parent.as_ref().is_some_and(|p| p.id == self.id) {
             self.status.lock_ignore_poison().awaiting.insert(to.id);
         }
         to.mailbox.exchange(Post::AgentMessage(AgentMessage {
@@ -497,14 +450,14 @@ impl Agent {
     /// Cancel this agent across both terminate-class layers: the cooperative
     /// [`cancel::Token`] the attend loop polls and its engine's durable root.
     pub(crate) fn cancel(&self, cause: CancelCause) {
-        self.cancel.cancel(cause);
+        self.token.cancel(cause);
         self.reach.terminate();
     }
 
     /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
     /// path, and the `` exarch-agents `cancel `` scoped verb's per-target primitive.
     pub(crate) fn interrupt(&self) {
-        self.cancel.cancel(CancelCause::Interrupt);
+        self.token.cancel(CancelCause::Interrupt);
         self.reach.interrupt();
     }
 
@@ -561,7 +514,7 @@ impl Agent {
     /// what keeps one tab's listing out of another's.
     pub(crate) fn root(self: &Arc<Self>) -> Arc<Self> {
         let mut here = self.clone();
-        while let Some(up) = here.parent().cloned() {
+        while let Some(up) = here.parent.clone() {
             here = up;
         }
         here
@@ -597,55 +550,22 @@ impl Agent {
     }
 
     /// `/clear`: abandon the subtree the rebuilt context no longer owns, and
-    /// forget what it was awaiting.  The fence itself is bumped by the drain
-    /// in `Avatar::clear`, not here.
-    pub(crate) fn clear_subtree(&self) {
+    /// every register the model wrote into it — what it was awaiting, its
+    /// wakeups, its pins.  The inbox fence is bumped by the drain in
+    /// `Avatar::clear`, not here.
+    pub(crate) fn forget(&self) {
         self.cancel_descendants(CancelCause::Explicit);
         self.status.lock_ignore_poison().awaiting.clear();
+        self.schedules.clear();
+        self.pins.lock_ignore_poison().clear();
     }
 }
 
 impl Avatar {
-    pub(crate) fn measured_input(&self) -> Option<u64> {
-        let (tokens, measured_at) = self.last_input;
-        (!self.log.lock().token_measure_is_stale(measured_at)).then_some(tokens)
-    }
-
-    pub(crate) fn token_eviction_due(&self, window: u64) -> bool {
-        self.measured_input()
-            .is_some_and(|tokens| crate::agent::digest::eviction_due(tokens, window))
-    }
-
-    pub(crate) fn token_pressure(&self, window: u64) -> Option<String> {
-        self.measured_input()
-            .filter(|tokens| crate::agent::digest::pressure_due(*tokens, window))
-            .map(|tokens| format!("{tokens} of {window} tokens"))
-    }
-
     /// This agent's wire identity — the public half's `id`, reachable without
     /// the `agent` field's crate-only visibility.
     pub fn id(&self) -> AgentId {
         self.agent.id
-    }
-
-    /// Production reads `self.agent.provider_handle()` directly; this is
-    /// test-only convenience for a driven `Avatar` a test does not otherwise
-    /// have a handle into.
-    #[cfg(test)]
-    pub(crate) fn provider_handle(&self) -> ProviderHandle {
-        self.agent.provider_handle()
-    }
-
-    pub(crate) fn current_provider(&self) -> Arc<Provider> {
-        self.agent.current_provider()
-    }
-
-    pub(crate) fn cancel_token(&self) -> &cancel::Token {
-        self.agent.cancel_token()
-    }
-
-    pub(crate) fn returns(&self) -> bool {
-        self.agent.returns()
     }
 
     /// Deliver `outcome` to the parent, then retire: dropping the avatar is the
@@ -659,15 +579,10 @@ impl Avatar {
         drop(self);
     }
 
-    #[cfg(test)]
-    pub(crate) fn caps(&self) -> &ral_core::types::GrantStack {
-        self.agent.caps()
-    }
-
     /// Where this agent's own session log is written — `record.jsonl` and its
     /// siblings sit directly inside.
-    pub fn log_dir(&self) -> std::path::PathBuf {
-        self.agent.log_dir().to_path_buf()
+    pub fn log_dir(&self) -> PathBuf {
+        self.agent.log_dir.clone()
     }
 
     /// The whole run's directory — the parent of the `sessions/` this agent's
@@ -675,14 +590,12 @@ impl Avatar {
     /// to the run rather than to one session: the engine's captured output,
     /// the lock.  See [`Agent::run_dir`] on why it is derived and when it is
     /// `None`.
-    pub fn run_dir(&self) -> Option<std::path::PathBuf> {
-        self.agent.run_dir().map(std::path::Path::to_path_buf)
+    pub fn run_dir(&self) -> Option<PathBuf> {
+        self.agent.run_dir().map(Path::to_path_buf)
     }
 
     /// Why no further frame will cross this agent's seat, if that has already
-    /// happened.  Named for the noun rather than the verb because
-    /// [`Avatar::severed`](attend) — the attend loop's own private edge — is
-    /// the act of *declaring* one, and the two must not be confused.
+    /// happened.
     ///
     /// A front-end asks after an exchange that failed, because a severed
     /// engine is the one failure whose explanation is not in this process at
@@ -694,18 +607,10 @@ impl Avatar {
         self.seat.severed()
     }
 
-    pub(crate) fn is_resumed(&self) -> bool {
-        self.resume_summary.is_some()
-    }
-
-    pub(crate) fn resume_summary(&self) -> Option<(u64, u64)> {
-        self.resume_summary
-    }
-
-    /// For `schedule` to arm wakeups into its *own* inbox, and for the spawn
-    /// site to capture as a child's upward result edge.
-    pub(crate) fn mailbox(&self) -> Mailbox {
-        self.agent.mailbox().clone()
+    /// Whether the trunk, refused until a reset, resumes there by a wakeup —
+    /// the launch's say, for the trunk alone: a fork fails up to its parent.
+    pub(crate) fn resumes_at_reset(&self) -> bool {
+        self.agent.parent.is_none() && self.fleet.launch.resume_on_reset
     }
 
     /// So a frontend's emitters mint mailboxes onto the queue the attend loop
@@ -719,7 +624,7 @@ impl Avatar {
     /// # Panics
     /// Panics if the log cell is contended — see [`LogCell::lock`].
     pub fn is_ready(&self) -> bool {
-        self.log.lock().is_ready()
+        self.log.lock().context().is_ready()
     }
 
     /// The model-view messages the next request would carry.
@@ -727,26 +632,7 @@ impl Avatar {
     /// # Panics
     /// Panics if the log cell is contended — see [`LogCell::lock`].
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.lock().history_rendered()
-    }
-
-    /// Serialised model-view byte count — the eviction-threshold input.
-    ///
-    /// # Panics
-    /// Panics if the log cell is contended — see [`LogCell::lock`].
-    pub fn history_bytes(&self) -> usize {
-        self.log.lock().history_bytes()
-    }
-
-    /// The *live* directory, probed so a prior `cd` shows — not the seat's own
-    /// `cwd`, which only reseeds the shell on `/clear`.  [`Self::host_services`]
-    /// wants the live one so a desk-spawned child starts where the model is.
-    ///
-    /// # Errors
-    /// The engine's severance — never a program error, since a `cwd` probe
-    /// is always legal at a run boundary.
-    pub(crate) fn cwd(&self) -> Result<std::path::PathBuf, ral_core::protocol::Severed> {
-        self.seat.read(ral_core::protocol::reading::cwd)
+        self.log.lock().context().rendered()
     }
 
     /// For a test polling an async spawn's settle without a full deliberation.

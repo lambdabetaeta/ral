@@ -485,7 +485,7 @@ pub(super) fn route_submit(
                 }
                 mailbox.push_user(text);
             } else if let Some(agent) = tui.app.tabs.agent(focused) {
-                agent.mailbox().steer(text);
+                agent.mailbox.steer(text);
             }
         }
     }
@@ -539,7 +539,7 @@ fn run(
         // token is permanent, and `/clear` rebuilds the trunk in place.
         // The pre-blank cancel reaches a foreground external child too.
         Command::Clear => {
-            crate::agent::cancel::raise_interrupt();
+            crate::signals::raise_interrupt();
             if let Some(agent) = tui.app.tabs.agent(root) {
                 agent.interrupt();
                 agent.cancel_descendants(ral_core::process::CancelCause::Explicit);

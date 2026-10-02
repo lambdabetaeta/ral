@@ -53,6 +53,8 @@ pub struct SessionInfo<'a> {
     pub extend_base: Option<&'a Path>,
     pub restrict_files: &'a [PathBuf],
     pub cwd: &'a str,
+    /// What a `--resume` picked up, `None` for a fresh session.
+    pub resumed: Option<crate::agent::Resumed>,
 }
 
 /// The startup metadata matrix.  Hue is spent only where it names something:
@@ -333,6 +335,7 @@ mod tests {
             extend_base: None,
             restrict_files: &[],
             cwd: "/Users/me/projects/ral",
+            resumed: None,
         }
     }
 

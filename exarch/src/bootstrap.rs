@@ -2,9 +2,8 @@
 //! directories around it, and the time/slug helpers those share.
 //!
 //! Nothing here runs per exchange — per-session disk state is
-//! [`crate::agent::event::AgentLog`].
+//! [`crate::agent::log::AgentLog`].
 
-use crate::agent::cancel;
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::io::TerminalState;
@@ -56,7 +55,7 @@ fn hold_exclusive(file: File) -> io::Result<fd_lock::RwLock<File>> {
 pub fn face_process_signals(terminal: &TerminalState) {
     ral_core::process::clear();
     ral_core::process::install_handlers();
-    cancel::install();
+    crate::signals::install();
     diagnostic::set_terminal(terminal);
 }
 

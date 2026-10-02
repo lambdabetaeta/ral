@@ -128,7 +128,7 @@ signal context. The two are different kinds of proposition.
   which strikes only the dispatch in flight, a root `RootAbort` to `Abort` and
   any other root cause to `Terminate`, which cancel the durable root. The REPL
   and batch hold one for the session, a wire engine one over its own scopes,
-  and exarch forwards to its trunk's `Agent` (`cancel::face`). So a process
+  and exarch forwards to its trunk's `Agent` (`signals::face`). So a process
   hosting many engines — exarch, a test binary — never has one signal reach
   them all.
 - **Sharing, not shadowing.** A nested run nests under the frame the
@@ -345,7 +345,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C / Ctrl-Break** | exarch on a Windows console | console event → `console_ctrl_handler`, ahead of ral's | `request_interrupt()`, reported handled so ral's ladder never sees it; `face` forwards it to the trunk's `Agent::interrupt` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
-| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `cancel::face` to the trunk's `Agent::interrupt` |
+| **async SIGINT** | exarch | ral's non-escalating `interrupt_handler` | forwarded by `signals::face` to the trunk's `Agent::interrupt` |
 | **async SIGTERM / SIGHUP** | exarch | ral's `handler` | forwarded to the trunk's `Agent::cancel(Terminate)` — its `Token` and `Control::Terminate`; ladder `+1` |
 
 ### ral interactive signal dispositions
@@ -418,9 +418,10 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   leaving SIGTERM/SIGHUP on ral's `handler`, so the escalation ladder survives.
   Install order matters — ral's handlers first, then exarch's — and
   `bootstrap::face_process_signals` runs it once, at the process entry; each
-  site that launches a process trunk holds `cancel::face` for the attend, which
-  forwards the ambient causes to that trunk's `Agent`. `/clear` resets only the
-  escalation ladder.
+  site that launches a process trunk holds `signals::face` for the attend, which
+  forwards the ambient causes to that trunk's `Agent`. `/clear` touches no
+  process-wide state: SIGINT no longer ticks the ladder, so there is nothing
+  for a rebuilt context to reset.
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
   key table (`exarch/src/tui/tui_loop.rs`) separates UI shape from cancellation:
   idle Ctrl-C/Ctrl-D quit, overlays close, and only active-exchange Ctrl-C/Esc

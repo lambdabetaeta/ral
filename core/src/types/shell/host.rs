@@ -134,6 +134,12 @@ impl Shell {
         self.local.workers.snapshot()
     }
 
+    /// Ral calls until a settled worker's retention expires; `None` while it
+    /// runs, or with no retention armed.
+    pub fn worker_retention_left(&self, entry: &WorkerEntry) -> Option<u64> {
+        self.local.workers.retention_left(entry)
+    }
+
     /// Re-acquire one entry by an id the host learned elsewhere — a pure read
     /// like [`Self::workers`], renewing no lease.
     pub fn worker_by_id(&self, id: WorkerId) -> Option<WorkerEntry> {

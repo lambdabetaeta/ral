@@ -7,7 +7,7 @@ source of truth for the next request; once a malformed or empty message is
 committed, it is re-serialised on every subsequent round-trip, so a
 single bad commit can wedge the whole run on a strict backend (Anthropic 400s,
 the run dies — misclassified as fatal). The protocol state machine
-([[map/exarch/agent|`agent/event.rs`]]) enforces *sequencing* — above all that a
+([[map/exarch/agent|`agent/log.rs`]]) enforces *sequencing* — above all that a
 `tool_use` block is answered; this invariant enforces *per-message
 admissibility* at the one place messages enter the log: the `deliberate` commit
 boundary in [[map/exarch/agent|agent]].

@@ -2,7 +2,7 @@
 //! [`Context::step`] runs, and the readings of it the agent asks for.
 
 use super::Context;
-use crate::agent::event::{QuiesceReason, ToolResult, validate_result_ids};
+use crate::agent::log::{QuiesceReason, ToolResult, validate_result_ids};
 use crate::record::Protocol;
 use genai::chat::{ChatMessage, ChatRole};
 

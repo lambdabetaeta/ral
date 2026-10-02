@@ -5,7 +5,7 @@
 //! being the one place the survivor rule lives.
 
 use super::{Body, Held, Linked, Pointer, Turn};
-use crate::agent::event::{Role, TurnKind};
+use crate::agent::log::{Role, TurnKind};
 use crate::record::{Protocol, Recorded};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

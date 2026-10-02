@@ -119,6 +119,8 @@ pub struct Conversation {
     /// holds, which drops first.
     dial: Arc<crate::machine_dial::MachineDial>,
     agent: Avatar,
+    /// The run's advisory lock, held for the conversation's life.
+    _run_lock: exarch::bootstrap::RunLock,
     baseline: Baseline,
     /// What the folder's shape says this conversation has changed so far,
     /// remade after every exchange against the one baseline — so the
@@ -216,6 +218,8 @@ impl Conversation {
         let run_dir = SYNOD
             .log_run_dir(&grant.root().to_string_lossy())
             .map_err(|e| format!("could not make a log folder: {e}"))?;
+        let run_lock = exarch::bootstrap::RunLock::try_acquire(&run_dir)
+            .map_err(|e| format!("could not lock the log folder {}: {e}", run_dir.display()))?;
         let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
         // The two slow arms of an opening wait on different things
@@ -258,8 +262,6 @@ impl Conversation {
             system,
             caps: ral_core::types::GrantStack::of(caps),
             run_dir,
-            resume: None,
-            run_lock: None,
             model,
             account: RecordedAccount {
                 label: label.clone(),
@@ -273,13 +275,13 @@ impl Conversation {
             // The exchange ends on a refusal, and Law B leaves nothing to
             // wake it.
             resume_on_reset: false,
-            // A conversation, not a job: the agent converses,
-            // withholding `reply` and parking between messages rather
-            // than returning once — [`exarch::headless::converse_sink`]
-            // drives one exchange at a time over this same session.
-            interactive: true,
-            chat: false,
-            thinking_tool: false,
+            // A conversation, not a job: the agent converses, withholding
+            // `reply`, and no human types into it — the window drives one
+            // exchange at a time through
+            // [`exarch::headless::converse_settled`], so it waits on its
+            // fleet alone.
+            trunk: exarch::agent::Trunk::Embedded,
+            tools: exarch::shell_eval::tools::Toolset::offered(false),
             disk_warn_bytes,
             // Every agent may delegate: the office assistant hatches
             // helpers that run concurrently in the same guest, and
@@ -300,6 +302,7 @@ impl Conversation {
                 grant,
                 dial,
                 agent,
+                _run_lock: run_lock,
                 baseline,
                 report: None,
                 net,

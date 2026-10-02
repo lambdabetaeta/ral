@@ -307,7 +307,7 @@ fn context_groups(rows: &[crate::record::TurnRow]) -> Vec<ContextGroup> {
     let mut drawn: Vec<(&crate::record::TurnRow, u64, usize)> = Vec::new();
     for row in rows {
         match drawn.last_mut() {
-            Some((_, last, bytes)) if !matches!(row.role, crate::agent::event::Role::User) => {
+            Some((_, last, bytes)) if !matches!(row.role, crate::agent::log::Role::User) => {
                 *last = row.id;
                 *bytes += row.bytes;
             }

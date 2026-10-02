@@ -4,7 +4,7 @@
 
 use super::{input_error, required_str};
 use crate::agent::Avatar;
-use crate::agent::event::ToolResult as SessionToolResult;
+use crate::agent::log::ToolResult as SessionToolResult;
 use crate::bus::Emitter;
 use crate::record::{BlockId, Display};
 use serde_json::{Value, json};
@@ -148,9 +148,9 @@ pub(crate) fn dispatch(
         Err(reason) => return invalid_input(id, &reason, session),
     };
     let call = record_call(session, args.cmd.clone(), Some(args.description.clone()));
-    let (content, failed) = session.ral(&args.cmd, args.timeout_secs, emit);
-    record_result(session, &content, failed, call);
-    SessionToolResult { id, content }
+    let crate::agent::Evaluated { text, failed } = session.ral(&args.cmd, args.timeout_secs, emit);
+    record_result(session, &text, failed, call);
+    SessionToolResult { id, content: text }
 }
 
 #[cfg(test)]

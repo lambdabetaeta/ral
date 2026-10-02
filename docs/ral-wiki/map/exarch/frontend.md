@@ -1,7 +1,7 @@
 ---
 generated_at_commit: c848c533
 generated_at_date: 2026-10-01
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/log.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
@@ -116,10 +116,11 @@ the one-shot/headless conversational drivers use a **per-exchange** bus with
 muted children, while `converse_settled` uses `per_exchange_live` so fleet work
 stays visible until quiescence.
 
-`agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
+`agent/log.rs` is the canonical per-session record. `AgentLog` owns two things:
 
-- the model fold's `Context` (`record/model.rs`) — its only session state:
-  drives the protocol state machine (`is_ready` gates a fresh prompt and
+- the model fold's `Context` (`record/model.rs`) — its only session state,
+  and the one every query about the context is asked of (`AgentLog::context`):
+  it drives the protocol state machine (`is_ready` gates a fresh prompt and
   `quiesce` winds any in-flight exchange back to it, so an exchange never
   strands a prompt mid-protocol; [[invariants/turn-ends-ready|exchange-ends-ready]])
   and answers `render_messages()` — the provider-facing `Vec<ChatMessage>`,
@@ -460,15 +461,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   on `err`, and the process exits after one seed exchange. The sink projects
   onto an explicit writer pair: `run` is the CLI's headless wrapper, while
   `converse_on` is the conversational projection that keeps streaming tokens
-  to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
+  to a non-CLI host (synod's GUI) one exchange at a time on a parked embedded
   trunk.
   `Headless` takes `Sink::drive` as it comes and keeps one `Blocks` memo per
   source agent; it takes a per-exchange bus, so its async children stay muted.
   It is a display only — the durable `record.jsonl` is written by each
-  session's own `agent/event.rs` seam, in headless exactly as in the TUI.
+  session's own `agent/log.rs`, in headless exactly as in the TUI.
 
 `agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
-handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
+handling, and `signals.rs` the process's half: the signal dispositions and
+`face`, which forwards an ambient cause to the trunk that launched. Every
+agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
 whole attend; the attend loop `reset`s it at each genuine exchange boundary. Esc /
 Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never a
 subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): the focused

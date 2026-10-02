@@ -5,17 +5,18 @@ tree, driven by the single shared `attend` loop; the only thing that distinguish
 one agent from another is its *position* — whether it has a parent.** A sub-agent
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, under its parent's capability
-stack plus one layer, with a strong `Arc<Agent>` parent edge. The thin `Fleet` holds what every node
-shares — the by-name door, the idle lease, the one event bus, and
-the transport engine ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
+stack plus one layer, with a strong `Arc<Agent>` parent edge. The `Fleet` holds what every node
+shares — the `Launch` fixed once for the run, the by-name index, and the idle
+lease ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 ## One predicate, fixed at construction
 
 There is no `is_root`. Whether an agent returns a value or converses with a human
 is a **construction-fixed `returns` bit** on the `Agent` — `true` for a `fork`ed
-sub-agent, `false` for a `/branch` child, `!interactive` at the trunk. One bit is
-the single source of truth for every role reader: `returns()`, parking's
-conversing predicate, the desk's `reply` refusal
+sub-agent, `false` for a `/branch` child, and at the trunk decided by how it is
+driven (`Trunk`: a `Headless` trunk returns; an `Attended` or `Embedded` one
+converses). One bit is the single source of truth for every role reader:
+parking's conversing predicate, the desk's `reply` refusal
 ([[map/exarch/builtins|builtins]]), and the per-agent builtin index resolved from
 the same bit at `Avatar::assemble` — so reply availability, parking, and the
 advertised vocabulary cannot disagree
@@ -29,16 +30,16 @@ the trunk's session is minted facing the ambient causes,
 not decide who returns.
 
 - **A returning agent holds `reply`.** A returning node at any depth, *and* a headless trunk
-  (`parent = None`, `interactive = false`) seeded once to produce one result, both
+  (`parent = None`, `Trunk::Headless`) seeded once to produce one result, both
   advertise it and terminate at quiescence. This is
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
   reply gate, read off the construction-fixed bit rather than off
   `is_root && interactive`.
 - **A conversing agent has `reply` withheld at construction** and parks for a human
   instead of returning. Its `reply` call is refused at the desk, and the verb is
-  dropped from its builtin index, both keyed on the same bit. The interactive
+  dropped from its builtin index, both keyed on the same bit. The attended
   trunk is one such agent — parent-less, its writer ever-present — but not the
-  *only* one: a **branch** is interactive, `reply`-withheld, and — like the
+  *only* one: a **branch** converses, `reply`-withheld, and — like the
   trunk — parent-less, a root of its own tree rather than a descendant
   ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less" and
   "converses" are not the same set, which is exactly why the property is a bit
@@ -47,10 +48,14 @@ not decide who returns.
 "Returns a value" and "does not park for a human" remain the *same fact*, read in
 one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
 `ParkMode` (`Held` / `Engaged` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
-derived on every wake: a conversing agent parks `Held` while its own cancel
-token is unterminated, a returning agent a human has exchanged a message
-with parks `Engaged` bounded by the fleet's idle lease, and everyone else
-quiesces.
+derived on every wake: a conversing agent with a human attached (the launch's
+`attended` — the TUI) parks `Held` while its own cancel token is unterminated,
+an unattended conversing trunk (synod's, driven one exchange at a time) holds
+for live children and quiesces once they settle, a returning agent a human has
+exchanged a message with parks `Engaged` bounded by the fleet's idle lease, and
+everyone else quiesces. Whether a node converses and whether a human will type
+into it are two facts — one per node, one per run — and the park verdict
+reads both.
 
 ## Prompt obligations follow construction
 
@@ -428,7 +433,7 @@ per-agent idle-lease reaper, and `/clear`. They share one cascade over the
 agent tree itself (`Agent::parent`/`Agent::children`), so terminating a
 mid-tree agent (`Agent::cancel_tree`) reaps everything below it
 (`Agent::cancel_descendants`, a walk over `children`); `/clear`
-(`Agent::clear_subtree`) additionally drains this agent's own inbox, whose
+(`Agent::forget`) additionally drains this agent's own inbox, whose
 clear-epoch bump drops a late result or deferred surface batch addressed
 into the rebuilt context. A `reply` still
 cancels only the replier's proper descendants — a

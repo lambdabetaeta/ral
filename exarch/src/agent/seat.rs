@@ -14,7 +14,13 @@ use std::sync::Arc;
 /// `/branch` choose their arm on this fact alone.
 pub(crate) enum SeatKind {
     Identity(Arc<IdentityTransport>),
-    Wire,
+    /// The attach this seat was given: a hatched child is attached alike.
+    /// Its seed carries the live cwd and overrides this one on hydration, so
+    /// no probe is owed per call.
+    Wire {
+        cwd: std::path::PathBuf,
+        home: std::path::PathBuf,
+    },
 }
 
 /// One agent's engine-side attachment; what differs per call already lives
@@ -30,10 +36,12 @@ pub(crate) enum Seat {
         rebirth: Option<Rebirth>,
     },
     /// Out-of-process, one engine per session: a fork is hatched guest-side
-    /// and dialled by the desk's wire arm.
+    /// and dialled by the desk's wire arm, attached as this seat was.
     Wire {
         transport: Box<ral_core::protocol::WireTransport>,
         target: InterruptTarget,
+        cwd: std::path::PathBuf,
+        home: std::path::PathBuf,
     },
 }
 
@@ -216,11 +224,17 @@ impl Seat {
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
     ) -> Result<Self, Severed> {
-        transport.attach(Attach::new(builtins::INSTALLER_TAG, cwd, home));
+        transport.attach(Attach::new(
+            builtins::INSTALLER_TAG,
+            cwd.clone(),
+            home.clone(),
+        ));
         transport.await_attached()?;
         Ok(Self::Wire {
             target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
+            cwd,
+            home,
         })
     }
 
@@ -234,7 +248,10 @@ impl Seat {
     pub(crate) fn kind(&self) -> SeatKind {
         match self {
             Self::Identity { transport, .. } => SeatKind::Identity(transport.clone()),
-            Self::Wire { .. } => SeatKind::Wire,
+            Self::Wire { cwd, home, .. } => SeatKind::Wire {
+                cwd: cwd.clone(),
+                home: home.clone(),
+            },
         }
     }
 
@@ -407,13 +424,9 @@ mod lost {
 // sibling test in this lib binary is mid-run, and core's lock over those
 // cells is unreachable from here.
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
-    use crate::agent::event::AgentLog;
+    use crate::agent::log::AgentLog;
     use crate::agent::testkit::source_run;
     use crate::bus::{Emitter, Inbox};
     use crate::fleet::Fleet;
@@ -488,13 +501,14 @@ mod tests {
     /// fleet and its one trunk, no scratch.
     fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> HostServices {
         HostServices {
-            fleet: Fleet::new(),
-            kind: SeatKind::Wire,
-            stamp: parent.mailbox().stamp(),
+            fleet: Fleet::for_test(),
+            kind: SeatKind::Wire {
+                cwd: std::env::temp_dir(),
+                home: std::env::temp_dir(),
+            },
+            stamp: parent.mailbox.stamp(),
             agent: parent.clone(),
             emit: emit.clone(),
-            cwd: std::env::temp_dir(),
-            home: Some(std::env::temp_dir()),
             reply: crate::agent::ReplyCell::default(),
             log: crate::agent::LogCell::new(test_log()),
             branch: None,
@@ -562,7 +576,7 @@ mod tests {
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
         let (seat, mut child) = wire_seat(Liveness::default());
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = test_trunk(&fleet);
         let host: Arc<dyn Host> = Arc::new(RunHost {
             desk: ExarchDesk {
@@ -602,7 +616,7 @@ mod tests {
         let (seat, mut child) = wire_seat(Liveness::default());
         let inbox = Inbox::new();
         let (tx, _rx) = crate::bus::channel();
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = test_trunk(&fleet);
         let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
@@ -712,6 +726,8 @@ mod tests {
         let mut seat = Seat::Wire {
             target: InterruptTarget::new(transport.control().clone()),
             transport: Box::new(transport),
+            cwd: std::env::temp_dir(),
+            home: std::env::temp_dir(),
         };
         let why = seat.clear().expect_err("a wire seat cannot reboot");
         assert!(why.contains("new conversation"), "{why}");

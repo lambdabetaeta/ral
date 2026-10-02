@@ -1,14 +1,16 @@
-//! The fleet: the by-name door a spawn claims its identity at, and the idle
-//! lease every reporting child is bounded by.
+//! The fleet: what every node of one run shares — the [`Launch`] fixed once
+//! for the whole run, the by-name index a spawn claims its identity at, and
+//! the idle lease every reporting child is bounded by.
 //!
 //! It is not the tree.  The tree is [`Agent::parent`](crate::agent::Agent)
 //! and [`Agent::children`](crate::agent::Agent), and every walk over it — the
 //! roster, the cancel cascade, the scope check — runs there.  What lives here
-//! is what only the fleet can answer: whether a name is free.
+//! is what no single node owns: the run's settings, and whether a name is
+//! free.
 //!
-//! A [`Fleet`] is shared behind one `Arc`, held by every agent it enrolled
-//! by every agent it enrolled: the trunk and each fork reach the same one, so
-//! no node can disagree about what is live.  `names` is a lookup index;
+//! A [`Fleet`] is shared behind one `Arc`, held by every agent it enrolled:
+//! the trunk and each fork reach the same one, so no node can disagree about
+//! what is live or what the run was launched with.  `names` is a lookup index;
 //! `roots` holds the trunk and every `/branch` — a root reports to nobody, so
 //! a walk over it is how `nearest_reap` reaches every live agent in the
 //! run.  Both hold [`Weak`], so an agent leaves the fleet by
@@ -28,7 +30,10 @@ pub(crate) mod enquiry;
 pub mod roster;
 pub mod schedule;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Dial};
+use crate::prompt::BuiltinIndex;
+use crate::provider::Bureau;
+use crate::shell_eval::tools::Toolset;
 use ral_core::process::{self, CancelCause};
 use ral_core::sync::LockExt;
 use std::collections::HashMap;
@@ -67,7 +72,60 @@ pub fn check_name(name: &str) -> Result<(), String> {
     ))
 }
 
-/// The fleet's two doors, each independently locked, plus the idle bound they share.
+/// What every node of one run shares, fixed at launch: the host's settings
+/// and the services it opened, held once here rather than copied into each
+/// [`Agent`].
+pub(crate) struct Launch {
+    /// Whether a human is attached to this run and types into a conversing
+    /// node's inbox — the TUI.  Off, a conversing trunk is driven one
+    /// exchange at a time and waits on nothing but its fleet.
+    pub attended: bool,
+    /// Whether the nodes hold the self-wakeup family.
+    pub allow_schedule: bool,
+    /// Whether the trunk, refused until a reset past the in-place wait, arms
+    /// a wakeup to resume there: exarch's terminal trunk alone.
+    pub resume_on_reset: bool,
+    /// What a request advertises and dispatch recognises; empty for `--chat`,
+    /// which is then never steered.
+    pub tools: Toolset,
+    /// The operator's disk ceiling; `None` never walks the dirs at all.
+    pub disk_warn_bytes: Option<u64>,
+    /// How a wire trunk reaches its helpers; `None` on an identity trunk.
+    pub dial: Option<Arc<dyn Dial>>,
+    /// The one owner of provider construction.
+    pub bureau: Arc<Bureau>,
+    /// The prompt template, still carrying the builtin-index placeholder, and
+    /// the index each node resolves it against for its own grants.
+    pub system: Arc<str>,
+    pub index: Arc<BuiltinIndex>,
+}
+
+#[cfg(test)]
+impl Launch {
+    /// A launch with nothing granted and nothing to reach: what a fleet-level
+    /// test's synthetic agents share.
+    pub(crate) fn for_test() -> Self {
+        Self {
+            attended: false,
+            allow_schedule: false,
+            resume_on_reset: false,
+            tools: Toolset::offered(false),
+            disk_warn_bytes: None,
+            dial: None,
+            bureau: Arc::new(Bureau::Scripted),
+            system: Arc::from(""),
+            index: BuiltinIndex::resolve(
+                ral_core::Shell::new(ral_core::io::TerminalState::default())
+                    .builtin_names()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// The fleet's two indices, each independently locked, plus the launch and
+/// the idle bound every node shares.
 ///
 /// [`Self::names`] is touched by every spawn and every name lookup;
 /// [`Self::roots`] only by a root's birth and a walk from the top.
@@ -79,21 +137,31 @@ pub struct Fleet {
     roots: Mutex<Vec<Weak<Agent>>>,
     /// [`AGENT_LEASE_IDLE`] outside tests.
     lease: Duration,
+    pub(crate) launch: Launch,
 }
 
 impl Fleet {
-    pub fn new() -> Arc<Self> {
-        Self::with_lease(AGENT_LEASE_IDLE)
-    }
-
-    /// A fleet whose idle bound is `lease` from birth, so a test can watch a
-    /// reap instead of waiting out [`AGENT_LEASE_IDLE`].
-    pub fn with_lease(lease: Duration) -> Arc<Self> {
+    /// A fleet for one run, whose reporting children are reaped `lease` after
+    /// their last exchange.
+    pub(crate) fn new(launch: Launch, lease: Duration) -> Arc<Self> {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
             roots: Mutex::new(Vec::new()),
             lease,
+            launch,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Arc<Self> {
+        Self::new(Launch::for_test(), AGENT_LEASE_IDLE)
+    }
+
+    /// A test fleet whose idle bound is `lease`, so a test can watch a reap
+    /// instead of waiting out [`AGENT_LEASE_IDLE`].
+    #[cfg(test)]
+    pub(crate) fn leased_for_test(lease: Duration) -> Arc<Self> {
+        Self::new(Launch::for_test(), lease)
     }
 
     /// Drop what has settled from `names`, so a name is free the moment its
@@ -121,24 +189,24 @@ impl Fleet {
     /// here and not only at the doors, because a wire peer is not trusted to
     /// have used one.
     pub(crate) fn enrol(self: &Arc<Self>, agent: &Arc<Agent>) -> Result<(), Unborn> {
-        if let Err(why) = check_name(agent.name()) {
+        if let Err(why) = check_name(&agent.name) {
             return Err(Unborn::NameMalformed(why));
         }
         let mut names = self.names.lock_ignore_poison();
         Self::prune_names(&mut names);
-        if let Some(parent) = agent.parent()
-            && parent.cancel_token().terminated()
+        if let Some(parent) = &agent.parent
+            && parent.token.terminated()
         {
             return Err(Unborn::SessionDead);
         }
-        if names.contains_key(agent.name()) {
-            return Err(Unborn::NameTaken(agent.name().to_string()));
+        if names.contains_key(&agent.name) {
+            return Err(Unborn::NameTaken(agent.name.clone()));
         }
-        names.insert(agent.name().to_string(), Arc::downgrade(agent));
+        names.insert(agent.name.clone(), Arc::downgrade(agent));
         drop(names);
         // Adopted (or rooted) only after the name is claimed: a refused agent
         // must never appear in the fleet, however briefly.
-        match agent.parent() {
+        match &agent.parent {
             Some(parent) => {
                 parent.adopt(agent);
                 arm_lease(self, agent, self.lease);
@@ -299,7 +367,7 @@ mod tests {
     /// reap only stamps the cancel layers.
     #[test]
     fn a_lease_is_armed_only_for_a_reporting_child() {
-        let fleet = Fleet::with_lease(Duration::from_millis(50));
+        let fleet = Fleet::leased_for_test(Duration::from_millis(50));
         let trunk = agent(&fleet, "trunk", None);
         let branch = agent(&fleet, "branch", None);
         let (reach, worker_engine) = reach_into();
@@ -313,7 +381,7 @@ mod tests {
         );
         std::thread::sleep(Duration::from_millis(300));
         assert!(
-            !branch.cancel_token().is_cancelled(),
+            !branch.token.is_cancelled(),
             "a root arms no reaper deadline"
         );
     }
@@ -323,18 +391,18 @@ mod tests {
     /// unwinds instead of grinding on as an orphan whose result nobody will
     /// collect.
     #[test]
-    fn clear_subtree_cancels_the_subtree() {
-        let fleet = Fleet::new();
+    fn forget_cancels_the_subtree() {
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let (reach, child_engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
         child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-        trunk.clear_subtree();
+        trunk.forget();
 
         assert!(
-            child.cancel_token().terminated(),
+            child.token.terminated(),
             "the abandoned child's token is terminate-stamped"
         );
         assert!(
@@ -349,28 +417,28 @@ mod tests {
     /// [`Agent::cancel_tree`] would, and every later run would fail forever.
     #[test]
     fn the_clear_gesture_cancels_descendants_but_spares_the_trunks_token() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
 
         trunk.cancel_descendants(CancelCause::Explicit);
 
         assert!(
-            child.cancel_token().terminated(),
+            child.token.terminated(),
             "the descendant's token is terminate-stamped"
         );
         assert!(
-            !trunk.cancel_token().is_cancelled(),
+            !trunk.token.is_cancelled(),
             "cancel_descendants never touches the trunk's own token"
         );
 
         // A stamped terminate cause would survive this round trip and an
         // uncancelled token does not, so this proves the trunk carries no
         // terminate cause at all — not merely that this call skipped it.
-        trunk.cancel_token().cancel(CancelCause::Interrupt);
-        trunk.cancel_token().reset();
+        trunk.token.cancel(CancelCause::Interrupt);
+        trunk.token.reset();
         assert!(
-            !trunk.cancel_token().is_cancelled(),
+            !trunk.token.is_cancelled(),
             "the trunk's token round-trips through an interrupt and reset \
              uncancelled, so the next run after /clear would run"
         );
@@ -380,7 +448,7 @@ mod tests {
     /// takes it with the subtree.
     #[test]
     fn cancel_tree_takes_the_root_too() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let (reach, branch_engine) = reach_into();
         let mut branch = spec("branch", Some(&trunk));
@@ -391,7 +459,7 @@ mod tests {
         branch.cancel_tree(CancelCause::Explicit);
 
         assert!(
-            branch.cancel_token().is_cancelled(),
+            branch.token.is_cancelled(),
             "the closed branch's token is set"
         );
         assert!(
@@ -399,11 +467,11 @@ mod tests {
             "close reaches the branch's eval layer, not just its token"
         );
         assert!(
-            grandchild.cancel_token().is_cancelled(),
+            grandchild.token.is_cancelled(),
             "a spawned descendant cascades"
         );
         assert!(
-            !trunk.cancel_token().is_cancelled(),
+            !trunk.token.is_cancelled(),
             "the trunk above the closed subtree survives"
         );
     }
@@ -414,7 +482,7 @@ mod tests {
     /// terminate cause.
     #[test]
     fn interrupt_unwinds_exactly_one_agent() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let (reach, child_engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
@@ -425,11 +493,11 @@ mod tests {
         child.interrupt();
 
         assert!(
-            child.cancel_token().is_cancelled(),
+            child.token.is_cancelled(),
             "interrupt trips the child's token"
         );
         assert!(
-            !child.cancel_token().terminated(),
+            !child.token.terminated(),
             "an interrupt is not a terminate cause"
         );
         assert!(
@@ -437,7 +505,7 @@ mod tests {
             "eval_root itself is never touched by an interrupt"
         );
         assert!(
-            !grandchild.cancel_token().is_cancelled(),
+            !grandchild.token.is_cancelled(),
             "no descendant walk: the grandchild is untouched"
         );
     }
@@ -448,7 +516,7 @@ mod tests {
     fn interrupt_never_poisons_the_next_run() {
         use ral_core::protocol::{Ending, Report, dispatch_to_report};
 
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let transport = Arc::new(bare_transport());
         let mut child = spec("child", Some(&trunk));
@@ -491,7 +559,7 @@ mod tests {
 
     #[test]
     fn cancel_sets_the_token_and_the_roster_reports_the_subtree() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let (reach, engine) = reach_into();
         let mut lint = spec("lint", Some(&trunk));
@@ -509,7 +577,7 @@ mod tests {
         );
 
         lint.cancel_tree(CancelCause::Explicit);
-        assert!(lint.cancel_token().is_cancelled(), "cancel sets the token");
+        assert!(lint.token.is_cancelled(), "cancel sets the token");
         assert!(
             ended(&engine).is_some(),
             "cancel reaches the worker's eval layer through its session root"
@@ -518,7 +586,7 @@ mod tests {
 
     #[test]
     fn cancel_cascades_to_the_whole_subtree() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let root = agent(&fleet, "r", None);
         let child = agent(&fleet, "c", Some(&root));
         let grandchild = agent(&fleet, "g", Some(&child));
@@ -526,26 +594,17 @@ mod tests {
 
         child.cancel_tree(CancelCause::Explicit);
 
-        assert!(child.cancel_token().is_cancelled(), "the cancelled node");
-        assert!(
-            grandchild.cancel_token().is_cancelled(),
-            "its descendant cascades"
-        );
-        assert!(
-            !sibling.cancel_token().is_cancelled(),
-            "a sibling is untouched"
-        );
-        assert!(
-            !root.cancel_token().is_cancelled(),
-            "the parent is untouched"
-        );
+        assert!(child.token.is_cancelled(), "the cancelled node");
+        assert!(grandchild.token.is_cancelled(), "its descendant cascades");
+        assert!(!sibling.token.is_cancelled(), "a sibling is untouched");
+        assert!(!root.token.is_cancelled(), "the parent is untouched");
     }
 
     /// Liveness is the avatar: an agent leaves both fleet doors and its
     /// parent's subtree by being dropped, and by nothing else.
     #[test]
     fn an_agent_resolves_only_while_something_holds_it() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
 
@@ -571,7 +630,7 @@ mod tests {
 
     #[test]
     fn a_message_posts_a_marked_note_to_a_descendant() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let inbox = Inbox::new();
         let mut worker = spec("worker", Some(&trunk));
@@ -595,7 +654,7 @@ mod tests {
     /// though all three are live agents an existence check alone would admit.
     #[test]
     fn the_scope_climb_refuses_self_and_non_descendants() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
         let sibling = agent(&fleet, "sibling", Some(&trunk));
@@ -614,7 +673,7 @@ mod tests {
     /// it there — and a root's `spawner` is nobody, because a human started it.
     #[test]
     fn every_row_names_who_started_it() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let mid = agent(&fleet, "mid", Some(&trunk));
         let _leaf = agent(&fleet, "leaf", Some(&mid));
@@ -647,7 +706,7 @@ mod tests {
     /// nothing, while a descendant holding a value owes it a `` `read ``.
     #[test]
     fn the_summary_counts_company_and_what_is_owed() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let mid = agent(&fleet, "mid", Some(&trunk));
         let _sibling = agent(&fleet, "sibling", Some(&trunk));
@@ -680,7 +739,7 @@ mod tests {
     /// `` `message `` crosses, by a name the human must have carried over.
     #[test]
     fn a_branch_is_a_root_outside_its_spawners_fleet() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let branch = agent(&fleet, "branch", None);
 
@@ -705,10 +764,10 @@ mod tests {
     /// miss this window.
     #[test]
     fn a_terminated_parent_bears_no_more_children() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let parent = agent(&fleet, "parent", Some(&trunk));
-        parent.cancel_token().cancel(CancelCause::Explicit);
+        parent.token.cancel(CancelCause::Explicit);
 
         assert_eq!(
             born(&fleet, spec("late-child", Some(&parent))).err(),
@@ -727,7 +786,7 @@ mod tests {
     /// half, this the check that closes the race.
     #[test]
     fn a_name_borne_by_a_live_agent_refuses_a_second() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let helper = agent(&fleet, "helper", Some(&trunk));
 
@@ -754,7 +813,7 @@ mod tests {
     #[test]
     fn a_steer_defers_the_fire() {
         let ttl = Duration::from_millis(300);
-        let fleet = Fleet::with_lease(ttl);
+        let fleet = Fleet::leased_for_test(ttl);
         let trunk = agent(&fleet, "trunk", None);
         let (reach, engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
@@ -762,7 +821,7 @@ mod tests {
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
         std::thread::sleep(ttl / 2);
-        child.mailbox().steer("still there".into());
+        child.mailbox.steer("still there".into());
 
         std::thread::sleep(ttl / 2 + Duration::from_millis(50));
         assert!(
@@ -778,12 +837,11 @@ mod tests {
     #[test]
     fn settling_before_the_fire_ends_the_chain_silently() {
         let ttl = Duration::from_millis(80);
-        let fleet = Fleet::with_lease(ttl);
+        let fleet = Fleet::leased_for_test(ttl);
         let trunk = agent(&fleet, "trunk", None);
-        let token = Token::new();
-        let mut child = spec("child", Some(&trunk));
-        child.cancel = token.clone();
-        let child = born(&fleet, child).expect("a fresh child of a live trunk");
+        let child =
+            born(&fleet, spec("child", Some(&trunk))).expect("a fresh child of a live trunk");
+        let token = child.token.clone();
 
         drop(child);
 
@@ -797,18 +855,18 @@ mod tests {
     #[test]
     fn a_clear_outranks_the_lease() {
         let ttl = Duration::from_millis(80);
-        let fleet = Fleet::with_lease(ttl);
+        let fleet = Fleet::leased_for_test(ttl);
         let trunk = agent(&fleet, "trunk", None);
         let (reach, engine) = reach_into();
         let mut child = spec("child", Some(&trunk));
         child.reach = reach;
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-        trunk.clear_subtree();
+        trunk.forget();
         assert_eq!(
             ended(&engine),
             Some(ral_core::types::Status::Cancelled(CancelCause::Terminate).code()),
-            "clear_subtree terminates the abandoned child's engine"
+            "forget terminates the abandoned child's engine"
         );
 
         // The cancelled child's own loop would retire it; here the drop is
@@ -826,7 +884,7 @@ mod tests {
     /// exchange.
     #[test]
     fn engaged_and_idle_read_the_exchange_clock() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let inbox = Inbox::new();
         let mut child = spec("child", Some(&trunk));
@@ -841,7 +899,7 @@ mod tests {
         // coalescing into this one.
         inbox.next_item();
 
-        child.mailbox().steer("hi".into());
+        child.mailbox.steer("hi".into());
         assert!(child.engaged(), "steered at least once");
         assert!(
             child.idle() < Duration::from_secs(1),
@@ -859,7 +917,7 @@ mod tests {
     /// quiesce between the two facts.
     #[test]
     fn a_settling_childs_result_outruns_the_quiesce_verdict() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
         let inbox = Inbox::new();

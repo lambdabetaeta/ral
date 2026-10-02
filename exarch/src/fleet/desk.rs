@@ -8,7 +8,7 @@
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
-use crate::agent::event::{AgentLog, ContextSurvey, EditAuthority};
+use crate::agent::log::{AgentLog, ContextSurvey, EditAuthority};
 use crate::agent::seat::{Seat, SeatKind};
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::card::{Card, encode_card};
@@ -203,11 +203,6 @@ pub(crate) struct HostServices {
     /// choose their arm on this fact.
     pub kind: SeatKind,
     pub emit: Emitter,
-    /// Frozen at install: the path root `narrow` and every handler resolves
-    /// from, and a hatched child's cwd.
-    pub cwd: PathBuf,
-    /// The engine's `$HOME`, frozen at install: a hatched child's home.
-    pub home: Option<PathBuf>,
     /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
     /// write it any other way.
     pub reply: ReplyCell,
@@ -333,20 +328,23 @@ impl ExarchDesk {
             Request::Transcript(Transcript::Index) => self.locate_then_read(
                 |log| {
                     Ok(Vec::from_iter(
-                        log.transcript_index().into_iter().map(Indexed::from),
+                        log.context()
+                            .transcript_index()
+                            .into_iter()
+                            .map(Indexed::from),
                     ))
                 },
                 |index| Ok(index.encode()),
             ),
             Request::Transcript(Transcript::Read(read)) => self.locate_then_read(
-                |log| log.locate_read(&read.turns),
+                |log| log.context().locate_read(&read.turns),
                 |read| {
                     read.turns()
                         .map(|turns| Vec::from_iter(turns.into_iter().map(Material::from)).encode())
                 },
             ),
             Request::Transcript(Transcript::Grep(grep)) => self.locate_then_read(
-                |log| log.locate_grep(grep.turns.as_deref()),
+                |log| log.context().locate_grep(grep.turns.as_deref()),
                 |read| {
                     read.grep(&grep.pattern)
                         .map(|hits| Hits::from(hits).encode())
@@ -377,7 +375,7 @@ impl ExarchDesk {
 
         // Fuel bounds depth, not fan-out: the parent's own is never debited, so
         // siblings are free and only a deep enough chain bottoms out.
-        if s.agent.fuel() == 0 {
+        if s.agent.fuel == 0 {
             return Err(Error::new(
                 "`exarch-agents `start` refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
@@ -413,7 +411,7 @@ impl ExarchDesk {
             provider,
             true,
             // A child may narrow its parent's search reach, never widen it.
-            s.agent.search() && spec.search,
+            s.agent.search && spec.search,
             spec.memory == Memory::Mnemon,
         )?;
         self.spawn_child(child, name, spec.prompt)
@@ -436,7 +434,7 @@ impl ExarchDesk {
             return Ok(current);
         }
         let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"), 1);
-        let bureau = s.agent.bureau();
+        let bureau = &s.fleet.launch.bureau;
         let available = bureau.available();
         let account = match provider {
             Selection::Inherit => current.account().clone(),
@@ -470,16 +468,16 @@ impl ExarchDesk {
                 .adopt_parked(id, grant)
                 .map(Seat::adopted)
                 .map_err(refused),
-            (SeatKind::Wire, ForkClaim::Listening { port, token }) => {
-                self.dial_seat(port, token).map_err(refused)
-            }
+            (SeatKind::Wire { cwd, home }, ForkClaim::Listening { port, token }) => self
+                .dial_seat(port, token, cwd.clone(), home.clone())
+                .map_err(refused),
             (SeatKind::Identity(_), ForkClaim::Listening { .. }) => Err(refused(
                 "this host runs its children in its own process, so the fork must be `parked \
                  <nursery id>` — a session that says it is listening for a dial is describing a \
                  wire this desk does not have"
                     .into(),
             )),
-            (SeatKind::Wire, ForkClaim::Parked(_)) => Err(refused(
+            (SeatKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(
                 "this host reaches its children across a wire, so the fork must be `listening \
                  [port, token]` — a session that says it is parked in process is naming a \
                  nursery this desk does not have"
@@ -491,14 +489,17 @@ impl ExarchDesk {
     /// The wire arm: dial the listener the guest opened for this one fork,
     /// write the token it is waiting for, and seat the child once the guest
     /// acknowledges — which it does only once the child process exists.
-    fn dial_seat(&self, port: u32, token: u64) -> Result<Seat, String> {
+    fn dial_seat(
+        &self,
+        port: u32,
+        token: u64,
+        cwd: PathBuf,
+        home: PathBuf,
+    ) -> Result<Seat, String> {
         let s = &self.services;
-        let dial = s.agent.dial().ok_or(
+        let dial = s.fleet.launch.dial.as_ref().ok_or(
             "this wire session has no dialler installed to reach a helper engine's listener — a \
              construction bug, since a fuelled wire trunk is refused at Avatar::root without one",
-        )?;
-        let home = s.home.clone().ok_or(
-            "this engine has no `$HOME` for its child to inherit — is `HOME` unset in it?",
         )?;
         let mut stream = dial.dial(port).map_err(|reason| {
             format!("could not dial the helper engine's listener on guest port {port} — {reason}")
@@ -512,9 +513,9 @@ impl ExarchDesk {
             ral_core::protocol::Liveness::default(),
         )
         .map_err(|e| format!("could not adopt the hatched wire: {e}"))?;
-        // The parent engine's own two paths, as read at this call's install.
-        // A hatched helper's logs live under the run that hatched it.
-        Seat::wire(transport, s.cwd.clone(), home).map_err(|lost| {
+        // Attached as the parent was; the seed carries the live cwd.  A
+        // hatched helper's logs live under the run that hatched it.
+        Seat::wire(transport, cwd, home).map_err(|lost| {
             crate::agent::seat::EngineLost::starting(&lost, s.agent.run_dir()).to_string()
         })
     }
@@ -537,20 +538,21 @@ impl ExarchDesk {
         inherit_context: bool,
     ) -> Result<Avatar, Error> {
         let s = &self.services;
-        let fuel = s.agent.fuel().saturating_sub(1);
+        let launch = &s.fleet.launch;
+        let fuel = s.agent.fuel.saturating_sub(1);
         // Against the *child's* grants, never this agent's, so the opening
         // bookend records the child's real system length.
-        let system_prompt = s.agent.index().apply(
-            s.agent.system_base(),
+        let system_prompt = launch.index.apply(
+            &launch.system,
             &crate::prompt::Grants {
                 returns,
-                allow_schedule: s.agent.allow_schedule,
+                allow_schedule: launch.allow_schedule,
                 spawns: fuel > 0,
             },
             &name,
         );
         let account =
-            crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
+            crate::agent::RecordedAccount::of(provider.account(), &launch.bureau.available());
         let log = {
             let parent_log = s.log.lock();
             let mut log = parent_log
@@ -571,30 +573,18 @@ impl ExarchDesk {
         };
         Avatar::assemble(Build {
             name,
-            system: s.agent.system_base().clone(),
             system_prompt,
-            index: s.agent.index().clone(),
             // The child's engine holds its own layer; the stack it runs under
             // is its parent's.
-            caps: s.agent.caps().clone(),
+            caps: s.agent.caps.clone(),
             seat,
             log,
             parent: returns.then(|| s.agent.clone()),
             fuel,
             provider: ProviderHandle::new(provider),
-            interactive: s.agent.interactive(),
             returns,
-            allow_schedule: s.agent.allow_schedule,
-            resume_on_reset: false,
-            tools: s.agent.tools(),
             search,
             fleet: s.fleet.clone(),
-            run_lock: None,
-            resume_summary: None,
-            disk_warn_bytes: s.agent.disk_warn_bytes(),
-            egress: s.agent.egress().clone(),
-            dial: s.agent.dial().cloned(),
-            bureau: s.agent.bureau().clone(),
         })
         .map_err(|why| Error::new(format!("`exarch-agents `{verb}` refused: {why}"), 1))
     }
@@ -645,7 +635,7 @@ impl ExarchDesk {
             seat,
             s.agent.current_provider(),
             order.returns,
-            s.agent.search(),
+            s.agent.search,
             !order.returns,
         )?;
         *order.child.lock_ignore_poison() = Some(child);
@@ -752,7 +742,7 @@ impl ExarchDesk {
     /// handed the tag the model typed, so the refusal names that and not a
     /// vocabulary the model was never taught.
     fn require_schedule_grant(&self, verb: &str) -> Result<(), Error> {
-        if self.services.agent.allow_schedule {
+        if self.services.fleet.launch.allow_schedule {
             return Ok(());
         }
         Err(Error::new(
@@ -787,7 +777,7 @@ impl ExarchDesk {
         let result = s
             .agent
             .schedules
-            .schedule(trigger, prompt, label.clone(), s.agent.mailbox());
+            .schedule(trigger, prompt, label.clone(), &s.agent.mailbox);
         let (payload, content) = match &result {
             Ok(receipt) => (
                 described,
@@ -844,7 +834,7 @@ impl ExarchDesk {
     /// on `returns` and never on trunk-ness.
     fn agent_reply(&self, value: FOValue) -> Result<FOValue, Error> {
         let s = &self.services;
-        if !s.agent.returns() {
+        if !s.agent.returns {
             return Err(Error::new(
                 "exarch-agents `reply` refused: you converse with the user; you do not return. \
                  `reply` parks you and hands your value to your parent's exarch-agents `read — \
@@ -962,7 +952,7 @@ impl ExarchDesk {
     /// The context as the log holds it. Silent, like the roster: a survey
     /// commits no act, and every edit tag answers one of these too.
     fn context_survey(&self) -> ContextSurvey {
-        self.services.log.lock().context_survey()
+        self.services.log.lock().context().context_survey()
     }
 
     /// The tail every `` `exarch-transcript `` tag shares: `locate` under the
@@ -1195,7 +1185,7 @@ impl Host for RunHost {
 )]
 mod tests {
     use super::*;
-    use crate::agent::event::AgentLog;
+    use crate::agent::log::AgentLog;
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
     use crate::fleet::enquiry::{Grant, Grep, Launch, Pin, Reading};
@@ -1225,10 +1215,11 @@ mod tests {
     /// needs both to drive `` `start `` end to end.
     fn services_with(
         fuel: u32,
+        launch: crate::fleet::Launch,
         configure: impl FnOnce(&mut crate::agent::testkit::TestAgentSpec),
     ) -> (HostServices, Arc<Fleet>, Inbox) {
         let parent_inbox = Inbox::new();
-        let fleet = Fleet::new();
+        let fleet = Fleet::new(launch, crate::fleet::AGENT_LEASE_IDLE);
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
         spec.mailbox = parent_inbox.mailbox();
         spec.fuel = fuel;
@@ -1240,11 +1231,9 @@ mod tests {
         let services = HostServices {
             fleet: fleet.clone(),
             kind: SeatKind::Identity(Arc::new(crate::bootstrap::test_transport())),
-            stamp: agent.mailbox().stamp(),
+            stamp: agent.mailbox.stamp(),
             agent,
             emit,
-            cwd: PathBuf::from("/"),
-            home: Some(PathBuf::from("/tmp")),
             reply: ReplyCell::default(),
             log: LogCell::new(fresh_log()),
             branch: None,
@@ -1257,7 +1246,7 @@ mod tests {
     /// The base capture every desk below builds on, so growing [`HostServices`]
     /// means touching one literal, not three.
     fn base_services() -> HostServices {
-        services_with(3, |_| {}).0
+        services_with(3, crate::fleet::Launch::for_test(), |_| {}).0
     }
 
     fn desk() -> ExarchDesk {
@@ -1408,7 +1397,15 @@ mod tests {
     /// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
     fn granted_desk() -> ExarchDesk {
         ExarchDesk {
-            services: services_with(3, |spec| spec.allow_schedule = true).0,
+            services: services_with(
+                3,
+                crate::fleet::Launch {
+                    allow_schedule: true,
+                    ..crate::fleet::Launch::for_test()
+                },
+                |_| {},
+            )
+            .0,
         }
     }
 
@@ -1416,7 +1413,8 @@ mod tests {
     /// `` `start ``/`` `cancel ``/`` `message `` run end to end and a child's
     /// result is observable — unlike [`desk`].
     fn spawnable_desk(fuel: u32) -> (Arc<ExarchDesk>, Arc<Fleet>, Inbox) {
-        let (services, fleet, parent_inbox) = services_with(fuel, |_| {});
+        let (services, fleet, parent_inbox) =
+            services_with(fuel, crate::fleet::Launch::for_test(), |_| {});
         (Arc::new(ExarchDesk { services }), fleet, parent_inbox)
     }
 
@@ -1550,7 +1548,7 @@ mod tests {
                 .expect("import");
             log.append_user("live".into(), None).expect("live prompt");
         }
-        let expected_bytes = desk.services.log.lock().history_bytes();
+        let expected_bytes = desk.services.log.lock().context().history_bytes();
 
         let answer = desk
             .ask(Request::Context(Context::Survey))
@@ -1799,7 +1797,7 @@ mod tests {
             .expect("context evict");
         assert_eq!(
             int_field(&answer, "total-bytes"),
-            i64::try_from(desk.services.log.lock().history_bytes()).unwrap(),
+            i64::try_from(desk.services.log.lock().context().history_bytes()).unwrap(),
             "the survey's total is the context's own weight"
         );
         let rows = survey_rows(&answer);
@@ -2221,7 +2219,7 @@ mod tests {
                 "exarch-agents `reply 'hi from child'",
             )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "say hi", "helper", true))
@@ -2276,7 +2274,7 @@ mod tests {
                 "exarch-agents `reply 'read me'",
             )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "say hi", "helper", true))
@@ -2303,7 +2301,7 @@ mod tests {
         let (desk, fleet, parent_inbox) = spawnable_desk(3);
         desk.services
             .agent
-            .provider_handle()
+            .provider
             .swap(Arc::new(Provider::scripted(
                 "test-model",
                 Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -2449,7 +2447,10 @@ mod tests {
     /// itself.
     #[test]
     fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
-        let (services, _fleet, parent_inbox) = services_with(3, |spec| spec.search = false);
+        let (services, _fleet, parent_inbox) =
+            services_with(3, crate::fleet::Launch::for_test(), |spec| {
+                spec.search = false;
+            });
         let desk = Arc::new(ExarchDesk { services });
         let provider = Arc::new(Provider::scripted(
             "test-model",
@@ -2458,7 +2459,7 @@ mod tests {
                 "exarch-agents `reply 'done'",
             )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "go", "searcher", true))
@@ -2526,10 +2527,15 @@ mod tests {
                 .map(str::to_string)
                 .collect(),
         );
-        let (services, _fleet, parent_inbox) = services_with(3, |spec| {
-            spec.system_base = template.clone();
-            spec.index = index.clone();
-        });
+        let (services, _fleet, parent_inbox) = services_with(
+            3,
+            crate::fleet::Launch {
+                system: template.as_str().into(),
+                index,
+                ..crate::fleet::Launch::for_test()
+            },
+            |_| {},
+        );
         let desk = Arc::new(ExarchDesk { services });
         let provider = Arc::new(Provider::scripted(
             "test-model",
@@ -2538,7 +2544,7 @@ mod tests {
                 "exarch-agents `reply 'hi from child'",
             )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "say hi", "helper", true))
@@ -2554,14 +2560,15 @@ mod tests {
 
         let expected = desk
             .services
-            .agent
-            .index()
+            .fleet
+            .launch
+            .index
             .apply(
                 &template,
                 &crate::prompt::Grants {
                     returns: true,
-                    allow_schedule: desk.services.agent.allow_schedule,
-                    spawns: desk.services.agent.fuel().saturating_sub(1) > 0,
+                    allow_schedule: desk.services.fleet.launch.allow_schedule,
+                    spawns: desk.services.agent.fuel.saturating_sub(1) > 0,
                 },
                 "helper",
             )
@@ -2614,7 +2621,7 @@ mod tests {
                 "exarch-agents `reply 'a'",
             )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         let answer = with_parked(&desk, |desk, session| {
             desk.ask(start_req(session, "go", "helper", true))
@@ -2694,7 +2701,7 @@ mod tests {
                     "exarch-agents `reply 'c'",
                 )])),
         ));
-        desk.services.agent.provider_handle().swap(provider);
+        desk.services.agent.provider.swap(provider);
 
         for i in 0..3 {
             let answer = with_parked(&desk, move |desk, session| {
@@ -2769,7 +2776,8 @@ mod tests {
     /// reaches any live agent but this one.
     #[test]
     fn cancel_scopes_to_descendants_and_message_does_not() {
-        let (services, fleet, _root_inbox) = services_with(3, |_| {});
+        let (services, fleet, _root_inbox) =
+            services_with(3, crate::fleet::Launch::for_test(), |_| {});
         let desk_root = ExarchDesk { services };
         // root -> mid -> grandchild, and root -> sibling (mid's sibling).
         let under = |name: &str, parent: &Arc<Agent>| {
@@ -2820,7 +2828,7 @@ mod tests {
     /// value must render before an enquiry raised after it in the same run.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, session.agent.id);
         let _ = session.ral(r#"exarch-pins `clear "test-marker"; exarch-agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
@@ -3009,7 +3017,10 @@ mod tests {
     #[test]
     fn reply_refused_without_returns() {
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let (services, _fleet, _inbox) = services_with(3, |spec| spec.returns = false);
+        let (services, _fleet, _inbox) =
+            services_with(3, crate::fleet::Launch::for_test(), |spec| {
+                spec.returns = false;
+            });
         let mut d = ExarchDesk { services };
         d.services.emit = emit;
         let err = d
@@ -3167,7 +3178,7 @@ mod tests {
         std::thread::spawn(move || {
             let (tx, _rx) = crate::bus::channel();
             let emit = Emitter::new(tx, id);
-            let (outcome, _payload) = child.attend(&emit);
+            let outcome = child.attend(&emit);
             child.settle(outcome);
         })
     }
@@ -3206,7 +3217,7 @@ mod tests {
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let parent = Avatar::for_test("system").unwrap();
         let child = parent.fork_named("helper").expect("fork child");
-        child.provider_handle().swap(Arc::new(Provider::scripted(
+        child.agent.provider.swap(Arc::new(Provider::scripted(
             "test-model",
             Script::new()
                 .then(Reply::text("first response, no reply yet"))
@@ -3221,7 +3232,7 @@ mod tests {
         let _keepalive = keepalive(&parent.fleet, &child_agent);
         let handle = attend_and_deliver(child);
 
-        child_agent.mailbox().steer("first message".into());
+        child_agent.mailbox.steer("first message".into());
         assert!(child_agent.engaged(), "steer renews the exchange clock");
         assert!(
             eventually_logged(
@@ -3232,7 +3243,7 @@ mod tests {
             "the child must answer the first steer before the second is sent"
         );
 
-        child_agent.mailbox().steer("second message".into());
+        child_agent.mailbox.steer("second message".into());
         match wait_for_settle(&parent.inbox()) {
             crate::bus::Next::Item(crate::bus::Item::Agent(result)) => {
                 assert!(
@@ -3276,7 +3287,8 @@ mod tests {
             long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
         }
         child
-            .provider_handle()
+            .agent
+            .provider
             .swap(Arc::new(Provider::scripted("test-model", long_script)));
         child.seed("go".into());
         let handle = attend_and_deliver(child);
@@ -3320,12 +3332,12 @@ mod tests {
         std::thread::sleep(ttl / 2);
         // A bare stamp, not a steer: the script is empty, so an actual
         // delivery would give the attend loop work it cannot answer.
-        agent.mailbox().stamp_exchange();
-        keepalive.mailbox().stamp_exchange();
+        agent.mailbox.stamp_exchange();
+        keepalive.mailbox.stamp_exchange();
 
         std::thread::sleep(ttl / 2 + Duration::from_millis(150));
         assert!(
-            !agent.cancel_token().is_cancelled(),
+            !agent.token.is_cancelled(),
             "renewed at half the ttl, still alive past the original bound"
         );
 
@@ -3351,7 +3363,7 @@ mod wire_tests {
     use super::tests::{confined, message_req, spec, start};
     use super::*;
     use crate::agent::cancel::InterruptTarget;
-    use crate::agent::event::AgentLog;
+    use crate::agent::log::AgentLog;
     use crate::bus::Inbox;
     use ral_core::types::NurseryId;
     use std::io::{Read, Write};
@@ -3492,26 +3504,32 @@ mod wire_tests {
     /// `kind: SeatKind::Wire` and a dialler installed.
     fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
         let parent_inbox = Inbox::new();
-        let fleet = Fleet::new();
+        let fleet = Fleet::new(
+            crate::fleet::Launch {
+                dial: Some(dial),
+                ..crate::fleet::Launch::for_test()
+            },
+            crate::fleet::AGENT_LEASE_IDLE,
+        );
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
         spec.reach = fake_wire_reach();
         spec.mailbox = parent_inbox.mailbox();
         spec.fuel = fuel;
         spec.returns = true;
         spec.search = true;
-        spec.dial = Some(dial);
         let agent =
             crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's wire trunk");
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
                 fleet: fleet.clone(),
-                kind: SeatKind::Wire,
-                stamp: agent.mailbox().stamp(),
+                kind: SeatKind::Wire {
+                    cwd: PathBuf::from("/work"),
+                    home: PathBuf::from("/tmp"),
+                },
+                stamp: agent.mailbox.stamp(),
                 agent,
                 emit,
-                cwd: PathBuf::from("/work"),
-                home: Some(PathBuf::from("/tmp")),
                 reply: ReplyCell::default(),
                 log: LogCell::new(fresh_log()),
                 branch: None,
@@ -3605,7 +3623,7 @@ mod wire_tests {
     /// sender and recipient never learn each other's transport.
     #[test]
     fn identity_and_wire_peers_exchange_messages_through_one_desk() {
-        let fleet = Fleet::new();
+        let fleet = Fleet::for_test();
         let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
         parent_spec.fuel = 3;
         parent_spec.returns = true;
@@ -3634,12 +3652,13 @@ mod wire_tests {
                 fleet,
                 // Neither peer's transport matters to `message`, which
                 // touches only the tree and a mailbox.
-                kind: SeatKind::Wire,
-                stamp: parent.mailbox().stamp(),
+                kind: SeatKind::Wire {
+                    cwd: PathBuf::from("/"),
+                    home: PathBuf::from("/tmp"),
+                },
+                stamp: parent.mailbox.stamp(),
                 agent: parent,
                 emit,
-                cwd: PathBuf::from("/"),
-                home: Some(PathBuf::from("/tmp")),
                 reply: ReplyCell::default(),
                 log: LogCell::new(fresh_log()),
                 branch: None,

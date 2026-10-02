@@ -228,14 +228,10 @@ mod tests {
         child_seam.attach(child.fleet_sink());
 
         let _recorded = root_seam
-            .emit(Forensic::UsageDelta {
-                usage: root_usage.into(),
-            })
+            .emit(Forensic::UsageDelta { usage: root_usage })
             .expect("a fileless seam still stamps");
         let _recorded = child_seam
-            .emit(Forensic::UsageDelta {
-                usage: child_usage.into(),
-            })
+            .emit(Forensic::UsageDelta { usage: child_usage })
             .expect("a fileless seam still stamps");
 
         let total = bus.usage_total();

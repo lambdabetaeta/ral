@@ -1,7 +1,7 @@
 ---
-generated_at_commit: c848c533
-generated_at_date: 2026-10-01
-covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+generated_at_commit: 647fab03
+generated_at_date: 2026-10-02
+covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
@@ -10,15 +10,18 @@ covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exar
 may touch what ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 **`Agent` is the public half**, held behind an `Arc` the fleet shares:
-identity (`id`, `name`, `log_dir`), the two cancel doors (`cancel::Token`
-and the eval-layer `reach: InterruptTarget`), the sender half of its own
-`mailbox`, an owned hot-swappable `provider: ProviderHandle`, immutable
-config (`caps`, `fuel`, `returns`, `search`, `interactive`,
-`allow_schedule`, `egress`, `dial`, `index`, the resolved `system` prompt,
-`disk_warn_bytes`), the single-writer `status: Mutex<Status>` — `{
+identity (`id`, `name`, `log_dir`), the two cancel layers (`token:
+cancel::Token` and the eval-layer `reach: InterruptTarget`), the sender half
+of its own `mailbox`, an owned hot-swappable `provider: ProviderHandle`, the
+per-node config fixed at birth (`caps`, `fuel`, `returns`, `search`, the
+resolved `system` prompt), the single-writer `status: Mutex<Status>` — `{
 rest, reply, awaiting }` — `consumer` (the parent's `Stamp`, minted at this
 agent's birth; `None` for a root), a strong `parent: Option<Arc<Agent>>`,
-and a weak `children: Mutex<Vec<Weak<Agent>>>`.  There is one fence, the
+and a weak `children: Mutex<Vec<Weak<Agent>>>`.  Its fields are plain
+`pub(crate)`: a record, not an interface, read directly by the modules that
+run it.  What every node of a run shares — the host's settings and the
+services it opened — is not on the node at all but on the fleet's
+[[#The Fleet|`Launch`]], held once.  There is one fence, the
 inbox's own clear-epoch
 ([[decisions/260827_agent-and-avatar|agent-and-avatar]]), and it is carried
 only inside `bus::Stamp` — the addressed envelope `Mailbox::stamp` mints,
@@ -34,15 +37,17 @@ the destination judges it at its own pop.
 (`bootstrap::engine_boot_shell`, the table `exarch::INSTALLERS` both carriers
 share) — a root keeps the `Attach` it was born from and the session `Scratch`
 that `Attach` names, an adopted fork keeps neither — or `Seat::Wire`, a
-`WireTransport` driving a remote engine, one process per session
+`WireTransport` driving a remote engine, one process per session, keeping the
+`cwd`/`home` it was attached with
 ([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
-([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`,
-the nudge `Registry`, the schedule `ScheduleRegistry`, and every other field
-only the attend thread touches, beside the `Arc<Agent>` it embodies
-(`.agent`, `pub(crate)` so a caller outside `agent` reaches identity and
-config at `.agent.…` directly). Every method that runs the agent takes
-`&mut Avatar`.
+([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`, the
+`reply: ReplyCell` the desk's `reply` handler stages into, the `readings`
+(the token `Measure`, the `Gauges`, the `Nudges` — everything this avatar has
+measured and told about one context, reborn whole with it), the
+`disk_checked` instant, and the `Arc<Agent>` it embodies (`.agent`,
+`pub(crate)` so a caller outside `agent` reaches identity and config at
+`.agent.…` directly). Every method that runs the agent takes `&mut Avatar`.
 
 **An agent is live while its `Avatar` holds that `Arc`.** Nothing
 deregisters: `Avatar`'s `Drop` (`agent/build.rs`) clears its own armed
@@ -50,13 +55,13 @@ schedules and records the session-ended bookend, and the last strong
 reference going with it is what a parent's `children` or the fleet's
 `roots`/`names` prune away at their next walk. There is no `Session`, no
 `is_root`: every distinction reduces to **position in the tree**, read from
-`Agent::parent` together with `interactive` and the agent's own exchange
-clock. What every node *shares* for identity resolution and the idle lease
-— the by-name door — lives on the thin [[#The Fleet|`Fleet`]],
-not on the node; the one [[map/exarch/frontend|`FleetBus`]] and the
-transport `Engine` are session-level handles the frontend builds and holds,
-not fields of `Fleet` itself. Output caps
-are fixed `agent/digest.rs` constants, not per-agent state.
+`Agent::parent` together with `returns`, the launch's `attended`, and the
+agent's own exchange clock. What every node *shares* — the `Launch`, the
+by-name index, the idle lease — lives on the [[#The Fleet|`Fleet`]], not on
+the node; the one [[map/exarch/frontend|`FleetBus`]] and the transport
+`Engine` are session-level handles the frontend builds and holds, not fields
+of `Fleet` itself. Output caps are fixed `agent/digest.rs` constants, and the
+eviction thresholds `agent/gauge.rs`'s, not per-agent state.
 
 ## Status, the exchange clock, and the lock rule
 
@@ -71,7 +76,7 @@ hold at most one at a time.** `children` is locked only to push
 copies); every walk (`Agent::walk`, `descendant`, cascade, roster) runs
 over the snapshot, never under the lock. `status` is a single-writer
 register — the avatar writes one field at a time (`set_resting`,
-`deposit_reply`, `heard`, `message`, `clear_subtree`) and a reader takes
+`deposit_reply`, `heard`, `message`, `forget`) and a reader takes
 one snapshot and computes nothing under the lock, so the mutex buys
 atomicity and nothing more. `parent` is a plain `Arc`, read lock-free.
 
@@ -109,14 +114,19 @@ holds an `Arc<Agent>` to a descendant** — every reaper closure
 a name or a `Weak`, never a strong handle down the tree.
 
 The **trunk** is the parent-less node (`parent = None`), built by
-`Avatar::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
-prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
-the `Egress` (`exarch/src/egress.rs`), and the optional `dial` a wire
-trunk reaches its children through ([[#Wire-seat spawn|below]]) — each set
-once at launch and inherited verbatim by every fork — while `RootSeat` picks
-the seat kind (`Identity` boots its own shell from `scratch`; `Wire` adopts a
-built transport whose engine lives elsewhere, and spawns its sub-agents by
-dialling back into it).
+`Avatar::root(RootConfig, RootSeat, provider)` over a fresh log, or by
+`Avatar::resume(RootConfig, RootSeat, provider)` over session 0's record in
+`run_dir` replayed, which also hands back the `Resumed { turn, bytes }`
+summary the TUI's banner shows. `RootConfig` carries the prompt, caps, `fuel`
+(exarch's and synod's launch sites pass `SPAWN_FUEL`), how the trunk is driven
+(`Trunk::{Headless, Attended, Embedded}`), the `Toolset` requests advertise
+(empty for `--chat`), the `Egress` (`exarch/src/egress.rs`) whose `search`
+verdict is read once, and the optional `dial` a wire trunk reaches its
+children through ([[#Wire-seat spawn|below]]) — what every fork shares goes
+onto the fleet's `Launch` — while `RootSeat` picks the seat kind (`Identity`
+boots its own shell from `scratch`; `Wire` adopts a built transport whose
+engine lives elsewhere, and spawns its sub-agents by dialling back into it).
+The run's advisory lock is the launcher's to hold, never the node's.
 
 `Egress` bundles the two things a fleet's outbound network shares across
 every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the
@@ -135,17 +145,21 @@ has no guest to police, still keeps `Egress` for one thing: the `search` bit
 that clamps the harness `` exarch-agents `start [... search: …] `` field
 ([[map/exarch/builtins|builtins]]).
 
-An `interactive` node
-built to converse — the interactive trunk, and every `/branch` tab
-([[decisions/260705_branch-minimal|branch-minimal]]) — withholds `reply` and
-parks for its human, but both behaviours fall out of construction and position,
-never an `is_root` branch:
+A node built to converse — an attended or embedded trunk, and every
+`/branch` tab ([[decisions/260705_branch-minimal|branch-minimal]]) — withholds
+`reply`; whether it also parks for a human is the launch's say, not the
+node's. Two bits, because they are two facts: `returns` is per node, fixed at
+birth; `attended` is per run, fixed at launch — a human at the inbox (the
+TUI), or none (synod drives one exchange at a time; headless seeds once).
+Both behaviours fall out of construction and position, never an `is_root`
+branch:
 
 ```
-  returns(a)    // fixed at construction: fork true, branch false, trunk ¬interactive
-  conversing(a) =  a.interactive ∧ ¬returns(a)
-  park_mode(a)  =  Quiesce        if conversing(a) ∧ a.cancel.terminated()   // /close reaped it
-                   Held           if conversing(a)                          // immune to cancellation
+  returns(a)      // fixed at birth: fork true, branch false, trunk by how it is driven (Headless returns)
+  attended        // fixed at launch, on the fleet: Trunk::Attended alone
+  park_mode(a)  =  Quiesce        if a.seat severed
+                   Quiesce        if ¬returns(a) ∧ attended ∧ a.token.terminated()   // /close reaped it
+                   Held           if ¬returns(a) ∧ attended                          // immune to cancellation
                    Engaged        if a.parent ∧ returns(a) ∧ (engaged ∨ a.has_reply())  // talked to, or holding a reply; a terminate cause still ends it
                    HeldByChildren if some live child of a is still awaited
                    UntilCancelled if a.schedules.armed()
@@ -153,57 +167,64 @@ never an `is_root` branch:
 ```
 
 `returns` (`agent.rs`) is a **construction-fixed field** — one bit read by
-`returns()`, parking's conversing predicate, the desk's `reply` refusal
-([[map/exarch/builtins|builtins]]), and the prompt's per-agent resolver. The
-resolver applies the index from `returns`, `allow_schedule`, and
-`spawns = fuel > 0`, so no agent is shown a verb or section the desk would
-certainly refuse; the nudge layer, parking, reply availability, and advertised
-vocabulary cannot disagree
+parking, the desk's `reply` refusal ([[map/exarch/builtins|builtins]]), and
+the prompt's per-agent resolver. The resolver applies the index from
+`returns`, the launch's `allow_schedule`, and `spawns = fuel > 0`, so no
+agent is shown a verb or section the desk would certainly refuse; the nudge
+layer, parking, reply availability, and advertised vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
 `park_mode` (`agent/attend.rs`, returning a `ParkMode` of `Held` / `Engaged` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus/inbox.rs`) is the `should_park`
-verdict: a conversing node parks `Held`, immune to cancellation; a returning,
-parented agent that is *messageable* — someone has messaged it, or it holds a
-deposited reply — parks `Engaged`, the same wait except a terminate-class
-cause still ends it, since an exchange is not a conversation — unless its
-own cancel token has been terminated (`self.agent.cancel.terminated()`, the
-one self-check not answered by a `Weak::upgrade`), which is what `/close`
-stamps, since a conversing root has no parent to prune it away and parking
-`Held` past that stamp would be a zombie; busy children hold it until they reply or
-die; a live self-schedule holds it until cancelled; otherwise it terminates at
-quiescence — the one-shot contract a headless trunk satisfies. `--chat` builds the trunk with no system
-prompt, no tool at all (an empty `Toolset`), and no nudge registry — a bare
-conversation, the same attend loop.
+verdict: a conversing node with a human attached parks `Held`, immune to
+cancellation — unless its own token has been terminated (the one self-check
+not answered by a `Weak::upgrade`), which is what `/close` stamps, since a
+conversing root has no parent to prune it away and parking `Held` past that
+stamp would be a zombie; an unattended conversing trunk falls through to the
+fleet arms, so it holds for live children and quiesces once they settle — the
+exchange synod drives ends at fleet quiescence with no policy hook; a
+returning, parented agent that is *messageable* — someone has messaged it, or
+it holds a deposited reply — parks `Engaged`, the same wait except a
+terminate-class cause still ends it, since an exchange is not a conversation;
+busy children hold it until they reply or die; a live self-schedule holds it
+until cancelled; otherwise it terminates at quiescence — the one-shot
+contract a headless trunk satisfies. `--chat` builds the trunk with no system
+prompt and no tool at all (an empty `Toolset`), so its `Nudges` steer
+nothing — a bare conversation, the same attend loop.
 
 ## The attend loop
 
 Three nested loops, the same for trunk and child alike:
 
 - `attend` — the per-agent lifetime. The trunk hears the OS signals
-  (`cancel::face`, held at each site that launches a process trunk —
+  (`signals::face`, held at each site that launches a process trunk —
   `headless::run`, `headless::converse_settled`, and `tui::tui_loop::run` — for
   the whole attend), which forwards each to its `Agent::interrupt` or
   `Agent::cancel`; a sub-agent hears none, being reached through the tree
-  cascade (`Agent::cancel_tree`). Each pass pulls the next
-  item from this agent's [[map/exarch/frontend|inbox]] via
-  `next_or_idle(|| self.park_mode(), …)`, which **re-evaluates the park verdict
-  on every `Condvar` wake** — so the idle lease's terminate-cause cancel, or the
-  last live child settling, is seen on the very next wake — and hands it to
-  `take_up`, the per-item step shared with `attend`'s bounded
-  twin `attend_backlog` (converse's per-exchange drain): every item reaching
-  here already survived the inbox's own pop-time fence, so what is left is the
-  exchange-boundary latch reset, a session command's run (`Avatar::read`,
-  `Avatar::rewrite`), the `deliberate` call itself, and the nudge reaction. A genuine
-  exchange boundary resets the nudge budget and clears the sticky cancel token
-  (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
-  self-nudge is the same exchange continuing and resets neither. A child's
-  `reply` deposits its value on its own `Agent` (`Agent::deposit_reply`, which
-  also posts the one-line notice) and the loop parks `Engaged`; only the
-  headless root's `reply` ends its loop. At the single exit the loop winds a stranded
+  cascade (`Agent::cancel_tree`). `attend` and its bounded twin
+  `attend_backlog` (converse's per-exchange drain) are one loop,
+  `attend_until`, differing in how an empty inbox is treated (`Idle::Park` /
+  `Idle::Return`). Each pass draws the next item from this agent's
+  [[map/exarch/frontend|inbox]] — parked, via
+  `next_or_idle(|engaged| self.park_mode(engaged), …)`, which **re-evaluates
+  the park verdict on every `Condvar` wake**, so the idle lease's
+  terminate-cause cancel, or the last live child settling, is seen on the very
+  next wake — and hands it to `take_up`, which answers a `Step { settled:
+  Option<AgentOutcome>, flow: ControlFlow }` or the engine's `Severed`: every
+  item reaching here already survived the inbox's own pop-time fence, so what
+  is left is the exchange-boundary latch reset, a session command's run
+  (`Avatar::read`, `Avatar::rewrite`), the `deliberate` call itself, and the
+  nudge reaction. A genuine exchange boundary resets the nudge budget and
+  clears the sticky cancel token (`cancel::Token::reset`), so a prior
+  exchange's Esc cannot bleed into the next; a self-nudge is the same exchange
+  continuing and resets neither. Every `reply` deposits its value on the
+  agent itself (`Agent::deposit_reply`, which also posts the one-line notice
+  to a parent); a child then parks `Engaged`, and only a parentless returning
+  agent — the headless root — ends its loop on it, its driver reading the
+  deposit off `Agent::reply`. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
   ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk's `Avatar`
   then drops (a child's drops when its detached thread returns), pruned from
-  its parent's `children` and the fleet's doors at their next walk — the
+  its parent's `children` and the fleet's indices at their next walk — the
   whole of deregistration — so the fleet empties as its
   last agent's avatar goes. A panic `take_up` catches around its
   `deliberate` call is a
@@ -219,7 +240,9 @@ Three nested loops, the same for trunk and child alike:
   else there, with nothing separate to retire.
 - `deliberate` — one prompt driven to quiescence over the agent's *own* provider
   (`self.provider.current()`, read once at the top by `take_up` so a `/model` swap
-  lands next item, never mid-deliberation): weigh the context for an eviction,
+  lands next item, never mid-deliberation), answering `Result<Outcome, Fault>`
+  where `Fault` is the provider's own error, the engine's `Severed`, or a log
+  append refused: weigh the context for an eviction,
   record the turn's start, render the context, stream a reply through
   `provider.complete` (one turn), **admit** then append the assistant message, run the
   resulting tool-call batch (`run_batch`), append their results, optionally append a drained steering prompt,
@@ -240,13 +263,14 @@ Three nested loops, the same for trunk and child alike:
 - **A severed seat runs nothing more.** `attend` breaks at the first
   severance it sees and every park quiesces behind one; `run_batch` answers
   each call left in the batch with the `EngineLost` sentence, and
-  `deliberate` ends the exchange `Outcome::Severed`. `close`
-  records the loss once — the plain sentence as the failed outcome, the
-  logged form (code and the engine's own words) as a durable note — and
-  headless and [[map/synod|synod]] end the conversation on it.
+  `deliberate` ends the exchange `Err(Fault::Severed)`, which `take_up`
+  passes up as its own `Err` — one `?` where there were eight polls.
+  `attend_until` records the loss once — the plain sentence as the failed
+  outcome, the logged form (code and the engine's own words) as a durable
+  note — and headless and [[map/synod|synod]] end the conversation on it.
 - `run_batch` — runs one turn's tool-call batch in order, each call through
   `invoke`. Every call returns a
-  `SessionToolResult` synchronously — dispatched through the agent's own
+  `SessionToolResult` synchronously — dispatched through the launch's
   `Toolset` (`ral`, and `thinking` under `--thinking-tool`,
   [[map/exarch/tools|tools]]); a spawn verb inside `ral` hands the script a start
   receipt after launching the detached child. Once every requested tool id has
@@ -286,14 +310,11 @@ The retention clock itself is core's: the engine ticks the worker registry
 once per source dispatch and sweeps it at each settled run's ready
 boundary ([[map/core/shell-state|shell-state]]), armed with
 [[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
-agent keeps its own mirror of the same drum — `Avatar::ral_epoch`,
-incremented once at the top of every `Avatar::ral` call, a failed eval still
-a call — which `/resources` reads to render nearest time-to-reap and
-`disk_warning` reads for its amortisation; the two clocks coincide
-one-to-one (`decisions/260629_agent-binding-reaping`). The counter starts
-at 0, a fork's child starts its own at 0, and `/clear` does not rewind it.
-Retention notices need no plumbing of their own: they ride the same drain
-above.
+agent keeps no mirror of that drum: the engine answers the question itself,
+each `WorkerRow` the `` `workers `` probe returns carrying `retention_left` —
+the calls until a settled entry expires, on the engine's own clock — which
+`/resources` renders as the nearest expiry. Retention notices need no
+plumbing of their own: they ride the same drain above.
 
 **The binding-lease ledger** is armed by `bootstrap::arm_session_ledgers` —
 the one policy site, run by the one recipe (`engine_boot_shell`) right after
@@ -323,16 +344,16 @@ which severs the seat on a refused answer,
 source, the event ledger's logical length and history bytes, the log dir
 walked host-side and the scratch sized engine-side (`reading::path_bytes`) at
 invocation, and the sub-agent idle lease as two rows (nearest
-time-to-reap, and the demote threshold) — and
-`emit_resources` posts one `Transient::Resources`
-carrying the raw rows beside their already-rendered card together — chrome
-only, so unlike a recorded observation there is no later fold to re-render one
-from.
+time-to-reap) — and `emit_resources` posts one `Transient::Resources`
+carrying the rendered card — chrome only, so unlike a recorded observation
+there is no later fold to re-render one from.  A row's `policy` is the
+closed `resources::Policy` enum, rendered as it reads.
 A probe fold is an interactive diagnostic, read when it is run: no session
 keeps a pressure history, so the figures live only in this emission, never
 in `record.jsonl`. The frontend appends the rows for the accumulators *it*
-owns (scrollbacks, views, the bus) at render time; neither half reaches
-across a thread. Probing never mutates and never renews a lease —
+owns (scrollbacks, views, the bus, the demote threshold — `tui/resources.rs`)
+at render time; neither half reaches across a thread, and the agent module
+never names the TUI. Probing never mutates and never renews a lease —
 enumeration is not observation — and the fold is never model-facing.
 
 The inbox's per-source depth is a probe figure, not a quota.
@@ -355,7 +376,8 @@ loss a cap is meant to rule out.
 
 There is no headless-completion gate and no role flag beside `parent`.
 Nudging splits into two disciplines, named and owned by `agent/nudge.rs`'s
-`Nudges` (`Avatar::nudges`, `None` for a toolless `--chat` trunk): a
+`Nudges` (`Avatar::readings.nudges`, which `steers` nothing for a toolless
+`--chat` trunk): a
 **repair** — `Empty`, `Stopped`, `Truncated`, or a returning agent's
 `Complete` without `reply` — is event-shaped, exceptional, and spends the
 per-exchange repair budget (`BUDGET`, 3); a **standing condition** — the pin
@@ -370,10 +392,13 @@ completion, self-posted as `Post::Nudge` and committed by `append_user` inside
 the same exchange, gated on `quiet` — no standing reply, no detached shell
 work, no busy children, the one condition those kinds share.
 `Nudges::remind` is the other entry point, reached from `Avatar::warnings` at
-a *tool* boundary, where a gauge's text lands as steering trailing the
-batch's arrivals: an agentic run takes one prompt and then two
+a *tool* boundary, where a gauge's `Reminder` — figures, not words; every
+model-facing sentence is `nudge.rs`'s to word — lands as steering trailing
+the batch's arrivals: an agentic run takes one prompt and then two
 hundred tool turns, so a warning that waited for the next completion would
 arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
+Its breadcrumb records no budget (`Forensic::Nudge { cause, spent: None }`);
+a repair's records what it spent (`spent: Some(Spent { used, max })`).
 
 | kind | channel | trigger | budget |
 |---|---|---|---|
@@ -404,7 +429,9 @@ already reaches its consumer through `AgentOutcome::Stopped("turn cap
 reached")`), and every unclassified provider error (the transport's own).
 
 `Nudges` owns the repair budget `used` and the pin digest last told
-(`pinned_told`); the ladder latches are `gauge::Gauges`' (below).
+(`pinned_told`); the ladder latches are `gauge::Gauges`' (below), and the
+two sit together with the token `Measure` in `Avatar::readings` — what the
+avatar has measured and told about one context.
 `pressure_gauge` is a pure `&self` reading with no latch of its own, and
 `deliberate` neither latches nor unlatches around it. An edge is **consumed
 at decide time, in the same act as the part's emission**, so "told but not
@@ -413,8 +440,8 @@ exchange-opening item, clears only the budget — a new exchange is not a new
 condition, and clearing the edges there would re-tell an unchanged pin once
 per delivered item. Every path that discards a decided-but-uncommitted nudge
 instead rebuilds `Nudges` whole: `/clear` (`Inbox::clear` sweeps the queue,
-`Avatar::clear` rebirths) and `/rewind` (`drop_nudges` sheds the queued
-nudge, `rewind` rebirths) — the rebirth also covers a `/rewind` typed mid-
+`Avatar::clear` rebirths the whole `Readings`) and `/rewind` (`drop_nudges`
+sheds the queued nudge, `rewind` rebirths `Nudges`) — the rebirth also covers a `/rewind` typed mid-
 deliberation, whose `Barrier` queues ahead of the nudge `take_up` posts
 after it: the nudge is decided (its edges already consumed) and then shed,
 so without the rebirth the telling would be recorded but never committed.
@@ -444,8 +471,8 @@ conditions self-heal regardless — pressure re-fires per excursion by
 construction, the pin reminder re-fires on the next register change, and the
 model can always `` exarch-pins `list ``.
 
-A `--chat` trunk holds **no `Nudges`** (`nudges: Option<nudge::Nudges>`,
-`None` when the tool is withheld): every nudge steers the model toward a
+A `--chat` trunk's `Nudges` **steers nothing** (`Nudges::new(false)`, the
+launch's `Toolset` being empty): every nudge steers the model toward a
 tool it does not have, so no rule runs, no reminder fires, and nothing
 synthetic ever joins the conversation. Its provider errors still reach the
 human, since that report is the attend loop's own step — `take_up` emits
@@ -468,21 +495,22 @@ once, where its `Warning` is built. Three ladders ride it; two are gathered in
 | usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | user 50, 75, 90, 95% (`USER_HEARS`); model 90, 95% (`MODEL_HEARS`) | user once per account; model once per agent |
 
 `Avatar::warnings` weighs all three after every tool batch, and `tell` delivers
-each climbed rung: a user line as a `Forensic::SystemNote`, a model line
-through `Nudges::remind` into the steering message — dropped for a `--chat`
-trunk, which reaches no tool boundary anyway. The ration gauge reads nothing
+each climbed rung: a user line as a `Forensic::SystemNote`, a model
+`Reminder` worded by `Nudges::remind` into the steering message — nothing for
+a `--chat` trunk, which reaches no tool boundary anyway. The ration gauge reads nothing
 itself: the read is the provider's, spawned on the road every request takes
 and shared by every agent on the account
 ([[map/exarch/provider|provider]]'s `Rations`). The user's latches are
 `Rations`' too (`Provider::climb_allowances`, on `USER_HEARS`), so a rung is
 told once per account by whichever agent climbs it first; the model's are each
 agent's own `gauge::ration::Ration`, since each model needs its own reminder,
-and its outcome sentence reads `resume_on_reset`: paused until the reset and
-resumed, or refused until it. The network is read once per account; the user
-hears once per account, each conversation's model once.
+and its outcome sentence reads `Avatar::resumes_at_reset` — the trunk, under
+a launch that resumes: paused until the reset and resumed, or refused until
+it. The network is read once per account; the user hears once per account,
+each conversation's model once.
 
 A refusal whose reset lies past the in-place wait ends as a provider error:
-on the terminal trunk alone (`resume_on_reset`), `take_up` answers
+on the terminal trunk alone (`resumes_at_reset`), `take_up` answers
 `ProviderError::Refused` with `resume_at`, which replaces any `provider-reset`
 schedule with a one-shot wakeup at the reset and notes the time to the user.
 Headless, synod and every fork fail instead. Once one agent's request is
@@ -493,8 +521,13 @@ refused, `Provider::complete` refuses every later request the hold covers
 ## The Fleet
 
 `fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
-Mutex<Vec<Weak<Agent>>>, lease: Duration }` — two `Weak` doors and the
-idle-lease bound they share, fixed at construction, nothing else. It is not the tree: the tree is
+Mutex<Vec<Weak<Agent>>>, lease: Duration, launch: Launch }` — two `Weak`
+indices, the idle-lease bound, and the **`Launch`**: what every node of one
+run shares, fixed once — `attended`, `allow_schedule`, `resume_on_reset`,
+the `Toolset`, `disk_warn_bytes`, the `dial`, the `Bureau`, and the prompt
+template with the `BuiltinIndex` each node resolves it against. Held here
+once rather than copied into every `Agent`, so a fork's `Build` names only
+what is its own. It is not the tree: the tree is
 `Agent::parent`/`Agent::children`, and every walk — the roster, the cancel
 cascade, the scope check — runs there. `names` is the by-name door a spawn
 claims identity at and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
@@ -563,7 +596,7 @@ enrolled agent is at once named and placed, so what a model can see through
 Every `Agent` carries a strong `parent`, so the tree
 is the spawn tree directly: `Agent::cancel_tree` cancels an agent and its
 whole subtree, `Agent::cancel_descendants` abandons a returning agent's
-children, and `Agent::clear_subtree` reaps a subtree and forgets what it
+children, and `Agent::forget` reaps a subtree and forgets what it
 was `awaiting`. The fence a late result or deferred surface batch must
 survive is not here: `Avatar::clear` drains this agent's own inbox,
 and that drain is what bumps the clear-epoch a `bus::Stamp`-borne message
@@ -651,8 +684,11 @@ surface buffer's, the frontend's coupled channel — writes into the new
 segment and keeps publishing. Swapping the `Emitter` instead stranded them
 on the rotated-away file, and the frontend, whose clear-drain gate opens on
 the `Transient::Cleared` that seam publishes, stayed dark for the whole first
-exchange of the cleared session. Clear also
-clears the schedule registry and cascades cancel to its subtree. Replacing the
+exchange of the cleared session. Clear then has the agent `forget` — cancel
+its subtree, drop what it was awaiting, clear its wakeups and its pins — and
+rebirths the avatar's `Readings` whole, a rebuilt context having been
+measured and told nothing. It touches no process-wide state: a `/clear` on
+one tab is that tab's. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every
 lease, the durable class included, with no host call site to forget
@@ -663,17 +699,17 @@ already drops a stale agent result drops that flush too, so no pre-clear
 worker output survives into the rebuilt context. It is the focused agent's,
 not a fleet-wide reset.
 
-`--resume` is a trunk-only lifecycle: it validates and replays session 0's
-`record.jsonl`, quarantining only an unterminated crash fragment, then reopens
-the file for append. The live model and provider are selected again, while the
-shell is fresh and receives a note describing the bindings, workers, cwd,
-scratch, pins, and schedules that were not durable. Wire seats and child logs
-are refused rather than half-resumed.
+`--resume` is a trunk-only lifecycle, `Avatar::resume`: it validates and
+replays session 0's `record.jsonl`, quarantining only an unterminated crash
+fragment, then reopens the file for append. The live model and provider are
+selected again, while the shell is fresh and receives a note describing the
+bindings, workers, cwd, scratch, pins, and schedules that were not durable.
+Wire seats, chat trunks and child logs are refused rather than half-resumed.
 
 `evict` sheds the older half of the context when pressure crosses the context
-window's reserve (`digest.rs`'s `eviction_due` — used tokens into the top 15%
+window's reserve (`gauge.rs`'s `eviction_due` — used tokens into the top 15%
 of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
-fallback when the window is unknown) and `AgentLog::can_evict` holds (no
+fallback when the window is unknown) and `Context::can_evict` holds (no
 pending tool results). It is called **at the top of every `deliberate` loop
 iteration**, before `record_turn_start`: every turn boundary is a boundary the
 protocol is well-formed at, and the turn a cut would take is never the one in
@@ -716,7 +752,7 @@ model reaches the other two: `` exarch-context `survey ``/``
 `index ``/`` `read ``/`` `grep `` read the record, an edit recording
 `Protocol::Evicted` with `EditAuthority::Model` rather than `Harness`; only the
 model's own `` `evict `` carries a `note`. The user's own hand is
-`/rewind <turn>`, which is `AgentLog::suffix_from(anchor)` — every resident
+`/rewind <turn>`, which is `Context::suffix_from(anchor)` — every resident
 turn from that id on — evicted at
 `EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
 `/context` surveys the context without editing it — `emit_context_survey`
@@ -728,10 +764,9 @@ resident turn range answering it and its weight — a `Read` beside
 `Avatar::disk_warning` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.
 Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
-by construction: no walk, no cost, ever. Configured, it rides the same
-`ral_epoch` the settled-worker and binding-lease sweeps already read,
-amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, weighed at the
-tool boundary with the other gauges.
+by construction: no walk, no cost, ever. Configured, it walks at most once
+per `DISK_WARN_CHECK_INTERVAL` (a minute, off `Avatar::disk_checked`),
+weighed at the tool boundary with the other gauges.
 Crossing the ceiling (the session log dir, sized host-side by
 `resources::dir_size`, plus `EXARCH_SCRATCH`, read and sized in the engine by
 `reading::env_var` and `reading::path_bytes`) is told to the user once, as a
@@ -801,8 +836,9 @@ spawn's `` `start `` tag leaves its fork the same way, and the desk's
 of fuel ([[map/exarch/builtins|builtins]]).
 
 Prompt resolution is shared across the root, identity-fork, and wire-child
-paths. Each keeps the unresolved base and applies its own `returns`,
-`allow_schedule`, and child-fuel bits; the resolver appends `Agents`
+paths. The launch keeps the unresolved base and the index; each node
+applies its own `returns` and child-fuel bits beside the launch's
+`allow_schedule`; the resolver appends `Agents`
 iff fuel remains and `Agent` iff the child returns. The child's log bookend
 records that fully resolved prompt length, including the filtered index and
 late sections, so a child never inherits an already-appended `Agent` section.
@@ -835,9 +871,9 @@ bars a desk handler from holding the `&mut Shell` a fork needs:
   the socket. The enquiry names
   `` `listening [port, token] ``.
 
-The desk's wire arm dials that port through its **`Dial`** capability
+The desk's wire arm dials that port through the launch's **`Dial`** capability
 (`exarch/src/agent/dial.rs` — `vm_manager`-free by construction, a capability
-object `RootConfig` carries, `None` on every identity trunk), writes the eight
+object `RootConfig` hands to the `Launch`, `None` on every identity trunk), writes the eight
 token bytes little-endian, and blocks on **one acknowledgement byte**
 (`ral_core::protocol::HATCH_ACK`) under the transport's own deadline. The
 listener thread accepts and compares the eight bytes, polling the wake pipe
@@ -852,9 +888,10 @@ framed seed before waiting for `Attach`, and the parent writes it after
 writes the ack **only once `spawn()` has returned and the seed has crossed**. An
 ack therefore means the child already exists and holds its seed. The desk then
 adopts the
-stream as `Seat::Wire`, attached at the parent engine's own cwd and home as
-read at the call's install, and hands the child to the same `spawn_async` an
-identity fork reaches, at `fuel = parent - 1`.
+stream as `Seat::Wire`, attached as the parent seat was (`SeatKind::Wire {
+cwd, home }` — the seed carries the live cwd and overrides the attach's on
+hydration, so no probe is owed per call), and hands the child to the same
+`spawn_async` an identity fork reaches, at `fuel = parent - 1`.
 
 One exchange, one token, one thread: the whole of failure is local. A refused
 enquiry never dialled, so the builtin wakes its listener through a pipe and
@@ -895,12 +932,15 @@ silently severed at this call site.
 `digest.rs` holds `clip` and the fixed per-section byte caps for what the
 *model* sees in history: each tool-result section has its own cap
 (`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside a separate cap
-for opaque error blobs (`OPAQUE_CAP`) and the whole-history gauges — the
-`EVICT_THRESHOLD` byte fallback, `eviction_due`/`eviction_trigger` (the reserve
-line and the token count that names it, for `/resources`), `pressure_due` and
-its `PRESSURE_THRESHOLD_FALLBACK` one reserve ahead of it, and
-`suffix_keep_budget`, the half-the-bytes cut. These caps bound a single result;
-eviction bounds the whole history. A child's reply is not clipped, since it reaches the parent as a value through
+for opaque error blobs (`OPAQUE_CAP`); `clip` measures what a terminal would
+show (`ral_core::ansi::visible`, replaying `\r` and backspace beside the
+escape strip). The whole-history gauges — the `EVICT_THRESHOLD` byte
+fallback, `eviction_due`/`eviction_trigger` (the reserve line and the token
+count that names it, for `/resources`), `pressure_due` and its
+`PRESSURE_THRESHOLD_FALLBACK` one reserve ahead of it, and
+`suffix_keep_budget`, the half-the-bytes cut — are `gauge.rs`'s. These caps
+bound a single result; eviction bounds the whole history. A child's reply is
+not clipped, since it reaches the parent as a value through
 `` exarch-agents `read `` rather than as text. An oversize section keeps a head+tail digest
 and elides the middle, with a banner nudging the model to scope the query at
 its source and re-read in slices — the same rendering the transcript records,
@@ -919,7 +959,9 @@ session's, known where the result is assembled and not inside a byte-capped
 section, and `system.md` tells the model to expect it
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
 
-`Avatar::ral` here threads to [[map/exarch/shell-eval|shell-eval]]'s `run_shell`.
+`Avatar::ral` here threads to [[map/exarch/shell-eval|shell-eval]]'s
+`run_shell`, answering an `Evaluated { text, failed }`; its desk capture
+(`HostServices`) is built from the avatar alone, with no probe per call.
 
 ## See also
 
@@ -935,7 +977,8 @@ worker/schedule teardown edge are chapters of),
 [[map/core/engine-protocol|engine-protocol]] (why a wire
 seat is one engine process, one connection),
 [[decisions/260827_agent-and-avatar|agent-and-avatar]] (why `Agent` and
-`Avatar` split this way, what the three-copy shape it replaced deleted),
+`Avatar` split this way, what the three-copy shape it replaced deleted, and
+the later amendment that moved the run's settings onto the fleet's `Launch`),
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] (the turn as
 the unit of eviction, the loop-top weighing, and the pressure reminder's
 channel),

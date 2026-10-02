@@ -26,6 +26,7 @@ mod picker;
 mod prompt;
 mod rail;
 mod render;
+mod resources;
 mod row;
 mod scrollback;
 mod select;

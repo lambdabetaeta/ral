@@ -89,15 +89,14 @@ impl Emitter {
         self.log.publish_transient(t);
     }
 
-    /// Report a record the seam could not append — a failed display commit,
-    /// today's one caller — as a [`Transient::Fault`] instead of the record
-    /// it could not become: the log itself is what just failed, so the
-    /// failure cannot go through it.  Also prints to stderr, mirroring
-    /// `Avatar::note_error`'s own last-resort fallback, so an unwritable log
-    /// never loses the diagnostic outright even before a printer draws the
-    /// chrome lane it lands in.
+    /// Report a record that could not be appended as a [`Transient::Fault`]
+    /// instead of the record it could not become: the log itself is what
+    /// just failed, so the failure cannot go through it.  Also prints to
+    /// stderr — the one last resort in the tree — so an unwritable log never
+    /// loses the diagnostic outright even before a printer draws the chrome
+    /// lane it lands in.
     pub fn report_fault(&self, error: &io::Error) {
-        let text = format!("a display commit was not recorded in record.jsonl: {error}");
+        let text = format!("a record was not appended to record.jsonl: {error}");
         self.transient(Transient::Fault { text: text.clone() });
         eprintln!("exarch: {text}");
     }

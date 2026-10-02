@@ -79,13 +79,13 @@ pub(crate) fn spawn_async(
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
     let log_dir = child.log_dir();
-    let spawner = child.agent.parent_id();
+    let spawner = child.agent.parent.as_ref().map(|p| p.id);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
     // watches.
     let child_emit = if emit.spawns_live_children() {
-        emit.child(agent_id, child.mailbox())
+        emit.child(agent_id, child.agent.mailbox.clone())
     } else {
         emit.muted_child(agent_id)
     };
@@ -116,18 +116,17 @@ pub(crate) fn spawn_async(
                 name: born_name,
                 parent: spawner,
             });
-            let (outcome, _payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    child.attend(&child_emit)
-                }))
-                .unwrap_or_else(|_| {
-                    if let Err(error) = recorder.emit(crate::record::Forensic::Error {
-                        text: "sub-agent panicked".into(),
-                    }) {
-                        recorder.report_fault(&error);
-                    }
-                    (AgentOutcome::Failed("sub-agent panicked".into()), None)
-                });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                child.attend(&child_emit)
+            }))
+            .unwrap_or_else(|_| {
+                if let Err(error) = recorder.emit(crate::record::Forensic::Error {
+                    text: "sub-agent panicked".into(),
+                }) {
+                    recorder.report_fault(&error);
+                }
+                AgentOutcome::Failed("sub-agent panicked".into())
+            });
             child.recorder().transient(Transient::Died);
             // A replied child's parent was notified at deposit time; `settle`
             // skips a second report for it.  A branch reports to nobody and

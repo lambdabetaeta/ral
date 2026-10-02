@@ -1,18 +1,20 @@
-//! `AgentLog`: one session's handle onto `sessions/<n>/record.jsonl`, the one
-//! seam every fact crosses, and [`Context`], the model fold's authoritative
-//! in-memory structure over it.
+//! `AgentLog`: one session's handle onto `sessions/<n>/record.jsonl`.
 //!
-//! Every query below reads `context`; nothing here keeps a second copy.
+//! It sits over [`Context`], the model fold's authoritative in-memory
+//! structure.  Mutations are this log's — each appends the record and
+//! advances the fold on what was witnessed; queries are the [`Context`]'s
+//! own, reached through [`AgentLog::context`].
+//!
 //! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! rendered `user.log`.
 
 use crate::agent::build::RecordedAccount;
+use crate::agent::nudge::Spent;
 use crate::bus::AgentId;
-use crate::provider::{CutShort, ProviderError, Refusal, Tuning, Usage};
-use crate::record::model::{Context, Linked, TranscriptRead, TurnRow};
+use crate::provider::{ProviderError, Tuning, Usage};
+use crate::record::model::{Context, Linked, TurnRow};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -25,126 +27,6 @@ use std::path::{Path, PathBuf};
 pub struct ToolResult {
     pub id: String,
     pub content: String,
-}
-
-/// Serialisable stand-in for [`Usage`], which derives no serde traits; the log
-/// converts in and out rather than ripple the derive through the provider's
-/// public surface.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
-pub struct UsageDelta {
-    pub input: u64,
-    pub output: u64,
-    pub cache_creation: Option<u64>,
-    pub cache_read: Option<u64>,
-    pub dollars: f64,
-    /// Defaulted on deserialize so pre-existing logs, written before the
-    /// round trip back to [`Usage`] existed, still read.
-    #[serde(default)]
-    pub unmetered: bool,
-}
-
-impl From<Usage> for UsageDelta {
-    fn from(u: Usage) -> Self {
-        Self {
-            input: u.input,
-            output: u.output,
-            cache_creation: u.cache_creation,
-            cache_read: u.cache_read,
-            dollars: u.dollars,
-            unmetered: u.unmetered,
-        }
-    }
-}
-
-impl From<&UsageDelta> for Usage {
-    fn from(d: &UsageDelta) -> Self {
-        Self {
-            input: d.input,
-            output: d.output,
-            cache_creation: d.cache_creation,
-            cache_read: d.cache_read,
-            dollars: d.dollars,
-            unmetered: d.unmetered,
-        }
-    }
-}
-
-/// Serialisable mirror of [`ProviderError`]: its `&'static str` site an owned
-/// string.
-///
-/// `tui::line` renders from this shape, so `record.jsonl` reconstructs the
-/// on-screen block.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProviderErrorRecord {
-    Cancelled {
-        #[serde(rename = "where")]
-        where_: String,
-    },
-    Transient {
-        cause: String,
-        attempts: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        status: Option<u16>,
-    },
-    Refused(Refusal),
-    Api {
-        status: Option<u16>,
-        model: String,
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<serde_json::Value>,
-    },
-    Truncated {
-        cause: CutShortRecord,
-    },
-    Other {
-        cause: String,
-    },
-}
-
-/// Serialisable mirror of [`CutShort`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "cut", rename_all = "snake_case")]
-pub enum CutShortRecord {
-    OutputCap {
-        stop_reason: String,
-    },
-    /// Boxed for the same reason [`ProviderError::Truncated`] boxes its cause:
-    /// the mirror is recursive too.
-    Stalled {
-        error: Box<ProviderErrorRecord>,
-    },
-}
-
-impl ProviderErrorRecord {
-    /// The failure that broke the stream, for a truncation the streamed prefix
-    /// survived — and `None` for every failure that ends the turn.  The
-    /// one place that reading is derived: the TUI fold, synod's seam and the
-    /// headless printer all grade a stall below a fatal error, and each asks
-    /// here rather than re-matching the shape.
-    pub fn stall_cause(&self) -> Option<&Self> {
-        match self {
-            Self::Truncated {
-                cause: CutShortRecord::Stalled { error },
-            } => Some(error),
-            _ => None,
-        }
-    }
-
-    /// Short human label for the failure's kind.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Cancelled { .. } => "cancelled",
-            Self::Transient { status, .. } => crate::provider::transient_label(*status),
-            Self::Refused(r) => r.limit.label(),
-            Self::Api { .. } => "api error",
-            Self::Truncated { .. } => "truncated",
-            Self::Other { .. } => "provider error",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,50 +44,6 @@ pub struct Cut {
     pub turns: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-}
-
-impl From<&ProviderError> for ProviderErrorRecord {
-    fn from(e: &ProviderError) -> Self {
-        match e {
-            ProviderError::Cancelled(w) => Self::Cancelled {
-                where_: (*w).to_string(),
-            },
-            ProviderError::Transient {
-                cause,
-                attempts,
-                body,
-                status,
-            } => Self::Transient {
-                cause: cause.clone(),
-                attempts: *attempts,
-                body: body.as_deref().cloned(),
-                status: *status,
-            },
-            ProviderError::Refused(r) => Self::Refused(r.clone()),
-            ProviderError::Api {
-                status,
-                model,
-                message,
-                body,
-            } => Self::Api {
-                status: *status,
-                model: model.clone(),
-                message: message.clone(),
-                body: body.as_deref().cloned(),
-            },
-            ProviderError::Truncated { cause } => Self::Truncated {
-                cause: match cause.as_ref() {
-                    CutShort::OutputCap { stop_reason } => CutShortRecord::OutputCap {
-                        stop_reason: stop_reason.clone(),
-                    },
-                    CutShort::Stalled(error) => CutShortRecord::Stalled {
-                        error: Box::new(error.into()),
-                    },
-                },
-            },
-            ProviderError::Other(s) => Self::Other { cause: s.clone() },
-        }
-    }
 }
 
 /// Why the work in hand is ending with no real assistant reply: decides whether it
@@ -342,6 +180,13 @@ pub enum TranscriptPart {
     },
 }
 
+/// What a resumed session picked up: its newest turn and the record's size.
+#[derive(Clone, Copy, Debug)]
+pub struct Resumed {
+    pub turn: u64,
+    pub bytes: u64,
+}
+
 /// One session's handle onto `sessions/<n>/record.jsonl`.
 ///
 /// Carries the seam every fact authors through, and the model fold's
@@ -356,9 +201,8 @@ pub struct AgentLog {
     account: RecordedAccount,
     /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
     sessions_root: PathBuf,
-    /// The directory this log has to itself, when a test made it: dropped with
-    /// the log.  A real session's log lives under the session's scratch and
-    /// owns no directory of its own.
+    /// The directory a test's log has to itself, dropped with the log.
+    #[cfg(test)]
     _scratch: Option<tempfile::TempDir>,
     /// The model fold's own structure over `record.jsonl` — the type every
     /// query in this file answers from; advanced inline through
@@ -419,8 +263,8 @@ impl AgentLog {
     ///
     /// # Errors
     /// Returns `Err` if the directory or the session log cannot be created.
-    #[doc(hidden)]
-    pub fn for_test(
+    #[cfg(test)]
+    pub(crate) fn for_test(
         session_id: AgentId,
         model: &str,
         account: &RecordedAccount,
@@ -516,20 +360,24 @@ impl AgentLog {
             model,
             account,
             sessions_root: sessions_root.to_path_buf(),
+            #[cfg(test)]
             _scratch: None,
             context,
             seam,
         };
-        if !resumed.is_ready() {
+        if !resumed.context.is_ready() {
             resumed.quiesce(QuiesceReason::Aborted);
         }
         Ok(resumed)
     }
 
-    pub fn resumed_summary(&self) -> (u64, u64) {
+    pub fn resumed_summary(&self) -> Resumed {
         let bytes =
             fs::metadata(self.dir.join("record.jsonl")).map_or(0, |metadata| metadata.len());
-        (self.context.current_turn().unwrap_or(0), bytes)
+        Resumed {
+            turn: self.context.current_turn().unwrap_or(0),
+            bytes,
+        }
     }
 
     /// Record the live model selection and the shared resume boundary stamp.
@@ -593,86 +441,10 @@ impl AgentLog {
         &self.dir
     }
 
-    /// Whether a fresh user prompt is admissible.  The attend loop leaves every
-    /// turn here, and an eviction demands it.
-    pub fn is_ready(&self) -> bool {
-        self.context.is_ready()
-    }
-
-    pub fn can_evict(&self) -> bool {
-        self.context.can_evict()
-    }
-
-    /// Number of records still owned by the context, for the host's resource
-    /// probe; the structure retains the rows an edit moves out of it.
-    pub fn event_count(&self) -> usize {
-        self.context.event_count()
-    }
-
-    /// The model's own line to its future self, one slot per eviction.
-    pub fn notes(&self) -> &[Option<String>] {
-        self.context.notes()
-    }
-
-    pub fn context_survey(&self) -> ContextSurvey {
-        self.context.context_survey()
-    }
-
-    /// Read the turns named, in transcript order, whether they are in the
-    /// context or departed. Both halves in one call; the desk splits them
-    /// across its lock.
-    ///
-    /// # Errors
-    /// Refuses a read that names no turn, a turn this lineage never
-    /// recorded, the turn still being written, or one whose file will not
-    /// read back.
-    pub fn read_transcript(&self, turns: &[u64]) -> Result<Vec<TranscriptTurn>, String> {
-        self.context.read_transcript(turns)
-    }
-
-    /// [`Self::read_transcript`]'s locating half, for a caller that means to
-    /// read outside the session lock.
-    ///
-    /// # Errors
-    /// Refuses whatever [`Self::read_transcript`] refuses.
-    pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, String> {
-        self.context.locate_read(turns)
-    }
-
-    /// Every turn the transcript holds, in id order, each saying whether it
-    /// is still in the context.
-    pub fn transcript_index(&self) -> Vec<TurnRow> {
-        self.context.transcript_index()
-    }
-
-    /// Search the closed turns' text — those a narrowing names, or the whole
-    /// transcript when none is given. Both halves in one call; the desk
-    /// splits them across its lock.
-    ///
-    /// # Errors
-    /// Refuses a narrowing the way [`Self::read_transcript`] does.
-    pub fn grep_transcript(
-        &self,
-        pattern: &Regex,
-        turns: Option<&[u64]>,
-    ) -> Result<GrepAnswer, String> {
-        self.context.grep_transcript(pattern, turns)
-    }
-
-    /// [`Self::grep_transcript`]'s locating half, for a caller that means to
-    /// search outside the session lock.
-    ///
-    /// # Errors
-    /// Refuses whatever [`Self::grep_transcript`] refuses.
-    pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptRead, String> {
-        self.context.locate_grep(turns)
-    }
-
-    /// Approximate context size in serialised bytes.  The fallback eviction
-    /// trigger in [`crate::agent::Avatar::evict`] when the model's context
-    /// window is unknown; otherwise that tracks token pressure instead.
-    pub fn history_bytes(&self) -> usize {
-        self.context.history_bytes()
+    /// The model fold this log advances: every query about the context is
+    /// its own.
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
     }
 
     /// Render the context for the next provider request.
@@ -687,11 +459,6 @@ impl AgentLog {
             ));
         }
         Ok(self.context.rendered())
-    }
-
-    /// Every committed message whatever the phase.
-    pub fn history_rendered(&self) -> Vec<ChatMessage> {
-        self.context.rendered()
     }
 
     /// The parent half of a `mnemon` fork — the seed, where ownership
@@ -869,7 +636,7 @@ impl AgentLog {
         if matches!(reason, QuiesceReason::Cancelled)
             && let Err(error) = self.record_forensic(Forensic::Cancelled)
         {
-            eprintln!("exarch: the cancellation breadcrumb was not recorded: {error}");
+            self.seam.report_fault(&error);
         }
     }
 
@@ -1001,7 +768,7 @@ impl AgentLog {
 
     /// # Errors
     /// See the meta-records note above.
-    pub fn record_usage(&mut self, usage: UsageDelta) -> io::Result<()> {
+    pub fn record_usage(&mut self, usage: Usage) -> io::Result<()> {
         self.record_forensic(Forensic::UsageDelta { usage })
     }
 
@@ -1019,14 +786,16 @@ impl AgentLog {
 
     /// # Errors
     /// See the meta-records note above.
-    pub fn record_nudge(&mut self, used: u32, max: u32, cause: String) -> io::Result<()> {
-        self.record_forensic(Forensic::Nudge { used, max, cause })
+    pub fn record_nudge(&mut self, cause: String, spent: Option<Spent>) -> io::Result<()> {
+        self.record_forensic(Forensic::Nudge { cause, spent })
     }
 
     /// # Errors
     /// See the meta-records note above.
-    pub fn record_provider_error(&mut self, e: &ProviderError) -> io::Result<()> {
-        self.record_forensic(Forensic::ProviderError { error: e.into() })
+    pub fn record_provider_error(&mut self, error: &ProviderError) -> io::Result<()> {
+        self.record_forensic(Forensic::ProviderError {
+            error: error.clone(),
+        })
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -1054,6 +823,7 @@ impl AgentLog {
             model,
             account,
             sessions_root,
+            #[cfg(test)]
             _scratch: None,
             context: Context::new(source),
             seam,
@@ -1131,28 +901,8 @@ impl AgentLog {
     fn record_protocol_lossy(&mut self, p: Protocol) {
         match self.seam.emit(p) {
             Ok(recorded) => self.advance(&widen(recorded)),
-            Err(error) => eprintln!(
-                "exarch: a harness-synthesized record was not recorded in record.jsonl: {error}"
-            ),
+            Err(error) => self.seam.report_fault(&error),
         }
-    }
-
-    /// The newest turn's id — what every tool result's `TURN:` stamp names.
-    pub fn current_turn(&self) -> Option<u64> {
-        self.context.current_turn()
-    }
-
-    /// The newest user turn's id: the prompt the work in hand answers.
-    pub fn current_prompt(&self) -> Option<u64> {
-        self.context.current_prompt()
-    }
-
-    pub fn log_len(&self) -> usize {
-        self.context.log_len()
-    }
-
-    pub fn token_measure_is_stale(&self, measured_at: usize) -> bool {
-        self.context.token_measure_is_stale(measured_at)
     }
 }
 
@@ -1228,15 +978,12 @@ pub(crate) fn validate_result_ids(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
-    use crate::agent::digest::suffix_keep_budget;
+    use crate::agent::gauge::suffix_keep_budget;
     use crate::record::model::Held;
     use genai::chat::{ContentPart, ToolCall};
+    use regex::Regex;
     use std::io::Write as _;
 
     /// A sessions root for one test, deleted when the returned guard falls.
@@ -1274,7 +1021,8 @@ mod tests {
     /// The resident turns at or below `through`: what a prefix cut names, now
     /// spelled as the set it always was.
     fn prefix(log: &AgentLog, through: u64) -> Vec<u64> {
-        log.context_survey()
+        log.context()
+            .context_survey()
             .rows
             .iter()
             .map(|row| row.id)
@@ -1286,7 +1034,8 @@ mod tests {
     /// answering it, up to the next prompt.
     fn answered(log: &AgentLog, prompts: &[u64]) -> Vec<u64> {
         let mut under = false;
-        log.context_survey()
+        log.context()
+            .context_survey()
             .rows
             .iter()
             .filter(|row| {
@@ -1328,7 +1077,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.transcript_index()
+            s.context()
+                .transcript_index()
                 .iter()
                 .map(|row| (row.id, row.role))
                 .collect::<Vec<_>>(),
@@ -1341,9 +1091,10 @@ mod tests {
                 (6, Role::Assistant),
             ]
         );
-        assert_eq!(s.transcript_index()[0].kind, TurnKind::Import);
+        assert_eq!(s.context().transcript_index()[0].kind, TurnKind::Import);
         assert!(
-            !s.history_rendered()
+            !s.context()
+                .rendered()
                 .iter()
                 .any(|message| message.content.first_text() == Some("before the first prompt"))
         );
@@ -1356,16 +1107,20 @@ mod tests {
         let mut s = fresh_root();
         complete_round(&mut s, "one", "one");
         complete_round(&mut s, "two", "two");
-        assert_eq!(s.current_prompt(), Some(3));
+        assert_eq!(s.context().current_prompt(), Some(3));
         s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
             .unwrap();
         complete_round(&mut s, "three", "three");
-        assert_eq!(s.current_prompt(), Some(5));
+        assert_eq!(s.context().current_prompt(), Some(5));
         s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
             .unwrap();
         complete_round(&mut s, "four", "four");
-        assert_eq!(s.current_prompt(), Some(7));
-        assert_eq!(s.current_turn(), Some(8), "the newest turn is the answer");
+        assert_eq!(s.context().current_prompt(), Some(7));
+        assert_eq!(
+            s.context().current_turn(),
+            Some(8),
+            "the newest turn is the answer"
+        );
     }
 
     #[test]
@@ -1373,8 +1128,12 @@ mod tests {
         let mut joins = fresh_root();
         complete_round(&mut joins, "one", "one");
         joins.append_user("nudge".into(), Some(1)).unwrap();
-        assert_eq!(joins.current_prompt(), Some(1));
-        assert_eq!(joins.transcript_index().len(), 2, "steering opens no turn");
+        assert_eq!(joins.context().current_prompt(), Some(1));
+        assert_eq!(
+            joins.context().transcript_index().len(),
+            2,
+            "steering opens no turn"
+        );
 
         let mut rewound = fresh_root();
         complete_round(&mut rewound, "one", "one");
@@ -1382,13 +1141,13 @@ mod tests {
             .evict(&answered(&rewound, &[1]), None, EditAuthority::Model)
             .unwrap();
         rewound.append_user("fresh".into(), Some(1)).unwrap();
-        assert_eq!(rewound.current_prompt(), Some(3));
+        assert_eq!(rewound.context().current_prompt(), Some(3));
 
         let mut intervened = fresh_root();
         complete_round(&mut intervened, "one", "one");
         complete_round(&mut intervened, "two", "two");
         intervened.append_user("fresh".into(), Some(1)).unwrap();
-        assert_eq!(intervened.current_prompt(), Some(5));
+        assert_eq!(intervened.context().current_prompt(), Some(5));
 
         let mut moved_past = fresh_root();
         complete_round(&mut moved_past, "one", "one");
@@ -1398,7 +1157,7 @@ mod tests {
             .unwrap();
         moved_past.append_user("fresh".into(), Some(1)).unwrap();
         assert_eq!(
-            moved_past.current_prompt(),
+            moved_past.context().current_prompt(),
             Some(5),
             "turn 1 is no longer the live prompt, whatever is still in context"
         );
@@ -1457,7 +1216,8 @@ mod tests {
         );
         s.evict(&[1, 2], None, EditAuthority::Model).unwrap();
         assert_eq!(
-            s.context_survey()
+            s.context()
+                .context_survey()
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -1480,6 +1240,7 @@ mod tests {
         complete_round(&mut s, "second prompt", "second answer");
 
         let read = s
+            .context()
             .read_transcript(&[1, 2])
             .expect("closed turns are readable");
         let [prompt, reply] = read.as_slice() else {
@@ -1507,11 +1268,11 @@ mod tests {
 
         complete_round(&mut s, "third prompt", "third answer");
         assert_eq!(
-            s.suffix_from(9).unwrap_err(),
+            s.context().suffix_from(9).unwrap_err(),
             "turn 9 is not recorded — the latest is 6"
         );
         assert_eq!(
-            s.suffix_from(3).expect("a resident anchor"),
+            s.context().suffix_from(3).expect("a resident anchor"),
             vec![3, 4, 5, 6],
             "a rewind takes every resident turn from its anchor on"
         );
@@ -1520,7 +1281,8 @@ mod tests {
     /// The marker standing at the head hole — message 0 — or `None` when the
     /// context does not open with a hole.
     fn head_marker(s: &AgentLog) -> Option<String> {
-        s.history_rendered()
+        s.context()
+            .rendered()
             .first()
             .and_then(|message| message.content.first_text())
             .filter(|text| text.contains("left your context"))
@@ -1543,7 +1305,8 @@ mod tests {
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
         assert_eq!(
-            s.transcript_index()
+            s.context()
+                .transcript_index()
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
@@ -1552,7 +1315,8 @@ mod tests {
 
         s.evict(&prefix(&s, 2), None, EditAuthority::Model).unwrap();
         assert_eq!(
-            s.context_survey()
+            s.context()
+                .context_survey()
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -1563,7 +1327,8 @@ mod tests {
         // The marker stands where the turn did: after the prompt, before the
         // reply that survived it.
         let rendered: Vec<String> = s
-            .history_rendered()
+            .context()
+            .rendered()
             .iter()
             .map(|message| message.content.first_text().unwrap_or_default().to_string())
             .collect();
@@ -1599,9 +1364,10 @@ mod tests {
         s.evict(&prefix(&s, 4), None, EditAuthority::Harness)
             .unwrap();
 
-        assert_eq!(s.notes().len(), 2);
+        assert_eq!(s.context().notes().len(), 2);
         assert_eq!(
-            s.context_survey()
+            s.context()
+                .context_survey()
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -1726,13 +1492,14 @@ mod tests {
             .unwrap();
         assert_eq!(head_marker(&s), Some(before));
         assert!(
-            s.transcript_index()
+            s.context()
+                .transcript_index()
                 .iter()
                 .filter(|row| [7, 8].contains(&row.id))
                 .all(|row| row.held == Held::Evicted { cut: 1 })
         );
         assert_eq!(
-            s.history_rendered().len(),
+            s.context().rendered().len(),
             6,
             "marker, turns 5 and 6, marker, turns 9 and 10"
         );
@@ -1768,16 +1535,21 @@ mod tests {
         let mut s = fresh_root();
         complete_round(&mut s, "one", "answer one");
         complete_round(&mut s, "two", "answer two");
-        let before = format!("{:?}", s.read_transcript(&[1, 2]).expect("in context"));
+        let before = format!(
+            "{:?}",
+            s.context().read_transcript(&[1, 2]).expect("in context")
+        );
         s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
             .unwrap();
         let after = format!(
             "{:?}",
-            s.read_transcript(&[1, 2]).expect("evicted but recorded")
+            s.context()
+                .read_transcript(&[1, 2])
+                .expect("evicted but recorded")
         );
         assert_eq!(after, before);
         assert_eq!(
-            s.read_transcript(&[9]).unwrap_err(),
+            s.context().read_transcript(&[9]).unwrap_err(),
             "turn 9 is not recorded — the latest is 4"
         );
     }
@@ -1806,6 +1578,7 @@ mod tests {
         fs::write(&path, &rewritten).expect("rewrite record.jsonl in place");
 
         let refusal = s
+            .context()
             .read_transcript(&[1, 2])
             .expect_err("a record that no longer hashes to its locus is unreadable");
         assert!(
@@ -1828,7 +1601,7 @@ mod tests {
             .unwrap();
         s.append_user("live".into(), None).unwrap();
 
-        let index = s.transcript_index();
+        let index = s.context().transcript_index();
         assert_eq!(
             index
                 .iter()
@@ -1866,17 +1639,18 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(
-            s.read_transcript(&[1, 2]).unwrap_err(),
+            s.context().read_transcript(&[1, 2]).unwrap_err(),
             "turn 2 is being written now — it is the one turn the transcript cannot read back yet"
         );
         assert_eq!(
-            s.read_transcript(&[1])
+            s.context()
+                .read_transcript(&[1])
                 .expect("the closed prompt reads back")
                 .len(),
             1
         );
         assert_eq!(
-            s.read_transcript(&[]).unwrap_err(),
+            s.context().read_transcript(&[]).unwrap_err(),
             "`turns` names no turn — `!{range a b}` builds a run of ids"
         );
     }
@@ -1893,6 +1667,7 @@ mod tests {
             .unwrap();
 
         let answer = s
+            .context()
             .grep_transcript(&regex(r"\bthe\b"), None)
             .expect("the whole transcript is searchable");
         assert_eq!(answer.total, 3);
@@ -1911,16 +1686,21 @@ mod tests {
         assert_eq!(answer.hits[0].text, "the parser is broken");
 
         let narrowed = s
+            .context()
             .grep_transcript(&regex(r"\bthe\b"), Some(&[1, 4]))
             .expect("a list with a gap searches exactly what it names");
         assert_eq!(narrowed.total, 1, "turns 2 and 3 are not searched");
         assert_eq!(narrowed.hits[0].turn, 1);
         assert_eq!(
-            s.grep_transcript(&regex("parser"), Some(&[9])).unwrap_err(),
+            s.context()
+                .grep_transcript(&regex("parser"), Some(&[9]))
+                .unwrap_err(),
             "turn 9 is not recorded — the latest is 4"
         );
         assert_eq!(
-            s.grep_transcript(&regex("parser"), Some(&[])).unwrap_err(),
+            s.context()
+                .grep_transcript(&regex("parser"), Some(&[]))
+                .unwrap_err(),
             "`turns` names no turn — omit it to search the whole transcript"
         );
     }
@@ -1937,6 +1717,7 @@ mod tests {
         complete_round(&mut s, "count", &many);
 
         let answer = s
+            .context()
             .grep_transcript(&regex("matches"), None)
             .expect("the whole transcript is searchable");
         assert_eq!(answer.total, 150);
@@ -1954,13 +1735,14 @@ mod tests {
         complete_round(&mut s, "one", "one");
         complete_round(&mut s, "two", "two");
         complete_round(&mut s, "three", "three");
-        let rows = s.context_survey().rows;
+        let rows = s.context().context_survey().rows;
         let keep = rows[4].bytes + rows[5].bytes;
-        let plan = s.plan_eviction(keep).expect("old turns to shed");
+        let plan = s.context().plan_eviction(keep).expect("old turns to shed");
         assert_eq!(plan, vec![1, 2, 3, 4]);
         s.evict(&plan, None, EditAuthority::Harness).unwrap();
         assert_eq!(
-            s.context_survey()
+            s.context()
+                .context_survey()
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -1969,7 +1751,8 @@ mod tests {
             "the planned turns left the context"
         );
         assert!(
-            !s.history_rendered()
+            !s.context()
+                .rendered()
                 .iter()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
@@ -1984,12 +1767,16 @@ mod tests {
         complete_round(&mut s, "one", "one");
         let big = "x".repeat(100_000);
         complete_round(&mut s, "two", &big);
-        let keep = suffix_keep_budget(s.history_bytes());
-        let plan = s.plan_eviction(keep).expect("the older turns to shed");
+        let keep = suffix_keep_budget(s.context().history_bytes());
+        let plan = s
+            .context()
+            .plan_eviction(keep)
+            .expect("the older turns to shed");
         assert_eq!(plan, vec![1, 2]);
         s.evict(&plan, None, EditAuthority::Harness).unwrap();
         assert_eq!(
-            s.context_survey()
+            s.context()
+                .context_survey()
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -2003,7 +1790,7 @@ mod tests {
     fn a_lone_prompt_is_never_planned_away() {
         let mut s = fresh_root();
         complete_round(&mut s, "one", "one");
-        assert!(s.plan_eviction(0).is_none());
+        assert!(s.context().plan_eviction(0).is_none());
     }
 
     #[test]
@@ -2012,7 +1799,7 @@ mod tests {
         s.import_note(ChatMessage::user("imported user")).unwrap();
         complete_round(&mut s, "normal", "answer");
 
-        let rendered = s.history_rendered();
+        let rendered = s.context().rendered();
         assert_eq!(
             rendered
                 .iter()
@@ -2030,7 +1817,7 @@ mod tests {
         let mut s = fresh_root();
         s.append_user("interrupted".into(), None).unwrap();
         s.quiesce(QuiesceReason::Cancelled);
-        assert!(s.is_ready());
+        assert!(s.context().is_ready());
         assert!(
             !records(&s).iter().any(|record| matches!(
                 record,
@@ -2039,7 +1826,7 @@ mod tests {
             "no assistant turn the model never took may enter the log"
         );
         complete_round(&mut s, "next", "answer");
-        let rendered = s.history_rendered();
+        let rendered = s.context().rendered();
         let read: Vec<&str> = rendered
             .iter()
             .filter_map(|message| message.content.first_text())
@@ -2064,7 +1851,8 @@ mod tests {
         s.quiesce(QuiesceReason::Cancelled);
         complete_round(&mut s, "next", "answer");
         assert_eq!(
-            s.history_rendered()
+            s.context()
+                .rendered()
                 .iter()
                 .map(|message| message.role.clone())
                 .collect::<Vec<_>>(),
@@ -2087,9 +1875,12 @@ mod tests {
         s.append_user("run the tool".into(), None).unwrap();
         s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
             .unwrap();
-        assert!(!s.is_ready(), "outstanding tool calls hold the log");
+        assert!(
+            !s.context().is_ready(),
+            "outstanding tool calls hold the log"
+        );
         s.quiesce(QuiesceReason::Aborted);
-        assert!(s.is_ready());
+        assert!(s.context().is_ready());
         assert!(records(&s).iter().any(|record| matches!(
             record,
             Record::Protocol(Protocol::ToolResults { results })
@@ -2123,7 +1914,7 @@ mod tests {
         s.quiesce(QuiesceReason::Replied);
         complete_round(&mut s, "follow-up", "answer");
         assert!(
-            s.history_rendered().iter().any(|message| {
+            s.context().rendered().iter().any(|message| {
                 message.content.first_text()
                     == Some("[EXARCH // Deliberation ended: replied to parent.]")
             }),
@@ -2202,14 +1993,15 @@ mod tests {
     fn diagnostic_records_round_trip_through_record_jsonl() {
         let mut s = fresh_root();
         s.record_error("boom".into()).unwrap();
-        s.record_nudge(2, 3, "stop=length".into()).unwrap();
+        s.record_nudge("stop=length".into(), Some(Spent { used: 2, max: 3 }))
+            .unwrap();
         let parsed = records(&s);
         assert!(parsed.iter().any(
             |record| matches!(record, Record::Forensic(Forensic::Error { text }) if text == "boom")
         ));
         assert!(parsed.iter().any(|record| matches!(
             record,
-            Record::Forensic(Forensic::Nudge { used: 2, max: 3, cause }) if cause == "stop=length"
+            Record::Forensic(Forensic::Nudge { cause, spent: Some(Spent { used: 2, max: 3 }) }) if cause == "stop=length"
         )));
     }
 
@@ -2253,8 +2045,8 @@ mod tests {
         let record = s.dir().join("record.jsonl");
         s.clear(0, 2).expect("clear");
         assert!(record.with_extension("jsonl.0").exists());
-        assert!(s.transcript_index().is_empty());
-        assert!(s.is_ready());
+        assert!(s.context().transcript_index().is_empty());
+        assert!(s.context().is_ready());
     }
 
     #[test]
@@ -2264,7 +2056,7 @@ mod tests {
         s.evict(&answered(&s, &[1]), None, EditAuthority::User)
             .unwrap();
         assert_eq!(
-            s.event_count(),
+            s.context().event_count(),
             1,
             "no turn's records are owned any more; the hole's marker is what stands"
         );
@@ -2287,13 +2079,13 @@ mod tests {
         live.evict(&prefix(&live, 3), None, EditAuthority::Harness)
             .unwrap();
         let expected =
-            serde_json::to_vec(&live.history_rendered().iter().collect::<Vec<_>>()).unwrap();
+            serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert!(resumed.is_ready());
+        assert!(resumed.context().is_ready());
         assert_eq!(
-            serde_json::to_vec(&resumed.history_rendered().iter().collect::<Vec<_>>()).unwrap(),
+            serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
             expected
         );
     }
@@ -2315,7 +2107,7 @@ mod tests {
         drop(live);
 
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert!(resumed.is_ready());
+        assert!(resumed.context().is_ready());
         let recorded = records(&resumed);
         assert!(
             recorded
@@ -2350,7 +2142,7 @@ mod tests {
         file.flush().unwrap();
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("torn tail is recoverable");
-        assert!(resumed.is_ready());
+        assert!(resumed.context().is_ready());
         assert_eq!(fs::read(&path).unwrap(), prefix);
         assert_eq!(
             fs::read(sessions.path().join("0/record.jsonl.crash")).unwrap(),
@@ -2624,17 +2416,19 @@ mod tests {
                 }
                 7 => {
                     live.record_error("forensics".into()).unwrap();
-                    live.record_nudge(1, 2, "retry".into()).unwrap();
+                    live.record_nudge("retry".into(), Some(Spent { used: 1, max: 2 }))
+                        .unwrap();
                 }
                 _ => unreachable!(),
             }
             let expected =
-                serde_json::to_vec(&live.history_rendered().iter().collect::<Vec<_>>()).unwrap();
+                serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
             drop(live);
             let resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
-            assert!(resumed.is_ready());
+            assert!(resumed.context().is_ready());
             assert_eq!(
-                serde_json::to_vec(&resumed.history_rendered().iter().collect::<Vec<_>>()).unwrap(),
+                serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>())
+                    .unwrap(),
                 expected,
                 "pattern {pattern}"
             );
@@ -2666,13 +2460,13 @@ mod tests {
             EditAuthority::Model,
         )
         .unwrap();
-        let rows = live.transcript_index();
-        let notes = live.notes().to_vec();
+        let rows = live.context().transcript_index();
+        let notes = live.context().notes().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.transcript_index(), rows);
-        assert_eq!(resumed.notes(), notes.as_slice());
+        assert_eq!(resumed.context().transcript_index(), rows);
+        assert_eq!(resumed.context().notes(), notes.as_slice());
     }
 
     /// A departed turn's address is not written down anywhere: the fold mints
@@ -2693,12 +2487,16 @@ mod tests {
         complete_round(&mut live, "two", "answer two");
         live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
             .unwrap();
-        let before = format!("{:?}", live.read_transcript(&[1, 2]).expect("evicted"));
+        let before = format!(
+            "{:?}",
+            live.context().read_transcript(&[1, 2]).expect("evicted")
+        );
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert_eq!(
             resumed
+                .context()
                 .context_survey()
                 .rows
                 .iter()
@@ -2710,6 +2508,7 @@ mod tests {
         let after = format!(
             "{:?}",
             resumed
+                .context()
                 .read_transcript(&[1, 2])
                 .expect("the pointer was rebuilt by the fold alone")
         );
@@ -2728,7 +2527,7 @@ mod tests {
     }
 
     fn seed_has_a_tool_call(log: &AgentLog) -> bool {
-        log.history_rendered().iter().any(|message| {
+        log.context().rendered().iter().any(|message| {
             message
                 .content
                 .iter()
@@ -2759,7 +2558,8 @@ mod tests {
         );
         assert!(
             child
-                .history_rendered()
+                .context()
+                .rendered()
                 .iter()
                 .any(|message| message.content.first_text() == Some("two")),
             "the prompt behind the dangling call must still seed"
@@ -2785,7 +2585,8 @@ mod tests {
         );
         assert!(
             child
-                .history_rendered()
+                .context()
+                .rendered()
                 .iter()
                 .any(|message| message.content.first_text() == Some("two")),
         );
@@ -2818,6 +2619,7 @@ mod tests {
             "the child's own copy of the turn stops in front of the call"
         );
         let read = child
+            .context()
             .read_transcript(&[3, 4])
             .expect("the turn is recorded in the parent's file");
         let called = |read: &[TranscriptTurn]| {
@@ -2836,6 +2638,7 @@ mod tests {
             .evict(&prefix(&child, 4), None, EditAuthority::Harness)
             .unwrap();
         let departed = child
+            .context()
             .read_transcript(&[3, 4])
             .expect("eviction points at the copy, never at the seed");
         assert_eq!(format!("{departed:?}"), format!("{read:?}"));
@@ -2876,6 +2679,7 @@ mod tests {
         let mut child = mnemon(&parent, 1);
         assert_eq!(
             child
+                .context()
                 .context_survey()
                 .rows
                 .iter()
@@ -2885,9 +2689,10 @@ mod tests {
             "the parent's surviving turns cross under the parent's own ids"
         );
         complete_round(&mut child, "the child's own", "answer");
-        assert_eq!(child.current_prompt(), Some(9));
+        assert_eq!(child.context().current_prompt(), Some(9));
 
         let read = child
+            .context()
             .read_transcript(&[3, 4])
             .expect("an ancestor's evicted turns are in the lineage's transcript");
         assert_eq!(
@@ -2902,11 +2707,12 @@ mod tests {
 
         let mut grandchild = mnemon(&child, 2);
         let read = grandchild
+            .context()
             .read_transcript(&[3, 4])
             .expect("two links back is still the same transcript");
         assert_eq!(openings(&read), vec!["two", "two"]);
         complete_round(&mut grandchild, "the grandchild's own", "answer");
-        assert_eq!(grandchild.current_prompt(), Some(11));
+        assert_eq!(grandchild.context().current_prompt(), Some(11));
     }
 
     /// A cut between a prompt and its answers, then a fork, leaves them in
@@ -2946,6 +2752,7 @@ mod tests {
 
         let child = mnemon(&parent, 1);
         let read = child
+            .context()
             .read_transcript(&[1, 2, 3])
             .expect("both halves are in the lineage's transcript");
         assert_eq!(
@@ -2986,12 +2793,12 @@ mod tests {
         parent
             .evict(&answered(&parent, &[1, 3]), None, EditAuthority::User)
             .unwrap();
-        assert_eq!(parent.context_survey().rows.len(), 0);
+        assert_eq!(parent.context().context_survey().rows.len(), 0);
 
         let mut child = mnemon(&parent, 1);
-        assert_eq!(child.context_survey().rows.len(), 0);
+        assert_eq!(child.context().context_survey().rows.len(), 0);
         child.append_user("first".into(), None).unwrap();
-        assert_eq!(child.current_prompt(), Some(5));
+        assert_eq!(child.context().current_prompt(), Some(5));
     }
 
     /// Only a fork's opening may link a log to an ancestry: a link found
@@ -3064,6 +2871,7 @@ mod tests {
         }
         fs::write(&source, &torn).expect("rewrite the ancestor's log");
         let refusal = child
+            .context()
             .read_transcript(&[1, 2])
             .expect_err("a line the read cannot follow stops the lineage");
         assert!(
@@ -3076,6 +2884,7 @@ mod tests {
 
         fs::remove_file(&source).expect("delete the ancestor's log");
         let refusal = child
+            .context()
             .read_transcript(&[1, 2])
             .expect_err("a deleted ancestor's log stops the lineage");
         assert!(
@@ -3125,12 +2934,13 @@ mod tests {
         .unwrap();
         live.import_context(inherited).unwrap();
         assert_eq!(
-            live.notes(),
+            live.context().notes(),
             [Some("the parser is fixed".to_string())],
             "the parent's cut crosses the link"
         );
         let head = live
-            .history_rendered()
+            .context()
+            .rendered()
             .first()
             .expect("an inherited context that was cut renders a head marker")
             .content
@@ -3145,13 +2955,13 @@ mod tests {
         complete_round(&mut live, "own", "own");
         live.evict(&prefix(&live, 6), None, EditAuthority::Harness)
             .unwrap();
-        let rows = live.transcript_index();
-        let notes = live.notes().to_vec();
+        let rows = live.context().transcript_index();
+        let notes = live.context().notes().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.transcript_index(), rows);
-        assert_eq!(resumed.notes(), notes.as_slice());
+        assert_eq!(resumed.context().transcript_index(), rows);
+        assert_eq!(resumed.context().notes(), notes.as_slice());
     }
 
     /// The index is the whole lineage's table, in id order: a child inherits
@@ -3178,7 +2988,7 @@ mod tests {
         let mut child = mnemon(&parent, 1);
         complete_round(&mut child, "four", "four");
 
-        let index = child.transcript_index();
+        let index = child.context().transcript_index();
         assert_eq!(
             index
                 .iter()
@@ -3225,6 +3035,7 @@ mod tests {
             .unwrap();
 
         let answer = child
+            .context()
             .grep_transcript(&regex(r"\bthe\b"), None)
             .expect("the lineage's whole transcript is searchable");
         assert_eq!(answer.total, 4);
@@ -3267,12 +3078,14 @@ mod tests {
         fs::remove_file(&source).expect("delete the ancestor's log");
 
         let answer = child
+            .context()
             .grep_transcript(&regex(r"\bthe\b"), None)
             .expect("an unnarrowed search answers what it can reach");
         assert_eq!(answer.total, 1);
         assert_eq!(answer.hits[0].text, "the tests pass");
 
         let refusal = child
+            .context()
             .read_transcript(&[1, 2])
             .expect_err("a read that names an unreadable turn is refused");
         assert!(

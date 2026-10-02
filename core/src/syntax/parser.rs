@@ -495,7 +495,10 @@ impl Parser {
         }
         let redirects = self.collect_trailing_redirects()?;
         let op = (kw.build)(ops);
-        Ok(Ast::Scope { op, redirects: Box::new(redirects) })
+        Ok(Ast::Scope {
+            op,
+            redirects: Box::new(redirects),
+        })
     }
 
     /// `options = '[' ']' | '[' item (',' item)* ']'`

@@ -272,13 +272,6 @@ impl Stamp {
     pub(crate) fn is_stale(&self) -> bool {
         self.mailbox.epoch() != self.epoch
     }
-
-    /// The minted epoch; test assertions only — production judges
-    /// staleness at the pop or through [`Self::is_stale`].
-    #[cfg(test)]
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
-    }
 }
 
 /// A session's inbox: the owned **consumer** the attend loop pulls from, with

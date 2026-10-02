@@ -231,7 +231,7 @@ mod tests {
             running,
             up_secs: 0,
             idle_secs: 0,
-            settled_epoch: None,
+            retention_left: None,
         }
     }
 

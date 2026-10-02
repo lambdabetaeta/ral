@@ -13,7 +13,7 @@ pub(crate) mod thinking;
 pub(crate) use agent::spawn_branch;
 
 use crate::agent::Avatar;
-use crate::agent::event::ToolResult;
+use crate::agent::log::ToolResult;
 use crate::bus::Emitter;
 use serde_json::Value;
 
@@ -60,17 +60,18 @@ static THINKING: Tool = Tool {
 static OFFER: [&Tool; 2] = [&RAL, &THINKING];
 
 /// What a request advertises and what dispatch recognises are one value, so
-/// the two cannot disagree.
+/// the two cannot disagree.  The default is empty: `--chat`, which offers
+/// the model no tool at all.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Toolset(&'static [&'static Tool]);
+pub struct Toolset(&'static [&'static Tool]);
 
 impl Toolset {
     /// `ral`, and the `thinking` relay when asked for.
-    pub(crate) fn offered(thinking: bool) -> Self {
+    pub fn offered(thinking: bool) -> Self {
         Self(if thinking { &OFFER } else { &OFFER[..1] })
     }
 
-    pub(crate) fn is_empty(self) -> bool {
+    pub fn is_empty(self) -> bool {
         self.0.is_empty()
     }
 

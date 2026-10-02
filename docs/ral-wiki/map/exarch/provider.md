@@ -295,9 +295,9 @@ thread never holds either while waiting on an agent thread. `Bureau::admit` is
 the one door that takes both at once, store first. The `/model` overlay's
 `drive_picker` therefore takes the catalog per fold — to open the `Listing`,
 to pump it, to record endpoints, to clone the fetch seam — and never around
-the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig`, `Build` and
-`Agent`, the established "host setting, inherited verbatim by every fork" slot
-beside `egress` and `dial`.
+the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig` and from
+there on the fleet's `Launch`, the one place a run's host settings live,
+beside `dial`.
 
 ## Model catalogs
 

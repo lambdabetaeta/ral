@@ -1,31 +1,26 @@
 //! Fixtures shared by two or more `mod tests` across the crate; a helper only
 //! one of them needs belongs in that file instead.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
-
 use crate::agent::cancel::InterruptTarget;
 use crate::agent::{
-    Agent, Avatar, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel,
+    Agent, Avatar, Birth, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, Trunk,
 };
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
 use crate::fleet::Fleet;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
+use crate::shell_eval::tools::Toolset;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
-use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 type Dress = Box<dyn FnOnce(&mut Shell)>;
 
@@ -111,10 +106,10 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 
 /// What a fleet-focused test varies about a synthetic agent — no seat, no
 /// shell, nothing an attend loop would touch.  Every other field is the inert
-/// placeholder [`test_agent`] fills in.
+/// placeholder [`test_agent`] fills in; what the run shares is the fleet's
+/// own [`Launch`](crate::fleet::Launch).
 pub(crate) struct TestAgentSpec {
     pub(crate) name: String,
-    pub(crate) cancel: cancel::Token,
     pub(crate) reach: InterruptTarget,
     pub(crate) mailbox: Mailbox,
     /// `None` builds a root, `Some` a reporting child of that agent.
@@ -127,15 +122,6 @@ pub(crate) struct TestAgentSpec {
     pub(crate) fuel: u32,
     pub(crate) returns: bool,
     pub(crate) search: bool,
-    pub(crate) allow_schedule: bool,
-    pub(crate) disk_warn_bytes: Option<u64>,
-    pub(crate) egress: crate::egress::Egress,
-    pub(crate) dial: Option<Arc<dyn crate::agent::Dial>>,
-    pub(crate) bureau: Arc<crate::provider::Bureau>,
-    /// Still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`], like
-    /// [`Agent::system_base`](crate::agent::Agent) itself.
-    pub(crate) system_base: String,
-    pub(crate) index: Arc<crate::prompt::BuiltinIndex>,
 }
 
 impl TestAgentSpec {
@@ -143,7 +129,6 @@ impl TestAgentSpec {
     pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            cancel: cancel::Token::new(),
             reach: InterruptTarget::new(
                 ral_core::protocol::Transport::control(&bare_transport()).clone(),
             ),
@@ -154,26 +139,10 @@ impl TestAgentSpec {
             fuel: 0,
             returns: false,
             search: false,
-            allow_schedule: false,
-            disk_warn_bytes: None,
-            egress: crate::egress::Egress::for_test(),
-            dial: None,
-            bureau: Arc::new(crate::provider::Bureau::Scripted),
-            system_base: String::new(),
-            index: crate::prompt::BuiltinIndex::resolve(
-                Shell::new(ral_core::io::TerminalState::default())
-                    .builtin_names()
-                    .map(str::to_string)
-                    .collect(),
-            ),
         }
     }
 }
 
-/// The `Arc<Agent>` a real fork or root carries, born exactly as one is —
-/// enrolled, adopted, leased — so the caller holds the only strong reference
-/// and dropping it settles the agent.
-///
 /// The log directory a test agent names: one no `create_dir_all` can make,
 /// so a test that unexpectedly writes a log fails loudly rather than
 /// quietly leaving a directory behind on the machine that ran it.
@@ -189,6 +158,10 @@ const UNWRITABLE_LOG_DIR: &str = "/nonexistent/test-agent";
 #[cfg(windows)]
 const UNWRITABLE_LOG_DIR: &str = r"\\.\NUL\test-agent";
 
+/// The `Arc<Agent>` a real fork or root carries, born exactly as one is —
+/// enrolled, adopted, leased — so the caller holds the only strong reference
+/// and dropping it settles the agent.
+///
 /// # Errors
 /// Whatever [`Fleet::enrol`] refuses.
 pub(crate) fn test_agent(
@@ -197,7 +170,6 @@ pub(crate) fn test_agent(
 ) -> Result<Arc<Agent>, crate::fleet::Unborn> {
     let TestAgentSpec {
         name,
-        cancel,
         reach,
         mailbox,
         parent,
@@ -206,52 +178,23 @@ pub(crate) fn test_agent(
         fuel,
         returns,
         search,
-        allow_schedule,
-        disk_warn_bytes,
-        egress,
-        dial,
-        bureau,
-        system_base,
-        index,
     } = spec;
-    let id = crate::agent::fresh_id();
-    let consumer = parent.as_ref().map(|p| p.mailbox().stamp());
-    let agent = Arc::new(Agent {
-        id,
+    let agent = Agent::new(Birth {
+        id: crate::agent::fresh_id(),
         name,
         log_dir: PathBuf::from(UNWRITABLE_LOG_DIR),
-        started: std::time::Instant::now()
+        started: Instant::now()
             .checked_sub(idle)
             .expect("a test's backdated birth stays inside the monotonic clock"),
         system: Arc::from(""),
-        system_base: system_base.into(),
-        index,
         caps,
         parent,
-        children: Mutex::new(Vec::new()),
         fuel,
         provider: ProviderHandle::new(scripted("test-model", Script::new())),
-        interactive: false,
-        tools: crate::shell_eval::tools::Toolset::offered(false),
-        search,
         returns,
-        allow_schedule,
-        resume_on_reset: false,
-        disk_warn_bytes,
-        egress,
-        dial,
-        bureau,
-        cancel,
+        search,
         reach,
         mailbox,
-        schedules: crate::fleet::schedule::ScheduleRegistry::new(),
-        pins: Arc::default(),
-        status: Mutex::new(crate::agent::Status {
-            rest: None,
-            reply: None,
-            awaiting: std::collections::BTreeSet::new(),
-        }),
-        consumer,
     });
     fleet.enrol(&agent)?;
     Ok(agent)
@@ -273,31 +216,33 @@ pub(crate) fn source_run(src: &str) -> ral_core::protocol::Run {
     }
 }
 
-/// A boundary read through one of `test_access`'s count doors — unlike
+/// A boundary read through one of `test_access`'s count probes — unlike
 /// `scope_has` it ticks no epoch and no ledger.
 pub(crate) fn probe_count(
     session: &Avatar,
-    door: impl FnOnce(&dyn ral_core::protocol::Transport) -> Result<u64, ral_core::protocol::ProbeError>,
+    probe: impl FnOnce(
+        &dyn ral_core::protocol::Transport,
+    ) -> Result<u64, ral_core::protocol::ProbeError>,
 ) -> u64 {
     session
         .seat
-        .read(door)
+        .read(probe)
         .expect("an identity seat never severs")
 }
 
 /// Whether `name` resolves, asked through a real eval — which ticks the ral
 /// epoch and the binding-lease ledger, so an idle-arithmetic test must count it.
-pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
+pub(crate) fn scope_has(session: &Avatar, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.agent.id);
     // Discarded, so a block- or handle-valued binding still settles on data.
-    let (content, _) = session.ral(&format!("let _ = ${name}"), 5, &emit);
-    if content.lines().any(|line| line == "EXIT: 0") {
+    let text = session.ral(&format!("let _ = ${name}"), 5, &emit).text;
+    if text.lines().any(|line| line == "EXIT: 0") {
         return true;
     }
     assert!(
-        content.contains(&format!("undefined variable: ${name}")),
-        "scope probe for `{name}` neither succeeded nor reported an undefined variable: {content}"
+        text.contains(&format!("undefined variable: ${name}")),
+        "scope probe for `{name}` neither succeeded nor reported an undefined variable: {text}"
     );
     false
 }
@@ -327,10 +272,9 @@ pub(crate) fn tmp(tag: &str) -> tempfile::TempDir {
         .expect("test scratch dir")
 }
 
-/// Swap `session`'s live provider handle — the test-only door onto what
-/// `/model` mutates in production, so a forked child can run its own
-/// independent script rather than share its spawner's, the way a real
-/// `` exarch-agents `start `` does.
+/// Swap `session`'s live provider — what `/model` mutates in production — so
+/// a forked child can run its own independent script rather than share its
+/// spawner's, the way a real `` exarch-agents `start `` does.
 pub(crate) fn set_provider(session: &Avatar, provider: Arc<Provider>) {
     session.agent.provider.swap(provider);
 }
@@ -347,15 +291,23 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
     }
 }
 
-/// A trunk through the real `Avatar::root` path; `interactive` makes it converse.
-pub(crate) fn trunk(interactive: bool) -> Avatar {
-    root(interactive, false)
+/// A trunk through the real `Avatar::root` path: attended when `attended`,
+/// else the embedded conversing trunk synod drives.
+pub(crate) fn trunk(attended: bool) -> Avatar {
+    root(
+        if attended {
+            Trunk::Attended
+        } else {
+            Trunk::Embedded
+        },
+        Toolset::offered(false),
+    )
 }
 
 /// The toolless `--chat` trunk, conversing by construction: the flag is
 /// interactive-only.
 pub(crate) fn chat_trunk() -> Avatar {
-    root(true, true)
+    root(Trunk::Attended, Toolset::default())
 }
 
 /// A trunk whose network policy denies hosted search — the ceiling a fork inherits,
@@ -368,7 +320,7 @@ pub(crate) fn searchless_trunk() -> Avatar {
     .expect("searchless test trunk")
 }
 
-fn root(interactive: bool, chat: bool) -> Avatar {
+fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     // The run dir sits beside the scratch, which the seat below owns, so the
     // trunk's whole footprint goes when the trunk does.
     let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "trunk").expect("scratch dir");
@@ -378,15 +330,12 @@ fn root(interactive: bool, chat: bool) -> Avatar {
             system: "system".into(),
             caps: ral_core::types::GrantStack::root(),
             run_dir,
-            resume: None,
-            run_lock: None,
             model: "test-model".into(),
             account: RecordedAccount::for_test("test"),
+            trunk,
+            tools,
             allow_schedule: false,
             resume_on_reset: false,
-            interactive,
-            chat,
-            thinking_tool: false,
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
@@ -409,10 +358,7 @@ fn root(interactive: bool, chat: bool) -> Avatar {
 /// spawned child does, so this stands in for the parent that would end that
 /// park: a terminate once the reply stands.  A peer that never replies
 /// quiesces on its own and the watcher simply retires with it.
-pub(crate) fn drive_peer(
-    child: &mut Avatar,
-    provider: Arc<Provider>,
-) -> (AgentOutcome, Option<FOValue>) {
+pub(crate) fn drive_peer(child: &mut Avatar, provider: Arc<Provider>) -> AgentOutcome {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let (tx, _rx) = crate::bus::channel();

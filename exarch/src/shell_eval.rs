@@ -1069,7 +1069,7 @@ keep-bottom
     fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
         use crate::agent::testkit::{TestAgentSpec, test_agent};
 
-        let fleet = crate::fleet::Fleet::new();
+        let fleet = crate::fleet::Fleet::for_test();
         let inbox = Inbox::new();
         let mut spec = TestAgentSpec::new("root");
         spec.mailbox = inbox.mailbox();

@@ -25,10 +25,9 @@ mod table;
 mod transcript;
 
 pub use resume::resume;
-pub(crate) use transcript::TranscriptRead;
 
 use super::{Fold, Locus, Protocol, Record, Recorded, Refusal};
-use crate::agent::event::{ContextSurvey, Role, TurnKind};
+use crate::agent::log::{ContextSurvey, Role, TurnKind};
 use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
 use serde::{Deserialize, Serialize};
 use state::{State, admissible_prefix};

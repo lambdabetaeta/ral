@@ -31,8 +31,8 @@ mod usage;
 mod wire;
 
 pub use bureau::{Bureau, Holdings};
-pub use error::{CutShort, Limit, ProviderError, Refusal};
-pub(crate) use error::{error_object, extract_url, transient_label};
+pub use error::{CancelSite, CutShort, Limit, ProviderError, Refusal};
+pub(crate) use error::{error_object, extract_url};
 pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use rations::Rations;

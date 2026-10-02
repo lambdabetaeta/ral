@@ -3,7 +3,7 @@
 //! owed back. The door builds a [`Request`] and the desk decodes one, so an
 //! ill-shaped request is refused in the same words at either end.
 
-use crate::agent::event::{ContextSurvey, TranscriptPart};
+use crate::agent::log::{ContextSurvey, TranscriptPart};
 use crate::bus::card::{Card, encode_card, value_to_card};
 use crate::fleet::check_name;
 use crate::fleet::roster::{AgentInfo, RosterState, Spawner, Summary};
@@ -1025,15 +1025,15 @@ record!(Hit {
     text: "text",
 });
 
-impl From<crate::agent::event::GrepAnswer> for Hits {
-    fn from(answer: crate::agent::event::GrepAnswer) -> Self {
+impl From<crate::agent::log::GrepAnswer> for Hits {
+    fn from(answer: crate::agent::log::GrepAnswer) -> Self {
         Self {
             hits: answer
                 .hits
                 .into_iter()
                 .map(|hit| Hit {
                     turn: hit.turn,
-                    role: crate::agent::event::role_label(&hit.role).into(),
+                    role: crate::agent::log::role_label(&hit.role).into(),
                     line: hit.line,
                     text: hit.text,
                 })
@@ -1066,8 +1066,8 @@ record!(Said {
     parts: "parts",
 });
 
-impl From<crate::agent::event::TranscriptTurn> for Material {
-    fn from(read: crate::agent::event::TranscriptTurn) -> Self {
+impl From<crate::agent::log::TranscriptTurn> for Material {
+    fn from(read: crate::agent::log::TranscriptTurn) -> Self {
         Self {
             turn: read.turn,
             role: read.role.as_str().into(),
@@ -1075,7 +1075,7 @@ impl From<crate::agent::event::TranscriptTurn> for Material {
                 .messages
                 .into_iter()
                 .map(|message| Said {
-                    role: Bare(crate::agent::event::role_label(&message.role).into()),
+                    role: Bare(crate::agent::log::role_label(&message.role).into()),
                     parts: message.parts,
                 })
                 .collect(),

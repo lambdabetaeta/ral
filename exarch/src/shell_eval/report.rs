@@ -185,7 +185,7 @@ mod tests {
             running,
             up_secs: 0,
             idle_secs: 0,
-            settled_epoch: (!running).then_some(0),
+            retention_left: (!running).then_some(0),
         }
     }
 
@@ -211,7 +211,13 @@ mod tests {
 
     #[test]
     fn a_returning_call_says_nothing() {
-        let (out, exit) = render(&settled_ending(), &HashSet::new(), &ActFragment::default(), &[], 30);
+        let (out, exit) = render(
+            &settled_ending(),
+            &HashSet::new(),
+            &ActFragment::default(),
+            &[],
+            30,
+        );
         assert!(out.is_empty(), "a settled ending composes nothing: {out:?}");
         assert_eq!(exit, 0);
     }
@@ -366,7 +372,8 @@ mod tests {
 
         for (name, ending, want_exit) in &endings {
             let effects_unshown = !matches!(ending, Ending::Settled { .. });
-            for (births_label, births) in [("present", births.clone()), ("absent", HashSet::new())] {
+            for (births_label, births) in [("present", births.clone()), ("absent", HashSet::new())]
+            {
                 for (acts_label, fragment) in [("committed", &committed), ("refused", &refused)] {
                     let (out, exit) = render(ending, &births, fragment, &live, 5);
                     assert_eq!(exit, *want_exit, "{name}/{births_label}/{acts_label}");

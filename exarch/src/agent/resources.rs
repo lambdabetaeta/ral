@@ -3,49 +3,71 @@
 //!
 //! The fold has two halves, split by who may legally read what: the agent
 //! assembles its own rows on its attend thread ([`Avatar::resource_rows`]),
-//! and the TUI's `Transient::Resources` arm appends the rows for the accumulators
-//! *it* owns ([`frontend_rows`]). Neither half reaches across a thread for
-//! the other's figures. Probing mutates nothing and renews no lease, so
-//! `/resources` cannot immortalise the zombies it exists to reveal.
+//! and the TUI appends the rows for the accumulators *it* owns
+//! (`tui::resources`).  Neither half reaches across a thread for the other's
+//! figures.  Probing mutates nothing and renews no lease, so `/resources`
+//! cannot immortalise the zombies it exists to reveal.
 
 use crate::agent::Avatar;
-use crate::agent::digest::{EVICT_THRESHOLD, eviction_trigger};
+use crate::agent::gauge::{EVICT_THRESHOLD, eviction_trigger};
 use crate::agent::seat::EngineLost;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::AGENT_LEASE_IDLE;
 use crate::shell_eval;
-use crate::tui::DEMOTE_IDLE;
 use ral_core::protocol::{Severed, reading};
-use serde::Serialize;
+use std::fmt;
 use std::path::Path;
 
-/// One probed accumulator, one row per figure: what the fold renders. A probe
+/// How an accumulator is kept bounded — or that it is not.  Stated even where
+/// the enforcement lands later, the row then carrying `cap: None` and a note
+/// saying so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Policy {
+    Coalesce,
+    Queue,
+    Reject,
+    Evict,
+    Reap,
+    Warn,
+    Unbounded,
+}
+
+impl fmt::Display for Policy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Coalesce => "coalesce",
+            Self::Queue => "queue",
+            Self::Reject => "reject",
+            Self::Evict => "evict",
+            Self::Reap => "reap",
+            Self::Warn => "warn",
+            Self::Unbounded => "none (unbounded)",
+        })
+    }
+}
+
+/// One probed accumulator, one row per figure: what the fold renders.  A probe
 /// fold is an interactive diagnostic, read when it is run; no session keeps a
 /// pressure history.
-///
-/// `policy` comes from a closed vocabulary — `"coalesce"`, `"reject"`,
-/// `"evict"`, `"reap"`, `"warn"`, `"none (unbounded)"` — and is stated even
-/// where the enforcement lands later, the row then carrying `cap: None` and a
-/// note saying so.
-#[derive(Clone, Debug, Serialize)]
-pub struct ProbeRow {
+#[derive(Clone, Debug)]
+pub(crate) struct ProbeRow {
     pub name: String,
     /// Its size now, in the unit the name implies (a count, bytes, seconds).
     pub current: u64,
     /// The enforced bound, when one is armed; `None` for a decided-but-
     /// unenforced cap and for a genuinely unbounded figure alike.
     pub cap: Option<u64>,
-    pub policy: &'static str,
+    pub policy: Policy,
     /// A free clause: the nearest time-to-reap, the probed path.
     pub note: Option<String>,
 }
 
 impl ProbeRow {
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         current: u64,
         cap: Option<u64>,
-        policy: &'static str,
+        policy: Policy,
         note: Option<String>,
     ) -> Self {
         Self {
@@ -60,7 +82,7 @@ impl ProbeRow {
 
 /// Render `rows` as one aligned [`Mark::Fields`] matrix: the figure (with
 /// `/cap` when one is armed), then policy and note as muted ink.
-pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
+pub(crate) fn rows_mark(rows: &[ProbeRow]) -> Mark {
     let fields = rows
         .iter()
         .map(|row| {
@@ -93,128 +115,9 @@ pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
 }
 
 /// Compose the agent's rows into the `/resources` card: a heading over one
-/// [`rows_mark`] matrix. The frontend appends its own section at render
-/// time; the raw rows ride beside the card on the bus.
-pub fn resources_card(rows: &[ProbeRow]) -> Card {
+/// [`rows_mark`] matrix. The frontend appends its own section at render time.
+pub(crate) fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![Mark::heading("resources"), rows_mark(rows)])
-}
-
-/// The probed agent's scrollback: its figures beside the one window that bounds
-/// them all, in one struct so a figure cannot drift from its bound.
-#[derive(Clone, Copy)]
-pub struct ScrollbackFigures {
-    /// Scrollback blocks resident, one per reader's atom.
-    pub blocks: u64,
-    /// Rendered rows those blocks put on screen, as of the last paint.
-    pub rows: u64,
-    /// Those rows' summed text bytes.
-    pub bytes: u64,
-    /// `record::BLOCKS_WINDOW` — the view fold's resident-row window, which is
-    /// the only thing that bounds the three figures above: a block leaves the
-    /// screen when the row it was built from leaves the fold.
-    pub window: u64,
-}
-
-/// The fleet's view counts: per-agent views the frontend holds, split
-/// live/dead, plus the live-agent tab count.
-#[derive(Clone, Copy)]
-pub struct ViewFigures {
-    pub live: u64,
-    /// Views whose agent has died — lingering, or already tombstoned down to
-    /// (id, status, log path) once past `tui::LINGER`.
-    pub dead: u64,
-    pub agents: u64,
-}
-
-/// The presentation bus's two probe figures.
-///
-/// Neither carries a cap: the transport's one enforced number is a
-/// *per-entry* text cap (`bus::MERGE_TEXT_CAP`), a different axis from either
-/// aggregate, so it is named in `bus.bytes`'s note rather than faked into
-/// `cap`.
-#[derive(Clone, Copy)]
-pub struct BusFigures {
-    /// Queue entries — a merged run and a reserved kind each count as one.
-    pub depth: u64,
-    /// Resident merged `Token`/`Thinking` text bytes.  `State` coalesces by
-    /// replacement and carries no text, so it weighs nothing here.
-    pub bytes: u64,
-}
-
-/// The rows for the accumulators the frontend owns.
-///
-/// Pure in its figures so the row shapes are unit-testable without a
-/// terminal: the TUI's `Transient::Resources` arm reads them off the
-/// tabs/scrollback/bus it holds.
-pub fn frontend_rows(
-    scrollback: ScrollbackFigures,
-    views: ViewFigures,
-    bus: BusFigures,
-) -> Vec<ProbeRow> {
-    vec![
-        ProbeRow::new(
-            "scrollback.blocks",
-            scrollback.blocks,
-            None,
-            "evict",
-            Some(format!(
-                "one per reader's atom; bounded by the view fold's {}-row window",
-                scrollback.window
-            )),
-        ),
-        ProbeRow::new(
-            "scrollback.rows",
-            scrollback.rows,
-            None,
-            "evict",
-            Some("what those blocks render to at the readable width".to_string()),
-        ),
-        ProbeRow::new(
-            "scrollback.bytes",
-            scrollback.bytes,
-            None,
-            "evict",
-            Some("no byte cap of its own; bounded indirectly by the fold's row window".to_string()),
-        ),
-        ProbeRow::new(
-            "views.live",
-            views.live,
-            None,
-            "none (unbounded)",
-            Some("one per live agent".to_string()),
-        ),
-        ProbeRow::new(
-            "views.dead",
-            views.dead,
-            None,
-            "evict",
-            Some("tombstoned (id, status, log path) once past LINGER".to_string()),
-        ),
-        ProbeRow::new(
-            "bus.depth",
-            bus.depth,
-            None,
-            "coalesce",
-            Some("entries; a same-class run off one agent merges into its tail".to_string()),
-        ),
-        ProbeRow::new(
-            "bus.bytes",
-            bus.bytes,
-            None,
-            "evict",
-            Some(format!(
-                "resident merged token/thinking/phase text; each run elides past {} KiB",
-                crate::bus::MERGE_TEXT_CAP / 1024
-            )),
-        ),
-        ProbeRow::new(
-            "fleet.agents",
-            views.agents,
-            None,
-            "reap",
-            Some("the frontend's tab view; the spawn tree is the authority".to_string()),
-        ),
-    ]
 }
 
 /// Total bytes of every regular file under `root`, recursively; symlinks are
@@ -229,7 +132,7 @@ pub fn frontend_rows(
     clippy::disallowed_methods,
     reason = "[silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
 )]
-pub fn dir_size(root: &Path) -> u64 {
+pub(crate) fn dir_size(root: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
     };
@@ -265,14 +168,14 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
                 "context.tokens",
                 tokens,
                 Some(eviction_trigger(w)),
-                "evict",
+                Policy::Evict,
                 Some(format!("auto-eviction trigger; window {w} tokens")),
             ),
             ProbeRow::new(
                 "log.bytes",
                 history_bytes,
                 None,
-                "evict",
+                Policy::Evict,
                 Some(
                     "context bytes (fallback eviction gauge when the context window is unknown)"
                         .to_string(),
@@ -283,7 +186,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
             "log.bytes",
             history_bytes,
             Some(EVICT_THRESHOLD as u64),
-            "evict",
+            Policy::Evict,
             Some(format!(
                 "auto-eviction threshold; token measure stale (window {w} tokens)"
             )),
@@ -292,7 +195,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
             "log.bytes",
             history_bytes,
             Some(EVICT_THRESHOLD as u64),
-            "evict",
+            Policy::Evict,
             Some("auto-eviction threshold; window unknown".to_string()),
         )],
     }
@@ -350,50 +253,46 @@ impl Avatar {
                 }
             } else {
                 settled += 1;
-                // An unstamped entry has its whole retention ahead — the
-                // sweep stamps it next call.
-                let left = match entry.settled_epoch {
-                    Some(s) => shell_eval::SETTLED_WORKER_RETENTION
-                        .saturating_sub(self.ral_epoch.saturating_sub(s)),
-                    None => shell_eval::SETTLED_WORKER_RETENTION,
-                };
-                nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+                // The engine's own figure, on its own clock.
+                if let Some(left) = entry.retention_left {
+                    nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+                }
             }
         }
         rows.push(ProbeRow::new(
             "workers.running",
             running_worker + running_durable,
             Some(shell_eval::LIVE_WORKER_CAP as u64),
-            "reject",
+            Policy::Reject,
             None,
         ));
         rows.push(ProbeRow::new(
             "workers.running[worker]",
             running_worker,
             None,
-            "reap",
+            Policy::Reap,
             nearest_reap.map(|d| format!("nearest reap in {}", crate::clock::hms(d.as_secs()))),
         ));
         rows.push(ProbeRow::new(
             "workers.running[durable]",
             running_durable,
             None,
-            "none (unbounded)",
+            Policy::Unbounded,
             Some("durable — dies by cancel, /clear, or process exit".to_string()),
         ));
         rows.push(ProbeRow::new(
             "workers.settled",
             settled,
             None,
-            "reap",
+            Policy::Reap,
             nearest_expiry.map(|n| format!("nearest expiry in {n} ral calls")),
         ));
 
         for (source, depth) in self.inbox.source_depths() {
             let (policy, note) = if source.coalesces() {
-                ("coalesce", "merges/dedupes")
+                (Policy::Coalesce, "merges/dedupes")
             } else {
-                ("queue", "one per child, worker, or keystroke")
+                (Policy::Queue, "one per child, worker, or keystroke")
             };
             rows.push(ProbeRow::new(
                 format!("inbox[{source}]"),
@@ -404,31 +303,37 @@ impl Avatar {
             ));
         }
 
+        let log = self.log.lock();
+        let (events, history_bytes) = (
+            log.context().event_count() as u64,
+            log.context().history_bytes() as u64,
+        );
+        drop(log);
         rows.push(ProbeRow::new(
             "log.events",
-            self.log.lock().event_count() as u64,
+            events,
             None,
-            "evict",
+            Policy::Evict,
             Some("counts the events the context still owns".to_string()),
         ));
         rows.extend(pressure_rows(
             self.measured_input(),
-            self.log.lock().history_bytes() as u64,
-            self.current_provider().context_window(),
+            history_bytes,
+            self.agent.current_provider().context_window(),
         ));
 
         rows.push(ProbeRow::new(
             "bindings.count",
             self.seat.read(reading::binding_count)?,
             None,
-            "reap",
+            Policy::Reap,
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
             self.seat.read(reading::leased_binding_count)?,
             None,
-            "reap",
+            Policy::Reap,
             Some(format!(
                 "idle {} calls prunes",
                 shell_eval::BINDING_IDLE_CALLS
@@ -438,7 +343,7 @@ impl Avatar {
             "bindings.largest_bytes",
             self.seat.read(reading::largest_binding_bytes)?,
             Some(shell_eval::LARGE_BINDING_BYTES),
-            "warn",
+            Policy::Warn,
             Some("shallow estimate; a closure's captures are never chased".to_string()),
         ));
 
@@ -447,7 +352,7 @@ impl Avatar {
             "disk.log_dir",
             dir_size(&log_dir),
             None,
-            "warn",
+            Policy::Warn,
             Some(log_dir.display().to_string()),
         ));
         if let Some((scratch, bytes)) = self.scratch_bytes()? {
@@ -455,7 +360,7 @@ impl Avatar {
                 "disk.scratch",
                 bytes,
                 None,
-                "warn",
+                Policy::Warn,
                 Some(scratch),
             ));
         }
@@ -467,25 +372,17 @@ impl Avatar {
                 .unwrap_or(AGENT_LEASE_IDLE)
                 .as_secs(),
             Some(AGENT_LEASE_IDLE.as_secs()),
-            "reap",
+            Policy::Reap,
             Some("renewed by a human exchange".to_string()),
-        ));
-        rows.push(ProbeRow::new(
-            "agents.demote",
-            DEMOTE_IDLE.as_secs(),
-            None,
-            "warn",
-            Some("a parked child demotes to a compact matrix row at this idle age".to_string()),
         ));
 
         Ok(rows)
     }
 
-    /// Publish the fold as one [`Transient::Resources`]: the agent rows
-    /// beside the card rendering them, drawn live and never recorded — a
-    /// probe fold is an interactive diagnostic, not a session fact. Run by
-    /// `Avatar::read` at whichever boundary drains the `/resources`;
-    /// transcript and TUI only, never model-facing.
+    /// Publish the fold as one [`Transient::Resources`] card, drawn live and
+    /// never recorded — a probe fold is an interactive diagnostic, not a
+    /// session fact.  Run by `Avatar::read` at whichever boundary drains the
+    /// `/resources`; transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, recorder: &crate::record::Emitter) {
         let rows = match self.resource_rows() {
             Ok(rows) => rows,
@@ -494,14 +391,15 @@ impl Avatar {
                 return;
             }
         };
-        let card = resources_card(&rows);
-        recorder.transient(crate::record::Transient::Resources { rows, card });
+        recorder.transient(crate::record::Transient::Resources {
+            card: resources_card(&rows),
+        });
     }
 
     /// `/context`'s one fact: the survey's turns as they stand, for the
     /// scrollback fold to draw.
     pub(crate) fn emit_context_survey(&self) {
-        let survey = self.log.lock().context_survey();
+        let survey = self.log.lock().context().context_survey();
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
         let recorder = self.recorder();
@@ -512,90 +410,18 @@ impl Avatar {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
     use crate::bus::{Emitter, Post};
-
-    /// Every frontend row wears its policy, and none of them fakes a ceiling:
-    /// the view fold's row window is what bounds the scrollback, so the rows it
-    /// bounds name it in their note rather than claim a `cap` of their own.
-    #[test]
-    fn frontend_rows_state_decided_policies_and_name_the_one_window() {
-        let rows = frontend_rows(
-            ScrollbackFigures {
-                blocks: 3,
-                rows: 120,
-                bytes: 4096,
-                window: 1000,
-            },
-            ViewFigures {
-                live: 2,
-                dead: 1,
-                agents: 2,
-            },
-            BusFigures {
-                depth: 5,
-                bytes: 777,
-            },
-        );
-        let by_name = |n: &str| {
-            rows.iter()
-                .find(|r| r.name == n)
-                .unwrap_or_else(|| panic!("row {n} must be emitted"))
-        };
-        assert_eq!(by_name("scrollback.blocks").current, 3);
-        assert_eq!(by_name("scrollback.rows").current, 120);
-        assert_eq!(by_name("scrollback.bytes").current, 4096);
-        assert_eq!(by_name("views.live").current, 2);
-        assert_eq!(by_name("views.dead").current, 1);
-        assert_eq!(by_name("fleet.agents").current, 2);
-        assert_eq!(by_name("bus.depth").current, 5);
-        assert_eq!(by_name("bus.bytes").current, 777);
-        assert!(
-            by_name("scrollback.blocks")
-                .note
-                .as_deref()
-                .is_some_and(|n| n.contains("1000-row window")),
-            "the blocks row names the one window that bounds it"
-        );
-        for name in [
-            "scrollback.blocks",
-            "scrollback.rows",
-            "scrollback.bytes",
-            "views.live",
-            "views.dead",
-            "bus.depth",
-            "bus.bytes",
-            "fleet.agents",
-        ] {
-            assert!(
-                by_name(name).cap.is_none(),
-                "no cap of its own is enforced for this row ({name})"
-            );
-        }
-        assert_eq!(by_name("scrollback.blocks").policy, "evict");
-        assert_eq!(by_name("bus.depth").policy, "coalesce");
-        assert!(
-            by_name("bus.bytes")
-                .note
-                .as_deref()
-                .is_some_and(|n| n.contains("KiB")),
-            "the bus bytes row must name the per-run elision cap"
-        );
-    }
 
     /// The card is a heading plus one matrix, one field per row, the cap
     /// rendered into the figure only when armed.
     #[test]
     fn resources_card_renders_one_field_per_row() {
         let rows = vec![
-            ProbeRow::new("workers.running", 3, Some(64), "reject", None),
-            ProbeRow::new("bindings.count", 7, None, "reap", Some("x".into())),
+            ProbeRow::new("workers.running", 3, Some(64), Policy::Reject, None),
+            ProbeRow::new("bindings.count", 7, None, Policy::Reap, Some("x".into())),
         ];
         let card = resources_card(&rows);
         assert_eq!(card.marks().len(), 2, "a heading and one matrix");
@@ -632,9 +458,8 @@ mod tests {
             .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
     }
 
-    /// `/context`'s survey records a `Display::Context` commit through the
-    /// seam — what lets a resumed scrollback rebuild the survey card the
-    /// user saw.
+    /// `/context`'s survey records a `Display::Context` commit — what lets a
+    /// resumed scrollback rebuild the survey card the user saw.
     #[test]
     fn context_survey_records_a_display_commit() {
         use crate::record::{Display, Record};
@@ -663,9 +488,9 @@ mod tests {
             .expect("the survey records a Display::Context commit");
         assert_eq!(
             (fact[0].id, fact[0].role),
-            (1, crate::agent::event::Role::User)
+            (1, crate::agent::log::Role::User)
         );
-        assert_eq!(fact[0].kind, crate::agent::event::TurnKind::Own);
+        assert_eq!(fact[0].kind, crate::agent::log::TurnKind::Own);
     }
 
     /// The agent half surveys what this thread owns: the worker registry's
@@ -674,8 +499,7 @@ mod tests {
     /// fallback when nothing has forked.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
-        let mut session =
-            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+        let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
@@ -736,7 +560,7 @@ mod tests {
                 .note
                 .as_deref()
                 .is_some_and(|n| n.contains("ral calls")),
-            "a settled entry carries its retention remaining in ral calls"
+            "a settled entry carries the retention the engine says it has left"
         );
 
         assert_eq!(
@@ -793,8 +617,7 @@ mod tests {
     /// `last_observed` cell without touching it.
     #[test]
     fn resource_rows_renew_no_lease() {
-        let mut session =
-            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+        let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.ral("spawn { test-clear-block-forever }", 30, &emit);
@@ -833,7 +656,7 @@ mod tests {
             Some(EVICT_THRESHOLD as u64),
             "an unknown window falls back to the byte threshold `evict` itself uses"
         );
-        assert_eq!(bytes.policy, "evict");
+        assert_eq!(bytes.policy, Policy::Evict);
         assert!(
             !rows.iter().any(|r| r.name == "context.tokens"),
             "no window means no token-pressure row to show"
@@ -854,7 +677,7 @@ mod tests {
             Some(eviction_trigger(200_000)),
             "the same trigger `Avatar::evict` fires auto-eviction on"
         );
-        assert_eq!(tokens.policy, "evict");
+        assert_eq!(tokens.policy, Policy::Evict);
         assert!(
             tokens.note.as_deref().is_some_and(|n| n.contains("200000")),
             "the note names the window the trigger was computed from"

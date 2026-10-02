@@ -52,11 +52,12 @@ impl AgentInfo {
             (Some(_), false) => RosterState::Waiting,
         };
         Self {
-            name: agent.name().to_string(),
+            name: agent.name.clone(),
             spawner: agent
-                .parent()
-                .map_or(Spawner::Root, |up| Spawner::Agent(up.name().to_string())),
-            log_dir: agent.log_dir().to_path_buf(),
+                .parent
+                .as_ref()
+                .map_or(Spawner::Root, |up| Spawner::Agent(up.name.clone())),
+            log_dir: agent.log_dir.clone(),
             elapsed: agent.elapsed(),
             state,
             idle: rest.map_or(Duration::ZERO, |at| at.elapsed()),

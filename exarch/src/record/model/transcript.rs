@@ -4,7 +4,7 @@
 //! is parsed.
 
 use super::{Body, Context, Pointer, Turn, into_chat_messages, not_recorded_refusal_turn};
-use crate::agent::event::{
+use crate::agent::log::{
     GrepAnswer, GrepHit, Role, TranscriptMessage, TranscriptPart, TranscriptTurn,
 };
 use crate::record::{Entry, Locus, Protocol, Record};
@@ -199,12 +199,13 @@ impl Context {
     /// recorded in an ancestor's.
     ///
     /// Both halves in one call — [`Self::locate_read`] then
-    /// [`TranscriptRead::turns`]; the desk keeps them apart so only the first
-    /// runs under the session lock.
+    /// [`TranscriptRead::turns`] — for a test; the desk keeps them apart so
+    /// only the first runs under the session lock.
     ///
     /// # Errors
     /// Refuses a read that names no turn, a turn this lineage never recorded,
     /// the turn being written now, or one whose file will not read back.
+    #[cfg(test)]
     pub(crate) fn read_transcript(&self, turns: &[u64]) -> Result<Vec<TranscriptTurn>, String> {
         self.locate_read(turns)?.turns()
     }
@@ -268,11 +269,12 @@ impl Context {
     /// has already told the model which of its turns it cannot have back.
     ///
     /// Both halves in one call — [`Self::locate_grep`] then
-    /// [`TranscriptRead::grep`]; the desk keeps them apart so only the first
-    /// runs under the session lock.
+    /// [`TranscriptRead::grep`] — for a test; the desk keeps them apart so
+    /// only the first runs under the session lock.
     ///
     /// # Errors
     /// Refuses a narrowing [`Self::read_transcript`] refuses.
+    #[cfg(test)]
     pub(crate) fn grep_transcript(
         &self,
         pattern: &Regex,

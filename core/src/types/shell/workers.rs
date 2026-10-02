@@ -326,6 +326,21 @@ impl WorkerRegistry {
         drop(inner);
     }
 
+    /// Ral calls until a settled `entry`'s retention expires: the whole bound
+    /// for one not yet stamped, `None` while it runs or with none armed.
+    pub(crate) fn retention_left(&self, entry: &WorkerEntry) -> Option<u64> {
+        if entry.handle.is_running() {
+            return None;
+        }
+        let (epoch, retention) = {
+            let inner = self.0.lock_ignore_poison();
+            (inner.epoch, inner.retention?)
+        };
+        Some(entry.settled_epoch.map_or(retention, |stamped| {
+            retention.saturating_sub(epoch.saturating_sub(stamped))
+        }))
+    }
+
     pub(crate) fn take_reap_notices(&self) -> Vec<ReapNotice> {
         std::mem::take(&mut self.0.lock_ignore_poison().reap_notices)
     }

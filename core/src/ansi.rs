@@ -129,7 +129,7 @@ pub fn escape_seq_len(bytes: &[u8], at: usize) -> usize {
 /// Drop every ANSI escape sequence from `s`, leaving the visible text.
 ///
 /// Styling only: carriage returns and backspaces survive untouched, since
-/// nothing here replays cursor motion.  exarch's `digest::visible_text` does.
+/// nothing here replays cursor motion.  [`visible`] does.
 pub fn strip(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -145,6 +145,58 @@ pub fn strip(s: &str) -> String {
         }
         out.push_str(&s[start..i]);
     }
+    out
+}
+
+/// Reduce `s` to what a terminal would leave on screen.
+///
+/// Escape sequences are dropped, a carriage return rewinds to column zero (a
+/// progress meter collapses to its final frame), and a backspace rewinds one
+/// cell (nroff overstrike keeps the last glyph).  A cell is one `char`, not a
+/// width-aware grapheme — exact for both, harmless beyond.
+pub fn visible(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut line: Vec<char> = Vec::new();
+    let mut col = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            ESC => i += escape_seq_len(bytes, i),
+            b'\n' => {
+                #[allow(
+                    clippy::iter_with_drain,
+                    reason = "line buffer capacity must survive across lines"
+                )]
+                out.extend(line.drain(..));
+                out.push('\n');
+                col = 0;
+                i += 1;
+            }
+            b'\r' => {
+                col = 0;
+                i += 1;
+            }
+            0x08 => {
+                col = col.saturating_sub(1);
+                i += 1;
+            }
+            _ => {
+                // `i` is a char boundary below `len`, so this is never `None`.
+                let Some(ch) = s[i..].chars().next() else {
+                    break;
+                };
+                if col < line.len() {
+                    line[col] = ch;
+                } else {
+                    line.push(ch);
+                }
+                col += 1;
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out.extend(line);
     out
 }
 
@@ -243,6 +295,28 @@ mod tests {
     #[test]
     fn strip_keeps_multibyte_char_after_bare_esc() {
         assert_eq!(strip("\x1bλ tail"), "λ tail");
+    }
+
+    #[test]
+    fn visible_keeps_multibyte_char_after_bare_esc() {
+        assert_eq!(visible("\x1bλ tail"), "λ tail");
+    }
+
+    #[test]
+    fn visible_collapses_carriage_return_to_final_frame() {
+        assert_eq!(visible("0%\r50%\r100%\n"), "100%\n");
+        assert_eq!(visible("alpha\r\nbeta\r\n"), "alpha\nbeta\n");
+        // A terminal leaves the unoverwritten cells standing; so does this.
+        assert_eq!(visible("loading\rdone"), "doneing");
+    }
+
+    #[test]
+    fn visible_backspace_overstrike_keeps_last_glyph() {
+        // nroff bold (b BS b) and underline (_ BS x); a backspace at column
+        // zero is inert.
+        assert_eq!(visible("b\u{8}bo\u{8}o000"), "bo000");
+        assert_eq!(visible("_\u{8}x"), "x");
+        assert_eq!(visible("\u{8}a"), "a");
     }
 
     #[test]

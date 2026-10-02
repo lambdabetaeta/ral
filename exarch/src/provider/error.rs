@@ -3,8 +3,8 @@
 //!
 //! Classification is structural: [`Fault`] walks an error's variants down to the
 //! leaf that decides recovery, never scraping a `Display` string. The retry
-//! driver in `retry.rs` keys its backoff on the resulting variant, and
-//! [`crate::agent::event::ProviderErrorRecord`] mirrors it for the TUI.
+//! driver in `retry.rs` keys its backoff on the resulting variant, and the
+//! record log carries the variant itself.
 
 use super::reset;
 use super::retry::Recovery;
@@ -20,13 +20,35 @@ use std::fmt;
 /// one — the width every provider call's success path pays for.
 type Body = Box<serde_json::Value>;
 
+/// Where in a request's life a cancel landed, so the UI can pin the blame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CancelSite {
+    BeforeRequest,
+    MidStream,
+    Backoff,
+}
+
+impl fmt::Display for CancelSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::BeforeRequest => "before request",
+            Self::MidStream => "mid-stream",
+            Self::Backoff => "during retry backoff",
+        })
+    }
+}
+
 /// Structured failure at the provider boundary.  The variant alone tells the
 /// retry loop whether to back off, so misclassifying one is expensive.
-#[derive(Debug, Clone)]
+///
+/// Recorded as it is: the log's `Forensic::ProviderError` carries this very
+/// value, so every renderer reads one shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderError {
-    /// Cancelled in flight; the string names the lifecycle site, so the UI
-    /// can pin the blame.
-    Cancelled(&'static str),
+    /// Cancelled in flight.
+    Cancelled(CancelSite),
     /// Retryable with the same payload: network, stream, or 5xx.  `attempts`
     /// is the total made before giving up, stamped by `retry.rs`.
     Transient {
@@ -127,7 +149,8 @@ impl Refusal {
 /// The two have different remedies — a cap is the user's ceiling to raise, a
 /// stall is nobody's to fix and is survived — so they are one type with two
 /// arms rather than one reason string the reader has to interpret.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CutShort {
     /// The output ceiling, under the provider's own raw stop reason.
     OutputCap { stop_reason: String },
@@ -139,6 +162,33 @@ pub enum CutShort {
 }
 
 impl ProviderError {
+    /// The failure that broke the stream, for a truncation the streamed prefix
+    /// survived — and `None` for every failure that ends the turn.  The one
+    /// place that reading is derived: the TUI fold, synod's seam and the
+    /// headless printer all grade a stall below a fatal error, and each asks
+    /// here rather than re-matching the shape.
+    pub fn stall_cause(&self) -> Option<&Self> {
+        match self {
+            Self::Truncated { cause } => match cause.as_ref() {
+                CutShort::Stalled(error) => Some(error),
+                CutShort::OutputCap { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Short human label for the failure's kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Cancelled(_) => "cancelled",
+            Self::Transient { status, .. } => transient_label(*status),
+            Self::Refused(r) => r.limit.label(),
+            Self::Api { .. } => "api error",
+            Self::Truncated { .. } => "truncated",
+            Self::Other(_) => "provider error",
+        }
+    }
+
     /// A fault this boundary raised itself, having never reached a response:
     /// retryable, and with neither a status nor a provider body to show.
     pub(crate) fn local_transient(cause: impl Into<String>) -> Self {
@@ -398,7 +448,7 @@ impl ProviderError {
     /// message and falls back to the kind label.
     pub fn summary(&self) -> String {
         match self {
-            Self::Cancelled(where_) => format!("cancelled {where_}"),
+            Self::Cancelled(site) => format!("cancelled {site}"),
             Self::Transient { body, status, .. } => {
                 with_body_message(transient_label(*status), body.as_deref())
             }

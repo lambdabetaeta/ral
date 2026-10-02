@@ -16,14 +16,13 @@
 //! so a new variant on either is a compile error here, not a silent drop.
 #![deny(clippy::wildcard_enum_match_arm)]
 
-use exarch::agent::event::{CutShortRecord, ProviderErrorRecord};
 use exarch::bus::card::{
     Card, Field, Hunk, Mark, Measure, Span, context_rows_card, notice_card,
     observation_display_card, to_card_notice,
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::clock;
-use exarch::provider::Recovery;
+use exarch::provider::{CutShort, ProviderError, Recovery};
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
 use serde::Serialize;
 use ts_rs::TS;
@@ -122,16 +121,16 @@ fn suffix(prefix: &str, text: &str) -> String {
     }
 }
 
-/// A [`ProviderErrorRecord`] as the one-line bracketed sentence the dial
+/// A [`ProviderError`] as the one-line bracketed sentence the dial
 /// shows, exhaustively over its variants — `label` is the tag word
 /// ("provider" or "stalled") the two events that carry one prefix it with.
-fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
+fn provider_error_text(label: &str, record: &ProviderError) -> String {
     let detail = match record {
-        ProviderErrorRecord::Cancelled { where_ } => suffix(" at ", where_),
-        ProviderErrorRecord::Transient {
+        ProviderError::Cancelled(site) => suffix(" at ", &site.to_string()),
+        ProviderError::Transient {
             cause, attempts, ..
         } => format!("{} (attempt {attempts})", suffix(" — ", cause)),
-        ProviderErrorRecord::Refused(r) => {
+        ProviderError::Refused(r) => {
             let wait = match r.recovery() {
                 Recovery::InPlace(Some(wait)) => format!(" — retry in {}s", wait.get().as_secs()),
                 Recovery::InPlace(None) => String::new(),
@@ -139,7 +138,7 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
             };
             wait + &suffix(" — ", &r.cause)
         }
-        ProviderErrorRecord::Api {
+        ProviderError::Api {
             status,
             model,
             message,
@@ -151,29 +150,29 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
                 .map(|part| suffix(" ", part))
                 .collect()
         }
-        ProviderErrorRecord::Truncated { cause } => match cause {
-            CutShortRecord::OutputCap { stop_reason } => format!(" — output cap ({stop_reason})"),
+        ProviderError::Truncated { cause } => match cause.as_ref() {
+            CutShort::OutputCap { stop_reason } => format!(" — output cap ({stop_reason})"),
             // A stall's sentence is its cause's: `project` reaches one only
             // through `stall_cause`, with the cause already unwrapped.
-            CutShortRecord::Stalled { error } => return provider_error_text(label, error),
+            CutShort::Stalled(error) => return provider_error_text(label, error),
         },
-        ProviderErrorRecord::Other { cause } if cause.is_empty() => {
+        ProviderError::Other(cause) if cause.is_empty() => {
             return format!("[{label}: error]");
         }
-        ProviderErrorRecord::Other { cause } => return format!("[{label}: {cause}]"),
+        ProviderError::Other(cause) => return format!("[{label}: {cause}]"),
     };
     format!("[{label}: {}{detail}]", record.kind())
 }
 
 /// An API failure or an unclassified one reads as a failure the exchange
 /// cannot recover from; every other kind is a warning.
-fn provider_error_severity(record: &ProviderErrorRecord) -> Severity {
+fn provider_error_severity(record: &ProviderError) -> Severity {
     match record {
-        ProviderErrorRecord::Api { .. } | ProviderErrorRecord::Other { .. } => Severity::Bad,
-        ProviderErrorRecord::Cancelled { .. }
-        | ProviderErrorRecord::Transient { .. }
-        | ProviderErrorRecord::Refused { .. }
-        | ProviderErrorRecord::Truncated { .. } => Severity::Warn,
+        ProviderError::Api { .. } | ProviderError::Other(_) => Severity::Bad,
+        ProviderError::Cancelled(_)
+        | ProviderError::Transient { .. }
+        | ProviderError::Refused(_)
+        | ProviderError::Truncated { .. } => Severity::Warn,
     }
 }
 
@@ -808,7 +807,7 @@ mod tests {
         let mut router = Router::default();
         router.route_transient(0, &Transient::State(AgentState::Ready));
 
-        let usage = exarch::agent::event::UsageDelta {
+        let usage = exarch::provider::Usage {
             input: 7,
             output: 3,
             cache_creation: None,

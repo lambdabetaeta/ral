@@ -137,7 +137,7 @@ pub(crate) fn answer(shell: &Shell, req: &FOValue) -> Result<FOValue, String> {
         Class::Workers => shell
             .workers()
             .iter()
-            .map(WorkerRow::of)
+            .map(|entry| WorkerRow::of(shell, entry))
             .collect::<Vec<_>>()
             .encode(),
         Class::SessionEnded => shell

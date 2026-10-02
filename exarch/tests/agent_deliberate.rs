@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::event::{Cut, EditAuthority, ProviderErrorRecord};
+use exarch::agent::log::{Cut, EditAuthority};
 use exarch::agent::{Avatar, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -35,9 +35,9 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 exarch::pre_main_ctor!();
 
 /// The drained result of one `deliberate` run: the outcome, every durable
-/// fact recorded through the seam, and every transient the worker emitted.
+/// fact recorded, and every transient the worker emitted.
 struct Drive {
-    outcome: Result<deliberate::Outcome, ProviderError>,
+    outcome: Result<deliberate::Outcome, deliberate::Fault>,
     facts: Vec<Record>,
     transients: Vec<Transient>,
 }
@@ -48,8 +48,7 @@ fn drive_deliberate(session: &mut Avatar, provider: &Arc<Provider>, prompt: Opti
     let id: AgentId = session.id();
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
-    let token = exarch::agent::cancel::Token::new();
-    let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
+    let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &emit);
     drop(emit);
     let mut facts = Vec::new();
     let mut transients = Vec::new();
@@ -102,7 +101,7 @@ fn plain_text_reaches_quiescence() {
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
 
     match outcome {
-        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "hello"),
+        Ok(deliberate::Outcome::Complete) => {}
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(session.is_ready());
@@ -166,7 +165,7 @@ fn bindings_persist_across_tool_calls() {
     );
 
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("compute"));
-    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
+    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete)));
 
     // The second tool result must show 42 — the binding survived.
     let results: Vec<_> = session
@@ -211,7 +210,7 @@ fn truncated_with_tool_calls_runs_and_continues() {
     let Drive { outcome, facts, .. } =
         drive_deliberate(&mut session, &provider, Some("do work then get cut off"));
     match outcome {
-        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "resumed after truncation"),
+        Ok(deliberate::Outcome::Complete) => {}
         other => panic!("truncated-with-tools must run and complete, got {other:?}"),
     }
     assert!(
@@ -242,15 +241,17 @@ fn stalled_stream_commits_partial_and_truncates() {
     let Drive { outcome, facts, .. } =
         drive_deliberate(&mut session, &provider, Some("answer at length"));
     match &outcome {
-        Err(ProviderError::Truncated { cause }) => match cause.as_ref() {
-            CutShort::Stalled(cause) => assert_eq!(
-                cause.summary(),
-                "Failed to parse stream data for model 'test-model'"
-            ),
-            other @ CutShort::OutputCap { .. } => {
-                panic!("a stall must carry its own cut, got {other:?}")
+        Err(deliberate::Fault::Provider(ProviderError::Truncated { cause })) => {
+            match cause.as_ref() {
+                CutShort::Stalled(cause) => assert_eq!(
+                    cause.summary(),
+                    "Failed to parse stream data for model 'test-model'"
+                ),
+                other @ CutShort::OutputCap { .. } => {
+                    panic!("a stall must carry its own cut, got {other:?}")
+                }
             }
-        },
+        }
         other => panic!("a committed stall must surface as Truncated, got {other:?}"),
     }
     // The streamed prefix is committed verbatim, so the exchange the nudge
@@ -282,18 +283,17 @@ fn stalled_stream_commits_partial_and_truncates() {
     // `stall_cause`, carrying the provider's own words whole and at error
     // weight: a ` | `-joined slate note beside a model switch reads as
     // housekeeping, and a stall is a dropped connection the user must act on.
-    let Err(error) = &outcome else {
+    let Err(deliberate::Fault::Provider(error)) = &outcome else {
         unreachable!("asserted Truncated above")
     };
-    let record = ProviderErrorRecord::from(error);
     assert!(
         matches!(
-            record.stall_cause(),
-            Some(ProviderErrorRecord::Other { cause })
+            error.stall_cause(),
+            Some(ProviderError::Other(cause))
                 if cause == "Failed to parse stream data for model 'test-model'"
         ),
         "the stall cause must reach the renderers through stall_cause, \
-         got {record:?}",
+         got {error:?}",
     );
     assert!(session.is_ready());
     assert_admissible(&session);
@@ -347,7 +347,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
     let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
     let Drive { outcome: acked, .. } = drive_deliberate(&mut session, &provider, Some(&first));
-    assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
+    assert!(matches!(acked, Ok(deliberate::Outcome::Complete)));
     // The second prompt tips the history over the threshold, so its own
     // first turn boundary sheds the first exchange — the prompt in hand
     // being the one turn no cut may take.
@@ -356,7 +356,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
         transients,
         ..
     } = drive_deliberate(&mut session, &provider, Some(&second));
-    assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
+    assert!(matches!(acked, Ok(deliberate::Outcome::Complete)));
     assert!(
         transients
             .iter()
@@ -365,7 +365,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     );
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("after"));
     match outcome {
-        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
+        Ok(deliberate::Outcome::Complete) => {}
         other => panic!("expected Complete, got {other:?}"),
     }
     // Three scripted replies for three deliberations: a request of the
@@ -445,7 +445,7 @@ fn malformed_tool_arguments_are_normalised_to_object() {
     );
 
     let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
-    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
+    assert!(matches!(outcome, Ok(deliberate::Outcome::Complete)));
 
     // Every committed tool call's arguments must be a JSON object.
     for m in session.rendered_messages() {

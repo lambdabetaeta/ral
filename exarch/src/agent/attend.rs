@@ -1,161 +1,168 @@
-//! The one loop every node runs: pull the next item off the node's own inbox,
+//! The one loop every node runs: draw the next item off the node's own inbox,
 //! take it up, and turn a nudge-worthy outcome into a self-posted nudge.
 //! Stepping the model to quiescence over one item is [`super::deliberate`]'s
-//! job; nothing here special-cases a node's position, since a child's reply
-//! is deposited on its own agent and a non-reply end is delivered up its
+//! job; nothing here special-cases a node's position, since a reply is
+//! deposited on the node's own agent and a non-reply end is delivered up its
 //! parent's mailbox by the spawn site.
 
-use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
-use crate::agent::event::QuiesceReason;
-use crate::agent::gauge::{Pressure, Warning, ration};
+use crate::agent::deliberate::{Fault, Outcome};
+use crate::agent::gauge::{Warning, ration};
+use crate::agent::log::QuiesceReason;
 use crate::agent::nudge;
 use crate::agent::seat::EngineLost;
-use crate::agent::{Avatar, deliberate, panic_msg};
+use crate::agent::{Avatar, panic_msg};
 use crate::bus::{
     AgentOutcome, AgentState, Emitter, Item, Next, ParkMode, Post, WORKER_PANIC_PREFIX,
 };
 use crate::clock;
 use crate::fleet::schedule::Trigger;
 use crate::provider::{Limit, Provider, ProviderError, Recovery};
+use crate::record::Transient;
 use crate::shell_eval;
 use ral_core::protocol::{Severed, reading};
-use ral_core::serial::FOValue;
 use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
-/// What the surrounding loop does next: `Stop` on `/quit` or a headless root's
-/// `reply`; `Severed` hands the loop the engine's loss to record once it ends.
-pub(super) enum Flow {
-    Continue,
-    Stop,
-    Severed(Severed),
+/// How an empty inbox ends a pass: parked on the verdict [`Avatar::park_mode`]
+/// gives, or handed back to the caller at once.
+#[derive(Clone, Copy)]
+enum Idle {
+    Park,
+    Return,
 }
 
-/// ral calls between disk-warn ceiling checks: the walk is a full scan of the
-/// session log dir and scratch, too costly to pay at every tool boundary.
-const DISK_WARN_CHECK_INTERVAL: u64 = 32;
+/// What one drawn item leaves the loop with: the outcome an item settled on,
+/// if one did — a command settles nothing — and whether the loop draws again;
+/// `/quit` and a root's `reply` end it.
+struct Step {
+    settled: Option<AgentOutcome>,
+    flow: ControlFlow<()>,
+}
+
+impl Step {
+    fn command(flow: ControlFlow<()>) -> Self {
+        Self {
+            settled: None,
+            flow,
+        }
+    }
+
+    fn settled(outcome: AgentOutcome, flow: ControlFlow<()>) -> Self {
+        Self {
+            settled: Some(outcome),
+            flow,
+        }
+    }
+}
+
+/// Between disk-ceiling walks: a full scan of the session log dir and
+/// scratch, too costly to pay at every tool boundary.
+const DISK_WARN_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The label of the one-shot wakeup armed at a refusal's reset.
 const RESUME_LABEL: &str = "provider-reset";
 
+/// A finish without `reply` did not complete a returning agent's contract;
+/// there is no scrape of its prose.
+const NO_REPLY_REASON: &str = "ended without calling `reply`";
+
 impl Avatar {
-    /// The one attend loop, identical for every node: pull the next inbox
+    /// The one attend loop, identical for every node: draw the next inbox
     /// item, take it up, and repeat until an empty inbox meets a
     /// [`Self::park_mode`] that does not park, or a cancel ends one that does.
-    /// The returned `payload` is the faithful [`FOValue`] a `reply` carried,
-    /// left for the consuming edge to render.
-    pub fn attend(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
-        self.attend_with(emit, |_, mode| mode)
-    }
-
-    /// [`Self::attend`] with the park verdict reshaped by `policy` before it
-    /// reaches either of its two readers — the idle-state emission just below
-    /// and `next_or_idle`'s own parking argument — so a frontend's status and
-    /// the loop's actual wait always agree on what an empty inbox means.
-    /// `attend`'s public behavior is this under the identity policy; the only
-    /// other one is [`quiesce_when_childless`], which
-    /// [`crate::headless::converse_settled`] runs under instead.
-    pub(crate) fn attend_with(
-        &mut self,
-        emit: &Emitter,
-        policy: impl Fn(&Self, ParkMode) -> ParkMode,
-    ) -> (AgentOutcome, Option<FOValue>) {
-        self.couple(emit);
-        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        let lost = loop {
-            if let Some(s) = self.seat.severed() {
-                break Some(s);
-            }
-            // Every pass is a settled ready boundary.  A lease-chain reap is
-            // deliberately not drained here: core pushes its `` `notice `` on
-            // the surface stream of the run that observes it, so a reap during
-            // a long idle surfaces once an item next runs.
-            //
-            // The state a frontend shows over the coming silence is this park's
-            // own verdict.  Only on an empty queue: with an item already in
-            // hand the agent is not idle for any observable moment, and the
-            // deliberation's own transitions are the truth.
-            if self.inbox.is_empty() {
-                let mode = policy(self, self.park_mode(self.agent.engaged()));
-                self.agent.set_resting(mode == ParkMode::Engaged);
-                self.recorder()
-                    .transient(crate::record::Transient::State(idle_state(mode)));
-            }
-            // `next_or_idle` recomputes the park verdict on every wake.  A
-            // returning agent that quiesces breaks here, and its outcome
-            // reaches its parent through the worker epilogue, not this break.
-            let Some(next) = self.inbox.next_or_idle(
-                |engaged| policy(self, self.park_mode(engaged)),
-                &self.agent.cancel,
-            ) else {
-                break None;
-            };
-            self.agent.set_resting(false);
-            match self.take_up(&next, emit, &mut final_outcome) {
-                Flow::Continue => {}
-                Flow::Stop => break None,
-                Flow::Severed(s) => break Some(s),
-            }
-        };
-        // `take_up` quiesces per item; `close` catches whichever path breaks
-        // the loop, so the agent is ReadyForUser however it ends.
-        self.close(lost, &mut final_outcome);
-        debug_assert!(
-            self.log.lock().is_ready(),
-            "attend must leave the agent ReadyForUser"
-        );
-        final_outcome
+    /// A `reply`'s value is deposited on the agent for its consumer to read.
+    pub fn attend(&mut self, emit: &Emitter) -> AgentOutcome {
+        self.attend_until(emit, Idle::Park)
     }
 
     /// [`Self::attend`]'s per-exchange half, for
     /// [`converse`](crate::headless::converse): drain the seeded message and
     /// any nudge continuation it raises, then return instead of blocking for
-    /// the next one.  Only the pull differs — an empty queue ends the exchange
-    /// rather than waiting on anything still in flight — so the per-item step
-    /// stays the shared [`Self::take_up`].  Converse posts no command, so a
-    /// slash-shaped user message reaches the model as ordinary text.
-    pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
+    /// the next one.  Converse posts no command, so a slash-shaped user
+    /// message reaches the model as ordinary text.
+    pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> AgentOutcome {
+        self.attend_until(emit, Idle::Return)
+    }
+
+    fn attend_until(&mut self, emit: &Emitter, idle: Idle) -> AgentOutcome {
         self.couple(emit);
-        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
+        let mut settled = AgentOutcome::Failed(NO_REPLY_REASON.into());
         let lost = loop {
             if let Some(s) = self.seat.severed() {
                 break Some(s);
             }
-            let Some(next) = self.inbox.next_item() else {
+            let Some(next) = self.draw(idle) else {
                 break None;
             };
-            match self.take_up(&next, emit, &mut final_outcome) {
-                Flow::Continue => {}
-                Flow::Stop => break None,
-                Flow::Severed(s) => break Some(s),
+            self.agent.set_resting(false);
+            match self.take_up(&next, emit) {
+                Ok(step) => {
+                    if let Some(outcome) = step.settled {
+                        settled = outcome;
+                    }
+                    if step.flow.is_break() {
+                        break None;
+                    }
+                }
+                Err(s) => break Some(s),
             }
         };
-        self.close(lost, &mut final_outcome);
-        final_outcome
+        // A severance the loop broke on, or one a park quiesced behind, is
+        // recorded exactly once: the engine's own account as a durable note,
+        // the plain sentence as the failed outcome.
+        if let Some(s) = lost.or_else(|| self.seat.severed()) {
+            let lost = EngineLost::running(&s, self.agent.run_dir());
+            self.note(lost.logged());
+            settled = AgentOutcome::Failed(lost.to_string());
+        }
+        // `take_up` quiesces per item; this catches whichever path broke the
+        // loop, so the agent is ReadyForUser however it ends.
+        self.abort_unready();
+        debug_assert!(
+            self.log.lock().context().is_ready(),
+            "attend must leave the agent ReadyForUser"
+        );
+        settled
     }
 
-    /// Take up one pull from the inbox — the per-item step [`Self::attend`]
-    /// and [`Self::attend_backlog`] share.  `final_outcome` is the running
-    /// `(outcome, payload)` the caller reports once its own loop ends; a
-    /// command never reaches the deliberation and leaves it as it was.  A
-    /// drawn item is always admissible: staleness is settled at the inbox's
-    /// own pop, against that inbox's clear-epoch.
-    fn take_up(
-        &mut self,
-        next: &Next,
-        emit: &Emitter,
-        final_outcome: &mut (AgentOutcome, Option<FOValue>),
-    ) -> Flow {
+    /// The next item, or `None` once an empty inbox ends the pass.  Every
+    /// draw is a settled ready boundary.  A lease-chain reap is deliberately
+    /// not drained here: core pushes its `` `notice `` on the surface stream
+    /// of the run that observes it, so a reap during a long idle surfaces once
+    /// an item next runs.
+    fn draw(&self, idle: Idle) -> Option<Next> {
+        match idle {
+            Idle::Return => self.inbox.next_item(),
+            Idle::Park => {
+                // The state a frontend shows over the coming silence is this
+                // park's own verdict.  Only on an empty queue: with an item
+                // already in hand the agent is not idle for any observable
+                // moment, and the deliberation's own transitions are the truth.
+                if self.inbox.is_empty() {
+                    let mode = self.park_mode(self.agent.engaged());
+                    self.agent.set_resting(mode == ParkMode::Engaged);
+                    self.recorder()
+                        .transient(Transient::State(idle_state(mode)));
+                }
+                // The verdict is recomputed on every wake.
+                self.inbox
+                    .next_or_idle(|engaged| self.park_mode(engaged), &self.agent.token)
+            }
+        }
+    }
+
+    /// Take up one drawn item.  A drawn item is always admissible: staleness
+    /// is settled at the inbox's own pop, against that inbox's clear-epoch.
+    ///
+    /// # Errors
+    /// The engine's severance, after which no item can run.
+    fn take_up(&mut self, next: &Next, emit: &Emitter) -> Result<Step, Severed> {
         let item = match next {
             Next::Read(cmd) => {
                 self.read(cmd, emit);
-                return Flow::Continue;
+                return Ok(Step::command(ControlFlow::Continue(())));
             }
-            Next::Rewrite(cmd) => {
-                return match self.rewrite(cmd, emit) {
-                    ControlFlow::Break(()) => Flow::Stop,
-                    ControlFlow::Continue(()) => Flow::Continue,
-                };
-            }
+            Next::Rewrite(cmd) => return Ok(Step::command(self.rewrite(cmd, emit))),
             Next::Item(item) => item,
         };
         self.heard(item);
@@ -164,110 +171,93 @@ impl Avatar {
         // exchange this one closes.  A self-nudge is the same exchange
         // continuing.
         if item.opens_exchange() {
-            if let Some(nudges) = &mut self.nudges {
-                nudges.reset();
-            }
-            self.agent.cancel.reset();
+            self.readings.nudges.reset();
+            self.agent.token.reset();
             self.inbox.drop_nudges();
         }
         announce(item, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
         // item rather than mid-item.
         let active = self.agent.provider.current();
-        let token = self.agent.cancel.clone();
-        let prompt = Some(item.text());
-        let continues = item.continues();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.deliberate(&active, prompt, continues, &token, emit)
+            self.deliberate(&active, Some(item.text()), item.continues(), emit)
         }));
-        let outcome = match attempt {
-            Ok(o) => o,
-            Err(p) => {
-                // Host-side only — transport, surface decode, render.  An
-                // eval-side panic is caught at `Shell::run`, which rolls the
-                // dynamic state back, so it never unwinds this far.  Recording
-                // and continuing keeps one crash from sinking the agent.
-                let msg = panic_msg(&p);
-                self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"));
-                *final_outcome = (
-                    AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
-                    None,
-                );
-                if !self.log.lock().is_ready() {
-                    self.log.lock().quiesce(QuiesceReason::Aborted);
-                }
-                return Flow::Continue;
+        // A provider error, a turn cap or an unwind can leave the session
+        // mid-protocol; quiesce now so the next prompt — nudge or user — is
+        // admissible.
+        self.abort_unready();
+        let outcome: Result<Outcome, ProviderError> = match attempt {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(Fault::Provider(error))) => Err(error),
+            Ok(Err(Fault::Severed(s))) => return Err(s),
+            Ok(Err(Fault::Log(why))) => {
+                self.note_error(&why);
+                return Ok(Step::settled(
+                    AgentOutcome::Failed(why),
+                    ControlFlow::Continue(()),
+                ));
+            }
+            // Host-side only — transport, surface decode, render.  An
+            // eval-side panic is caught at `Shell::run`, which rolls the
+            // dynamic state back, so it never unwinds this far.  Recording
+            // and continuing keeps one crash from sinking the agent.
+            Err(payload) => {
+                let msg = format!("{WORKER_PANIC_PREFIX}{}", panic_msg(&payload));
+                self.note_error(&msg);
+                return Ok(Step::settled(
+                    AgentOutcome::Failed(msg),
+                    ControlFlow::Continue(()),
+                ));
             }
         };
-        // A provider error or turn cap can leave the session mid-protocol.
-        // The caller's guard would only fire on loop exit; quiesce now so the
-        // next prompt — nudge or user — is admissible.
-        self.abort_unready();
-        // A root's reply goes to whoever drives its loop, not to a deposit: it
-        // has no parent to fetch it, and staging one would read as a standing
-        // reply the nudge layer must fall silent for.
-        if let Ok(deliberate::Outcome::Replied(v)) = &outcome
-            && self.agent.parent.is_some()
-        {
-            self.agent.deposit_reply(v.clone());
-        }
-        *final_outcome = agent_outcome(&outcome, self.agent.run_dir());
         // Before any nudge decision, and whether or not one follows: a chat
         // trunk keeps no registry, and its failures must still reach the human.
-        if let Err(e) = &outcome
-            && let Err(error) = self.log.lock().record_provider_error(e)
-        {
-            eprintln!("exarch: a provider error was not recorded: {error}");
-        }
-        if let Err(ProviderError::Refused(refusal)) = &outcome
-            && self.agent.resume_on_reset
-            && let Recovery::Deferred(at) = refusal.recovery()
-        {
-            self.resume_at(at, refusal.limit);
-        }
-        if let Ok(deliberate::Outcome::Severed(s)) = &outcome {
-            return Flow::Severed(s.clone());
+        if let Err(error) = &outcome {
+            let recorded = self.log.lock().record_provider_error(error);
+            if let Err(unrecorded) = recorded {
+                self.recorder().report_fault(&unrecorded);
+            }
+            if let ProviderError::Refused(refusal) = error
+                && self.resumes_at_reset()
+                && let Recovery::Deferred(at) = refusal.recovery()
+            {
+                self.resume_at(at, refusal.limit);
+            }
         }
         // A boundary read, legal here: the batch has fully drained and no
         // dispatch is in flight.
-        let workers_idle = match self.seat.read(reading::workers) {
-            Ok(workers) => workers.is_empty(),
-            Err(s) => return Flow::Severed(s),
-        };
+        let workers_idle = self.seat.read(reading::workers)?.is_empty();
         let facts = nudge::Facts {
-            must_reply: self.returns(),
+            must_reply: self.agent.returns,
             pinned: self.pinned_digest(),
             // Nudged only when nothing else is already carrying this agent
-            // forward: no reply standing for a parent to fetch, no detached
+            // forward: no reply standing for a consumer to fetch, no detached
             // shell work, no busy children.
             quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
         };
-        let nudge_msg = match &mut self.nudges {
-            Some(nudges) => nudges.react(&outcome, &facts, &mut self.log.lock()),
-            None => None,
-        };
-        if let Some(text) = nudge_msg {
-            let prompt = self.log.lock().current_prompt();
-            if let Some(prompt) = prompt {
-                self.inbox.push(Post::Nudge { prompt, text });
-            } else {
+        let nudged = self
+            .readings
+            .nudges
+            .react(outcome.as_ref(), &facts, &mut self.log.lock());
+        if let Some(text) = nudged {
+            let prompt = self.log.lock().context().current_prompt();
+            match prompt {
+                Some(prompt) => self.inbox.push(Post::Nudge { prompt, text }),
                 // Unreachable: every outcome `react` answers followed a
                 // deliberation whose prompt `append_user` committed.
-                let recorded = self.log.lock().record_error(format!(
-                    "a nudge was decided with no prompt in hand to continue — \
-                     dropping it: {text}"
-                ));
-                if let Err(error) = recorded {
-                    eprintln!("exarch: a dropped nudge was not recorded: {error}");
-                }
+                None => self.note_error(&format!(
+                    "a nudge was decided with no prompt in hand to continue — dropping it: {text}"
+                )),
             }
         }
-        // Only the headless root ends on `reply` — a child parks on its deposit.
-        if self.agent.parent.is_none() && matches!(outcome, Ok(deliberate::Outcome::Replied(_))) {
-            Flow::Stop
+        // Only a parentless returning agent — the headless root — ends on
+        // `reply`; a child parks on its deposit, to be messaged again.
+        let flow = if self.agent.parent.is_none() && matches!(outcome, Ok(Outcome::Replied)) {
+            ControlFlow::Break(())
         } else {
-            Flow::Continue
-        }
+            ControlFlow::Continue(())
+        };
+        Ok(Step::settled(agent_outcome(&outcome), flow))
     }
 
     /// Book a drawn item against the park verdict: a direct child's
@@ -290,87 +280,65 @@ impl Avatar {
 
     /// How an empty inbox should be treated, recomputed on every wake, from
     /// `engaged` — the exchange clock, read by `next_or_idle` under the queue
-    /// mutex — and this agent's own status.  A
-    /// conversing agent parks [`ParkMode::Held`], immune to cancellation; a
-    /// returning agent a human has exchanged with parks [`ParkMode::Engaged`]
-    /// — the same wait, but a terminate-cause cancel still ends it, and the
-    /// fleet's idle lease rather than this predicate bounds it.
+    /// mutex — and this agent's own status.  A conversing agent with a human
+    /// attached parks [`ParkMode::Held`], immune to cancellation; one driven
+    /// one exchange at a time waits on nothing but its fleet; a returning
+    /// agent a human has exchanged with parks [`ParkMode::Engaged`] — the same
+    /// wait, but a terminate-cause cancel still ends it, and the fleet's idle
+    /// lease rather than this predicate bounds it.
     fn park_mode(&self, engaged: bool) -> ParkMode {
         // Nothing is left to wait for once the engine is gone.
         if self.seat.severed().is_some() {
             return ParkMode::Quiesce;
         }
-        let conversing = self.agent.interactive && !self.returns();
-        if conversing {
+        let agent = &self.agent;
+        if !agent.returns && self.fleet.launch.attended {
             // `next_or_idle` lets a terminate cause end every park but `Held`,
             // so a conversing agent asks here instead: `/close` stamps this
             // token, and parking Held past it would be a zombie.
-            if self.agent.cancel.terminated() {
-                return ParkMode::Quiesce;
-            }
-            return ParkMode::Held;
+            return if agent.token.terminated() {
+                ParkMode::Quiesce
+            } else {
+                ParkMode::Held
+            };
         }
         // Only an agent with somewhere to report waits to be messaged; a
         // headless root returns and ends.
-        if self.agent.parent.is_some() && self.returns() && (engaged || self.agent.has_reply()) {
+        if agent.parent.is_some() && agent.returns && (engaged || agent.has_reply()) {
             return ParkMode::Engaged;
         }
-        if self.agent.has_busy_children() {
+        if agent.has_busy_children() {
             return ParkMode::HeldByChildren;
         }
-        if self.agent.schedules.armed() {
+        if agent.schedules.armed() {
             return ParkMode::UntilCancelled;
         }
         ParkMode::Quiesce
     }
 
-    /// One reading of the pressure gauge, no state — taken at a tool boundary
-    /// by [`Avatar::deliberate`], where `last_input` is this turn's own.  The
-    /// soft line is [`crate::agent::digest::pressure_due`], one reserve ahead
-    /// of auto-eviction; an unknown window falls back to the byte heuristic
-    /// against [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading
-    /// carries the cut [`Avatar::planned_eviction`] would make, so the
-    /// reminder can name it.
-    pub(super) fn pressure_gauge(&self, provider: &Provider) -> Pressure {
-        let detail = match provider.context_window() {
-            Some(w) if w > 0 => match self.token_pressure(w) {
-                None if self.measured_input().is_none() => return Pressure::Unknown,
-                detail => detail,
-            },
-            _ => {
-                let bytes = self.log.lock().history_bytes();
-                (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
-            }
-        };
-        match detail {
-            Some(detail) => Pressure::Over {
-                detail,
-                planned: self.planned_eviction(),
-            },
-            None => Pressure::Under,
-        }
-    }
-
     /// The disk-warn ceiling's verdict, as an operational note once per
     /// excursion — nothing is ever rotated or deleted.  Unconfigured it walks
-    /// nothing at all; otherwise it walks on the [`Self::ral_epoch`] cadence of
+    /// nothing at all; otherwise it walks at most once per
     /// [`DISK_WARN_CHECK_INTERVAL`].
     ///
     /// # Errors
     /// The engine's severance, from the `EXARCH_SCRATCH` probe.
     fn disk_warning(&mut self) -> Result<Option<Warning>, Severed> {
-        let Some(ceiling) = self.agent.disk_warn_bytes else {
+        let Some(ceiling) = self.fleet.launch.disk_warn_bytes else {
             return Ok(None);
         };
-        if self.ral_epoch < self.disk_check_epoch {
+        if self
+            .disk_checked
+            .is_some_and(|at| at.elapsed() < DISK_WARN_CHECK_INTERVAL)
+        {
             return Ok(None);
         }
-        self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
+        self.disk_checked = Some(Instant::now());
         let mut total = crate::agent::resources::dir_size(self.log.lock().dir());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }
-        Ok(self.gauges.disk(total, ceiling))
+        Ok(self.readings.gauges.disk(total, ceiling))
     }
 
     /// Every standing condition newly climbed, told: the user's lines noted,
@@ -380,9 +348,11 @@ impl Avatar {
     /// # Errors
     /// The engine's severance, from the disk probe.
     pub(super) fn warnings(&mut self, provider: &Provider) -> Result<Vec<String>, Severed> {
+        let pressure = self.pressure_gauge(provider);
         let mut told: Vec<Warning> = self
+            .readings
             .gauges
-            .pressure(&self.pressure_gauge(provider))
+            .pressure(pressure)
             .into_iter()
             .collect();
         told.extend(self.disk_warning()?);
@@ -391,16 +361,16 @@ impl Avatar {
             account,
             &provider.climb_allowances(ration::USER_HEARS),
         ));
-        told.extend(self.gauges.ration.climb(
+        told.extend(self.readings.gauges.ration.climb(
             account,
             &provider.allowances(),
-            self.agent.resume_on_reset,
+            self.resumes_at_reset(),
         ));
         Ok(self.tell(told))
     }
 
-    /// Note each user line; turn each model one into a reminder, dropped
-    /// for a `--chat` trunk, which keeps no [`nudge::Nudges`].
+    /// Note each user line; word each model one as a reminder — none for a
+    /// trunk that steers nothing.
     fn tell(&self, warnings: Vec<Warning>) -> Vec<String> {
         warnings
             .into_iter()
@@ -409,11 +379,9 @@ impl Avatar {
                     self.note(line);
                     None
                 }
-                Warning::Model { cause, body } => Some(self.nudges.as_ref()?.remind(
-                    cause,
-                    &body,
-                    &mut self.log.lock(),
-                )),
+                Warning::Model(reminder) => {
+                    self.readings.nudges.remind(&reminder, &mut self.log.lock())
+                }
             })
             .collect()
     }
@@ -434,7 +402,7 @@ impl Avatar {
             Trigger::At(resets_at),
             prompt,
             RESUME_LABEL.into(),
-            &self.mailbox(),
+            &self.agent.mailbox,
         ) {
             Ok(_) => self.note(format!(
                 "{} — resuming {}, in {}",
@@ -442,7 +410,7 @@ impl Avatar {
                 clock::local(resets_at),
                 clock::hms(clock::until(resets_at, now).as_secs())
             )),
-            Err(refusal) => self.note_error(format!(
+            Err(refusal) => self.note_error(&format!(
                 "{} — the resume could not be scheduled: {refusal}",
                 limit.label()
             )),
@@ -451,31 +419,10 @@ impl Avatar {
 
     /// Quiesce a log a deliberation left mid-protocol.
     fn abort_unready(&self) {
-        if !self.log.lock().is_ready() {
-            self.log.lock().quiesce(QuiesceReason::Aborted);
+        let mut log = self.log.lock();
+        if !log.context().is_ready() {
+            log.quiesce(QuiesceReason::Aborted);
         }
-    }
-
-    /// The one edge both loops end on: a severance they broke on, or one a
-    /// park quiesced behind, is recorded here exactly once — the sentence and
-    /// the failed outcome in place of `NO_REPLY_REASON` — then the log is
-    /// quiesced if a deliberation left it mid-protocol.
-    fn close(&self, lost: Option<Severed>, final_outcome: &mut (AgentOutcome, Option<FOValue>)) {
-        if let Some(s) = lost.or_else(|| self.seat.severed()) {
-            self.record_severance(&s, final_outcome);
-        }
-        self.abort_unready();
-    }
-
-    fn record_severance(&self, s: &Severed, final_outcome: &mut (AgentOutcome, Option<FOValue>)) {
-        let lost = EngineLost::running(s, self.agent.run_dir());
-        // Two renderings of one failure, and the difference is the point: the
-        // durable note keeps the engine's own account of itself, while the
-        // outcome the loop settles on is the plain sentence a person reads.
-        // A note, not an error record: a window shows errors, and the
-        // engine's words stay out of windows.
-        self.note(lost.logged());
-        *final_outcome = (AgentOutcome::Failed(lost.to_string()), None);
     }
 }
 
@@ -504,9 +451,8 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
             );
         }
         // A detached `spawn`'s deferred batch, decoded as the live foreground
-        // decode would — through the very same seam.  It was stamped with and
-        // posted to this same session, so the emitter's id already routes its
-        // cards to the right scrollback.
+        // decode would.  It was stamped with and posted to this same session,
+        // so the emitter's id already routes its cards to the right scrollback.
         Item::Surface { values, .. } => {
             for v in values {
                 match shell_eval::decode_surface(v) {
@@ -538,23 +484,6 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
     }
 }
 
-/// [`Avatar::attend_with`]'s park policy for
-/// [`crate::headless::converse_settled`]: a conversing trunk's `park_mode`
-/// always answers [`ParkMode::Held`], blind to its fleet, because the general
-/// policy assumes a chat trunk has no fleet worth waiting on. This reshapes exactly that
-/// answer — live children hold as [`ParkMode::HeldByChildren`] instead, and a
-/// childless trunk quiesces at once rather than parking on a human who is not
-/// there to type. Every other verdict passes through unchanged: `Engaged`
-/// requires a `steer` synod never offers, and `UntilCancelled` requires an
-/// armed schedule `converse_settled` already refused at construction.
-pub(crate) fn quiesce_when_childless(avatar: &Avatar, mode: ParkMode) -> ParkMode {
-    match mode {
-        ParkMode::Held if avatar.agent.has_busy_children() => ParkMode::HeldByChildren,
-        ParkMode::Held => ParkMode::Quiesce,
-        other => other,
-    }
-}
-
 /// The state an idle agent is in, read off the park verdict that is about to
 /// hold it there: a wait on the fleet is the one idleness that is not the
 /// human's turn, and every other park — including the [`ParkMode::Quiesce`]
@@ -568,43 +497,23 @@ fn idle_state(mode: ParkMode) -> AgentState {
     }
 }
 
-/// Reduce a finished deliberation to the `(tag, payload)` a returning agent's
-/// result carries.  Only `reply` carries a value up, as the faithful
-/// [`FOValue`] the model passed; there is no scrape, so a finish without one
-/// did not complete the contract and settles [`AgentOutcome::Failed`].
-const NO_REPLY_REASON: &str = "ended without calling `reply`";
-
-fn agent_outcome(
-    r: &Result<deliberate::Outcome, ProviderError>,
-    run_dir: Option<&std::path::Path>,
-) -> (AgentOutcome, Option<FOValue>) {
+/// Reduce a finished deliberation to the result a returning agent's consumer
+/// is told.  Only `reply` completes the contract — its value is already
+/// deposited on the agent — so a finish without one settles
+/// [`AgentOutcome::Failed`].
+fn agent_outcome(r: &Result<Outcome, ProviderError>) -> AgentOutcome {
     match r {
-        // The headless root's own `reply` reaches the epilogue directly — a
-        // child's is deposited on its own agent instead, and never
-        // drives `take_up`'s call here.
-        Ok(deliberate::Outcome::Replied(v)) => (AgentOutcome::Replied, Some(v.clone())),
+        Ok(Outcome::Replied) => AgentOutcome::Replied,
         // Re-nudged within budget by `nudge` before it ever reaches here.
-        Ok(deliberate::Outcome::Complete(_) | deliberate::Outcome::Empty) => {
-            (AgentOutcome::Failed(NO_REPLY_REASON.into()), None)
-        }
-        Ok(deliberate::Outcome::Stopped { reason }) => {
-            (AgentOutcome::Stopped(reason.clone()), None)
-        }
-        Ok(deliberate::Outcome::Cancelled) => (AgentOutcome::Cancelled, None),
-        Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("turn cap reached".into()), None),
-        Ok(deliberate::Outcome::Severed(s)) => (
-            AgentOutcome::Failed(EngineLost::running(s, run_dir).to_string()),
-            None,
-        ),
-        Err(e) => (AgentOutcome::Failed(e.summary()), None),
+        Ok(Outcome::Complete | Outcome::Empty) => AgentOutcome::Failed(NO_REPLY_REASON.into()),
+        Ok(Outcome::Stopped { reason }) => AgentOutcome::Stopped(reason.clone()),
+        Ok(Outcome::Cancelled) => AgentOutcome::Cancelled,
+        Ok(Outcome::Capped) => AgentOutcome::Stopped("turn cap reached".into()),
+        Err(e) => AgentOutcome::Failed(e.summary()),
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
     use crate::agent::TestTrunk;
@@ -612,11 +521,11 @@ mod tests {
     use crate::provider::Refusal;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
-    use std::time::Duration;
+    use ral_core::serial::FOValue;
 
-    /// Every item `announce` draws records its display commit through the
-    /// seam: a prompt commits `Display::Prompt`, and a subagent's breadcrumb
-    /// commits `Display::SubagentDone`.
+    /// Every item `announce` draws records its display commit: a prompt
+    /// commits `Display::Prompt`, and a subagent's breadcrumb commits
+    /// `Display::SubagentDone`.
     #[test]
     fn announce_records_display_facts() {
         use crate::bus::AgentResult;
@@ -661,7 +570,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
+        assert_eq!(facts, ["prompt", "subagent"], "both commits land");
     }
 
     /// The park verdict reads engagement off the agent's own exchange clock,
@@ -679,7 +588,7 @@ mod tests {
             "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
-        child.agent.mailbox().steer("hi".into());
+        child.agent.mailbox.steer("hi".into());
         assert_eq!(
             child.park_mode(child.agent.engaged()),
             ParkMode::Engaged,
@@ -687,23 +596,47 @@ mod tests {
         );
     }
 
+    /// A conversing trunk with no human attached — the embedded one synod
+    /// drives — holds for live children and quiesces once they settle, where
+    /// an attended one would park on the human who is not there to type.
+    #[test]
+    fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
+        let embedded = trunk(false);
+        assert!(
+            !embedded.agent.returns && !embedded.fleet.launch.attended,
+            "the fixture is a conversing trunk nobody types into"
+        );
+        assert_eq!(
+            embedded.park_mode(embedded.agent.engaged()),
+            ParkMode::Quiesce
+        );
+        let mut spec = TestAgentSpec::new("helper");
+        spec.parent = Some(embedded.agent.clone());
+        spec.returns = true;
+        let _helper = test_agent(&embedded.fleet, spec).expect("a live child");
+        assert_eq!(
+            embedded.park_mode(embedded.agent.engaged()),
+            ParkMode::HeldByChildren
+        );
+    }
+
     /// The `reply` refusal keys on the captured `returns` bit, not on
     /// trunk-ness, and is an ordinary call error rather than a termination.
     #[test]
     fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
-        let mut root = trunk(true);
+        let root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, root.agent.id);
-        let (root_result, _) = root.ral("exarch-agents `reply 1", 5, &emit);
+        let root_result = root.ral("exarch-agents `reply 1", 5, &emit).text;
         let refusal = "you converse with the user; you do not return";
         assert!(root_result.contains(refusal), "got: {root_result}");
 
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // fleet, and names are unique among the live.
-        let mut branch = root
+        let branch = root
             .branch("branch".into(), &crate::bus::dummy_emitter().0)
             .expect("branch a conversing child");
-        let (branch_result, _) = branch.ral("exarch-agents `reply 1", 5, &emit);
+        let branch_result = branch.ral("exarch-agents `reply 1", 5, &emit).text;
         assert!(
             branch_result.contains(refusal),
             "a /branch child must be refused with the same text, got: {branch_result}"
@@ -728,14 +661,14 @@ mod tests {
         for _ in 0..8 {
             script = script.then(Reply::text("here is prose, but no reply"));
         }
-        let (outcome, payload) = drive_peer(&mut child, scripted("test-model", script));
+        let outcome = drive_peer(&mut child, scripted("test-model", script));
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "an un-replied finish settles Failed, got {outcome:?}"
         );
         assert!(
-            payload.is_none(),
-            "the final prose must not be scraped: {payload:?}"
+            child.agent.reply().is_none(),
+            "the final prose must not be scraped as a reply"
         );
         assert!(child.is_ready());
     }
@@ -760,8 +693,9 @@ mod tests {
         child.couple(&emit);
         child.seed("do more".into());
         let item = child.inbox.next_item().expect("the seeded item");
-        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        child.take_up(&item, &emit, &mut final_outcome);
+        child
+            .take_up(&item, &emit)
+            .expect("an identity seat never severs");
 
         assert!(
             child.inbox.next_item().is_none(),
@@ -787,7 +721,7 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         session.seed("crash on this one".into());
-        let (panicked, _) = session.attend(&emit);
+        let panicked = session.attend(&emit);
         assert!(
             matches!(&panicked, AgentOutcome::Failed(m) if m.starts_with(WORKER_PANIC_PREFIX)),
             "the unwind must fail the item, not sink the attend thread: {panicked:?}"
@@ -799,7 +733,7 @@ mod tests {
 
         // Seeded only now: consecutive prompts coalesce into one inbox entry.
         session.seed("but answer this one".into());
-        let (outcome, _) = session.attend(&emit);
+        let outcome = session.attend(&emit);
 
         let signals: Vec<crate::bus::Signal> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
@@ -830,7 +764,7 @@ mod tests {
                 r,
                 Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)
             )),
-            "the panic is recorded in the one seam's log too"
+            "the panic is recorded in the log too"
         );
     }
 
@@ -863,8 +797,7 @@ mod tests {
     /// surfaces at the next run, and exactly once.
     #[test]
     fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
-        let mut session =
-            dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+        let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
 
         dispatch_with_lease(
             &session,
@@ -951,7 +884,7 @@ mod tests {
                 )])),
         ));
         session.seed("get on with it".into());
-        let (outcome, _) = session.attend(&emit);
+        let outcome = session.attend(&emit);
 
         assert!(
             matches!(outcome, AgentOutcome::Replied),
@@ -993,8 +926,9 @@ mod tests {
         ));
         session.seed("go".into());
         let item = session.inbox.next_item().expect("the seeded item");
-        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
-        session.take_up(&item, &emit, &mut final_outcome);
+        session
+            .take_up(&item, &emit)
+            .expect("an identity seat never severs");
 
         let nudge = session
             .inbox
@@ -1009,7 +943,9 @@ mod tests {
             "test-model",
             Script::new().then(Reply::text("still working")),
         ));
-        session.take_up(&nudge, &emit, &mut final_outcome);
+        session
+            .take_up(&nudge, &emit)
+            .expect("an identity seat never severs");
 
         assert!(
             session.inbox.next_item().is_none(),
@@ -1055,7 +991,7 @@ mod tests {
     /// nothing is left idle.  The tiny re-armed bound is for speed only.
     #[test]
     fn boundary_prune_notice_rides_the_runs_own_stream() {
-        let mut session = dressed_trunk(|shell| {
+        let session = dressed_trunk(|shell| {
             shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
@@ -1101,12 +1037,12 @@ mod tests {
         );
     }
 
-    /// Unconfigured, the check returns before the epoch bookkeeping: no walk,
-    /// no warning, no cost.
+    /// Unconfigured, the check returns before any bookkeeping: no walk, no
+    /// warning, no cost.
     #[test]
     fn disk_warning_unconfigured_never_walks_or_warns() {
         let mut session = Avatar::for_test("system").unwrap();
-        assert!(session.agent.disk_warn_bytes.is_none());
+        assert!(session.fleet.launch.disk_warn_bytes.is_none());
 
         assert!(
             session
@@ -1115,9 +1051,9 @@ mod tests {
                 .is_none(),
             "unconfigured: never warns, ever"
         );
-        assert_eq!(
-            session.disk_check_epoch, 0,
-            "the early return never advances the check epoch"
+        assert!(
+            session.disk_checked.is_none(),
+            "the early return never stamps a walk"
         );
     }
 
@@ -1157,11 +1093,12 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.couple(&emit);
-        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         for prompt in ["first", "again"] {
             session.seed(prompt.into());
             let item = session.inbox.next_item().expect("the seeded item");
-            session.take_up(&item, &emit, &mut final_outcome);
+            session
+                .take_up(&item, &emit)
+                .expect("an identity seat never severs");
         }
         session
     }
@@ -1192,7 +1129,7 @@ mod tests {
     /// model-view `record.jsonl`.
     #[test]
     fn prune_does_not_add_model_events() {
-        let mut session = dressed_trunk(|shell| {
+        let session = dressed_trunk(|shell| {
             shell.arm_binding_lease(ral_core::types::BindingLease {
                 idle_calls: 1,
                 large_binding_bytes: u64::MAX,
@@ -1202,11 +1139,11 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         session.ral("let events_json_x = 1", 5, &emit);
-        let after_bind = session.log.lock().event_count();
+        let after_bind = session.log.lock().context().event_count();
 
         // The prune fires at this call's own ready boundary (idle bound 1).
         session.ral("$[0]", 5, &emit);
-        let after_prune_call = session.log.lock().event_count();
+        let after_prune_call = session.log.lock().context().event_count();
         let pruned = crate::bus::drain_records(&rx).into_iter().any(|record| {
             matches!(
                 record,
@@ -1218,7 +1155,7 @@ mod tests {
         assert!(pruned, "the prune notice must have fired on the bus");
 
         session.ral("$[0]", 5, &emit);
-        let after_plain_call = session.log.lock().event_count();
+        let after_plain_call = session.log.lock().context().event_count();
         assert_eq!(
             after_prune_call - after_bind,
             after_plain_call - after_prune_call,
