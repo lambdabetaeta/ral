@@ -403,33 +403,19 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::HandleState;
 
     fn fake_entry(id: u64, cmd: &str, class: LeaseClass, running: bool) -> WorkerEntry {
-        let state = if running {
-            HandleState::Running
-        } else {
-            HandleState::Completed
-        };
+        let handle = HandleInner::new(cmd, crate::process::CancelScope::default(), None);
+        if !running {
+            handle.complete();
+        }
         WorkerEntry {
             id: WorkerId(id),
             cmd: cmd.to_string(),
             started: SystemTime::now(),
             class,
             settled_epoch: None,
-            handle: HandleInner {
-                result: Arc::new(Mutex::new(None)),
-                cached: Arc::new(Mutex::new(None)),
-                state: Arc::new(Mutex::new(state)),
-                stdout_buf: crate::io::ByteBuffer::default(),
-                stderr_buf: crate::io::ByteBuffer::default(),
-                surface_buf: Arc::new(Mutex::new(Vec::new())),
-                joined: Arc::new(Mutex::new(false)),
-                last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-                cmd: cmd.to_string(),
-                site: None,
-                cancel: crate::process::CancelScope::default(),
-            },
+            handle,
         }
     }
 

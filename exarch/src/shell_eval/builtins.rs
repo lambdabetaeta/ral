@@ -1454,7 +1454,7 @@ mod tests {
         let entry = shell.workers().pop().expect("the service registered");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
+            if entry.handle.state() != ral_core::types::HandleState::Running {
                 break;
             }
             assert!(

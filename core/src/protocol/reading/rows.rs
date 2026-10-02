@@ -4,7 +4,6 @@
 use crate::record;
 use crate::serial::FOValue;
 use crate::serial::datum::{Datum, tag, untag};
-use crate::sync::LockExt as _;
 use crate::types::{HandleState, LeaseClass, Shell, Value, WorkerEntry};
 
 /// One row of the worker table.
@@ -36,14 +35,9 @@ impl WorkerRow {
             id: entry.id.0,
             cmd: entry.cmd.clone(),
             class: entry.class,
-            running: *entry.handle.state.lock_ignore_poison() == HandleState::Running,
+            running: entry.handle.is_running(),
             up_secs: entry.started.elapsed().unwrap_or_default().as_secs(),
-            idle_secs: entry
-                .handle
-                .last_observed
-                .lock_ignore_poison()
-                .elapsed()
-                .as_secs(),
+            idle_secs: entry.handle.last_observed().elapsed().as_secs(),
             settled_epoch: entry.settled_epoch,
         }
     }
@@ -108,7 +102,7 @@ impl BindingRow {
             .fold_union(&shell.sig, |b| {
                 let handle = match &b.value {
                     Value::Handle(h) => Some(HandleRow {
-                        state: *h.state.lock_ignore_poison(),
+                        state: h.state(),
                         cmd: h.cmd.clone(),
                     }),
                     _ => None,

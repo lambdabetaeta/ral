@@ -802,12 +802,12 @@ mod tests {
         let entry = workers(&session)
             .pop()
             .expect("the spawn registered its worker");
-        let before = *entry.handle.last_observed.lock().unwrap();
+        let before = entry.handle.last_observed();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let _ = session
             .resource_rows()
             .expect("an identity seat never severs");
-        let after = *entry.handle.last_observed.lock().unwrap();
+        let after = entry.handle.last_observed();
         assert_eq!(after, before, "the probe must not renew the lease");
 
         entry

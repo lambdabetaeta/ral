@@ -12,7 +12,7 @@
 use crate::evaluator::audit::observe;
 use crate::evaluator::machine;
 use crate::evaluator::scope::{error_record, error_record_of};
-use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
+use crate::io::{Sink, new_buffer, peek_buffer};
 use crate::serial::FOValue;
 use crate::sync::LockExt as _;
 use crate::types::{
@@ -21,7 +21,6 @@ use crate::types::{
     SurfaceBuffer, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::io::Write as _;
-use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
@@ -108,7 +107,7 @@ impl DeferredSurface {
     /// Deliver the buffer plus a final [`done_event`] as one batch, at most once
     /// — the test-and-set lives here, at the sink's sole call site, so no
     /// implementation can forget the discipline.  The batch is a fresh clone,
-    /// independent of `complete_handle`'s later `mem::take` of the same buffer.
+    /// independent of `HandleInner::try_settle`'s later `mem::take` of the same buffer.
     fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: &Value) {
         let Some(deferred) = self.deferred.as_ref() else {
             return;
@@ -222,13 +221,22 @@ where
     let cmd = cmd.to_string();
     let worker_cmd = cmd.clone();
 
+    let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
     // Minted before the thread so the worker can hold a clone: its exit mark is
     // what ends the lease chain silently on a finished worker.
-    let state = Arc::new(Mutex::new(HandleState::Running));
-    let worker_state = state.clone();
-
-    let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
-    let (_join, cancel) = shell
+    let handle = HandleInner {
+        stdout_buf,
+        stderr_buf,
+        surface_buf,
+        joined,
+        ..HandleInner::new(
+            cmd.clone(),
+            worker_mooring.cancel.as_scope().clone(),
+            Some(rx),
+        )
+    };
+    let worker = handle.clone();
+    shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
             // A worker's stdout is its handle buffer: nobody is watching it
             // until `await` drains one.
@@ -262,28 +270,11 @@ where
             guard.settle(&outcome);
             let _ = tx.send(result);
             // Strictly *after* the send, so `Completed` always implies an
-            // outcome already in the channel.  Guarded: an eliminator may have
-            // won the transition, and a `cancel`'s `Cancelled` must not be undone.
-            let mut settled_state = worker_state.lock_ignore_poison();
-            if *settled_state == HandleState::Running {
-                *settled_state = HandleState::Completed;
-            }
+            // outcome already in the channel.
+            worker.complete();
         })
         .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
-    let handle = HandleInner {
-        result: Arc::new(Mutex::new(Some(rx))),
-        cached: Arc::new(Mutex::new(None)),
-        state,
-        stdout_buf,
-        stderr_buf,
-        surface_buf,
-        joined,
-        last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-        cmd: cmd.clone(),
-        site: None,
-        cancel,
-    };
     let id = WorkerId::mint();
     shell.local.workers.register(
         reservation,
@@ -346,7 +337,7 @@ fn lease_fire(chain: &LeaseChain) {
         return;
     }
     let age = chain.started.elapsed();
-    let idle = chain.handle.last_observed.lock_ignore_poison().elapsed();
+    let idle = chain.handle.last_observed().elapsed();
     if age >= chain.lease.backstop {
         chain.registry.reap(chain.id, ReapCause::Backstop);
         chain
@@ -524,19 +515,10 @@ pub(super) fn builtin_detach(
 /// it, never the other way round.  The scope fires after the guard is dropped —
 /// `CancelScope::cancel` runs every armed watcher on this thread, and nothing
 /// that runs arbitrary code belongs inside a handle's transition.
-#[allow(
-    clippy::significant_drop_tightening,
-    reason = "the guard's span is the point: dropping it earlier reopens the window in which a worker completes between the test and the transition and loses its outcome"
-)]
 fn stop_handle(handle: &HandleInner) {
-    {
-        let mut state = handle.state.lock_ignore_poison();
-        if *state == HandleState::Completed {
-            return;
-        }
-        detach_handle(handle, &mut state);
+    if handle.detach() {
+        handle.cancel.cancel(crate::process::CancelCause::Explicit);
     }
-    handle.cancel.cancel(crate::process::CancelCause::Explicit);
 }
 
 /// `cancel <handle>` -- mark a running concurrent block as cancelled.
@@ -550,47 +532,13 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// The pre-check `await` and `poll` share: a cancelled handle has no result to
 /// wait for or sample, so observing one is an error.
 fn ensure_live(handle: &HandleInner) -> Settled<()> {
-    if *handle.state.lock_ignore_poison() == HandleState::Cancelled {
+    if handle.state() == HandleState::Cancelled {
         return Err(Break::Error(
             Error::new("handle is cancelled", 1)
                 .with_hint("use try around await to handle cancellation"),
         ));
     }
     Ok(())
-}
-
-/// Non-blocking settle: `Some` if the handle has an outcome to observe now (the
-/// cache, or a just-arrived channel message drained into it), `None` while the
-/// worker runs.  A `Disconnected` receiver means the worker dropped its `Sender`
-/// unsent — it panicked — so it settles as a failure rather than a `None` that
-/// `poll` and `race` would read as still-running.
-#[allow(
-    clippy::significant_drop_tightening,
-    reason = "settling is a transition: the state guard must span the cache read, try_recv and cache write, or a second awaiter observes a bare Disconnected"
-)]
-fn try_settle(handle: &HandleInner) -> Option<CompletedHandle> {
-    // Settling is once-only, and a transition: take `state` first and hold it
-    // across the whole thing, so a second awaiter either sees the first's
-    // cached outcome or blocks, and a concurrent `cancel` waits its turn.
-    let mut state = handle.state.lock_ignore_poison();
-    let cached = handle.cached.lock_ignore_poison().clone();
-    if let Some(completed) = cached {
-        return Some(completed);
-    }
-    let mut rx_guard = handle.result.lock_ignore_poison();
-    let rx = rx_guard.as_ref()?;
-    let result = match rx.try_recv() {
-        Ok(result) => result,
-        // The worker names itself: the eliminator that found the corpse is not
-        // what panicked, and `await`, `poll` and `race` all arrive here.
-        Err(TryRecvError::Disconnected) => {
-            Err(sig(format!("{}: spawned thread panicked", handle.cmd)))
-        }
-        Err(TryRecvError::Empty) => return None,
-    };
-    rx_guard.take();
-    drop(rx_guard);
-    Some(complete_handle(handle, &mut state, result))
 }
 
 /// Replay a finished detached worker's buffered surface events through the
@@ -653,14 +601,13 @@ fn wait_first_settled<'a>(
         for &handle in handles {
             // A blocked wait is continuous observation: each sweep renews
             // every named handle's idle lease, so none is reaped mid-wait.
-            *handle.last_observed.lock_ignore_poison() = std::time::Instant::now();
-            let state = *handle.state.lock_ignore_poison();
-            match state {
+            handle.renew();
+            match handle.state() {
                 HandleState::Cancelled => continue,
                 HandleState::Running => saw_running = true,
                 HandleState::Completed => {}
             }
-            if let Some(completed) = try_settle(handle) {
+            if let Some(completed) = handle.try_settle() {
                 return Ok((handle, completed));
             }
         }
@@ -710,12 +657,12 @@ pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
     ensure_live(handle)?;
     // Both arms are observations, so the touch lands once at entry, before the
     // settle attempt decides which arm it is.
-    *handle.last_observed.lock_ignore_poison() = std::time::Instant::now();
+    handle.renew();
     let variant = |label: &str, payload| Value::Variant {
         label: label.into(),
         payload,
     };
-    let result = if let Some(completed) = try_settle(handle) {
+    let result = if let Some(completed) = handle.try_settle() {
         // A settled poll observes as `await` does, so it removes the entry too.
         shell.local.workers.remove(handle);
         let outcome = match completed.outcome {
@@ -800,41 +747,6 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
     }
 }
 
-/// Transition a handle to `Completed`, drain both byte buffers exactly once
-/// into a cached [`CompletedHandle`].  Draining on the error path too
-/// captures a failed block's bytes; the cache serves every repeat.
-///
-/// Takes the caller's `state` guard rather than re-locking: the transition and
-/// the cache write are one step, which is what makes a concurrent `cancel`
-/// either find nothing to stop or leave a settled outcome alone.
-fn complete_handle(
-    handle: &HandleInner,
-    state: &mut HandleState,
-    result: Settled<Value>,
-) -> CompletedHandle {
-    if *state == HandleState::Running {
-        *state = HandleState::Completed;
-    }
-    let completed = CompletedHandle {
-        stdout: take_buffer(&handle.stdout_buf),
-        stderr: take_buffer(&handle.stderr_buf),
-        surface: std::mem::take(&mut *handle.surface_buf.lock_ignore_poison()),
-        outcome: result,
-    };
-    *handle.cached.lock_ignore_poison() = Some(completed.clone());
-    completed
-}
-
-/// Release a handle's receiver and clear its cached result, under the caller's
-/// `state` guard — the transition and the release are one step.
-fn detach_handle(handle: &HandleInner, state: &mut HandleState) {
-    *state = HandleState::Cancelled;
-    let mut rx_guard = handle.result.lock_ignore_poison();
-    let _ = rx_guard.take();
-    drop(rx_guard);
-    *handle.cached.lock_ignore_poison() = None;
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -868,17 +780,9 @@ mod tests {
             .write_all(stderr)
             .expect("a buffer sink cannot fail");
         HandleInner {
-            result: Arc::new(Mutex::new(Some(rx))),
-            cached: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(HandleState::Running)),
             stdout_buf,
             stderr_buf,
-            surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Arc::new(Mutex::new(false)),
-            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-            cmd: "<test>".into(),
-            site: None,
-            cancel: crate::process::CancelScope::default(),
+            ..HandleInner::new("<test>", crate::process::CancelScope::default(), Some(rx))
         }
     }
 
@@ -915,7 +819,7 @@ mod tests {
     #[test]
     fn try_settle_reports_disconnected_worker_as_failed() {
         let handle = handle_with_disconnected_worker(b"", b"");
-        match try_settle(&handle) {
+        match handle.try_settle() {
             Some(CompletedHandle {
                 outcome: Err(Break::Error(e)),
                 ..
@@ -1053,17 +957,9 @@ mod tests {
         let (_sink2, stderr_buf) = new_buffer();
         let worker_scope = shell.session.root.worker().as_scope().clone();
         let handle = HandleInner {
-            result: Arc::new(Mutex::new(Some(rx))),
-            cached: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(HandleState::Running)),
             stdout_buf,
             stderr_buf,
-            surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Arc::new(Mutex::new(false)),
-            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-            cmd: "<test>".into(),
-            site: None,
-            cancel: worker_scope.clone(),
+            ..HandleInner::new("<test>", worker_scope.clone(), Some(rx))
         };
 
         // Cancel the foreground (run deadline / interrupt), not the root.
@@ -1098,7 +994,7 @@ mod tests {
     /// Block until `handle`'s worker has marked itself `Completed` at exit.
     fn wait_settled(handle: &HandleInner) {
         for _ in 0..500 {
-            if *handle.state.lock().unwrap() == HandleState::Completed {
+            if handle.state() == HandleState::Completed {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1328,7 +1224,7 @@ mod tests {
         // bounds elapse so the chain has demonstrably fired and ended.
         let mut completed = false;
         for _ in 0..200 {
-            if *handle.state.lock().unwrap() == HandleState::Completed {
+            if handle.state() == HandleState::Completed {
                 completed = true;
                 break;
             }
@@ -1850,17 +1746,10 @@ mod tests {
             payload: None,
         }]));
         let handle = HandleInner {
-            result: Arc::new(Mutex::new(Some(rx))),
-            cached: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(HandleState::Running)),
             stdout_buf,
             stderr_buf,
             surface_buf,
-            joined: Arc::new(Mutex::new(false)),
-            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-            cmd: "<test>".into(),
-            site: None,
-            cancel: crate::process::CancelScope::default(),
+            ..HandleInner::new("<test>", crate::process::CancelScope::default(), Some(rx))
         };
 
         builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll ok");
@@ -2046,7 +1935,7 @@ mod tests {
         );
         assert_eq!(done_outcome_label(&batch[1]), "panic");
 
-        match try_settle(&handle) {
+        match handle.try_settle() {
             Some(CompletedHandle {
                 outcome: Err(Break::Error(_)),
                 ..

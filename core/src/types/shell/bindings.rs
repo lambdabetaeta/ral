@@ -434,7 +434,7 @@ mod chokepoint_tests {
 
     fn handle_state(shell: &Shell, name: &str) -> HandleState {
         match shell.scope_lookup(name) {
-            Some(Value::Handle(h)) => *h.state.lock().unwrap(),
+            Some(Value::Handle(h)) => h.state(),
             other => panic!("{name} is not a handle: {other:?}"),
         }
     }

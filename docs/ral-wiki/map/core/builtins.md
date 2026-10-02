@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1776d222
-generated_at_date: 2026-09-30
+generated_at_commit: 647fab03
+generated_at_date: 2026-10-02
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -115,17 +115,21 @@ Bodies are grouped by concern, one submodule each:
   `Handle`, so none of the eliminators below apply to it. On completion a
   block's buffers drain *once* into a cached `CompletedHandle { stdout, stderr,
   outcome }` ([[map/core/shell-state|types/value.rs]]); the eliminators project that
-  one settle. `try_settle` is the shared non-blocking sample (cached outcome, else a
-  `try_recv` completed through `complete_handle`; a `Disconnected` receiver — a
+  one settle. `HandleInner::try_settle` is the shared non-blocking sample (cached
+  outcome, else a `try_recv` drained into the cache; a `Disconnected` receiver — a
   panicked worker — settles as a failure naming the worker rather than whichever
   eliminator found it, so `poll`/`race` see a finished block rather than
-  spinning).  A handle's `state` mutex is its transition lock: settling and
-  stopping each take it first and hold it across both the test and the
-  transition, taking `result` and `cached` under it and never the other way
-  round.  That is what makes the promise good that a finished worker's value is
-  never destroyed by a losing `race` or a `cancel` — a worker that completes
-  cannot slip between a `stop_handle` test and its `detach_handle`, because
-  there is no window between them. `await`/`race` `project_completed` the
+  spinning).  A handle's `state` is its transition lock, and `types/handle.rs`
+  seals it: `StateCell` hands out no guard, so the worker's exit mark
+  (`complete`), settling (`try_settle`) and stopping (`detach`, under
+  `stop_handle`) are the only transitions, each holding the lock across both
+  the test and the transition, taking `result` and `cached` under it and never
+  the other way round.  That is what makes the promise good that a finished
+  worker's value is never destroyed by a losing `race` or a `cancel` — a worker
+  that completes cannot slip between `detach`'s test and its transition,
+  because there is no window between them — and what keeps a reader from
+  holding `state` across a registry call, the one order the registry's own lock
+  documents. `await`/`race` `project_completed` the
   outcome to `{value, stdout, stderr}`, re-raising `` `err ``; `poll` is total,
   wrapping it as `` `settled `` `{stdout, stderr, outcome: `ok/`err}` (the `` `err ``
   payload built through the shared `evaluator::scope::error_record`, the record

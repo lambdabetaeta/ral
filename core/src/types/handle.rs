@@ -1,10 +1,13 @@
 //! The shared cells behind [`Value::Handle`](super::Value): what a spawned
 //! worker writes and its observers read.
 
+use super::flow::Settled;
 use super::value::Value;
-use crate::io::ByteBuffer;
+use crate::io::{ByteBuffer, take_buffer};
 use crate::sync::LockExt as _;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Whether `v` structurally reaches a running handle — the binding-lease
 /// reaper's pin check, so a name still holding live work is never pruned.
@@ -73,10 +76,8 @@ pub struct HandleInner {
     pub cached: Arc<Mutex<Option<CompletedHandle>>>,
     /// Lock order: the worker registry lock may take this lock (a brief read
     /// in `WorkerRegistry::reserve` and `WorkerRegistry::sweep_retention`),
-    /// never the reverse. Every lock on this field elsewhere drops its guard
-    /// before any registry call — [`HandleInner::is_running`] does so itself,
-    /// rather than leaving the caller to.
-    pub state: Arc<Mutex<HandleState>>,
+    /// never the reverse.
+    pub state: StateCell,
     /// Buffered stdout, drained into `cached` on completion.  Empty for a
     /// watched handle, whose lines surface live through `Sink::Watch`.
     pub stdout_buf: ByteBuffer,
@@ -93,7 +94,7 @@ pub struct HandleInner {
     /// When an eliminator last named this handle: renewed by `poll` and by
     /// every `await`/`race` sweep, read by the idle lease chain in
     /// `builtins::concurrency`.  Cancelling or listing never renews it.
-    pub last_observed: Arc<Mutex<std::time::Instant>>,
+    pub last_observed: Observed,
     pub cmd: std::string::String,
     /// Where an observer checks the value the worker settles with, set by
     /// `service-handle`: what the worker returns was decided by another unit,
@@ -107,6 +108,17 @@ pub struct HandleInner {
     pub cancel: crate::process::CancelScope,
 }
 
+/// A handle's lifecycle, read and transitioned only through [`HandleInner`]'s
+/// methods: a guard born in a caller's expression lives to the end of that
+/// expression — long enough to re-enter this lock, or to take the registry's
+/// against the documented order — so none is ever handed out.
+#[derive(Debug, Clone)]
+pub struct StateCell(Arc<Mutex<HandleState>>);
+
+/// When a handle was last named by an eliminator; sealed as [`StateCell`] is.
+#[derive(Debug, Clone)]
+pub struct Observed(Arc<Mutex<Instant>>);
+
 impl PartialEq for HandleInner {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.result, &other.result)
@@ -114,27 +126,127 @@ impl PartialEq for HandleInner {
 }
 
 impl HandleInner {
-    /// Locks, reads, and releases `state` in one step, so a caller never
-    /// holds the guard past this call — see `state`'s own doc for why.
+    /// A running handle, observed now, whose worker (if any) settles through
+    /// `result`; its buffers start empty.
+    pub fn new(
+        cmd: impl Into<std::string::String>,
+        cancel: crate::process::CancelScope,
+        result: Option<Receiver<Settled<Value>>>,
+    ) -> Self {
+        Self {
+            result: Arc::new(Mutex::new(result)),
+            cached: Arc::new(Mutex::new(None)),
+            state: StateCell(Arc::new(Mutex::new(HandleState::Running))),
+            stdout_buf: ByteBuffer::default(),
+            stderr_buf: ByteBuffer::default(),
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            joined: Arc::new(Mutex::new(false)),
+            last_observed: Observed(Arc::new(Mutex::new(Instant::now()))),
+            cmd: cmd.into(),
+            site: None,
+            cancel,
+        }
+    }
+
+    pub fn state(&self) -> HandleState {
+        *self.state.0.lock_ignore_poison()
+    }
+
     pub(crate) fn is_running(&self) -> bool {
-        *self.state.lock_ignore_poison() == HandleState::Running
+        self.state() == HandleState::Running
+    }
+
+    pub fn last_observed(&self) -> Instant {
+        *self.last_observed.0.lock_ignore_poison()
+    }
+
+    /// An eliminator named this handle.
+    pub(crate) fn renew(&self) {
+        *self.last_observed.0.lock_ignore_poison() = Instant::now();
+    }
+
+    /// The worker's exit mark.  Guarded: an eliminator may have won the
+    /// transition, and a `cancel`'s `Cancelled` must not be undone.
+    pub(crate) fn complete(&self) {
+        let mut state = self.state.0.lock_ignore_poison();
+        if *state == HandleState::Running {
+            *state = HandleState::Completed;
+        }
+    }
+
+    /// `cancel`'s transition: release the receiver and the cache with the
+    /// state, as one step.  `false` if the worker had already completed, whose
+    /// outcome is left alone.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard's span is the point: dropping it earlier reopens the window in which a worker completes between the test and the transition and loses its outcome"
+    )]
+    pub(crate) fn detach(&self) -> bool {
+        let mut state = self.state.0.lock_ignore_poison();
+        if *state == HandleState::Completed {
+            return false;
+        }
+        *state = HandleState::Cancelled;
+        self.result.lock_ignore_poison().take();
+        *self.cached.lock_ignore_poison() = None;
+        true
+    }
+
+    /// Non-blocking settle: `Some` if the handle has an outcome to observe now
+    /// (the cache, or a just-arrived channel message drained into it), `None`
+    /// while the worker runs.  A `Disconnected` receiver means the worker
+    /// dropped its `Sender` unsent — it panicked — so it settles as a failure
+    /// rather than a `None` that `poll` and `race` would read as still-running.
+    ///
+    /// Settling is once-only, and a transition: `state` is held across the
+    /// cache read, `try_recv` and the cache write, so a second awaiter either
+    /// sees the first's cached outcome or blocks, and a concurrent `cancel`
+    /// waits its turn.  Draining on the error path too captures a failed
+    /// block's bytes.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the guard must span the whole transition, or a second awaiter observes a bare Disconnected"
+    )]
+    pub(crate) fn try_settle(&self) -> Option<CompletedHandle> {
+        let mut state = self.state.0.lock_ignore_poison();
+        let cached = self.cached.lock_ignore_poison().clone();
+        if let Some(completed) = cached {
+            return Some(completed);
+        }
+        let mut rx_guard = self.result.lock_ignore_poison();
+        let rx = rx_guard.as_ref()?;
+        let outcome = match rx.try_recv() {
+            Ok(result) => result,
+            // The worker names itself: the eliminator that found the corpse is
+            // not what panicked, and `await`, `poll` and `race` all arrive here.
+            Err(TryRecvError::Disconnected) => Err(super::coerce::sig(format!(
+                "{}: spawned thread panicked",
+                self.cmd
+            ))),
+            Err(TryRecvError::Empty) => return None,
+        };
+        rx_guard.take();
+        drop(rx_guard);
+        if *state == HandleState::Running {
+            *state = HandleState::Completed;
+        }
+        let completed = CompletedHandle {
+            stdout: take_buffer(&self.stdout_buf),
+            stderr: take_buffer(&self.stderr_buf),
+            surface: std::mem::take(&mut *self.surface_buf.lock_ignore_poison()),
+            outcome,
+        };
+        *self.cached.lock_ignore_poison() = Some(completed.clone());
+        Some(completed)
     }
 }
 
 /// A running handle with no worker behind it.
 #[cfg(test)]
 pub(crate) fn idle_handle() -> Value {
-    Value::Handle(Box::new(HandleInner {
-        result: Arc::new(Mutex::new(None)),
-        cached: Arc::new(Mutex::new(None)),
-        state: Arc::new(Mutex::new(HandleState::Running)),
-        stdout_buf: ByteBuffer::default(),
-        stderr_buf: ByteBuffer::default(),
-        surface_buf: Arc::new(Mutex::new(Vec::new())),
-        joined: Arc::new(Mutex::new(false)),
-        last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-        cmd: "<test>".into(),
-        site: None,
-        cancel: crate::process::CancelScope::default(),
-    }))
+    Value::Handle(Box::new(HandleInner::new(
+        "<test>",
+        crate::process::CancelScope::default(),
+        None,
+    )))
 }
