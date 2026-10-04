@@ -296,7 +296,10 @@ through `sandboxed_command` (`sandbox/launch.rs`), which confines that *one*
 child:
 
 - *Linux* wraps each child in `bwrap` via `make_command_with_policy`, threading
-  the logical cwd in as `--chdir`. The envelope is the child's whole world, not
+  the logical cwd in as `--chdir`; a cwd the grant does not cover gets an empty
+  `0555` tmpfs stand-in laid before the binds (which hide it where they do
+  cover it), so a grant narrower than the cwd still runs commands, as under
+  Seatbelt, and a relative write there is refused. The envelope is the child's whole world, not
   only its filesystem view: its own ipc, uts and cgroup namespaces on every
   projection, and a pid namespace with a fresh `/proc` wherever the host can
   build one, so a confined child sees and can signal nothing of the host,

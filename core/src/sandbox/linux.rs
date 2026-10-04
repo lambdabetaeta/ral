@@ -169,6 +169,12 @@ pub(crate) fn make_command_with_policy(
         FsProjection::Restricted(_) => {
             // Before the prefix binds: a write prefix under `/tmp` lands inside it.
             c.args(["--tmpfs", "/tmp"]);
+            // `--chdir` needs a directory to enter, and a cwd outside the
+            // grant has none: an empty unwritable stand-in, as macOS leaves it
+            // unreadable.  A bind over the name hides it.
+            if let Some(dir) = chdir.filter(|dir| *dir != "/") {
+                c.args(["--perms", "0555", "--tmpfs", dir]);
+            }
             for bind in &ro_binds {
                 if !rw_binds.contains(bind) {
                     c.args(["--ro-bind", bind.as_str(), bind.as_str()]);
@@ -679,6 +685,51 @@ mod tests {
             .is_some(),
             "a denied directory needs an unwritable tmpfs mask: {args:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bwrap cannot `--chdir` into a name nothing mounted, so a cwd outside
+    /// the grant gets an empty unwritable directory — before the binds, which
+    /// hide it where they cover the name — and the root and an unrestricted
+    /// envelope, which already have one, get none.
+    #[test]
+    fn a_cwd_outside_the_grant_is_stood_up_empty_and_unwritable() {
+        let dir = workdir("cwd-stand-in");
+        let dir_s = dir.to_string_lossy().into_owned();
+        let granted = deny_within(&dir, &[]);
+        let payload = Payload {
+            program: "/bin/true",
+            args: &[],
+            image: None,
+        };
+        for (label, policy, cwd, stood_up) in [
+            ("ungranted", &granted, "/ral-ungranted/cwd", true),
+            ("root", &granted, "/", false),
+            ("unrestricted", &unrestricted(), "/ral-ungranted/cwd", false),
+        ] {
+            let args: Vec<String> = make_command_with_policy(
+                &stand_in(),
+                payload,
+                policy,
+                Some(cwd),
+                Ownership::Kept,
+                WHOLE,
+            )
+            .expect("ASCII paths render")
+            .0
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+            let mask = position_of(&args, &["--perms", "0555", "--tmpfs", cwd]);
+            assert_eq!(mask.is_some(), stood_up, "{label}: {args:?}");
+            if let Some(mask) = mask {
+                let bind = position_of(&args, &["--bind", &dir_s]).expect("the grant's bind");
+                assert!(
+                    mask < bind,
+                    "{label}: a bind must be able to cover it: {args:?}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
