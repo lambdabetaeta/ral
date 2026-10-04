@@ -5,7 +5,7 @@
 //! ancestor-walk fallback (`canon`), alias-aware containment
 //! (`lex::path_within`), and — only where a name is about to be *written
 //! through* — symlink-free location of the object itself (`walk`), so the
-//! gate judges what the kernel will touch.
+//! guard judges what the kernel will touch.
 //!
 //! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
 //! [`NormalizedPrefix`] through the same folding kernel, so an access-side
@@ -13,10 +13,9 @@
 //!
 //! `lex::path_within` and its string twin are `pub(super)` here, so the
 //! containment kernel does not leave this module: a prefix carries two
-//! forms, and *which* one an authority is judged on is that authority's
-//! rule, not a caller's — fs on the object (`prefix_set::covers`), exec on
-//! the name (`NormalizedPrefix::grant_depth`, `veto_depth`).  See
-//! `docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`.
+//! forms, and *which* one a question is asked of is settled here, not by a
+//! caller — both fs (`prefix_set::covers`) and exec (`RealPath::within`, over
+//! a prefix's frozen `resolved` form) judge the object.
 
 pub mod basedir;
 pub(crate) mod canon;
@@ -25,6 +24,7 @@ pub mod git;
 pub mod lex;
 pub(crate) mod prefix_set;
 pub mod ral_path;
+mod real;
 pub(crate) mod render;
 pub(crate) mod resolved;
 pub(crate) mod resolver;
@@ -45,6 +45,7 @@ pub use lex::{
     resolve_str, shape,
 };
 pub(crate) use prefix_set::{PrefixSet, covers, meet_prefixes};
+pub(crate) use real::RealPath;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;

@@ -2,7 +2,7 @@
 //! handoff.  No process is created and no pipe opened; launch reads everything
 //! this phase produces.
 
-use super::super::command::CommandIdentity;
+use super::super::command::Head;
 use super::super::command_call;
 use crate::evaluator::machine;
 use crate::ir::{Comp, CompKind};
@@ -27,10 +27,7 @@ pub(super) enum TerminalPlan {
 /// `command::vet` applies the same shape rejection single-command exec does.
 #[derive(Clone, Debug)]
 pub(super) enum StageLaunch {
-    Direct {
-        id: CommandIdentity,
-        args: Vec<Value>,
-    },
+    Direct { head: Head, args: Vec<Value> },
     Thread,
 }
 
@@ -52,7 +49,7 @@ fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch
     let CompKind::Exec(e) = &stage.item else {
         return Ok(StageLaunch::Thread);
     };
-    let command_call::Resolution::External(id) =
+    let command_call::Resolution::External(head) =
         command_call::resolve_command_word(&e.head, env, shell)
     else {
         return Ok(StageLaunch::Thread);
@@ -61,7 +58,7 @@ fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch
         return Ok(StageLaunch::Thread);
     }
     Ok(StageLaunch::Direct {
-        id,
+        head,
         args: machine::close_args(&e.args, env, &shell.sig)?,
     })
 }

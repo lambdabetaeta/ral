@@ -13,17 +13,16 @@
 use crate::path::NormalizedPrefix;
 use crate::typecheck::contract::{Form as ContractForm, declared};
 use crate::types::{
-    Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, List, PolicyError, ShellPolicy,
-    Value, as_map, as_map_ref, settings_map,
+    Capabilities, EditorPolicy, ExecGrant, FsPolicy, List, PolicyError, ShellPolicy, Value,
+    Verdict, as_map, as_map_ref, meet_insert, settings_map,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// [`decode_exec_grant`]'s output, which [`freeze_exec_map`] turns into
-/// the real [`ExecMap`]: `dirs` keys are still raw sigil-or-path strings,
-/// and the bool is `true` for `'deny'`.
+/// [`decode_exec_grant`]'s output, which [`freeze_exec_grant`] turns into
+/// the real [`ExecGrant`]: every key is still a raw sigil, path or name.
 #[derive(Debug, Default)]
-struct RawExecMap {
-    literals: BTreeMap<String, ExecPolicy>,
+struct RawExecGrant {
+    literals: BTreeMap<String, Verdict>,
     dirs: BTreeMap<String, bool>,
 }
 
@@ -191,7 +190,7 @@ pub fn decode_capability_map(
         match k {
             "exec" => {
                 let raw = decode_exec_grant(&v, &format!("{err_prefix} exec"))?;
-                caps.exec = Some(freeze_exec_map(raw, ctx, &format!("{err_prefix} exec"))?);
+                caps.exec = Some(freeze_exec_grant(raw, ctx, &format!("{err_prefix} exec"))?);
             }
             "fs" => caps.fs = Some(decode_fs(&v, &format!("{err_prefix} fs"), ctx)?),
             "net" => caps.net = Some(decode_bool(&v, &format!("{err_prefix} net"))?),
@@ -210,71 +209,67 @@ pub fn decode_capability_map(
     Ok(caps)
 }
 
-/// Freeze the exec map's keys.  Every `dirs` key and every path-shaped
-/// `literals` key (`xdg:bin`, `~/.cargo/bin`, `/usr/bin/git`) must
-/// resolve absolute; bare command names (`git`, `kubectl`) are names
-/// rather than paths and pass through unchanged.
+/// Freeze the exec grant's keys.  Every dir key and every path-shaped
+/// literal key (`xdg:bin`, `~/.cargo/bin`, `/usr/bin/git`) must resolve
+/// absolute; bare command names (`git`, `kubectl`) are names rather than
+/// paths and pass through unchanged.  Every entry goes in through
+/// [`meet_insert`], so two keys landing on one entry meet whichever came
+/// first.
 ///
 /// `path:` and `system:` are special-cased here rather than in
 /// [`freeze_absolute`] because each expands to *many* directories — one
 /// per `$PATH` component, one per
 /// [`crate::path::sigil::system_tool_roots`] entry.
-fn freeze_exec_map(
-    map: RawExecMap,
+fn freeze_exec_grant(
+    raw: RawExecGrant,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
-) -> Result<ExecMap, PolicyError> {
+) -> Result<ExecGrant, PolicyError> {
     use crate::path::sigil::looks_like_path_or_sigil;
-    // `None` is `freeze_absolute`'s dead grant: skip the key.
-    let freeze_key = |key: &str| -> Result<Option<String>, PolicyError> {
-        Ok(freeze_absolute(key, ctx, err_prefix)?.map(NormalizedPrefix::into_string))
-    };
-    let dir_is_deny = |sigil: &str, policy: ExecPolicy| -> Result<bool, PolicyError> {
-        match policy {
-            ExecPolicy::Allow => Ok(false),
-            ExecPolicy::Deny => Ok(true),
-            ExecPolicy::Subcommands(_) => Err(PolicyError::new(format!(
+    let dir_verdict = |sigil: &str, verdict: Verdict| -> Result<bool, PolicyError> {
+        match verdict {
+            Verdict::Allow => Ok(true),
+            Verdict::Deny => Ok(false),
+            Verdict::Only(_) => Err(PolicyError::new(format!(
                 "{err_prefix}: '{sigil}' only takes 'allow' or 'deny', not a subcommand list \
                  (a subcommand list matches a command's first argument, so it needs a literal command)"
             ))),
         }
     };
 
-    let mut literals = BTreeMap::new();
-    let mut allow_dirs = BTreeSet::new();
-    let mut deny_dirs = BTreeSet::new();
-
-    for (key, policy) in map.literals {
+    let mut grant = ExecGrant::default();
+    for (key, verdict) in raw.literals {
         if key == "path:" {
-            let is_deny = dir_is_deny("path:", policy)?;
-            for d in path_dirs(err_prefix)? {
-                insert_dir_meet(&mut allow_dirs, &mut deny_dirs, d, is_deny);
+            let allow = dir_verdict("path:", verdict)?;
+            for dir in path_dirs(err_prefix)? {
+                meet_insert(&mut grant.dirs, dir, allow);
             }
         } else if key == "system:" {
-            let is_deny = dir_is_deny("system:", policy)?;
-            for d in system_dirs() {
-                insert_dir_meet(&mut allow_dirs, &mut deny_dirs, d, is_deny);
+            let allow = dir_verdict("system:", verdict)?;
+            for dir in system_dirs() {
+                meet_insert(&mut grant.dirs, dir, allow);
             }
         } else if looks_like_path_or_sigil(&key) {
-            if let Some(frozen) = freeze_key(&key)? {
+            // `None` is `freeze_absolute`'s dead grant: skip the key.
+            if let Some(frozen) = freeze_absolute(&key, ctx, err_prefix)? {
                 // A decoder that stats: the freeze pass already reads
                 // `$PATH` and the environment, so disk is in reach.
-                if crate::path::is_dir(&frozen) {
+                if crate::path::is_dir(frozen.as_str()) {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: '{key}' is a directory, so as a literal command key it \
                          names a binary that cannot exist — did you mean '{key}/'?"
                     )));
                 }
-                literals.insert(frozen, policy);
+                meet_insert(&mut grant.paths, frozen, verdict);
             }
         } else {
-            literals.insert(key, policy);
+            meet_insert(&mut grant.names, key, verdict);
         }
     }
 
-    // `'path:/'` strips its slash and lands here in `map.dirs`; reject it
+    // `'path:/'` strips its slash and lands here in `raw.dirs`; reject it
     // before generic directory handling — `path:` is the one spelling.
-    for (key, is_deny) in map.dirs {
+    for (key, allow) in raw.dirs {
         if key == "path:" || key == "system:" {
             return Err(PolicyError::new(format!(
                 "{err_prefix}: '{key}/' is not a directory grant — \
@@ -282,34 +277,11 @@ fn freeze_exec_map(
             )));
         }
         if let Some(frozen) = freeze_absolute(&key, ctx, err_prefix)? {
-            insert_dir_meet(&mut allow_dirs, &mut deny_dirs, frozen, is_deny);
+            meet_insert(&mut grant.dirs, frozen, allow);
         }
     }
 
-    Ok(ExecMap {
-        literals,
-        allow_dirs,
-        deny_dirs,
-    })
-}
-
-/// Insert into `allow`/`deny`, meeting rather than overwriting.
-/// `system:`'s expansion and an author's explicit grant can name the same
-/// resolved directory — a Homebrew root the author carves back out with a
-/// `deny` — and which of the two insertion loops above runs first must not
-/// decide the verdict.  Deny is the sticky veto, as in [`ExecPolicy`].
-fn insert_dir_meet(
-    allow: &mut BTreeSet<NormalizedPrefix>,
-    deny: &mut BTreeSet<NormalizedPrefix>,
-    key: NormalizedPrefix,
-    is_deny: bool,
-) {
-    if is_deny {
-        allow.remove(&key);
-        deny.insert(key);
-    } else if !deny.contains(&key) {
-        allow.insert(key);
-    }
+    Ok(grant)
 }
 
 /// Split `$PATH` on the platform separator, keeping the absolute entries.
@@ -348,24 +320,24 @@ fn system_dirs() -> Vec<NormalizedPrefix> {
 /// Decode the `exec` dimension of a grant into its pre-freeze shape.
 ///
 /// A key ending in `/` names a directory prefix and lands in
-/// [`RawExecMap::dirs`]; every other key is a literal command name or
+/// [`RawExecGrant::dirs`]; every other key is a literal command name or
 /// path, taking `'allow'`, `'deny'`, or a subcommand allowlist.  An empty
 /// allowlist is an error rather than a third spelling of `'allow'`:
 /// `meet` intersects subcommand sets, so the empty set already means
 /// "admits nothing", and one surface spelling cannot mean ⊤ and ⊥ at once.
 ///
 /// The surface takes lowercase strings only; the capitalised serde tags
-/// on [`ExecPolicy`] belong to the IPC wire format.
-fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, PolicyError> {
+/// on [`Verdict`] belong to the IPC wire format.
+fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecGrant, PolicyError> {
     let entries = as_map(value, err_prefix).map_err(PolicyError::from)?;
-    let mut out = RawExecMap::default();
+    let mut out = RawExecGrant::default();
     for (cmd, policy_val) in &entries {
         let cmd = cmd.to_string();
         let policy_val = policy_val.into_owned();
         if let Some(dir) = cmd.strip_suffix('/') {
-            let is_deny = match policy_val {
-                Value::String(s) if s.as_str() == "allow" => false,
-                Value::String(s) if s.as_str() == "deny" => true,
+            let allow = match policy_val {
+                Value::String(s) if s.as_str() == "allow" => true,
+                Value::String(s) if s.as_str() == "deny" => false,
                 _ => {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: directory key '{cmd}' must be 'allow' or 'deny'; \
@@ -374,13 +346,13 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
                     )));
                 }
             };
-            out.dirs.insert(dir.to_string(), is_deny);
+            out.dirs.insert(dir.to_string(), allow);
             continue;
         }
-        let policy = match policy_val {
+        let verdict = match policy_val {
             Value::String(s) => match s.as_str() {
-                "allow" => ExecPolicy::Allow,
-                "deny" => ExecPolicy::Deny,
+                "allow" => Verdict::Allow,
+                "deny" => Verdict::Deny,
                 other => {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: policy for '{cmd}' must be 'allow', 'deny', or a list of subcommands; got '{other}'"
@@ -403,7 +375,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
                          use 'allow' to admit any arguments, or 'deny' to refuse the command"
                     )));
                 }
-                ExecPolicy::Subcommands(subs)
+                Verdict::Only(subs)
             }
             Value::Thunk(_) => {
                 return Err(PolicyError::new(format!(
@@ -417,7 +389,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
                 )));
             }
         };
-        out.literals.insert(cmd, policy);
+        out.literals.insert(cmd, verdict);
     }
     Ok(out)
 }
@@ -425,7 +397,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "test-only FreezeCtx cwd; no resolution rule to centralise"
+    reason = "[test] test fs scaffolding: FreezeCtx cwds and tempdir files"
 )]
 mod tests {
     use super::*;
@@ -443,14 +415,14 @@ mod tests {
     fn decode_exec_grant_accepts_lowercase_allow_string() {
         let v = exec_map(&[("git", Value::string("allow"))]);
         let m = decode_exec_grant(&v, "test").unwrap();
-        assert_eq!(m.literals.get("git"), Some(&ExecPolicy::Allow));
+        assert_eq!(m.literals.get("git"), Some(&Verdict::Allow));
     }
 
     #[test]
     fn decode_exec_grant_accepts_lowercase_deny_string() {
         let v = exec_map(&[("bash", Value::string("deny"))]);
         let m = decode_exec_grant(&v, "test").unwrap();
-        assert_eq!(m.literals.get("bash"), Some(&ExecPolicy::Deny));
+        assert_eq!(m.literals.get("bash"), Some(&Verdict::Deny));
     }
 
     #[test]
@@ -468,7 +440,7 @@ mod tests {
         )]);
         let m = decode_exec_grant(&v, "test").unwrap();
         match m.literals.get("cargo") {
-            Some(ExecPolicy::Subcommands(s)) => {
+            Some(Verdict::Only(s)) => {
                 assert_eq!(
                     s,
                     &BTreeSet::from(["build".to_string(), "test".to_string()])
@@ -533,22 +505,17 @@ mod tests {
     }
 
     /// Order-independence is what keeps a reorder or a resigil of
-    /// [`freeze_exec_map`]'s two insertion loops from quietly widening
+    /// [`freeze_exec_grant`]'s two insertion loops from quietly widening
     /// authority.
     #[test]
-    fn insert_dir_meet_lets_deny_win_regardless_of_insertion_order() {
+    fn meet_insert_lets_deny_win_regardless_of_insertion_order() {
         let x = NormalizedPrefix::from_surface("/x");
-
-        let mut allow = BTreeSet::new();
-        let mut deny = BTreeSet::new();
-        insert_dir_meet(&mut allow, &mut deny, x.clone(), false);
-        insert_dir_meet(&mut allow, &mut deny, x.clone(), true);
-        assert!(deny.contains(&x) && !allow.contains(&x));
-
-        let mut allow = BTreeSet::new();
-        let mut deny = BTreeSet::new();
-        insert_dir_meet(&mut allow, &mut deny, x.clone(), true);
-        insert_dir_meet(&mut allow, &mut deny, x.clone(), false);
-        assert!(deny.contains(&x) && !allow.contains(&x));
+        for order in [[true, false], [false, true]] {
+            let mut dirs: BTreeMap<NormalizedPrefix, bool> = BTreeMap::new();
+            for allow in order {
+                meet_insert(&mut dirs, x.clone(), allow);
+            }
+            assert_eq!(dirs.get(&x), Some(&false));
+        }
     }
 }

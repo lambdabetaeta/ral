@@ -1,47 +1,71 @@
-//! Point-of-use capability gates.
+//! The in-process guards.
 //!
 //! Every runtime yes/no asked as an action is attempted — exec and its
 //! argv, an fs read or write, the editor and shell flags, head admission
 //! — folds the whole dynamic [`GrantStack`], so a verdict is authority
 //! intersected across every layer, never one frame.  Only the exec and fs
-//! gates reach a real OS resource, and only they audit.  The sibling
+//! guards reach a real OS resource, and only they audit.  The sibling
 //! [`super::sandbox`] projects the same authority onto the OS sandbox, and
 //! does so off the same per-dimension folds this module tests against —
-//! [`super::fs::allow_region`] and [`super::exec::evaluate_exec`] — so the
-//! two cannot drift.
+//! [`super::fs::allow_region`] and the table [`check_exec`] hands over in
+//! its [`Admitted`] — so the two cannot drift.
 
-use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
+use super::exec::{ExecRules, Program, rules};
 use super::fs::{FsOp, allow_region, deny_region};
 use crate::path::Resolver;
+use crate::runtime::command::Head;
 use crate::types::{
     Audit, CallSite, Capabilities, Context, Decision, GrantStack, Observation, Observed, Settled,
-    sig, sig_hint,
+    Verdict, sig, sig_hint,
 };
 use std::collections::BTreeMap;
 
-/// Gate a command and its argv against the stack's exec opinions.  A refusal
-/// is recorded on an open trail, as the fs gate's is.
-pub(crate) fn check_exec_args(
+/// A program the in-process guard admitted with these arguments, and the table that
+/// admitted it.  Only [`check_exec`] makes one, so nothing launches unjudged.
+#[must_use]
+pub(crate) struct Admitted {
+    program: Program,
+    args: Vec<String>,
+    rules: Option<ExecRules>,
+}
+
+impl Admitted {
+    pub(crate) fn program(&self) -> &Program {
+        &self.program
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The stack's exec table, `None` where no layer restricts exec.
+    pub(crate) fn rules(&self) -> Option<&ExecRules> {
+        self.rules.as_ref()
+    }
+}
+
+/// Judge a program and its argv against the stack's exec rules.  A refusal
+/// is recorded on an open trail, as the fs guard's is.
+pub(crate) fn check_exec(
     ctx: &Context,
-    display_name: &str,
-    deny_names: &[&str],
-    policy_names: &[&str],
-    args: &[String],
+    shown: &str,
+    program: Program,
+    args: Vec<String>,
     audit: &mut Audit,
     site: Option<CallSite>,
-) -> Settled<()> {
-    let names = ExecNames {
-        deny: deny_names,
-        allow: policy_names,
-    };
-    let result: Settled<()> = match evaluate_exec(&ctx.grants, names) {
-        ExecVerdict::Unrestricted | ExecVerdict::Allowed(Admit::Any) => Ok(()),
-        ExecVerdict::Denied => Err(sig_hint(
-            format!("command '{display_name}' denied by active grant"),
+) -> Settled<Admitted> {
+    let rules = rules(&ctx.grants);
+    let verdict = rules
+        .as_ref()
+        .map_or(Verdict::Allow, |r| r.verdict(program.subject()));
+    let result: Settled<()> = match verdict {
+        Verdict::Allow => Ok(()),
+        Verdict::Deny => Err(sig_hint(
+            format!("command '{shown}' denied by active grant"),
             "add the command to the grant exec map \
              (or its directory, keyed with a trailing '/') to allow it",
         )),
-        ExecVerdict::Allowed(Admit::Subcommands(allowed)) => {
+        Verdict::Only(allowed) => {
             let hint = || {
                 format!(
                     "allowed subcommands (matched against the command's first argument): {}",
@@ -51,12 +75,12 @@ pub(crate) fn check_exec_args(
             match args.first() {
                 Some(first) if allowed.contains(first) => Ok(()),
                 Some(first) => Err(sig_hint(
-                    format!("command '{display_name}' subcommand '{first}' denied by active grant"),
+                    format!("command '{shown}' subcommand '{first}' denied by active grant"),
                     hint(),
                 )),
                 None => Err(sig_hint(
                     format!(
-                        "command '{display_name}' requires an allowed subcommand \
+                        "command '{shown}' requires an allowed subcommand \
                          under the active grant"
                     ),
                     hint(),
@@ -67,18 +91,17 @@ pub(crate) fn check_exec_args(
 
     if result.is_err() {
         emit_capability_denial(ctx, "exec", audit, site, |f| {
-            f.insert("name".into(), display_name.into());
-            if let Some(resolved_name) = policy_names
-                .iter()
-                .find(|candidate| **candidate != display_name)
-            {
-                f.insert("resolved".into(), (*resolved_name).into());
-            }
+            f.insert("name".into(), shown.into());
+            f.insert("resolved".into(), program.to_string());
             f.insert("args".into(), args.join(" "));
         });
     }
 
-    result
+    result.map(|()| Admitted {
+        program,
+        args,
+        rules,
+    })
 }
 
 /// The decision half of [`check_fs_op`]: does the stack admit `op` on the
@@ -128,9 +151,9 @@ pub(super) fn fs_verdict(
 }
 
 impl GrantStack {
-    /// The fs gate's verdict as a plain bool, for callers with no [`Context`]
+    /// The fs guard's verdict as a plain bool, for callers with no [`Context`]
     /// to audit through — exarch's boot-time skill discovery asks it of a
-    /// one-frame [`GrantStack::of`].  The same [`fs_verdict`] the gate runs,
+    /// one-frame [`GrantStack::of`].  The same [`fs_verdict`] the guard runs,
     /// canonicalising leniently inside as [`check_fs_op`] does, so there is no
     /// surface-form spelling of the question.  The
     /// [`ResolvedPath::is_discard`](crate::path::ResolvedPath::is_discard)
@@ -220,17 +243,13 @@ pub(crate) fn check_fs_exact(
 
 /// Head-only admission, before any argv is known: classification and the
 /// `which` inspector consult it to refuse a denied head with a focused
-/// error rather than let the call reach [`check_exec_args`].
-pub(crate) fn admits_head(ctx: &Context, id: &crate::runtime::command::CommandIdentity) -> bool {
-    let allow = id.policy_names(ctx);
-    let deny = id.deny_names_from(allow.clone());
-    let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
-    let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
-    let names = ExecNames {
-        deny: &deny_refs,
-        allow: &allow_refs,
+/// error rather than let the call reach [`check_exec`].  A head with no
+/// program passes: `vet` reports the missing command.
+pub(crate) fn admits_head(ctx: &Context, head: &Head) -> bool {
+    let Ok(program) = &head.program else {
+        return true;
     };
-    !matches!(evaluate_exec(&ctx.grants, names), ExecVerdict::Denied)
+    rules(&ctx.grants).is_none_or(|r| !r.verdict(program.subject()).is_denied())
 }
 
 pub(crate) fn check_editor_read(ctx: &Context, subcmd: &str) -> Settled<()> {
@@ -285,7 +304,7 @@ fn check_grant_bool(
 /// asked, and the refusals are the whole story.
 ///
 /// The trail is this door's whole audience: it has no `&Mooring` to surface
-/// through. Its callers ([`check_exec_args`], [`check_fs_op`]) are reached
+/// through. Its callers ([`check_exec`], [`check_fs_op`]) are reached
 /// from `types/shell/checks.rs`, which fans out through
 /// `builtins/{fs,modules,util}.rs`, `runtime/command/{vet,redirect}.rs`, and
 /// exarch's own doors, none of which carry one. So a denial here reaches the

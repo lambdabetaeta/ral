@@ -217,7 +217,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 
 /// Lexical sibling of `resolve-path`: same anchoring, no
 /// `canonicalise_strict`, so symlinks stand and the path need not exist —
-/// and no `check_fs_read`, since that gate guards a stat this never does.
+/// and no `check_fs_read`, since that guard covers a stat this never does.
 pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
     let resolved = shell.resolve(as_str(&args[0], "absolute-path")?);
     Ok(Value::string(resolved.as_path().to_string_lossy()))

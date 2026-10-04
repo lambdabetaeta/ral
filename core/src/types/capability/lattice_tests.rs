@@ -2,11 +2,13 @@
 //!
 //! In-crate rather than under `core/tests/` because these reach crate-private
 //! doors: `decode_capability_map`, `NormalizedPrefix::for_test`,
-//! `admits_for_test`.
+//! `RealPath::assumed`.
 
 use super::*;
-use crate::capability::decode_capability_map;
-use crate::types::{PolicyError, Value};
+use crate::capability::{Program, admits_head, decode_capability_map};
+use crate::path::RealPath;
+use crate::runtime::command::Head;
+use crate::types::{Context, PolicyError, Value};
 
 /// The `Value::Map` shape `decode_capability_map` receives in production.
 fn map(entries: Vec<(&str, Value)>) -> Value {
@@ -28,14 +30,48 @@ fn np(s: &str) -> String {
     nprefix(s).into_string()
 }
 
-/// A prefix witness for the fixtures that build `FsPolicy`/`ExecMap` directly
-/// rather than through `decode_capability_map`.
+/// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`
+/// directly rather than through `decode_capability_map`.
 fn nprefix(s: &str) -> crate::path::NormalizedPrefix {
     crate::path::NormalizedPrefix::from_surface(s)
 }
 
 fn break_msg(e: PolicyError) -> String {
     e.message
+}
+
+fn only(subs: &[&str]) -> Verdict {
+    Verdict::Only(subs.iter().map(ToString::to_string).collect())
+}
+
+fn names(entries: &[(&str, Verdict)]) -> BTreeMap<String, Verdict> {
+    entries
+        .iter()
+        .map(|(name, v)| ((*name).to_string(), v.clone()))
+        .collect()
+}
+
+fn dirs(entries: &[(&str, bool)]) -> BTreeMap<crate::path::NormalizedPrefix, bool> {
+    entries.iter().map(|(dir, v)| (nprefix(dir), *v)).collect()
+}
+
+/// A host file whose real path, and launch path, is `real`.
+fn file(real: &str) -> Program {
+    Program::File {
+        path: real.into(),
+        real: RealPath::assumed(real),
+    }
+}
+
+/// Whether `grants` admits running the file whose real path is `real`.
+fn admits(grants: &GrantStack, real: &str) -> bool {
+    let mut ctx = Context::default();
+    ctx.grants = grants.clone();
+    let head = Head {
+        shown: real.into(),
+        program: Ok(file(real)),
+    };
+    admits_head(&ctx, &head)
 }
 
 #[cfg(unix)]
@@ -59,16 +95,10 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
 
 fn witness_a() -> Capabilities {
     Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([
-                ("cargo".into(), ExecPolicy::Allow),
-                (
-                    "git".into(),
-                    ExecPolicy::Subcommands(BTreeSet::from(["log".into(), "status".into()])),
-                ),
-            ]),
-            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
-            deny_dirs: BTreeSet::new(),
+        exec: Some(ExecGrant {
+            names: names(&[("cargo", Verdict::Allow), ("git", only(&["log", "status"]))]),
+            paths: BTreeMap::from([(nprefix("/opt/tool"), Verdict::Allow)]),
+            dirs: dirs(&[("/usr/bin", true)]),
         }),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp")],
@@ -88,16 +118,10 @@ fn witness_a() -> Capabilities {
 
 fn witness_b() -> Capabilities {
     Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([
-                (
-                    "cargo".into(),
-                    ExecPolicy::Subcommands(BTreeSet::from(["build".into()])),
-                ),
-                ("ls".into(), ExecPolicy::Allow),
-            ]),
-            allow_dirs: BTreeSet::from([nprefix("/usr/bin"), nprefix("/usr/local/bin")]),
-            deny_dirs: BTreeSet::new(),
+        exec: Some(ExecGrant {
+            names: names(&[("cargo", only(&["build"])), ("ls", Verdict::Allow)]),
+            paths: BTreeMap::from([(nprefix("/opt/tool"), Verdict::Deny)]),
+            dirs: dirs(&[("/usr/bin", true), ("/usr/local/bin", true)]),
         }),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp/work")],
@@ -117,10 +141,9 @@ fn witness_b() -> Capabilities {
 
 fn witness_c() -> Capabilities {
     Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("cargo".into(), ExecPolicy::Allow)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
+        exec: Some(ExecGrant {
+            names: names(&[("cargo", Verdict::Allow)]),
+            ..ExecGrant::default()
         }),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/tmp")],
@@ -164,110 +187,59 @@ fn detach_is_permitted_until_some_layer_withholds_it() {
 /// A veto is a floor: an overlay naming `bash: 'allow'` over a base
 /// `bash: 'deny'` leaves bash denied.  To permit it, change the base.
 #[test]
-fn join_exec_regrant_does_not_lift_deny() {
-    let base = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
+fn widen_exec_regrant_does_not_lift_deny() {
+    let grant = |v: Verdict| Capabilities {
+        exec: Some(ExecGrant {
+            names: names(&[("bash", v)]),
+            ..ExecGrant::default()
         }),
         ..Default::default()
     };
-    let extend = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("bash".into(), ExecPolicy::Allow)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Default::default()
-    };
-    let j = base.join(extend);
+    let widened = grant(Verdict::Deny).widen(grant(Verdict::Allow));
     assert_eq!(
-        j.exec.unwrap().literals.get("bash"),
-        Some(&ExecPolicy::Deny)
+        widened.exec.unwrap().names.get("bash"),
+        Some(&Verdict::Deny)
     );
 }
 
-/// A one-sided `Deny` is a floor under join too: an extension opening one
+/// A one-sided `Deny` is a floor under widening too: an extension opening one
 /// command must not re-admit every shell the base pinned out.
 #[test]
-fn join_exec_keeps_one_sided_deny() {
-    let base = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Default::default()
+fn widen_exec_keeps_one_sided_deny() {
+    let grant = |name: &str, v: Verdict| ExecGrant {
+        names: names(&[(name, v)]),
+        ..ExecGrant::default()
     };
-    let extend = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Default::default()
-    };
-    let exec = base.join(extend).exec.unwrap();
-    assert_eq!(exec.literals.get("bash"), Some(&ExecPolicy::Deny));
-    assert_eq!(exec.literals.get("rg"), Some(&ExecPolicy::Allow));
+    let exec = grant("bash", Verdict::Deny).widen(grant("rg", Verdict::Allow));
+    assert_eq!(exec.names.get("bash"), Some(&Verdict::Deny));
+    assert_eq!(exec.names.get("rg"), Some(&Verdict::Allow));
 }
 
 /// Deny-overrides on dirs: re-granting the exact denied tree does not lift it.
 #[test]
-fn join_exec_dirs_regrant_does_not_lift_deny() {
-    let base = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::from([nprefix("/x")]),
-        }),
-        ..Default::default()
-    };
-    let extend = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([nprefix("/x")]),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Default::default()
-    };
-    let exec = base.join(extend).exec.unwrap();
-    assert!(exec.deny_dirs.contains(&nprefix("/x")));
-    assert!(!exec.allow_dirs.contains(&nprefix("/x")));
+fn widen_exec_dirs_regrant_does_not_lift_deny() {
+    let exec = exec_deny_of(&nprefix("/x")).widen(exec_of(&nprefix("/x")));
+    assert_eq!(exec.dirs.get(&nprefix("/x")), Some(&false));
 }
 
 #[test]
-fn join_exec_dirs_keep_one_sided_deny() {
-    let base = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::new(),
-            deny_dirs: BTreeSet::from([nprefix("/opt/danger")]),
-        }),
-        ..Default::default()
-    };
-    let extend = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([nprefix("/usr/bin")]),
-            deny_dirs: BTreeSet::new(),
-        }),
-        ..Default::default()
-    };
-    let exec = base.join(extend).exec.unwrap();
-    assert!(exec.deny_dirs.contains(&nprefix("/opt/danger")));
-    assert!(exec.allow_dirs.contains(&nprefix("/usr/bin")));
+fn widen_exec_dirs_keep_one_sided_deny() {
+    let exec = exec_deny_of(&nprefix("/opt/danger")).widen(exec_of(&nprefix("/usr/bin")));
+    assert_eq!(exec.dirs.get(&nprefix("/opt/danger")), Some(&false));
+    assert_eq!(exec.dirs.get(&nprefix("/usr/bin")), Some(&true));
 }
 
-/// A `Capabilities` is sigil-free by construction, so the wire form carries
-/// concrete paths and the peer has nothing to re-resolve.
+/// A stack is sigil-free by construction, so the wire form carries concrete
+/// paths and the peer has nothing to re-resolve — path and dir keys
+/// included, though no JSON object can be keyed by one.
 #[test]
-fn ipc_roundtrip_preserves_frozen_capabilities() {
-    let c = witness_a();
-    let json = serde_json::to_string(&c).unwrap();
-    let back: Capabilities = serde_json::from_str(&json).unwrap();
-    assert_eq!(c, back);
+fn ipc_roundtrip_preserves_a_frozen_grant_stack() {
+    let mut stack = GrantStack::root();
+    stack.push(witness_a());
+    stack.push(witness_b());
+    let json = serde_json::to_string(&stack).unwrap();
+    let back: GrantStack = serde_json::from_str(&json).unwrap();
+    assert_eq!(stack, back);
 }
 
 fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
@@ -278,11 +250,10 @@ fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
     }
 }
 
-fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
-    ExecMap {
-        literals: BTreeMap::new(),
-        allow_dirs: BTreeSet::from([p.clone()]),
-        deny_dirs: BTreeSet::new(),
+fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
+    ExecGrant {
+        dirs: BTreeMap::from([(p.clone(), true)]),
+        ..ExecGrant::default()
     }
 }
 
@@ -312,34 +283,34 @@ fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
 }
 
 #[test]
-fn join_commutative_over_prefix_universe() {
+fn widen_commutative_over_prefix_universe() {
     let u = prefix_universe();
     for a in &u {
         for b in &u {
-            assert_eq!(fs_of(a).join(fs_of(b)), fs_of(b).join(fs_of(a)));
-            assert_eq!(exec_of(a).join(exec_of(b)), exec_of(b).join(exec_of(a)));
-            assert_eq!(caps_of(a).join(caps_of(b)), caps_of(b).join(caps_of(a)));
+            assert_eq!(fs_of(a).widen(fs_of(b)), fs_of(b).widen(fs_of(a)));
+            assert_eq!(exec_of(a).widen(exec_of(b)), exec_of(b).widen(exec_of(a)));
+            assert_eq!(caps_of(a).widen(caps_of(b)), caps_of(b).widen(caps_of(a)));
         }
     }
 }
 
 #[test]
-fn join_associative_over_prefix_universe() {
+fn widen_associative_over_prefix_universe() {
     let u = prefix_universe();
     for a in &u {
         for b in &u {
             for c in &u {
                 assert_eq!(
-                    fs_of(a).join(fs_of(b).join(fs_of(c))),
-                    fs_of(a).join(fs_of(b)).join(fs_of(c))
+                    fs_of(a).widen(fs_of(b).widen(fs_of(c))),
+                    fs_of(a).widen(fs_of(b)).widen(fs_of(c))
                 );
                 assert_eq!(
-                    exec_of(a).join(exec_of(b).join(exec_of(c))),
-                    exec_of(a).join(exec_of(b)).join(exec_of(c))
+                    exec_of(a).widen(exec_of(b).widen(exec_of(c))),
+                    exec_of(a).widen(exec_of(b)).widen(exec_of(c))
                 );
                 assert_eq!(
-                    caps_of(a).join(caps_of(b).join(caps_of(c))),
-                    caps_of(a).join(caps_of(b)).join(caps_of(c))
+                    caps_of(a).widen(caps_of(b).widen(caps_of(c))),
+                    caps_of(a).widen(caps_of(b)).widen(caps_of(c))
                 );
             }
         }
@@ -347,67 +318,101 @@ fn join_associative_over_prefix_universe() {
 }
 
 #[test]
-fn join_idempotent_over_prefix_universe() {
+fn widen_idempotent_over_prefix_universe() {
     for a in &prefix_universe() {
-        assert_eq!(fs_of(a).join(fs_of(a)), fs_of(a));
-        assert_eq!(exec_of(a).join(exec_of(a)), exec_of(a));
-        assert_eq!(caps_of(a).join(caps_of(a)), caps_of(a));
+        assert_eq!(fs_of(a).widen(fs_of(a)), fs_of(a));
+        assert_eq!(exec_of(a).widen(exec_of(a)), exec_of(a));
+        assert_eq!(caps_of(a).widen(caps_of(a)), caps_of(a));
     }
 }
 
-fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
-    ExecMap {
-        literals: BTreeMap::new(),
-        allow_dirs: BTreeSet::new(),
-        deny_dirs: BTreeSet::from([p.clone()]),
+fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecGrant {
+    ExecGrant {
+        dirs: BTreeMap::from([(p.clone(), false)]),
+        ..ExecGrant::default()
     }
 }
 
-/// An allow and a deny sharing a surface but frozen against different disk
-/// state are distinct records to `NormalizedPrefix`'s derived `Eq`/`Ord`
-/// (three fields, where the gate weighs two), so eviction must key on
-/// `evicts`.  Checked through the gate as well as `allow_dirs` — the
-/// leak is only real if the gate itself is fooled.
+fn stack_of(exec: ExecGrant) -> GrantStack {
+    GrantStack::of(Capabilities {
+        exec: Some(exec),
+        ..Capabilities::root()
+    })
+}
+
+fn allow_dirs(exec: &ExecGrant) -> Vec<&crate::path::NormalizedPrefix> {
+    exec.dirs
+        .iter()
+        .filter(|(_, allow)| **allow)
+        .map(|(dir, _)| dir)
+        .collect()
+}
+
+/// The in-process guard judges dirs on their resolved forms, so eviction keys on those
+/// alone: an allow and a deny sharing a surface but resolving apart are two
+/// directories, and neither clash strips the other.  Checked through the
+/// guard as well as the allow dirs.
 #[test]
-fn exec_join_drops_allow_clashing_with_deny_on_divergent_resolved() {
-    use crate::capability::admits_for_test;
+fn exec_widen_keeps_allow_and_deny_that_share_a_surface_but_resolve_apart() {
     use crate::path::Namespace;
 
-    // The gate weighs only candidates the platform calls absolute, and a
-    // rooted path with no drive is not absolute to Windows.
-    let (surface, divergent, candidate) = if cfg!(windows) {
-        (r"C:\x", r"C:\y", r"C:\x\bin")
+    // Spelled for the host: a rooted path with no drive is not absolute to
+    // Windows.
+    let (surface, divergent, allowed, denied) = if cfg!(windows) {
+        (r"C:\x", r"C:\y", r"C:\x\bin", r"C:\y\bin")
     } else {
-        ("/x", "/y", "/x/bin")
+        ("/x", "/y", "/x/bin", "/y/bin")
     };
     let allow = crate::path::NormalizedPrefix::for_test(surface, surface, Namespace::Host);
     let deny = crate::path::NormalizedPrefix::for_test(surface, divergent, Namespace::Host);
-    let allow_map = exec_of(&allow);
-    let deny_map = exec_deny_of(&deny);
 
-    let composed = allow_map.join(deny_map);
-    assert!(
-        composed.allow_dirs.is_empty(),
-        "the deny must evict the clashing allow from allow_dirs, got {:?}",
-        composed.allow_dirs
+    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
+    assert_eq!(
+        allow_dirs(&composed).len(),
+        1,
+        "a different directory is not evicted"
     );
-    let mut grants = GrantStack::root();
-    grants.push(Capabilities {
-        exec: Some(composed),
-        ..Capabilities::root()
-    });
-    let candidate = [candidate];
+    let grants = stack_of(composed);
     assert!(
-        !admits_for_test(&grants, &candidate, &candidate),
-        "a binary under the clashing surface must be denied"
+        admits(&grants, allowed),
+        "the allow still covers its own directory"
+    );
+    assert!(
+        !admits(&grants, denied),
+        "the deny covers where it resolves"
+    );
+}
+
+/// Two symlinks resolving to one directory clash: the deny evicts the allow
+/// though neither spelling is the other's.
+#[test]
+fn exec_widen_drops_allow_resolving_to_the_same_dir_as_a_deny() {
+    use crate::path::Namespace;
+
+    let (link_a, link_b, target, candidate) = if cfg!(windows) {
+        (r"C:\a", r"C:\b", r"C:\x", r"C:\x\bin")
+    } else {
+        ("/a", "/b", "/x", "/x/bin")
+    };
+    let allow = crate::path::NormalizedPrefix::for_test(link_a, target, Namespace::Host);
+    let deny = crate::path::NormalizedPrefix::for_test(link_b, target, Namespace::Host);
+
+    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
+    assert!(
+        allow_dirs(&composed).is_empty(),
+        "the deny must evict the allow it shares a target with, got {:?}",
+        composed.dirs
+    );
+    assert!(
+        !admits(&stack_of(composed), candidate),
+        "a binary under the shared target must be denied"
     );
 }
 
 /// A deny dir that is a symlink vetoes where it points, so it evicts an
 /// allow written as that target.
 #[test]
-fn exec_join_drops_allow_naming_a_deny_dirs_target() {
-    use crate::capability::admits_for_test;
+fn exec_widen_drops_allow_naming_a_deny_dirs_target() {
     use crate::path::Namespace;
 
     let (link, target, candidate) = if cfg!(windows) {
@@ -418,59 +423,45 @@ fn exec_join_drops_allow_naming_a_deny_dirs_target() {
     let allow = crate::path::NormalizedPrefix::for_test(target, target, Namespace::Host);
     let deny = crate::path::NormalizedPrefix::for_test(link, target, Namespace::Host);
 
-    let composed = exec_of(&allow).join(exec_deny_of(&deny));
+    let composed = exec_of(&allow).widen(exec_deny_of(&deny));
     assert!(
-        composed.allow_dirs.is_empty(),
+        allow_dirs(&composed).is_empty(),
         "the deny must evict the allow on its target, got {:?}",
-        composed.allow_dirs
+        composed.dirs
     );
-    let mut grants = GrantStack::root();
-    grants.push(Capabilities {
-        exec: Some(composed),
-        ..Capabilities::root()
-    });
-    let candidate = [candidate];
     assert!(
-        !admits_for_test(&grants, &candidate, &candidate),
+        !admits(&stack_of(composed), candidate),
         "a binary under the deny's target must be denied"
     );
 }
 
 /// The same clash without shared bytes: `/private/tmp/x` and `/tmp/x` name
 /// one macOS firmlink-aliased directory, so eviction keys on `evicts`
-/// and not byte equality.  `capability/exec.rs` pins the gate half.
+/// and not byte equality.  `capability/exec.rs` pins the guard half.
 #[cfg(target_os = "macos")]
 #[test]
-fn exec_join_drops_allow_clashing_with_deny_on_firmlink_alias() {
-    use crate::capability::admits_for_test;
-
-    let allow_map = exec_of(&crate::path::NormalizedPrefix::from_surface(
+fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
+    let allow = exec_of(&crate::path::NormalizedPrefix::from_surface(
         "/private/tmp/x",
     ));
-    let deny_map = exec_deny_of(&crate::path::NormalizedPrefix::from_surface("/tmp/x"));
+    let deny = exec_deny_of(&crate::path::NormalizedPrefix::from_surface("/tmp/x"));
 
-    let composed = allow_map.join(deny_map);
+    let composed = allow.widen(deny);
     assert!(
-        composed.allow_dirs.is_empty(),
-        "the deny must evict the alias-clashing allow from allow_dirs, got {:?}",
-        composed.allow_dirs
+        allow_dirs(&composed).is_empty(),
+        "the deny must evict the alias-clashing allow, got {:?}",
+        composed.dirs
     );
-    let mut grants = GrantStack::root();
-    grants.push(Capabilities {
-        exec: Some(composed),
-        ..Capabilities::root()
-    });
-    let candidate = ["/tmp/x/bin"];
     assert!(
-        !admits_for_test(&grants, &candidate, &candidate),
+        !admits(&stack_of(composed), "/tmp/x/bin"),
         "a binary under the aliased surface must be denied"
     );
 }
 
-/// The prefix universe folded through an allow-only and a deny-only `ExecMap`
+/// The prefix universe folded through an allow-only and a deny-only grant
 /// alike, so the laws below reach deny-overrides — the dimension `exec_of` on
 /// its own never enters.
-fn exec_universe() -> Vec<ExecMap> {
+fn exec_universe() -> Vec<ExecGrant> {
     prefix_universe()
         .iter()
         .flat_map(|p| [exec_of(p), exec_deny_of(p)])
@@ -478,24 +469,24 @@ fn exec_universe() -> Vec<ExecMap> {
 }
 
 #[test]
-fn exec_join_commutative_with_denies() {
+fn exec_widen_commutative_with_denies() {
     let u = exec_universe();
     for a in &u {
         for b in &u {
-            assert_eq!(a.clone().join(b.clone()), b.clone().join(a.clone()));
+            assert_eq!(a.clone().widen(b.clone()), b.clone().widen(a.clone()));
         }
     }
 }
 
 #[test]
-fn exec_join_associative_with_denies() {
+fn exec_widen_associative_with_denies() {
     let u = exec_universe();
     for a in &u {
         for b in &u {
             for c in &u {
                 assert_eq!(
-                    a.clone().join(b.clone().join(c.clone())),
-                    a.clone().join(b.clone()).join(c.clone())
+                    a.clone().widen(b.clone().widen(c.clone())),
+                    a.clone().widen(b.clone()).widen(c.clone())
                 );
             }
         }
@@ -503,49 +494,53 @@ fn exec_join_associative_with_denies() {
 }
 
 #[test]
-fn exec_join_idempotent_with_denies() {
+fn exec_widen_idempotent_with_denies() {
     for a in &exec_universe() {
-        assert_eq!(a.clone().join(a.clone()), a.clone());
+        assert_eq!(a.clone().widen(a.clone()), a.clone());
     }
 }
 
 #[test]
-fn join_commutative() {
+fn widen_commutative() {
     let a = witness_a();
     let b = witness_b();
-    assert_eq!(a.clone().join(b.clone()), b.join(a));
+    assert_eq!(a.clone().widen(b.clone()), b.widen(a));
 }
 
 #[test]
-fn join_associative() {
+fn widen_associative() {
     let a = witness_a();
     let b = witness_b();
     let c = witness_c();
-    assert_eq!(a.clone().join(b.clone().join(c.clone())), a.join(b).join(c),);
+    assert_eq!(
+        a.clone().widen(b.clone().widen(c.clone())),
+        a.widen(b).widen(c)
+    );
 }
 
 #[test]
-fn join_idempotent() {
+fn widen_idempotent() {
     let a = witness_a();
-    assert_eq!(a.clone().join(a.clone()), a);
+    assert_eq!(a.clone().widen(a.clone()), a);
 }
 
 #[test]
-fn join_none_is_identity() {
+fn widen_none_is_identity() {
     let a = witness_a();
-    assert_eq!(a.clone().join(Capabilities::default()), a);
-    assert_eq!(Capabilities::default().join(a.clone()), a);
+    assert_eq!(a.clone().widen(Capabilities::default()), a);
+    assert_eq!(Capabilities::default().widen(a.clone()), a);
 }
+
 /// Boolean vetoes are floors under base extension: an extension may add an
 /// opinion where the base is silent, but may not turn a base `false` into `true`.
 #[test]
-fn join_boolean_vetoes_are_sticky() {
-    let joined = witness_a().join(witness_b());
-    let editor = joined.editor.unwrap();
-    let shell = joined.shell.unwrap();
+fn widen_boolean_vetoes_are_sticky() {
+    let widened = witness_a().widen(witness_b());
+    let editor = widened.editor.unwrap();
+    let shell = widened.shell.unwrap();
 
-    assert_eq!(joined.net, Some(false));
-    assert_eq!(joined.detach, Some(false));
+    assert_eq!(widened.net, Some(false));
+    assert_eq!(widened.detach, Some(false));
     assert!(editor.read);
     assert!(!editor.write);
     assert!(!editor.tui);
@@ -553,73 +548,62 @@ fn join_boolean_vetoes_are_sticky() {
 }
 
 #[test]
-fn join_exec_widens_policies_and_unions_names() {
-    let m = witness_a().join(witness_b());
-    let exec = m.exec.unwrap();
-    assert_eq!(exec.literals.get("cargo"), Some(&ExecPolicy::Allow));
-    assert_eq!(exec.literals.get("ls"), Some(&ExecPolicy::Allow));
-    match exec.literals.get("git").unwrap() {
-        ExecPolicy::Subcommands(s) => {
-            assert!(s.iter().any(|x| x == "log") && s.iter().any(|x| x == "status"));
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
+fn widen_exec_widens_verdicts_and_unions_keys() {
+    let exec = witness_a().widen(witness_b()).exec.unwrap();
+    assert_eq!(exec.names.get("cargo"), Some(&Verdict::Allow));
+    assert_eq!(exec.names.get("ls"), Some(&Verdict::Allow));
+    assert_eq!(exec.names.get("git"), Some(&only(&["log", "status"])));
+    assert_eq!(exec.paths.get(&nprefix("/opt/tool")), Some(&Verdict::Deny));
 }
 
-/// The stack keeps a one-sided `Subcommands` restriction: layer A restricts
-/// `git` to `status` over an allowed binary directory, layer B repeats only
-/// the directory allow.  The stack's per-layer fold (`evaluate_exec`) never
-/// flattens the two, so the restriction survives whichever layer sits on
-/// top.
+/// The stack keeps a one-sided `Only` restriction: layer A restricts `git`
+/// to `status` over an allowed binary directory, layer B repeats only the
+/// directory allow.  The stack meets the layers' tables pointwise, so the
+/// restriction survives whichever layer sits on top.
 #[test]
 fn stack_keeps_a_one_sided_subcommand_restriction() {
-    // `longest_dir_match` only considers an absolute candidate, and what
-    // counts as absolute is the host's own answer: a leading `/` roots a
-    // path on Unix and is merely drive-relative on Windows.  So the pair is
-    // spelled for the host running the test, as the gate's own dir-match
+    // What counts as absolute is the host's own answer: a leading `/` roots
+    // a path on Unix and is merely drive-relative on Windows.  So the pair is
+    // spelled for the host running the test, as the guard's own dir-match
     // tests are.
     let (bin_dir, git_path) = if cfg!(windows) {
-        (r"C:\bin", r"C:\bin\git")
+        (r"C:\ral-test\bin", r"C:\ral-test\bin\git")
     } else {
-        ("/usr/bin", "/usr/bin/git")
+        ("/ral-test/bin", "/ral-test/bin/git")
     };
     let restricting = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::from([(
-                "git".into(),
-                ExecPolicy::Subcommands(BTreeSet::from(["status".into()])),
-            )]),
-            allow_dirs: BTreeSet::from([nprefix(bin_dir)]),
-            deny_dirs: BTreeSet::new(),
+        exec: Some(ExecGrant {
+            paths: BTreeMap::from([(nprefix(git_path), only(&["status"]))]),
+            dirs: dirs(&[(bin_dir, true)]),
+            ..ExecGrant::default()
         }),
         ..Default::default()
     };
     let silent = Capabilities {
-        exec: Some(ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([nprefix(bin_dir)]),
-            deny_dirs: BTreeSet::new(),
-        }),
+        exec: Some(exec_of(&nprefix(bin_dir))),
         ..Default::default()
     };
     for (first, second) in [(restricting.clone(), silent.clone()), (silent, restricting)] {
         let mut shell = crate::types::Shell::default();
         shell.with_capabilities(first, |sh| {
             sh.with_capabilities(second, |sh| {
-                sh.check_exec_args("git", &["git", git_path], &["push".to_string()])
+                let check = |sh: &mut crate::types::Shell, arg: &str| {
+                    sh.check_exec("git", file(git_path), vec![arg.to_string()])
+                        .map(drop)
+                };
+                check(sh, "push")
                     .expect_err("A's restriction must survive whichever layer sits on top");
-                sh.check_exec_args("git", &["git", git_path], &["status".to_string()])
-                    .expect("the admitted subcommand must still be allowed");
+                check(sh, "status").expect("the admitted subcommand must still be allowed");
             });
         });
     }
 }
 
-/// A `deny_path` is a sticky veto under join as under meet, so an extension
-/// silent on a base carve-out cannot erode it.
+/// A `deny_path` is a sticky veto under widening as under meet, so an
+/// extension silent on a base carve-out cannot erode it.
 #[test]
-fn join_fs_unions_prefixes_and_denies() {
-    let m = witness_a().join(witness_b());
+fn widen_fs_unions_prefixes_and_denies() {
+    let m = witness_a().widen(witness_b());
     let fs = m.fs.unwrap();
     assert!(fs.read_prefixes.iter().any(|p| p == np("/tmp").as_str()));
     assert!(
@@ -701,12 +685,9 @@ fn decode_rewrites_sigils_to_concrete_paths() {
         .expect("known sigils freeze");
     // Dir keys are stored slash-free.
     let exec = caps.exec.unwrap();
-    assert!(
-        exec.allow_dirs
-            .iter()
-            .any(|p| p.as_str() == "/h/.local/bin")
-    );
-    assert!(exec.allow_dirs.iter().any(|p| p.as_str() == "/usr/bin"));
+    let allowed = allow_dirs(&exec);
+    assert!(allowed.iter().any(|p| p.as_str() == "/h/.local/bin"));
+    assert!(allowed.iter().any(|p| p.as_str() == "/usr/bin"));
     let reads = caps.fs.unwrap().read_prefixes;
     assert_eq!(reads[0], "/h/notes");
     assert_eq!(reads[1], "/etc");
@@ -782,7 +763,7 @@ fn decode_accepts_bare_exec_name() {
     let v = map(vec![("exec", map(vec![("git", Value::string("allow"))]))]);
     let caps =
         decode_capability_map(&v, "test", &test_ctx("/h")).expect("bare command name is exempt");
-    assert!(caps.exec.unwrap().literals.contains_key("git"));
+    assert!(caps.exec.unwrap().names.contains_key("git"));
 }
 
 /// `cwd:proj` freezes to an absolute path — the sanctioned "relative to here"

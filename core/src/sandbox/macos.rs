@@ -11,9 +11,9 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use crate::path::{Rendered, render_paths, rendered_ancestors};
-use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
 use std::ffi::{CStr, CString};
-use std::fmt::Write;
+use std::fmt::{self, Write};
 use std::os::raw::{c_char, c_int};
 
 /// Apply `policy` to the current process.  Seatbelt entry cannot be undone.
@@ -155,14 +155,13 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Res
 pub(crate) const RENDERS_EXEC: bool = true;
 
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard, so an
-/// fs-only grant does not attenuate exec here.  `Restricted` folds the grant's
-/// admits, the `Exec` system paths and ral's own binary into one
-/// `file-read* process-exec` allow — Seatbelt needs both to spawn — then the
-/// denies, both operations each.  Coarser than the gate by design: this layer
-/// closes the interpreter-bypass class by denying what lies *outside* the
-/// admitted set.  `freeze_admitted_set` denies writes under every admitted
-/// dir, without which `(allow file-write*)` makes every veto hollow.  Rule by
-/// rule: `docs/ral-wiki/internals/seatbelt-profile.md`.
+/// fs-only grant does not attenuate exec here.  `Restricted` admits the
+/// loader base and ral's own binary first, then renders each rule in order,
+/// one [`Sbpl`] form each: Seatbelt is last-match-wins, the order the rules
+/// already carry.  Exec denies deny no reads: those are fs's.
+/// `freeze_admitted_set` denies writes under everything admitted, without
+/// which `(allow file-write*)` makes every veto hollow.  Rule by rule:
+/// `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
 /// `Err` when the platform base's or the self-exec path's own name-class
 /// expansion is not valid UTF-8, which [`render_paths`] refuses.
@@ -171,73 +170,86 @@ fn emit_exec_rules(
     exec: &ExecProjection<Rendered>,
     freeze_admitted_set: bool,
 ) -> Result<(), String> {
-    match exec {
-        ExecProjection::Unrestricted => {
-            lines.push("(allow process-exec)".to_string());
+    let ExecProjection::Restricted(rules) = exec else {
+        lines.push("(allow process-exec)".to_string());
+        return Ok(());
+    };
+    // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
+    // among them; only the loader base is ambient.
+    let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
+    // Bundled tools re-exec this binary (`--ral-bundled-tool`; the per-tool
+    // check is `vet`'s).  Rendered like the rest: execve presents `/tmp/x` as
+    // `/private/tmp/x`.
+    let self_exec = render_paths(super::reexec::self_exec_path_string().as_slice())?;
+    let mut clauses = String::new();
+    for path in &self_exec {
+        let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
+    }
+    for dir in &system_dirs {
+        let _ = write!(clauses, "\n  (subpath \"{}\")", escape_path(dir));
+    }
+    // An operand-less `(allow file-read* process-exec)` is an unconditional
+    // allow under SBPL, so an empty base must emit nothing.
+    if !clauses.is_empty() {
+        lines.push(format!("(allow file-read* process-exec{clauses})"));
+    }
+    lines.extend(rules.iter().map(|rule| Sbpl(rule).to_string()));
+    let files: Vec<&Rendered> = self_exec
+        .iter()
+        .chain(rules.iter().filter_map(|rule| match rule {
+            ExecRule::File { path, allow: true } => Some(path),
+            _ => None,
+        }))
+        .collect();
+    emit_ancestor_metadata(lines, files.iter().copied());
+    if freeze_admitted_set {
+        let dirs = system_dirs
+            .iter()
+            .chain(rules.iter().filter_map(|rule| match rule {
+                ExecRule::Dir { path, allow: true } => Some(path),
+                _ => None,
+            }));
+        for dir in dirs {
+            lines.push(format!(
+                "(deny file-write* (subpath \"{}\"))",
+                escape_path(dir)
+            ));
         }
-        ExecProjection::Restricted {
-            allow_paths,
-            allow_dirs,
-            deny_paths,
-            deny_dirs,
-            deny_basenames,
-        } => {
-            // `gcc → cc1 → as → ld` lives under CommandLineTools and would die
-            // at the first descendant exec were only `[exec]`'s dirs admitted.
-            let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
-            // Bundled tools re-exec this binary (`--ral-bundled-tool`; the
-            // per-tool gate is `vet`).  Rendered like the rest: execve presents
-            // `/tmp/x` as `/private/tmp/x`.
-            let self_exec = render_paths(super::reexec::self_exec_path_string().as_slice())?;
-            let mut clauses = String::new();
-            for path in allow_paths.iter().chain(&self_exec) {
-                let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
-            }
-            for dir in allow_dirs.iter().chain(&system_dirs) {
-                let _ = write!(clauses, "\n  (subpath \"{}\")", escape_path(dir));
-            }
-            // An operand-less `(allow file-read* process-exec)` is an
-            // unconditional allow under SBPL, so an empty admit set must
-            // emit nothing and leave deny-default in force.
-            if !clauses.is_empty() {
-                lines.push(format!("(allow file-read* process-exec{clauses})"));
-            }
-            emit_ancestor_metadata(lines, allow_paths.iter().chain(&self_exec));
-            // After the allow: last-match-wins.  Both ops — read alone lets the
-            // exec through to fail later, exec alone leaves the binary readable.
-            for path in deny_paths {
-                let escaped = escape_path(path);
-                lines.push(format!("(deny file-read* (literal \"{escaped}\"))"));
-                lines.push(format!("(deny process-exec (literal \"{escaped}\"))"));
-            }
-            for dir in deny_dirs {
-                let escaped = escape_path(dir);
-                lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
-                lines.push(format!("(deny process-exec (subpath \"{escaped}\"))"));
-            }
-            // A bare name vetoes wherever it resolves: a final-component regex,
-            // exec only — denying every same-named file's reads would over-reach.
-            for name in deny_basenames {
-                let pattern = format!("/{}$", escape_regex(name));
-                lines.push(format!("(deny process-exec (regex #\"{pattern}\"))"));
-            }
-            if freeze_admitted_set {
-                for dir in allow_dirs.iter().chain(&system_dirs) {
-                    lines.push(format!(
-                        "(deny file-write* (subpath \"{}\"))",
-                        escape_path(dir)
-                    ));
-                }
-                for path in allow_paths.iter().chain(&self_exec) {
-                    lines.push(format!(
-                        "(deny file-write* (literal \"{}\"))",
-                        escape_path(path)
-                    ));
-                }
-            }
+        for path in files {
+            lines.push(format!(
+                "(deny file-write* (literal \"{}\"))",
+                escape_path(path)
+            ));
         }
     }
     Ok(())
+}
+
+/// One kernel exec rule as one SBPL form.  An allow admits `file-read*`
+/// beside `process-exec`, which Seatbelt needs to spawn; a deny is exec only.
+struct Sbpl<'a>(&'a ExecRule<Rendered>);
+
+impl fmt::Display for Sbpl<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (allow, filter, path) = match self.0 {
+            ExecRule::Dir { path, allow } => (allow, "subpath", path),
+            ExecRule::File { path, allow } => (allow, "literal", path),
+            // Wherever the name resolves: a final-component regex.
+            ExecRule::Veto(name) => {
+                return write!(
+                    f,
+                    "(deny process-exec (regex #\"/{}$\"))",
+                    escape_regex(name)
+                );
+            }
+        };
+        let op = if *allow {
+            "allow file-read* process-exec"
+        } else {
+            "deny process-exec"
+        };
+        write!(f, "({op} ({filter} \"{}\"))", escape_path(path))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -252,12 +264,13 @@ enum SystemAccess {
 fn system_paths() -> &'static [(&'static str, SystemAccess)] {
     use SystemAccess::{Exec, Read};
     &[
-        ("/bin", Exec),
-        ("/usr", Exec),
+        ("/bin", Read),
+        ("/usr", Read),
+        // Rosetta's runtime, the loader analogue: no grant should name it.
         ("/Library/Apple/usr", Exec),
-        ("/Library/Developer/CommandLineTools", Exec),
-        ("/Applications/Xcode.app/Contents/Developer", Exec),
-        ("/opt/homebrew", Exec),
+        ("/Library/Developer/CommandLineTools", Read),
+        ("/Applications/Xcode.app/Contents/Developer", Read),
+        ("/opt/homebrew", Read),
         ("/lib", Read),
         ("/System", Read),
         ("/dev", Read),
@@ -377,7 +390,7 @@ unsafe extern "C" {
 mod tests {
     use super::{build_profile, withheld_doors};
     use crate::path::proper_ancestors;
-    use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
 
     /// The profile with its commentary dropped — what the kernel reads.  The
     /// `.sbpl` files argue at length for what they leave *out*, so a test
@@ -391,6 +404,35 @@ mod tests {
             .join("\n")
     }
 
+    fn dir(path: &str, allow: bool) -> ExecRule {
+        ExecRule::Dir {
+            path: path.into(),
+            allow,
+        }
+    }
+
+    fn file(path: &str, allow: bool) -> ExecRule {
+        ExecRule::File {
+            path: path.into(),
+            allow,
+        }
+    }
+
+    fn restricted(fs: FsProjection, rules: Vec<ExecRule>) -> SandboxProjection {
+        SandboxProjection {
+            fs,
+            exec: ExecProjection::Restricted(rules),
+            ..SandboxProjection::default()
+        }
+    }
+
+    /// The index of `form` in `profile`, which must hold it.
+    fn at(profile: &str, form: &str) -> usize {
+        profile
+            .find(form)
+            .unwrap_or_else(|| panic!("missing {form}:\n{profile}"))
+    }
+
     #[test]
     fn mac_shell_profile_allows_general_exec_when_unrestricted() {
         let profile = build_profile(&SandboxProjection::default()).unwrap();
@@ -399,234 +441,211 @@ mod tests {
     }
 
     #[test]
-    fn mac_profile_emits_combined_read_exec_rule_when_restricted() {
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: vec!["/usr/bin/git".into()],
-                allow_dirs: vec!["/usr/bin".into(), "/opt/homebrew/bin".into()],
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
-        let profile = build_profile(&policy).unwrap();
-        assert!(
-            profile.contains("(allow file-read* process-exec"),
-            "missing combined read+exec rule:\n{profile}"
+    fn mac_profile_renders_each_rule_as_one_form() {
+        let policy = restricted(
+            FsProjection::default(),
+            vec![
+                dir("/usr/bin", true),
+                dir("/opt/homebrew/bin", true),
+                file("/usr/bin/git", true),
+            ],
         );
-        assert!(profile.contains("(literal \"/usr/bin/git\")"));
-        assert!(profile.contains("(subpath \"/usr/bin\")"));
-        assert!(profile.contains("(subpath \"/opt/homebrew/bin\")"));
+        let profile = build_profile(&policy).unwrap();
+        for form in [
+            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
+            "(allow file-read* process-exec (subpath \"/opt/homebrew/bin\"))",
+            "(allow file-read* process-exec (literal \"/usr/bin/git\"))",
+            "(allow file-read-metadata (literal \"/usr\"))",
+            "(allow file-read-metadata (literal \"/usr/bin\"))",
+        ] {
+            at(&profile, form);
+        }
         assert!(
             !profile.contains("(allow process-exec)\n"),
             "wildcard process-exec leaked into restricted profile"
         );
     }
 
+    /// Seatbelt is last-match-wins, and the projection's order is precedence.
+    #[test]
+    fn mac_profile_keeps_the_rules_in_order() {
+        let policy = restricted(
+            FsProjection::default(),
+            vec![
+                dir("/x", true),
+                dir("/x/y", false),
+                file("/x/y/z", true),
+                ExecRule::Veto("z".into()),
+            ],
+        );
+        let profile = build_profile(&policy).unwrap();
+        let forms = [
+            "(allow file-read* process-exec (subpath \"/x\"))",
+            "(deny process-exec (subpath \"/x/y\"))",
+            "(allow file-read* process-exec (literal \"/x/y/z\"))",
+            r#"(deny process-exec (regex #"/z$"))"#,
+        ];
+        let indices: Vec<usize> = forms.iter().map(|form| at(&profile, form)).collect();
+        assert!(indices.is_sorted(), "out of order:\n{profile}");
+    }
+
     /// An exec veto under an unrestricted fs is otherwise hollow: the child
-    /// drops a binary into an admitted directory — `/opt/homebrew/bin` is
-    /// admitted unconditionally — and runs it from there under a name the
-    /// veto never mentions.
+    /// drops a binary into an admitted directory and runs it from there under
+    /// a name the veto never mentions.
     #[test]
     fn mac_profile_freezes_the_admitted_set_when_a_veto_meets_unrestricted_fs() {
-        let vetoed = SandboxProjection {
-            fs: FsProjection::Unrestricted,
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: vec!["/usr/bin".into()],
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: vec!["git".into()],
-            },
-            ..SandboxProjection::default()
-        };
+        let vetoed = restricted(
+            FsProjection::Unrestricted,
+            vec![dir("/usr/bin", true), ExecRule::Veto("git".into())],
+        );
         let profile = build_profile(&vetoed).unwrap();
-        for dir in ["/usr/bin", "/usr"] {
-            assert!(
-                profile.contains(&format!("(deny file-write* (subpath \"{dir}\"))")),
-                "{dir} stayed writable under a veto:\n{profile}"
-            );
-        }
+        assert!(
+            profile.contains("(deny file-write* (subpath \"/usr/bin\"))"),
+            "/usr/bin stayed writable under a veto:\n{profile}"
+        );
+        assert!(
+            !profile.contains("(deny file-write* (subpath \"/usr\"))"),
+            "/usr is no part of the admitted set:\n{profile}"
+        );
         // Freezing is the veto's price, so a grant that vetoes nothing pays it
         // not at all.
-        let open = SandboxProjection {
-            fs: FsProjection::Unrestricted,
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: vec!["/usr/bin".into()],
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
+        let open = restricted(FsProjection::Unrestricted, vec![dir("/usr/bin", true)]);
         assert!(
             !build_profile(&open).unwrap().contains("(deny file-write*"),
             "a veto-free grant had its admitted set frozen"
         );
     }
 
-    /// Apple spawns its real binaries from `CommandLineTools` (or Xcode.app),
-    /// so those dirs must fold into the combined rule: otherwise `gcc → cc1 →
-    /// as → ld` dies at the first descendant exec even with `/usr/bin/` in
-    /// `[exec]`.
+    /// The kernel exec set is the rules and the loader base: `/usr`, the
+    /// toolchains and Homebrew are readable but run only where the grant
+    /// (`system:`) names them.
     #[test]
-    fn mac_profile_folds_toolchain_into_combined_exec_rule_when_restricted() {
-        if !crate::path::exists("/Library/Developer/CommandLineTools") {
-            return; // No toolchain on this host.
-        }
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: vec!["/usr/bin".into()],
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
+    fn mac_profile_admits_no_ambient_exec_beyond_the_loader_base() {
+        let policy = restricted(
+            FsProjection::Restricted(FsRules::default()),
+            vec![dir("/usr/bin", true)],
+        );
         let profile = build_profile(&policy).unwrap();
-        let combined = profile
-            .find("(allow file-read* process-exec")
-            .expect("missing combined rule");
-        let user = profile[combined..]
-            .find("(subpath \"/usr/bin\")")
-            .expect("user admit missing from combined rule");
-        let toolchain = profile[combined..]
-            .find("(subpath \"/Library/Developer/CommandLineTools\")")
-            .expect("toolchain not folded into combined rule");
-        // Both fall inside the combined rule; the toolchain gets no allow of
-        // its own.
-        assert!(user > 0 && toolchain > 0);
+        let exec_allows: Vec<&str> = profile
+            .split("\n(")
+            .filter(|form| form.starts_with("allow file-read* process-exec"))
+            .collect();
+        assert!(
+            exec_allows
+                .iter()
+                .any(|form| form.contains("(subpath \"/usr/bin\")"))
+        );
+        for dir in [
+            "/bin",
+            "/usr",
+            "/opt/homebrew",
+            "/Library/Developer/CommandLineTools",
+            "/Applications/Xcode.app/Contents/Developer",
+        ] {
+            assert!(
+                !exec_allows
+                    .iter()
+                    .any(|form| form.contains(&format!("(subpath \"{dir}\")"))),
+                "{dir} is exec-admitted without a grant:\n{profile}"
+            );
+        }
+        assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
     }
 
     #[test]
     fn mac_profile_emits_only_system_base_when_restricted_to_empty() {
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: Vec::new(),
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
-        let profile = build_profile(&policy).unwrap();
-        // An empty exec map still admits the platform base, just as an empty
-        // fs grant still admits libc and dyld.
+        super::super::reexec::register_sandbox_self();
+        let profile = build_profile(&restricted(FsProjection::default(), Vec::new())).unwrap();
+        // An empty rule list still admits the platform base — ral itself —
+        // just as an empty fs grant still admits libc and dyld.
         assert!(profile.contains("(allow file-read* process-exec"));
         assert!(!profile.contains("(allow process-exec)\n"));
     }
 
+    /// Exec denies follow the allow they carve, and deny no reads: reads are
+    /// the fs grant's to refuse.
     #[test]
-    fn mac_profile_emits_subpath_deny_after_broad_allow() {
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: vec!["/usr/bin".into()],
-                deny_paths: vec!["/usr/bin/git".into()],
-                deny_dirs: vec!["/usr/bin/sensitive".into()],
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
+    fn mac_profile_exec_denies_follow_their_allow_and_deny_no_reads() {
+        let policy = restricted(
+            FsProjection::default(),
+            vec![
+                dir("/usr/bin", true),
+                dir("/usr/bin/sensitive", false),
+                file("/usr/bin/git", false),
+            ],
+        );
         let profile = build_profile(&policy).unwrap();
-        let allow_idx = profile
-            .find("(allow file-read* process-exec")
-            .expect("missing broad allow");
-        let deny_exec_idx = profile
-            .find("(deny process-exec (subpath \"/usr/bin/sensitive\"))")
-            .expect("missing deny process-exec for /usr/bin/sensitive");
-        let deny_read_idx = profile
-            .find("(deny file-read* (subpath \"/usr/bin/sensitive\"))")
-            .expect("missing deny file-read* for /usr/bin/sensitive");
-        let deny_git_idx = profile
-            .find("(deny process-exec (literal \"/usr/bin/git\"))")
-            .expect("missing deny process-exec for /usr/bin/git");
-        assert!(allow_idx < deny_read_idx, "deny read must follow allow");
-        assert!(allow_idx < deny_exec_idx, "deny exec must follow allow");
-        assert!(allow_idx < deny_git_idx, "literal deny must follow allow");
+        let allow = at(
+            &profile,
+            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
+        );
+        let deny_dir = at(
+            &profile,
+            "(deny process-exec (subpath \"/usr/bin/sensitive\"))",
+        );
+        let deny_git = at(&profile, "(deny process-exec (literal \"/usr/bin/git\"))");
+        assert!(allow < deny_dir && allow < deny_git);
+        assert!(
+            !profile.contains("(deny file-read*"),
+            "an exec deny carved reads:\n{profile}"
+        );
     }
 
-    /// A bare-name deny renders as a `/name$` regex after the broad allow, so
-    /// the name is exec-denied wherever it resolves under an admitted dir,
-    /// with metacharacters escaped so `c++` matches itself.
+    /// A veto renders as a `/name$` regex, so the name is exec-denied
+    /// wherever it resolves, with metacharacters escaped so `c++` matches
+    /// itself.
     #[test]
-    fn mac_profile_emits_basename_deny_as_final_component_regex() {
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: vec!["/usr/bin".into()],
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: vec!["git".into(), "c++".into()],
-            },
-            ..SandboxProjection::default()
-        };
+    fn mac_profile_emits_a_veto_as_a_final_component_regex() {
+        let policy = restricted(
+            FsProjection::default(),
+            vec![
+                dir("/usr/bin", true),
+                ExecRule::Veto("git".into()),
+                ExecRule::Veto("c++".into()),
+            ],
+        );
         let profile = build_profile(&policy).unwrap();
-        let allow_idx = profile
-            .find("(allow file-read* process-exec")
-            .expect("missing broad allow");
-        let deny_git_idx = profile
-            .find(r#"(deny process-exec (regex #"/git$"))"#)
-            .expect("missing basename deny for git");
-        assert!(
-            profile.contains(r#"(deny process-exec (regex #"/c\+\+$"))"#),
-            "metacharacters in a denied name must be escaped:\n{profile}"
+        let allow = at(
+            &profile,
+            "(allow file-read* process-exec (subpath \"/usr/bin\"))",
         );
-        assert!(
-            allow_idx < deny_git_idx,
-            "basename deny must follow the broad allow so last-match-wins"
-        );
-        // Exec-scoped only: the gate's basename veto never denies reads.
+        let veto = at(&profile, r#"(deny process-exec (regex #"/git$"))"#);
+        at(&profile, r#"(deny process-exec (regex #"/c\+\+$"))"#);
+        assert!(allow < veto, "a veto must follow the allow it overrides");
         assert!(
             !profile.contains(r#"(deny file-read* (regex #"/git$"))"#),
-            "basename deny must not carve reads:\n{profile}"
+            "a veto must not carve reads:\n{profile}"
         );
     }
 
     /// `/tmp` firmlinks to `/private/tmp`, and execve names the canonical
-    /// spelling: a literal exec rule left raw would gate a path the kernel
-    /// never presents, so both admit and veto expand like the dir rules do.
+    /// spelling: a literal exec rule left raw would rule on a path the kernel
+    /// never presents, so admit and deny alike expand like the dir rules do.
     #[test]
     fn mac_profile_expands_firmlinks_in_literal_exec_rules() {
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: vec!["/tmp/tool".into()],
-                allow_dirs: Vec::new(),
-                deny_paths: vec!["/tmp/evil".into()],
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
+        let policy = restricted(
+            FsProjection::default(),
+            vec![file("/tmp/tool", true), file("/tmp/evil", false)],
+        );
         let profile = build_profile(&policy).unwrap();
         for form in ["/tmp/tool", "/private/tmp/tool"] {
-            assert!(
-                profile.contains(&format!("(literal \"{form}\")")),
-                "admit for {form} missing:\n{profile}"
+            at(
+                &profile,
+                &format!("(allow file-read* process-exec (literal \"{form}\"))"),
             );
         }
         for form in ["/tmp/evil", "/private/tmp/evil"] {
-            assert!(
-                profile.contains(&format!("(deny process-exec (literal \"{form}\"))")),
-                "exec deny for {form} missing:\n{profile}"
-            );
-            assert!(
-                profile.contains(&format!("(deny file-read* (literal \"{form}\"))")),
-                "read deny for {form} missing:\n{profile}"
+            at(
+                &profile,
+                &format!("(deny process-exec (literal \"{form}\"))"),
             );
         }
     }
 
     /// The self-exec admit is the one exec path the projection never carries,
-    /// so it was the one literal chained on *after* expansion and emitted raw:
-    /// a ral binary running from `/tmp/…` was admitted under a spelling execve
-    /// never presents, and its own bundled-tool re-exec died under a
-    /// restricted profile.  It now comes through the same door as everything
-    /// else, so every form of it must appear.
+    /// so it must come through the same door as everything else and appear
+    /// in every form, or a ral binary running from `/tmp/…` is admitted under
+    /// a spelling execve never presents and its bundled-tool re-exec dies.
     ///
     /// `register_sandbox_self` pins this test binary, which is the only handle
     /// on what the profile will name; where that path touches no firmlink and
@@ -638,17 +657,7 @@ mod tests {
         super::super::reexec::register_sandbox_self();
         let self_exec = super::super::reexec::self_exec_path_string()
             .expect("registration pins this test binary");
-        let policy = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: Vec::new(),
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: Vec::new(),
-            },
-            ..SandboxProjection::default()
-        };
-        let profile = build_profile(&policy).unwrap();
+        let profile = build_profile(&restricted(FsProjection::default(), Vec::new())).unwrap();
         for form in crate::path::render_paths(&[self_exec]).unwrap() {
             assert!(
                 profile.contains(&format!("(literal \"{}\")", form.as_str())),

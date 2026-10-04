@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::CommandIdentity;
+use super::super::command::Head;
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
@@ -123,8 +123,8 @@ pub(super) fn spawn_stage(
         held,
     } = route;
     let kind = match &spec.launch {
-        StageLaunch::Direct { id, args } => StageKind::External(launch_external_stage_direct(
-            id, args, stdin, stdout, cx, &slot,
+        StageLaunch::Direct { head, args } => StageKind::External(launch_external_stage_direct(
+            head, args, stdin, stdout, cx, &slot,
         )?),
         StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
             stage,
@@ -140,14 +140,14 @@ pub(super) fn spawn_stage(
 
 /// Spawn an external stage with no thread hosting it.
 fn launch_external_stage_direct(
-    id: &CommandIdentity,
+    head: &Head,
     args: &[Value],
     stdin: ByteIn,
     stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<ExternalStage> {
-    let rc = command::vet(id, args, cx.shell)?;
+    let rc = command::vet(head, args, cx.shell)?;
     let mut cmd = command::build_command(
         &rc,
         crate::sandbox::Ownership::Kept,
@@ -173,7 +173,7 @@ fn launch_external_stage_direct(
     Ok(ExternalStage {
         watch: slot.watch(child),
         name: rc.shown,
-        args: rc.args,
+        args: rc.admitted.args().to_vec(),
         jail,
         pumps,
         envelope: leader,

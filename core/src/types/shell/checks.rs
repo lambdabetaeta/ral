@@ -4,7 +4,7 @@
 //! abstains, so a check passes unless some layer withholds.
 
 use super::Shell;
-use crate::capability::FsOp;
+use crate::capability::{Admitted, FsOp, Program};
 use crate::path::walk::Leaf;
 use crate::types::{Audit, CallSite, Context, SandboxProjection, Settled};
 
@@ -49,51 +49,25 @@ impl Shell {
         f(&self.context, &mut self.local.audit, site)
     }
 
-    /// Check `exec` for a command with one identity set — `policy_names` both
-    /// vetoes and admits.  Runtime dispatch, where the resolved and as-invoked
-    /// basenames widen the veto set, goes through [`Self::check_exec_call`].
+    /// Check `exec` for `program`, shown as `shown`, then hold `args` to any
+    /// subcommand restriction.  The [`Admitted`] is what the launcher demands.
     ///
     /// # Errors
-    /// `Err` if the active grant denies the command, or admits only a
+    /// `Err` if the active grant denies the program, or admits only a
     /// subcommand set that `args`'s first element misses.
-    pub fn check_exec_args(
+    pub(crate) fn check_exec(
         &mut self,
-        display_name: &str,
-        policy_names: &[&str],
-        args: &[String],
-    ) -> Settled<()> {
-        self.check_exec_call(display_name, policy_names, policy_names, args)
-    }
-
-    /// Check `exec` deny-broad, allow-narrow: `deny_names` is the wide set
-    /// consulted for vetoes, `policy_names` the narrow one that may admit.
-    /// `CommandIdentity::deny_names_from` widens the latter into the former.
-    ///
-    /// # Errors
-    /// `Err` if the active grant denies the command, or admits only a
-    /// subcommand set that `args`'s first element misses.
-    pub(crate) fn check_exec_call(
-        &mut self,
-        display_name: &str,
-        deny_names: &[&str],
-        policy_names: &[&str],
-        args: &[String],
-    ) -> Settled<()> {
+        shown: &str,
+        program: Program,
+        args: Vec<String>,
+    ) -> Settled<Admitted> {
         self.audit_call(|ctx, audit, site| {
-            crate::capability::check_exec_args(
-                ctx,
-                display_name,
-                deny_names,
-                policy_names,
-                args,
-                audit,
-                site,
-            )
+            crate::capability::check_exec(ctx, shown, program, args, audit, site)
         })
     }
 
     /// Check an fs read *by name* — a predicate, a listing, a module load.
-    /// `path` comes from `Shell::resolve`, so the gate's sole input is
+    /// `path` comes from `Shell::resolve`, so the guard's sole input is
     /// already cwd-anchored and `.`/`..`-collapsed.  Anything that opens the
     /// name, for reading or writing, takes [`Self::locate`] instead.
     ///
@@ -191,9 +165,7 @@ impl Shell {
     /// The OS-renderable projection of the live capability stack; `None` when
     /// no layer restricts enough to need an OS sandbox at all.
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
-        let ctx = &self.context;
-        let path_env = ctx.env_overrides().get("PATH").map_or("", String::as_str);
-        crate::capability::sandbox_projection(&ctx.grants, &ctx.resolver(), path_env)
+        crate::capability::sandbox_projection(&self.context, None)
     }
 
     /// Whether the live stack permits birthing a process this session stops

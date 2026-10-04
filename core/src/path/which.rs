@@ -2,7 +2,7 @@
 //!
 //! Sibling to the grant pipeline, but `$PATH` is only a colon-separated
 //! list walked in turn, so the sigil/lex/canon stages do not apply.
-//! Dispatch arrives via `runtime::command::identity`.
+//! Dispatch arrives via `runtime::command::head`.
 //!
 //! The walk costs one stat per `PATH` entry, and on Windows one per
 //! `%PATHEXT%` suffix per entry, so [`locate`] memoises it for the extent of a
@@ -161,9 +161,8 @@ thread_local! {
     ///
     /// Thread-local and lock-free, because a run's evaluation is
     /// single-threaded on the calling thread.  It hangs off no `Shell` and no
-    /// `Context` on purpose: two of the hottest callers,
-    /// `runtime::command::identity`'s `walk_path` and `policy_names`, hold
-    /// only a `&Context`.
+    /// `Context` on purpose: the hottest callers, `runtime::command::head`'s
+    /// resolution and `capability::exec`'s compile, hold no `Shell`.
     ///
     /// A newly installed or newly deleted executable is therefore invisible
     /// for at most the remainder of the current top-level run — one submitted
@@ -372,7 +371,7 @@ fn windows_pathext_suffixes() -> Vec<String> {
 
 /// Mirror the Windows resolver's `%PATHEXT%` fallback, so
 /// `locate("python")` finds `python.exe`.  `capability::exec` keeps its
-/// own copy of the default list to strip suffixes off grant keys.
+/// own copy of the default list to strip suffixes off command names.
 ///
 /// The resolver *appends* each suffix; it never substitutes one.  Building the
 /// candidates with `Path::with_extension` — which replaces — resolved a bare

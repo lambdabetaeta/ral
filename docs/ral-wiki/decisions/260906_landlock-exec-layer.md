@@ -36,7 +36,8 @@ Four findings shape it.
    `Execute`-admitted directory.
 
 3. **`execve` of a dynamic binary needs `Execute` on the binary and its
-   `PT_INTERP` only.** The shared libraries the loader then maps need no right
+   `PT_INTERP` only** — and of a `#!` script, on its interpreter, which
+   [[decisions/261004_exec-carriers|exec-carriers]] admits as a carrier. The shared libraries the loader then maps need no right
    from this layer. The platform base is therefore the linker files themselves
    — `ld*.so*` under the `/lib` and `/usr/lib` variants and one level down for
    Debian multiarch — and never a command directory, since `/usr/bin` in the

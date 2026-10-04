@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b1a0f280
-generated_at_date: 2026-09-21
+generated_at_commit: f4e88bce
+generated_at_date: 2026-10-05
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -16,9 +16,9 @@ narrow.
 
 Every runtime yes/no over the dynamic capability stack is a free
 `capability::check_*(&Context, …)` function that folds the whole stack
-(`ctx.grants`): `admits_head`, `check_exec_args`, `check_fs_op` (a read by
+(`ctx.grants`): `admits_head`, `check_exec`, `check_fs_op` (a read by
 name) and `check_fs_exact` (the object `Shell::locate` walked to), the
-editor/shell bool gates, and the OS-renderable `sandbox_projection`. The
+editor/shell bool checks, and the OS-renderable `sandbox_projection`. The
 fold combines the layers' *verdicts*; there is no `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]). The
 `capability` module is the only place authority is decided — a module boundary
@@ -29,9 +29,11 @@ the live judgment, and `SandboxProjection` are distinct and not one is argued in
 
 Submodules:
 
-- `enforce.rs` — the point-of-use gates: head admission, the
-  audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`,
-  `check_fs_exact`), and the editor/shell bool gates. The fs gate is split
+- `enforce.rs` — the in-process guards: head admission, the
+  audit-bearing exec/fs checks (`check_exec`, `check_fs_op`,
+  `check_fs_exact`), and the editor/shell bool checks. `check_exec` returns
+  `Admitted` — the program, its argv and the table that judged them, private
+  fields, minted nowhere else — which is all a launch reads. The fs guard is split
   so the judgment is reusable without the report: `fs_verdict` is the
   decision — `Guarded` first, for a write onto a boot-pinned sandbox binary
   (`sandbox::pinned_binary`, by inode), before any grant is folded —
@@ -42,7 +44,10 @@ Submodules:
   is the door every open takes: `path::walk` to the object, then
   `check_fs_exact` on `Located::real`; `GrantStack::admits_fs_exact` is the
   quiet twin a write card asks before reading a before-image;
-- `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
+- `sandbox.rs` — the OS-renderable `sandbox_projection` builder; exec is
+  `ExecRules::kernel` of the `Admitted`'s own table, with the carriers of its
+  allowed files and its program (`sandbox::carriers`), so the profile renders
+  the table that judged the launch rather than a second compile;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
   grant makes both `exec`-admitted and `fs`-writable, judged with
   `path::covers` on the `GrantStack`'s two prefix sets folded by
@@ -51,12 +56,16 @@ Submodules:
   confinement that wrote it, and only a runner outside the projection turns
   the shape into an escape — so it reports and never denies. Findings surface at grant push and at an exarch profile load
   ([[design/grant|grant]]);
-- `exec.rs` — per-layer exec verdicts; the admitted arm carries `Admit`
-  (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict; the
-  literal comparison is case- and PATHEXT-insensitive under Windows path
-  semantics, so a bare `git` grant admits a resolved `GIT.EXE`; every
-  fold-equal key is met before the verdict, so a `git` deny still vetoes an
-  exact `GIT` allow;
+- `exec.rs` — exec authority as rules about programs
+  ([[decisions/261004_exec-rules|exec-rules]]): `Program` (`Tool` or `File {
+  path, real }`) and its view `Subject`; `ExecRules::compile`, one layer's
+  `ExecGrant` to a table over real paths, tools, dirs and vetoes, a bare key
+  resolved on the host `PATH`; `ExecRules::verdict`, the only verdict, by
+  `Rank` (`Dir(depth) < Carrier < Exact < Veto`, the greatest deciding, equal
+  ranks meeting); `Meet for ExecRules`, pointwise; `rules`, the stack's
+  table, compiled per question; `ExecRules::kernel`, the same rules in `Rank`
+  order for last-match-wins. `name_key` folds case and strips
+  `.com`/`.exe`/`.bat`/`.cmd` on Windows, for bare names only;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` key —
@@ -64,7 +73,8 @@ Submodules:
   ([[design/audit|audit]]); its
   exec-map freeze expands the two *exec-only* sigils `path:` (every `$PATH`
   component) and `system:` (the platform's tool roots,
-  `sigil::system_tool_roots`), and drops bundled-tool grants for coreutils a
+  `sigil::system_tool_roots`) into the `ExecGrant`'s dirs, every entry through
+  `meet_insert`, and drops bundled-tool grants for coreutils a
   host does not ship (`COREUTILS_UNIX_ONLY_TOOLS`);
 - `load.rs` — `load_capabilities_from_path` / `_from_str` for `.ral`
   capability profiles, compiled under `grant`'s own declared table
@@ -76,13 +86,14 @@ The capability *types* live in [[map/core/shell-state|types/capability]]: the
 single always-frozen `Capabilities`, resolved at decode by the freeze pass
 inside `decode_capability_map` ([[design/capability-freeze|freeze boundary]]);
 plus `FsPolicy`, `GrantStack`,
-`Meet`, `Join`, and the exec authority
-`ExecMap { literals, allow_dirs, deny_dirs }` — `literals` keyed by name/path
-under the three-valued `ExecPolicy`, the two directory sets stored already
-partitioned by verdict as `BTreeSet<NormalizedPrefix>`, so a verdict reads
-the partition it needs rather than re-deriving it, and a deny survives the
-spelling and the depth it is judged on
-([[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]).
+`Meet`, `Widen`, and the authored exec grant
+`ExecGrant { names, paths, dirs }` — bare keys, frozen path keys and frozen
+dir keys, names and paths under `Verdict` (`Deny < Only(s) < Allow`), dirs
+under a `bool`, since a dir cannot restrict argv; every entry added by
+`meet_insert`. It rides the wire (path-keyed maps as pair sequences) and is
+never matched directly; `ExecRules` is what judges. The kernel's view is
+`ExecProjection::Restricted(Vec<ExecRule>)`, an ordered `Dir`/`File`/`Veto`
+list.
 
 Path resolution for grant matching is `core/src/path/`: a fixed staged rule,
 plus `which.rs` for PATH search.
@@ -135,37 +146,32 @@ from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
   `runtime::command::vet` reads a verdict rather than taking a second walk.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
-- `capability::sandbox::resolve_literal` anchors its exec-key resolution through
-  `Resolver::search_cwd`, so the OS profile and the in-ral gate name the same
-  binary.
+- `ExecRules::compile` walks the process's own `PATH` with
+  `SearchCwd::nowhere`, so neither a scoped `PATH` nor a relative entry can
+  redirect a bare key.
 
 A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical — what
-the author wrote, and what the OS profile emits, since the sandbox matcher works
-lexically), its `resolved` form (symlinks followed), and its `Namespace`, all
-fixed by one disk consultation at the freeze door. The duality is load-bearing,
-not redundant, and **neither form is the real one**:
-[[invariants/fs-judges-objects-exec-judges-names|fs authority is over objects
-and is judged on `resolved`; exec authority is over names and is judged on
-`surface`]]. So the type offers containment doors per authority — `covers`
-(below) for fs, and for the exec gate
-`NormalizedPrefix::grant_depth` on the surface and `veto_depth`, which widens a
-deny to the resolved form too — and no other: `lex::path_within` and its string twin are `pub(super)`,
+the author wrote, kept for display), its `resolved` form (symlinks followed),
+and its `Namespace`, all fixed by one disk consultation at the freeze door.
+[[invariants/grants-judge-objects|Every authority is judged on `resolved`]]:
+`covers` (below) for fs, `RealPath::frozen` (`real.rs`) for the exec table,
+and `evicts` for composition — and no other door: `lex::path_within` and its string twin are `pub(super)`,
 so the form-blind kernel does not leave `core/src/path/`, `surface_path` is
 private to `resolved.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
 rather than documented because the `xdg:` freeze guard once chose the form for
-itself — asking on the surface while the gate it guarded matched the resolved
+itself — asking on the surface while the check it guarded matched the resolved
 form — and read a symlink out of `$HOME` as contained.
 
 `prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
 disk-free: `covers` is the one *fs* containment judgment, keyed on
 `(namespace, resolved)` so prefixes in different namespaces never overlap and
 a cross-namespace meet is the empty, fail-closed intersection; `meet_prefixes`
-is the kernel `PrefixSet::meet`, `ExecMap::join` and the deputy fold share;
+is the kernel `PrefixSet::meet` and the deputy fold share;
 `PrefixSet::outside` drops the allows a deny region covers, so no projection
 carries an allow beneath a deny. `PrefixSet::resolve` is the lone door here that still holds a
 `Resolver` — the sandbox-projection fold, which must render a prefix that was
-never frozen (a bare exec-dir string, a `~`-headed fs prefix).
+never frozen (a `~`-headed fs prefix).
 
 XDG base directories resolve through one resolver, `basedir.rs`
 (`XdgKind`, `resolve_xdg`): an absolute `$XDG_*_HOME` override else the
@@ -184,15 +190,18 @@ declared **filesystem and network** capabilities — and **exec**, wherever a
 backend carries the allow-list into the kernel, so a grant whose only opinion
 is `exec` engages the sandbox too (`sandbox::EXEC_ENFORCED`, the one statement
 of that fact, read by `capability::sandbox::sandbox_projection`). Exec is
-gated in-process on every platform (`capability::check_exec_args`) before the
+guarded in-process on every platform (`capability::check_exec`) before the
 spawn; both Unix
-backends additionally render the allow-list into the kernel, catching the
-re-execs the in-process check never sees (`sh -c`, `find -exec`) — macOS as a
-Seatbelt `process-exec` clause, Linux as a Landlock `Execute` ruleset the
-payload enters inside the bwrap envelope (`linux/landlock.rs`; Landlock being
-allow-list only, a deny *inside* an admit stays with the in-process gate
-there). The AppContainer on Windows has no path-exec filter, so there the
-in-process gate stands alone (the deny-by-default fs projection still bounds
+backends additionally render the same rules into the kernel, catching the
+re-execs the in-process guard never sees (`sh -c`, `find -exec`) — macOS as
+Seatbelt `process-exec` forms in rule order, Linux as a Landlock `Execute`
+ruleset the payload enters inside the bwrap envelope (`linux/landlock.rs`;
+Landlock being allow-list only, a deny *inside* an allowed directory stays
+with the in-process guard there). `carriers.rs` computes what the kernel
+must admit beside them for a script to start: system-vouched `#!`
+interpreters and macOS shims, by `trusted_real`, never `env`'s target
+([[decisions/261004_exec-carriers|exec-carriers]]). The AppContainer on
+Windows has no path-exec filter, so there the in-process guard stands alone (the deny-by-default fs projection still bounds
 which images a child can *read*, and so load, at all).
 
 Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
@@ -200,7 +209,7 @@ Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
 is already confined by the [[map/core/io-process|spawn jail]] (a fresh
 unprivileged uid and a per-exec cgroup), the daemon disables the
 unprivileged user namespaces bwrap needs, and the guest has no network
-device for `net` to govern; the in-process gates apply unchanged
+device for `net` to govern; the in-process guards apply unchanged
 (`docs/SPEC.md` §12.11).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
@@ -251,13 +260,15 @@ device for `net` to govern; the in-process gates apply unchanged
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
-  confining that *one* child: a `LaunchTarget::Host` external, or a
-  `LaunchTarget::BundledTool` placed as `ral --ral-bundled-tool <tool>`. macOS
+  confining that *one* child, the `Admitted`'s program: a `Program::File`
+  by the absolute path the guard judged, or a `Program::Tool` placed as
+  `ral --ral-bundled-tool <tool>`. macOS
   and Linux share one trampoline argv, `trampoline_tail`: the payload is the
   pinned ral itself, `ral --sandbox-projection <json>` followed by either
-  `--ral-sandbox-exec <host>` or `--ral-bundled-tool <tool>`, so the child
-  enters the process sandbox in `early_init` and only then becomes the target,
-  `serve_sandbox_exec` `execve`ing a host program inside the confinement.
+  `--ral-sandbox-exec <path>` or `--ral-bundled-tool <tool>`, so the child
+  enters the process sandbox in `early_init` from the projection alone and
+  only then becomes the target, `serve_sandbox_exec` `execve`ing that path
+  inside the confinement.
   macOS spawns that trampoline directly; Linux spawns it under `bwrap`
   (`make_command_with_policy`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. That order is forced rather than chosen: a Landlock
@@ -266,7 +277,8 @@ device for `net` to govern; the in-process gates apply unchanged
   `make_command_with_policy` therefore takes a `Payload { program, args, image
   }` — `program` is the trampoline, `image` the host binary it will exec in
   turn — and binds both read-only where absolute, since bwrap cannot exec what
-  it cannot see. Windows builds the
+  it cannot see, with every allowing `ExecRule::File`, carriers included, not
+  already under a bind. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
   spawn is the confinement point — never a re-exec child; the
@@ -344,7 +356,8 @@ backend pays to express an object policy in Seatbelt's name language — in
 [[internals/seatbelt-profile|seatbelt-profile]].
 
 Path-scoped *exec* confinement on Linux is a Landlock layer the payload enters
-inside the envelope; its deny sets stay with the in-process gate —
+inside the envelope; a deny inside an allowed directory stays with the
+in-process guard —
 [[decisions/260906_landlock-exec-layer|landlock-exec-layer]].
 
 `diag.rs` (with per-platform readers in `diag/macos.rs` / `diag/linux.rs`) turns
@@ -380,7 +393,7 @@ yields the fixed, pathless hint — never a fabricated path.
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
-access has no in-process gate, so a bundled tool is never inlined — it is
+access has no in-process guard, so a bundled tool is never inlined — it is
 spawned as a `ral --ral-bundled-tool` child and, under a restrictive grant,
 floored by the OS profile of the per-command sandbox it runs in
 ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],

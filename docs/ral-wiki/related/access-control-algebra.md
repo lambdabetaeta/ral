@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a2d120d2
-verified_at_date: 2026-09-11
-anchors: [GrantStack, Capabilities::join, FsPolicy::join, ExecPolicy::meet, ExecPolicy::join, join_literal_exec, evaluate_exec, allow_region, deny_region, check_fs_op, layer_exec_verdict, for_invocation]
+verified_at_commit: f4e88bce
+verified_at_date: 2026-10-05
+anchors: [GrantStack, Capabilities::widen, FsPolicy::widen, Verdict::meet, Verdict::widen, ExecGrant::widen, ExecRules::meet, ExecRules::verdict, allow_region, deny_region, check_fs_op, for_invocation]
 against: [design/grant, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
 
@@ -25,7 +25,8 @@ Every rule does one of three things to a given command or path: **allow** it,
   the access at hand. Nothing flattens two layers into one — see below for
   why it cannot.
 - **extend-base** (`--extend-base`) — *widen*. The result adds the overlay's
-  grants on top of the base (`Capabilities::join`), producing one layer.
+  grants on top of the base (`Capabilities::widen`, through the `Widen`
+  trait), producing one layer.
 
 ## The one rule: a deny is a floor
 
@@ -80,7 +81,9 @@ These composition rules have standard names; ral picks the conservative one.
   catalog firewall-rule anomalies over prefix containment — *shadowing*,
   *generalization*, *correlation*, *redundancy*. A broad allow over a narrow deny
   is *generalization*; "most-specific match wins" is the discipline that tames
-  it, the same one grant's symlink-resolving `path_within` enforces
+  it, and in exec it is literal: the derived `Ord` on `Rank`
+  (`Dir(depth) < Carrier < Exact < Veto`), the greatest matching rank
+  deciding, over paths `path_within` has already resolved
   ([[internals/capability-enforcement|capability-enforcement]]).
 - **The operators form an algebra.** Bonatti, di Vimercati & Samarati give policy
   *union*, *intersection*, and *difference*; ral's restrict/extend-base are the
@@ -91,7 +94,7 @@ These composition rules have standard names; ral picks the conservative one.
 For the formal shape: the value space is **Belnap's four-valued logic** — allow,
 deny, neither, conflict — which carries *two* orderings at once, a **bilattice**
 (Ginsberg; Fitting), applied to access control by Bruns & Huth's PBel language.
-`restrict` is a meet on one ordering (permission); `extend-base` is a join on the
+`restrict` is a meet on one ordering (permission); `extend-base` is a widen on the
 other (assertedness), with deny-overrides as the fixed rule for conflicts. The
 practical upshot is the only thing needed day to day: **deny wins, both ways.**
 That this is *not* a single lattice — it genuinely has two orderings — is why one
@@ -113,6 +116,18 @@ command and intersects the answers, where the same question *is* closed.
 (This was a real hole: a flattened `meet_literal_exec` dropped the one-sided
 restriction — [[decisions/260906_object-not-name|object-not-name]].)
 
+> **Amended 2026-10-04.** The argument holds of the *authored* form: an
+> `ExecGrant { names, paths, dirs }` is still not closed under intersection,
+> and the stack still keeps its layers. But each layer now compiles, on every
+> question, to an `ExecRules` table keyed by objects — real paths, bundled
+> tools, directories, vetoed names — and those tables *are* closed under
+> meet. `ExecRules::meet` is pointwise over the union of supports, storing at
+> each key both sides' total verdicts met, so
+> `verdict(a ∧ b, p) = verdict(a, p) ∧ verdict(b, p)`, pinned by a property
+> test. The one-sided key above survives as exactly "A's restriction ∧ B's
+> directory verdict on the resolved path", computed once the name is a file
+> ([[decisions/261004_exec-rules|exec-rules]]).
+
 ## Cross-check: the code matches
 
 The composition site is `exarch::policy::for_invocation`, which produces a
@@ -120,14 +135,14 @@ The composition site is `exarch::policy::for_invocation`, which produces a
 deny layers for the restrict files and the credential files.
 
 - **restrict** — each file is a layer; `allow_region` intersects fs regions
-  across layers, `deny_region` unions them, `evaluate_exec` intersects the
-  layers' exec verdicts. Deny-overrides. ✔
-- **extend-base** — `FsPolicy::join` unions denies *and* prefixes;
-  `ExecPolicy::join` and `join_literal_exec` make `Deny` win; `ExecMap::join`
-  lets a deny-dir win the exact-key clash. Deny-overrides, uniform with fs. ✔
+  across layers, `deny_region` unions them, `ExecRules::meet` meets the
+  layers' compiled exec tables. Deny-overrides. ✔
+- **extend-base** — `FsPolicy::widen` unions denies *and* prefixes;
+  `Verdict::widen` makes `Deny` win key by key; `ExecGrant::widen` lets a
+  deny-dir evict a clashing allow-dir. Deny-overrides, uniform with fs. ✔
 - **at the point of use** — `check_fs_op` and `Shell::locate` test denies
-  before grants and fold every stack layer; `layer_exec_verdict` checks vetoes
-  first. Any layer's deny denies. ✔
+  before grants and fold every stack layer; `ExecRules::verdict` ranks a veto
+  above every other rule. Any layer's deny denies. ✔
 
 ## See also
 

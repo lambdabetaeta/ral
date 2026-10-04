@@ -7,7 +7,6 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
-use crate::path::process_cwd;
 use crate::path::tilde::{TildePath, expand_tilde_path};
 use crate::types::Error;
 use serde::{Deserialize, Serialize};
@@ -17,22 +16,18 @@ use std::path::PathBuf;
 /// it, and `within [dir: …]` is its local-state handler, restoring the cell on
 /// every exit.
 ///
-/// It keeps no previous directory, hence no `OLDPWD`.  `None` means unseeded — readers fall back through [`process_cwd`] until
+/// It keeps no previous directory, hence no `OLDPWD`.  `None` means unseeded — readers fall back through [`process_cwd`](crate::path::process_cwd) until
 /// [`Shell::seed_default_env_vars`] or [`Shell::seed_cwd`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cwd(pub(in crate::types::shell) Option<PathBuf>);
 
 impl Shell {
-    /// The logical cwd: the cell's directory, else [`process_cwd`] for an
-    /// unseeded shell, else `"."` if even `getcwd(3)` fails.
+    /// The logical cwd, [`Context::launch_cwd`](super::Context::launch_cwd).
     ///
     /// Every path-resolving builtin routes through here, so a `within` scope or
     /// a prior `cd` binds the whole interpreter, not just spawned children.
     pub fn cwd(&self) -> PathBuf {
-        if let Some(p) = self.context.cwd() {
-            return p.to_path_buf();
-        }
-        process_cwd().unwrap_or_else(|| PathBuf::from("."))
+        self.context.launch_cwd()
     }
 
     /// State the logical cwd outright, overriding whatever
@@ -95,7 +90,7 @@ impl Shell {
     }
 
     /// Resolve `path` against the effective cwd, minting a
-    /// [`crate::path::ResolvedPath`] that the fs gates consume directly; a
+    /// [`crate::path::ResolvedPath`] that the fs guards consume directly; a
     /// caller that opens the file takes `.into_inner()` / `.as_path()`.
     pub fn resolve(&self, path: &str) -> crate::path::ResolvedPath {
         self.context.resolver().resolve(path)
@@ -105,8 +100,8 @@ impl Shell {
     /// effective `PATH` and cwd; `None` if there is none.
     ///
     /// A filesystem question only — admission is `capability::admits_head`
-    /// (head alone) and [`Self::check_exec_args`] (full call).  `which` and the
-    /// dispatch error path pair the two to tell denied-but-installed from absent.
+    /// (head alone) and [`Self::check_exec`] (full call).  `which` pairs
+    /// the two to tell denied-but-installed from absent.
     pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {
         let env_path = self.context.env_overrides.get_or_host("PATH");
         let cwd = self.cwd();

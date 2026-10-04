@@ -87,12 +87,12 @@ impl PrefixSet {
     }
 
     /// The deepest prefix whose region contains `path`, if any — the
-    /// containment question the runtime gate asks, decided against the same
+    /// containment question the in-process guard asks, decided against the same
     /// `resolved` forms [`covers`] keys on and through the same alias-aware
     /// [`path_within`].
     ///
     /// Deepest by [`identity_depth`](super::lex::identity_depth), as
-    /// `capability::exec::longest_dir_match` ranks directories: the answer
+    /// `capability::exec` ranks directories: the answer
     /// names the narrowest authority the path fell under, which is what the
     /// audit record wants, and a set that has been through
     /// [`meet`](Meet::meet) has no order left to prefer instead.
@@ -271,7 +271,7 @@ mod tests {
         );
     }
 
-    /// `covering` answers the question the runtime gate asks, so it decides
+    /// `covering` answers the question the in-process guard asks, so it decides
     /// on the *resolved* form: a prefix that spells as an ancestor of the
     /// access path but resolves elsewhere covers nothing.
     #[test]
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// Nested prefixes both cover; the answer is the narrowest authority the
-    /// path fell under, which is what the gate's audit record reports.
+    /// path fell under, which is what the guard's audit record reports.
     #[test]
     fn covering_returns_the_deepest_match() {
         let s = set(&[lit("/a"), lit("/a/b"), lit("/a/b/c"), lit("/other")]);
@@ -296,14 +296,14 @@ mod tests {
     }
 
     /// The empty set is the fail-closed meet, so it must cover nothing —
-    /// this is what turns a collapsed intersection into a gate denial.
+    /// this is what turns a collapsed intersection into a guard denial.
     #[test]
     fn the_empty_set_covers_nothing() {
         assert_eq!(PrefixSet::default().covering(Path::new("/a")), None);
     }
 
     /// Depth is counted in components of the alias-folded form, as
-    /// `capability::exec::longest_dir_match` counts it: `/private/tmp` is an
+    /// `capability::exec` counts it: `/private/tmp` is an
     /// alias of the one-deep `/tmp` yet spells longer, so a character count
     /// would rank it above the genuinely deeper `/tmp/a`.
     #[cfg(target_os = "macos")]

@@ -10,15 +10,24 @@ try {
     grant [exec: ['/bin/sh': [-c, -s]]] { grant [exec: ['/bin/sh': [-c]]] { /bin/sh -s } }
 } { |_| echo 'intersection denies outer-only' }
 
+# A head's spelling is not its identity: `//` and `.` fold before the key is met
+grant [exec: ['/bin/sh': [-c]]] { /bin//./sh -c 'exit 0' }
+echo 'unfolded head runs'
+
 # A thunk is not an exec policy
 try { grant [exec: [cmd: { return ok }]] { cmd } } { |e| echo $e[message] }
 
 # Refusal needs no audit trail around it
 try { grant [exec: ['/bin/echo': 'allow']] { /bin/sh -c 'exit 0' } } { |_| echo 'refused' }
 
-# A directory key admits what lives under it and nothing else
+# A directory key admits what lives under it and nothing else: a link under
+# the key is judged at the file it names
 grant [exec: ['/bin/': 'allow']] { /bin/echo 'under the key' }
-try { grant [exec: ['/bin/': 'allow']] { /usr/bin/env true } } { |_| echo 'outside the key denied' }
+let d = temp-dir
+ln -s /bin/echo "$d/echo"
+let key = "$d/"
+try { within [dir: $d] { grant [exec: [$key: 'allow']] { ./echo hi } } } { |_| echo 'outside the key denied' }
+rm -rf $d
 
 # An inner layer's exec map is a complete opinion: /bin/echo is not in it
 try {

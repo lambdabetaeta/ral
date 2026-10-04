@@ -2876,7 +2876,11 @@ A literal command accepts:
 
 The subcommand check examines only the first argument. A command with no first argument is denied by a subcommand policy.
 
-A key ending in `/` names every executable beneath that directory. Directory keys accept only `'allow'` or `'deny'`. An allowing directory covers commands named beneath it as written; a denying one also covers commands beneath the directory it resolves to, so denying a directory that is a symbolic link denies its target too. The most specific matching directory wins; an equal allow and deny resolves to deny. A literal denial also vetoes the command by basename, so `bash: 'deny'` cannot be avoided by spelling `/bin/bash`.
+Every rule judges the file that will run: its real path, with symbolic links followed. A path key names one file, frozen to its real path when the grant is decoded. A bare key names the file the host `PATH` finds for it, and the bundled tool of that name; a scoped `PATH` cannot change what it names. So `git: 'allow'` also admits `/usr/bin/git` spelled as a path, because it is the same file.
+
+A key ending in `/` names every executable beneath that directory, frozen to its real path. Directory keys accept only `'allow'` or `'deny'`. A literal denial also vetoes the command by file name wherever it lives, so `bash: 'deny'` cannot be avoided through a link or another directory.
+
+The most specific rule decides: a veto, then a literal key, then the deepest covering directory; rules of equal specificity meet, so an equal allow and deny resolves to deny. A command that does not exist is never judged: it fails with status 127, or 126 when the file is not executable.
 
 Once an `exec` map is present, commands not admitted by that map are denied. Nested `exec` maps intersect, subcommand lists intersect, and every denial remains effective.
 
@@ -2886,8 +2890,6 @@ Two exec-only shorthands expand when the grant is decoded:
 - `'system:'` — ral’s platform-defined system tool directories.
 
 Both take only `'allow'` or `'deny'`. `path:` is an error if `$PATH` contains no absolute directories.
-
-Bare command names still resolve through the effective `PATH` when invoked. For tighter control, use an absolute executable path or a frozen directory rule.
 
 ### 12.3. `fs`
 
@@ -2992,7 +2994,7 @@ could replace or create a program there — one observation per flagged prefix,
 naming it in `fields[prefix]`. This finding reports the confused-deputy shape;
 it does not deny it.
 
-The `net`, `detach`, `editor`, and `shell` Boolean gates record no individual
+The `net`, `detach`, `editor`, and `shell` Boolean checks record no individual
 checks.
 
 ### 12.8. `editor` and `shell`
@@ -3033,10 +3035,10 @@ External and bundled commands receive an OS-sandbox projection folded from the e
 
 ral uses two complementary enforcement layers:
 
-1. The in-process gate checks command admission, subcommands, ral-owned filesystem operations, editor operations, `cd`, and detached-process birth.
+1. The in-process guard checks command admission, subcommands, ral-owned filesystem operations, editor operations, `cd`, and detached-process birth.
 2. The OS sandbox confines filesystem and network actions performed directly by a spawned program. On macOS and Linux it also confines executable paths.
 
-The in-process command gate applies on every host, including when no OS sandbox is needed. It cannot see a command that an admitted child launches internally. Conversely, an OS sandbox cannot express first-argument subcommand rules and cannot protect operations ral performs in its own process.
+The in-process command guard applies on every host, including when no OS sandbox is needed. It cannot see a command that an admitted child launches internally. Conversely, an OS sandbox cannot express first-argument subcommand rules and cannot protect operations ral performs in its own process.
 
 Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, and `DYLD_*` are removed from child environments while capabilities are active. Confined Unix children also receive resource limits; Windows confines process trees with a Job Object.
 
@@ -5260,7 +5262,7 @@ follows those of everything it ran; the `start`–`end` intervals, not the list
 structure, recover which extent contained which.
 
 A `` `check `` observation is a distinct tag from a `` `command ``. The
-capability gates record every filesystem and execution *denial* while a trail
+in-process guards record every filesystem and execution *denial* while a trail
 is open, and no allowed check ever; entering a capability layer may also record
 a flagged confused-deputy prefix. With no trail open, capability checks add no
 observations.

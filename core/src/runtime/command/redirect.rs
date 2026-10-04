@@ -3,7 +3,7 @@
 //!
 //! No open lives here.  Every one goes through [`Shell::locate`] into
 //! `path::walk`, so the object authorised is the object the handle then
-//! names — the door never re-walks a string the gate has already judged.
+//! names — the door never re-walks a string the guard has already judged.
 
 use crate::capability::FsOp;
 use crate::evaluator::audit::observe;

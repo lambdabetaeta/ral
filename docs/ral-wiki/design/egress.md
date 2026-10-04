@@ -84,7 +84,7 @@ proxy does not proxy.
 ## Where authority actually narrows
 
 ral's own `net` capability is a flat boolean
-([[design/two-enforcers|two-enforcers]] — `net` has no in-process gate, only
+([[design/two-enforcers|two-enforcers]] — `net` has no in-process guard, only
 an OS-sandbox one, and inside a guest not even that: `docs/SPEC.md` §12.5,
 §12.11). It cannot express "reachable, but only this host"; nothing in the
 grant vocabulary names an endpoint. The real narrowing this page describes

@@ -19,9 +19,10 @@ return [
   shell: [chdir: true],
 
   # Build-toolchain caches, user-installed toolchains, and the
-  # project tree itself.  The OS sandbox layer's system paths
-  # (CommandLineTools, /opt/homebrew, /etc/alternatives, …) are
-  # added separately; this section covers what the OS layer can't
+  # project tree itself.  The OS sandbox layer's readable system
+  # paths (CommandLineTools, /opt/homebrew, /etc/alternatives, …)
+  # are added separately, and the tool roots that may run come from
+  # `system:` below; this section covers what the OS layer can't
   # bake in.
   #
   # Path-prefix sigils are expanded before grant matching:

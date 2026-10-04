@@ -1,5 +1,5 @@
 //! The external arm of command dispatch — `command_call` picks it over
-//! env and handler: vet the resolved identity, wire the shell's streams
+//! env and handler: vet the resolved head, wire the shell's streams
 //! into child stdio, spawn under the canonical pgid and sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
@@ -14,7 +14,7 @@ mod child;
 #[cfg(unix)]
 mod detach;
 mod foreground;
-mod identity;
+mod head;
 pub(crate) mod process;
 mod redirect;
 mod stdio;
@@ -23,14 +23,13 @@ mod vet;
 pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
-pub(crate) use identity::CommandIdentity;
+pub(crate) use head::Head;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
     PendingWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
     open_write,
 };
 pub(crate) use stdio::{ChildIo, TtyInputPermit, stdin_error, wire_stdio};
-use vet::ExecImage;
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
@@ -42,12 +41,12 @@ use stdio::inherit_tty;
 /// coreutils/diffutils/ripgrep head takes the same path as any host
 /// executable: its image is `ral --ral-bundled-tool <tool>`.
 pub(crate) fn run(
-    id: &CommandIdentity,
+    head: &Head,
     args: &[Value],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let rc = vet(id, args, shell)?;
+    let rc = vet(head, args, shell)?;
     let cmd_name = rc.shown.clone();
 
     // Confinement can run for minutes on Windows, so the run's scope goes in
@@ -73,11 +72,8 @@ pub(crate) fn run(
 
     let confinement = command.confinement();
     let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
-    let image_shown = match &rc.image {
-        ExecImage::Host(p) => p.clone(),
-        ExecImage::BundledTool { tool } => format!("ral --ral-bundled-tool {tool}"),
-    };
-    trace_io_wiring(&cmd_name, &image_shown, inherit_tty, needs_pump, &fg, shell);
+    let program = rc.admitted.program().to_string();
+    trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
 
     announce_command_title(&cmd_name, shell);
 

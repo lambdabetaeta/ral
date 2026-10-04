@@ -1673,8 +1673,8 @@ return !{{length $hits}}"
         }
     }
 
-    /// `check_fs_read` is a prefix gate, not an existence test, so a root that
-    /// simply lacks the skill passes the gate for a missing file. The loop must
+    /// `check_fs_read` is a prefix guard, not an existence test, so a root that
+    /// simply lacks the skill passes the guard for a missing file. The loop must
     /// keep walking to later roots rather than reporting the first `ENOENT` as
     /// "could not read" — otherwise a skill living only in the config root is
     /// shadowed by the empty local root.

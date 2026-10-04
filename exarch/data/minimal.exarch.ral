@@ -62,9 +62,8 @@ return [
   # (see `core/src/path/sigil.rs::system_tool_roots`); the explicit
   # `deny` below carves it back out so `minimal` stays "system tools
   # only" regardless of host.  Apple's toolchain (CommandLineTools,
-  # Xcode) is folded in automatically by the macOS sandbox base — see
-  # `core/src/sandbox/macos.rs::system_paths` — so building from
-  # source works without listing each tool here.
+  # Xcode) is folded in by `system:` too, so building from source works
+  # without listing each tool here.
   #
   # `bash` and `zsh` live under a tool root (admitted by `system:`
   # above), but a literal-match `'deny'` overrides the subpath rule.

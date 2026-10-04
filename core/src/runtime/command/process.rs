@@ -2,9 +2,10 @@
 //! canonical pgid + sandbox funnel, and render spawn failures as [`Break`]s.
 //! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
 
+use crate::capability::Program;
 use crate::types::{Break, Error, Settled, Shell};
 
-use super::vet::{ExecImage, SpawnPlan};
+use super::vet::SpawnPlan;
 
 /// Build a launch for `plan` and apply the shell's scoped env and cwd.  Stdio
 /// and `pre_exec` hooks are the caller's: they differ between the standalone
@@ -20,41 +21,32 @@ pub(crate) fn build_command(
 ) -> Settled<crate::process::Launch> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
-    // The capability gate in `vet` runs either way.
+    // The in-process guard in `vet` runs either way.
     let jail = shell.guest_jail();
+    let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
-        && let Some(projection) = shell.sandbox_projection()
+        && let Some(projection) =
+            crate::capability::sandbox_projection(&shell.context, Some(admitted))
     {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
         crate::sandbox::projection_enforceable(&projection)
             .map_err(|reason| Break::Error(crate::sandbox::confinement_unavailable(reason)))?;
-        let target = match &plan.image {
-            ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
-            ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
-        };
-        crate::sandbox::sandboxed_command(
-            &projection,
-            target,
-            &plan.args,
-            ownership,
-            shell,
-            cancel,
-        )?
+        crate::sandbox::sandboxed_command(&projection, admitted, ownership, shell, cancel)?
     } else {
-        match &plan.image {
-            ExecImage::Host(path) => {
+        match admitted.program() {
+            Program::File { path, .. } => {
                 let mut cmd = crate::process::Launch::new(path);
-                cmd.args(&plan.args);
+                cmd.args(admitted.args());
                 cmd
             }
-            ExecImage::BundledTool { tool } => {
+            Program::Tool(tool) => {
                 use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
                 let mut cmd = self_reexec(BUNDLED_TOOL_FLAG).map_err(|e| {
                     Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1))
                 })?;
                 cmd.arg(tool);
-                cmd.args(&plan.args);
+                cmd.args(admitted.args());
                 cmd
             }
         }

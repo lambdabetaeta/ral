@@ -128,7 +128,7 @@ pub fn freeze_path_list(
 }
 
 /// Expand one entry's sigil against `ctx`, then fold `.`/`..` and wrap, so every
-/// frozen entry is sigil-free and in the normal form the gate matches against.
+/// frozen entry is sigil-free and in the normal form the in-process guard matches against.
 ///
 /// Two sigils read a source the session does not own, and each guards it in the
 /// terms of what would otherwise author the grant: an `$XDG_*_HOME` must land
@@ -215,9 +215,9 @@ fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
 /// otherwise an attacker-set `XDG_DATA_HOME=/etc` would silently widen an
 /// `xdg:data` grant to `/etc`.
 ///
-/// The question is asked exactly as the runtime *fs* gate asks it —
+/// The question is asked exactly as the in-process *fs* guard asks it —
 /// [`path_within`] over the symlink-followed forms, fs authority being over
-/// objects — so guard and gate cannot disagree.  Both
+/// objects — so the freeze guard and the fs guard cannot disagree.  Both
 /// sides are folded and canonicalised: `xdg:config/../../etc` collapses to
 /// `/etc` rather than stepping over the guard and collapsing at match time, a
 /// `$XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a
@@ -293,7 +293,7 @@ fn unknown_xdg_message(entry: &str) -> String {
 /// Feeds [`unix_tool_roots`] or [`windows_tool_roots`] the live filesystem and
 /// environment.  Both stay public and parameterised over those inputs so each
 /// platform's list is unit-testable on every host, not only the one compiling
-/// it — the pattern `capability::exec`'s `names_match` follows too.
+/// it — the pattern `capability::exec`'s `name_key` follows too.
 pub fn system_tool_roots() -> Vec<String> {
     #[cfg(windows)]
     {
@@ -312,20 +312,30 @@ pub fn system_tool_roots() -> Vec<String> {
     }
 }
 
-/// `/usr/bin` and `/bin` unconditionally, plus whichever Homebrew prefix
-/// `exists` reports.
+/// `/usr/bin` and `/bin` unconditionally, plus whichever of the Homebrew
+/// prefixes and the toolchain roots `exists` reports.
 ///
-/// That is `/opt/homebrew` as `sandbox::macos` admits for `Exec` and
-/// `/home/linuxbrew/.linuxbrew` as `sandbox::linux` lists, mirrored here for
-/// the capability layer's separate exec-admission concern.
+/// The one place platform tool roots live as grant data: the OS sandboxes
+/// admit nothing beyond what a grant names, so program behaviour that no
+/// carrier explains — `cc → cc1`, `git → git-remote-https`, `clang → ld` —
+/// needs its directory here.
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]
 pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
-    for brew in ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"] {
-        if exists(brew) {
-            roots.push(brew.to_string());
-        }
-    }
+    roots.extend(
+        [
+            "/opt/homebrew",
+            "/home/linuxbrew/.linuxbrew",
+            "/usr/libexec",
+            "/usr/lib/git-core",
+            "/usr/lib/gcc",
+            "/Library/Developer/CommandLineTools",
+            "/Applications/Xcode.app/Contents/Developer",
+        ]
+        .into_iter()
+        .filter(|root| exists(root))
+        .map(str::to_string),
+    );
     roots
 }
 
@@ -435,8 +445,8 @@ mod tests {
     }
 
     /// The escape the surface form hides: `$XDG_DATA_HOME` naming a link
-    /// *inside* HOME whose target is outside it.  The gate matches the
-    /// symlink-followed form, so the guard must ask it there too.
+    /// *inside* HOME whose target is outside it.  The fs guard matches the
+    /// symlink-followed form, so the freeze guard must ask it there too.
     // Unix-only: `std::os::unix::fs::symlink`, and `/etc` is a Unix root.
     #[cfg(unix)]
     #[test]
@@ -490,7 +500,7 @@ mod tests {
         });
     }
 
-    /// Even a sigil-free literal is stored in the form the gate matches against.
+    /// Even a sigil-free literal is stored in the form the in-process guard matches against.
     // Unix-only: Unix path shapes.
     #[cfg(unix)]
     #[test]
@@ -613,6 +623,25 @@ mod tests {
                 "/opt/homebrew".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn unix_tool_roots_adds_each_present_toolchain_root_only() {
+        let toolchains = [
+            "/usr/libexec",
+            "/usr/lib/git-core",
+            "/usr/lib/gcc",
+            "/Library/Developer/CommandLineTools",
+            "/Applications/Xcode.app/Contents/Developer",
+        ];
+        assert_eq!(
+            unix_tool_roots(|p| toolchains.contains(&p)).split_at(2).1,
+            toolchains
+        );
+        for present in toolchains {
+            let roots = unix_tool_roots(|p| p == present);
+            assert_eq!(roots, ["/usr/bin", "/bin", present], "{present}");
+        }
     }
 
     /// No `cfg(windows)` on any of the Windows-shape tests: they run on the

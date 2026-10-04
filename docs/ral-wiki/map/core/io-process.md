@@ -300,6 +300,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   plan above has room for it (one more syscall-time check beside
   `NO_NEW_PRIVS`).
 
-Spawning an external command is capability-gated; that gate lives in
+Spawning an external command is capability-checked; that in-process guard
+lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that
 drives this plumbing in [[map/core/runtime|runtime]].

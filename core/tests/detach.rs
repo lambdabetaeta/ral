@@ -309,9 +309,9 @@ fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
     );
 }
 
-/// A launch that is admitted and then fails — the path head passes vet, whose
-/// existence probe covers bare names only, and dies at the kernel's ENOENT —
-/// must give its reservation back.  The budget is whole-life and monotone for
+/// A launch that is admitted and then fails — the path head names a file, so
+/// it passes vet, but no program, so the kernel refuses it — must give its
+/// reservation back.  The budget is whole-life and monotone for
 /// births; a failed launch birthed nothing, so it spends nothing.
 #[test]
 fn a_launch_that_fails_after_admission_gives_the_slot_back() {
@@ -320,10 +320,7 @@ fn a_launch_that_fails_after_admission_gives_the_slot_back() {
     // One birth in the whole session: had the failed launch counted, the
     // real birth below would be refused for exhaustion instead.
     shell.arm_detach(1);
-    let message = refusal(
-        &mut shell,
-        "detach #'never born'# /definitely/not/a/real/binary-8fb1",
-    );
+    let message = refusal(&mut shell, "detach #'never born'# /etc/hosts");
     assert!(
         message.contains("cannot launch"),
         "the refusal must come from the failed spawn, not from vet or exhaustion, got {message:?}"

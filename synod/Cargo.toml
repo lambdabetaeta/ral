@@ -43,6 +43,8 @@ ts-rs      = { workspace = true }
 guest-net  = { path = "../guest-net" }
 
 [dev-dependencies]
+# `test_access`'s exec doors, for the office grant's tests.
+ral-core = { path = "../core", features = ["test-util"] }
 # `test_fixture::workshop`'s per-test directory, which deletes itself.
 tempfile = { workspace = true }
 # The boot contract, for `examples/check-media`; synod's own code never asks.

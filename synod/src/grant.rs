@@ -29,14 +29,14 @@
 //! the construction lives here and is not scattered across the session.
 
 use ral_core::path::NormalizedPrefix;
-use ral_core::types::{Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy, ShellPolicy};
-use std::collections::{BTreeMap, BTreeSet};
+use ral_core::types::{Capabilities, EditorPolicy, ExecGrant, FsPolicy, ShellPolicy, Verdict};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The image's office toolbox, as an allowlist of *literal command
-/// names* — `ExecMap::allow_dirs`/`deny_dirs` stay empty.
+/// The image's office toolbox, as an allowlist of *bare command names* —
+/// `ExecGrant::paths` and `ExecGrant::dirs` stay empty.
 ///
-/// [`ExecMap`] admits either bare-name literals or directory prefixes,
+/// [`ExecGrant`] admits by bare name, by path or by directory prefix,
 /// and exarch's profiles lean hard on the directory half because a
 /// developer's tool roots are open-ended: Homebrew, rustup toolchains,
 /// nvm and pyenv install binaries nobody can enumerate in advance, so
@@ -364,9 +364,9 @@ impl Grant {
     ///
     /// The hardware boundary is the first lock — the guest can reach only
     /// the granted folder and the control socket — and this value is the
-    /// second: every claim below is enforced by ral's own gate inside the
-    /// guest, on top of the wall around it.  Because the gate runs *there*,
-    /// the paths are guest paths: the folder at its mount point, never the
+    /// second: every claim below is enforced by ral's own in-process guard
+    /// inside the guest, on top of the wall around it.  Because the guard runs
+    /// *there*, the paths are guest paths: the folder at its mount point, never the
     /// host path the user picked, which names nothing inside the machine.
     /// They are also *spelled* there — minted through
     /// [`NormalizedPrefix::from_guest`], because a host that writes its
@@ -407,7 +407,7 @@ impl Grant {
     /// difference reported — not a hidden read barrier.
     pub fn capabilities(&self) -> Capabilities {
         // Minted by the guest's rule, not this host's: `from_guest` folds
-        // `/work` in the namespace the gate will match it in.  The ordinary
+        // `/work` in the namespace the guard will match it in.  The ordinary
         // door would fold it with the *host's* kernel, which on Windows
         // rebuilds it as `\work` — and the agent would then be denied the
         // one folder it was given, by a grant that reads as if it had been
@@ -426,13 +426,12 @@ impl Grant {
                 deny_paths: Vec::new(),
             }),
             net: Some(true),
-            exec: Some(ExecMap {
-                literals: TOOLBOX
+            exec: Some(ExecGrant {
+                names: TOOLBOX
                     .iter()
-                    .map(|name| ((*name).to_string(), ExecPolicy::Allow))
+                    .map(|name| ((*name).to_string(), Verdict::Allow))
                     .collect::<BTreeMap<_, _>>(),
-                allow_dirs: BTreeSet::new(),
-                deny_dirs: BTreeSet::new(),
+                ..ExecGrant::default()
             }),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy { chdir: true }),
@@ -843,14 +842,14 @@ mod tests {
     /// The point of the whole file: the value admits the guest namespace —
     /// the mount point and the guest scratch — and denies the host one,
     /// the granted folder's own host path included.  Judged by ral's own
-    /// point-of-use gate rather than by reading the struct's fields.
+    /// in-process guard rather than by reading the struct's fields.
     #[test]
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
         let (_dir, grant) = granted("grant-fs");
         let caps = grant.capabilities();
 
         let mut shell = Shell::default();
-        // Read asks the gate, write asks the stack directly: the write door
+        // Read asks the guard, write asks the stack directly: the write door
         // is `locate`, which walks the name first and would fail on these
         // paths for not existing, long before it reached the grant.
         shell.with_capabilities(caps, |sh| {
@@ -884,12 +883,12 @@ mod tests {
     /// The bytes the guest will be handed, which the test above cannot
     /// see and this one exists for.
     ///
-    /// That test runs the grant through ral's gate *on the host*, so both
+    /// That test runs the grant through ral's guard *on the host*, so both
     /// sides of the comparison fold with the host's kernel and agree even
     /// when both are wrong: on Windows it passed while the shipped product
     /// denied `/work` on the first read, because the real access side is
     /// the engine inside the machine and it folds like Linux.  A host-side
-    /// simulation of a guest-side gate cannot catch a host/guest
+    /// simulation of a guest-side guard cannot catch a host/guest
     /// normaliser split — only the spelling can, because the spelling is
     /// the whole of what crosses the wire.
     #[test]
@@ -927,23 +926,30 @@ mod tests {
         });
     }
 
+    /// A bare name is the file the guest's `PATH` finds, so the toolbox is
+    /// asserted as the names it lists; a developer tool is absent, and no
+    /// file of its name is admitted.
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
         let (_dir, grant) = granted("grant-exec");
         let caps = grant.capabilities();
+        let exec = caps.exec.as_ref().expect("the office grant restricts exec");
+        for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
+            assert_eq!(
+                exec.names.get(tool),
+                Some(&Verdict::Allow),
+                "the office toolbox must admit {tool}"
+            );
+        }
         let mut shell = Shell::default();
         shell.with_capabilities(caps, |sh| {
-            for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
-                sh.check_exec_args(tool, &[tool], &[])
-                    .unwrap_or_else(|_| panic!("the office toolbox must admit {tool}"));
-            }
             // The image cuts these on purpose: what has to be built from
             // source on a machine that forgets it at reboot is a delay,
             // not a capability.
             for cut in ["cc", "gcc", "make", "cargo", "sh", "bash", "apt"] {
                 let path = format!("/usr/bin/{cut}");
                 assert!(
-                    sh.check_exec_args(cut, &[cut, &path], &[]).is_err(),
+                    !ral_core::test_access::admits_file(sh, &path),
                     "the office grant must not admit {cut}"
                 );
             }

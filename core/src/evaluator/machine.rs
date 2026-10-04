@@ -824,8 +824,8 @@ impl Machine {
                 Resolution::Base(entry) => Focus::Return(Terminal::Value(
                     command_call::run_base_frame(&entry, &argv, &redirs, span, mooring, shell)?,
                 )),
-                Resolution::External(id) => Focus::Return(Terminal::Value(
-                    command_call::run_external(&id, &argv, &redirs, span, mooring, shell)?,
+                Resolution::External(head) => Focus::Return(Terminal::Value(
+                    command_call::run_external(&head, &argv, &redirs, span, mooring, shell)?,
                 )),
             },
         )

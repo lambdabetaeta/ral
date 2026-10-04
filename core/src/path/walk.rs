@@ -1,10 +1,10 @@
 //! Stage 4 of path resolution: locating the *object* a resolved name denotes,
-//! so the thing a gate authorises is the thing the kernel then operates on.
+//! so the thing a guard authorises is the thing the kernel then operates on.
 //!
-//! A path-based gate judges a canonicalised string and the open that follows
+//! A path-based guard judges a canonicalised string and the open that follows
 //! re-walks the original one; whatever differs between those two walks — a
 //! dangling link the canonicaliser could not follow, a directory swapped for a
-//! symlink in between — is an object the gate never saw.  [`walk`] does one
+//! symlink in between — is an object the guard never saw.  [`walk`] does one
 //! walk: from the root, one component at a time through directory handles,
 //! never letting the kernel follow a symlink, splicing each link it meets
 //! into the remaining name itself.  Where it lands is [`Located::real`],
@@ -330,7 +330,7 @@ fn nofollow(opts: &mut OpenOptions) -> &mut OpenOptions {
 }
 
 impl Located {
-    /// The symlink-free path of the object: what a gate judges and a card names.
+    /// The symlink-free path of the object: what a guard judges and a card names.
     pub(crate) fn real(&self) -> &Path {
         &self.real
     }
@@ -626,7 +626,7 @@ mod tests {
     }
 
     /// The finding that motivated the walk: a link whose target does not
-    /// exist must locate the *target*, so a gate judges where the bytes go.
+    /// exist must locate the *target*, so a guard judges where the bytes go.
     #[test]
     fn a_dangling_link_locates_its_target() {
         let tmp = tempfile::tempdir().unwrap();

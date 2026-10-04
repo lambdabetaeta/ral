@@ -12,9 +12,10 @@ pub(crate) use signature::{PreludeMap, Signature, lookup};
 pub use shell::repl::{PluginEntry, ReplScratch};
 
 mod capability;
+pub(crate) use capability::meet_insert;
 pub use capability::{
-    Capabilities, EditorPolicy, ExecMap, ExecPolicy, ExecProjection, FsPolicy, FsProjection,
-    FsRules, GrantStack, Join, Meet, SandboxProjection, ShellPolicy,
+    Capabilities, EditorPolicy, ExecGrant, ExecProjection, ExecRule, FsPolicy, FsProjection,
+    FsRules, GrantStack, Meet, SandboxProjection, ShellPolicy, Verdict, Widen,
 };
 
 mod value;

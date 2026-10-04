@@ -18,7 +18,7 @@ const READ_ONLY_RAL: &str = include_str!("../../data/read-only.exarch.ral");
 const EDIT_ONLY_RAL: &str = include_str!("../../data/edit-only.exarch.ral");
 const CONFINED_RAL: &str = include_str!("../../data/confined.exarch.ral");
 const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
-// Gated with its only consumers, the Unix-shaped extension-join tests below.
+// Gated with its only consumers, the Unix-shaped extension-widening tests below.
 #[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
@@ -63,7 +63,7 @@ pub(super) fn resolve_base(
     Ok(caps)
 }
 
-/// Drop exec literals naming a coreutil this platform cannot bundle — the
+/// Drop bare exec keys naming a coreutil this platform cannot bundle — the
 /// `coreutils-unix-only` set, whose `uu_*` crates compile on Unix alone — so a
 /// rendered profile never advertises a grant it cannot honour.
 ///
@@ -74,7 +74,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
         return;
     }
     if let Some(exec) = caps.exec.as_mut() {
-        exec.literals.retain(|name, _| {
+        exec.names.retain(|name, _| {
             !ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str())
         });
     }
@@ -101,7 +101,7 @@ mod tests {
     #[cfg(unix)]
     use ral_core::path::sigil::freeze_one;
     #[cfg(unix)]
-    use ral_core::types::ExecPolicy;
+    use ral_core::types::Verdict;
     use ral_core::types::{Capabilities, Shell};
     use std::path::Path;
 
@@ -126,6 +126,32 @@ mod tests {
     #[cfg(unix)]
     fn frozen(entry: &str, ctx: &FreezeCtx<'_>) -> ral_core::path::NormalizedPrefix {
         freeze_one(entry, ctx).unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
+    }
+
+    /// The real path of a file at `path`, as the in-process exec guard judges it.
+    #[cfg(unix)]
+    fn object(path: &str) -> String {
+        ral_core::path::Resolver::shell_less()
+            .resolve(path)
+            .canonicalise_lenient()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The real path of the `name` the host `PATH` finds, if any.
+    #[cfg(unix)]
+    fn host_real(name: &str) -> Option<String> {
+        let path = std::env::var("PATH").ok()?;
+        let hit =
+            ral_core::path::resolve_in_path(name, &path, ral_core::path::SearchCwd::nowhere())?;
+        Some(object(&hit))
+    }
+
+    /// Whether `caps` admits running the file whose real path is `real`.
+    #[cfg(unix)]
+    fn admits(caps: Capabilities, real: &str) -> bool {
+        let mut shell = Shell::default();
+        shell.with_capabilities(caps, |sh| ral_core::test_access::admits_file(sh, real))
     }
 
     /// Every bake-in names `~`/`xdg:` paths, so a host with no `$HOME` cannot
@@ -200,11 +226,7 @@ mod tests {
         );
         let exec = caps.exec.as_ref().expect("minimal declares exec");
         assert!(
-            !exec
-                .allow_dirs
-                .iter()
-                .any(|p| p.as_str() == "/opt/homebrew")
-                && !exec.deny_dirs.iter().any(|p| p.as_str() == "/opt/homebrew"),
+            !exec.dirs.keys().any(|p| p.as_str() == "/opt/homebrew"),
             "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
         );
     }
@@ -224,10 +246,15 @@ mod tests {
         let exec = caps.exec.as_ref().expect("confined declares exec");
         let bundled = ral_core::uutils::bundled_tools();
         let host_named: Vec<&str> = exec
-            .literals
+            .names
             .keys()
             .map(String::as_str)
             .filter(|name| !bundled.contains(name))
+            .chain(
+                exec.paths
+                    .keys()
+                    .map(ral_core::path::NormalizedPrefix::as_str),
+            )
             .collect();
         assert!(
             host_named.is_empty(),
@@ -279,7 +306,7 @@ mod tests {
     }
 
     /// `xdg:bin` freezes to `${XDG_BIN_HOME:-~/.local/bin}` and must land in
-    /// the `dirs` half of the exec map, where directory keys live.
+    /// the grant's `dirs`, where directory keys live.
     #[cfg(unix)]
     #[test]
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
@@ -291,8 +318,9 @@ mod tests {
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
         let xdg_bin = frozen("xdg:bin", &ctx);
-        assert!(
-            exec.allow_dirs.iter().any(|p| p == &xdg_bin),
+        assert_eq!(
+            exec.dirs.get(&xdg_bin),
+            Some(&true),
             "reasonable should list the resolved xdg:bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
@@ -320,14 +348,10 @@ mod tests {
                 .exec
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
+            let allows = |dir: &str| exec.dirs.iter().any(|(p, v)| p.as_str() == dir && *v);
+            assert!(allows(&cwd_resolved), "{name} exec missing resolved cwd");
             assert!(
-                exec.allow_dirs.iter().any(|p| p.as_str() == cwd_resolved),
-                "{name} exec missing resolved cwd"
-            );
-            assert!(
-                exec.allow_dirs
-                    .iter()
-                    .any(|p| p.as_str() == tempdir_resolved),
+                allows(&tempdir_resolved),
                 "{name} exec missing resolved tempdir"
             );
             let fs = caps
@@ -360,19 +384,16 @@ mod tests {
         };
         let caps = load("minimal", MINIMAL_RAL, &ctx);
 
-        let mut shell = Shell::default();
-        shell.seed_cwd(work.to_path_buf());
-        shell
-            .with_capabilities(caps, |sh| {
-                sh.check_exec_args("./configure", &["./configure", "/work/proj/configure"], &[])
-            })
-            .expect("./configure under cwd: must be admitted");
+        assert!(
+            admits(caps, "/work/proj/configure"),
+            "./configure under cwd: must be admitted"
+        );
     }
 
-    /// `system:`'s Homebrew root admits cmake by short name and by full path
-    /// alike, though cmake is no per-name entry.  That root exists only where
-    /// Homebrew does, so on a brew-less host this passes vacuously rather than
-    /// failing falsely; CI's macOS runners ship Homebrew, so it still bites.
+    /// `system:`'s Homebrew root admits cmake, though cmake is no per-name
+    /// entry.  That root exists only where Homebrew does, so on a brew-less
+    /// host this passes vacuously rather than failing falsely; CI's macOS
+    /// runners ship Homebrew, so it still bites.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cmake_under_homebrew_when_present() {
@@ -386,25 +407,16 @@ mod tests {
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
-            caps.exec
-                .as_ref()
-                .is_some_and(|m| m.allow_dirs.iter().any(|p| p.as_str() == "/opt/homebrew")),
+            caps.exec.as_ref().is_some_and(|m| m
+                .dirs
+                .iter()
+                .any(|(p, v)| p.as_str() == "/opt/homebrew" && *v)),
             "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
-
-        let mut shell = Shell::default();
-        shell
-            .with_capabilities(caps.clone(), |sh| {
-                sh.check_exec_args("cmake", &["cmake", "/opt/homebrew/bin/cmake"], &[])
-            })
-            .expect("short-name cmake under /opt/homebrew/bin must be admitted");
-
-        let mut shell2 = Shell::default();
-        shell2
-            .with_capabilities(caps, |sh| {
-                sh.check_exec_args("/opt/homebrew/bin/cmake", &["/opt/homebrew/bin/cmake"], &[])
-            })
-            .expect("full-path cmake under /opt/homebrew/bin must be admitted");
+        assert!(
+            admits(caps, "/opt/homebrew/bin/cmake"),
+            "cmake under /opt/homebrew/bin must be admitted"
+        );
     }
 
     /// Rustup resolves `cargo` under `~/.rustup/toolchains/`, a path shape easy
@@ -418,13 +430,13 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let cargo = format!("{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo");
-        let mut shell = Shell::default();
-        shell
-            .with_capabilities(caps, |sh| {
-                sh.check_exec_args("cargo", &["cargo", &cargo], &[])
-            })
-            .expect("rustup toolchain cargo must be admitted");
+        let cargo = object(&format!(
+            "{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
+        ));
+        assert!(
+            admits(caps, &cargo),
+            "rustup toolchain cargo must be admitted"
+        );
     }
 
     #[cfg(unix)]
@@ -436,17 +448,9 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let gobin = format!("{home}/go/bin/goimports");
-        for (name, abs) in [
-            ("go", "/usr/local/go/bin/go"),
-            ("goimports", gobin.as_str()),
-        ] {
-            let mut shell = Shell::default();
-            shell
-                .with_capabilities(caps.clone(), |sh| {
-                    sh.check_exec_args(name, &[name, abs], &[])
-                })
-                .unwrap_or_else(|_| panic!("{name} at {abs} must be admitted"));
+        let gobin = object(&format!("{home}/go/bin/goimports"));
+        for abs in ["/usr/local/go/bin/go", gobin.as_str()] {
+            assert!(admits(caps.clone(), abs), "{abs} must be admitted");
         }
     }
 
@@ -459,11 +463,8 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let node = format!("{home}/.nvm/versions/node/v22.0.0/bin/node");
-        let mut shell = Shell::default();
-        shell
-            .with_capabilities(caps, |sh| sh.check_exec_args("node", &["node", &node], &[]))
-            .expect("nvm node must be admitted");
+        let node = object(&format!("{home}/.nvm/versions/node/v22.0.0/bin/node"));
+        assert!(admits(caps, &node), "nvm node must be admitted");
     }
 
     /// Both the versioned install and the shim layer pyenv puts on `$PATH`.
@@ -476,15 +477,10 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let versioned = format!("{home}/.pyenv/versions/3.12.0/bin/python3");
-        let shim = format!("{home}/.pyenv/shims/python3");
-        for (name, abs) in [("python3", versioned.as_str()), ("python3", shim.as_str())] {
-            let mut shell = Shell::default();
-            shell
-                .with_capabilities(caps.clone(), |sh| {
-                    sh.check_exec_args(name, &[name, abs], &[])
-                })
-                .unwrap_or_else(|_| panic!("{name} at {abs} must be admitted"));
+        let versioned = object(&format!("{home}/.pyenv/versions/3.12.0/bin/python3"));
+        let shim = object(&format!("{home}/.pyenv/shims/python3"));
+        for abs in [versioned.as_str(), shim.as_str()] {
+            assert!(admits(caps.clone(), abs), "{abs} must be admitted");
         }
     }
 
@@ -505,8 +501,8 @@ mod tests {
             let caps = load(name, text, &ctx);
             let exec = caps.exec.as_ref().expect("base declares exec");
             assert_eq!(
-                exec.literals.get("git"),
-                Some(&ExecPolicy::Allow),
+                exec.names.get("git"),
+                Some(&Verdict::Allow),
                 "{name} should admit git"
             );
             let fs = caps.fs.as_ref().expect("base declares fs");
@@ -520,8 +516,9 @@ mod tests {
 
     /// `minimal`'s explicit `/opt/homebrew/` deny is what keeps `system:`,
     /// which folds a Homebrew tree in when the host has one, from widening it:
-    /// brew tools stay opt-in, and the git extension is the opt-in.  The cwd
-    /// must not be `/`, or the `cwd:/` allow would admit everything.
+    /// brew tools stay opt-in, and the git extension is the opt-in — its bare
+    /// `git` is whichever git the host `PATH` finds.  The cwd must not be `/`,
+    /// or the `cwd:/` allow would admit everything.
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
@@ -530,34 +527,31 @@ mod tests {
             home: Some(&home),
             cwd: Path::new("/work"),
         };
-        let admits = |caps: ral_core::types::Capabilities, names: &[&str]| {
-            let mut shell = Shell::default();
-            shell
-                .with_capabilities(caps, |sh| sh.check_exec_args(names[0], names, &[]))
-                .is_ok()
-        };
         assert!(
-            admits(load("minimal", MINIMAL_RAL, &ctx), &["git", "/usr/bin/git"]),
+            admits(load("minimal", MINIMAL_RAL, &ctx), "/usr/bin/git"),
             "minimal admits the system git via the /usr/bin/ subpath"
         );
         assert!(
-            !admits(
-                load("minimal", MINIMAL_RAL, &ctx),
-                &["git", "/opt/homebrew/bin/git"]
-            ),
+            !admits(load("minimal", MINIMAL_RAL, &ctx), "/opt/homebrew/bin/git"),
             "minimal does not admit a Homebrew git — brew trees are opt-in"
         );
         let widened =
-            load("minimal", MINIMAL_RAL, &ctx).join(load("git-ext", GIT_EXTENSION_RAL, &ctx));
-        assert!(
-            admits(widened, &["git", "/opt/homebrew/bin/git"]),
-            "the git extension's git: 'allow' carries a Homebrew install"
+            load("minimal", MINIMAL_RAL, &ctx).widen(load("git-ext", GIT_EXTENSION_RAL, &ctx));
+        assert_eq!(
+            widened.exec.as_ref().and_then(|exec| exec.names.get("git")),
+            Some(&Verdict::Allow)
         );
+        if let Some(git) = host_real("git") {
+            assert!(
+                admits(widened, &git),
+                "the git extension's git: 'allow' carries the host's git, wherever it lives"
+            );
+        }
     }
 
     /// The extension widens `minimal` — gitconfig readable, `git` admitted —
-    /// while `reasonable`'s credential denies survive: `FsPolicy::join` unions
-    /// deny sets, so a veto sticks without the overlay re-stating it, which is
+    /// while `reasonable`'s credential denies survive: widening an `FsPolicy`
+    /// unions deny sets, so a veto sticks without the overlay re-stating it, which is
     /// what lets an overlay stay purely additive.  Both sides freeze against
     /// the same home, so their `xdg:config/*` paths coincide.
     #[cfg(unix)]
@@ -571,27 +565,30 @@ mod tests {
         let gitconfig = frozen("~/.gitconfig", &ctx);
         let xdg_config_git = frozen("xdg:config/git", &ctx);
 
-        let widened_minimal =
-            load("minimal", MINIMAL_RAL, &ctx).join(load("git-extension", GIT_EXTENSION_RAL, &ctx));
+        let widened_minimal = load("minimal", MINIMAL_RAL, &ctx).widen(load(
+            "git-extension",
+            GIT_EXTENSION_RAL,
+            &ctx,
+        ));
         let exec = widened_minimal
             .exec
             .as_ref()
             .expect("extension should keep exec map");
-        assert_eq!(exec.literals.get("git"), Some(&ExecPolicy::Allow));
+        assert_eq!(exec.names.get("git"), Some(&Verdict::Allow));
         let fs = widened_minimal
             .fs
             .as_ref()
             .expect("extension should keep fs map");
         assert!(
             fs.read_prefixes.iter().any(|p| p == &gitconfig),
-            "join with minimal should add ~/.gitconfig"
+            "widening minimal should add ~/.gitconfig"
         );
         assert!(
             fs.read_prefixes.iter().any(|p| p == &xdg_config_git),
-            "join with minimal should add xdg:config/git"
+            "widening minimal should add xdg:config/git"
         );
 
-        let widened_reasonable = load("reasonable", REASONABLE_RAL, &ctx).join(load(
+        let widened_reasonable = load("reasonable", REASONABLE_RAL, &ctx).widen(load(
             "git-extension",
             GIT_EXTENSION_RAL,
             &ctx,
@@ -604,7 +601,7 @@ mod tests {
             let resolved = frozen(denied, &ctx);
             assert!(
                 fs.deny_paths.iter().any(|p| p == &resolved),
-                "join with reasonable should preserve {denied} deny ({})",
+                "widening reasonable should preserve {denied} deny ({})",
                 resolved.as_str()
             );
         }
@@ -640,21 +637,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
                 let normalized = ral_core::path::NormalizedPrefix::from_surface(root).into_string();
-                let denied = name == "minimal" && root == "/opt/homebrew";
-                let (expected, in_set) = if denied {
-                    (
-                        "Deny",
-                        exec.deny_dirs.iter().any(|p| p.as_str() == normalized),
-                    )
-                } else {
-                    (
-                        "Allow",
-                        exec.allow_dirs.iter().any(|p| p.as_str() == normalized),
-                    )
-                };
+                let expected = !(name == "minimal" && root == "/opt/homebrew");
                 assert!(
-                    in_set,
-                    "{name} should carry a {expected} verdict for the live system tool root {normalized}"
+                    exec.dirs
+                        .iter()
+                        .any(|(p, v)| p.as_str() == normalized && *v == expected),
+                    "{name} should carry allow={expected} for the live system tool root {normalized}"
                 );
             }
         }
@@ -689,7 +677,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
                 .into_iter()
-                .filter(|tool| !exec.literals.contains_key(*tool))
+                .filter(|tool| !exec.names.contains_key(*tool))
                 .collect();
             assert!(
                 unsettled.is_empty(),
@@ -714,11 +702,11 @@ mod tests {
         {
             let exec = caps.exec.as_ref().expect("reasonable declares exec");
             assert!(
-                exec.literals.contains_key("tac"),
+                exec.names.contains_key("tac"),
                 "host build should still bundle tac"
             );
             assert!(
-                exec.literals.contains_key("test"),
+                exec.names.contains_key("test"),
                 "host build should still bundle test"
             );
         }
@@ -728,16 +716,16 @@ mod tests {
         let exec = caps.exec.as_ref().expect("reasonable declares exec");
         for dead in ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS {
             assert!(
-                !exec.literals.contains_key(*dead),
+                !exec.names.contains_key(*dead),
                 "'{dead}' should be dropped when the platform can't bundle it"
             );
         }
         assert!(
-            exec.literals.contains_key("git"),
+            exec.names.contains_key("git"),
             "an ordinary named binary must survive the drop"
         );
         assert!(
-            exec.literals.contains_key("cat"),
+            exec.names.contains_key("cat"),
             "a cross-platform bundled tool must survive the drop"
         );
     }

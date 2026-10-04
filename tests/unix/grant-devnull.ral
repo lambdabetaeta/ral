@@ -1,5 +1,5 @@
 # Test: `/dev/null` stays writable under a restrictive fs write grant —
-# and only `/dev/null`. The discard device is exempt from the fs gate, so
+# and only `/dev/null`. The discard device is exempt from the fs guard, so
 # `2> /dev/null` keeps working inside a grant that names neither `/dev`
 # nor anything under it. Unix-only: Windows has no such device path.
 

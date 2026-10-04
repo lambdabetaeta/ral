@@ -4,13 +4,14 @@
 //! a pid namespace.  Entered by the payload itself, never before bwrap: a
 //! domain handling any fs right forbids `mount(2)`, bwrap's first act.
 //!
-//! Declared gap: Landlock is allow-list only, so `deny_paths`, `deny_dirs`
-//! and `deny_basenames` render nothing here — a deny outside every admit is
-//! already absence, and a deny *inside* an admit stays with the in-ral gate
-//! on Linux, where Seatbelt would carry it into the kernel.
+//! Declared gap: Landlock is allow-list only and cannot remove part of an
+//! allowed directory, so denies and vetoes render nothing here — a deny
+//! outside every allow is already absence, and a deny inside an allowed
+//! directory holds only at the in-process guard on Linux, where Seatbelt
+//! would carry it into the kernel.
 
 use crate::path::{Rendered, render_paths};
-use crate::types::{ExecProjection, SandboxProjection};
+use crate::types::{ExecProjection, ExecRule, SandboxProjection};
 use std::fmt;
 use std::io;
 use std::sync::OnceLock;
@@ -129,6 +130,9 @@ impl Layer {
         Self::render(&policy.rendered()?.exec, abi)
     }
 
+    /// Every allow rule — a dir as a hierarchy, a file as itself, `Execute`
+    /// beneath either — plus the loader base and ral's own binary.
+    ///
     /// # Errors
     /// A loader or self path this host cannot spell in Unicode: an admit is
     /// never approximated, and dropping it silently would deny every exec
@@ -137,16 +141,15 @@ impl Layer {
         let scope_signals = abi >= Abi::SIGNAL_SCOPE;
         let exec = match exec {
             ExecProjection::Unrestricted => None,
-            ExecProjection::Restricted {
-                allow_paths,
-                allow_dirs,
-                ..
-            } => {
+            ExecProjection::Restricted(rules) => {
                 let base: Vec<String> = platform_base().into_iter().chain([self_path()?]).collect();
-                let mut admits: Vec<Rendered> = allow_paths
-                    .iter()
-                    .chain(allow_dirs)
-                    .cloned()
+                let allowed = rules.iter().filter_map(|rule| match rule {
+                    ExecRule::Dir { path, allow: true } | ExecRule::File { path, allow: true } => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                });
+                let mut admits: Vec<Rendered> = allowed
                     .chain(render_paths(&base)?)
                     .filter(|p| crate::path::exists(p.as_str()))
                     .collect();
@@ -285,10 +288,11 @@ fn self_path() -> Result<String, String> {
 }
 
 /// The dynamic linkers, and nothing else.  `execve` of a dynamic binary needs
-/// `Execute` on the binary and on its `PT_INTERP` file; the shared libraries
-/// the loader then maps need no right from this layer.  So the base is a set
-/// of regular files — never a directory, which under `/usr/bin` would be a
-/// layer that denies nothing.
+/// `Execute` on the binary and on its `PT_INTERP` file — and of a `#!` script,
+/// on its interpreter, which is a carrier rather than base; the shared
+/// libraries the loader then maps need no right from this layer.  So the base
+/// is a set of regular files — never a directory, which under `/usr/bin`
+/// would be a layer that denies nothing.
 fn platform_base() -> Vec<String> {
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
@@ -404,26 +408,26 @@ mod tests {
     use std::io::Write;
 
     fn restricted(allow_paths: Vec<&str>, denies: bool) -> ExecProjection<Rendered> {
-        let render = |v: Vec<&str>| render_paths(&v).expect("ASCII paths render");
-        ExecProjection::Restricted {
-            allow_paths: render(allow_paths),
-            allow_dirs: Vec::new(),
-            deny_paths: if denies {
-                render(vec!["/usr/bin/curl"])
-            } else {
-                Vec::new()
-            },
-            deny_dirs: if denies {
-                render(vec!["/usr/local/bin"])
-            } else {
-                Vec::new()
-            },
-            deny_basenames: if denies {
-                vec!["curl".to_string()]
-            } else {
-                Vec::new()
-            },
+        let render = |p: &str| render_paths(&[p]).expect("ASCII paths render");
+        let mut rules: Vec<ExecRule<Rendered>> = allow_paths
+            .into_iter()
+            .flat_map(render)
+            .map(|path| ExecRule::File { path, allow: true })
+            .collect();
+        if denies {
+            rules.extend(
+                render("/usr/local/bin")
+                    .into_iter()
+                    .map(|path| ExecRule::Dir { path, allow: false }),
+            );
+            rules.extend(
+                render("/usr/bin/curl")
+                    .into_iter()
+                    .map(|path| ExecRule::File { path, allow: false }),
+            );
+            rules.push(ExecRule::Veto("curl".to_string()));
         }
+        ExecProjection::Restricted(rules)
     }
 
     fn layer(exec: &ExecProjection<Rendered>, abi: Abi) -> Option<Layer> {
@@ -512,12 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn the_deny_sets_render_nothing() {
+    fn denies_and_vetoes_render_nothing() {
         let with = layer(&restricted(vec!["/bin/true"], true), Abi(9));
         let without = layer(&restricted(vec!["/bin/true"], false), Abi(9));
         assert_eq!(
             with, without,
-            "Landlock is allow-list only; the denies stay with the in-ral gate"
+            "Landlock is allow-list only; the denies stay with the in-process guard"
         );
     }
 

@@ -1,9 +1,9 @@
 //! The fs dimension's folds, as [`super::exec`] holds the exec dimension's.
 //!
-//! Both readers of fs authority consume them: the point-of-use gate in
+//! Both readers of fs authority consume them: the in-process guard in
 //! [`super::enforce`] tests containment in the folded regions, the OS
 //! projection in [`super::sandbox`] renders those same regions.  Agreement
-//! between gate and sandbox profile is then structural — one fold per
+//! between guard and sandbox profile is then structural — one fold per
 //! region, two consumers — rather than a property two independent folds
 //! have to be tested into.
 //!
@@ -14,7 +14,7 @@
 //! Prefixes are re-frozen against the caller's [`Resolver`] here rather
 //! than read off the frozen policy, so the caller decides how fresh the
 //! answer is: composition is a statement about the policy, these about the
-//! world.  The gate folds afresh on every check; the projection folds once,
+//! world.  The guard folds afresh on every check; the projection folds once,
 //! at spawn, because that is when the OS profile is written.
 
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
@@ -43,7 +43,7 @@ impl FsOp {
 }
 
 /// Intersect every opining layer's allow region for `op`.  `None` exactly
-/// when no layer held an `fs` opinion — so the gate is unrestricted and the
+/// when no layer held an `fs` opinion — so the guard is unrestricted and the
 /// projection needs no fs rules — where an empty set is a layer that opined
 /// and admitted nothing, which denies.
 pub(super) fn allow_region(

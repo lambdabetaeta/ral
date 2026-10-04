@@ -912,7 +912,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
         let sk_md = dir.join("SKILL.md");
         let rp = shell.resolve(&sk_md.to_string_lossy());
         if shell.check_fs_read(&rp).is_ok() {
-            // `check_fs_read` is a prefix gate, not an existence test: a path
+            // `check_fs_read` is a prefix guard, not an existence test: a path
             // under a readable prefix can still be a skill this root lacks.
             // Missing here is not a miss for the name — walk to the next root.
             if !sk_md.is_file() {

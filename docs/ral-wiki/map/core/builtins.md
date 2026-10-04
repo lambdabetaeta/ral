@@ -293,7 +293,7 @@ A bundled head is a resolved command *image*, not a builtin in `CORE_BUILTINS`:
 it is always an ordinary `ral --ral-bundled-tool <tool>` child carrying process
 semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
 [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
-That dispatch — the `ExecImage::BundledTool` placement and the hidden
+That dispatch — the `Program::Tool` placement and the hidden
 entrypoint — is the [[map/core/runtime|runtime]]'s; this page owns only the
 registry of names, shims, and the in-binary `uutils_invoke` they converge on.
 `docs/SPEC.md` §14.7 covers the single-binary tool surface.

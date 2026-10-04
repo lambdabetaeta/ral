@@ -39,7 +39,7 @@ absent. **Which observations matter is the host's call**, made once in
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 
-The one gate core keeps is its own, and it is the decision rather than a flag:
+The one filter core keeps is its own, and it is the decision rather than a flag:
 a capability *denial* joins the trail whenever one is open, an *allowed* check
 never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only a head admission
@@ -292,7 +292,7 @@ with `FollowSymlinks::No`, so what was judged is what gets opened.
 That is why the site set is short enough to read: `redirect.rs` drives the
 recipe but contains no open, and `builtins/fs.rs`, `builtins/modules.rs` and
 exarch's readers, editors and grep all reach the filesystem through a
-`Located` rather than by re-walking a string the gate already judged. The one
+`Located` rather than by re-walking a string the in-process guard already judged. The one
 exception is the discard device, which has no object to locate — on Windows
 `NUL` is a name the Win32 layer resolves anywhere rather than an entry in any
 directory.

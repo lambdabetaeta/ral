@@ -60,7 +60,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
 
 /// Capability frame that actually triggers `sandbox_projection()` to
 /// return `Some(_)`: any `fs` policy is enough.  Read prefix `/` makes
-/// every read pass the in-ral gate; the projection still goes through
+/// every read pass the in-process guard; the projection still goes through
 /// the OS-sandbox machinery because `saw_fs` is true.
 #[cfg(unix)]
 fn projecting_caps() -> Capabilities {

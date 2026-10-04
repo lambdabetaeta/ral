@@ -17,7 +17,7 @@ use crate::path::tilde::TildePath;
 use crate::process::StdioSpec;
 use crate::types::{AuditIo, CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
-use super::identity::CommandIdentity;
+use super::head::Head;
 use super::process::build_command;
 use super::vet::vet;
 
@@ -75,7 +75,7 @@ pub(crate) fn detach(
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
-    let plan = vet(&CommandIdentity::resolve(name, &shell.context), argv, shell)?;
+    let plan = vet(&Head::resolve(&name, &shell.context), argv, shell)?;
 
     let Some(policy) = shell.detach_policy() else {
         return Err(sig(
@@ -119,7 +119,7 @@ pub(crate) fn detach(
         mooring,
         command_fact(
             &plan.shown,
-            plan.args,
+            plan.admitted.args().to_vec(),
             0,
             CommandOrigin::Detached,
             AuditIo::default(),

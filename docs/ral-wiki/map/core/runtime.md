@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8d868e18
-generated_at_date: 2026-09-30
+generated_at_commit: f4e88bce
+generated_at_date: 2026-10-05
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -33,23 +33,26 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   — with the calling convention fixed by surface position, not inferred from a
   value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-- `command.rs` — the External arm: vet the resolved identity, choose its
-  *exec image*, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
+- `command.rs` — the External arm: vet the resolved head, launch its
+  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
-  Submodules: `identity.rs` (`CommandIdentity`, the classify-once
-  name/shown/resolved triple), `vet.rs` (existence → argv shape → grant policy,
-  yielding a `SpawnPlan` with its `ExecImage`), `process.rs`, `child.rs`,
+  Submodules: `head.rs` (`Head { shown, program }`, resolved once: a bundled
+  `Program::Tool`, a host `Program::File` with its launch path and real path,
+  or a `Missing`), `vet.rs` (existence → argv shape → grant policy, yielding a
+  `SpawnPlan` that holds the guard's `Admitted`), `process.rs`, `child.rs`,
   `stdio.rs`, `redirect.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]].
-  - **`resolved` and the 126/127 verdict are two projections of one `PATH`
-    walk.** `identity::walk_path` calls `path::search` once, storing the
-    `PathSearch` on the identity; `vet::check_existence` pattern-matches it and
-    never probes the disk itself, so walk and verdict cannot disagree. Both that
-    walk and `policy_names`' host-`PATH` baseline anchor through
-    `Context::search_cwd` — the shell's one cwd cell — so the grant gate judges
-    the identity vet saw
-    ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
+  - **The program and the 126/127 verdict are two projections of one `PATH`
+    walk.** `Head::resolve` calls `path::search` once, anchored through
+    `Context::search_cwd`, the shell's one cwd cell; a miss is
+    `Missing::NotFound`, a hit lacking `+x` `Missing::NotExecutable`, and
+    `vet` reads that rather than probing the disk, so walk and verdict cannot
+    disagree and a missing command never reaches the in-process guard
+    ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]). A path
+    head is anchored at the launch cwd with only `.` folded, so the guard
+    judges the file the kernel will reach and the launcher runs that very path
+    ([[decisions/261004_exec-rules|exec-rules]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument through `RefusedArg::of_value`
     (`core/src/types/exec_arg.rs`) and carries the shape's own `remedy`; the
@@ -57,7 +60,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `detach.rs` is that same machinery — `CommandIdentity`, `vet`,
+  - `detach.rs` is that same machinery — `Head`, `vet`,
     `build_command` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
@@ -71,7 +74,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     (an arm, the catch-all, or a base frame): a handler runs inside this
     session, so nothing could be detached; its scheme is
     `[String] → F [pid: Int, desc: String]`.
-  - **A bundled coreutils/diffutils/ripgrep head is an `ExecImage::BundledTool`,
+  - **A bundled coreutils/diffutils/ripgrep head is a `Program::Tool`,
     always run as a `ral --ral-bundled-tool <tool>` child** — its inherited
     stdio, env, cwd, process group, and sandbox are the execution context, so it
     threads the same spawn/`RunningChild`/audit machinery as a host external,
@@ -143,7 +146,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   - A bundled (uutils) head routes `Direct` like any external, its
     `ral --ral-bundled-tool` child the image chosen by `command::build_command`
     — nothing in the pipeline distinguishes a bundled head from a host binary,
-    so both classify as `External` carrying the resolved `CommandIdentity`.
+    so both classify as `External` carrying the resolved `Head`.
     Value-style composition is evaluator application, never a stage-transport
     concern. The terminal-ownership decision (`resolve_terminal_plan`)
     likewise gates on a reachable terminal lease and a terminal-bound final
@@ -292,7 +295,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   `shell.guest_jail()` marks every spawn as already confined by the spawn
   jail — a fresh unprivileged uid and a per-exec cgroup,
   `process/jail.rs` ([[map/core/io-process|io-process]]) — since bwrap
-  needs the user namespaces the guest boot disables; the in-process gates
+  needs the user namespaces the guest boot disables; the in-process guards
   apply unchanged, and `child.rs` tracks the per-exec `JailCgroup`, so
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase

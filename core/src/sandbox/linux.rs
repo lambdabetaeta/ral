@@ -23,7 +23,7 @@ pub(crate) use host::HostEnvelope;
 
 use super::reexec::Pinned;
 use crate::path::{PathShape, Rendered, render_paths};
-use crate::types::{FsProjection, SandboxProjection};
+use crate::types::{ExecProjection, ExecRule, FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -134,6 +134,22 @@ pub(crate) fn make_command_with_policy(
                 .map_err(|e| format!("sandbox: {exe} is not on the host to bind: {e}"))?;
             ro_binds.extend(render_paths(&[real.to_string_lossy()])?);
         }
+    }
+    // A file the exec layer admits, carriers among them, is useless unless
+    // the envelope shows it.
+    if let ExecProjection::Restricted(exec) = &rendered.exec {
+        let unbound: Vec<Rendered> = exec
+            .iter()
+            .filter_map(|rule| match rule {
+                ExecRule::File { path, allow: true }
+                    if !ro_binds.iter().any(|bind| path.within(bind)) =>
+                {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        ro_binds.extend(unbound);
     }
     ro_binds.sort();
     ro_binds.dedup();
@@ -413,7 +429,7 @@ enum DenyMask<'p> {
     /// deny creating the very name it forbids (`deny: ['cwd:/.env']` leaving
     /// an `.env` directory in the user's tree).  So the name is left alone: a
     /// read-only bind refuses the only access an absent name has, and under a
-    /// writable one the in-process gate stays its single enforcer.
+    /// writable one the in-process guard stays its single enforcer.
     LeftAbsent,
 }
 
@@ -570,9 +586,9 @@ fn default_ro_binds() -> Vec<String> {
 )]
 mod tests {
     use super::{HostEnvelope, Payload, Pinned, make_command_with_policy};
-    use crate::sandbox::LaunchTarget;
-    use crate::sandbox::launch::{Ownership, trampoline_tail};
-    use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::capability::Program;
+    use crate::sandbox::launch::{Ownership, admitted, trampoline_tail};
+    use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
     /// A bare Linux host.
@@ -798,6 +814,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The envelope shows an interpreter only on the system's word: a script
+    /// the user can write binds nothing beside itself.
+    #[test]
+    fn a_script_the_user_can_write_has_no_interpreter_bound() {
+        let dir = workdir("carrier-bind");
+        let interp = dir.join("interp");
+        std::fs::write(&interp, "\x7fELF").unwrap();
+        let script = dir.join("run");
+        std::fs::write(&script, format!("#!{}\n", interp.display())).unwrap();
+        let script = script.to_string_lossy();
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules::default()),
+            net: true,
+            exec: crate::types::ExecProjection::default(),
+        };
+        let args: Vec<String> = make_command_with_policy(
+            &stand_in(),
+            Payload {
+                program: "/bin/true",
+                args: &[],
+                image: Some(&script),
+            },
+            &policy,
+            None,
+            Ownership::Kept,
+            WHOLE,
+        )
+        .expect("ASCII paths render")
+        .0
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        let real = std::fs::canonicalize(&interp)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !args.contains(&real),
+            "an interpreter the user could have swapped in must not be bound: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Through the very argv a launch builds: the payload is the trampoline,
     /// which enters the Landlock layer before `execve`ing `/bin/sh`.  A broken
     /// trampoline is exactly what these tests exist to catch, so even the
@@ -809,10 +868,10 @@ mod tests {
         script: &str,
     ) -> Option<std::process::Output> {
         let sh = "/bin/sh";
+        let program = Program::file(sh.into()).expect("/bin/sh exists");
         let tail = trampoline_tail(
             policy,
-            LaunchTarget::Host { program: sh },
-            &["-c".to_string(), script.to_string()],
+            &admitted(program, &["-c".to_string(), script.to_string()]),
         )
         .expect("the projection encodes");
         let self_path = crate::sandbox::reexec::self_arg0().expect("own path");
@@ -1458,7 +1517,6 @@ mod tests {
     fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
         use crate::process::{CancelCause, CancelScope, Group, PgidPolicy};
         use crate::runtime::command::{Pumps, RunningChild};
-        use crate::sandbox::LaunchTarget;
 
         let policy = unrestricted();
         if envelope_launches(&policy).is_none() {
@@ -1474,10 +1532,10 @@ mod tests {
 
         let shell = crate::types::Shell::default();
         let scope = CancelScope::root();
+        let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
         let mut launch = crate::sandbox::sandboxed_command(
             &policy,
-            LaunchTarget::Host { program: "/bin/sh" },
-            &["-c".to_string(), script],
+            &admitted(sh, &["-c".to_string(), script]),
             Ownership::Kept,
             &shell,
             &scope,
@@ -1674,17 +1732,18 @@ mod tests {
     /// The command directories, plus whatever a test adds.  The loader and
     /// ral's own binary need no naming: `Layer::render` folds them in.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
-        ExecProjection::Restricted {
-            allow_paths: paths.iter().map(|p| (*p).to_string()).collect(),
-            allow_dirs: ["/bin", "/usr/bin"]
-                .iter()
-                .chain(dirs)
-                .map(|d| (*d).to_string())
-                .collect(),
-            deny_paths: Vec::new(),
-            deny_dirs: Vec::new(),
-            deny_basenames: Vec::new(),
-        }
+        let dirs = ["/bin", "/usr/bin"]
+            .iter()
+            .chain(dirs)
+            .map(|d| ExecRule::Dir {
+                path: (*d).to_string(),
+                allow: true,
+            });
+        let files = paths.iter().map(|p| ExecRule::File {
+            path: (*p).to_string(),
+            allow: true,
+        });
+        ExecProjection::Restricted(dirs.chain(files).collect())
     }
 
     /// Landlock's own precondition, alongside `envelope_launches`: without a
@@ -1721,7 +1780,7 @@ mod tests {
         copy
     }
 
-    /// The interpreter bypass the in-ral gate cannot see: `sh -c` re-execs
+    /// The interpreter bypass the in-process guard cannot see: `sh -c` re-execs
     /// whatever it likes, and only the kernel is still looking.
     #[test]
     fn an_interpreter_cannot_exec_a_binary_outside_the_admits() {

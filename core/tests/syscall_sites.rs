@@ -122,6 +122,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox.rs", "silent:restricted-envelope-probe"),
     ("core/src/sandbox.rs", "silent:pin-identity"),
     ("core/src/sandbox.rs", "silent:self-reexec"),
+    ("core/src/sandbox/carriers.rs", "silent:carrier-shebang"),
     ("core/src/sandbox/diag.rs", "silent:ps-sample"),
     ("core/src/sandbox/diag/linux.rs", "silent:journal-read"),
     ("core/src/sandbox/diag/macos.rs", "silent:log-show"),

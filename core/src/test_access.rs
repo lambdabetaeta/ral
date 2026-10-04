@@ -15,7 +15,10 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
+use crate::capability::Program;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
+use crate::path::RealPath;
+use crate::runtime::command::Head;
 use crate::typecheck::{Scheme, Ty, TypeError, Unifier};
 use crate::types::{BuiltinEntry, FsProjection, FsRules, Settled, Shell};
 
@@ -68,19 +71,39 @@ pub fn fs_rules<N>(projection: &FsProjection<N>) -> Option<&FsRules<N>> {
     projection.rules()
 }
 
-/// `Shell::check_exec_call`: the grant gate one exec faces.
+/// A host file whose real path, and launch path, is `real`.
+fn file(real: &str) -> Program {
+    Program::File {
+        path: real.into(),
+        real: RealPath::assumed(real),
+    }
+}
+
+/// Whether the live stack admits running the file whose real path is `real`.
+pub fn admits_file(shell: &Shell, real: &str) -> bool {
+    admits(shell, real, file(real))
+}
+
+/// Whether the live stack admits the bundled tool `name`.
+pub fn admits_tool(shell: &Shell, name: &str) -> bool {
+    admits(shell, name, Program::Tool(name.into()))
+}
+
+fn admits(shell: &Shell, shown: &str, program: Program) -> bool {
+    let head = Head {
+        shown: shown.into(),
+        program: Ok(program),
+    };
+    crate::capability::admits_head(&shell.context, &head)
+}
+
+/// `Shell::check_exec` on the file whose real path is `real`, with `args`.
 ///
 /// # Errors
-/// `Err` if the active grant denies the command, or admits only a
-/// subcommand set that `args`'s first element misses.
-pub fn check_exec_call(
-    shell: &mut Shell,
-    display_name: &str,
-    deny_names: &[&str],
-    policy_names: &[&str],
-    args: &[String],
-) -> Settled<()> {
-    shell.check_exec_call(display_name, deny_names, policy_names, args)
+/// `Err` if the active grant denies the file, or admits only a subcommand
+/// set that `args`'s first element misses.
+pub fn check_file(shell: &mut Shell, real: &str, args: &[String]) -> Settled<()> {
+    shell.check_exec(real, file(real), args.to_vec()).map(drop)
 }
 
 /// `Shell::leased_binding_count`: how many bindings hold a terminal lease.

@@ -898,9 +898,10 @@ fn grant_exec_explicit_path_allows_scoped_path_command() {
     std::fs::set_permissions(&fake_git, perms).unwrap();
 
     // See sibling test: fs:read for the tempdir is required so the bwrap
-    // sandbox can actually exec the spoofed git from /tmp/...
+    // sandbox can actually exec the spoofed git from /tmp/...  The script is
+    // one the user can author, so it carries no interpreter: the grant names it.
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: ['{1}': 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: ['{1}': 'allow', '/bin/sh': 'allow'], fs: [read: ['{0}']]] {{ git }} }}",
         dir.path().to_string_lossy(),
         fake_git.to_string_lossy()
     );

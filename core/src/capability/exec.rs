@@ -1,352 +1,327 @@
-//! Per-layer and stack-level exec policy evaluation.
+//! Exec authority as rules about programs.
 //!
-//! A layer's exec map admits a command two ways: by literal key (bare
-//! name or absolute path), or by a covering `allow_dirs`/`deny_dirs`
-//! prefix.  Literal beats dir, deeper dir beats shallower, and a tie
-//! resolves to deny.
+//! Decode leaves each layer an authored [`ExecGrant`];
+//! [`ExecRules::compile`] turns it into rules over host files, bundled tools,
+//! directories and vetoed names, and [`ExecRules::verdict`] is the one
+//! function that judges a [`Program`].  A stack's authority is the pointwise
+//! meet of its layers' tables, compiled afresh on every question.
 
-use crate::types::{ExecMap, ExecPolicy, GrantStack, Meet};
+use crate::path::{RealPath, SearchCwd};
+use crate::types::{ExecGrant, ExecRule, GrantStack, Meet, Verdict, meet_insert};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
-/// What an admitted command may run: any argv, or only these
-/// first-argument subcommands.
-pub(super) enum Admit {
-    Any,
-    Subcommands(BTreeSet<String>),
+/// What a grant judges, and what the launcher runs.
+#[derive(Clone, Debug)]
+pub(crate) enum Program {
+    /// A bundled tool, run as ral itself.
+    Tool(String),
+    /// A host file: `path` is what the launcher runs, `real` is `realpath(path)`.
+    File { path: PathBuf, real: RealPath },
 }
 
-/// `Admit` is [`ExecPolicy`] with the `Deny` bottom removed, so this
-/// fold can never reach it — hence the `unreachable!` below.
-impl Meet for Admit {
-    fn meet(self, other: Self) -> Self {
-        Self::from_policy(self.into_policy().meet(other.into_policy()))
-    }
-}
-
-impl Admit {
-    fn into_policy(self) -> ExecPolicy {
+impl Program {
+    pub(crate) fn subject(&self) -> Subject<'_> {
         match self {
-            Self::Any => ExecPolicy::Allow,
-            Self::Subcommands(s) => ExecPolicy::Subcommands(s),
-        }
-    }
-
-    fn from_policy(policy: ExecPolicy) -> Self {
-        match policy {
-            ExecPolicy::Allow => Self::Any,
-            ExecPolicy::Subcommands(s) => Self::Subcommands(s),
-            ExecPolicy::Deny => unreachable!("meet of two admitted verdicts is never Deny"),
+            Self::Tool(name) => Subject::Tool(name),
+            Self::File { real, .. } => Subject::File(real),
         }
     }
 }
 
-/// One opining capability layer's vote on a candidate command.
-pub(super) enum LayerExec {
-    Denied,
-    Allowed(Admit),
+/// A file by its real path, a bundled tool by name.
+impl std::fmt::Display for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool(name) => write!(f, "bundled {name}"),
+            Self::File { real, .. } => real.fmt(f),
+        }
+    }
 }
 
-/// The two identity sets a command carries into the gate, consulted
-/// asymmetrically.  `deny` is broad — the policy names, the file they
-/// name with symlinks followed, and every basename among them — so a
-/// bare `bash: deny` vetoes an absolute `/bin/bash` and a symlink to
-/// it alike.  `allow` is exactly the policy names, so a planted
-/// `/tmp/evil/rg` cannot inherit an outer grant's bare `rg: allow`.
-/// Both are built in `runtime::command::identity`.
+/// What a grant judges: a borrowed view of a [`Program`].
 #[derive(Clone, Copy)]
-pub(super) struct ExecNames<'a> {
-    pub(super) deny: &'a [&'a str],
-    pub(super) allow: &'a [&'a str],
+pub(crate) enum Subject<'a> {
+    Tool(&'a str),
+    File(&'a RealPath),
 }
 
-/// Folded verdict across the whole capability stack; `Unrestricted`
-/// means no layer held an exec opinion at all.
-pub(super) enum ExecVerdict {
-    Unrestricted,
-    Denied,
-    Allowed(Admit),
+/// How specific a rule is.  The derived `Ord` is precedence: the greater rank
+/// decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Dir(usize),
+    Carrier,
+    Exact,
+    Veto,
 }
 
-/// Fold every opining layer: one denial denies, allowances intersect,
-/// and a stack that opines but admits nothing denies.  Takes the grant
-/// stack alone, not a `Context` — every other input is lexical, so the
-/// verdict is pure.
-pub(super) fn evaluate_exec(grants: &GrantStack, names: ExecNames) -> ExecVerdict {
-    let mut admit: Option<Admit> = None;
-    let mut saw = false;
-    for exec in grants.exec() {
-        saw = true;
-        match layer_exec_verdict(exec, names) {
-            LayerExec::Denied => return ExecVerdict::Denied,
-            LayerExec::Allowed(a) => admit = admit.meet(Some(a)),
+/// One rule, before meeting the others.
+pub(crate) enum Rule {
+    File(RealPath, Verdict),
+    Tool(String, Verdict),
+    /// `true` admits.
+    Dir(RealPath, bool),
+    Veto(String),
+}
+
+/// One grant's exec authority, as a function from programs to verdicts.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExecRules {
+    files: BTreeMap<RealPath, Verdict>,
+    tools: BTreeMap<String, Verdict>,
+    dirs: BTreeMap<RealPath, bool>,
+    /// The [`name_key`] of every bare deny.
+    vetoes: BTreeSet<String>,
+}
+
+impl Extend<Rule> for ExecRules {
+    fn extend<I: IntoIterator<Item = Rule>>(&mut self, rules: I) {
+        for rule in rules {
+            match rule {
+                Rule::File(real, v) => meet_insert(&mut self.files, real, v),
+                Rule::Tool(name, v) => meet_insert(&mut self.tools, name, v),
+                Rule::Dir(real, v) => meet_insert(&mut self.dirs, real, v),
+                Rule::Veto(name) => {
+                    self.vetoes.insert(name_key(&name).into_owned());
+                }
+            }
         }
     }
-    if let Some(a) = admit {
-        ExecVerdict::Allowed(a)
-    } else if saw {
-        ExecVerdict::Denied
-    } else {
-        ExecVerdict::Unrestricted
+}
+
+impl FromIterator<Rule> for ExecRules {
+    fn from_iter<I: IntoIterator<Item = Rule>>(rules: I) -> Self {
+        let mut table = Self::default();
+        table.extend(rules);
+        table
     }
 }
 
-/// Decide one layer.  A literal `Deny` on any broad name goes first
-/// because it must beat a covering allow dir; then a literal admission
-/// on the narrow names; then the deepest covering dir; else deny by
-/// default.
-pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec {
-    if literal_vetoes(&exec.literals, names.deny) {
-        return LayerExec::Denied;
+impl ExecRules {
+    /// A bare key is the file the host `PATH` finds — the process's own, so a
+    /// scoped `PATH` cannot redirect it — and the bundled tool of that name,
+    /// and for a deny a veto on the name everywhere.  Path and dir keys are
+    /// their frozen forms, never re-read from disk.
+    pub(crate) fn compile(grant: &ExecGrant) -> Self {
+        let host_path = std::env::var("PATH").ok();
+        let names = grant.names.iter().flat_map(|(name, v)| {
+            let tool =
+                crate::uutils::is_uutils_tool(name).then(|| Rule::Tool(name.clone(), v.clone()));
+            let file = crate::path::locate(name, host_path.as_deref(), SearchCwd::nowhere())
+                .and_then(|hit| RealPath::of(&hit).ok())
+                .map(|real| Rule::File(real, v.clone()));
+            let veto = v.is_denied().then(|| Rule::Veto(name.clone()));
+            [tool, file, veto].into_iter().flatten()
+        });
+        let paths = grant
+            .paths
+            .iter()
+            .map(|(path, v)| Rule::File(RealPath::frozen(path), v.clone()));
+        let dirs = grant
+            .dirs
+            .iter()
+            .map(|(dir, allow)| Rule::Dir(RealPath::frozen(dir), *allow));
+        names.chain(paths).chain(dirs).collect()
     }
-    if let Some(policy) = match_literal_keys(&exec.literals, names.allow) {
-        return match policy {
-            ExecPolicy::Deny => LayerExec::Denied,
-            ExecPolicy::Allow => LayerExec::Allowed(Admit::Any),
-            ExecPolicy::Subcommands(s) => LayerExec::Allowed(Admit::Subcommands(s)),
+
+    pub(crate) fn verdict(&self, subject: Subject<'_>) -> Verdict {
+        most_specific(self.matching(subject)).unwrap_or(Verdict::Deny)
+    }
+
+    /// Every rule that speaks to `subject`, ranked.
+    fn matching<'s>(&'s self, subject: Subject<'s>) -> impl Iterator<Item = (Rank, Verdict)> + 's {
+        let (name, exact, real) = match subject {
+            Subject::Tool(name) => (Cow::Borrowed(name), self.tools.get(name), None),
+            Subject::File(real) => (real.name(), self.files.get(real), Some(real)),
         };
+        let veto = self.vetoes.contains(name_key(&name).as_ref());
+        let dirs = real.into_iter().flat_map(move |real| self.covering(real));
+        veto.then_some((Rank::Veto, Verdict::Deny))
+            .into_iter()
+            .chain(exact.map(|v| (Rank::Exact, v.clone())))
+            .chain(dirs)
     }
-    match longest_dir_match(exec, names) {
-        Some(true) => LayerExec::Allowed(Admit::Any),
-        Some(false) | None => LayerExec::Denied,
+
+    fn covering<'s>(&'s self, real: &'s RealPath) -> impl Iterator<Item = (Rank, Verdict)> + 's {
+        self.dirs
+            .iter()
+            .filter(move |(dir, _)| real.within(dir))
+            .map(|(dir, allow)| (Rank::Dir(dir.depth()), Verdict::from(*allow)))
+    }
+
+    /// What the dirs alone say of `real` — a dir covers itself.
+    fn dir_verdict(&self, real: &RealPath) -> Verdict {
+        most_specific(self.covering(real)).unwrap_or(Verdict::Deny)
+    }
+
+    /// The kernel's rules, in ascending [`Rank`] so last-match-wins is
+    /// [`most_specific`]; within a rank denies follow allows, as equal ranks
+    /// meet.  The kernel cannot see argv, so `Only` is an allow; tools are not
+    /// rendered, the kernel seeing ral's own binary for them.
+    pub(crate) fn kernel(&self, carriers: &BTreeSet<RealPath>) -> Vec<ExecRule> {
+        let file = |p: &RealPath, allow| ExecRule::File {
+            path: p.to_string(),
+            allow,
+        };
+        let mut ranked: Vec<_> = (self.dirs.iter())
+            .map(|(d, &allow)| {
+                let dir = ExecRule::Dir {
+                    path: d.to_string(),
+                    allow,
+                };
+                (Rank::Dir(d.depth()), dir)
+            })
+            .chain(carriers.iter().map(|c| (Rank::Carrier, file(c, true))))
+            .chain(
+                self.files
+                    .iter()
+                    .map(|(f, v)| (Rank::Exact, file(f, !v.is_denied()))),
+            )
+            .chain(
+                self.vetoes
+                    .iter()
+                    .map(|n| (Rank::Veto, ExecRule::Veto(n.clone()))),
+            )
+            .collect();
+        ranked.sort_by_key(|(rank, rule)| {
+            let allows = matches!(
+                rule,
+                ExecRule::Dir { allow: true, .. } | ExecRule::File { allow: true, .. }
+            );
+            (*rank, !allows)
+        });
+        ranked.into_iter().map(|(_, rule)| rule).collect()
+    }
+
+    /// The files a rule admits.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
+        self.files
+            .iter()
+            .filter(|(_, v)| !v.is_denied())
+            .map(|(real, _)| real)
     }
 }
 
-fn literal_vetoes(literals: &BTreeMap<String, ExecPolicy>, deny_names: &[&str]) -> bool {
-    deny_names
-        .iter()
-        .any(|n| matches!(lookup_literal(literals, n), Some(ExecPolicy::Deny)))
+/// The greatest rank decides; equal ranks meet.
+fn most_specific(candidates: impl IntoIterator<Item = (Rank, Verdict)>) -> Option<Verdict> {
+    candidates
+        .into_iter()
+        .fold(None::<(Rank, Verdict)>, |best, (rank, v)| match best {
+            Some((held, b)) if held > rank => Some((held, b)),
+            Some((held, b)) if held == rank => Some((held, b.meet(v))),
+            _ => Some((rank, v)),
+        })
+        .map(|(_, v)| v)
 }
 
-/// Whether the gate admits, over an explicit deny/allow name pair.
-/// Lets `runtime::command::identity` and the capability lattice tests
-/// drive the real verdict with hand-built sets.
-#[cfg(test)]
-pub(crate) fn admits_for_test(grants: &GrantStack, deny: &[&str], allow: &[&str]) -> bool {
-    !matches!(
-        evaluate_exec(grants, ExecNames { deny, allow }),
-        ExecVerdict::Denied
-    )
+/// The meet of two finite-support functions: the union of their supports,
+/// each point met.
+fn pointwise<'k, K: Ord + Clone + 'k, V>(
+    keys: impl Iterator<Item = &'k K>,
+    at: impl Fn(&K) -> V,
+) -> BTreeMap<K, V> {
+    keys.map(|k| (k.clone(), at(k))).collect()
 }
 
-/// Bare names and absolute paths share one keyspace, so a layer listing
-/// the same binary under both takes the meet of the two policies.
-fn match_literal_keys(
-    literals: &BTreeMap<String, ExecPolicy>,
-    names: &[&str],
-) -> Option<ExecPolicy> {
-    let mut matched = names.iter().filter_map(|n| lookup_literal(literals, n));
-    let first = matched.next()?;
-    Some(matched.fold(first, ExecPolicy::meet))
-}
-
-/// Off Windows, lookup is exact.  Under Windows identity distinct keys can be
-/// fold-equal (`GIT` and `git` are one name to the OS), so every fold-equal hit
-/// is meet-folded: an exact `Allow` must not hide a `Deny` on another spelling.
-fn lookup_literal(literals: &BTreeMap<String, ExecPolicy>, name: &str) -> Option<ExecPolicy> {
-    lookup_literal_on(literals, name, cfg!(windows))
-}
-
-fn lookup_literal_on(
-    literals: &BTreeMap<String, ExecPolicy>,
-    name: &str,
-    windows: bool,
-) -> Option<ExecPolicy> {
-    if !windows {
-        return literals.get(name).cloned();
-    }
-    let mut matches = literals
-        .iter()
-        .filter(|(key, _)| names_match(key, name, true))
-        .map(|(_, policy)| policy.clone());
-    let first = matches.next()?;
-    Some(matches.fold(first, ExecPolicy::meet))
-}
-
-/// The default PATHEXT list [`path::which`](crate::path::which) falls back to.  `.bat` and
-/// `.cmd` belong here even though `process::launch` refuses to spawn
-/// them: that is a later gate on the image, not on the name.
-const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
-
-/// `git.EXE` → `git`; an unrecognised extension (`my.tool`) is left
-/// alone.
-fn strip_windows_extension(name: &str) -> &str {
-    match name.rsplit_once('.') {
-        Some((stem, ext))
-            if WINDOWS_EXEC_EXTENSIONS
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(ext)) =>
-        {
-            stem
+/// `verdict(a ∧ b, p) == verdict(a, p) ∧ verdict(b, p)` for every program `p`.
+impl Meet for ExecRules {
+    fn meet(self, other: Self) -> Self {
+        let (a, b) = (&self, &other);
+        let at = |s: Subject<'_>| a.verdict(s).meet(b.verdict(s));
+        Self {
+            files: pointwise(a.files.keys().chain(b.files.keys()), |k| {
+                at(Subject::File(k))
+            }),
+            tools: pointwise(a.tools.keys().chain(b.tools.keys()), |k| {
+                at(Subject::Tool(k))
+            }),
+            dirs: pointwise(a.dirs.keys().chain(b.dirs.keys()), |k| {
+                !a.dir_verdict(k).meet(b.dir_verdict(k)).is_denied()
+            }),
+            vetoes: &a.vetoes | &b.vetoes,
         }
-        _ => name,
     }
 }
 
-/// True iff `name` pins a specific executable extension rather than
-/// naming a bare stem.
-fn names_an_extension(name: &str) -> bool {
-    strip_windows_extension(name).len() != name.len()
+/// The stack's exec authority; `None` when no layer holds an exec opinion.
+pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
+    grants.exec().map(ExecRules::compile).reduce(Meet::meet)
 }
 
-/// True iff exec-map key `literal` and command identity `candidate`
-/// name the same executable: byte-exact off Windows; under Windows
-/// identity, case folds and a candidate's PATHEXT extension is
-/// transparent, so a bare `git` key matches `GIT.CMD`.  A key that
-/// names an extension is a pin, not a stem — `git.exe: 'allow'` must
-/// not admit a planted `git.com`, which default PATHEXT resolution
-/// tries first.  `windows` is a parameter, not a `cfg!` read, so the
-/// rule is testable off Windows; [`lookup_literal`] is the platform
-/// gate.
-fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
+/// The extensions Windows runs a bare name through.  `.bat` and `.cmd` belong
+/// here even though `process::launch` refuses to spawn them: that is a later
+/// refusal of the image, not of the name.
+pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
+
+/// A command name as the host identifies it.
+fn name_key(name: &str) -> Cow<'_, str> {
+    name_key_on(name, cfg!(windows))
+}
+
+/// Off Windows the name itself; on Windows ASCII lower-case, a trailing
+/// executable extension stripped.  `windows` is a parameter so the Windows
+/// rule is tested on every host.
+fn name_key_on(name: &str, windows: bool) -> Cow<'_, str> {
     if !windows {
-        return literal == candidate;
+        return Cow::Borrowed(name);
     }
-    if names_an_extension(literal) {
-        return literal.eq_ignore_ascii_case(candidate);
+    let lower = name.to_ascii_lowercase();
+    match lower.rsplit_once('.') {
+        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.contains(&ext) => Cow::Owned(stem.to_string()),
+        _ => Cow::Owned(lower),
     }
-    literal.eq_ignore_ascii_case(strip_windows_extension(candidate))
-}
-
-/// The deepest directory prefix covering any absolute candidate, and
-/// whether it allows.  "Deepest" by [`identity_depth`](crate::path::lex::identity_depth) —
-/// components of the alias-folded form, not characters of the raw
-/// surface, so a firmlink spelling (`/tmp` vs `/private/tmp`) cannot
-/// buy a shallow directory rank.  An allow and a deny of equal depth do
-/// reach here — composition only strips a clash where
-/// [`evicts`](crate::path::resolved::NormalizedPrefix::evicts) holds — so
-/// the two loops break the tie in opposite directions: allow displaces
-/// `best` on strictly greater depth, deny on greater-or-equal.  A gate's
-/// ambiguity must resolve to deny.
-///
-/// Each side reads what its polarity earns, exactly as the literals above
-/// do: an allow dir admits, so it sees the narrow spellings alone and is
-/// matched as written; a deny dir vetoes, so it also sees the canonical
-/// path and is matched on its resolved form too.  A symlink planted under
-/// an allowed dir cannot launder a binary out of a denied one, nor a denied
-/// dir that is itself a symlink spare what it points at.  Bare basenames in
-/// the broad set fall to the `is_absolute` filter — a directory covers no
-/// bare name.
-fn longest_dir_match(exec: &ExecMap, names: ExecNames) -> Option<bool> {
-    let mut best: Option<(usize, bool)> = None;
-    let mut consider = |depth: Option<usize>, allow: bool, wins_tie: bool| match (depth, best) {
-        (None, _) => {}
-        (Some(depth), Some((best_depth, _)))
-            if best_depth > depth || (best_depth == depth && !wins_tie) => {}
-        (Some(depth), _) => best = Some((depth, allow)),
-    };
-    for dir in &exec.allow_dirs {
-        consider(dir.grant_depth(names.allow), true, false);
-    }
-    for dir in &exec.deny_dirs {
-        consider(dir.veto_depth(names.deny), false, true);
-    }
-    best.map(|(_, allow)| allow)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test fs scaffolding: a tempdir file and a link to it"
+)]
 mod tests {
     use super::*;
-    use crate::path;
+    use crate::path::{Namespace, NormalizedPrefix};
 
-    /// `which.rs`'s `%PATHEXT%` fallback and the grant-key strip list are
-    /// twin copies of one fact; they may only drift together.
+    /// `which.rs`'s `%PATHEXT%` fallback and the name-key strip list are twin
+    /// copies of one fact; they may only drift together.
     #[cfg(windows)]
     #[test]
-    fn grant_key_extensions_agree_with_the_resolver_default_pathext() {
+    fn name_key_extensions_agree_with_the_resolver_default_pathext() {
         let from_pathext: Vec<String> = crate::path::which::DEFAULT_PATHEXT
             .split(';')
             .map(|e| e.trim_start_matches('.').to_lowercase())
             .collect();
-        let from_grant_keys: Vec<String> = WINDOWS_EXEC_EXTENSIONS
+        let from_name_key: Vec<String> = WINDOWS_EXEC_EXTENSIONS
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert_eq!(from_pathext, from_grant_keys);
+        assert_eq!(from_pathext, from_name_key);
     }
 
     #[test]
-    fn names_match_off_windows_is_byte_exact() {
-        assert!(names_match("git", "git", false));
-        assert!(!names_match("git", "git.exe", false));
-        assert!(!names_match("git", "Git", false));
-    }
-
-    /// No `cfg(windows)`: the Windows rule runs on every CI host.
-    #[test]
-    fn windows_names_match_ignores_case() {
-        assert!(names_match("git", "Git", true));
-        assert!(names_match("GIT", "git", true));
+    fn name_key_off_windows_is_the_name() {
+        assert_eq!(name_key_on("Git.exe", false), "Git.exe");
     }
 
     #[test]
-    fn windows_names_match_strips_pathext() {
-        assert!(names_match("git", "git.exe", true));
-        assert!(names_match("git", "GIT.EXE", true));
-        assert!(names_match("git", "git.cmd", true));
-        assert!(names_match("git", "git.CMD", true));
-        assert!(names_match("git", "git.com", true));
-        assert!(names_match("git", "git.bat", true));
+    fn windows_name_key_folds_case_and_strips_an_executable_extension() {
+        for name in [
+            "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
+        ] {
+            assert_eq!(name_key_on(name, true), "git", "{name}");
+        }
+        assert_eq!(name_key_on("git.tool", true), "git.tool");
+        assert_eq!(name_key_on("gitk.exe", true), "gitk");
     }
 
     #[test]
-    fn windows_names_match_rejects_unrelated_extension() {
-        assert!(!names_match("git", "git.tool", true));
-        assert!(!names_match("git", "gitx", true));
-    }
-
-    #[test]
-    fn windows_names_match_still_requires_the_same_stem() {
-        assert!(!names_match("git", "gitk.exe", true));
-    }
-
-    #[test]
-    fn windows_names_match_extension_pin_is_exact() {
-        assert!(names_match("git.exe", "git.exe", true));
-        assert!(names_match("git.exe", "GIT.EXE", true));
-        assert!(!names_match("git.exe", "git.com", true));
-        assert!(!names_match("git.exe", "git.bat", true));
-        assert!(!names_match("git.exe", "git", true));
-    }
-
-    #[test]
-    fn strip_windows_extension_leaves_unknown_extensions_alone() {
-        assert_eq!(strip_windows_extension("my.tool"), "my.tool");
-        assert_eq!(strip_windows_extension("git"), "git");
-        assert_eq!(strip_windows_extension("git.EXE"), "git");
-    }
-
-    /// An allow and a deny of equal depth, both covering the candidate,
-    /// must resolve to deny — the gate's own half of the guarantee,
-    /// independent of what composition already strips.  The fixture is
-    /// spelled for the host: the gate weighs only candidates
-    /// [`path::is_absolute`] admits, and a rooted path with no drive is
-    /// not absolute to Windows.
-    #[test]
-    fn longest_dir_match_ties_resolve_to_deny() {
-        let (dir, divergent, candidate) = if cfg!(windows) {
-            (r"C:\x", r"C:\y", r"C:\x\bin")
-        } else {
-            ("/x", "/y", "/x/bin")
-        };
-        let exec = ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface(dir)]),
-            deny_dirs: BTreeSet::from([path::NormalizedPrefix::for_test(
-                dir,
-                divergent,
-                path::Namespace::Host,
-            )]),
-        };
-        assert_eq!(
-            longest_dir_match(
-                &exec,
-                ExecNames {
-                    deny: &[candidate],
-                    allow: &[candidate]
-                }
-            ),
-            Some(false)
-        );
+    fn rank_is_precedence() {
+        assert!(Rank::Dir(0) < Rank::Dir(9));
+        assert!(Rank::Dir(9) < Rank::Carrier);
+        assert!(Rank::Carrier < Rank::Exact);
+        assert!(Rank::Exact < Rank::Veto);
     }
 
     /// `p` as an absolute path on the host, which for Windows needs a drive.
@@ -358,140 +333,295 @@ mod tests {
         }
     }
 
-    /// The gate over one directory prefix `/l` frozen as resolving to `/x`,
-    /// asked of a candidate invoked by its real path.
-    fn linked_dir_verdict(allow: bool, extra_allow: Option<&str>, candidate: &str) -> Option<bool> {
-        let linked =
-            path::NormalizedPrefix::for_test(&host("/l"), &host("/x"), path::Namespace::Host);
-        let mut allow_dirs: BTreeSet<_> = extra_allow
-            .map(|d| path::NormalizedPrefix::from_surface(host(d)))
+    fn real(p: &str) -> RealPath {
+        RealPath::assumed(host(p))
+    }
+
+    fn file(p: &str, v: Verdict) -> Rule {
+        Rule::File(real(p), v)
+    }
+
+    fn dir(p: &str, allow: bool) -> Rule {
+        Rule::Dir(real(p), allow)
+    }
+
+    fn of_file(rules: &ExecRules, p: &str) -> Verdict {
+        rules.verdict(Subject::File(&real(p)))
+    }
+
+    #[test]
+    fn a_veto_beats_a_file_allow() {
+        let rules: ExecRules = [file("/x/bash", Verdict::Allow), Rule::Veto("bash".into())]
             .into_iter()
             .collect();
-        let mut deny_dirs = BTreeSet::new();
-        if allow {
-            allow_dirs.insert(linked);
-        } else {
-            deny_dirs.insert(linked);
-        }
-        let exec = ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs,
-            deny_dirs,
-        };
-        let candidate = host(candidate);
-        let names = [candidate.as_str()];
-        longest_dir_match(
-            &exec,
-            ExecNames {
-                deny: &names,
-                allow: &names,
-            },
-        )
+        assert_eq!(of_file(&rules, "/x/bash"), Verdict::Deny);
     }
 
-    /// A deny dir that is a symlink vetoes where it points, as a deny
-    /// literal does; an allow dir grants only as written.
     #[test]
-    fn a_symlinked_deny_dir_vetoes_its_target_and_an_allow_dir_does_not_grant_it() {
-        assert_eq!(linked_dir_verdict(false, None, "/x/tool"), Some(false));
-        assert_eq!(linked_dir_verdict(true, None, "/x/tool"), None);
+    fn a_file_rule_beats_a_covering_deny_dir() {
+        let rules: ExecRules = [file("/x/tool", Verdict::Allow), dir("/x", false)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&rules, "/x/tool"), Verdict::Allow);
+        assert_eq!(of_file(&rules, "/x/other"), Verdict::Deny);
     }
 
-    /// Matched through its target, a deny ranks at the target's depth, so a
-    /// deeper allow inside the target still wins.
+    #[test]
+    fn the_deepest_dir_wins() {
+        let rules: ExecRules = [dir("/x", false), dir("/x/sub", true)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&rules, "/x/sub/tool"), Verdict::Allow);
+        assert_eq!(of_file(&rules, "/x/tool"), Verdict::Deny);
+    }
+
+    #[test]
+    fn no_rule_denies() {
+        assert_eq!(of_file(&ExecRules::default(), "/x/tool"), Verdict::Deny);
+        assert_eq!(
+            ExecRules::default().verdict(Subject::Tool("ls")),
+            Verdict::Deny
+        );
+    }
+
+    /// A tool has no place on disk, so no dir covers it.
+    #[test]
+    fn a_tool_is_judged_by_tools_and_vetoes_only() {
+        let allowed: ExecRules = std::iter::once(Rule::Tool("ls".into(), Verdict::Allow)).collect();
+        assert_eq!(allowed.verdict(Subject::Tool("ls")), Verdict::Allow);
+        let covered: ExecRules = [dir("/", true), file("/bin/ls", Verdict::Allow)]
+            .into_iter()
+            .collect();
+        assert_eq!(covered.verdict(Subject::Tool("ls")), Verdict::Deny);
+        let vetoed: ExecRules = [
+            Rule::Tool("rm".into(), Verdict::Allow),
+            Rule::Veto("rm".into()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(vetoed.verdict(Subject::Tool("rm")), Verdict::Deny);
+    }
+
+    /// A deeper allow in one layer cannot lift a deny another layer places
+    /// above it.
+    #[test]
+    fn a_stacked_deeper_allow_does_not_lift_a_deny() {
+        let a: ExecRules = [dir("/a", true), dir("/a/b", false)].into_iter().collect();
+        let b: ExecRules = std::iter::once(dir("/a/b/c", true)).collect();
+        assert_eq!(of_file(&a.meet(b), "/a/b/c/x"), Verdict::Deny);
+    }
+
+    /// A tiny xorshift: deterministic and dependency-free.
+    struct Rng(usize);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+
+        fn pick<T: Clone>(&mut self, items: &[T]) -> T {
+            items[self.below(items.len())].clone()
+        }
+    }
+
+    const DIRS: [&str; 4] = ["/a", "/a/b", "/a/b/c", "/z"];
+    const FILES: [&str; 7] = [
+        "/a/x",
+        "/a/b/x",
+        "/a/b/c/x",
+        "/a/b/c/d/x",
+        "/z/x",
+        "/q/x",
+        "/a/b/sh",
+    ];
+    const TOOLS: [&str; 2] = ["ls", "rm"];
+    const NAMES: [&str; 3] = ["x", "sh", "rm"];
+
+    fn verdicts() -> [Verdict; 4] {
+        let only = |subs: &[&str]| Verdict::Only(subs.iter().map(ToString::to_string).collect());
+        [
+            Verdict::Allow,
+            Verdict::Deny,
+            only(&["a"]),
+            only(&["a", "b"]),
+        ]
+    }
+
+    /// A table over the universe, each rule present one time in three.
+    fn table(rng: &mut Rng) -> ExecRules {
+        let mut rules = Vec::new();
+        for f in FILES {
+            if rng.below(3) == 0 {
+                rules.push(file(f, rng.pick(&verdicts())));
+            }
+        }
+        for t in TOOLS {
+            if rng.below(3) == 0 {
+                rules.push(Rule::Tool(t.into(), rng.pick(&verdicts())));
+            }
+        }
+        for d in DIRS {
+            if rng.below(3) == 0 {
+                rules.push(dir(d, rng.pick(&[true, false])));
+            }
+        }
+        for n in NAMES {
+            if rng.below(6) == 0 {
+                rules.push(Rule::Veto(n.into()));
+            }
+        }
+        rules.into_iter().collect()
+    }
+
+    #[test]
+    fn the_meet_of_two_tables_judges_as_the_meet_of_their_verdicts() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let files: Vec<RealPath> = FILES.iter().chain(&DIRS).map(|p| real(p)).collect();
+        for _ in 0..2000 {
+            let (a, b) = (table(&mut rng), table(&mut rng));
+            let met = a.clone().meet(b.clone());
+            let subjects = files
+                .iter()
+                .map(Subject::File)
+                .chain(TOOLS.iter().map(|t| Subject::Tool(t)));
+            for s in subjects {
+                assert_eq!(
+                    met.verdict(s),
+                    a.verdict(s).meet(b.verdict(s)),
+                    "a = {a:?}\nb = {b:?}"
+                );
+            }
+        }
+    }
+
+    /// The kernel's last-match-wins over `rules`, deny by default.
+    fn last_match(rules: &[ExecRule], real: &RealPath) -> bool {
+        rules
+            .iter()
+            .rev()
+            .find_map(|rule| match rule {
+                ExecRule::Dir { path, allow } => {
+                    real.within(&RealPath::assumed(path)).then_some(*allow)
+                }
+                ExecRule::File { path, allow } => {
+                    (*real == RealPath::assumed(path)).then_some(*allow)
+                }
+                ExecRule::Veto(name) => (name_key(&real.name()) == name.as_str()).then_some(false),
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn the_kernel_rules_judge_as_the_table_and_its_carriers() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let files: Vec<RealPath> = FILES.iter().chain(&DIRS).map(|p| real(p)).collect();
+        for _ in 0..2000 {
+            let rules = table(&mut rng);
+            let carriers: BTreeSet<RealPath> = files
+                .iter()
+                .filter(|_| rng.below(4) == 0)
+                .cloned()
+                .collect();
+            let kernel = rules.kernel(&carriers);
+            for f in &files {
+                let expected = if rules.vetoes.contains(name_key(&f.name()).as_ref()) {
+                    false
+                } else if rules.files.contains_key(f) {
+                    !rules.verdict(Subject::File(f)).is_denied()
+                } else {
+                    carriers.contains(f) || !rules.dir_verdict(f).is_denied()
+                };
+                assert_eq!(
+                    last_match(&kernel, f),
+                    expected,
+                    "{f}\nrules = {rules:?}\ncarriers = {carriers:?}\nkernel = {kernel:?}"
+                );
+            }
+        }
+    }
+
+    /// One file, two path keys: a deny on the link `a` and an allow on its
+    /// target `b` compile to one rule, and it denies.
+    #[cfg(unix)]
+    #[test]
+    fn two_path_keys_naming_one_file_meet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("b");
+        std::fs::write(&target, "").unwrap();
+        let link = tmp.path().join("a");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let grant = ExecGrant {
+            paths: BTreeMap::from([
+                (NormalizedPrefix::from_surface(&link), Verdict::Deny),
+                (NormalizedPrefix::from_surface(&target), Verdict::Allow),
+            ]),
+            ..ExecGrant::default()
+        };
+        let rules = ExecRules::compile(&grant);
+        assert_eq!(
+            rules.files.into_values().collect::<Vec<_>>(),
+            [Verdict::Deny]
+        );
+    }
+
+    /// A table of one dir key `/l` frozen as resolving to `/x`.
+    fn linked_dir(allow: bool, extra_allow: Option<&str>) -> ExecRules {
+        let linked = NormalizedPrefix::for_test(&host("/l"), &host("/x"), Namespace::Host);
+        let mut dirs = BTreeMap::from([(linked, allow)]);
+        if let Some(extra) = extra_allow {
+            dirs.insert(NormalizedPrefix::from_surface(host(extra)), true);
+        }
+        ExecRules::compile(&ExecGrant {
+            dirs,
+            ..ExecGrant::default()
+        })
+    }
+
+    /// A dir that is a symlink covers where it points, allow or deny alike.
+    #[test]
+    fn a_symlinked_dir_covers_its_target() {
+        assert_eq!(of_file(&linked_dir(false, None), "/x/tool"), Verdict::Deny);
+        assert_eq!(of_file(&linked_dir(true, None), "/x/tool"), Verdict::Allow);
+    }
+
+    /// Matched through its target, a symlinked dir ranks at the target's
+    /// depth, so a deeper allow inside the target still wins a deny.
     #[test]
     fn a_symlinked_deny_dir_ranks_at_its_target_depth() {
-        assert_eq!(
-            linked_dir_verdict(false, Some("/x/sub"), "/x/sub/tool"),
-            Some(true)
-        );
-        assert_eq!(
-            linked_dir_verdict(false, Some("/x"), "/x/tool"),
-            Some(false)
-        );
+        let inner = linked_dir(false, Some("/x/sub"));
+        assert_eq!(of_file(&inner, "/x/sub/tool"), Verdict::Allow);
+        let level = linked_dir(false, Some("/x"));
+        assert_eq!(of_file(&level, "/x/tool"), Verdict::Deny);
     }
 
-    /// A deny on `/tmp/bin` and an allow on its firmlink alias
-    /// `/private/tmp/bin` are one directory to the gate
-    /// (`path_within` follows firmlinks) but distinct bytes.
-    /// `identity_depth` ranks them equal, so the deny-wins tie-break
-    /// closes the clash even when it reaches the gate uncomposed, as
-    /// here.
+    /// `/tmp/bin` and `/private/tmp/bin` are one directory to the guard but
+    /// distinct bytes: equal rank, so the deny meets the allow.
     #[cfg(target_os = "macos")]
     #[test]
-    fn longest_dir_match_firmlink_alias_does_not_outrank_deny() {
-        let exec = ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp/bin")]),
-            deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/bin")]),
-        };
-        assert_eq!(
-            longest_dir_match(
-                &exec,
-                ExecNames {
-                    deny: &["/tmp/bin/evil"],
-                    allow: &["/tmp/bin/evil"]
-                }
-            ),
-            Some(false)
-        );
+    fn a_firmlink_alias_does_not_outrank_a_deny() {
+        let rules: ExecRules = [
+            Rule::Dir(RealPath::assumed("/private/tmp/bin"), true),
+            Rule::Dir(RealPath::assumed("/tmp/bin"), false),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(of_file(&rules, "/tmp/bin/evil"), Verdict::Deny);
     }
 
-    /// `/tmp/a/b` nests three deep; `/private/tmp` is an alias of the
-    /// one-deep `/tmp`, yet spells longer.  Counting characters would
-    /// rank the alias above the real descendant — fail-open whichever
-    /// side carries the deny.
+    /// `/private/tmp` is an alias of the one-deep `/tmp` yet spells longer:
+    /// depth counts components, or the alias would outrank `/tmp/a/b`.
     #[cfg(target_os = "macos")]
     #[test]
-    fn longest_dir_match_depth_counts_components_not_characters() {
-        let exec = ExecMap {
-            literals: BTreeMap::new(),
-            allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp")]),
-            deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/a/b")]),
-        };
-        assert_eq!(
-            longest_dir_match(
-                &exec,
-                ExecNames {
-                    deny: &["/tmp/a/b/x"],
-                    allow: &["/tmp/a/b/x"]
-                }
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn lookup_literal_exact_match_always_hits() {
-        let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
-        assert_eq!(lookup_literal(&literals, "git"), Some(ExecPolicy::Allow));
-    }
-
-    /// [`lookup_literal`] reads the real `cfg(windows)`, so the outcome
-    /// is the host's; [`names_match`] is where the rule itself gets a
-    /// fixed-outcome test.
-    #[test]
-    fn lookup_literal_case_mismatch_follows_real_platform() {
-        let literals = BTreeMap::from([("git".to_string(), ExecPolicy::Allow)]);
-        let hit = lookup_literal(&literals, "Git");
-        assert_eq!(hit.is_some(), cfg!(windows));
-    }
-
-    /// Windows identity folds distinct map keys.  Both a mixed spelling and an
-    /// exact `Allow` hit must still see the fold-equal `Deny`.
-    #[test]
-    fn lookup_literal_meets_windows_fold_equal_keys_deny_wins() {
-        let literals = BTreeMap::from([
-            ("GIT".to_string(), ExecPolicy::Allow),
-            ("git".to_string(), ExecPolicy::Deny),
-        ]);
-        assert_eq!(
-            lookup_literal_on(&literals, "Git.exe", true),
-            Some(ExecPolicy::Deny)
-        );
-        assert_eq!(
-            lookup_literal_on(&literals, "GIT", true),
-            Some(ExecPolicy::Deny)
-        );
+    fn depth_counts_components_not_characters() {
+        let rules: ExecRules = [
+            Rule::Dir(RealPath::assumed("/private/tmp"), true),
+            Rule::Dir(RealPath::assumed("/tmp/a/b"), false),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(of_file(&rules, "/tmp/a/b/x"), Verdict::Deny);
     }
 }

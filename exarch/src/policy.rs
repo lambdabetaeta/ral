@@ -5,7 +5,7 @@
 //!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?]
 //! ```
 //!
-//! One optional join widens the ceiling into its own layer; every other
+//! One optional widening lifts the ceiling, in its own layer; every other
 //! composition is the [`GrantStack`] itself — each `--restrict` file, and
 //! each deny carve-out, is pushed as its own layer rather than folded ahead
 //! of time, so the stack's own per-check fold is the one meet that ever
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
 /// against the session's `$HOME` and working directory as it loads, so the
-/// join and every layer push run on already-resolved bundles.  Each restrict
+/// widening and every layer push run on already-resolved bundles.  Each restrict
 /// file's own path joins a deny layer, putting the bytes that shape the
 /// agent's permissions beyond its reach; the extend-base file does not,
 /// since widening authority is a trust-source concern rather than a
@@ -62,7 +62,7 @@ pub fn for_invocation(
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
     if let Some(path) = extend_base {
         let abs = absolute_in(cwd, path);
-        ceiling = ceiling.join(load_capabilities_ral(
+        ceiling = ceiling.widen(load_capabilities_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             &abs,

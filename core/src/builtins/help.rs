@@ -5,7 +5,7 @@
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
 use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
-use crate::runtime::command::CommandIdentity;
+use crate::runtime::command::Head;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
 use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
@@ -363,8 +363,7 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
     } else {
         CommandName::Bare(name.into())
     };
-    let id = CommandIdentity::resolve(head, &shell.context);
-    crate::capability::admits_head(&shell.context, &id)
+    crate::capability::admits_head(&shell.context, &Head::resolve(&head, &shell.context))
 }
 
 #[cfg(test)]

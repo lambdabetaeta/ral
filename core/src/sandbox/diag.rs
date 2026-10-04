@@ -70,7 +70,7 @@ pub(super) enum Denied<'a> {
     /// A resolved path the grant's `fs.write` set can admit.
     Write(&'a str),
     /// A binary outside the grant's `exec` allow-list — the re-execs
-    /// (`sh -c`, `find -exec`) the in-process gate never sees.
+    /// (`sh -c`, `find -exec`) the in-process guard never sees.
     Exec(&'a str),
     /// A Mach or IPC name.  The base profile decides these, so no grant
     /// widens one, and most such denials are a library probing a service it

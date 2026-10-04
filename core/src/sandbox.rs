@@ -4,14 +4,16 @@
 //! launcher (`launch`), binary pinning and re-exec (`reexec`), kernel-denial
 //! diagnostics (`diag`).
 //!
-//! Exec is gated in-process everywhere by `capability::check_exec_args`.
+//! Exec is checked everywhere by `capability::check_exec`, the in-process guard.
 //! Both Unix backends also render the allow-list into the kernel, catching the
 //! re-execs that check never sees (`sh -c`, `find -exec`): macOS a Seatbelt
 //! `process-exec` clause, Linux a Landlock `Execute` ruleset the payload
 //! enters inside the bwrap envelope (`linux::landlock`).  Landlock being
-//! allow-list only, a deny *inside* an allow stays with the in-process gate
+//! allow-list only, a deny *inside* an allow stays with the in-process guard
 //! there; Seatbelt carries it into the kernel.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod carriers;
 mod diag;
 mod launch;
 #[cfg(target_os = "linux")]
@@ -53,8 +55,10 @@ pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
 // through `sandboxed_command` when a projection is active and no guest jail
 // already confines it; `serve_sandbox_exec` is the Unix trampoline's tail,
 // run once the process sandbox is entered.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use carriers::carriers;
 pub use launch::serve_sandbox_exec;
-pub(crate) use launch::{LaunchTarget, Ownership, sandboxed_command};
+pub(crate) use launch::{Ownership, sandboxed_command};
 
 // Called by the command runners on a failure that ran under an active OS
 // sandbox, to attach a hint naming the denied path.
@@ -68,7 +72,7 @@ const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", wi
 // Whether this platform's backend carries the exec allow-list into the
 // kernel, per the rendering named in this module's header: Seatbelt's
 // `process-exec` clause, Landlock's `Execute` ruleset.  Windows has no
-// counterpart, so an exec opinion there is the in-process gate's alone.
+// counterpart, so an exec opinion there is the in-process guard's alone.
 //
 // `capability::sandbox::sandbox_projection` reads this to decide whether an
 // exec-only grant is worth an OS sandbox at all.  Each backend declares its
@@ -115,7 +119,7 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
 /// child, and this is the same fact for the in-process half).
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs gate's own verdict, not the model's data I/O"
+    reason = "[silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs guard's own verdict, not the model's data I/O"
 )]
 pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
     let meta = std::fs::metadata(path).ok()?;

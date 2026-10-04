@@ -27,6 +27,12 @@ impl Rendered {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this name is `dir` or lies under it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn within(&self, dir: &Self) -> bool {
+        super::lex::path_within_str(&self.0, &dir.0)
+    }
 }
 
 /// Every name by which a kernel sandbox hook might present the objects that

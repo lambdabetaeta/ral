@@ -6,12 +6,13 @@
 //! every arm; pipeline staging reaches
 //! `resolve_command_word`/`classify_command` directly.
 
+use crate::capability::Program;
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
     Break, BuiltinEntry, Env, Error, HandlerEntry, HandlerLookup, Mooring, Settled, Shell, Value,
 };
 
-use super::command::{self, CommandIdentity};
+use super::command::{self, Head};
 use crate::evaluator::audit;
 use crate::evaluator::redirect::with_redirects;
 use crate::source::Span;
@@ -31,7 +32,7 @@ pub(crate) enum Resolution {
     },
     /// A base handler frame — a manifest row from the argv half.
     Base(BuiltinEntry),
-    External(CommandIdentity),
+    External(Head),
 }
 
 /// Bare-name lookup: env → handlers → external.  A head like `f x` is a
@@ -45,8 +46,8 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
     match shell.lookup_handler(name) {
         Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
-        None => Resolution::External(CommandIdentity::resolve(
-            CommandName::Bare(name.into()),
+        None => Resolution::External(Head::resolve(
+            &CommandName::Bare(name.into()),
             &shell.context,
         )),
     }
@@ -59,7 +60,7 @@ pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell)
     match head {
         CommandWord::Name(CommandName::Bare(s)) => resolve(s, env, shell),
         CommandWord::External(name) | CommandWord::Name(name) => {
-            Resolution::External(CommandIdentity::resolve(name.clone(), &shell.context))
+            Resolution::External(Head::resolve(name, &shell.context))
         }
     }
 }
@@ -74,34 +75,25 @@ pub(crate) fn classify_command(
     shell: &mut Shell,
 ) -> Settled<Resolution> {
     let r = resolve_command_word(head, env, shell);
-    if let Resolution::External(id) = &r
-        && !crate::capability::admits_head(&shell.context, id)
+    if let Resolution::External(head) = &r
+        && !crate::capability::admits_head(&shell.context, head)
+        && let Ok(program) = &head.program
     {
-        return Err(refuse_head(id, mooring, shell));
+        return Err(refuse_head(&head.shown, program, mooring, shell));
     }
     Ok(r)
 }
 
-/// Denial for a head the grant refuses.  One absent from PATH is reported as
-/// missing instead, so nobody hunts for a grant entry to fix.
-fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Break {
-    let (msg, hint) = match shell.locate_command(&id.shown) {
-        Some(p) => (
-            format!(
-                "command '{}' denied by active grant ({})",
-                id.shown,
-                p.display()
-            ),
-            "add the command to the grant exec map to allow it",
-        ),
-        None => (
-            format!("command '{}' not found on PATH", id.shown),
-            "install the command, or add it to the grant exec map if it lives elsewhere",
-        ),
-    };
-    let fields = std::collections::BTreeMap::from([("name".to_string(), id.shown.clone())]);
+/// Denial for a head whose program the grant refuses.
+fn refuse_head(shown: &str, program: &Program, mooring: &Mooring, shell: &mut Shell) -> Break {
+    let fields = std::collections::BTreeMap::from([("name".to_string(), shown.to_string())]);
     audit::record_capability(shell, mooring, "exec", fields);
-    Error::new(msg, 1).with_hint(hint).into()
+    Error::new(
+        format!("command '{shown}' denied by active grant ({program})"),
+        1,
+    )
+    .with_hint("add the command to the grant exec map to allow it")
+    .into()
 }
 
 // ── Runners ─────────────────────────────────────────────────────────────
@@ -129,16 +121,16 @@ pub(crate) fn run_base_frame(
 
 /// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
-    id: &CommandIdentity,
+    head: &Head,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    audit::call_external(&id.shown, args, mooring, shell, |shell| {
+    audit::call_external(&head.shown, args, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
-            command::run(id, args, mooring, shell)
+            command::run(head, args, mooring, shell)
         })
     })
 }

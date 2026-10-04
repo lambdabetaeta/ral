@@ -92,8 +92,8 @@ whether or not later composition would keep that path. A `restrict` profile that
 mentions an escaping `xdg:data` is rejected even if a `meet` would have
 intersected it away.
 
-The guard asks its containment question on the form the *gate* matches. That
-gate is the `fs` one, which authorises objects, so the form is the
+The guard asks its containment question on the form the *in-process guard*
+matches, here the `fs` one, which authorises objects, so the form is the
 symlink-followed `resolved` one, asked with `path_within` — the same alias-aware
 predicate `covers` and `covering` use — and with `$HOME` canonicalised on the
 other side. Asking it of the surface spelling instead read
@@ -101,12 +101,11 @@ other side. Asking it of the surface spelling instead read
 under `$HOME` while the frozen `resolved` form — the only one `fs` enforcement
 ever sees — was `/etc`.
 
-A guard and a gate that judge different forms of the same prefix do not guard
-it. The general rule is
-[[invariants/fs-judges-objects-exec-judges-names|fs judges objects, exec judges
-names]]: *which* form is per-authority, not universal — the `exec` gate matches
-on the surface, and rightly, since it asks what command the user named — so the
-choice is made once inside `core/src/path/`, where the containment kernel now
+A freeze guard and an in-process guard that judge different forms of the same
+prefix do not guard it. The general rule is
+[[invariants/grants-judge-objects|grants judge objects]]: every authority is
+judged on the resolved form, and the choice is made once inside
+`core/src/path/`, where the containment kernel now
 stays, and each authority reaches it through its own door. No caller elsewhere
 holds two paths and picks.
 
@@ -171,7 +170,7 @@ already resolved every path. Since a `Capabilities` is always resolved, only
 concrete paths cross; there is no second, sigil-bearing form that could.
 
 A resolved path is resolved *in some namespace*, and one carrier crosses to a
-different one: synod's bundle is frozen on the host and enforced by a gate inside
+different one: synod's bundle is frozen on the host and enforced by the in-process guard inside
 a Linux guest, so its prefixes name `/work` and `/tmp` and are folded by the
 guest's rule, not this process's
 ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]] — a

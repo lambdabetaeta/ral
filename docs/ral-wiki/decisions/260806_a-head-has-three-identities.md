@@ -1,6 +1,8 @@
 ---
-status: active
+status: superseded
 ---
+
+> **Superseded 2026-10-04** by [[decisions/261004_exec-rules|exec-rules]].
 
 # A head has three identities, and a veto reads all three
 

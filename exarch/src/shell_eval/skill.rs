@@ -49,7 +49,7 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Frontmatter for every readable skill, for the prompt's Skills section.
 ///
-/// Runs once at boot, before a `Shell` exists, so it asks the fs gate's own
+/// Runs once at boot, before a `Shell` exists, so it asks the fs guard's own
 /// verdict — [`GrantStack::admits_fs`](ral_core::types::GrantStack::admits_fs)
 /// over the session's whole grant stack — about each `SKILL.md` it opens,
 /// where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot that

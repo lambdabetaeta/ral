@@ -67,7 +67,7 @@ outside the manifest module: `core/src/uutils.rs` declares the vendored tools vi
 `declare_coreutils!` as two `cfg`-gated lists — `cross` (always on) and `unix`
 (Unix-only) — emitting one `COREUTILS_TOOLS` slice and a `coreutils_invoke`
 dispatcher; `RIPGREP_TOOLS` routes `rg` through `ral-ripgrep-core`. A bundled
-head resolves to an `ExecImage::BundledTool` and is always born as a
+head resolves to a `Program::Tool` and is always born as a
 `ral --ral-bundled-tool <tool>` child, so it carries ordinary process semantics
 and the same capability chokepoint as a host external
 ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]) —

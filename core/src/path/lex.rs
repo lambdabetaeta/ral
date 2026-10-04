@@ -25,15 +25,14 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 /// lies inside `prefix` modulo firmlinks and, on Windows, modulo the path
 /// identity [`starts_with_identity`] applies.
 ///
-/// The runtime grant gate (`capability::enforce`) and the prefix intersector
+/// The in-process guard (`capability::enforce`) and the prefix intersector
 /// (`super::prefix_set`) both decide containment through it.
 ///
 /// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
-/// forms a containment question is asked of is authority-specific
-/// (`docs/ral-wiki/invariants/fs-judges-objects-exec-judges-names.md`), so
-/// it is settled inside `path` — by [`super::prefix_set::covers`] for fs and
-/// [`NormalizedPrefix::grant_depth`](super::resolved::NormalizedPrefix::grant_depth)
-/// and its deny-side twin for exec — and never by a caller holding two bare paths.
+/// forms a containment question is asked of is settled inside `path` — by
+/// [`super::prefix_set::covers`] for fs and
+/// [`RealPath::within`](super::RealPath::within) for exec — and never by a
+/// caller holding two bare paths.
 pub(super) fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
@@ -87,7 +86,7 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> b
 /// internal normalisation, and folding `//?/C:/work` differently from
 /// `\\?\C:\work` would leave a deny that a differently-spelled access slips
 /// past.  The case fold is ASCII-only, matching
-/// `capability::exec::names_match` so paths and command names fold alike, and
+/// `capability::exec`'s `name_key` so paths and command names fold alike, and
 /// erring below the real NTFS `$UpCase` table rather than above it — missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
 pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
@@ -293,8 +292,8 @@ pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
 /// (longer) spelling, then split under Windows path identity when `windows`
 /// is set, by [`Path::components`] otherwise.
 ///
-/// `capability::exec::longest_dir_match` ranks competing directory prefixes
-/// by depth, and a character count is a depth proxy only within one spelling:
+/// `capability::exec` ranks competing directory rules by depth, and a
+/// character count is a depth proxy only within one spelling:
 /// `/tmp/a/b` nests deeper than `/private/tmp` yet is shorter, so counting
 /// characters ranks spelling and lets a shallow alias outrank the directory
 /// it sits above.

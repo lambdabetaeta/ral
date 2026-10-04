@@ -3,12 +3,12 @@
 //! A [`Capabilities`] frame bundles the per-effect policies.  Composition
 //! downward is the [`GrantStack`]: a `grant { ... }` or a loaded profile
 //! pushes one more layer, and every verdict folds the layers afresh —
-//! `evaluate_exec`, `allow_region`/`deny_region`, `permits_detach` — rather
-//! than flattening them into one `Capabilities` first.  [`Capabilities::join`]
-//! is the one place a frame still composes eagerly: `--extend-base` widens a
-//! base ceiling at load time, before any attenuation runs, and its "silence
-//! lifts no veto" semantics only make sense as a single-layer union.  Denies
-//! are sticky under both regimes.
+//! `capability::exec::rules`, `allow_region`/`deny_region`, `permits_detach` —
+//! rather than flattening them into one `Capabilities` first.
+//! [`Capabilities::widen`] is the one place a frame still composes eagerly:
+//! `--extend-base` widens a base ceiling at load time, before any attenuation
+//! runs, and its "silence lifts no veto" semantics only make sense as a
+//! single-layer union.  Denies are sticky under both regimes.
 //!
 //! [`SandboxProjection`] is the meet-folded fs+net+exec residue the OS sandbox
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
@@ -34,8 +34,8 @@ pub trait Meet {
 ///
 /// Not the order-dual of [`Meet`]: vetoes survive from either side, so a deny
 /// is lifted by choosing a different base, never by composing over it.
-pub trait Join {
-    fn join(self, other: Self) -> Self;
+pub trait Widen {
+    fn widen(self, other: Self) -> Self;
 }
 
 impl<T: Meet> Meet for Option<T> {
@@ -47,11 +47,11 @@ impl<T: Meet> Meet for Option<T> {
     }
 }
 
-impl<T: Join> Join for Option<T> {
-    fn join(self, other: Self) -> Self {
+impl<T: Widen> Widen for Option<T> {
+    fn widen(self, other: Self) -> Self {
         match (self, other) {
             (None, x) | (x, None) => x,
-            (Some(a), Some(b)) => Some(a.join(b)),
+            (Some(a), Some(b)) => Some(a.widen(b)),
         }
     }
 }
@@ -62,44 +62,79 @@ impl Meet for bool {
     }
 }
 
-impl Join for bool {
-    fn join(self, other: Self) -> Self {
+impl Widen for bool {
+    fn widen(self, other: Self) -> Self {
         self && other
     }
 }
 
-/// Exec verdict for one key of [`ExecMap::literals`] — a bare command name
-/// (`git`) or an absolute path (`/usr/bin/git`).
+/// `Deny < Only(s) < Allow`.
 ///
-/// A three-point lattice: `Allow` on top, `Subcommands` between (more elements,
-/// more authority), `Deny` at bottom.  A `Deny` is sticky under meet *and*
-/// join, even against a layer whose map omits the key, so a base can pin a name
-/// out once and no overlay re-grants it; only a different base lifts one.
-/// Literal keys beat the directory prefixes in the same [`ExecMap`].
+/// A `Deny` is sticky under meet *and* widen, even against a layer whose grant
+/// omits the key, so a base can pin a command out once and no overlay
+/// re-grants it; only a different base lifts one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExecPolicy {
+pub enum Verdict {
     Allow,
     /// Admits only these first arguments.  `BTreeSet` canonicity is what makes
-    /// `meet` and `join` idempotent with no normalization pass.
-    Subcommands(BTreeSet<String>),
+    /// `meet` and `widen` idempotent with no normalization pass.
+    Only(BTreeSet<String>),
     Deny,
 }
 
-/// Exec authority partitioned by key kind: `literals` carry the full
-/// three-valued [`ExecPolicy`], while a directory can only admit or deny the
-/// binaries resolving inside it.
+/// Exec authority as authored, per layer.
 ///
-/// The two-valued half *is* the partition, so [`Meet`]/[`Join`] just
-/// intersect the allows and union the denies. Literals beat dirs where both
-/// cover a candidate; among dirs, the deepest wins.
+/// Bare names, path keys and directory keys, each with its verdict.  The
+/// author's spellings survive for display; `capability::exec` compiles the
+/// grant into rules over programs, and nothing matches it directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecMap {
+pub struct ExecGrant {
+    /// Bare keys: `git`.
     #[serde(default)]
-    pub literals: BTreeMap<String, ExecPolicy>,
-    #[serde(default)]
-    pub allow_dirs: BTreeSet<NormalizedPrefix>,
-    #[serde(default)]
-    pub deny_dirs: BTreeSet<NormalizedPrefix>,
+    pub names: BTreeMap<String, Verdict>,
+    /// Path keys, frozen: `/usr/bin/git`, `~/bin/x`.
+    #[serde(default, with = "pairs")]
+    pub paths: BTreeMap<NormalizedPrefix, Verdict>,
+    /// Dir keys, and the expansions of `path:` and `system:`; `true` admits.
+    #[serde(default, with = "pairs")]
+    pub dirs: BTreeMap<NormalizedPrefix, bool>,
+}
+
+/// The one way an exec entry is added: a key already present meets.
+pub(crate) fn meet_insert<K: Ord, V: Meet>(map: &mut BTreeMap<K, V>, key: K, value: V) {
+    let value = match map.remove(&key) {
+        Some(held) => held.meet(value),
+        None => value,
+    };
+    map.insert(key, value);
+}
+
+/// A map keyed by a struct, as the sequence of its pairs — no JSON object can
+/// key one — read back through [`meet_insert`].
+mod pairs {
+    use super::{Meet, meet_insert};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub(super) fn serialize<K: Serialize, V: Serialize, S: Serializer>(
+        map: &BTreeMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map)
+    }
+
+    pub(super) fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de> + Meet,
+        D: Deserializer<'de>,
+    {
+        let mut map = BTreeMap::new();
+        for (key, value) in Vec::<(K, V)>::deserialize(deserializer)? {
+            meet_insert(&mut map, key, value);
+        }
+        Ok(map)
+    }
 }
 
 /// Filesystem access within a `grant` block.
@@ -209,37 +244,54 @@ impl<N> FsProjection<N> {
     }
 }
 
-/// OS-renderable view of the meet-folded exec policy.
+/// Exec rules for the kernel, in order; the last rule that matches decides.
 ///
-/// Under `Unrestricted` the in-ral gate is the only check; `Restricted`
-/// closes the OS layer around the same admits, shutting the `sh -c
+/// Under `Unrestricted` the in-process guard is the only check; `Restricted`
+/// closes the OS layer around the same table, shutting the `sh -c
 /// "PATH=…; cmd"` route by which a sandboxed child re-execs binaries the
-/// gate never sees. An empty `Restricted` admits nothing and the
-/// deny-default kills every spawn.
-///
-/// The three deny dimensions mirror the three shapes of the in-ral veto, so the
-/// profile denies exactly what the gate would.  `deny_basenames` renders as a
-/// final-path-component match: a bare-name deny must hold wherever the name
-/// resolves, and must not be dodged by reaching it through an admitted dir.
-///
-/// `deny_basenames` stays `Vec<String>` while every path set is `Vec<N>`, and
-/// that asymmetry is load-bearing: a bare name is not a path, so under a
-/// rendered naming expanding it — or sliding it into a path set — stops
-/// typechecking rather than quietly emitting a rule for `/git`.
+/// guard never sees.  An empty `Restricted` admits nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "rules", rename_all = "snake_case")]
 pub enum ExecProjection<N = String> {
     Unrestricted,
-    Restricted {
-        allow_paths: Vec<N>,
-        allow_dirs: Vec<N>,
-        #[serde(default)]
-        deny_paths: Vec<N>,
-        #[serde(default)]
-        deny_dirs: Vec<N>,
-        #[serde(default)]
-        deny_basenames: Vec<String>,
-    },
+    Restricted(Vec<ExecRule<N>>),
+}
+
+/// One kernel exec rule.  A `Veto` stays `String` while paths are `N`: a bare
+/// name is not a path, so rendering it stops typechecking rather than
+/// emitting a rule for `/git`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecRule<N = String> {
+    Dir { path: N, allow: bool },
+    File { path: N, allow: bool },
+    Veto(String),
+}
+
+impl<N> ExecRule<N> {
+    /// Each name `f` renders becomes a rule with this one's `allow`, in place.
+    pub(crate) fn try_flat_map<M, E>(
+        &self,
+        mut f: impl FnMut(&N) -> Result<Vec<M>, E>,
+    ) -> Result<Vec<ExecRule<M>>, E> {
+        Ok(match self {
+            Self::Dir { path, allow } => f(path)?
+                .into_iter()
+                .map(|path| ExecRule::Dir {
+                    path,
+                    allow: *allow,
+                })
+                .collect(),
+            Self::File { path, allow } => f(path)?
+                .into_iter()
+                .map(|path| ExecRule::File {
+                    path,
+                    allow: *allow,
+                })
+                .collect(),
+            Self::Veto(name) => vec![ExecRule::Veto(name.clone())],
+        })
+    }
 }
 
 /// Hand-written for the same reason as [`FsProjection`]'s.
@@ -250,19 +302,21 @@ impl<N> Default for ExecProjection<N> {
 }
 
 impl<N> ExecProjection<N> {
-    /// Whether some layer denied a command rather than merely not admitting
-    /// one — the distinction between an allow-set that is narrow and one that
-    /// is narrowed on purpose, which is what a backend must protect.
+    /// Whether some rule denies rather than merely not admitting — the
+    /// distinction between an allow-set that is narrow and one that is
+    /// narrowed on purpose, which is what a backend must protect.
     #[cfg(target_os = "macos")]
     pub(crate) fn carries_veto(&self) -> bool {
         match self {
             Self::Unrestricted => false,
-            Self::Restricted {
-                deny_paths,
-                deny_dirs,
-                deny_basenames,
-                ..
-            } => !(deny_paths.is_empty() && deny_dirs.is_empty() && deny_basenames.is_empty()),
+            Self::Restricted(rules) => rules.iter().any(|rule| {
+                matches!(
+                    rule,
+                    ExecRule::Veto(_)
+                        | ExecRule::Dir { allow: false, .. }
+                        | ExecRule::File { allow: false, .. }
+                )
+            }),
         }
     }
 }
@@ -302,11 +356,12 @@ impl<N> Default for SandboxProjection<N> {
 
 impl SandboxProjection<String> {
     /// Rename every path in the projection through `f`, ordering and deduping
-    /// each set once on the way and deriving `pinned_dirs` from the result.
+    /// each fs set once on the way and deriving `pinned_dirs` from the result.
     ///
     /// The completeness guarantee is structural, not promised: the input is
     /// destructured exhaustively, the output constructed exhaustively, and the
-    /// only way to obtain a `Vec<Rendered>` is to call `f`.  A path set added
+    /// only way to obtain a `Vec<Rendered>` or an `ExecRule<Rendered>` is to
+    /// call `f`.  A path set added
     /// later therefore fails to compile until it too is threaded — which is
     /// the point, since every under-enforcement of this class has been someone
     /// forgetting to expand one new list.
@@ -358,21 +413,14 @@ impl SandboxProjection<String> {
         };
         let exec = match exec {
             ExecProjection::Unrestricted => ExecProjection::Unrestricted,
-            ExecProjection::Restricted {
-                allow_paths,
-                allow_dirs,
-                deny_paths,
-                deny_dirs,
-                deny_basenames,
-            } => ExecProjection::Restricted {
-                allow_paths: f(&ordered(allow_paths))?,
-                allow_dirs: f(&ordered(allow_dirs))?,
-                deny_paths: f(&ordered(deny_paths))?,
-                deny_dirs: f(&ordered(deny_dirs))?,
-                // A bare name reaches no expansion, and the differing types
-                // make that a compile-time fact rather than a convention.
-                deny_basenames: ordered(deny_basenames),
-            },
+            // Order is precedence here, so the rules are neither sorted nor deduped.
+            ExecProjection::Restricted(rules) => {
+                let mut rendered = Vec::with_capacity(rules.len());
+                for rule in rules {
+                    rendered.extend(rule.try_flat_map(|path| f(std::slice::from_ref(path)))?);
+                }
+                ExecProjection::Restricted(rendered)
+            }
         };
         Ok(SandboxProjection {
             fs,
@@ -428,7 +476,7 @@ pub struct ShellPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     #[serde(default)]
-    pub exec: Option<ExecMap>,
+    pub exec: Option<ExecGrant>,
     #[serde(default)]
     pub fs: Option<FsPolicy>,
     #[serde(default)]
@@ -461,7 +509,7 @@ impl GrantStack {
         Self(vec![Capabilities::root()])
     }
 
-    /// A stack of exactly `frame`: a view for asking a gate's question of one
+    /// A stack of exactly `frame`: a view for asking the in-process guard's question of one
     /// frame — a boot-time `Capabilities` no shell holds yet — not a session
     /// stack, which is always built by [`GrantStack::root`] plus `push`.
     /// Verdict-identical to `[root, frame]` because the ambient root holds no
@@ -500,7 +548,7 @@ impl GrantStack {
 
     /// Layers with no opinion are skipped, here and in `fs` and `net` below:
     /// the folds intersect what remains, and an empty run means no attenuation.
-    pub fn exec(&self) -> impl Iterator<Item = &ExecMap> {
+    pub fn exec(&self) -> impl Iterator<Item = &ExecGrant> {
         self.0.iter().filter_map(|c| c.exec.as_ref())
     }
 
@@ -543,7 +591,7 @@ impl Capabilities {
     /// most-restrictive value, so a `meet` against it zeroes every dimension.
     pub fn deny_all() -> Self {
         Self {
-            exec: Some(ExecMap::default()),
+            exec: Some(ExecGrant::default()),
             fs: Some(FsPolicy::default()),
             net: Some(false),
             detach: Some(false),
@@ -573,31 +621,28 @@ impl Capabilities {
     /// a base ceiling before any attenuation.  Positive authority unions, but
     /// every veto survives from either side, so an extension can grant where
     /// the base was silent and never re-admit what it denied.  Hence no
-    /// order-dual of [`meet`](Self::meet): a deny is a floor under both.
-    pub fn join(self, other: Self) -> Self {
+    /// order-dual of [`Meet`]: a deny is a floor under both.
+    pub fn widen(self, other: Self) -> Self {
         Self {
-            exec: self.exec.join(other.exec),
-            fs: self.fs.join(other.fs),
-            net: self.net.join(other.net),
-            detach: self.detach.join(other.detach),
-            editor: self.editor.join(other.editor),
-            shell: self.shell.join(other.shell),
+            exec: self.exec.widen(other.exec),
+            fs: self.fs.widen(other.fs),
+            net: self.net.widen(other.net),
+            detach: self.detach.widen(other.detach),
+            editor: self.editor.widen(other.editor),
+            shell: self.shell.widen(other.shell),
         }
     }
 }
 
 // ── Lattice impls ─────────────────────────────────────────────────────────
-//
-// The `literals` folds stay free fns below: they range over a whole map, which
-// the per-element trait cannot see.
 
-impl ExecPolicy {
-    /// `name`, or `name[sub1,sub2,…]` under `Subcommands`; `None` when denied.
+impl Verdict {
+    /// `name`, or `name[sub1,sub2,…]` under `Only`; `None` when denied.
     /// The set iterates sorted, so the label is deterministic.
     pub fn admit_label(&self, name: &str) -> Option<String> {
         match self {
             Self::Allow => Some(name.to_string()),
-            Self::Subcommands(subs) => Some(format!(
+            Self::Only(subs) => Some(format!(
                 "{name}[{}]",
                 subs.iter()
                     .map(String::as_str)
@@ -607,39 +652,44 @@ impl ExecPolicy {
             Self::Deny => None,
         }
     }
+}
 
+impl Verdict {
     pub fn is_denied(&self) -> bool {
         matches!(self, Self::Deny)
     }
 }
 
-impl Meet for ExecPolicy {
+impl From<bool> for Verdict {
+    fn from(allow: bool) -> Self {
+        if allow { Self::Allow } else { Self::Deny }
+    }
+}
+
+impl Meet for Verdict {
     fn meet(self, other: Self) -> Self {
         match (self, other) {
             (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
-            (Self::Allow, Self::Allow) => Self::Allow,
-            (Self::Allow, Self::Subcommands(s)) | (Self::Subcommands(s), Self::Allow) => {
-                Self::Subcommands(s)
-            }
-            (Self::Subcommands(s1), Self::Subcommands(s2)) => Self::Subcommands(&s1 & &s2),
+            (Self::Allow, v) | (v, Self::Allow) => v,
+            (Self::Only(a), Self::Only(b)) => Self::Only(&a & &b),
         }
     }
 }
 
-impl Join for ExecPolicy {
-    fn join(self, other: Self) -> Self {
+impl Widen for Verdict {
+    fn widen(self, other: Self) -> Self {
         match (self, other) {
             // Deny-overrides under widening too, so `--extend-base` can never
             // re-admit a command the base denies.
             (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
             (Self::Allow, _) | (_, Self::Allow) => Self::Allow,
-            (Self::Subcommands(s1), Self::Subcommands(s2)) => Self::Subcommands(&s1 | &s2),
+            (Self::Only(a), Self::Only(b)) => Self::Only(&a | &b),
         }
     }
 }
 
-impl Join for FsPolicy {
-    fn join(self, other: Self) -> Self {
+impl Widen for FsPolicy {
+    fn widen(self, other: Self) -> Self {
         Self {
             read_prefixes: union_prefixes(self.read_prefixes, other.read_prefixes),
             write_prefixes: union_prefixes(self.write_prefixes, other.write_prefixes),
@@ -650,70 +700,57 @@ impl Join for FsPolicy {
     }
 }
 
-impl Join for EditorPolicy {
-    fn join(self, other: Self) -> Self {
+impl Widen for EditorPolicy {
+    fn widen(self, other: Self) -> Self {
         Self {
-            read: self.read.join(other.read),
-            write: self.write.join(other.write),
-            tui: self.tui.join(other.tui),
+            read: self.read.widen(other.read),
+            write: self.write.widen(other.write),
+            tui: self.tui.widen(other.tui),
         }
     }
 }
 
-impl Join for ShellPolicy {
-    fn join(self, other: Self) -> Self {
+impl Widen for ShellPolicy {
+    fn widen(self, other: Self) -> Self {
         Self {
-            chdir: self.chdir.join(other.chdir),
+            chdir: self.chdir.widen(other.chdir),
         }
     }
 }
 
-/// Both sets union, then an [`evicts`](NormalizedPrefix::evicts)
-/// sweep drops any allow that clashes with a deny — even across alias
-/// spellings, or two sides that froze different disk state — so an overlay
-/// that re-grants a directory the base vetoed still loses it.
-impl Join for ExecMap {
-    fn join(self, other: Self) -> Self {
-        let mut allow_dirs: BTreeSet<NormalizedPrefix> = self
-            .allow_dirs
-            .into_iter()
-            .chain(other.allow_dirs)
+/// Names, paths and dirs widen key by key, then an
+/// [`evicts`](NormalizedPrefix::evicts) sweep drops any allow dir that clashes
+/// with a deny dir — whatever spelling either side used — so an overlay that
+/// re-grants a directory the base vetoed still loses it.
+impl Widen for ExecGrant {
+    fn widen(self, other: Self) -> Self {
+        let mut dirs = widen_keys(self.dirs, other.dirs);
+        let denied: Vec<NormalizedPrefix> = dirs
+            .iter()
+            .filter(|(_, allow)| !**allow)
+            .map(|(dir, _)| dir.clone())
             .collect();
-        let deny_dirs: BTreeSet<NormalizedPrefix> =
-            self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
-        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.evicts(p)));
+        dirs.retain(|dir, allow| !*allow || !denied.iter().any(|d| d.evicts(dir)));
         Self {
-            allow_dirs,
-            deny_dirs,
-            literals: join_literal_exec(&self.literals, &other.literals),
+            names: widen_keys(self.names, other.names),
+            paths: widen_keys(self.paths, other.paths),
+            dirs,
         }
     }
 }
 
-/// Shared keys combine through [`ExecPolicy::join`], and a one-sided key
-/// survives verbatim: an absent key is the join identity, so silence on one
-/// side lifts neither the other's grant nor its veto.
-fn join_literal_exec(
-    a: &BTreeMap<String, ExecPolicy>,
-    b: &BTreeMap<String, ExecPolicy>,
-) -> BTreeMap<String, ExecPolicy> {
-    let mut out = BTreeMap::new();
-    for (name, pa) in a {
-        match b.get(name) {
-            Some(pb) => {
-                out.insert(name.clone(), pa.clone().join(pb.clone()));
-            }
-            None => {
-                out.insert(name.clone(), pa.clone());
-            }
-        }
+/// Shared keys widen, and a one-sided key survives verbatim: an absent key is
+/// the widening identity, so silence on one side lifts neither the other's
+/// grant nor its veto.
+fn widen_keys<K: Ord, V: Widen>(mut a: BTreeMap<K, V>, b: BTreeMap<K, V>) -> BTreeMap<K, V> {
+    for (key, v) in b {
+        let v = match a.remove(&key) {
+            Some(held) => held.widen(v),
+            None => v,
+        };
+        a.insert(key, v);
     }
-    for (name, pb) in b {
-        if !a.contains_key(name) {
-            out.insert(name.clone(), pb.clone());
-        }
-    }
-    out
+    a
 }
 
 fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix> {
@@ -819,25 +856,38 @@ mod traverse_tests {
         );
     }
 
-    /// Bare names are not paths: they pass the traversal untouched, never
-    /// gaining the extra spellings a path would.
+    /// Bare names are not paths: a veto passes the traversal untouched,
+    /// while each rendered spelling of a path keeps its rule's place.
     #[test]
-    fn a_denied_basename_is_carried_across_unexpanded() {
+    fn a_veto_is_carried_across_unexpanded_and_paths_keep_their_place() {
         let out = SandboxProjection {
-            exec: ExecProjection::Restricted {
-                allow_paths: Vec::new(),
-                allow_dirs: Vec::new(),
-                deny_paths: Vec::new(),
-                deny_dirs: Vec::new(),
-                deny_basenames: vec!["git".to_string()],
-            },
+            exec: ExecProjection::Restricted(vec![
+                ExecRule::Dir {
+                    path: "/usr/bin".to_string(),
+                    allow: true,
+                },
+                ExecRule::Veto("git".to_string()),
+                ExecRule::File {
+                    path: "/usr/bin/git".to_string(),
+                    allow: false,
+                },
+            ]),
             ..SandboxProjection::default()
         }
         .rendered()
-        .expect("no paths to render");
-        assert!(matches!(
-            out.exec,
-            ExecProjection::Restricted { deny_basenames, .. } if deny_basenames == ["git"]
+        .expect("ASCII paths render");
+        let ExecProjection::Restricted(rules) = out.exec else {
+            panic!("restricted in, restricted out");
+        };
+        let veto = rules
+            .iter()
+            .position(|r| matches!(r, ExecRule::Veto(name) if name == "git"))
+            .expect("the veto survives");
+        assert!(rules[..veto].iter().all(
+            |r| matches!(r, ExecRule::Dir { path, allow: true } if path.as_str().ends_with("/usr/bin"))
+        ));
+        assert!(rules[veto + 1..].iter().all(
+            |r| matches!(r, ExecRule::File { path, allow: false } if path.as_str().ends_with("/usr/bin/git"))
         ));
     }
 }

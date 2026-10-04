@@ -2,6 +2,19 @@
 status: active
 ---
 
+> **Amended 2026-10-04.** The law stands, the mechanism below is gone.
+> `evaluate_exec`, `reduce_exec`, `admitted_literal_paths` and the
+> `deny_basenames` carve dimension no longer exist: the in-process guard and
+> the kernel read one compiled table, `ExecRules`, the guard through
+> `ExecRules::verdict` and the kernel through `ExecRules::kernel`, a rule list
+> ordered so that last-match-wins equals the guard's precedence. The projection
+> is rendered from the very table that admitted the launch (`Admitted`), so
+> there is nothing left to defer to and no differential test to keep; two
+> property tests pin the meet and the render instead. A bare deny is still a
+> final-component veto in Seatbelt. See
+> [[decisions/261004_exec-rules|exec-rules]] and
+> [[decisions/261004_exec-carriers|exec-carriers]].
+
 # The exec projection defers admission to the gate
 
 **The OS exec projection's *admit* decision is the in-process gate's verdict,

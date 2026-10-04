@@ -5,7 +5,7 @@
 //!
 //! A bare-name `deny` projects into `(deny process-exec (regex #"/cat$"))`,
 //! emitted *after* the broad allow because Seatbelt is last-match-wins.
-//! Rule order is the whole enforcement, and the in-ral gate never sees a
+//! Rule order is the whole enforcement, and the in-process guard never sees a
 //! command an interpreter spawns — so only a real Seatbelt envelope can
 //! close the `sh -c cat` route.  These runs walk that chain end to end.
 
@@ -50,7 +50,7 @@ fn write_script(path: &Path, line: &str) {
 }
 
 #[test]
-fn a_bare_name_deny_stops_a_grandchild_the_gate_never_sees() {
+fn a_bare_name_deny_stops_a_grandchild_the_guard_never_sees() {
     let td = tempfile::tempdir().unwrap();
     let secret = td.path().join("secret");
     std::fs::write(&secret, format!("{SENTINEL}\n")).unwrap();

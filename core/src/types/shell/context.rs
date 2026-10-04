@@ -9,7 +9,7 @@ use super::Context;
 use super::cwd::Cwd;
 use crate::path::{Resolver, SearchCwd};
 use crate::types::{EnvVars, GrantStack, HandlerStack, Modules};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl Context {
     /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
@@ -62,6 +62,16 @@ impl Context {
         self.cwd.0.as_deref()
     }
 
+    /// Where a child launched from this context starts: the cell's directory,
+    /// else [`process_cwd`](crate::path::process_cwd) for an unseeded shell,
+    /// else `"."` if even `getcwd(3)` fails.
+    pub(crate) fn launch_cwd(&self) -> PathBuf {
+        self.cwd().map_or_else(
+            || crate::path::process_cwd().unwrap_or_else(|| PathBuf::from(".")),
+            Path::to_path_buf,
+        )
+    }
+
     /// The anchor a `PATH` walk made from this context runs against: the
     /// [`Self::cwd`] every other consumer of "here" reads.
     pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
@@ -69,7 +79,7 @@ impl Context {
     }
 
     /// A [`Resolver`] bound to this layer's home and cwd — grant-prefix
-    /// resolution, deny-path canonicalisation, and the fs gates all mint one here.
+    /// resolution, deny-path canonicalisation, and the fs guards all mint one here.
     pub(crate) fn resolver(&self) -> Resolver<'_> {
         Resolver {
             home: self.home(),

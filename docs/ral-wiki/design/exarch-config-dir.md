@@ -61,7 +61,7 @@ could omit ([[map/exarch/policy|policy]]).
   and `fs` all denied), in a throwaway shell. It can compute a value, cause
   no effect. The asymmetry is deliberate: even a file the agent cannot write is
   evaluated as if it might be hostile, because a redirected endpoint is an
-  exfiltration channel and the in-process gate suffices to close it
+  exfiltration channel and the in-process guard suffices to close it
   ([[design/two-enforcers|two enforcers]]: with `exec` denied there is no route
   to the network).
 

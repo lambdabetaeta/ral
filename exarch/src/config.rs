@@ -12,7 +12,7 @@
 //! the file is an exfiltration channel to whoever can write it. Hence two defences:
 //! it lives at the XDG config home, never the working tree the sandboxed agent can
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
-//! there is no route to the network, so the in-process gate suffices.
+//! there is no route to the network, so the in-process guard suffices.
 
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// A bare command statement is ral's surface for an external invocation, so
-    /// this is the whole exfiltration route: stopped at the in-process exec gate.
+    /// this is the whole exfiltration route: stopped at the in-process exec guard.
     #[cfg(unix)]
     #[test]
     fn no_authority_grant_denies_exec() {

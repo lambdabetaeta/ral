@@ -87,10 +87,10 @@ dynamic design:
 - **Authority is permission over effects.** `grant` attenuates *which* operations
   may be performed and on what arguments — a capability is permission over the
   effect set ([[design/grant|grant]]).
-- **The capability gate sits at the effect-performance site.** The check lives
-  where the operation is performed: the in-process gate for operations ral
+- **The capability check sits at the effect-performance site.** It lives
+  where the operation is performed: the in-process guard for operations ral
   dispatches itself, the OS sandbox for operations a spawned child performs.
-  `net` has no in-process gate because ral performs no network *operation* —
+  `net` has no in-process guard because ral performs no network *operation* —
   there is no such effect in its signature, only the kernel's
   ([[design/two-enforcers|two-enforcers]]).
 - **Dynamic scope is for authority.** An operation's ambient context and

@@ -7,7 +7,8 @@ everything it calls. Authority is never amplified:
 
 - a dimension omitted from a grant inherits the ambient authority;
 - a dimension present can only narrow it;
-- nested grants compose by meet;
+- nested grants compose by meet, deny-overrides, the algebra read against the
+  literature in [[related/access-control-algebra|access-control-algebra]];
 - a deny is anti-monotonic — further layers can add denies but never reopen a
   denied region.
 
@@ -31,7 +32,7 @@ identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
   narrows the filesystem but leaves `net`, `exec`, `editor`, and `shell` at the
   caller's authority; a grant that means to confine network access must say
   `net: false` itself.
-- **`net` has no in-process gate.** ral has no network primitives, so a
+- **`net` has no in-process guard.** ral has no network primitives, so a
   `net: false` is enforced only by the OS sandbox — it fails closed where no
   backend exists.
 - **The process view is the envelope's, on every projection.** No axis names
@@ -47,7 +48,7 @@ for an implicit cross-axis deny: an omitted axis is ⊤, the identity of `meet`.
 
 **Capability checks gate four dimensions:**
 
-- **exec** over a three-valued lattice (Allow / Subcommands / Deny) — more
+- **exec** over a three-valued lattice (Allow / Only / Deny) — more
   expressive than orthodox object-capability, since a base profile can veto a
   name a restrict file never mentions;
 - **fs** by read/write path prefix with denies;
@@ -146,7 +147,7 @@ in `.git/config`, an `.envrc`, a `package.json` script, a `Makefile`. None is a
 binary, none is exec-admitted, and each runs with the user's full authority the
 moment the user reaches for the ordinary tool that reads it. The `exec`
 dimension cannot see this: a file that is never executed, only interpreted, is
-invisible to a gate on execution. The default profiles make `cwd:` and
+invisible to any check on execution. The default profiles make `cwd:` and
 `gitdir:` writable, so the class is live rather than hypothetical.
 
 Nothing in this vocabulary expresses it, because the question is not what the

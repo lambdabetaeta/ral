@@ -2,7 +2,7 @@
 
 //! [`exarch::policy::for_invocation`] end to end, in its own test binary: the
 //! two lattice phases in their fixed order, the deny that has to land on the
-//! real fs gate rather than merely on a list, the two diagnostics a user meets
+//! real fs guard rather than merely on a list, the two diagnostics a user meets
 //! before a session starts, and the grant summary the model reads.
 //!
 //! Every scenario needs a directory of `.ral` profiles on disk — a composed
@@ -14,7 +14,8 @@ use exarch::policy::for_invocation;
 use exarch::prompt::{SCRATCH_PLACEHOLDER, host_section};
 use ral_core::capability::FsOp;
 use ral_core::path::basedir::XdgKind;
-use ral_core::path::{NormalizedPrefix, SearchCwd, resolve_in_path};
+use ral_core::path::{NormalizedPrefix, Resolver, SearchCwd, resolve_in_path};
+use ral_core::test_access::check_file;
 use ral_core::types::{Break, GrantStack, Settled, Shell};
 use std::path::PathBuf;
 
@@ -45,20 +46,25 @@ fn bullet<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no `{label}` line in:\n{text}"))
 }
 
-/// Where `name` really lives on this host, for the resolved half of an exec
-/// check.  `/usr/bin/ls` is `/bin/ls` on macOS and `rustc` is wherever rustup
-/// put it, so the fixture asks `PATH` rather than naming a directory.
+/// The real path of the file `name` runs on this host — what a bare key
+/// denotes: the canonical path of what `PATH` finds.  `rustc` is wherever
+/// rustup put it, so the fixture asks `PATH` rather than naming a directory.
 fn on_path(name: &str) -> String {
     let path = std::env::var("PATH").expect("PATH is set");
-    resolve_in_path(name, &path, SearchCwd::nowhere()).unwrap_or_else(|| {
+    let hit = resolve_in_path(name, &path, SearchCwd::nowhere()).unwrap_or_else(|| {
         panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
-    })
+    });
+    let object = Resolver::shell_less().resolve(&hit).canonicalise_strict();
+    object
+        .expect("a PATH hit exists")
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// The gate's refusal message, or a panic naming what arrived instead.
+/// The guard's refusal message, or a panic naming what arrived instead.
 fn refusal(r: Settled<()>) -> String {
     match r {
-        Ok(()) => panic!("the gate admitted a call it had to refuse"),
+        Ok(()) => panic!("the guard admitted a call it had to refuse"),
         Err(Break::Error(err)) => err.message,
         Err(other) => panic!("expected a grant denial, got: {other:?}"),
     }
@@ -73,7 +79,7 @@ fn install(shell: &mut Shell, stack: &GrantStack) {
     }
 }
 
-/// The join runs before the meet, so a widened grant the attenuation file
+/// The widening runs before the meet, so a widened grant the attenuation file
 /// never names is erased by it.  Inverting the phases turns `--extend-base`
 /// into an escape hatch from `--restrict`; `ls`, named on both sides, is the
 /// control that says the meet attenuated rather than emptied.
@@ -93,12 +99,9 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
 
     let mut shell = Shell::default();
     install(&mut shell, &stack);
-    shell
-        .check_exec_args("rustc", &["rustc", &on_path("rustc")], &[])
+    check_file(&mut shell, &on_path("rustc"), &[])
         .expect_err("--extend-base must not outlive a --restrict that omits it");
-    shell
-        .check_exec_args("ls", &["ls", &on_path("ls")], &[])
-        .expect("what both sides name survives the fold");
+    check_file(&mut shell, &on_path("ls"), &[]).expect("what both sides name survives the fold");
 }
 
 /// `--restrict` is documented as order-free.  Each file becomes its own
@@ -131,12 +134,10 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     for stack in [&ab, &ba] {
         let mut shell = Shell::default();
         install(&mut shell, stack);
-        shell
-            .check_exec_args("ls", &["ls", &ls], &[])
+        check_file(&mut shell, &ls, &[])
             .expect("what both files name is admitted regardless of restrict argv order");
         for one_sided in ["git", "cat"] {
-            let resolved = on_path(one_sided);
-            let message = refusal(shell.check_exec_args(one_sided, &[one_sided, &resolved], &[]));
+            let message = refusal(check_file(&mut shell, &on_path(one_sided), &[]));
             assert!(
                 message.contains(one_sided),
                 "a name only one restrict file carries must be refused, by name: {message}"
@@ -169,14 +170,14 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
 }
 
 /// Being in `deny_paths` is not the claim; being unwritable is.  The frozen
-/// entry is lexical, and the gate expands it — so the file is refused by both
+/// entry is lexical, and the guard expands it — so the file is refused by both
 /// its own spelling and its canonical one, while its sibling stays writable.
 ///
 /// The ceiling is `cwd:`, the directory holding both files: a literal `/`
 /// would be a foreign-rooted dead grant on Windows, leaving nothing writable
 /// and the sibling refused for the wrong reason.
 #[test]
-fn a_restrict_file_is_refused_by_the_fs_gate_under_either_spelling() {
+fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
     let dir = Scratch::for_test(EXARCH, "restrict-unwritable").expect("scratch dir");
     let restrict = profile(
         &dir,

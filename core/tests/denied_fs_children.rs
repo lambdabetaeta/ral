@@ -16,7 +16,7 @@
 //!   2. a bundled coreutil that *writes* outside the write set is denied;
 //!   3. a bundled coreutil used as a **byte pipeline stage** that writes
 //!      outside the write set is denied (the key gap — bundled byte
-//!      stages are direct `ExecImage::BundledTool` children that must
+//!      stages are direct `Program::Tool` children that must
 //!      receive the same per-command sandbox as any external);
 //!   4. the same denial for a *downstream* stage of a multi-stage
 //!      bundled byte pipeline.
@@ -264,7 +264,7 @@ fn bundled_write_outside_grant_denied() {
 /// Positive control for the byte-pipeline test: a bundled byte stage
 /// (`tee`) that writes its input to a path *inside* the grant lands the
 /// file. `tee` is a bundled coreutil that copies stdin to both stdout and
-/// the named file; here it runs as a direct `ExecImage::BundledTool`
+/// the named file; here it runs as a direct `Program::Tool`
 /// pipeline stage, confined to the grant, and its write inside the prefix
 /// succeeds.
 #[test]

@@ -88,7 +88,8 @@ everything `crate::types::*`.
 ## Capabilities
 
 `capability.rs` holds the capability *types* the [[map/core/capabilities|grant]]
-decision layer interprets: `Capabilities` (one layer), `ExecPolicy`, `FsPolicy`,
+decision layer interprets: `Capabilities` (one layer), `ExecGrant` under
+`Verdict`, `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<Capabilities>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
 stack's verdicts, not a `Capabilities::meet`
@@ -97,10 +98,10 @@ stack's verdicts, not a `Capabilities::meet`
 position (`GrantStack::remove`) rather than popping the top, so a session
 frame `push_session_capabilities` lays inside it, as the boot door's
 `--capabilities` does inside its run, survives it), `SandboxProjection`,
-and the `Join` lattice operation (tested in `capability/lattice_tests.rs`),
+and the `Widen` lattice operation (tested in `capability/lattice_tests.rs`),
 which widens a base overlay for `--extend-base`; Boolean `false` permissions
 remain sticky vetoes. `Meet` survives only where a value genuinely narrows by
-intersection — `bool`, `ExecPolicy` — not as a whole-`Capabilities` operation.
+intersection — `bool`, `Verdict` — not as a whole-`Capabilities` operation.
 
 ## Shell
 

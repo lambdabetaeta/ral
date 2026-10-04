@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d0477d84
-verified_at_date: 2026-09-11
-anchors: [build_profile, emit_fs_restricted, emit_exec_rules, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+verified_at_commit: f4e88bce
+verified_at_date: 2026-10-05
+anchors: [build_profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -43,7 +43,7 @@ read) and the grant's read and write prefixes as `file-read*` subpaths with
 their ancestor chains, the write prefixes as `file-write*` subpaths, and then
 the denies. `Unrestricted` passes both through — `(allow file-read*)`,
 `(allow file-write*)` — so an exec-only grant can enter the sandbox for exec
-gating without clamping the agent's cwd or `HOME`.
+confinement without clamping the agent's cwd or `HOME`.
 
 `system_paths` is wholesale where cherry-picking breaks tools mysteriously:
 `/private/etc` (gitconfig, paths.d, zshenv, nix.conf; nothing user-secret sits
@@ -55,28 +55,29 @@ socket). User temp and workspace paths are absent by design: they arrive
 through the grant.
 
 **exec.** `Unrestricted` is `(allow process-exec)`, so an fs-only grant does
-not attenuate exec at the OS layer. `Restricted` folds the grant's literals and
-directories, the `Exec`-tagged system paths and ral's own binary into one
-`(allow file-read* process-exec …)` — Seatbelt needs both operations to spawn
-— because the system reads miss user toolchains (`~/.rustup/…/bin`), Apple's
-compiler chain (`gcc → cc1 → as → ld`) lives under CommandLineTools and would
-die at the first descendant exec when `[exec]` names only `/usr/bin`, and
-bundled tools re-exec ral itself (`--ral-bundled-tool`; the per-tool gate is
-`vet`). An operand-less form is an unconditional allow, so an empty admit set
-emits nothing. This layer is deliberately coarser than the in-process gate —
-`(subpath D)` admits every binary under `D` — because its job is the
-interpreter-bypass class the gate never sees (`sh -c`, `env`, `xargs`,
-`find -exec`): deny what lies *outside* the admitted set. Denies follow, both
-operations each (read alone lets the exec through to fail later; exec alone
-leaves the binary readable), and a bare-name veto is a final-component regex
-over `process-exec` only, vetoing the name wherever it resolves without
-denying reads of every same-named file.
+not attenuate exec at the OS layer. `Restricted` first admits Rosetta's
+runtime (`/Library/Apple/usr`, the one `Exec`-tagged system path) and ral's own
+binary in one `(allow file-read* process-exec …)` — Seatbelt needs both
+operations to spawn; an operand-less form is an unconditional allow, so an
+empty base emits nothing. Then each of the projection's rules, already in
+`Rank` order, becomes one `Sbpl` form: an allowing dir or file
+`(allow file-read* process-exec (subpath|literal …))`, a denying one
+`(deny process-exec …)`, a veto `(deny process-exec (regex #"/name$"))`,
+the name wherever it resolves. Last-match-wins over that order is the
+in-process guard's precedence, carriers included
+([[decisions/261004_exec-carriers|exec-carriers]]). **Exec denies deny no
+reads**: reading is fs's to decide, and a veto would otherwise hide every
+same-named file. Allowed files get their ancestor chains. Bundled tools
+re-exec ral itself (`--ral-bundled-tool`; the per-tool check is `vet`'s),
+and Apple's compiler chain is grant data, under `system:`. This layer still
+cannot see argv, so `Only` renders as an allow; its job is the
+interpreter-bypass class the guard never sees (`sh -c`, `env`, `xargs`,
+`find -exec`).
 
 **Freezing the admitted set.** Under `fs: Unrestricted` with a veto in force,
-every admitted directory is also `(deny file-write*)`. Otherwise
+every admitted directory and file is also `(deny file-write*)`. Otherwise
 `(allow file-write*)` makes every veto hollow: copy the denied binary under a
-fresh name into an admitted directory — or drop anything at all into the
-unconditionally admitted `/opt/homebrew/bin` — and run it from there.
+fresh name into an admitted directory and run it from there.
 Freezing contradicts no layer, none having asked to write there, and restores
 the premise `capability::deputy` reasons from: that an unrestricted `fs` is
 not "everything writable" — true of the folded grant, false of this backend

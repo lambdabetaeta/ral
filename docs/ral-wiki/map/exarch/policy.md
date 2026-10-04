@@ -119,9 +119,9 @@ via `include_str!`, ordered from most to least authority:
   bare-name entries for core's bundled tools (which have no path to match).
 
 **Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
-— coreutils, and diffutils/ripgrep under their features). `command::vet` routes
-those to an `ExecImage::BundledTool` and skips the `PATH` probe entirely, so they
-reach the gate as a bare name with no resolved path: a directory prefix cannot
+— coreutils, and diffutils/ripgrep under their features). `Head::resolve` makes
+those a `Program::Tool` and skips the `PATH` walk entirely, so they reach the
+in-process guard as a tool with no place on disk: a directory prefix cannot
 match one, and silence denies it. That is why `read-only`, `edit-only`,
 `reasonable` and `confined` each carry a per-name coreutils block that looks
 redundant beside their `system:` subpath rule and is not.

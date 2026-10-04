@@ -54,9 +54,9 @@ pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 #[cfg(feature = "ripgrep")]
 pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 
-/// True when `name` is a bundled tool.  `command::vet` routes these to an
-/// `ExecImage::BundledTool` and skips the PATH probe entirely, so the
-/// in-binary implementation wins over any same-named system binary.
+/// True when `name` is a bundled tool.  `command::Head` resolves these to a
+/// `Program::Tool` and skips the PATH probe entirely, so the in-binary
+/// implementation wins over any same-named system binary.
 #[cfg_attr(
     not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")),
     allow(

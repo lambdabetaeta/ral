@@ -77,7 +77,7 @@ return [
   # Exec mirrors `reasonable` — the agent has the same toolset.  No
   # write capability means `rm`, `mv`, `cp`, `mkdir`, `touch`,
   # `truncate` and friends are still admitted as commands but fail at
-  # the fs gate when their target lies under `cwd:`.  This is
+  # the fs guard when their target lies under `cwd:`.  This is
   # intentional: the agent can attempt the action and observe the
   # denial, rather than having "tool not found" surprise.
   exec: [
@@ -161,7 +161,7 @@ return [
     # Version control.  `git` is admitted; review work needs
     # `git log`, `git diff`, `git show`.  Writes go to scratch only,
     # so `git commit` (which writes objects into cwd:/.git) fails by
-    # fs gate — the agent can read history but not rewrite it.  See
+    # fs guard — the agent can read history but not rewrite it.  See
     # `reasonable` for the credential-helper analysis.
     git: 'allow',
     gh:  'allow',

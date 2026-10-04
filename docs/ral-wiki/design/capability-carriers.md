@@ -52,17 +52,17 @@ understand different languages ([[design/two-enforcers|two-enforcers]]):
 - **ral itself** is the sharp judge — it sees the exact command and arguments,
   knows where it is running, and rules on each action as it happens. So it never
   pre-decides; it judges live. That is the function over `Context`.
-- **the operating system's sandbox** is the blunt but powerful guard — it can
+- **the operating system's sandbox** is the blunt but powerful sentry — it can
   physically stop a runaway child program, but it is dim: you must hand it a flat
   list of "these locations yes, these no" *up front*, and it cannot ask
   follow-ups or understand "`git` but only `status`."
 
 `SandboxProjection` is the permission boiled down into that flat list — the
 subtle parts (which subcommand, this argument vs that) flattened away because the
-guard could never act on them. Same authority, two renderings, because there are
+sentry could never act on them. Same authority, two renderings, because there are
 two enforcers of unequal sophistication. Neither rendering serves both: hand the
 flat list to the sharp judge and you have thrown away its precision; ask the
-blunt guard to understand the subtle rule and it simply can't
+blunt sentry to understand the subtle rule and it simply can't
 ([[decisions/260602_exec-authority-partitioned|the two folds stay separate]]).
 
 ## The shape of it

@@ -394,17 +394,19 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
     s
 }
 
-/// Per-command exec policy as `name` or `name[sub1,sub2,...]`, comma-joined.
-/// Directory admittances are surfaced by [`exec_dirs_line`], `Deny` literals
-/// by [`exec_denies`], so only admitted literals land here.
+/// Per-command exec policy as `name` or `name[sub1,sub2,...]`, comma-joined:
+/// bare names, then path keys as their author spelled them.  Directory
+/// admittances are surfaced by [`exec_dirs_line`], denies by
+/// [`exec_denies`], so only admitted keys land here.
 fn exec_line(caps: &Capabilities) -> String {
-    let Some(m) = &caps.exec else {
+    let Some(grant) = &caps.exec else {
         return "unrestricted".into();
     };
-    let admitted: Vec<String> = m
-        .literals
-        .iter()
-        .filter_map(|(name, pol)| pol.admit_label(name))
+    let names = grant.names.iter().map(|(name, v)| (name.as_str(), v));
+    let paths = grant.paths.iter().map(|(path, v)| (path.as_str(), v));
+    let admitted: Vec<String> = names
+        .chain(paths)
+        .filter_map(|(key, v)| v.admit_label(key))
         .collect();
     if admitted.is_empty() {
         "(none)".into()
@@ -416,26 +418,38 @@ fn exec_line(caps: &Capabilities) -> String {
 /// Allowed directory prefixes, each with a trailing `/` so it reads as a
 /// directory.  Empty when nothing admits by directory.
 fn exec_dirs_line(caps: &Capabilities) -> String {
-    caps.exec.as_ref().map_or_else(String::new, |m| {
-        m.allow_dirs
+    caps.exec.as_ref().map_or_else(String::new, |grant| {
+        grant
+            .dirs
             .iter()
-            .map(|dir| format!("{}/", dir.as_str()))
+            .filter(|(_, allow)| **allow)
+            .map(|(dir, _)| format!("{}/", dir.as_str()))
             .collect::<Vec<_>>()
             .join(", ")
     })
 }
 
-/// Names and directory prefixes carrying an explicit `Deny` — vetoed even
-/// where a covering directory admittance would otherwise admit the path.
+/// Names, path keys and directory prefixes carrying an explicit `Deny` —
+/// vetoed even where a covering directory admittance would otherwise admit
+/// the path.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
-    caps.exec.as_ref().map_or_else(Vec::new, |m| {
-        let literals = m
-            .literals
+    caps.exec.as_ref().map_or_else(Vec::new, |grant| {
+        let names = grant
+            .names
             .iter()
-            .filter(|&(_, pol)| pol.is_denied())
+            .filter(|(_, v)| v.is_denied())
             .map(|(name, _)| name.clone());
-        let dirs = m.deny_dirs.iter().map(|dir| format!("{}/", dir.as_str()));
-        literals.chain(dirs).collect()
+        let paths = grant
+            .paths
+            .iter()
+            .filter(|(_, v)| v.is_denied())
+            .map(|(path, _)| path.as_str().to_string());
+        let dirs = grant
+            .dirs
+            .iter()
+            .filter(|(_, allow)| !**allow)
+            .map(|(dir, _)| format!("{}/", dir.as_str()));
+        names.chain(paths).chain(dirs).collect()
     })
 }
 
