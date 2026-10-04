@@ -26,6 +26,12 @@ jobs:
       # denial, then a mount-layer /dev fault no policy fixes), so every cargo
       # step runs privileged inside this image — exactly what `just linux-ci`
       # does locally.
+      # Ubuntu 24.04 runners deny unprivileged user namespaces by default, and
+      # that denial is the host kernel's, so `--privileged` does not lift it:
+      # bwrap, run as the image's non-root user, dies at "setting up uid map".
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Build the Linux sandbox image
         run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
