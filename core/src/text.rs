@@ -170,7 +170,7 @@ mod tests {
             ["lenght", "length", "lengths"]
         );
         assert_eq!(near_names("lenght", pool, 1), ["lenght"]);
-        assert!(near_names("qqqqq", pool, 3).is_empty());
+        assert_eq!(near_names("qqqqq", pool, 3), Vec::<&str>::new());
     }
 
     #[test]

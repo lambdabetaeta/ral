@@ -336,7 +336,7 @@ mod tests {
         let menu = menu_from(std::slice::from_ref(&account), &mut catalog);
 
         assert!(menu.providers[0].default_model.is_none());
-        assert!(model_names(&menu.providers[0]).is_empty());
+        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
     }
 
     #[test]

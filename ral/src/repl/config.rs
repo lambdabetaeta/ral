@@ -667,7 +667,10 @@ mod tests {
     /// anything but a map is reported and that one plugin skipped.
     #[test]
     fn rc_plugin_non_map_options_is_rejected() {
-        assert!(loaded_plugins("return [plugins: [zoxide: 'alt-z']]\n").is_empty());
+        assert_eq!(
+            loaded_plugins("return [plugins: [zoxide: 'alt-z']]\n"),
+            Vec::<String>::new()
+        );
     }
 
     /// Aliases declared in rc install as alias-origin handler frames.

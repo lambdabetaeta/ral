@@ -287,7 +287,7 @@ mod tests {
                 .into_iter()
                 .find_map(|(name, value)| (name == "RAL_GUEST").then_some(value))
                 .expect("the engine is given RAL_GUEST");
-            assert!(!value.is_empty());
+            assert_ne!(value, "");
         }
     }
 

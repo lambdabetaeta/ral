@@ -82,7 +82,10 @@ mod tests {
         let before = Manifest::of_folder(folder).expect("baseline");
         let after = Manifest::of_folder(folder).expect("closing walk");
 
-        assert!(job_report(&before, &after).changes.changes.is_empty());
+        assert_eq!(
+            job_report(&before, &after).changes.changes,
+            Vec::<Change>::new()
+        );
     }
 
     /// A rename over the real filesystem, end to end: the move preserves

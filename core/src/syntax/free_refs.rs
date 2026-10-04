@@ -241,12 +241,12 @@ mod tests {
     #[test]
     fn only_candidates_are_reported() {
         assert_eq!(refs_of("$x", &["x"]), vec!["x"]);
-        assert!(refs_of("$y", &["x"]).is_empty());
+        assert_eq!(refs_of("$y", &["x"]), Vec::<String>::new());
     }
 
     #[test]
     fn lambda_parameter_shadows_a_candidate() {
-        assert!(refs_of("{ |x| $x }", &["x"]).is_empty());
+        assert_eq!(refs_of("{ |x| $x }", &["x"]), Vec::<String>::new());
         assert_eq!(refs_of("{ |x| $g }", &["g", "x"]), vec!["g"]);
     }
 
@@ -263,7 +263,10 @@ mod tests {
 
     #[test]
     fn let_binding_in_lambda_body_scopes_over_later_statements() {
-        assert!(refs_of("{ |x| let y = 1\n $y }", &["y"]).is_empty());
+        assert_eq!(
+            refs_of("{ |x| let y = 1\n $y }", &["y"]),
+            Vec::<String>::new()
+        );
         assert_eq!(refs_of("{ |x| $g\n let y = 1 }", &["g", "y"]), vec!["g"]);
     }
 

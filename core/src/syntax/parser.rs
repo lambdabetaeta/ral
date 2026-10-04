@@ -2180,7 +2180,7 @@ mod tests {
                     ..
                 },
             ] => {
-                assert!(args.is_empty());
+                assert_eq!(args.as_slice(), []);
                 assert_eq!(head, &external_head("git"));
             }
             _ => panic!("expected zero-arg external-name app, got {ast:?}"),
@@ -3516,7 +3516,7 @@ mod tests {
                     ..
                 },
             ] => {
-                assert!(args.is_empty());
+                assert_eq!(args.as_slice(), []);
                 assert_eq!(
                     head,
                     &Head::TildePath(TildePath {
@@ -3556,7 +3556,7 @@ mod tests {
                     ..
                 },
             ] => {
-                assert!(args.is_empty());
+                assert_eq!(args.as_slice(), []);
                 assert_eq!(head, &path_head("./script"));
             }
             _ => panic!("expected zero-arg path app, got {ast:?}"),

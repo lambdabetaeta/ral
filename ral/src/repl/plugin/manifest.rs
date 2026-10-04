@@ -391,7 +391,7 @@ mod tests {
         let manifest = Value::map(vec![("name".into(), Value::string("p"))]);
         let (manifest, handlers) = parse(&manifest).expect("clean manifest parses");
         assert_eq!(manifest.name, "p");
-        assert!(handlers.aliases.is_empty());
+        assert_eq!(handlers.aliases, Vec::<(String, Value)>::new());
     }
 
     /// A trivial block-shaped `Value::Thunk` handler for well-formed

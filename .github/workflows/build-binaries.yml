@@ -60,7 +60,7 @@ jobs:
             pkg: ral
             bin: ral
             target: x86_64-unknown-linux-musl
-            features: coreutils,diffutils,grep,ripgrep
+            features: coreutils,diffutils,ripgrep
           - out: ral-linux-arm64
             artifact: release-ral-linux-arm64
             os: ubuntu-24.04-arm
@@ -88,7 +88,7 @@ jobs:
             pkg: ral
             bin: ral
             target: aarch64-unknown-linux-musl
-            features: coreutils,diffutils,grep,ripgrep
+            features: coreutils,diffutils,ripgrep
           - out: ral-macos-arm64
             artifact: release-ral-macos-arm64
             os: macos-latest
@@ -101,7 +101,7 @@ jobs:
             pkg: ral
             bin: ral
             target: aarch64-apple-darwin
-            features: coreutils,diffutils,grep,ripgrep
+            features: coreutils,diffutils,ripgrep
 
           # The MSI's payload, and the only Windows ral build there is:
           # Windows has no system coreutils to fall back on, so the bundled
@@ -113,7 +113,7 @@ jobs:
             pkg: ral
             bin: ral.exe
             target: x86_64-pc-windows-msvc
-            features: coreutils,diffutils,grep,ripgrep
+            features: coreutils,diffutils,ripgrep
 
           # exarch, which ships as a bare executable everywhere including
           # Windows.  No `-allutils` variant: those utilities are ral's, and

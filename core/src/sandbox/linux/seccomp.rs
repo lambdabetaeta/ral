@@ -728,7 +728,7 @@ mod tests {
         // Kill; Errno(EPERM) (unshare/clone, setns, ioctl); Errno(ENOSYS) (clone3).
         assert_eq!(programs.verdicts.len(), 3);
         for (_, bytes) in &programs.verdicts {
-            assert!(!bytes.is_empty());
+            assert_ne!(bytes, &Vec::<u8>::new());
             assert_eq!(bytes.len() % 8, 0);
         }
         #[cfg(target_arch = "x86_64")]

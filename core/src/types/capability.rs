@@ -775,12 +775,12 @@ mod traverse_tests {
     /// chain, so a read-only `/repo` pins nothing.
     #[test]
     fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
-        assert!(pinned(&[], &["/repo/.ssh/id_rsa"]).is_empty());
+        assert_eq!(pinned(&[], &["/repo/.ssh/id_rsa"]), Vec::<String>::new());
     }
 
     #[test]
     fn pins_nothing_for_a_deny_outside_every_prefix() {
-        assert!(pinned(&["/repo"], &["/etc/secret"]).is_empty());
+        assert_eq!(pinned(&["/repo"], &["/etc/secret"]), Vec::<String>::new());
     }
 
     /// A supplied pin is not authority: the traversal recomputes the set from

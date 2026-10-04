@@ -2045,7 +2045,7 @@ mod tests {
         let record = s.dir().join("record.jsonl");
         s.clear(0, 2).expect("clear");
         assert!(record.with_extension("jsonl.0").exists());
-        assert!(s.context().transcript_index().is_empty());
+        assert_eq!(s.context().transcript_index(), Vec::<TurnRow>::new());
         assert!(s.context().is_ready());
     }
 

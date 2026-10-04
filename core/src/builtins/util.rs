@@ -424,7 +424,7 @@ mod stdin_tests {
         let mut buf = Vec::new();
         let n = reader.read_to_end(&mut buf).expect("read");
         assert_eq!(n, 0, "Empty source yields no bytes");
-        assert!(buf.is_empty());
+        assert_eq!(buf, Vec::<u8>::new());
         // A persistent marker: a second read still sees `Empty`, never
         // collapsing to `Terminal` and its fd-0 fall-through.
         assert!(matches!(shell.io.stdin, Source::Empty));

@@ -659,9 +659,9 @@ mod tests {
 
     #[test]
     fn a_typed_space_or_a_plain_line_ends_the_completion() {
-        assert!(replacements("/export ").is_empty());
-        assert!(replacements("/export ~/notes.md").is_empty());
-        assert!(replacements("what is a monad").is_empty());
+        assert_eq!(replacements("/export "), Vec::<String>::new());
+        assert_eq!(replacements("/export ~/notes.md"), Vec::<String>::new());
+        assert_eq!(replacements("what is a monad"), Vec::<String>::new());
     }
 
     #[test]

@@ -260,7 +260,10 @@ mod tests {
     fn an_untouched_file_is_no_change_at_all() {
         let before = manifest(&[("notes.txt", file(4, 100))]);
         let after = manifest(&[("notes.txt", file(4, 100))]);
-        assert!(ChangeSet::between(&before, &after).changes.is_empty());
+        assert_eq!(
+            ChangeSet::between(&before, &after).changes,
+            Vec::<Change>::new()
+        );
     }
 
     /// A move preserves size and timestamp both, which is what pairs the

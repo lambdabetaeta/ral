@@ -1393,7 +1393,7 @@ mod tests {
                 suffix: Some("/.local/bin/claude".into()),
             })
         );
-        assert!(args.is_empty());
+        assert_eq!(args.as_slice(), []);
     }
 
     #[test]
@@ -1402,7 +1402,7 @@ mod tests {
         let comp = elaborate_one(&ast, HashSet::new(), "");
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(name, &CommandName::Path("./script".into()));
-        assert!(args.is_empty());
+        assert_eq!(args.as_slice(), []);
     }
 
     #[test]

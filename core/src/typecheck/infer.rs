@@ -2061,8 +2061,11 @@ mod tests {
     fn an_unbound_variable_is_refused_where_it_is_read() {
         assert_eq!(error_codes("echo $nope"), ["T0071"]);
         assert_eq!(error_codes("let f = { |x| $y }"), ["T0071"]);
-        assert!(error_codes("let a = 1\necho $a").is_empty());
-        assert!(error_codes("let t = $true; if $t { echo y } else { echo n }").is_empty());
+        assert_eq!(error_codes("let a = 1\necho $a"), Vec::<&str>::new());
+        assert_eq!(
+            error_codes("let t = $true; if $t { echo y } else { echo n }"),
+            Vec::<&str>::new()
+        );
     }
 
     /// A session binding of a value is no program; one of unknown type — a
@@ -2077,7 +2080,10 @@ mod tests {
             error_codes_seeded("date +%s", bound(Some(Ty::Int))),
             ["T0072"]
         );
-        assert!(error_codes_seeded("date +%s", bound(None)).is_empty());
+        assert_eq!(
+            error_codes_seeded("date +%s", bound(None)),
+            Vec::<&str>::new()
+        );
     }
 
     /// A static duplicate key is T0022 in a record, a plain map, and a map

@@ -1007,7 +1007,7 @@ mod tests {
             vec![1, 2, 3]
         );
         evict(&mut context, &[1, 2, 3], None);
-        assert!(resident_ids(&context).is_empty());
+        assert_eq!(resident_ids(&context), Vec::<u64>::new());
         assert_eq!(markers(&context).len(), 1, "one hole, one marker");
         assert_eq!(context.rendered().len(), 1, "the marker stands alone");
         assert_eq!(

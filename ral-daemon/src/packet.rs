@@ -142,7 +142,7 @@ mod tests {
         write_frame(&mut wire, &packet).unwrap();
         let mut cursor = wire.as_slice();
         assert_eq!(read_frame(&mut cursor).unwrap(), packet);
-        assert!(cursor.is_empty());
+        assert_eq!(cursor, []);
     }
 
     #[test]
@@ -194,6 +194,6 @@ mod tests {
         write_frame(&mut wire, &packet).unwrap();
         let mut cursor = wire.as_slice();
         assert_eq!(read_frame(&mut cursor).unwrap(), packet);
-        assert!(cursor.is_empty());
+        assert_eq!(cursor, []);
     }
 }

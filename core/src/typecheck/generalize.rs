@@ -642,7 +642,7 @@ mod tests {
             result.expect("two variables unite");
             assert!(u.is_weak_ty(other) && u.is_weak_ty(weak));
             let scheme = generalized(&u, &arrow(b, Ty::Unit));
-            assert!(scheme.ty_vars.is_empty());
+            assert_eq!(scheme.ty_vars, Vec::<(TyVar, Kind)>::new());
         }
     }
 
@@ -654,7 +654,7 @@ mod tests {
         u.unify_ty(&Ty::Var(weak), &Ty::List(Box::new(Ty::Var(inner))))
             .expect("a free variable binds");
         let scheme = generalized(&u, &arrow(Ty::Var(weak), Ty::Unit));
-        assert!(scheme.ty_vars.is_empty());
+        assert_eq!(scheme.ty_vars, Vec::<(TyVar, Kind)>::new());
         assert!(u.is_weak_ty(inner));
         assert!(scheme.weak.tys.contains_key(&inner));
     }

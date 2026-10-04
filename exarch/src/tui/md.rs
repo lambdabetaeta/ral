@@ -998,7 +998,7 @@ mod tests {
             },
         );
         let spans = ink(&lines);
-        assert!(!spans.is_empty());
+        assert_ne!(spans, Vec::<&Span<'_>>::new());
         for span in spans {
             let fg = span.style.fg.expect("drained span carries an explicit fg");
             assert!(

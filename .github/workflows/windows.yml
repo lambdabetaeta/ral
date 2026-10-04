@@ -31,15 +31,15 @@ jobs:
         run: cargo build -p ral-core
       - name: cargo build (ral)
         run: cargo build -p ral
-      - name: cargo build (ral with grep + ripgrep)
-        run: cargo build -p ral --features grep,ripgrep
+      - name: cargo build (ral with ripgrep)
+        run: cargo build -p ral --features ripgrep
       # The exact feature set build-binaries.yml's build-windows-allutils job
       # ships as ral-windows-allutils.exe; uu_timeout and the rest of
       # coreutils-unix-only (core/Cargo.toml's coreutils-unix-only feature)
       # stay out of this because that feature is cfg(unix)-gated at the
       # workspace level, not because `coreutils` itself fails to build here.
-      - name: cargo build (ral with coreutils,diffutils,grep,ripgrep)
-        run: cargo build -p ral --features coreutils,diffutils,grep,ripgrep
+      - name: cargo build (ral with coreutils,diffutils,ripgrep)
+        run: cargo build -p ral --features coreutils,diffutils,ripgrep
       # exarch carries cfg(windows) console paths and a windows-sys dep that
       # compile nowhere else; its default `coreutils` feature stays on the
       # Windows-buildable subset (coreutils-unix-only is cfg(unix)-gated).
@@ -58,12 +58,12 @@ jobs:
       - name: cargo test (ral)
         if: ${{ !cancelled() }}
         run: cargo test -p ral --no-fail-fast
-      - name: cargo test (ral with grep + ripgrep)
+      - name: cargo test (ral with ripgrep)
         if: ${{ !cancelled() }}
-        run: cargo test -p ral --features grep,ripgrep --no-fail-fast
-      - name: cargo test (ral with coreutils,diffutils,grep,ripgrep)
+        run: cargo test -p ral --features ripgrep --no-fail-fast
+      - name: cargo test (ral with coreutils,diffutils,ripgrep)
         if: ${{ !cancelled() }}
-        run: cargo test -p ral --features coreutils,diffutils,grep,ripgrep --no-fail-fast
+        run: cargo test -p ral --features coreutils,diffutils,ripgrep --no-fail-fast
       - name: cargo test (exarch)
         if: ${{ !cancelled() }}
         run: cargo test -p exarch --no-fail-fast

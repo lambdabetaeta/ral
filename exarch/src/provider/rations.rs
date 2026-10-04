@@ -286,7 +286,7 @@ mod tests {
         rations.land(&account.id, reading(0.80));
         let ladder = [50, 75, 90, 95];
         assert_eq!(rations.climb(&account.id, &ladder), reading(0.80));
-        assert!(rations.climb(&account.id, &ladder).is_empty());
+        assert_eq!(rations.climb(&account.id, &ladder), Vec::<Allowance>::new());
     }
 
     #[test]
