@@ -1582,7 +1582,7 @@ mod tests {
         session.ral("exarch-tasks `status [id: 1, status: `doing]", 5, &emit);
         let saved = session
             .ral(
-                &format!(r#"exarch-tasks `save "{}""#, path.display()),
+                &format!("exarch-tasks `save '{}'", path.display()),
                 5,
                 &emit,
             )
@@ -1594,7 +1594,7 @@ mod tests {
         session.ral(r#"exarch-pins `clear "tasks""#, 5, &emit);
         let loaded = session
             .ral(
-                &format!(r#"exarch-tasks `load "{}""#, path.display()),
+                &format!("exarch-tasks `load '{}'", path.display()),
                 5,
                 &emit,
             )

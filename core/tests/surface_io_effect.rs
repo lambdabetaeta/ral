@@ -108,7 +108,7 @@ fn s(v: &str) -> Value {
 //
 // A builtin dispatch never reaches the rail — only a command that actually
 // crossed a door (external, detached) surfaces.  Redirect and command
-// observations in the audit trail are goldened in `tests/builtins/audit-trail.ral`;
+// observations in the audit trail are goldened in `tests/unix/audit-trail.ral`;
 // this one pins delivery through the surface sink itself.
 
 /// A bare external command (`/usr/bin/true`) emits one command observation

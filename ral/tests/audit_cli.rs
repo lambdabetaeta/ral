@@ -1,3 +1,4 @@
+#![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
 
 // Integration tests for `ral --audit`: the JSON dumped to stderr must be

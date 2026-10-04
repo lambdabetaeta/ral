@@ -21,5 +21,11 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=RAL_VERSION_SUFFIX={suffix}");
 
+    // Windows gives the main thread 1 MiB; the recursive front end needs the
+    // 8 MiB every other platform's main thread has.
+    if std::env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|e| e == "msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    }
+
     ral_core::boot::bake_prelude_to_out_dir();
 }

@@ -416,6 +416,7 @@ mod tests {
     /// `try`'s body ran in its own trail, because a `try` interposes no
     /// scope at all.
     #[test]
+    #[cfg(unix)]
     fn nested_delimiters_flat_merge() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let report = match shell.run(capture_req(
@@ -448,6 +449,7 @@ mod tests {
     /// `audit { }`'s report envelope: a body that returned gives `` `ok ``,
     /// over a flat `trail` naming the one command it ran.
     #[test]
+    #[cfg(unix)]
     fn audit_reports_ok_over_its_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let report = match shell.run(capture_req("audit { /bin/echo hi }")) {

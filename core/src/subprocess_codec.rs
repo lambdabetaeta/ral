@@ -281,6 +281,16 @@ mod tests {
 
     #[test]
     fn a_deep_result_crosses_in_a_report_frame() {
+        // Building, comparing and dropping a 5000-deep value recurses past a test thread's stack.
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(deep_result_crosses)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn deep_result_crosses() {
         use crate::protocol::{DispatchId, Ending, Event, Frame, Report};
         use crate::serial::FOValue;
 
