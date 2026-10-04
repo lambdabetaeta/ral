@@ -112,6 +112,14 @@ jobs:
           path: site/wiki
           key: ${{ steps.wiki-restore.outputs.cache-primary-key }}
 
+      # Tracking tag injected at deploy time so the website id stays out of the repo.
+      - name: Inject analytics
+        env:
+          UMAMI_WEBSITE_ID: ${{ secrets.UMAMI_WEBSITE_ID }}
+        run: |
+          tag="<script defer src=\"https://analytics.lambdabetaeta.eu/script.js\" data-website-id=\"$UMAMI_WEBSITE_ID\"></script>"
+          find site -name '*.html' -exec sed -i "s#</head>#$tag</head>#" {} +
+
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
