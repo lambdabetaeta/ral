@@ -1593,7 +1593,11 @@ mod tests {
                     "the table inside must be the envelope's own: {stdout}"
                 );
                 assert!(
-                    field(&stdout, "INIT=").is_some_and(|init| init.starts_with("bwrap")),
+                    field(&stdout, "INIT=")
+                        .and_then(|init| init.split_whitespace().next())
+                        .is_some_and(|argv0| {
+                            std::path::Path::new(argv0).file_name() == Some("bwrap".as_ref())
+                        }),
                     "pid 1 inside must be bwrap's init: {stdout}"
                 );
             } else {
@@ -1638,9 +1642,11 @@ mod tests {
                 Some(own.to_string().as_str()),
                 "/proc/self must be the reader's own entry: {stdout}"
             );
+            // By name: the restricted envelope binds `/bin` beside `/usr`, so
+            // the path is whichever mount the exec went through.
             assert_eq!(
-                field(&stdout, "EXE=").map(std::path::Path::new),
-                Some(shell.as_path()),
+                field(&stdout, "EXE=").and_then(|exe| std::path::Path::new(exe).file_name()),
+                shell.file_name(),
                 "/proc/<pid>/exe must name the shell's own binary: {stdout}"
             );
             if host.private_pids {
