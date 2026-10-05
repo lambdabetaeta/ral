@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 4e80e33f
+generated_at_commit: 28d3a540
 generated_at_date: 2026-10-05
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -307,8 +307,11 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - Anthropic, DeepSeek and Gemini list through exarch's own `GET /models`
   (paged to the end for Anthropic and Gemini), because each reports a context
   window genai discards; other API-key providers list through genai's
-  `all_model_names`. Every listing is `Vec<Listed { id, context_window }>`,
-  and the picker sees only the names.
+  `all_model_names`. Each of the three is one `Native` row in
+  `models/native.rs` — base URL, how the key is presented, paging, page
+  parser — and `Native::of` is the only place an adapter picks one. Every
+  listing is `Vec<Listed { id, context_window }>`, and the picker sees only
+  the names.
 - ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
   their live OAuth cell after the common stale-token check; each entry's
   `context_window` is kept.

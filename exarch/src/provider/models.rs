@@ -1,11 +1,11 @@
 //! Live model lists, cached with a TTL, behind a network seam.
 //!
 //! An account's model list is that account's to know: Anthropic, `DeepSeek` and
-//! Gemini list through their own endpoints, other API-key services through
-//! genai, `ChatGPT` accounts through the Codex backend. A listing carries each
-//! model's context window where the wire reports one. Fetching is lazy and
-//! never load-bearing — a list that fails, or that omits the wanted model,
-//! still leaves manual entry.
+//! Gemini list through their own endpoints ([`native`]), other API-key services
+//! through genai, `ChatGPT` accounts through the Codex backend. A listing
+//! carries each model's context window where the wire reports one. Fetching is
+//! lazy and never load-bearing — a list that fails, or that omits the wanted
+//! model, still leaves manual entry.
 //!
 //! All network I/O sits behind [`ModelSource`], so tests drive the resolution
 //! logic against a fake; the unit tests here take [`ModelCatalog::memo_only`],
@@ -17,23 +17,20 @@ use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::oauth;
 use genai::Client;
-use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
+use native::Native;
 use ral_core::sync::LockExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+mod native;
 
 /// How long a cached model list stays fresh.
 const TTL: Duration = Duration::from_hours(6);
 
 const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
-const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1/";
-const DEEPSEEK_BASE: &str = "https://api.deepseek.com/v1/";
-const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// A model a listing names, with the context window its provider reports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,87 +47,6 @@ impl Listed {
             context_window: None,
         }
     }
-}
-
-/// One page of a listing, and the cursor of the next, if any.
-type Page = (Vec<Listed>, Option<String>);
-
-/// A window of `0` or `null` on the wire is no window.
-fn window(wire: &Value) -> Option<u64> {
-    wire.as_u64().filter(|&n| n > 0)
-}
-
-fn id_of(entry: &Value, key: &str) -> Option<String> {
-    entry.get(key)?.as_str().map(str::to_owned)
-}
-
-/// One page of Anthropic's `GET /models`, and the `after_id` of the next.
-fn anthropic_page(body: &Value) -> Page {
-    let listed = body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            Some(Listed {
-                id: id_of(m, "id")?,
-                context_window: window(&m["max_input_tokens"]),
-            })
-        })
-        .collect();
-    let next = body["has_more"]
-        .as_bool()
-        .unwrap_or(false)
-        .then(|| id_of(body, "last_id"))
-        .flatten();
-    (listed, next)
-}
-
-/// `DeepSeek`'s `GET /models`, which has no paging.
-fn deepseek_page(body: &Value) -> Page {
-    let listed = body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            Some(Listed {
-                id: id_of(m, "id")?,
-                context_window: window(&m["context_window"]),
-            })
-        })
-        .collect();
-    (listed, None)
-}
-
-/// One page of Gemini's `GET /models`, and the `pageToken` of the next.
-fn gemini_page(body: &Value) -> Page {
-    let listed = body["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            let name = id_of(m, "name")?;
-            Some(Listed {
-                id: name
-                    .strip_prefix("models/")
-                    .map_or_else(|| name.clone(), str::to_owned),
-                context_window: window(&m["inputTokenLimit"]),
-            })
-        })
-        .collect();
-    (listed, id_of(body, "nextPageToken"))
-}
-
-/// The account's `models` URL — its declared endpoint, else `default` — with
-/// `params` percent-encoded onto it.
-fn paged(
-    account: &Account,
-    default: &str,
-    params: &[(&str, &str)],
-) -> Result<reqwest::Url, String> {
-    let base = account.service.endpoint.as_deref().unwrap_or(default);
-    let sep = if base.ends_with('/') { "" } else { "/" };
-    reqwest::Url::parse_with_params(&format!("{base}{sep}models"), params)
-        .map_err(|e| format!("bad endpoint {base}: {e}"))
 }
 
 /// One upstream provider `OpenRouter` can route a given model to — a row of the
@@ -261,28 +177,27 @@ impl ModelSource for LiveSource {
 
 impl LiveSource {
     fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<Listed>, String> {
-        let label = self.roster.label(account);
         let runtime = blocking_runtime("listing")?;
-        let adapter = account.service.adapter;
-        if matches!(
-            adapter,
-            AdapterKind::Anthropic | AdapterKind::DeepSeek | AdapterKind::Gemini
-        ) {
-            return runtime
-                .block_on(list_windowed(adapter, account, key))
-                .map_err(|e| format!("list models for {label}: {e}"));
-        }
-        // Endpoint and key passed explicitly, so a catalog request never leans
-        // on the client's auth resolver. Both come from the account's
-        // service, so a declared endpoint lists exactly as a built-in one does.
+        let listing = match Native::of(account.service.adapter) {
+            Some(native) => runtime.block_on(native.list(account, key)),
+            None => runtime.block_on(self.list_genai(account, key)),
+        };
+        listing.map_err(|e| format!("list models for {}: {e}", self.roster.label(account)))
+    }
+
+    /// Endpoint and key passed explicitly, so a catalog request never leans on
+    /// the client's auth resolver. Both come from the account's service, so a
+    /// declared endpoint lists exactly as a built-in one does.
+    async fn list_genai(&self, account: &Account, key: &str) -> Result<Vec<Listed>, String> {
         let provider_config = ProviderConfig {
             endpoint: account.service.endpoint.clone().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.to_owned())),
         };
-        runtime
-            .block_on(self.client.all_model_names(adapter, provider_config))
+        self.client
+            .all_model_names(account.service.adapter, provider_config)
+            .await
             .map(|names| names.into_iter().map(Listed::bare).collect())
-            .map_err(|e| format!("list models for {label}: {e}"))
+            .map_err(|e| e.to_string())
     }
 
     /// The subscription catalog. `client_version` must be a real Codex CLI
@@ -349,61 +264,6 @@ struct CodexModel {
     slug: String,
     #[serde(default)]
     context_window: Option<u64>,
-}
-
-/// Follow one of the three windowed listings to its last page, at the largest
-/// page size each allows.
-async fn list_windowed(
-    adapter: AdapterKind,
-    account: &Account,
-    key: &str,
-) -> Result<Vec<Listed>, String> {
-    let client = crate::provider::tls::client();
-    let mut listed = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let (request, parse): (_, fn(&Value) -> Page) = match adapter {
-            AdapterKind::Anthropic => {
-                let mut params = vec![("limit", "1000")];
-                params.extend(cursor.as_deref().map(|after| ("after_id", after)));
-                let request = client
-                    .get(paged(account, ANTHROPIC_BASE, &params)?)
-                    .header("x-api-key", key)
-                    .header("anthropic-version", ANTHROPIC_VERSION);
-                (request, anthropic_page)
-            }
-            AdapterKind::Gemini => {
-                let mut params = vec![("pageSize", "1000")];
-                params.extend(cursor.as_deref().map(|token| ("pageToken", token)));
-                let request = client
-                    .get(paged(account, GEMINI_BASE, &params)?)
-                    .header("x-goog-api-key", key);
-                (request, gemini_page)
-            }
-            _ => (
-                client
-                    .get(paged(account, DEEPSEEK_BASE, &[])?)
-                    .bearer_auth(key),
-                deepseek_page,
-            ),
-        };
-        let response = request.send().await.map_err(|e| e.to_string())?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("HTTP {status}: {}", body_detail(&body)));
-        }
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("unreadable listing: {e}"))?;
-        let (page, next) = parse(&body);
-        listed.extend(page);
-        match next {
-            Some(next) => cursor = Some(next),
-            None => return Ok(listed),
-        }
-    }
 }
 
 /// `OpenRouter`'s `/endpoints` envelope; only the fields the picker shows are
@@ -1013,61 +873,6 @@ mod tests {
             err.contains("alex@bristol.ac.uk") && err.contains("alex@work"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn anthropic_page_reads_windows_and_the_cursor() {
-        let body = serde_json::json!({
-            "data": [
-                {"id": "claude-opus-4-1", "max_input_tokens": 200_000},
-                {"id": "claude-old", "max_input_tokens": null},
-            ],
-            "has_more": true,
-            "last_id": "claude-old",
-        });
-        let (listed, next) = anthropic_page(&body);
-        assert_eq!(
-            listed,
-            vec![
-                Listed {
-                    id: "claude-opus-4-1".into(),
-                    context_window: Some(200_000)
-                },
-                Listed::bare("claude-old"),
-            ]
-        );
-        assert_eq!(next.as_deref(), Some("claude-old"));
-        let last = serde_json::json!({"data": [], "has_more": false, "last_id": "x"});
-        assert_eq!(anthropic_page(&last).1, None);
-    }
-
-    #[test]
-    fn deepseek_page_reads_windows() {
-        let body = serde_json::json!({"data": [
-            {"id": "deepseek-flash", "context_window": 1_000_000},
-            {"id": "deepseek-zero", "context_window": 0},
-        ]});
-        let (listed, next) = deepseek_page(&body);
-        assert_eq!(listed[0].context_window, Some(1_000_000));
-        assert_eq!(listed[1], Listed::bare("deepseek-zero"));
-        assert_eq!(next, None);
-    }
-
-    #[test]
-    fn gemini_page_strips_the_prefix_and_reads_the_token() {
-        let body = serde_json::json!({
-            "models": [{"name": "models/gemini-3-pro", "inputTokenLimit": 1_048_576}],
-            "nextPageToken": "tok",
-        });
-        let (listed, next) = gemini_page(&body);
-        assert_eq!(
-            listed,
-            vec![Listed {
-                id: "gemini-3-pro".into(),
-                context_window: Some(1_048_576)
-            }]
-        );
-        assert_eq!(next.as_deref(), Some("tok"));
     }
 
     #[test]
