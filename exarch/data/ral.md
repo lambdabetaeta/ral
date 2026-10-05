@@ -124,8 +124,9 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
       echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
   `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
+- A double-quoted string that begins with `~/` (or is just `"~"`) is home-rooted, like a bare `~/x`: `ls "~/To process at work"`. `$HOME` is the same value. `'~/x'` is verbatim.
 
-* Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
+* Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\~`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
 - Raw strings `#'…'#` are the verbatim string form; they need NO escapes and carry NO interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. A hash not followed by a single-quote starts a comment to end of line.
 
   A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.

@@ -50,7 +50,7 @@ The core entries group by what they compute:
   ad-hoc-polymorphic, dispatched on the runtime value's shape.
 - **Structured filesystem queries** — `list-dir` `file-info`
   `is-file` / `is-dir` / `is-link` / `is-readable` / `is-writable` `exists` `glob`
-  `resolve-path` `absolute-path` `temp-dir` / `temp-file`.
+  `resolve-path` `absolute-path` `abbreviate-home` `temp-dir` / `temp-file`.
 - **Codecs** — the `from-X` / `to-X` pairs and the streaming `fold-lines`: the
   typed byte↔value crossing, given its own page ([[design/codecs|codecs]]).
 - **Concurrency** — `spawn` `watch` `await` `poll` `race` `cancel`: a worker

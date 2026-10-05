@@ -62,7 +62,6 @@ fn is_bare_char(ch: char) -> bool {
             | '$'
             | '^'
             | '!'
-            | '~'
             | '<'
             | '>'
             | '"'
@@ -88,7 +87,8 @@ pub enum StringPart {
     /// A `$…` or `!…` splice, as the very tokens it lexes to outside a
     /// string — `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name`, the two
     /// undelimited forms with their `[key]` groups (see [`Lexer::scan_splice`])
-    /// — so the parser reads it as one atom.
+    /// — so the parser reads it as one atom.  Also a leading `~` before `/`
+    /// or the closing quote, as a lone tilde word.
     Splice(Vec<(Token, Span)>),
 }
 
@@ -144,16 +144,7 @@ pub enum RedirectOp {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Word(Word::Tilde(path)) => {
-                let mut rendered = "~".to_string();
-                if let Some(user) = &path.user {
-                    rendered.push_str(user);
-                }
-                if let Some(suffix) = &path.suffix {
-                    rendered.push_str(suffix);
-                }
-                write!(f, "{rendered}")
-            }
+            Self::Word(Word::Tilde(path)) => write!(f, "{}", path.to_literal()),
             Self::Word(Word::Plain(s) | Word::Slash(s)) | Self::SingleQuoted(s) => {
                 write!(f, "'{s}'")
             }
@@ -612,7 +603,6 @@ impl Lexer {
                     Ok(self.two_char_word("!=", span))
                 }
                 '!' => Ok(self.bump_simple(Token::Bang, span)),
-                '~' => Ok(self.scan_tilde(span)),
                 '?' => Ok(self.bump_simple(Token::Question, span)),
                 '\'' => self.scan_quoted(span, 0),
                 '"' => self.scan_double_quoted(span),
@@ -778,12 +768,14 @@ impl Lexer {
         }
 
         let word = self.scan_bare_fragment();
-        let token = if word.contains('/') {
-            Token::Word(Word::Slash(word))
+        let word = if let Some(path) = TildePath::parse(&word) {
+            Word::Tilde(path)
+        } else if word.contains('/') {
+            Word::Slash(word)
         } else {
-            Token::Word(Word::Plain(word))
+            Word::Plain(word)
         };
-        (token, self.finish(span))
+        (Token::Word(word), self.finish(span))
     }
 
     fn scan_bare_fragment(&mut self) -> String {
@@ -811,17 +803,6 @@ impl Lexer {
             self.bump();
         }
         word
-    }
-
-    fn scan_tilde(&mut self, span: Span) -> (Token, Span) {
-        self.bump();
-        let suffix = match self.peek() {
-            Some(ch) if is_bare_char(ch) => self.scan_bare_fragment(),
-            _ => String::new(),
-        };
-        let raw = format!("~{suffix}");
-        let path = TildePath::parse(&raw).expect("tilde token should always parse");
-        (Token::Word(Word::Tilde(path)), self.finish(span))
     }
 
     /// Length of the `#` run at the cursor, consuming nothing.
@@ -946,6 +927,14 @@ impl Lexer {
                         literal.push(sigil);
                     }
                 }
+                Some('~')
+                    if cursor == span.start + 1 && matches!(self.peek_n(1), Some('/' | '"')) =>
+                {
+                    self.bump();
+                    let tilde = Span::new(file, cursor, self.byte_pos());
+                    let home = Token::Word(Word::Tilde(TildePath { suffix: None }));
+                    parts.push(Spanned::new(tilde, StringPart::Splice(vec![(home, tilde)])));
+                }
                 Some(ch) => {
                     literal_start.get_or_insert(cursor);
                     literal.push(ch);
@@ -1008,6 +997,10 @@ impl Lexer {
             Some('!') => {
                 self.bump();
                 literal.push('!');
+            }
+            Some('~') => {
+                self.bump();
+                literal.push('~');
             }
             Some('\n') => {
                 self.bump();
@@ -1351,9 +1344,8 @@ impl Lexer {
             self.bump();
             return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Append), span));
         }
-        // `>~` is the stream-write operator only when the `~` stands alone.
-        // `>~/path` is a plain write to a tilde path, so a bare char after
-        // the `~` leaves it to lex as its own `Tilde` word.
+        // `>~` is the stream-write operator only when the `~` stands alone:
+        // a bare char after it makes a word, so `>~/path` writes to `~/path`.
         if self.peek() == Some('~') && !self.peek_n(1).is_some_and(is_bare_char) {
             self.bump();
             return Ok(self.finish_redirect(fd, RedirectOp::Write(WriteMode::Stream), span));
@@ -1424,9 +1416,8 @@ mod tests {
         Token::Word(Word::Slash(s.into()))
     }
 
-    fn tilde_tok(user: Option<&str>, suffix: Option<&str>) -> Token {
+    fn tilde_tok(suffix: Option<&str>) -> Token {
         Token::Word(Word::Tilde(TildePath {
-            user: user.map(str::to_owned),
             suffix: suffix.map(str::to_owned),
         }))
     }
@@ -1760,7 +1751,7 @@ mod tests {
             "expected a plain Write redirect, got {:?}",
             toks[2]
         );
-        assert_eq!(toks[3], tilde_tok(None, Some("/dir")));
+        assert_eq!(toks[3], tilde_tok(Some("/dir")));
     }
 
     /// With no tilde-path suffix after it, `>~` stays stream-write.
@@ -2248,25 +2239,75 @@ mod tests {
     #[test]
     fn tilde() {
         let toks = tok_types("~");
-        assert_eq!(toks, vec![tilde_tok(None, None), Token::Eof,]);
+        assert_eq!(toks, vec![tilde_tok(None), Token::Eof,]);
     }
 
     #[test]
-    fn tilde_is_not_part_of_bare_word() {
+    fn tilde_inside_a_word_is_ordinary() {
         let toks = tok_types("foo~bar");
-        assert_eq!(
-            toks,
-            vec![plain("foo"), tilde_tok(Some("bar"), None), Token::Eof,]
-        );
+        assert_eq!(toks, vec![plain("foo~bar"), Token::Eof]);
+    }
+
+    /// A tilde not standing alone or before `/` is plain text.
+    #[test]
+    fn tilde_before_a_name_is_ordinary() {
+        assert_eq!(tok_types("~bob"), vec![plain("~bob"), Token::Eof]);
+        assert_eq!(tok_types("~bob/x"), vec![slash("~bob/x"), Token::Eof]);
     }
 
     #[test]
     fn tilde_path_token_is_structured() {
         let toks = tok_types("~/bin/claude");
+        assert_eq!(toks, vec![tilde_tok(Some("/bin/claude")), Token::Eof,]);
+    }
+
+    #[test]
+    fn tildes_in_a_list_are_tilde_words() {
         assert_eq!(
-            toks,
-            vec![tilde_tok(None, Some("/bin/claude")), Token::Eof,]
+            tok_types("[~, ~/x]"),
+            vec![
+                Token::LBracket,
+                tilde_tok(None),
+                Token::Comma,
+                tilde_tok(Some("/x")),
+                Token::RBracket,
+                Token::Eof,
+            ]
         );
+    }
+
+    #[test]
+    fn leading_tilde_in_a_string_is_a_splice() {
+        let parts = string_parts(r#""~/a b""#);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(splice_kinds(&parts[0].item), vec![&tilde_tok(None)]);
+        let tilde = parts[0].span.unwrap();
+        assert_eq!((tilde.start, tilde.end), (1, 2));
+        assert_eq!(parts[1].item, StringPart::Literal("/a b".into()));
+    }
+
+    #[test]
+    fn lone_tilde_string_is_one_splice() {
+        let parts = string_parts(r#""~""#);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(splice_kinds(&parts[0].item), vec![&tilde_tok(None)]);
+    }
+
+    /// Only a leading `~`, and only before `/` or the closing quote.
+    #[test]
+    fn other_tildes_in_a_string_are_text() {
+        for (src, text) in [
+            (r#""~5""#, "~5"),
+            (r#""a~/b""#, "a~/b"),
+            (r#""\~/x""#, "~/x"),
+        ] {
+            let parts = string_parts(src);
+            assert_eq!(
+                parts.iter().map(|p| &p.item).collect::<Vec<_>>(),
+                vec![&StringPart::Literal(text.into())],
+                "{src}"
+            );
+        }
     }
 
     #[test]
@@ -2278,7 +2319,7 @@ mod tests {
     #[test]
     fn tilde_with_space_stays_two_tokens() {
         let toks = tok_types("~ foo");
-        assert_eq!(toks, vec![tilde_tok(None, None), plain("foo"), Token::Eof,]);
+        assert_eq!(toks, vec![tilde_tok(None), plain("foo"), Token::Eof,]);
     }
 
     #[test]

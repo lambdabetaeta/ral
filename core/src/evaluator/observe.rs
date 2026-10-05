@@ -1,17 +1,16 @@
 //! `Observe(Register)` — a read of the shell's store, in computation
-//! position: what `$CWD`, `$ENV`, and a `~`-path are.
+//! position: what `$CWD`, `$ENV`, `$HOME` and `~` are.
 //!
-//! Elaboration hoists every read of the five pseudo-variables into this
-//! typed `Register` form, so this is their one reader —
-//! `Register`'s five variants are the total match, not a string dispatch.
+//! Elaboration hoists every read of a pseudo-variable into this typed
+//! `Register` form, so this is their one reader — a total match over
+//! `Register`, not a string dispatch.
 
 use crate::ir::Register;
-use crate::path::tilde::{Unexpandable, expand_tilde_path};
 use crate::types::{Error, Shell, Value};
 
-/// A read of the store: the five pseudo-variables, and a `~`-path awaiting
-/// `HOME`.  `$SCRIPT` is not among them: the elaborator bakes it to a
-/// literal from the file it compiles, so no runtime reader exists.
+/// A read of the store: a pseudo-variable, or `~` awaiting `HOME`.
+/// `$SCRIPT` is not among them: the elaborator bakes it to a literal from
+/// the file it compiles, so no runtime reader exists.
 pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
     match reg {
         Register::Env => Ok(env_map(shell)),
@@ -27,31 +26,23 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
         Register::Nproc => Ok(Value::Int(
             std::thread::available_parallelism().map_or(1, |n| i64::try_from(n.get()).unwrap_or(1)),
         )),
-        Register::Cwd => Ok(Value::string(cwd_string(shell))),
+        Register::Cwd => Ok(Value::string(shell.cwd().to_string_lossy())),
         Register::User => Ok(Value::string(
             crate::path::user_name(shell.env_overrides()).unwrap_or_else(|| "?".into()),
         )),
-        Register::Tilde(path) => {
-            let home = shell.context.home();
-            expand_tilde_path(
-                path.user.as_deref(),
-                path.suffix.as_deref(),
-                home.as_deref(),
-            )
+        Register::Tilde(path) => path
+            .expand(shell.context.home().as_deref())
             .map(Value::string)
-            .map_err(|cause| {
+            .ok_or_else(|| {
                 Error::new(
-                    format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
+                    format!(
+                        "cannot resolve {}: HOME is unset, so `~` names no directory",
+                        path.to_literal()
+                    ),
                     1,
                 )
-                .with_hint(match cause {
-                    Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
-                    Unexpandable::ForeignUser => {
-                        "use bare ~ for the current user, or spell out an explicit path"
-                    }
-                })
-            })
-        }
+                .with_hint("set HOME, or spell out an explicit path")
+            }),
     }
 }
 
@@ -74,19 +65,6 @@ fn env_map(shell: &Shell) -> Value {
     )
 }
 
-/// `$CWD`: total, so an unabbreviatable path names its own placeholder
-/// rather than hand back a stand-in the caller could mistake for a real one.
-fn cwd_string(shell: &Shell) -> String {
-    let p = shell.cwd();
-    let home = shell.context.home();
-    let cwd_str = crate::path::abbreviate_home(&p, home.as_deref());
-    if cwd_str.is_empty() {
-        "?".into()
-    } else {
-        cwd_str
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,13 +75,10 @@ mod tests {
     }
 
     #[test]
-    fn cwd_is_live() {
+    fn cwd_is_the_logical_cwd() {
         let shell = new_shell();
         let val = observe(&Register::Cwd, &shell).expect("$CWD must resolve");
-        match val {
-            Value::String(s) => assert!(!s.is_empty(), "$CWD must be non-empty"),
-            other => panic!("$CWD must be a String, got {other:?}"),
-        }
+        assert_eq!(val, Value::string(shell.cwd().to_string_lossy()));
     }
 
     #[test]

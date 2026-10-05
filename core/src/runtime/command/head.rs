@@ -9,7 +9,7 @@
 
 use crate::capability::Program;
 use crate::ir::CommandName;
-use crate::path::{PathSearch, RealPath, is_executable_file, tilde::expand_tilde_path};
+use crate::path::{PathSearch, RealPath, is_executable_file};
 use crate::process::SpawnFailure;
 use crate::types::{Context, Error};
 use std::io::ErrorKind;
@@ -119,24 +119,15 @@ fn launch_path(shown: &str, ctx: &Context) -> PathBuf {
     ctx.launch_cwd().join(shown)
 }
 
-/// Surface rendering of `name`: bare and path heads verbatim, tilde heads
-/// expanded against the effective `HOME`.  A `~user` head off Unix, where
-/// there is no `getpwnam(3)`, falls back to its literal spelling — keeping
-/// resolution total, and leaving it to fail downstream as an ordinary
-/// missing command.
+/// Surface rendering of `name`; an unexpandable `~` falls back to its
+/// spelling and fails downstream as a missing command.
 fn render(name: &CommandName, ctx: &Context) -> String {
     match name {
         CommandName::Bare(name) => name.to_string(),
         CommandName::Path(path) => path.clone(),
-        CommandName::TildePath(path) => {
-            let home = ctx.home();
-            expand_tilde_path(
-                path.user.as_deref(),
-                path.suffix.as_deref(),
-                home.as_deref(),
-            )
-            .unwrap_or_else(|_| path.to_literal())
-        }
+        CommandName::TildePath(path) => path
+            .expand(ctx.home().as_deref())
+            .unwrap_or_else(|| path.to_literal()),
     }
 }
 
@@ -160,7 +151,6 @@ mod tests {
         assert_eq!(
             render(
                 &CommandName::TildePath(crate::path::tilde::TildePath {
-                    user: None,
                     suffix: Some("/.local/bin/claude".into()),
                 }),
                 &shell.context,

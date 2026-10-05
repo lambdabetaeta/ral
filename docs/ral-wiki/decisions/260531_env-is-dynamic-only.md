@@ -33,3 +33,11 @@ rather than straddling it.
 
 Realised in `core/src/types/shell/init.rs` (`seed_default_env_vars`).
 See also [[map/core/shell-state|shell-state]].
+
+> **Amended 2026-10-05.** `$HOME` returns as a *register*: a read of
+> `env_overrides`, like `$USER`, never a lexical copy, so an overlay
+> `within [env: [HOME: …]]` is observed by `$HOME` exactly as by `~`, and the
+> one-authority resolution above stands. Its surface sentence — a bare `$HOME`
+> is an undefined variable — does not: `$HOME` is reserved, and `let HOME = …`
+> is refused like `let CWD = …`
+> ([[decisions/261005_one-tilde-rule|one-tilde-rule]]).

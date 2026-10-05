@@ -1,4 +1,4 @@
-//! Path-prefix sigils: `~[user][/sub]`, `xdg:NAME[/sub]`, `cwd:[/sub]`,
+//! Path-prefix sigils: `~[/sub]`, `xdg:NAME[/sub]`, `cwd:[/sub]`,
 //! `tempdir:[/sub]`, and `gitdir:[/sub]` at the head of a grant path.
 //!
 //! A policy thus names no host's home, XDG layout, or working directory.
@@ -20,7 +20,7 @@ use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::canon::canonicalise_lenient;
 use crate::path::lex::{fold_dots, path_within};
 use crate::path::resolved::NormalizedPrefix;
-use crate::path::tilde::{TildePath, Unexpandable, expand_tilde_path};
+use crate::path::tilde::TildePath;
 use crate::types::PolicyError;
 use std::path::{Path, PathBuf};
 
@@ -35,7 +35,7 @@ pub(crate) fn looks_like_xdg(s: &str) -> bool {
 /// through freeze unresolved.
 pub(crate) fn looks_like_path_or_sigil(s: &str) -> bool {
     s.contains('/')
-        || s.starts_with('~')
+        || TildePath::parse(s).is_some()
         || s.starts_with("xdg:")
         || s.starts_with("cwd:")
         || s.starts_with("tempdir:")
@@ -65,10 +65,9 @@ fn relative_suffix(s: &str) -> &str {
 ///
 /// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is:
 /// whatever cannot be answered passes through literally — an unknown `home`
-/// leaves `~/x` as `~/x`, exactly as a `~user` this platform cannot resolve
-/// stays `~user`.  That fails closed, a prefix matching nothing beating a
-/// fabricated path that might; a caller wanting the same gap to be a
-/// configuration error uses [`freeze_one`].
+/// leaves `~/x` as `~/x`.  That fails closed, a prefix matching nothing
+/// beating a fabricated path that might; a caller wanting the same gap to be
+/// a configuration error uses [`freeze_one`].
 pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
         return match resolve_xdg(kind, home) {
@@ -80,8 +79,7 @@ pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
         };
     }
     if let Some(t) = TildePath::parse(input) {
-        return expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), home)
-            .unwrap_or_else(|_| input.to_string());
+        return t.expand(home).unwrap_or_else(|| input.to_string());
     }
     input.to_string()
 }
@@ -139,8 +137,8 @@ pub fn freeze_path_list(
 ///
 /// # Errors
 /// An unknown `xdg:` token, an `xdg:` path that escapes `$HOME` once folded, an
-/// unset `$HOME` under a home-relative sigil (`~`, `xdg:`), a `~user` naming
-/// another user's home off Unix, or a `.git` pointer no git directory claims.
+/// unset `$HOME` under a home-relative sigil (`~`, `xdg:`), or a `.git` pointer
+/// no git directory claims.
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
     if looks_like_xdg(entry) {
@@ -159,24 +157,12 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
         return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {
-        let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home())
-            .map_err(|cause| PolicyError::new(unexpandable_tilde_message(entry, cause)))?;
+        let expanded = t
+            .expand(ctx.home())
+            .ok_or_else(|| PolicyError::new(home_unknown_message()))?;
         return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
     }
     Ok(NormalizedPrefix::freeze(Path::new(entry)))
-}
-
-/// A tilde a policy cannot resolve, put in the policy author's terms: each
-/// cause takes a different way out.
-fn unexpandable_tilde_message(entry: &str, cause: Unexpandable) -> String {
-    match cause {
-        Unexpandable::HomeUnknown => home_unknown_message(),
-        Unexpandable::ForeignUser => format!(
-            "'{entry}' names another user's home directory, which this platform \
-             cannot resolve (no getpwnam(3) equivalent) — replace it with an \
-             explicit absolute path, or use bare `~`/`~/...` for the current user."
-        ),
-    }
 }
 
 /// The one answer for a home-relative sigil where nothing binds `$HOME`: `~`
@@ -563,25 +549,6 @@ mod tests {
         }
         assert_eq!(expand_path_prefix("~/.gitconfig", None), "~/.gitconfig");
         assert_eq!(expand_path_prefix("xdg:config/git", None), "xdg:config/git");
-    }
-
-    /// No `getpwnam(3)` off Unix, and `expand_path_prefix` cannot fail, so the
-    /// literal spelling survives rather than a fabricated path.
-    #[cfg(not(unix))]
-    #[test]
-    fn named_user_tilde_passes_through_unchanged_off_unix() {
-        assert_eq!(expand_path_prefix("~bob/foo", Some("/h")), "~bob/foo");
-    }
-
-    /// `freeze_one` can fail, so the same entry is a load-time error rather
-    /// than a frozen grant that can never match.
-    #[cfg(not(unix))]
-    #[test]
-    fn freeze_rejects_named_user_tilde_off_unix() {
-        let err = frozen(&["~bob/secrets"], &ctx("/h", Path::new("/cwd")))
-            .unwrap_err()
-            .message;
-        assert!(err.contains("~bob/secrets"), "{err}");
     }
 
     #[test]

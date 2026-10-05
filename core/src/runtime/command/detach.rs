@@ -13,7 +13,6 @@
 
 use crate::evaluator::audit::{command_fact, observe};
 use crate::ir::CommandName;
-use crate::path::tilde::TildePath;
 use crate::process::StdioSpec;
 use crate::types::{AuditIo, CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
@@ -38,9 +37,7 @@ pub(crate) fn detach(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let spelled = head.to_string();
-    let name = if let Some(tilde) = TildePath::parse(&spelled) {
-        CommandName::TildePath(tilde)
-    } else if spelled.contains('/') {
+    let name = if spelled.contains('/') {
         CommandName::Path(spelled)
     } else {
         CommandName::Bare(spelled.into())

@@ -394,13 +394,17 @@ occur in a bare word. Spaces, tabs, line endings, and these characters end a
 bare word or start another language form:
 
 ```text
-|  {  }  [  ]  $  ^  !  ~  <  >  "  '  `  (  )  ;
+|  {  }  [  ]  $  ^  !  <  >  "  '  `  (  )  ;
 ```
 
 Some characters depend on their position:
 
 - `#` starts a comment only at the start of a word. It remains literal inside
   a word.
+- `~` at the start of a word, standing alone or followed by `/`, abbreviates
+  `$HOME`, the current user's home directory (§10.2): `~/src` is
+  `$HOME/src`. Anywhere else `~` is an ordinary character, so `foo~bar` and
+  `~bob/x` are plain words.
 - `,` separates items while `[...]` is the innermost form. Outside brackets,
   it can be part of a word, as in `--features=a,b`.
 - `:` is punctuation before whitespace, a newline, `]`, or the end of input.
@@ -606,8 +610,13 @@ followed by a bracketed host. Only `$name` and `!$name`, which have no
 closing delimiter, continue into the `[key]` groups written immediately
 after them. To index a delimited form, wrap it: `"$[!{cmd}[k]]"`.
 
+A double-quoted string that begins with `~` followed by `/` or by the closing
+quote begins with the home directory, exactly as a bare word does (§3.5):
+`"~/x"` and `"$HOME/x"` mean the same. A `~` anywhere else in the string, and
+any `~` in a literal string, is text; `"\~/x"` begins with a literal `~`.
+
 The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
-`\$`, `\!`, `\xNN`, `\u{X..}`, and backslash followed by a line ending.
+`\$`, `\!`, `\~`, `\xNN`, `\u{X..}`, and backslash followed by a line ending.
 `\xNN` accepts one ASCII byte from `00` to `7F`. `\u{X..}` accepts one valid
 Unicode scalar value written with one to six hexadecimal digits. An unknown
 or malformed escape is an error.
@@ -1164,6 +1173,10 @@ The spelling of the head selects one of four paths.
 A path head does not consult bindings, handlers, bundled commands, or `PATH`.
 ral expands `~` when it resolves the command. A relative path uses ral's current
 logical directory.
+
+A literal word, a bare `~`, and a `$[...]` block are value heads wherever they
+stand: `let h = ~` binds the home directory, and `42 foo` or `~ foo` is a type
+error rather than a missing command.
 
 An explicit value head stays in the value world. If ral cannot apply it, ral
 reports an error. It does not reinterpret the value as a command name.
@@ -2196,7 +2209,7 @@ within [env: [PATH: 'tools:/usr/bin', DEBUG: true]] {
 }
 ```
 
-An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `$ENV`, `$USER`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
+An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `$ENV`, `$USER`, `$HOME`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
 
 `PWD` and `OLDPWD` cannot be set through `within env`. `PWD` is ral’s logical cwd, so use `cd` or `within dir` instead; ral keeps no previous directory, so there is no `OLDPWD`. Lists, maps, blocks, handles, and other non-scalar environment values are rejected.
 
@@ -2326,7 +2339,8 @@ The following names describe the live shell:
 | Name | Value |
 |---|---|
 | `$ENV` | Environment variables as a map of `String` to `String`. |
-| `$CWD` | The logical working directory, abbreviated with `~` when it lies under the current home directory. |
+| `$CWD` | The logical working directory, absolute. |
+| `$HOME` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment; the directory `~` abbreviates. |
 | `$USER` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
 | `$NPROC` | Available processor parallelism as an `Int`, never less than 1. |
 | `$ARGS` | The current program’s argument strings. |
@@ -2347,11 +2361,11 @@ within [env: [MODE: 'test', USER: 'builder']] {
 }
 ```
 
-Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
+Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, `$HOME`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
 
 `PWD` and `OLDPWD` are deliberately absent from `$ENV`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD` and their actual process working directory from this logical state, and no `OLDPWD`: ral keeps no previous directory.
 
-`cd path` changes the session’s logical working directory. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
+`cd path` changes the session’s logical working directory. It resolves `path` as every path builtin does, path-prefix sigils included. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
 
 A `cd` inside a function call or a forced block changes the caller's working directory, as at top level; only the body's bindings stay local.
 
@@ -3752,7 +3766,7 @@ resolution stays stable, but calling one then fails with a clear feature error.
 ral provides structured queries rather than requiring programs to parse the
 text output of `ls` or `stat`:
 
-- `cwd`, `absolute-path`, and `resolve-path`;
+- `cwd`, `absolute-path`, `resolve-path`, and `abbreviate-home`;
 - `list-dir`, `file-info`, and `glob`;
 - `exists`, `is-file`, `is-dir`, `is-link`, `is-readable`, and `is-writable`;
 - `temp-dir` and `temp-file`.
@@ -3760,8 +3774,9 @@ text output of `ls` or `stat`:
 `absolute-path` is lexical: it resolves `~`, `.`, and `..` against the logical
 working directory without requiring the result to exist. `resolve-path`
 canonicalises through the filesystem, follows symbolic links, and requires an
-existing path. Filesystem reads and creations are checked against the active
-filesystem grant.
+existing path. `abbreviate-home` is for display: it folds a leading home
+directory to `~`. Filesystem reads and creations are checked against the
+active filesystem grant.
 
 `list-dir` returns records rather than formatted columns. `file-info` uses
 link metadata and reports fields including name, type, size, timestamps,
@@ -4006,7 +4021,7 @@ return [
     surface: readline,
     recursion_limit: 1024,
 
-    prompt: { return "$CWD ❯ " },
+    prompt: { return "!{abbreviate-home $CWD} ❯ " },
     env: [EDITOR: 'vim', PAGER: 'less'],
     bindings: [work: '/srv/work'],
     aliases: [ll: { |args| ls -lh ...$args }],
@@ -4604,10 +4619,10 @@ Which lexical words are literals rather than names is the numeral grammar of
 §4.1, and the expression grammar inside `$[...]` reads numbers by that same
 rule.
 
-A plain identifier in head position enters ordinary name dispatch. A slash or
-tilde path is a direct path head. `^name` requests external-name lookup. Other
-atoms are value heads. With no arguments or redirects, a literal value head
-remains a value rather than becoming a call.
+A plain identifier in head position enters ordinary name dispatch. A slash
+path or a `~/` path is a direct path head. `^name` requests external-name
+lookup. A literal word, a bare `~`, a `$[...]` block, and every other atom are
+value heads. With no arguments or redirects, a value head is simply its value.
 
 The parser curries a multi-parameter block:
 

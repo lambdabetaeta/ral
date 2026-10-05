@@ -26,7 +26,7 @@ return [
   # bake in.
   #
   # Path-prefix sigils are expanded before grant matching:
-  #   * `~` / `~user` — the usual shell tilde rule.
+  #   * `~` / `~/sub` — the home directory.
   #   * `xdg:NAME[/sub]` — an XDG basedir, honouring `XDG_*_HOME` env
   #     vars with the Linux defaults universally.
   #   * `cwd:[/sub]` — the working directory at session start.

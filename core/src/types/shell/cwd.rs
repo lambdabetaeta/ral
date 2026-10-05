@@ -7,7 +7,6 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
-use crate::path::tilde::{TildePath, expand_tilde_path};
 use crate::types::Error;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -49,9 +48,9 @@ impl Shell {
         self.context.cwd = saved;
     }
 
-    /// Move the logical cwd to `target`, resolved against [`Self::cwd`].
-    /// Empty `target` means `~`; relative ones fold lexically, so symlinks
-    /// survive as under bash's default `cd -L`.
+    /// Move the logical cwd to `target`, resolved as every path builtin
+    /// resolves (see [`Self::resolve`]).  A relative one folds lexically, so
+    /// symlinks survive as under bash's default `cd -L`.
     ///
     /// # Errors
     /// If the resolved target cannot be stat'd, or is not a directory.
@@ -60,22 +59,7 @@ impl Shell {
         reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
     )]
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
-        let old = self.cwd();
-
-        let home = self.context.home();
-        let raw: String = if let Some(path) = TildePath::parse(target) {
-            expand_tilde_path(
-                path.user.as_deref(),
-                path.suffix.as_deref(),
-                home.as_deref(),
-            )
-            .map_err(|cause| Error::new(format!("{target}: {}", cause.why()), 1))?
-        } else {
-            target.into()
-        };
-
-        let resolved = crate::path::resolve_path(Some(&old), &raw);
-
+        let resolved = self.resolve(target).into_inner();
         let meta = std::fs::metadata(&resolved)
             .map_err(|e| Error::new(format!("{}: {e}", resolved.display()), 1))?;
         if !meta.is_dir() {

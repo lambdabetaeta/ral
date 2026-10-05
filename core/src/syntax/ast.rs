@@ -14,14 +14,14 @@ use crate::syntax::lexer::RedirectOp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Unquoted word, shaped once by the lexer. A leading slash or tilde marks it
-/// as a path, and in head position that skips name lookup entirely.
+/// Unquoted word, shaped once by the lexer. A `/`, or a `~` standing for
+/// home, marks it as a path; a path head skips name lookup entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Word {
     Plain(String),
     /// `./x`, `/bin/x`
     Slash(String),
-    /// `~`, `~user`, `~/x`
+    /// `~`, `~/x`
     Tilde(TildePath),
 }
 
@@ -178,9 +178,10 @@ pub enum Head {
     ExternalName(String),
     /// `./x`, `/bin/x`
     Path(String),
-    /// `~/x`
+    /// `~/x`; a lone `~` is a value head.
     TildePath(TildePath),
-    /// An explicit value head: `$f`, `!$f`, a block literal.
+    /// A value head: `$f`, `!$f`, a block literal, `$[…]`, a literal word,
+    /// a lone `~`.
     Value(Box<Ast>),
 }
 

@@ -1,4 +1,4 @@
 # codes: T0071
 # contains: environment variables are read as
-# contains: $ENV[HOME]
-echo $HOME
+# contains: $ENV[EDITOR]
+echo $EDITOR

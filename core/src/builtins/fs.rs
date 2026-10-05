@@ -223,6 +223,13 @@ pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Va
     Ok(Value::string(resolved.as_path().to_string_lossy()))
 }
 
+pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<Value> {
+    Ok(Value::string(crate::path::abbreviate_home(
+        as_str(&args[0], "abbreviate-home")?,
+        shell.context.home().as_deref(),
+    )))
+}
+
 /// Shared predicate body.  `leaf` is the whole difference between the two
 /// families: `Resolve` gives `test -f`/`test -d`/`test -r` semantics, where a
 /// link to a file is `is-file` and a dangling link fails every probe;

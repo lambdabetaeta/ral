@@ -408,7 +408,7 @@ mod tests {
     use crate::types::Nursery;
     use std::sync::Mutex;
 
-    // The five pseudo-variable reads (`$CWD`, `$USER`, …) live and are
+    // The pseudo-variable reads (`$CWD`, `$USER`, …) live and are
     // tested at `evaluator::observe`, their one reader, hoisted out of
     // lexical-scope lookup into the `Observe` computation form.
 

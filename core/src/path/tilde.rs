@@ -1,166 +1,59 @@
-//! Tilde paths: the `~`/`~user`/`~/sub` shape the lexer hands to the parser,
-//! AST, IR and typechecker, and the one expansion of it.
+//! `~`, the current user's home directory.
 //!
-//! `path::sigil`, `cd`, command identity and REPL completion all resolve
-//! through [`expand_tilde_path`], so the rule is one-and-the-same.
-//!
-//! Neither shape is always answerable, and both unanswerable cases are shaped
-//! alike: a *named* user has no answer off Unix (no `getpwnam(3)` analogue),
-//! and bare `~` has none where nothing binds `$HOME`.  So [`home`] and
-//! [`get_user_home`] return `Option`, [`expand_tilde_path`] fails with the
-//! [`Unexpandable`] cause, and each caller picks its own honest answer: the
-//! policy freeze, `cd` and interpolation error; command resolution falls back
-//! to the literal spelling; completion offers no candidates.
+//! It stands alone or before a `/` (or a `\` under Windows); any other `~` is
+//! an ordinary character, so `~bob` and `a~b` are plain text.
+//! [`TildePath::expand`] and [`abbreviate_home`] are inverses.
 //!
 //! Also the `$HOME`/`$USER` lookups, which pin the env var each one reads;
 //! `path.rs` re-exports them.
 
 use serde::{Deserialize, Serialize};
 
-/// Structured tilde syntax: `~`, `~user`, `~/path`, or `~user/path`.
+/// `~` or `~/sub`, the suffix keeping its separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TildePath {
-    pub user: Option<String>,
     pub suffix: Option<String>,
 }
 
 impl TildePath {
-    /// Recognise the shape; `None` when the input does not begin with `~`.
-    ///
-    /// The public door: `windows` is read from `cfg!` here and nowhere below,
-    /// so [`Self::parse_for`] carries the actual rule and can be pinned on
-    /// every host in tests, matching `lex::starts_with_identity`'s split
-    /// between a platform-reading door and a platform-taking parameter.
+    /// `~` or `~/rest`; `None` for any other spelling.
     pub fn parse(input: &str) -> Option<Self> {
         Self::parse_for(input, cfg!(windows))
     }
 
-    /// [`Self::parse`]'s rule, `windows` a parameter rather than the `cfg!`
-    /// read at the door.
-    ///
-    /// Off Windows only `/` separates the user part from the suffix, as
-    /// before. Under Windows `\` counts too — `~\sub` typed at a Windows
-    /// prompt is exactly the shape `~/sub` is elsewhere, and splitting only on
-    /// `/` would leave it a literal `user = "\sub"` with no suffix, which then
-    /// fails to expand at all.
-    ///
-    /// The suffix keeps whichever separator byte it was split on — `/sub` or
-    /// `\sub` — rather than normalising to one spelling: [`Self::to_literal`]
-    /// promises to reconstruct *the spelling this parsed from*, and callers
-    /// that echo it back in an error message (a `~user` this platform cannot
-    /// resolve) should echo what the user actually typed. Nothing downstream
-    /// cares which separator survives — [`expand_tilde_path`] only
-    /// concatenates, and the resolver it feeds accepts either.
+    /// [`Self::parse`] with `windows` a parameter, so its `~\rest` reading is
+    /// pinned on every host.  The suffix keeps the separator byte it was
+    /// written with: [`Self::to_literal`] returns the spelling.
     fn parse_for(input: &str, windows: bool) -> Option<Self> {
         let rest = input.strip_prefix('~')?;
-        let split = if windows {
-            rest.find(['/', '\\'])
-        } else {
-            rest.find('/')
-        };
-        match split {
-            None => Some(Self {
-                user: Some(rest.to_string()).filter(|s| !s.is_empty()),
-                suffix: None,
-            }),
-            Some(idx) => Some(Self {
-                user: Some(rest[..idx].to_string()).filter(|s| !s.is_empty()),
-                suffix: Some(rest[idx..].to_string()),
-            }),
+        if rest.is_empty() {
+            return Some(Self { suffix: None });
         }
+        let separated = rest.starts_with('/') || (windows && rest.starts_with('\\'));
+        separated.then(|| Self {
+            suffix: Some(rest.to_string()),
+        })
     }
 
-    /// Reconstruct the spelling this parsed from — the fallback at call sites
-    /// that cannot fail, where an unexpanded `~user` dies downstream as an
-    /// ordinary missing-command error rather than matching a fabricated path.
-    pub(crate) fn to_literal(&self) -> String {
-        let user = self.user.as_deref().unwrap_or_default();
+    /// `home` followed by the suffix; `None` iff `home` is.
+    pub fn expand(&self, home: Option<&str>) -> Option<String> {
         let suffix = self.suffix.as_deref().unwrap_or_default();
-        format!("~{user}{suffix}")
+        Some(format!("{}{suffix}", home?))
     }
-}
 
-/// `username`'s home via the reentrant `getpwnam_r(3)`, falling back to the
-/// conventional `/home/<name>` when the lookup misses or the name contains a
-/// NUL byte.
-#[cfg(unix)]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "one signature for both platforms: the cfg(not(unix)) sibling has no lookup to fall back from"
-)]
-pub(crate) fn get_user_home(username: &str) -> Option<String> {
-    match nix::unistd::User::from_name(username) {
-        Ok(Some(user)) => Some(user.dir.to_string_lossy().into_owned()),
-        _ => Some(format!("/home/{username}")),
+    /// The spelling this parsed from.
+    pub(crate) fn to_literal(&self) -> String {
+        format!("~{}", self.suffix.as_deref().unwrap_or_default())
     }
-}
-
-/// A named user's home is unresolvable off Unix — there is no `getpwnam(3)`
-/// analogue and no way to turn a bare username into a Windows profile
-/// directory without an account lookup this codebase doesn't carry.
-#[cfg(not(unix))]
-#[allow(
-    clippy::too_long_first_doc_paragraph,
-    reason = "the summary is one sentence with no interior stop: its only seam is an em dash, so a paragraph break there would leave rustdoc's item list an unterminated clause and open the next paragraph with a dangling dash"
-)]
-pub(crate) fn get_user_home(_username: &str) -> Option<String> {
-    None
-}
-
-/// Why a tilde has no expansion.  The two causes take different fixes, so the
-/// failure carries which one rather than leaving each caller to re-derive it
-/// from the arguments it passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unexpandable {
-    /// Nothing binds `$HOME`, so bare `~` names no directory.
-    HomeUnknown,
-    /// A `~user` this platform cannot look up.
-    ForeignUser,
-}
-
-impl Unexpandable {
-    /// The cause as a clause, the advice left to the caller — what to suggest
-    /// depends on whether a shell user typed the tilde or a policy declared it.
-    pub(crate) fn why(self) -> &'static str {
-        match self {
-            Self::HomeUnknown => "HOME is unset, so `~` names no directory",
-            Self::ForeignUser => {
-                "this platform cannot resolve another user's home directory \
-                 (no getpwnam(3) equivalent)"
-            }
-        }
-    }
-}
-
-/// Expand a tilde shape against `home`, the current user's home — `None` when
-/// nothing binds it; a named `user` routes through [`get_user_home`] instead,
-/// and so is unresolvable off Unix.
-///
-/// # Errors
-/// [`Unexpandable::HomeUnknown`] for a bare `~` with no `home`,
-/// [`Unexpandable::ForeignUser`] for a `~user` this platform cannot look up.
-pub fn expand_tilde_path(
-    user: Option<&str>,
-    suffix: Option<&str>,
-    home: Option<&str>,
-) -> Result<String, Unexpandable> {
-    let base = match user {
-        None => home.ok_or(Unexpandable::HomeUnknown)?.to_string(),
-        Some(user) => get_user_home(user).ok_or(Unexpandable::ForeignUser)?,
-    };
-    Ok(match suffix {
-        None => base,
-        Some(suffix) => format!("{base}{suffix}"),
-    })
 }
 
 /// Fold a leading `home` prefix to `~` for display, inverting
-/// [`expand_tilde_path`]'s `~` case.
+/// [`TildePath::expand`].
 ///
 /// The match is on component boundaries, so home `/home/al` leaves
 /// `/home/alex` alone where a `starts_with` on the raw string would clip it.
-pub fn abbreviate_home(path: &std::path::Path, home: Option<&str>) -> String {
-    abbreviate_home_for(&path.to_string_lossy(), home, cfg!(windows))
+pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
+    abbreviate_home_for(path, home, cfg!(windows))
 }
 
 /// [`abbreviate_home`] on strings, `windows` a parameter rather than a `cfg!`
@@ -238,7 +131,7 @@ fn windows_strip_home(path: &str, home: &str) -> String {
 /// `Some("")` here is what once let `~/x` expand to `/x` — a syntactically
 /// ordinary path meaning something nobody asked for.  Every downstream `~`,
 /// `xdg:` and prompt fold therefore takes an `Option` and picks its own honest
-/// answer, exactly as [`get_user_home`]'s callers do.
+/// answer.
 pub fn home(env_overrides: &crate::types::EnvVars) -> Option<String> {
     bound(env_overrides, "HOME").or_else(|| bound(env_overrides, "USERPROFILE"))
 }
@@ -259,35 +152,61 @@ fn bound(env_overrides: &crate::types::EnvVars, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bare_tilde_expands_to_home_on_every_platform() {
-        assert_eq!(
-            expand_tilde_path(None, None, Some("/h")),
-            Ok("/h".to_string())
-        );
+    fn tilde(suffix: Option<&str>) -> TildePath {
+        TildePath {
+            suffix: suffix.map(str::to_owned),
+        }
     }
 
     #[test]
-    fn bare_tilde_with_suffix_expands_on_every_platform() {
+    fn parse_admits_a_lone_tilde_and_a_separated_one() {
+        assert_eq!(TildePath::parse("~"), Some(tilde(None)));
+        assert_eq!(TildePath::parse("~/x"), Some(tilde(Some("/x"))));
+    }
+
+    #[test]
+    fn parse_refuses_every_other_tilde() {
+        for input in ["~bob", "~bob/x", "a~b", "~5", "x"] {
+            assert_eq!(TildePath::parse(input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn expansion_appends_the_suffix_to_home() {
+        assert_eq!(tilde(None).expand(Some("/h")), Some("/h".into()));
         assert_eq!(
-            expand_tilde_path(None, Some("/sub"), Some("/h")),
-            Ok("/h/sub".to_string())
+            tilde(Some("/sub")).expand(Some("/h")),
+            Some("/h/sub".into())
         );
     }
 
-    /// The two unanswerable shapes, kept apart: an unset `$HOME` and a
-    /// `~user` this platform cannot look up fail differently, so a caller can
-    /// say which happened instead of guessing from what it passed in.
+    /// No home, no expansion: never a `~/x` rooted at `/x`.
     #[test]
-    fn bare_tilde_without_home_is_unexpandable_not_rooted_at_slash() {
-        assert_eq!(
-            expand_tilde_path(None, Some("/.gitconfig"), None),
-            Err(Unexpandable::HomeUnknown)
-        );
-        assert_eq!(
-            expand_tilde_path(None, None, None),
-            Err(Unexpandable::HomeUnknown)
-        );
+    fn expansion_without_home_is_none() {
+        assert_eq!(tilde(None).expand(None), None);
+        assert_eq!(tilde(Some("/.gitconfig")).expand(None), None);
+    }
+
+    #[test]
+    fn to_literal_reconstructs_the_parsed_spelling() {
+        for input in ["~", "~/sub"] {
+            assert_eq!(TildePath::parse(input).unwrap().to_literal(), input);
+        }
+    }
+
+    // `parse_for` rather than `parse` below: `windows` pinned as a parameter,
+    // so the Windows separator rule is exercised on every host.
+
+    #[test]
+    fn backslash_separates_on_windows_and_round_trips() {
+        let parsed = TildePath::parse_for(r"~\sub", true);
+        assert_eq!(parsed, Some(tilde(Some(r"\sub"))));
+        assert_eq!(parsed.unwrap().to_literal(), r"~\sub");
+    }
+
+    #[test]
+    fn backslash_is_an_ordinary_byte_off_windows() {
+        assert_eq!(TildePath::parse_for(r"~\sub", false), None);
     }
 
     /// An unknown home folds nothing — the prompt shows the path whole rather
@@ -295,32 +214,6 @@ mod tests {
     #[test]
     fn abbreviation_without_home_leaves_the_path_alone() {
         assert_eq!(abbreviate_home_for("/a/b", None, false), "/a/b");
-    }
-
-    /// The username is chosen to be vanishingly unlikely to exist, so the test
-    /// reaches the `/home/<name>` fallback rather than a real account.
-    #[cfg(unix)]
-    #[test]
-    fn unix_named_user_falls_back_when_lookup_misses() {
-        let home = get_user_home("ral-tilde-test-no-such-user-8f3c1a");
-        assert_eq!(
-            home,
-            Some("/home/ral-tilde-test-no-such-user-8f3c1a".to_string())
-        );
-    }
-
-    /// Runs only where it is meaningful (Windows CI); the sibling test above
-    /// pins the Unix half.
-    #[cfg(not(unix))]
-    #[test]
-    fn non_unix_named_user_is_unresolvable_not_fabricated() {
-        assert_eq!(get_user_home("bob"), None);
-        let foreign = Err(Unexpandable::ForeignUser);
-        assert_eq!(expand_tilde_path(Some("bob"), None, Some("/h")), foreign);
-        assert_eq!(
-            expand_tilde_path(Some("bob"), Some("/sub"), Some("/h")),
-            foreign
-        );
     }
 
     // No `cfg(windows)` on the fold tests below: `windows` is a parameter,
@@ -351,61 +244,6 @@ mod tests {
         assert_eq!(
             abbreviate_home_for(r"/h/we\ird", Some("/h"), false),
             r"~/we\ird"
-        );
-    }
-
-    #[test]
-    fn to_literal_reconstructs_the_parsed_spelling() {
-        assert_eq!(
-            TildePath::parse("~bob/sub").unwrap().to_literal(),
-            "~bob/sub"
-        );
-        assert_eq!(TildePath::parse("~bob").unwrap().to_literal(), "~bob");
-        assert_eq!(TildePath::parse("~/sub").unwrap().to_literal(), "~/sub");
-        assert_eq!(TildePath::parse("~").unwrap().to_literal(), "~");
-    }
-
-    // `parse_for` rather than `parse` below: `windows` pinned as a parameter,
-    // so the Windows separator rule is exercised on every host.
-
-    #[test]
-    fn backslash_suffix_parses_as_tilde_with_suffix_on_windows() {
-        assert_eq!(
-            TildePath::parse_for(r"~\sub", true),
-            Some(TildePath {
-                user: None,
-                suffix: Some(r"\sub".to_string()),
-            })
-        );
-        assert_eq!(
-            TildePath::parse_for(r"~bob\sub", true),
-            Some(TildePath {
-                user: Some("bob".to_string()),
-                suffix: Some(r"\sub".to_string()),
-            })
-        );
-    }
-
-    /// Off Windows `\` is an ordinary filename byte, so the whole rest is the
-    /// (unresolvable, but honestly reported) user part, not a suffix split.
-    #[test]
-    fn backslash_suffix_is_not_a_separator_off_windows() {
-        assert_eq!(
-            TildePath::parse_for(r"~\sub", false),
-            Some(TildePath {
-                user: Some(r"\sub".to_string()),
-                suffix: None,
-            })
-        );
-    }
-
-    /// [`TildePath::to_literal`] promises the parsed spelling back, so a
-    /// backslash suffix must survive the round trip unnormalised.
-    #[test]
-    fn backslash_suffix_round_trips_through_to_literal() {
-        assert_eq!(
-            TildePath::parse_for(r"~\sub", true).unwrap().to_literal(),
-            r"~\sub"
         );
     }
 

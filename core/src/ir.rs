@@ -170,7 +170,7 @@ pub(crate) enum CommandName {
     Bare(Name),
     /// Slash-bearing literal path: skips the lookup chain, exec'd as written.
     Path(String),
-    /// Tilde-headed path, carried unexpanded until command resolution.
+    /// `~/x`, carried unexpanded until command resolution.
     TildePath(TildePath),
 }
 
@@ -493,8 +493,8 @@ impl Mentions for Comp {
             }
             // The group is a nested node: its own occ, not a walk.
             CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
-            // No `Register` variant carries a name reference: the five
-            // pseudo-variables are computed, and a `~`-path names no variable.
+            // No `Register` variant carries a name reference: a register is
+            // read from the store, never looked up by name.
             CompKind::Observe(_) => {}
             CompKind::If { cond, then, else_ } => {
                 cond.item.mentions(out);
@@ -789,7 +789,7 @@ impl CommandWord {
 }
 
 /// A read of the shell's store, in computation position: what `$CWD`,
-/// `$ENV`, and a `~`-path are. Never a value — reading the store is an
+/// `$ENV`, `$HOME` and `~` are. Never a value — reading the store is an
 /// effect, so it names a register rather than being spelled as one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Register {
@@ -928,7 +928,6 @@ mod tests {
             index: 0,
         });
         let observe = Spanned::synthetic(CompKind::Observe(Register::Tilde(TildePath {
-            user: None,
             suffix: None,
         })));
         let if_ = Spanned::synthetic(CompKind::If {

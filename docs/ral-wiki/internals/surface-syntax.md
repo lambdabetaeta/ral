@@ -33,6 +33,10 @@ boundary and keeps such a dash.
 `scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` in place and
 stores the stream in `StringPart::Splice`; the parser reads it with the
 ordinary `parse_atom`. So `"!$d"` is the same `Force(Variable)` as `!$d`.
+A leading `~` before `/` or the closing quote is a splice too:
+`scan_double_quoted` reads it as the bare `~` it would be outside, one read of
+the home register followed by ordinary text, so `"~/x"` and `"$HOME/x"` are
+one string; `\~` escapes it, and a literal string never splices.
 Outside a string nothing is fused: `$xs[0]` is a variable followed by a
 bracket group, and `parse_atom` reads the adjacency, as it does for `!{f}[k]`.
 
@@ -101,7 +105,10 @@ here. The surface forms are preserved verbatim for the
 **Head classification refines in three stages, each deciding a different
 question.** The parser fixes the *syntactic shape* of each command head
 (`ast.rs`: `ExternalName` for `^name`, `Path` / `TildePath` for `./x` / `~/x`,
-`Bare` for a lexical-lookup-or-`Exec` word). The
+`Bare` for a lexical-lookup-or-`Exec` word, `Value` for every other atom). A
+literal word, a bare `~` and a `$[…]` block are value heads wherever they
+stand, so `let h = ~` binds the home directory and `42 foo` is the checker's
+T0011 rather than a missing command. The
 [[map/core/elaboration|elaborator]] resolves a `Bare` head against the lexical
 scope — a bound name lowers to CBPV application, an unbound one to `Exec`
 (forward declarations cover only the thunk-form bindings `group.rs` knots, so

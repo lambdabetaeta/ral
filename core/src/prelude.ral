@@ -19,9 +19,9 @@ let from-words = {
 }
 
 # Paths and value coercions — each is a directly registered builtin
-# (resolve-path, absolute-path, file-info, list-dir, temp-dir, temp-file,
-# int, float, str).  Filesystem predicates and size/line-count wrappers
-# live below under "Filesystem queries".
+# (resolve-path, absolute-path, abbreviate-home, file-info, list-dir,
+# temp-dir, temp-file, int, float, str).  Filesystem predicates and
+# size/line-count wrappers live below under "Filesystem queries".
 
 # Control flow
 # `each`, `map`, `filter`, `sort-list`, `sort-list-by`, `fold`

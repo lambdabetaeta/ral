@@ -1214,10 +1214,15 @@ impl Parser {
                 _ => Err(self.error("expected bare command name after '^'")),
             };
         }
+        // `$[…]` is a value wherever it stands, whatever it unboxes to.
+        if matches!(self.peek(), Token::Expr(_)) {
+            return Ok(Head::Value(Box::new(self.parse_atom()?)));
+        }
+        // A literal word (`42`, `true`) and a lone `~` are values too.
         Ok(match self.parse_atom()? {
             Ast::Word(Word::Slash(s)) => Head::Path(s),
-            Ast::Word(Word::Plain(s)) => Head::Bare(s),
-            Ast::Word(Word::Tilde(path)) => Head::TildePath(path),
+            Ast::Word(Word::Plain(s)) if WordLiteral::classify(&s).is_none() => Head::Bare(s),
+            Ast::Word(Word::Tilde(path)) if path.suffix.is_some() => Head::TildePath(path),
             other => Head::Value(Box::new(other)),
         })
     }
@@ -1239,16 +1244,13 @@ impl Parser {
             }
         }
 
-        // A bare head that is really a value (`$x`, `true`, `42`) sheds the
-        // `Ast::Call` wrapper so downstream passes see the value itself.
-        if args.is_empty() && redirects.is_empty() {
-            match head {
-                Head::Value(value) => return Ok(*value),
-                Head::Bare(s) if WordLiteral::classify(&s).is_some() => {
-                    return Ok(Ast::Word(Word::Plain(s)));
-                }
-                _ => {}
-            }
+        // A value head with nothing applied sheds the `Ast::Call` wrapper,
+        // so downstream passes see the value itself.
+        if args.is_empty()
+            && redirects.is_empty()
+            && let Head::Value(value) = head
+        {
+            return Ok(*value);
         }
         Ok(Ast::Call {
             head,
@@ -3470,28 +3472,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_tilde() {
-        let ast = unwrap_stmts(parse("~").unwrap());
-        assert_eq!(
-            ast,
-            vec![tilde_word(TildePath {
-                user: None,
-                suffix: None,
-            })]
-        );
+    /// The one statement `src` parses to, spans and `Call` wrappers intact.
+    fn sole_stmt(src: &str) -> Ast {
+        let mut stmts = parse(src).unwrap();
+        assert_eq!(stmts.len(), 1, "{src}");
+        stmts.remove(0).item
+    }
+
+    fn home_word() -> Ast {
+        tilde_word(TildePath { suffix: None })
+    }
+
+    /// The value bound by the lone `let` in `src`, unstripped.
+    fn let_value(src: &str) -> Ast {
+        match sole_stmt(src) {
+            Ast::Let { value, .. } => *value.item,
+            other => panic!("expected a let, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_tilde_user() {
-        let ast = unwrap_stmts(parse("~root").unwrap());
-        assert_eq!(
-            ast,
-            vec![tilde_word(TildePath {
-                user: Some("root".into()),
-                suffix: None,
-            })]
-        );
+    fn parse_tilde() {
+        assert_eq!(sole_stmt("~"), home_word());
     }
 
     #[test]
@@ -3500,9 +3502,46 @@ mod tests {
         assert_eq!(
             ast,
             vec![tilde_word(TildePath {
-                user: None,
                 suffix: Some("/foo/bar".into()),
             })]
+        );
+    }
+
+    #[test]
+    fn parse_tilde_before_a_name_is_a_plain_word() {
+        let ast = unwrap_stmts(parse("echo ~bob").unwrap());
+        assert_eq!(ast, vec![app(bare_head("echo"), vec![plain("~bob")])]);
+    }
+
+    #[test]
+    fn parse_let_of_lone_tilde_binds_the_tilde_word() {
+        assert_eq!(let_value("let h = ~"), home_word());
+    }
+
+    /// `$[foo]` is the word `foo` as a value, never a command named `foo`.
+    #[test]
+    fn parse_expr_block_head_is_a_value() {
+        assert_eq!(let_value("let x = $[foo]"), plain("foo"));
+        assert_eq!(sole_stmt("$[~]"), home_word());
+    }
+
+    #[test]
+    fn parse_literal_head_with_args_is_a_value_head() {
+        let ast = unwrap_stmts(parse("42 foo").unwrap());
+        assert_eq!(ast, vec![app(value_head(plain("42")), vec![plain("foo")])]);
+    }
+
+    #[test]
+    fn parse_tilde_path_command_head_with_args() {
+        let ast = unwrap_stmts(parse("~/bin/x a").unwrap());
+        assert_eq!(
+            ast,
+            vec![app(
+                Head::TildePath(TildePath {
+                    suffix: Some("/bin/x".into()),
+                }),
+                vec![plain("a")],
+            )]
         );
     }
 
@@ -3520,7 +3559,6 @@ mod tests {
                 assert_eq!(
                     head,
                     &Head::TildePath(TildePath {
-                        user: None,
                         suffix: Some("/.local/bin/claude".into()),
                     })
                 );
@@ -3570,16 +3608,7 @@ mod tests {
         let ast = unwrap_stmts(parse("echo ~ foo").unwrap());
         assert_eq!(
             ast,
-            vec![app(
-                bare_head("echo"),
-                vec![
-                    tilde_word(TildePath {
-                        user: None,
-                        suffix: None,
-                    }),
-                    plain("foo"),
-                ],
-            )]
+            vec![app(bare_head("echo"), vec![home_word(), plain("foo")],)]
         );
     }
 

@@ -313,27 +313,17 @@ fn is_cmd_pos(before_token: &str) -> bool {
 
 // ── Path completion ───────────────────────────────────────────────────────────
 
-/// Expand a tilde-prefixed directory component for completion.  Delegates to
-/// [`ral_core::path::tilde`] so the rule matches the rest of ral; returns
-/// `None` when the home directory is unavailable, or when the component
-/// names another user's home and this platform has no way to look one up
-/// (no `getpwnam(3)` equivalent) — either way the caller offers no
-/// candidates rather than completing against a fabricated path.
+/// `dir` with a leading `~` expanded; `None` when no home is known, so the
+/// caller offers no candidates rather than a fabricated path.
 #[allow(
     clippy::disallowed_methods,
     reason = "host-env: completion completes for the launching user, outside any shell overlay"
 )]
 fn expand_tilde(dir: &str) -> Option<String> {
-    let Some(parsed) = ral_core::path::tilde::TildePath::parse(dir) else {
-        return Some(dir.to_string());
-    };
-    let home = ral_core::host::home();
-    ral_core::path::tilde::expand_tilde_path(
-        parsed.user.as_deref(),
-        parsed.suffix.as_deref(),
-        home.as_deref(),
+    ral_core::path::tilde::TildePath::parse(dir).map_or_else(
+        || Some(dir.to_string()),
+        |t| t.expand(ral_core::host::home().as_deref()),
     )
-    .ok()
 }
 
 /// A path entry as the haystack [`rank`] matches the needle against.

@@ -122,12 +122,19 @@ mod tests {
         assert!(!is_bare_word("~"));
     }
 
+    /// Any other `~` is an ordinary character.
+    #[test]
+    fn bare_word_accepts_other_tildes() {
+        assert!(is_bare_word("a~b"));
+        assert!(is_bare_word("~bob"));
+    }
+
     #[test]
     fn bare_word_rejects_metacharacters() {
         for s in [
             "a b", // space
-            "a|b", "a$b", "a!b", "a~b", "a<b", "a>b", "a\"b", "a'b", "a`b", "a(b", "a)b", "a;b",
-            "a^b", "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
+            "a|b", "a$b", "a!b", "a<b", "a>b", "a\"b", "a'b", "a`b", "a(b", "a)b", "a;b", "a^b",
+            "a[b", "a]b", "a{b", "a}b", "a,b", // comma (context-sensitive)
         ] {
             assert!(!is_bare_word(s), "{s:?} should not be bare");
         }

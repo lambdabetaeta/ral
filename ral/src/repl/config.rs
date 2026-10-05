@@ -79,7 +79,7 @@ const DEFAULT_RC: &str = "\
     # recursion_limit:  100000,      # maximum machine-frame recursion depth
 
     # prompt: {
-    #     return \"$CWD $ \"
+    #     return \"!{abbreviate-home $CWD} $ \"
     # },
 
     # env: [

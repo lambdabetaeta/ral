@@ -19,6 +19,7 @@ use crate::ir::{
     GroupNode, HandlerArmV, IrPattern, Name, OptionsV, Phrase, Register, Toplevel, Val,
     ValListElem, ValMapEntry, ValRecordEntry,
 };
+use crate::path::tilde::TildePath;
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
@@ -1212,8 +1213,8 @@ fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
     }
 }
 
-/// The five reserved pseudo-variables: a store read, and the English
-/// name of what it reads, for the "not a name you can bind" diagnostic.
+/// The reserved pseudo-variables: a store read, and the English name of
+/// what it reads, for the "not a name you can bind" diagnostic.
 fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
     Some(match name {
         "ENV" => (Register::Env, "the shell's environment"),
@@ -1221,6 +1222,10 @@ fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
         "NPROC" => (Register::Nproc, "the machine's processor count"),
         "CWD" => (Register::Cwd, "the shell's working directory"),
         "USER" => (Register::User, "the current user"),
+        "HOME" => (
+            Register::Tilde(TildePath { suffix: None }),
+            "the current user's home directory",
+        ),
         _ => return None,
     })
 }
@@ -1263,7 +1268,7 @@ fn prelude_scope() -> Arc<HashSet<String>> {
 ///
 /// # Errors
 /// `$SCRIPT` referenced where `name` carries no script identity; a pattern
-/// binding one of the five reserved pseudo-variable names.
+/// binding a reserved pseudo-variable name.
 #[allow(
     clippy::implicit_hasher,
     reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
@@ -1368,8 +1373,7 @@ mod tests {
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(
             name,
-            &CommandName::TildePath(crate::path::tilde::TildePath {
-                user: None,
+            &CommandName::TildePath(TildePath {
                 suffix: Some("/.local/bin/claude".into()),
             })
         );
@@ -1388,8 +1392,7 @@ mod tests {
         let (name, args, _) = expect_exec_name(&comp);
         assert_eq!(
             name,
-            &CommandName::TildePath(crate::path::tilde::TildePath {
-                user: None,
+            &CommandName::TildePath(TildePath {
                 suffix: Some("/.local/bin/claude".into()),
             })
         );
@@ -1741,6 +1744,73 @@ mod tests {
         };
         assert!(matches!(rhs.item, CompKind::Observe(Register::Cwd)));
         assert!(matches!(rest.item, CompKind::Exec(_)));
+    }
+
+    fn is_home_observe(comp: &Comp) -> bool {
+        comp.item == CompKind::Observe(Register::Tilde(TildePath { suffix: None }))
+    }
+
+    /// The hoisted read and what follows it, from `comp`'s outermost bind.
+    fn hoisted(comp: &Comp) -> (&Comp, &IrPattern, &Comp) {
+        let CompKind::Bind {
+            comp: rhs,
+            pattern,
+            rest,
+        } = &comp.item
+        else {
+            panic!("expected a Bind over a hoisted read, got {:?}", comp.item);
+        };
+        (rhs, pattern, rest)
+    }
+
+    #[test]
+    fn home_reference_is_the_tilde_observe() {
+        let ast = parse("echo $HOME").expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        let (rhs, _, rest) = hoisted(&comp);
+        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        assert!(matches!(rest.item, CompKind::Exec(_)));
+    }
+
+    #[test]
+    fn let_home_is_a_parse_error_naming_the_reading() {
+        let ast = parse("let HOME = 1").expect("parse");
+        let err = elaborate(&ast, HashSet::new(), "").expect_err("expected a ParseError");
+        assert!(
+            err.message.contains("home directory"),
+            "message did not name the reading: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn leading_tilde_in_a_string_interpolates_the_home_observe() {
+        let ast = parse(r#""~/x""#).expect("parse");
+        let comp = elaborate_one(&ast, HashSet::new(), "");
+        let (rhs, pattern, rest) = hoisted(&comp);
+        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        let IrPattern::Name(tmp) = pattern else {
+            panic!("expected a named temporary, got {pattern:?}");
+        };
+        let CompKind::Interpolation(parts) = &rest.item else {
+            panic!("expected an Interpolation, got {:?}", rest.item);
+        };
+        assert_eq!(
+            parts.as_slice(),
+            [Val::Variable(tmp.clone()), Val::String("/x".into())]
+        );
+    }
+
+    #[test]
+    fn let_of_lone_tilde_observes_rather_than_runs() {
+        let ast = parse("let h = ~").expect("parse");
+        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
+        let Phrase::Define { comp, .. } = &top.phrases[0].item else {
+            panic!("expected a Define, got {:?}", top.phrases[0].item);
+        };
+        let (rhs, _, rest) = hoisted(comp);
+        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        assert!(matches!(rest.item, CompKind::Return(Val::Variable(_))));
     }
 
     #[test]

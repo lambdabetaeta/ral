@@ -102,9 +102,8 @@ plus `which.rs` for PATH search.
   `tempdir:`, `gitdir:` — the last three policy-only, expanded at freeze;
   `git.rs` backs `gitdir:` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
-  tree back), `tilde.rs` (`~user` resolves honestly
-  per platform: off-Unix `get_user_home` declines rather than fabricating a
-  home, and each call site picks its own fallback);
+  tree back), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
+  and each caller picks its own honest answer);
 - lex — `lex.rs`;
 - canonicalise — `canon.rs`, for a read by name;
 - locate — `walk.rs`, for an open: `walk` descends from the root through
