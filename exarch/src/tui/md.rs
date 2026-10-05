@@ -457,7 +457,7 @@ impl Composer {
         self.blank_separator();
     }
 
-    /// Fold the open line to the content budget and seat every row under the
+    /// Fold the open line to the content budget and set every row under the
     /// margin — the first row wearing the list marker, the rest the pad that
     /// holds their text under it.  [`wrap_line`] owns the fold: its word runs
     /// cross span seams, so a styled span and the punctuation fused to it

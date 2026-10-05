@@ -83,7 +83,7 @@ impl Emitter {
         Ok(Recorded::new(stamp, value))
     }
 
-    /// Publish a transient — a delta, the thinking seat, chrome — with no
+    /// Publish a transient — a delta, the open thinking line, chrome — with no
     /// durable form and no sequence number of its own.
     pub fn transient(&self, t: Transient) {
         self.log.publish_transient(t);

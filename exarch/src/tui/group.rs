@@ -184,7 +184,7 @@ pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
         .reduce(|a, b| a + b)
 }
 
-/// Render the run's rail-less body at `at`.  [`super::block`] seats the
+/// Render the run's rail-less body at `at`.  [`super::block`] sets the
 /// data-encoding rail on the first content row, exactly as for a single part.
 /// `calls` is in arrival order and never empty — a run is opened by a call.
 pub(super) fn body(calls: &[Call], at: Detail, width: usize) -> Vec<Line<'static>> {
@@ -195,8 +195,8 @@ pub(super) fn body(calls: &[Call], at: Detail, width: usize) -> Vec<Line<'static
     }
 }
 
-/// `Summary`: the tip call's intent on the head row — the row the scrollback seats
-/// the rail on — the whole-run sparkline pinned right, then that call's effects.
+/// `Summary`: the tip call's intent on the head row — the row that wears
+/// the rail mark — the whole-run sparkline pinned right, then that call's effects.
 fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     // Anchor on the latest *settled* call, not `calls.last()`: a call still in
     // flight has no effects yet, so the tip would blank the previous call's
@@ -283,7 +283,7 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 
 /// One call's intent rows, with its bar pinned to the shared column.  Every
 /// intent opens flush in content space — the margin is the only indent, and the
-/// rail glyph the first call wears is seated in it.
+/// rail glyph the first call wears sits in it.
 fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
     pinned_intent(
         &[],
@@ -311,7 +311,7 @@ fn pinned_intent(
     let bars_w = bars.width();
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
-    // The intent is work-narration, not the answer: SLATE seats it below the
+    // The intent is work-narration, not the answer: SLATE sets it below the
     // model's prose and gives the context drain a hue to desaturate.
     let ink = Style::default().fg(SLATE);
     let mut out: Vec<Line<'static>> = Vec::new();

@@ -2,7 +2,7 @@
 //! drawing colour and width from [`super::palette`].  [`super::App::handle`]
 //! calls in here to turn a typed [`crate::bus::card::Card`] into rows.
 //!
-//! No builder here draws a rail glyph: `Block::seated` in `block.rs` seats it
+//! No builder here draws a rail glyph: `Block::railed` in `block.rs` sets it
 //! on the first content row, so a selection through a block copies clean.
 
 use super::block::Detail;
@@ -416,7 +416,7 @@ struct Cols {
 }
 
 impl Cols {
-    /// Every mark is asked what it seats in the shared columns, exhaustively:
+    /// Every mark is asked what it places in the shared columns, exhaustively:
     /// a mark added to the set must answer here as it must in [`render_mark`],
     /// or it would draw rows the card never measured.
     fn of(marks: &[Mark]) -> Self {
@@ -432,9 +432,9 @@ impl Cols {
                         }
                     }
                 }
-                // A diff seats its line numbers in a gutter of its own,
+                // A diff sets its line numbers in a gutter of its own,
                 // measured over its own hunks: that column belongs to the patch
-                // block, not to the card.  Prose and bytes seat nothing.
+                // block, not to the card.  Prose and bytes place nothing.
                 Mark::Diff { .. } | Mark::Text { .. } | Mark::Raw { .. } => {}
             }
         }

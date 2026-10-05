@@ -4,10 +4,10 @@
 //! The split is represented, never recovered.  Every consumer downstream —
 //! copy, drag-selection, hover, the log — reads `content` or `gutter` by name,
 //! so no amount of span coalescing or restyling can smuggle chrome into a
-//! clipboard.  Rows are born in the two places that seat rails — `Block::rows`
-//! and `Scrollback::render_group`, both through [`Row::seat`] — and flattened
-//! by [`Row::into_line`] at exactly two seams: the screen in
-//! [`super::render`] and `user.log` in `super::scrollback`.
+//! clipboard.  Rail marks are set in one place — `Block::railed`, through
+//! [`Row::rail`] — and rows are flattened by [`Row::into_line`] at exactly two
+//! seams: the screen in [`super::render`] and `user.log` in
+//! `super::scrollback`.
 
 use super::line::{self, is_blank};
 use super::palette::{RAIL_W, content_w};
@@ -39,25 +39,25 @@ impl Row {
         Self { gutter, content }
     }
 
-    /// A row with a blank margin: content that seats no glyph.
+    /// A row with a blank margin: content that wears no glyph.
     pub(super) fn bare(content: Line<'static>) -> Self {
         Self::new(Span::raw(BLANK), content)
     }
 
-    /// Seat `glyph` on the first row of `lines` that carries content, every
-    /// other row wearing the blank margin.  The one way a rail is seated: a
+    /// Set `glyph` on the first row of `lines` that carries content, every
+    /// other row wearing the blank margin.  The one way a rail mark is set: a
     /// `None` glyph — a continuing paragraph, a framed card that is its own
-    /// mark — still yields the margin every row wears.  An all-blank body seats
-    /// on row 0, so a block that renders nothing shows nothing.
-    pub(super) fn seat(lines: Vec<Line<'static>>, glyph: Option<Span<'static>>) -> Vec<Self> {
-        let seat = glyph.map(|glyph| {
+    /// mark — still yields the margin every row wears.  An all-blank body takes
+    /// it on row 0, so a block that renders nothing shows nothing.
+    pub(super) fn rail(lines: Vec<Line<'static>>, glyph: Option<Span<'static>>) -> Vec<Self> {
+        let mark = glyph.map(|glyph| {
             let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
             (glyph, idx)
         });
         lines
             .into_iter()
             .enumerate()
-            .map(|(i, line)| match &seat {
+            .map(|(i, line)| match &mark {
                 Some((glyph, idx)) if i == *idx => Self::new(glyph.clone(), line),
                 _ => Self::bare(line),
             })
@@ -145,7 +145,7 @@ mod tests {
     use super::*;
     use ratatui::style::Style;
 
-    /// Every shape in the vocabulary seats a gutter of the invariant width —
+    /// Every shape in the vocabulary fills a gutter of the invariant width —
     /// the geometric coupling that replaced the old copy-time glyph sniff.
     #[test]
     fn every_rail_shape_is_a_legal_gutter() {

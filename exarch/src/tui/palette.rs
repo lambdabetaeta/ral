@@ -71,7 +71,7 @@ pub(super) const BANNER_CRIMSON: Color = Color::Rgb(224, 20, 60);
 // ── Layout constants ─────────────────────────────────────────────────────────
 
 /// A column that rows share: its width in display cells, and the padding that
-/// seats a cell in it.  A column is either *declared* ([`Col::wide`], where the
+/// sets a cell in it.  A column is either *declared* ([`Col::wide`], where the
 /// rows arrive one at a time and could only align with themselves) or
 /// *measured* ([`Col::of`], where they arrive together); the two differ in
 /// provenance alone, so every gutter in the TUI that holds a cell is one of

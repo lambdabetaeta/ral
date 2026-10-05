@@ -8,7 +8,7 @@
 //! from the disposition, or read the log back except through [`replay`].
 //!
 //! [`Transient`] is the disjoint, unrecorded half of the channel: deltas, the
-//! provisional thinking seat, and chrome that dies with the process.
+//! provisional open thinking line, and chrome that dies with the process.
 #![deny(unused_results)]
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::wildcard_enum_match_arm)]

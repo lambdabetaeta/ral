@@ -39,7 +39,7 @@ pub(super) struct AgentSlot(pub u8);
 pub(super) enum Chrome {
     Turn,
     /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
-    /// full-width by [`seat_rows`].  No band — background is the machine's.
+    /// full-width by [`lay_rows`].  No band — background is the machine's.
     Prompt(String),
     /// A meta-notice — a model switch, an export, a stall: an annotation
     /// rather than a navigable block.
@@ -176,45 +176,22 @@ impl Thinking {
         self.text.is_empty()
     }
 
-    /// The deliberation's mass — the grain's numerator.
-    fn chars(&self) -> u32 {
-        let n: usize = self.text.iter().map(|t| t.chars().count()).sum();
+    /// The deliberation's mass with `open`, the line no record covers yet —
+    /// the grain's numerator.
+    fn chars(&self, open: &str) -> u32 {
+        let n: usize = self.with(open).map(|t| t.chars().count()).sum();
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 
-    /// Its bulk — the header's size bar and the rail's value step.  Both
-    /// saturate: a count read as a magnitude may not wrap.
-    fn lines(&self) -> u32 {
-        let n: usize = self.text.iter().map(|t| t.lines().count()).sum();
+    /// Its bulk with `open` — the header's size bar and the rail's value
+    /// step.  Both saturate: a count read as a magnitude may not wrap.
+    fn lines(&self, open: &str) -> u32 {
+        let n: usize = self.with(open).map(|t| t.lines().count()).sum();
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 
-    /// The grain and bulk of the whole, and — past the header rung — each
-    /// stretch in turn.  `open` is the line no record covers yet, joined onto
-    /// the last stretch.
-    fn body(&self, at: Detail, width: u16, open: &str) -> Vec<Line<'static>> {
-        let mut ls = line::thinking_header(self.chars(), self.lines(), self.answer_chars);
-        if at >= Detail::Full {
-            // One deliberation, one document: the stretches are joined as
-            // paragraphs, so the seam between two of them reads as a break
-            // and not as a wrap.
-            let mut text = self
-                .text
-                .iter()
-                .map(|t| t.trim_end())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if !open.is_empty() {
-                // The line the last stretch is still speaking, on its own row:
-                // the newline the stretch was trimmed of is the one that
-                // separates them.
-                text.push('\n');
-                text.push_str(open);
-            }
-            ls.push(Line::default());
-            ls.extend(md::render_thinking(&text, width, MD_INDENT));
-        }
-        ls
+    fn with<'a>(&'a self, open: &'a str) -> impl Iterator<Item = &'a str> {
+        self.text.iter().map(String::as_str).chain([open])
     }
 }
 
@@ -285,6 +262,39 @@ impl Group {
             Member::Turn => return false,
         }
         true
+    }
+
+    /// The `∴` part: the grain and bulk of the whole, and — past the header
+    /// rung — each stretch in turn.  `open` is the line no record covers yet,
+    /// drawn where its record will land: onto the last stretch while thinking
+    /// is what the group last took, else as a stretch of its own.
+    fn deliberation(&self, at: Detail, width: u16, open: &str) -> Vec<Line<'static>> {
+        let t = &self.thinking;
+        let mut ls = line::thinking_header(t.chars(open), t.lines(open), t.answer_chars);
+        if at >= Detail::Full {
+            // One deliberation, one document: the stretches are joined as
+            // paragraphs, so the seam between two of them reads as a break
+            // and not as a wrap.
+            let mut text = t
+                .text
+                .iter()
+                .map(|s| s.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !open.is_empty() {
+                // Continuing, the newline the stretch was trimmed of is the
+                // one that separates them.
+                text.push_str(if self.last == Part::Thinking {
+                    "\n"
+                } else {
+                    "\n\n"
+                });
+                text.push_str(open);
+            }
+            ls.push(Line::default());
+            ls.extend(md::render_thinking(&text, width, MD_INDENT));
+        }
+        ls
     }
 }
 
@@ -366,9 +376,9 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
     let mut out = Vec::new();
     for message in messages {
         let prompt = Block::chrome(Chrome::Prompt(message.clone()), None);
-        let (seated, _) = prompt.seated(width, AgentSlot::default(), None, "");
-        let rows = trim_blanks(seated, Row::is_blank);
-        let _ = seat_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
+        let (railed, _) = prompt.railed(width, AgentSlot::default(), None, "");
+        let rows = trim_blanks(railed, Row::is_blank);
+        let _ = lay_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
     if out.len() > max_rows {
@@ -385,13 +395,13 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
     out
 }
 
-/// Seat block-rendered rows onto the screen — the shared last step of the
+/// Lay block-rendered rows onto the screen — the shared last step of the
 /// transcript and the queued-prompt projection.  Every body already rendered
 /// at `width`, so this only fences and washes; it no longer wraps.  With
 /// `prompt` set the fence goes in above the first visible row and outside any
 /// `wash`: a boundary marks the plane's edge rather than lying within it, so a
 /// prompt's rule reads the same committed or queued.
-pub(super) fn seat_rows(
+pub(super) fn lay_rows(
     out: &mut Vec<Row>,
     rows: Vec<Row>,
     width: u16,
@@ -570,7 +580,7 @@ impl Block {
     }
 
     /// Whether an open prose line continues this block.
-    pub(super) fn open_prose(&self) -> bool {
+    pub(super) fn takes_prose(&self) -> bool {
         self.is_prose()
     }
 
@@ -587,11 +597,10 @@ impl Block {
         }
     }
 
-    /// Whether an open thinking line continues this block: a group renders
-    /// its deliberation above its work, so only one whose last member was a
-    /// stretch of thinking is still speaking.
-    pub(super) fn open_thinking(&self) -> bool {
-        matches!(&self.kind, BlockKind::Group(g) if g.last == Part::Thinking)
+    /// Whether an open thinking line continues this block — by the fold's own
+    /// admission rule, so the line is drawn where its record will land.
+    pub(super) fn takes_thinking(&self) -> bool {
+        matches!(&self.kind, BlockKind::Group(g) if g.admits(&Member::Thinking(String::new())))
     }
 
     /// Replace the text the fold just grew — the prose this block is, or its
@@ -739,11 +748,11 @@ impl Block {
     }
 
     fn wrapped(&self, width: u16, agent: AgentSlot, at: Option<Detail>, open: &str) -> Memo {
-        let (mut head, split) = self.seated(width, agent, at, open);
+        let (mut head, split) = self.railed(width, agent, at, open);
         let tail = head.split_off(split);
         let mut rows = Vec::new();
-        let thinking = seat_rows(&mut rows, head, width, false, None);
-        let _ = seat_rows(&mut rows, tail, width, self.prompt(), None);
+        let thinking = lay_rows(&mut rows, head, width, false, None);
+        let _ = lay_rows(&mut rows, tail, width, self.prompt(), None);
         Memo {
             width,
             rows,
@@ -751,11 +760,11 @@ impl Block {
         }
     }
 
-    /// Build each part's body in content space and seat its rail glyph on the
+    /// Build each part's body in content space with its rail glyph on the
     /// part's first content row, returning the rows and where the `∴` part
     /// ends.  `at` overrides every part's own rung; `open` is the lane's
     /// still-uncommitted line.
-    fn seated(
+    fn railed(
         &self,
         width: u16,
         agent: AgentSlot,
@@ -765,10 +774,10 @@ impl Block {
         let content = content_w(width);
         if let BlockKind::Group(g) = &self.kind {
             let mut rows = Vec::new();
-            if !g.thinking.is_empty() {
-                let body = g.thinking.body(at.unwrap_or(g.thinking.at), content, open);
-                let glyph = rail::span(RailKind::Thinking, agent, Some(g.thinking.lines()));
-                rows.extend(Row::seat(body, Some(glyph)));
+            if !g.thinking.is_empty() || !open.is_empty() {
+                let body = g.deliberation(at.unwrap_or(g.thinking.at), content, open);
+                let glyph = rail::span(RailKind::Thinking, agent, Some(g.thinking.lines(open)));
+                rows.extend(Row::rail(body, Some(glyph)));
             }
             let split = rows.len();
             if !g.calls.is_empty() {
@@ -781,9 +790,9 @@ impl Block {
                 );
                 // The two parts meet under the one seam rule, so the run's
                 // leading blank never doubles the deliberation's.
-                let seated = Row::seat(body, Some(glyph));
+                let run = Row::rail(body, Some(glyph));
                 let blank = rows.last().is_some_and(Row::is_blank);
-                rows.extend_from_slice(seam(blank, &seated));
+                rows.extend_from_slice(seam(blank, &run));
             }
             return (rows, split);
         }
@@ -798,7 +807,7 @@ impl Block {
             .rail_kind()
             .filter(|_| self.leads())
             .map(|kind| rail::span(kind, agent, self.magnitude()));
-        (Row::seat(lines, glyph), 0)
+        (Row::rail(lines, glyph), 0)
     }
 
     /// Whether this block leads its own rail mark.  A continuing paragraph
@@ -896,14 +905,14 @@ impl Block {
                         .collect()
                 }
             }
-            // A group renders each of its parts in `seated`; it has no
+            // A group renders each of its parts in `railed`; it has no
             // one-part body of its own.
             BlockKind::Group(_) => Vec::new(),
         }
     }
 
-    /// The rail shape a one-part block wears, `None` for one that seats no
-    /// rail.  A group's two glyphs are seated per part instead.
+    /// The rail shape a one-part block wears, `None` for one that wears no
+    /// rail.  A group's two glyphs are set per part instead.
     fn rail_kind(&self) -> Option<RailKind> {
         match &self.kind {
             BlockKind::Prose { .. } => Some(RailKind::Markdown),
@@ -919,7 +928,7 @@ impl Block {
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
             // A diff and a write are both file mutations, so both wear `▎` and
             // the body says which. A framed card's frame is its own mark, and
-            // an unowned effect folds into nothing, so neither seats a glyph.
+            // an unowned effect folds into nothing, so neither wears a glyph.
             BlockKind::Card { card, landing, .. } => {
                 (card.has_diff() || *landing == Landing::Write).then_some(RailKind::Patch)
             }
@@ -998,7 +1007,7 @@ mod tests {
                 continues,
                 None,
             )
-            .seated(READ_W, AgentSlot(0), None, "")
+            .railed(READ_W, AgentSlot(0), None, "")
             .0
             .iter()
             .map(|r| r.gutter().to_owned())

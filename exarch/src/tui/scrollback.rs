@@ -861,14 +861,13 @@ impl Scrollback {
                 live: Vec::new(),
             };
         }
-        // The block the line continues: the one already drawn at the tail,
-        // when it holds this lane.  What is on screen is the authority — this
-        // splice and the fold's rule for growing a block must agree, and they
-        // do, both being "the run of records of one lane".
+        // The block the line continues: the one at the tail, when the line's
+        // record would grow it.  This splice and the fold's rule for growing a
+        // block must agree, or the commit moves the picture.
         let joins = self.blocks.last().is_some_and(if answering {
-            Block::open_prose
+            Block::takes_prose
         } else {
-            Block::open_thinking
+            Block::takes_thinking
         });
         let blocks = all - usize::from(joins);
         let (rows, prev_blank) = self.upto(blocks);
@@ -1124,7 +1123,7 @@ impl Scrollback {
             // line it means to, tails included, so an open line still
             // standing here stands for text the producer chose not to record
             // — a cancelled deliberation, a whitespace-only tail.  Dropping it is
-            // what keeps a seat from outliving the turn it was reading.
+            // what keeps an open line from outliving its turn.
             Transient::Boundary => {
                 self.answer.clear();
                 self.thinking_line.clear();

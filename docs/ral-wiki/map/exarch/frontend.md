@@ -198,7 +198,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
 
  Nothing is laid out before its width is known. `Scrollback::render_window`
  caps the pane at `READ_W` — the reading measure, applied in that one place —
- `Block::seated` takes the content columns off it, and every builder below is
+ `Block::railed` takes the content columns off it, and every builder below is
  handed that width: chrome renders at it, a card's marks are dispatched at it
  by `render_mark`, and a call's effects and its ral source are laid out at
  what remains after their indent. There is no fixed budget to lay out against
@@ -255,13 +255,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    renders that open line *inside the block that will absorb it*: the trailing
    block's own source plus the open line plus the newline it is about to gain,
    in that block's own `Fidelity`, drawn through the one path a committed
-   block draws by — `Block::seated` takes the open line as a parameter and the
+   block draws by — `Block::railed` takes the open line as a parameter and the
    result is never memoised — so the record that completes the line changes
    the text and not the picture, and the markdown context the line sits in (an
-   open fence, a list) is the block's own. What is on screen is the authority,
-   which agrees with the fold because both are "the run of records of one
-   lane". At most one lane is ever open: prose ends the thinking run on the
-   mirror's side exactly as it does on the worker's, so `Transient::Token`
+   open fence, a list) is the block's own. The line joins the tail block
+   exactly when its record would grow it — `Block::takes_thinking` asks the
+   group's own admission rule — so a thinking line after work is drawn in the
+   group's `∴` part above that work, where its record lands, and never in a
+   provisional block at the foot that the commit would delete. At most one
+   lane is ever open: prose ends the thinking run on the mirror's side
+   exactly as it does on the worker's, so `Transient::Token`
    clears the thinking lane's open line as `Stream::push` flushes it, and
    `Transient::Boundary` clears whatever is left when no record will cover it.
    Thinking therefore streams as thinking — dimmed through
@@ -518,20 +521,20 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
-        - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
+        - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; `opening` lays the wordmark over the width-matched card as the one rail-free `Chrome::Opening`, neither paying an inset of its own so both start in the column the rail margin already opens
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `view` and its boundary lines, `neighbour`, `strip`'s justified row projection, `turn_cells`
         - `tui/diff.rs` — a patch as a block: `DIFF_PEEK_ROWS`, `diff_body` and its graded `diff_capped`, `patch_header`'s size and grain, the hunk rows numbered against one `DiffCols` gutter, `elision_row`
         - `tui/group.rs` — the `▸` part of a group: `Call`, one burst of `ral` work that its effects join, `aggregate_magnitude`, `body`
-        - `tui/line.rs` — line builders turning a typed `Card` into rows: `text`, `size_bar`, `thinking_header`, `user_prompt`, `act_row`, `wash`; no rail glyph, which `Block::seated` seats
+        - `tui/line.rs` — line builders turning a typed `Card` into rows: `text`, `size_bar`, `thinking_header`, `user_prompt`, `act_row`, `wash`; no rail glyph, which `Block::railed` sets
         - `tui/rail.rs` — the marginal rail: `RailKind` for shape, hue from `palette::AGENT_HUES`, `value_step`/`lighten` for lightness
         - `tui/md.rs` — markdown to lines over `pulldown-cmark`: `render_md`, `render_thinking`, the `$…$`/`$$…$$` typesetting, `apply_context`
         - `tui/highlight.rs` — ral source coloured by ral's own lexer: `highlight_ral`, `highlight_ral_spans`
         - `tui/fidelity.rs` — coherent degradation: `Fidelity`, turn-level `context_floor` and per-block `echo_delta`
         - `tui/select.rs` — drag-selection geometry in text-area columns: `highlight_range` for painting, `plain_slice` for copying
         - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `PickAction`, `overlay_frame`, `centered`, `render_shadow`
-        - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that seats a cell is built from ([[map/exarch/cards|cards]])
+        - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`
