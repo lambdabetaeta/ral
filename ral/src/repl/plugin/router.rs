@@ -66,20 +66,20 @@ pub(in crate::repl) fn parse_key_notation(key: &str) -> Option<KeyChord> {
         ctrl: false,
         alt: false,
     };
+    let char_key = |s: &str| match s.as_bytes() {
+        [b] => Some(KeyName::Char(char::from(*b))),
+        _ => None,
+    };
     let key = key.trim();
-    if key.len() == 1 {
-        return Some(plain(KeyName::Char(key.chars().next()?)));
+    if let Some(name) = char_key(key) {
+        return Some(plain(name));
     }
     if let Some(&(_, name)) = NAMED.iter().find(|(n, _)| *n == key) {
         return Some(plain(name));
     }
     for (prefix, ctrl, alt) in [("ctrl-", true, false), ("alt-", false, true)] {
         if let Some(rest) = key.strip_prefix(prefix) {
-            return Some(KeyChord {
-                name: KeyName::Char(rest.chars().next()?),
-                ctrl,
-                alt,
-            });
+            return char_key(rest).map(|name| KeyChord { name, ctrl, alt });
         }
     }
     let num = key.strip_prefix('f').and_then(|s| s.parse::<u8>().ok())?;
@@ -271,6 +271,10 @@ mod tests {
         // Unrecognised notations and out-of-range function keys are rejected.
         assert_eq!(parse_key_notation("hyper-x"), None);
         assert_eq!(parse_key_notation("f13"), None);
+        // A modifier takes exactly one character.
+        assert_eq!(parse_key_notation("alt-enter"), None);
+        assert_eq!(parse_key_notation("ctrl-left"), None);
+        assert_eq!(parse_key_notation("ctrl-"), None);
     }
 
     /// `guard_allows`: no guard always allows; a guard matches against the
