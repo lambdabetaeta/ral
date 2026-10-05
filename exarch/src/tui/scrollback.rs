@@ -1027,9 +1027,6 @@ impl Scrollback {
             // provider error, a stall), never a nonzero exit, which reads as a
             // red status in the row here just as it does on an exec.
             K::Done { cmd, outcome } => chrome(Chrome::Settled(card::settled_spans(cmd, outcome))),
-            K::Notice { notice } => {
-                vec![surfaced(card::notice_card(&card::to_card_notice(notice)))]
-            }
             K::Context { turns } => {
                 vec![surfaced(card::context_rows_card(turns))]
             }

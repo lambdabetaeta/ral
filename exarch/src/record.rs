@@ -232,9 +232,6 @@ pub enum Display {
         cmd: String,
         outcome: DoneOutcome,
     },
-    Notice {
-        notice: NoticeFact,
-    },
     Context {
         turns: Vec<model::TurnRow>,
     },
@@ -260,24 +257,6 @@ pub enum DoneOutcome {
     Ok,
     Err { message: String, status: i64 },
     Panic { message: String },
-}
-
-/// A `` `notice `` housekeeping fact, minus its rendered card.
-///
-/// `cause` mirrors `ReapCause::as_str`'s three spellings rather than
-/// importing the live enum, keeping this parcel's serde surface
-/// self-contained.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "notice", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NoticeFact {
-    Reap {
-        cmd: String,
-        cause: String,
-    },
-    Prune {
-        names: Vec<String>,
-        idle_calls: Vec<u64>,
-    },
 }
 
 /// Breadcrumbs that determine no model projection but are worth keeping.
@@ -371,6 +350,18 @@ pub enum Forensic {
     },
     Unpin {
         key: String,
+    },
+    /// A worker policy removed after nobody observed it; `cause` is one of
+    /// `ReapCause`'s spellings (`idle`, `backstop`, `retention`).
+    Reap {
+        cmd: String,
+        cause: String,
+    },
+    /// Idle top-level bindings the ledger unset at a ready boundary;
+    /// `idle_calls` is parallel to `names`.
+    Prune {
+        names: Vec<String>,
+        idle_calls: Vec<u64>,
     },
     /// A mid-session model switch — the context-floor denominator, absent
     /// from `SessionStarted` once the run outlives its first selection.

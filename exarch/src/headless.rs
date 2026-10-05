@@ -333,9 +333,6 @@ impl Headless<'_> {
             K::Done { cmd, outcome } => {
                 let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
             }
-            K::Notice { notice } => {
-                self.print_card(&card::notice_card(&card::to_card_notice(notice)));
-            }
             K::Context { turns } => {
                 self.print_card(&card::context_rows_card(turns));
             }

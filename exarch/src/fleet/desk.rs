@@ -1096,9 +1096,22 @@ pub(crate) fn absorb_surface(
             })?;
             Ok(())
         }
-        Surface::Notice(notice) => {
-            let _recorded = recorder.emit(crate::record::Display::Notice {
-                notice: notice_fact(notice),
+        Surface::Notice(crate::bus::card::Notice::Reap { cmd, cause }) => {
+            let cause = match cause {
+                ral_core::types::ReapCause::Idle => "idle",
+                ral_core::types::ReapCause::Backstop => "backstop",
+                ral_core::types::ReapCause::Retention => "retention",
+            };
+            let _recorded = recorder.emit(crate::record::Forensic::Reap {
+                cmd: cmd.clone(),
+                cause: cause.to_string(),
+            })?;
+            Ok(())
+        }
+        Surface::Notice(crate::bus::card::Notice::Prune { names, idle_calls }) => {
+            let _recorded = recorder.emit(crate::record::Forensic::Prune {
+                names: names.clone(),
+                idle_calls: idle_calls.clone(),
             })?;
             Ok(())
         }
@@ -1116,26 +1129,6 @@ pub(crate) fn absorb_surface(
             recorder.transient(crate::record::Transient::Unpin { key: key.clone() });
             Ok(())
         }
-    }
-}
-
-/// The data half of a `` `notice `` card, the reap cause carried as the three
-/// spellings the record's serde surface names.
-fn notice_fact(notice: &crate::bus::card::Notice) -> crate::record::NoticeFact {
-    match notice {
-        crate::bus::card::Notice::Reap { cmd, cause } => crate::record::NoticeFact::Reap {
-            cmd: cmd.clone(),
-            cause: match cause {
-                ral_core::types::ReapCause::Idle => "idle",
-                ral_core::types::ReapCause::Backstop => "backstop",
-                ral_core::types::ReapCause::Retention => "retention",
-            }
-            .to_string(),
-        },
-        crate::bus::card::Notice::Prune { names, idle_calls } => crate::record::NoticeFact::Prune {
-            names: names.clone(),
-            idle_calls: idle_calls.clone(),
-        },
     }
 }
 
@@ -2165,9 +2158,7 @@ mod tests {
                         outcome: crate::record::DoneOutcome::Ok,
                         ..
                     }) => "done",
-                    Record::Display(Display::Notice {
-                        notice: crate::record::NoticeFact::Reap { cause, .. },
-                    }) if cause == "idle" => "notice",
+                    Record::Forensic(Forensic::Reap { cause, .. }) if cause == "idle" => "notice",
                     Record::Forensic(Forensic::Pin { key }) if key == "tasks" => "pin",
                     Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
                     _ => continue,

@@ -1006,7 +1006,7 @@ keep-bottom
     /// `deliver` mints later.
     #[test]
     fn decode_surface_round_trips_each_class() {
-        use crate::bus::card::testkit::{card_value, map_value, s, variant};
+        use crate::bus::card::testkit::{card_value, int, list, map_value, s, variant};
         assert!(matches!(
             decode_surface(
                 &Observation::instant(
@@ -1040,6 +1040,24 @@ keep-bottom
                 ]),
             )),
             Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
+        ));
+        assert!(matches!(
+            decode_surface(&variant(
+                "notice",
+                map_value(vec![
+                    (
+                        "kind",
+                        FOValue::Variant {
+                            label: "prune".into(),
+                            payload: None,
+                        },
+                    ),
+                    ("names", list(vec![s("x")])),
+                    ("idle-calls", list(vec![int(256)])),
+                ]),
+            )),
+            Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Prune { names, idle_calls }))
+                if names == ["x"] && idle_calls == [256]
         ));
         assert!(matches!(
             decode_surface(&card_value(vec![])),

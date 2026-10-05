@@ -987,6 +987,45 @@ pub(crate) mod tests {
 
         // The first live sink of the session: until this run, the pending reap
         // has nowhere to push through.
+        let reaps = surfaced_notices(&mut shell, "$[1 + 1]", "reap");
+        assert_eq!(
+            reaps.len(),
+            1,
+            "the settled run must surface the pending reap as a `notice`"
+        );
+    }
+
+    /// An idle top-level name is pruned at the ready boundary of the run that
+    /// crosses its bound, and announced there exactly once.
+    #[test]
+    fn ready_boundary_notice_surfaces_an_idle_prune() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.arm_binding_lease(crate::types::BindingLease {
+            idle_calls: 2,
+            large_binding_bytes: u64::MAX,
+        });
+
+        let mut prunes = surfaced_notices(&mut shell, "let idle_x = 1", "prune");
+        prunes.extend(surfaced_notices(&mut shell, "$[0]", "prune"));
+        prunes.extend(surfaced_notices(&mut shell, "$[0]", "prune"));
+        let [prune] = prunes.as_slice() else {
+            panic!("exactly one prune across the bound, got {prunes:?}");
+        };
+        let names = prune.field("names").and_then(|v| v.as_list());
+        assert!(
+            matches!(names, Some([name]) if name.as_str() == Some("idle_x")),
+            "the prune names the idle binding, got {prune:?}"
+        );
+
+        assert!(
+            surfaced_notices(&mut shell, "$[0]", "prune").is_empty(),
+            "nothing left idle — no second prune"
+        );
+    }
+
+    /// Run `src` under a capturing surface sink, answering the payloads of the
+    /// `` `notice `` values of `kind` it pushed.
+    fn surfaced_notices(shell: &mut Shell, src: &str, kind: &str) -> Vec<crate::serial::FOValue> {
         struct CapturingSink(Arc<Mutex<Vec<crate::serial::FOValue>>>);
         impl crate::types::EventSink for CapturingSink {
             fn emit(&self, ev: &crate::serial::FOValue) {
@@ -996,27 +1035,24 @@ pub(crate) mod tests {
         let captured: Arc<Mutex<Vec<crate::serial::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
         let _ = shell.run(RunRequest {
             surface: Some(Arc::new(CapturingSink(captured.clone()))),
-            ..capture_req("$[1 + 1]")
+            ..capture_req(src)
         });
-
         let events = captured.lock().unwrap().clone();
-        let saw_reap_notice = events.iter().any(|ev| {
-            let crate::serial::FOValue::Variant { label, payload } = ev else {
-                return false;
-            };
-            if label != "notice" {
-                return false;
-            }
-            let Some(payload) = payload else { return false };
-            matches!(
-                payload.field("kind"),
-                Some(crate::serial::FOValue::Variant { label, .. }) if label == "reap"
-            )
-        });
-        assert!(
-            saw_reap_notice,
-            "the settled run must surface the pending reap as a `notice`, got {events:?}"
-        );
+        events
+            .into_iter()
+            .filter_map(|ev| match ev {
+                crate::serial::FOValue::Variant { label, payload } if label == "notice" => {
+                    payload.map(|p| *p)
+                }
+                _ => None,
+            })
+            .filter(|payload| {
+                matches!(
+                    payload.field("kind"),
+                    Some(crate::serial::FOValue::Variant { label, .. }) if label == kind
+                )
+            })
+            .collect()
     }
 
     /// An interrupt struck mid-run is read at the next poll point, so

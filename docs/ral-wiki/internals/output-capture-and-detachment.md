@@ -184,8 +184,7 @@ The escape is detachment — the *handle* is its evidence
   from `run_framed` just before the frame tears down) and pushes it through
   that run's surface sink as a `` `notice `` value, beside the binding-lease's
   idle-prune notice; exarch decodes it back (`card::value_to_notice`) into a
-  `Display::Notice` record, folded into a transcript/TUI row by whichever
-  printer draws it. The model's later "where did my job go?" always has an
+  `Forensic::Reap` record that no printer draws. The model's later "where did my job go?" always has an
   answer in the log.
 
 ## Reading a spawned server's output (the exarch caveat)

@@ -296,12 +296,12 @@ core's own engine pushes both as `` `notice `` surface classes at the ready
 boundary of the run that produced them
 ([[map/core/engine-protocol|engine-protocol]]), decoded by
 [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Surface::Notice`
-and recorded/rendered from there. A reap notice names a worker removed by policy — the lease
+and recorded from there. A reap notice names a worker removed by policy — the lease
 chain's idle or backstop bound on a running worker, or the retention sweep
 expiring a settled entry's unclaimed result — rather than one an eliminator
-observed away. Transcript and TUI only — the rendered one-liner is
-[[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
-model-facing, since delivery of a reap to the model itself is deferred.
+observed away. It is recorded as `Forensic::Reap` and drawn nowhere — a
+worker nobody watched is not news — and never model-facing, since delivery of
+a reap to the model itself is deferred.
 `attend`'s top runs nothing else; the disk ceiling is weighed at the tool
 boundary with the other gauges (below). (No pin is protected or reconciled —
 [[design/pins|pins]].)
@@ -326,8 +326,8 @@ sequence), and over each parked fork by `_exarch-branch`'s and `start`'s shared
 large-binding residency nudge rides the pushed `` `notice `` channel above,
 and the prune half is engine housekeeping too: idle top-level names fall at
 the engine's own ready boundary, announced as a pushed
-`` `notice [kind: `prune] `` class the host decodes into the same
-recorded `Display::Notice` posture as a reap. The engine's
+`` `notice [kind: `prune] `` class the host records as `Forensic::Prune`
+— kept in the log, drawn by no fold. The engine's
 run-entry checkpoint orders after any prior boundary's prune, so a later
 panic rollback can never resurrect a name a pass just pruned.
 

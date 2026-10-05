@@ -106,20 +106,11 @@ agent's answer arriving, whatever produced it — and synod's fold drops
 `Display::Done` unnarrated, a worker thread being exarch's own bookkeeping
 rather than anything the window's reader has business with.
 
-`notice_card` is `done`'s sibling for core's ready-boundary housekeeping (`value_to_notice` → a `Notice` recorded as `Display::Notice
-{ notice }`): a `Notice::Reap` renders
-through `reap_card` as a `warn` span plus the worker's `cmd` and which lease
-fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding
-notices rendered by its per-kind siblings
-([[map/core/engine-protocol|engine-protocol]]). All are fixed-position
-value marks, never an animation, and all stay inside the existing `text` mark
-vocabulary, so none widens the closed mark set above.
-
-A notice's raw fact is what reaches the record log — `Display::Notice
-{ notice }` — exactly as a structural observation records only its raw wire
-form (`Display::Observation`, [[map/exarch/io-surface|io-surface]]):
-the card is a rendering, built fresh by whoever draws, and is never itself
-recorded ([[map/exarch/agent|agent]]).
+Core's ready-boundary housekeeping (`value_to_notice` → a `Notice`) has no
+card. A reaped worker and a pruned binding are each something nobody observed
+for a long while — housekeeping, not news — so they are recorded as
+`Forensic::Reap` and `Forensic::Prune`, breadcrumbs no fold projects
+([[map/core/engine-protocol|engine-protocol]], [[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 

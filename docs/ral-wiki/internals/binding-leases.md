@@ -69,7 +69,8 @@ past the bound is examined: a name whose value still structurally reaches a
 (`pins_running_work` — it recurses lists, maps, and variant payloads, and
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
-in one act — and one dim transcript card names what fell. A pruned name cannot
+in one act — and one `Forensic::Prune` record names what fell, shown to no
+one. A pruned name cannot
 come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
 at *run entry*, after any earlier prune, so the rollback target
 already excludes what fell. Pruning is the ready boundary's own door — reached
@@ -81,7 +82,7 @@ What it does not do: it never touches a closure, so it frees a value's bytes
 only when no live closure mentions its name, and it never tells the
 model anything at prune time — the only model-visible consequence is an
 ordinary `undefined variable` diagnostic, refused before it runs, if the model names the binding again, with the
-paper trail waiting in `record.jsonl`'s `Notice::Prune` commit.
+paper trail waiting in `record.jsonl`'s `Forensic::Prune` breadcrumb.
 
 ## The capture scenario, worked
 

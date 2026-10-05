@@ -43,12 +43,9 @@ pub(crate) use observation::{Landing, landing};
 /// because only the mirror groups, and it groups at render time.
 pub(crate) use observation::{execs_card, greps_card, reads_card};
 
-/// `done` and `notice` each word one class of event core surfaces, `pub`
-/// alongside [`to_card_notice`], the record-type converter a notice needs. A
-/// notice is a card; a settlement is a line on the rail, so `done` exports
-/// spans and their flattening rather than a [`Card`] nothing would draw.
+/// A settlement is a line on the rail, so `done` exports spans and their
+/// flattening rather than a [`Card`] nothing would draw.
 pub use done::{settled_spans, settled_text};
-pub use notice::notice_card;
 pub use observation::{observation_card, observation_spans};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
@@ -236,26 +233,6 @@ impl Card {
             [Mark::Diff { path, hunks }] => Some((path, hunks)),
             _ => None,
         }
-    }
-}
-
-/// `record::NoticeFact` → [`Notice`], parsing `cause` back into
-/// [`ral_core::types::ReapCause`] the same three spellings `record.rs`'s doc
-/// names.  Shared by `tui` and `headless`, and `pub` for synod.
-pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
-    match notice {
-        crate::record::NoticeFact::Reap { cmd, cause } => Notice::Reap {
-            cmd: cmd.clone(),
-            cause: match cause.as_str() {
-                "backstop" => ral_core::types::ReapCause::Backstop,
-                "retention" => ral_core::types::ReapCause::Retention,
-                _ => ral_core::types::ReapCause::Idle,
-            },
-        },
-        crate::record::NoticeFact::Prune { names, idle_calls } => Notice::Prune {
-            names: names.clone(),
-            idle_calls: idle_calls.clone(),
-        },
     }
 }
 

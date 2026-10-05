@@ -351,7 +351,10 @@ Resolved, 260705:
   context.** Constraint 7 holds throughout: no `events.jsonl` twin, no inbox
   message. The only model-facing consequence of a prune is the ordinary
   undefined-variable diagnostic, unmodified, should the model name the pruned
-  binding again.
+  binding again. Amended 261005: not a display fact either — a prune is
+  recorded as `Forensic::Prune` and drawn by no fold; its transcript card was
+  noise about a name nobody had touched in hundreds of calls. A worker reap
+  went the same way (`Forensic::Reap`), for the same reason.
 - **Host pins dissolve.** No future durable-job or schedule registry needs to
   pin binding names or handle ids against this reaper:
   leases-and-budgets's worker registry

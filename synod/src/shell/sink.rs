@@ -17,8 +17,7 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use exarch::bus::card::{
-    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, notice_card,
-    observation_display_card, to_card_notice,
+    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, observation_display_card,
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::clock;
@@ -289,7 +288,7 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
 /// The card-carrying arms split by intent: [`Display::Card`] is a deliberate
 /// user-facing act, carrying its card verbatim, and projects to
 /// [`SynodEvent::Card`], which the window stands in the transcript; the
-/// grouped and single observations, a done, a notice, and a context survey
+/// grouped and single observations, a done, and a context survey
 /// are raw-fact pairings whose card is a presentation of process, built here
 /// at fold time, so they collapse to [`SynodEvent::ProcessCard`] and stay
 /// inside the dial.
@@ -316,7 +315,6 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         Display::Card { card } => Some(SynodEvent::Card {
             marks: marks_dto(card.clone()),
         }),
-        Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
@@ -348,7 +346,6 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
     match display {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { card } => process_card(Some(card.clone())),
-        Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         Display::Done { .. }
         | Display::Thinking { .. }
@@ -395,6 +392,8 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SystemNote { .. }
         | Forensic::HarnessResult { .. }
         | Forensic::Pin { .. }
+        | Forensic::Reap { .. }
+        | Forensic::Prune { .. }
         | Forensic::Unpin { .. }
         | Forensic::ModelChanged { .. }
         | Forensic::SessionStarted { .. }
@@ -421,6 +420,8 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::SystemNote { .. }
         | Forensic::HarnessResult { .. }
         | Forensic::Pin { .. }
+        | Forensic::Reap { .. }
+        | Forensic::Prune { .. }
         | Forensic::Unpin { .. }
         | Forensic::ModelChanged { .. }
         | Forensic::SessionStarted { .. }
@@ -643,7 +644,7 @@ mod tests {
     use super::*;
     use exarch::bus::AgentState;
     use exarch::bus::card::{Row, Seg};
-    use exarch::record::{DoneOutcome, NoticeFact};
+    use exarch::record::DoneOutcome;
     use ral_core::types::{Observation, Observed};
     use std::path::PathBuf;
 
@@ -719,13 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn notice_context_and_a_lone_observation_all_collapse_to_process_card() {
-        let notice = Record::Display(Display::Notice {
-            notice: NoticeFact::Prune {
-                names: vec!["x".to_string()],
-                idle_calls: vec![0],
-            },
-        });
+    fn context_and_a_lone_observation_both_collapse_to_process_card() {
         let context = Record::Display(Display::Context { turns: Vec::new() });
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker {
@@ -734,7 +729,7 @@ mod tests {
                 class: ral_core::types::LeaseClass::Worker,
             }),
         });
-        for record in [notice, context, observation] {
+        for record in [context, observation] {
             let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {
                 panic!("expected a ProcessCard event for {record:?}");
             };
@@ -790,16 +785,14 @@ mod tests {
                 .is_none()
         );
 
-        let notice = Record::Display(Display::Notice {
-            notice: NoticeFact::Prune {
-                names: vec!["x".to_string()],
-                idle_calls: vec![0],
-            },
-        });
-        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &notice) else {
+        let context = Record::Display(Display::Context { turns: Vec::new() });
+        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &context) else {
             panic!("a helper's structural facts still fold into the dial");
         };
-        assert!(!marks.is_empty(), "a notice always renders some ink");
+        assert!(
+            !marks.is_empty(),
+            "a context survey always renders some ink"
+        );
     }
 
     #[test]

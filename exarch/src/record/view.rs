@@ -15,7 +15,7 @@ use crate::bus::card::Card;
 use crate::provider::{ProviderError, Usage};
 use ral_core::serial::FOValue;
 
-pub use super::{DoneOutcome, NoticeFact};
+pub use super::DoneOutcome;
 
 /// What a [`Block`] carries: the [`Display`] commits verbatim, plus the
 /// [`Forensic`] rows this fold draws — errors, notes, nudge marks.
@@ -59,9 +59,6 @@ pub enum BlockKind {
     Done {
         cmd: String,
         outcome: DoneOutcome,
-    },
-    Notice {
-        notice: NoticeFact,
     },
     Context {
         turns: Vec<TurnRow>,
@@ -315,7 +312,6 @@ impl Blocks {
             Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
             Display::Card { card } => self.push(seq, BlockKind::Card { card }),
             Display::Done { cmd, outcome } => self.push(seq, BlockKind::Done { cmd, outcome }),
-            Display::Notice { notice } => self.push(seq, BlockKind::Notice { notice }),
             Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
             Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),
             Display::Evicted { cut, by } => self.push(seq, BlockKind::Evicted { cut, by }),
@@ -349,7 +345,10 @@ impl Blocks {
             // shell boundary and is not restored — so neither is a scrollback
             // block this fold draws.  The tail bookend and a turn's effort dial
             // draw none either: evidence with a display twin, or with none.
+            // Core's housekeeping is the log's alone.
             Forensic::Pin { .. }
+            | Forensic::Reap { .. }
+            | Forensic::Prune { .. }
             | Forensic::Unpin { .. }
             | Forensic::SessionEnded
             | Forensic::TurnStarted { .. } => Delta::Quiet,

@@ -772,90 +772,6 @@ mod tests {
         );
     }
 
-    /// Run `cmd` as one dispatched run under a millisecond-scale
-    /// `deferred_lease`, so a reap test need not wait out `run_shell`'s real
-    /// 1 h/24 h policy.
-    fn dispatch_with_lease(session: &Avatar, cmd: &str, lease: ral_core::types::WorkerLease) {
-        use ral_core::protocol::{DispatchId, Host, Program, Run};
-        use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
-        session.seat.transport().dispatch(
-            DispatchId(0),
-            Run {
-                program: Program::Source(cmd.to_string()),
-                script_name: "<test>".to_string(),
-                caps: ral_core::types::GrantStack::root(),
-                wall: Some(std::time::Duration::from_secs(5)),
-                deferred_lease: Some(lease),
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            &(std::sync::Arc::new(()) as std::sync::Arc<dyn Host>),
-        );
-    }
-
-    /// A reap the lease chain performs between runs sits queued: core only
-    /// pushes a `` `notice `` from inside a run's own surface stream, so it
-    /// surfaces at the next run, and exactly once.
-    #[test]
-    fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
-        let session = dressed_trunk(|shell| shell.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-
-        dispatch_with_lease(
-            &session,
-            "spawn { test-clear-block-forever }",
-            ral_core::types::WorkerLease {
-                idle: std::time::Duration::from_millis(40),
-                backstop: std::time::Duration::from_secs(10),
-            },
-        );
-
-        // Past the idle bound, unpolled: the lease chain reaps it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while probe_count(&session, ral_core::test_access::worker_count) > 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the unpolled worker must be reaped within the budget"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-
-        session.ral("return 1", 5, &emit);
-
-        let reaps: Vec<(String, String)> = crate::bus::drain_records(&rx)
-            .into_iter()
-            .filter_map(|record| match record {
-                Record::Display(Display::Notice {
-                    notice: crate::record::NoticeFact::Reap { cmd, cause },
-                }) => Some((cmd, cause)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(reaps.len(), 1, "the queued reap surfaces exactly once");
-        let (cmd, cause) = &reaps[0];
-        assert_eq!(
-            cmd, "block at <test>, line 1",
-            "the reap must name the spawned body by its line"
-        );
-        assert_eq!(
-            cause, "idle",
-            "an unpolled worker past its idle bound reaps as Idle"
-        );
-
-        session.ral("return 1", 5, &emit);
-        assert!(
-            crate::bus::drain_records(&rx)
-                .into_iter()
-                .all(|record| !matches!(record, Record::Display(Display::Notice { .. }))),
-            "a further run with nothing new queued must surface no second notice"
-        );
-    }
-
     /// The reminder is built from the register the model actually wrote, and it
     /// becomes the next committed prompt: `pinned_digest` → `Facts` →
     /// `Post::Nudge` → the user turn the next deliberation sends.  The nudge
@@ -990,57 +906,6 @@ mod tests {
         );
     }
 
-    /// A boundary prune's `Display::Notice` rides the surface stream of the
-    /// call it fires inside — one notice naming the binding, none once
-    /// nothing is left idle.  The tiny re-armed bound is for speed only.
-    #[test]
-    fn boundary_prune_notice_rides_the_runs_own_stream() {
-        let session = dressed_trunk(|shell| {
-            shell.arm_binding_lease(ral_core::types::BindingLease {
-                idle_calls: 2,
-                large_binding_bytes: u64::MAX,
-            });
-        });
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.ral("let reap_me = 1", 5, &emit);
-        session.ral("$[0]", 5, &emit);
-        session.ral("$[0]", 5, &emit);
-
-        let prunes: Vec<(Vec<String>, Vec<u64>)> = crate::bus::drain_records(&rx)
-            .into_iter()
-            .filter_map(|record| match record {
-                Record::Display(Display::Notice {
-                    notice: crate::record::NoticeFact::Prune { names, idle_calls },
-                }) => Some((names, idle_calls)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            prunes.len(),
-            1,
-            "exactly one prune notice rides a run's surface stream"
-        );
-        let (names, idle_calls) = &prunes[0];
-        assert_eq!(names, &vec!["reap_me".to_string()]);
-        assert_eq!(idle_calls.len(), 1);
-        assert!(idle_calls[0] >= 2, "idle at least the armed bound");
-
-        session.ral("$[0]", 5, &emit);
-        assert!(
-            crate::bus::drain_records(&rx).into_iter().all(|record| {
-                !matches!(
-                    record,
-                    Record::Display(Display::Notice {
-                        notice: crate::record::NoticeFact::Prune { .. },
-                    })
-                )
-            }),
-            "nothing left idle — no second prune notice"
-        );
-    }
-
     /// Unconfigured, the check returns before any bookkeeping: no walk, no
     /// warning, no cost.
     #[test]
@@ -1127,43 +992,5 @@ mod tests {
         let armed = |resumes, resets_in| refused_twice(resumes, resets_in).agent.schedules.armed();
         assert!(!armed(false, Duration::from_hours(5)));
         assert!(!armed(true, Duration::from_secs(5)));
-    }
-
-    /// A binding prune is transcript/TUI-only: it must never grow the
-    /// model-view `record.jsonl`.
-    #[test]
-    fn prune_does_not_add_model_events() {
-        let session = dressed_trunk(|shell| {
-            shell.arm_binding_lease(ral_core::types::BindingLease {
-                idle_calls: 1,
-                large_binding_bytes: u64::MAX,
-            });
-        });
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.agent.id);
-        session.ral("let events_json_x = 1", 5, &emit);
-        let after_bind = session.log.lock().context().event_count();
-
-        // The prune fires at this call's own ready boundary (idle bound 1).
-        session.ral("$[0]", 5, &emit);
-        let after_prune_call = session.log.lock().context().event_count();
-        let pruned = crate::bus::drain_records(&rx).into_iter().any(|record| {
-            matches!(
-                record,
-                Record::Display(Display::Notice {
-                    notice: crate::record::NoticeFact::Prune { .. },
-                })
-            )
-        });
-        assert!(pruned, "the prune notice must have fired on the bus");
-
-        session.ral("$[0]", 5, &emit);
-        let after_plain_call = session.log.lock().context().event_count();
-        assert_eq!(
-            after_prune_call - after_bind,
-            after_plain_call - after_prune_call,
-            "a binding prune must never write a model-view record.jsonl entry"
-        );
     }
 }
