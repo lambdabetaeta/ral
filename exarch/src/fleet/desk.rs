@@ -981,34 +981,28 @@ impl ExarchDesk {
             .as_ref()
             .map_or_else(String::new, |note| format!("note {note}"));
         let subject = turns_subject(&turns);
-        let result = self
+        let evicted = self
             .services
             .log
             .lock()
             .evict(&turns, note, EditAuthority::Model);
-        match result {
-            // `evict` records `Evicted` through the seam, and the live row
-            // derives from that published record: nothing separate to emit
-            // here.
-            Ok(()) => {
-                self.services
-                    .commit_act(DeskAct::ContextEvict, Some(&subject), payload, false);
-                let survey = self.context_survey();
-                let text = format!("context is now {} serialized bytes", survey.total_bytes);
-                self.services
-                    .record_forensic(crate::record::Forensic::HarnessResult { text });
-                Ok(Survey::from(survey).encode())
-            }
-            Err(error) => {
-                self.services
-                    .commit_act(DeskAct::ContextEvict, Some(&subject), payload, true);
-                self.services
-                    .record_forensic(crate::record::Forensic::HarnessResult {
-                        text: error.clone(),
-                    });
-                Err(Error::new(error, 1))
-            }
-        }
+        // The act row is this eviction's only row.
+        self.services.commit_act(
+            DeskAct::ContextEvict,
+            Some(&subject),
+            payload,
+            evicted.is_err(),
+        );
+        let survey = evicted.map(|_| self.context_survey());
+        let text = match &survey {
+            Ok(survey) => format!("context is now {} serialized bytes", survey.total_bytes),
+            Err(error) => error.clone(),
+        };
+        self.services
+            .record_forensic(crate::record::Forensic::HarnessResult { text });
+        survey
+            .map(|survey| Survey::from(survey).encode())
+            .map_err(|error| Error::new(error, 1))
     }
 }
 

@@ -37,6 +37,16 @@ pub enum EditAuthority {
     Harness,
 }
 
+impl EditAuthority {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::User => "user",
+            Self::Harness => "harness",
+        }
+    }
+}
+
 /// One eviction as recorded: the resident turns it took — resolved by the
 /// writer, so replay departs exactly these — and the model's note.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,7 +659,8 @@ impl AgentLog {
 
     /// Take `turns` out of the context at once, leaving a marker where they
     /// stood and `note` beneath it. The set is resolved before it is
-    /// recorded, so replay departs exactly the ids on disk.
+    /// recorded, so replay departs exactly the ids on disk. Returns the
+    /// resolved cut; its row on screen is the caller's to author.
     ///
     /// # Errors
     /// Refuses an eviction naming no turn, a turn never recorded, one that
@@ -660,7 +671,7 @@ impl AgentLog {
         turns: &[u64],
         note: Option<String>,
         by: EditAuthority,
-    ) -> Result<(), String> {
+    ) -> Result<Cut, String> {
         let turns = self.context.resolve_cut(turns)?;
         let cut = Cut { turns, note };
         self.record_protocol(Protocol::Evicted {
@@ -668,10 +679,7 @@ impl AgentLog {
             by,
         })
         .map_err(|e| e.to_string())?;
-        // The display twin: the screen never derives from the protocol
-        // record it duplicates a field of.
-        self.record_display(Display::Evicted { cut, by })
-            .map_err(|e| e.to_string())
+        Ok(cut)
     }
 
     /// Every resident turn from `anchor` on — what a user rewind takes. The

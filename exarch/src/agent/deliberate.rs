@@ -348,11 +348,7 @@ impl Avatar {
         };
         self.recorder()
             .transient(Transient::State(AgentState::Evicting));
-        // `evict` records `Evicted`, and the live row derives from the
-        // published record — there is no separate notification to keep in
-        // step with it.
-        let edited = self.log.lock().evict(&turns, None, EditAuthority::Harness);
-        if let Err(e) = edited {
+        if let Err(e) = self.evict_unbidden(&turns, EditAuthority::Harness) {
             self.note_error(&format!("evict failed: {e}"));
         }
     }

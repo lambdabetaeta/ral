@@ -22,7 +22,6 @@ use super::line::is_blank;
 use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
-use crate::agent::log::EditAuthority;
 use crate::bus::card::{self, Card, Landing, landing, observation_card};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
@@ -1049,13 +1048,8 @@ impl Scrollback {
             K::SystemNote { text } => note(text),
             K::Turn { .. } => vec![Item::Member(Member::Turn)],
             K::Evicted { cut, by } => {
-                let authority = match by {
-                    EditAuthority::Model => "model",
-                    EditAuthority::User => "user",
-                    EditAuthority::Harness => "harness",
-                };
                 let runs = crate::record::model::runs(&cut.turns);
-                note(&format!("[turns {runs} left the context ({authority})]"))
+                note(&format!("[turns {runs} left the context ({})]", by.name()))
             }
         }
     }

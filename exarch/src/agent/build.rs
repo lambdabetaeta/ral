@@ -496,11 +496,8 @@ impl Avatar {
         // Coupled first, so the edit's record — the one notification there is
         // — publishes live.
         self.couple(emit);
-        {
-            let mut log = self.log.lock();
-            let turns = log.context().suffix_from(anchor)?;
-            log.evict(&turns, None, EditAuthority::User)?;
-        }
+        let turns = self.log.lock().context().suffix_from(anchor)?;
+        self.evict_unbidden(&turns, EditAuthority::User)?;
         // A nudge decided for the rewound prompt must neither commit nor
         // leave its edges consumed.
         self.inbox.drop_nudges();

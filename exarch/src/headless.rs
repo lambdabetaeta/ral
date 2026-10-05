@@ -10,7 +10,6 @@
 //! record at the seam, through [`crate::agent::log`].
 
 use crate::agent::Avatar;
-use crate::agent::log::EditAuthority;
 use crate::bus::card::{self, Card, Mark, Row, landing, observation_card};
 use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
@@ -347,13 +346,8 @@ impl Headless<'_> {
                 }
             }
             K::Evicted { cut, by } => {
-                let authority = match by {
-                    EditAuthority::Model => "model",
-                    EditAuthority::User => "user",
-                    EditAuthority::Harness => "harness",
-                };
                 let runs = crate::record::model::runs(&cut.turns);
-                let _ = writeln!(self.err, "[turns {runs} left the context ({authority})]");
+                let _ = writeln!(self.err, "[turns {runs} left the context ({})]", by.name());
             }
             // Interactive-only, pure presentation, or — the nudge — the agent
             // steering itself, which stays forensic and never addresses the

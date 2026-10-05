@@ -8,7 +8,7 @@
 
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
-use crate::agent::log::AgentLog;
+use crate::agent::log::{AgentLog, EditAuthority};
 use crate::agent::seat::EngineLost;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
@@ -95,6 +95,16 @@ impl Avatar {
     /// chopper, the surface buffer, a tool-call row.
     pub(crate) fn recorder(&self) -> crate::record::Emitter {
         self.log.lock().record_emitter()
+    }
+
+    /// Evict on an authority no act row speaks for — the harness's pressure
+    /// cut, the user's `/rewind` — so the eviction draws its own row.
+    pub(crate) fn evict_unbidden(&self, turns: &[u64], by: EditAuthority) -> Result<(), String> {
+        let cut = self.log.lock().evict(turns, None, by)?;
+        self.recorder()
+            .emit(crate::record::Display::Evicted { cut, by })
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 
     /// `record_error` is durable and published in one call, so there is no
