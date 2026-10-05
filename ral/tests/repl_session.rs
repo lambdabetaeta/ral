@@ -102,7 +102,7 @@ fn rc_bad_literal_key_fails_the_whole_file() {
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
-        out.stderr.contains("skipped due to type errors"),
+        out.stderr.contains("skipped, since it does not compile"),
         "the bad literal key must fail the whole rc: {}",
         out.stderr
     );
@@ -122,7 +122,7 @@ fn rc_unknown_key_behind_a_spread_is_a_static_error() {
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("surfase") && out.stderr.contains("skipped due to type errors"),
+        out.stderr.contains("surfase") && out.stderr.contains("skipped, since it does not compile"),
         "the misspelling must be named before the file runs: {}",
         out.stderr
     );
@@ -142,7 +142,7 @@ fn rc_returning_a_map_is_a_static_error() {
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
         out.stderr.contains("takes a record of settings")
-            && out.stderr.contains("skipped due to type errors"),
+            && out.stderr.contains("skipped, since it does not compile"),
         "a map rc must be refused statically: {}",
         out.stderr
     );
@@ -267,7 +267,7 @@ fn rc_plugins_take_differently_shaped_options() {
 
     let out = repl(&["-i"], &env, "ping-alpha\nping-beta\n");
     assert!(
-        !out.stderr.contains("skipped due to type errors"),
+        !out.stderr.contains("skipped, since it does not compile"),
         "the rc must survive its own contract check: {}",
         out.stderr
     );

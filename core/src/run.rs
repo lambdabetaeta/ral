@@ -20,22 +20,13 @@ use crate::types::{
     Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard, Observation,
     Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
-use crate::{CompileError, compile_and_typecheck};
+use crate::{Uncompiled, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Parse/type diagnostics from a run that never reached evaluation.
-///
-/// The spanned arms carry the [`Source`](crate::source::Source) their carets
-/// point into, rather than resolving it through the session's
-/// [`SourceDb`](crate::source::SourceDb): a run that failed to compile leaves
-/// no live span behind, so its text has no business in a registry that is
-/// append-only precisely because live spans index it.
 pub enum StaticDiagnostics {
-    Compile {
-        error: CompileError,
-        source: crate::source::Source,
-    },
+    Compile(Uncompiled),
     /// A host-level error that stopped the run before it started: hook not
     /// found, non-ground argument, and the like. Spanless, so no text.
     Host(crate::types::Error),
@@ -595,10 +586,10 @@ pub(crate) fn compile_run(
     // The text is copied only here, on the failure path, and dies with the
     // report: `file` was peeked, never minted, so the registry is untouched.
     let top = Arc::new(outcome.map_err(|error| {
-        Box::new(StaticDiagnostics::Compile {
+        Box::new(StaticDiagnostics::Compile(Uncompiled {
             error,
             source: crate::source::Source::from_text(name, src),
-        })
+        }))
     })?);
 
     let single_command = crate::ir::is_single_command(&top);
@@ -729,10 +720,10 @@ pub(crate) mod tests {
                 assert!(
                     matches!(
                         diagnostics,
-                        StaticDiagnostics::Compile {
-                            error: CompileError::Parse(_),
+                        StaticDiagnostics::Compile(Uncompiled {
+                            error: crate::CompileError::Parse(_),
                             ..
-                        }
+                        })
                     ),
                     "expected a parse diagnostic"
                 );
@@ -867,10 +858,10 @@ pub(crate) mod tests {
                 assert!(
                     matches!(
                         diagnostics,
-                        StaticDiagnostics::Compile {
-                            error: CompileError::Types(_),
+                        StaticDiagnostics::Compile(Uncompiled {
+                            error: crate::CompileError::Types(_),
                             ..
-                        }
+                        })
                     ),
                     "expected type diagnostics"
                 );

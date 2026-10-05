@@ -22,6 +22,7 @@ use ral_core::typecheck::Form;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
 
+use super::errfmt::report_failed_load;
 use super::frontend::Surface;
 use super::plugin::Keymap;
 use super::theme::OutputTheme;
@@ -453,14 +454,7 @@ fn apply_rc_key(
             };
             for (name, options) in &entries {
                 if let Err(err) = load_rc_plugin(name, options.into_owned(), mooring, shell) {
-                    eprint!(
-                        "{}",
-                        ral_core::diagnostic::format_runtime_error_auto(
-                            shell.sources(),
-                            &err,
-                            None
-                        )
-                    );
+                    report_failed_load(shell, &format!("plugin '{name}'"), &err, None);
                 }
             }
             Ok(())

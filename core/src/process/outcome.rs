@@ -201,16 +201,17 @@ impl WaitOutcome {
     }
 }
 
-/// Why a spawn failed before there was a process.
+/// Why a spawn failed before there was a process.  Its payloads are boxed:
+/// `Error` carries one in its `Status`, and must stay under `result_large_err`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnFailure {
     NotFound,
     /// `found` is the file a `PATH` walk stopped at, when it differs from the
     /// name the user typed.
     PermissionDenied {
-        found: Option<std::path::PathBuf>,
+        found: Option<Box<std::path::Path>>,
     },
-    Io(String),
+    Io(Box<str>),
 }
 
 impl From<&std::io::Error> for SpawnFailure {
@@ -218,7 +219,7 @@ impl From<&std::io::Error> for SpawnFailure {
         match e.kind() {
             std::io::ErrorKind::NotFound => Self::NotFound,
             std::io::ErrorKind::PermissionDenied => Self::PermissionDenied { found: None },
-            _ => Self::Io(e.to_string()),
+            _ => Self::Io(e.to_string().into()),
         }
     }
 }

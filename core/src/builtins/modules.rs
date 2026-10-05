@@ -7,41 +7,44 @@
 //! guard: nothing is cached, so those are what keep repeated loads
 //! terminating.
 //!
-//! [`evaluate_checked`]/[`evaluate_source`] are the sibling door for every
-//! *other* runtime load: [`crate::capability::load_capabilities_from_str`]
-//! and the plugin loader call [`evaluate_source`], the plugin loader with
-//! its manifest contract; the REPL's rc loader, which renders type errors
-//! itself, calls [`evaluate_checked`] with an already-checked `Toplevel`.
+//! [`evaluate_source`] is the sibling door for every *other* runtime load:
+//! the rc and profiles, a plugin (with its manifest contract), a capability
+//! file, exarch's agent library.  Both doors compile through [`check_source`],
+//! so a file that fails to compile reaches every caller as an `Error`
+//! carrying its [`Uncompiled`] report.
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
-use crate::types::{Break, Env, Mooring, Settled, Shell, Site, Value, sig};
+use crate::types::{Break, Env, Error, Mooring, Settled, Shell, Site, Value, sig};
+use crate::{Uncompiled, source::Source};
 use std::sync::Arc;
 
 use super::util::as_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
-/// Evaluate an already-checked `top` under the cycle-detection stack and
-/// depth guard, registering its `source` text under `virtual_path`, in the
-/// caller's own scope.
+/// Compile `source` under `virtual_path` and run it in the caller's own
+/// scope, its defines landing in `shell.env`.
 ///
-/// Errors come back raw; each caller prefixes its own surface name
-/// (`use:`, `capability file <path>:`).
+/// The path is virtual: the caller owns the filesystem read; this only
+/// names the registered source and keys the cycle stack.  `contract` is the
+/// loading form's declared table, whose closed keyset `source`'s returned row
+/// is held to — the plugin loader's door, for a manifest's fields — in the
+/// same check as the rest of the file.
 ///
 /// # Errors
-/// Returns `Err` if `virtual_path` is already on the module stack (a
-/// circular dependency), if the depth limit is exceeded, or if evaluating
-/// `top` fails.
-pub fn evaluate_checked(
+/// A compile failure, a broken `contract` among them, as an [`Uncompiled`]
+/// error; a circular dependency or the depth limit; or the file's own failure.
+pub fn evaluate_source(
     mooring: &Mooring,
     shell: &mut Shell,
-    top: &std::sync::Arc<Toplevel>,
     source: &str,
     virtual_path: &str,
+    contract: Option<crate::typecheck::ReturnContract>,
 ) -> Settled<Value> {
+    let top = check_source(source, virtual_path, shell, contract)?;
     let load = ModuleLoad {
-        top,
+        top: &top,
         virtual_path,
         source_text: source,
     };
@@ -55,60 +58,7 @@ pub fn evaluate_checked(
     ran.outcome
 }
 
-/// Parse, elaborate, check, and evaluate `source` under `virtual_path`.
-///
-/// The path is virtual: the caller owns the filesystem read; this only
-/// names the registered source and keys the cycle stack.  `contract` is the
-/// loading form's declared table, whose closed keyset `source`'s returned row
-/// is held to — the plugin loader's door, for a manifest's fields — in the
-/// same check as the rest of the file.
-///
-/// # Errors
-/// Returns `Err` if `source` fails to compile, breaks `contract`, or for any
-/// error from [`evaluate_checked`].
-pub fn evaluate_source(
-    mooring: &Mooring,
-    shell: &mut Shell,
-    source: &str,
-    virtual_path: &str,
-    contract: Option<crate::typecheck::ReturnContract>,
-) -> Settled<Value> {
-    let top = check_source(source, virtual_path, shell, contract)?;
-    evaluate_checked(mooring, shell, &top, source, virtual_path)
-}
-
 // ── Phrases (§10.3) ─────────────────────────────────────────────────────
-
-/// Elaborate and typecheck `source_text` into a [`Toplevel`], seeded from
-/// the live session's schemes.  The `FileId` is peeked, not minted, on the
-/// same promise [`check_source`] relies on: [`module_phrases`]'s
-/// `install_script_context` call, a moment later, is the one registration
-/// in between.  Also the binding-lease harvest seam, mirroring
-/// [`check_source`]: every name the file references counts as a real use.
-fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) -> Settled<Toplevel> {
-    let file = shell.session.sources.next_id();
-    let ast =
-        crate::syntax::parser::parse_with(source_text, file).map_err(|e| sig(e.to_string()))?;
-    let bindings = shell
-        .session_schemes()
-        .bindings
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
-    let top = crate::elaborator::elaborate(&ast, bindings, virtual_path)
-        .map_err(|e| sig(e.to_string()))?;
-    let top = crate::typecheck::typecheck(&top, shell.session_schemes(), None).map_err(|errs| {
-        sig(errs
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"))
-    })?;
-    if shell.local.bindings.armed() {
-        shell.local.bindings.renew(top.referenced_names());
-    }
-    Ok(top)
-}
 
 /// A compiled module ready to run: what both loaders hand [`module_phrases`].
 #[derive(Clone, Copy)]
@@ -120,7 +70,7 @@ struct ModuleLoad<'a> {
 
 /// Run `load`'s phrases under `mode`, guarded by the cycle check, the depth
 /// limit and the module-stack frame: the one door every runtime load goes
-/// through, `use` and [`evaluate_checked`] alike.  `use` is a native, so
+/// through, `use` and [`evaluate_source`] alike.  `use` is a native, so
 /// [`command_call::run_host_thunk`](crate::runtime::command_call) already
 /// records its own audit frame; this records nothing further.
 ///
@@ -201,7 +151,7 @@ fn check_source(
     virtual_path: &str,
     shell: &mut Shell,
     contract: Option<crate::typecheck::ReturnContract>,
-) -> Settled<std::sync::Arc<Toplevel>> {
+) -> Settled<Toplevel> {
     let file = shell.session.sources.next_id();
     let top = crate::compile_and_typecheck(
         source,
@@ -210,8 +160,12 @@ fn check_source(
         virtual_path,
         contract,
     )
-    .map(std::sync::Arc::new)
-    .map_err(|e| sig(e.to_string()))?;
+    .map_err(|error| {
+        Error::from(Uncompiled {
+            error,
+            source: Source::from_text(virtual_path, source),
+        })
+    })?;
     if shell.local.bindings.armed() {
         shell.local.bindings.renew(top.referenced_names());
     }
@@ -278,7 +232,7 @@ pub(crate) fn builtin_use(
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
     let source = read_and_normalize(&abs_path, shell)?;
-    let top = compile_toplevel(&source, &abs_path, shell).map_err(tag_loader_error)?;
+    let top = check_source(&source, &abs_path, shell, None).map_err(tag_loader_error)?;
 
     let env = shell.env.clone();
     let load = ModuleLoad {
@@ -289,9 +243,7 @@ pub(crate) fn builtin_use(
     // `Mode::Module` never writes `shell.env` (only `Session` does),
     // so the module's own top-level names die with `env` here — no save or
     // restore needed to keep them from leaking into the caller.
-    let ran = module_phrases(load, env, Mode::Module, mooring, shell);
-
-    let ran = ran.map_err(tag_loader_error)?;
+    let ran = module_phrases(load, env, Mode::Module, mooring, shell).map_err(tag_loader_error)?;
     ran.outcome.map_err(tag_loader_error)?;
     let bindings: Vec<(String, Value)> = ran
         .defined

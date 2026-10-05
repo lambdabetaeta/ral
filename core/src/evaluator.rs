@@ -38,7 +38,7 @@ pub(crate) struct Ran {
     pub(crate) outcome: Settled<Value>,
 }
 
-/// Whose phrases these are.  Leases belong to `Session` alone; the host loading door (`evaluate_checked` — rc, a
+/// Whose phrases these are.  Leases belong to `Session` alone; the host loading door (`evaluate_source` — rc, a
 /// plugin, a capability file) and a `use` body run under a mode that leases
 /// nothing.  Only `Session` writes each landed `Define` back into
 /// `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run

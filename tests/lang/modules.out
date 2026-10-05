@@ -3,7 +3,7 @@ true
 true
 true
 7 use: boom
-use: @18..24: undefined variable: $local
+use: undefined variable: $local
 1 42 hidden
 true
 module tests done

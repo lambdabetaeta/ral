@@ -12,6 +12,7 @@ use ral_core::typecheck::builtins::{closed_record, closed_variant, fun, mk_schem
 use ral_core::typecheck::{Row, Scheme, Ty, Unifier};
 use ral_core::types::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled,
+    Status,
 };
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
@@ -125,7 +126,10 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     }
     let paths: Vec<std::path::PathBuf> = boot.capabilities.iter().map(Into::into).collect();
     ral_core::capability::apply_session_profiles(mooring, shell, &paths).map_err(|e| match e {
-        Break::Error(e) => Break::Error(Error::new(format!("--capabilities: {}", e.message), 2)),
+        Break::Error(mut e) => {
+            e.status = Status::Raised(2);
+            Break::Error(e.context("--capabilities"))
+        }
         escape @ Break::Escape(_) => escape,
     })?;
     if shell.is_interactive() {

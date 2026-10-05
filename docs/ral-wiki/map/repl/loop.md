@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 375e8477
+generated_at_commit: 22d70dff
 generated_at_date: 2026-10-05
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
@@ -95,19 +95,21 @@ engine's shell.
 Each startup file has one contract on its return value: a profile is sourced
 for its effects and returns `()`; the rc returns a configuration record. An
 `exit` in either ends the session with its status; any other failure is
-reported and the boot goes on. The rc goes through `compile_and_typecheck`
-against the live session, against the `FileId` `evaluate_checked` registers
-its text with, so an alias or function it defines keeps naming the rc for the
-whole session. It compiles under a **return contract**
+reported and the boot goes on. The rc goes through `modules::evaluate_source`,
+compiled against the live session and the `FileId` its text is registered
+with, so an alias or function it defines keeps naming the rc for the whole
+session. It compiles under a **return contract**
 (`ral_core::typecheck::ReturnContract`): `contract::declared(Form::Rc)`, whose
 closed keyset the rc's own returned *row* is held to — the same rule
 `within`/`grant` options get, extended to a program's own return value. It is
 the inferred row and not the syntax that produced it, so a key misspelled
 inside a spread is caught with one written out; a return carrying no row (a
-`Map`) meets the same keyset at `apply_rc_config` instead. Both failing
-`CompileError` arms — `Parse` and `Types`, a broken contract among the
-latter — are *reported and skipped*: the file has no runnable annotation,
-while the boot always survives
+`Map`) meets the same keyset at `apply_rc_config` instead. A file that does
+not compile — a parse or type error, a broken contract among the latter — is
+*reported and skipped*: `errfmt::report_failed_load` prints the caret report
+its `Error::uncompiled` carries ([[map/core/diagnostics|diagnostics]]), then
+names the file `skipped, since it does not compile`, as against `sourcing
+stopped at the error above` for one that failed partway; the boot always survives
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), the
 whole rc unapplied rather than only the offending key. A *computed* rc return
 (a bound variable, a call) is invisible to the contract and stays on
@@ -217,7 +219,9 @@ the structural worksheet projection, and completion live in
   optional `value_color`, default yellow) governs value rendering;
   process-global behind an `RwLock`, set once from the boot's answer.
 - `errfmt.rs` — the REPL-styled plugin notices (the breaker's disable notice,
-  a plugin warning), beside core's full ariadne renderer.
+  a plugin warning), beside core's full ariadne renderer, and
+  `report_failed_load`, the one printer for a failed rc, profile, or plugin
+  load: the report, then a `ral: WHAT: …` line saying how far it got.
 - `cursor.rs` — the zsh-style partial-line marker, written before each
   rustyline prompt. On Unix it is `PROMPT_SP`'s fill-and-erase — `%`, then
   `width − 1` spaces, then `\r\x1b[K` — which leaves the `%` only when the

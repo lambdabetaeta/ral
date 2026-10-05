@@ -1,7 +1,7 @@
 //! Module-loader state.
 //!
 //! Nothing about a load is cached, so this stack is all that keeps a
-//! recursive `use` terminating.  `evaluate_checked` in
+//! recursive `use` terminating.  `module_phrases` in
 //! `core/src/builtins/modules.rs` is the sole mutator, popping even when
 //! a load fails.
 

@@ -87,7 +87,7 @@ impl Missing {
             Self::NotExecutable(found) => Error::spawn_failure(
                 shown,
                 SpawnFailure::PermissionDenied {
-                    found: Some(found.clone()),
+                    found: Some(found.as_path().into()),
                 },
             ),
         }

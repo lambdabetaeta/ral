@@ -122,7 +122,7 @@ fn rc_value_type_error_skips_file_but_boots() {
     let rc = "let marker = 'applied'\nlet bad = [a: 1]\nreturn $bad[b]\n";
     let r = boot_with_rc(rc, "return marker-absent\n");
     assert!(
-        r.stderr.contains("skipped due to type errors"),
+        r.stderr.contains("skipped, since it does not compile"),
         "the rc file must be skipped; stderr was:\n{}",
         r.stderr
     );
@@ -145,7 +145,7 @@ fn rc_stage_shape_error_skips_file_but_boots() {
     let rc = "let marker = 'applied'\necho foo | length\n";
     let r = boot_with_rc(rc, "return booted\n");
     assert!(
-        r.stderr.contains("T0050") && r.stderr.contains("skipped due to type errors"),
+        r.stderr.contains("T0050") && r.stderr.contains("skipped, since it does not compile"),
         "an rc stage-shape error must skip the file; stderr was:\n{}",
         r.stderr
     );

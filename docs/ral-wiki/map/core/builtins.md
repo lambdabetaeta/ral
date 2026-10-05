@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 647fab03
-generated_at_date: 2026-10-02
+generated_at_commit: 22d70dff
+generated_at_date: 2026-10-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -211,10 +211,12 @@ Bodies are grouped by concern, one submodule each:
   record and admits it with `Site::admit_module`, holding each function to the
   scheme the module was checked at),  and the host loading door every
   runtime script load shares. `evaluate_source` is the shared parse +
-  elaborate + evaluate core — `check_source` compiles against the live
-  session, peeking the `FileId` its own registration will mint so the
-  module's spans carry its real identity, and `module_phrases` holds the
-  cycle stack and depth bound, the one door both `evaluate_checked` and
+  elaborate + evaluate core — `check_source`, the compile door `use` shares,
+  checks against the live session, peeking the `FileId` its own registration
+  will mint so the module's spans carry its real identity, and hands back a
+  failure as an `Error` carrying its `Uncompiled` report
+  ([[map/core/diagnostics|diagnostics]]); `module_phrases` holds the
+  cycle stack and depth bound, the one door both `evaluate_source` and
   `use` run their phrases through; `use` is a scope-projecting caller of
   that door, running under the session environment rather than the caller's
   own block-local scope. Module loads carry no cache, so the guards keep

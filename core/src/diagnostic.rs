@@ -1,7 +1,6 @@
 //! Every user-visible parse, type, and runtime error is rendered here: through
 //! `ariadne` when a span points somewhere, as a one-liner when it does not.
 
-use crate::CompileError;
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use crate::run::StaticDiagnostics;
 use crate::source::{SourceDb, Span, byte_to_line_col};
@@ -9,6 +8,7 @@ use crate::syntax::lexer::LexErrorKind;
 use crate::syntax::parser::ParseError;
 use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
+use crate::{CompileError, Uncompiled};
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -305,37 +305,28 @@ pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeErro
 }
 
 /// Every error in `errs`, one caret report each.
-///
-/// The script and `--check` paths call this directly; every host on the
-/// protocol reaches it through [`format_static_diagnostics`].  The module
-/// loaders still print `Display`.
 pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) -> String {
     errs.iter()
         .map(|e| format_type_error_ariadne(file, source, e))
         .collect()
 }
 
-/// A run that never reached evaluation, rendered whole, with its exit status.
-///
-/// The status is 2 for a parse failure, 1 for a type failure, and the host
-/// error's own otherwise.  The one place static diagnostics become text, so
-/// every host prints the same report.
+/// The one place a compile failure becomes text — a run's or a loaded file's —
+/// with the status a run that failed so exits on: 2 for a parse failure, 1 for
+/// a type failure.
+fn render_uncompiled(Uncompiled { error, source }: &Uncompiled) -> (String, i32) {
+    let (file, text) = (source.name(), source.as_str());
+    match error {
+        CompileError::Parse(e) => (format_parse_error_ariadne(file, text, e), 2),
+        CompileError::Types(errs) => (format_type_errors_ariadne(file, text, errs), 1),
+    }
+}
+
+/// A run that never reached evaluation, rendered whole, with its exit status:
+/// the compile failure's, or the host error's own.
 pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i32) {
     match diagnostics {
-        StaticDiagnostics::Compile {
-            error: CompileError::Parse(error),
-            source,
-        } => (
-            format_parse_error_ariadne(source.name(), source.as_str(), error),
-            2,
-        ),
-        StaticDiagnostics::Compile {
-            error: CompileError::Types(errors),
-            source,
-        } => (
-            format_type_errors_ariadne(source.name(), source.as_str(), errors),
-            1,
-        ),
+        StaticDiagnostics::Compile(uncompiled) => render_uncompiled(uncompiled),
         StaticDiagnostics::Host(e) => (
             render_messageless(None, &e.message, e.hint.as_deref()),
             e.exit_code(),
@@ -377,7 +368,8 @@ pub(crate) fn format_runtime_error_ariadne(
     )
 }
 
-/// Compact only when the error stayed inside `compact_root`'s file — the id
+/// A loaded file that failed to compile draws its own report.  Otherwise
+/// compact only when the error stayed inside `compact_root`'s file — the id
 /// of an input that compiled to a single command.
 ///
 /// Shape alone will not do: `boom` at the prompt is one command, but as an
@@ -392,8 +384,9 @@ pub fn format_runtime_error_auto(
     err: &crate::types::Error,
     compact_root: Option<crate::source::FileId>,
 ) -> String {
-    match compact_root {
-        Some(root) if err.span.is_none_or(|sp| sp.file == root) => {
+    match (&err.uncompiled, compact_root) {
+        (Some(uncompiled), _) => render_uncompiled(uncompiled).0,
+        (None, Some(root)) if err.span.is_none_or(|sp| sp.file == root) => {
             format_runtime_error_compact(err)
         }
         _ => format_runtime_error_ariadne(
@@ -560,6 +553,21 @@ mod tests {
         let mut db = SourceDb::default();
         let id = db.register(Source::from_text(name, text));
         (db, id)
+    }
+
+    /// A loaded file's compile failure draws its own report, even where the
+    /// error would otherwise render compact.
+    #[test]
+    fn uncompiled_error_renders_its_compile_report() {
+        let span = Span::new(FileId::DUMMY, 4, 5);
+        let err = crate::types::Error::from(Uncompiled {
+            error: CompileError::Parse(parse_error_with("expected ]", Some(span))),
+            source: Source::from_text("plugin.ral", "let [x"),
+        });
+        let (db, root) = db_with("main.ral", "load-plugin plugin");
+        let out = format_runtime_error_auto(&db, &err, Some(root));
+        assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
+        assert_eq!(err.message, "parse error: expected ]");
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub struct Error {
     /// The shown name of the command whose failure this is; `None` until
     /// `evaluator::audit`'s `name_failure` stamps the innermost dispatch.
     pub(crate) command: Option<Box<str>>,
+    /// A loaded file that failed to compile: renderers draw its report, not
+    /// `message`.
+    pub uncompiled: Option<Box<crate::Uncompiled>>,
 }
 
 /// An error's exit status: one constructor per fact, whichever door reported it.
@@ -60,13 +63,18 @@ impl Status {
 
 impl Error {
     pub fn new(message: impl Into<String>, status: i32) -> Self {
+        Self::with_status(message, Status::Raised(status))
+    }
+
+    fn with_status(message: impl Into<String>, status: Status) -> Self {
         Self {
             message: message.into(),
-            status: Status::Raised(status),
+            status,
             span: None,
             hint: None,
             witness: None,
             command: None,
+            uncompiled: None,
         }
     }
 
@@ -74,14 +82,7 @@ impl Error {
     /// `is_cancelled()`) and answers `Some` by ending the evaluation with an
     /// error; every such site mints that error through `Error::cancelled(cause)`.
     pub(crate) fn cancelled(cause: CancelCause) -> Self {
-        Self {
-            message: cause.message().into(),
-            status: Status::Cancelled(cause),
-            span: None,
-            hint: None,
-            witness: None,
-            command: None,
-        }
+        Self::with_status(cause.message(), Status::Cancelled(cause))
     }
 
     pub(crate) fn cancelled_by(&self) -> Option<CancelCause> {
@@ -104,14 +105,7 @@ impl Error {
     /// the spawn itself found out.
     pub(crate) fn spawn_failure(cmd: &str, failure: SpawnFailure) -> Self {
         let failure = CommandFailure::Spawn(failure);
-        Self {
-            message: failure.message(cmd),
-            status: Status::Process(failure),
-            span: None,
-            hint: None,
-            witness: None,
-            command: None,
-        }
+        Self::with_status(failure.message(cmd), Status::Process(failure))
     }
 
     /// A bare exit code takes its hint from the session's `exit_hints` table.
@@ -125,12 +119,8 @@ impl Error {
             _ => None,
         });
         Self {
-            message: failure.message(cmd),
-            status: Status::Process(failure),
-            span: None,
             hint,
-            witness: None,
-            command: None,
+            ..Self::with_status(failure.message(cmd), Status::Process(failure))
         }
     }
 
@@ -176,3 +166,15 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// A loaded file's compile failure: a plain message for a handler to read,
+/// the whole report for a renderer to draw.
+impl From<crate::Uncompiled> for Error {
+    fn from(uncompiled: crate::Uncompiled) -> Self {
+        let message = uncompiled.error.to_string();
+        Self {
+            uncompiled: Some(Box::new(uncompiled)),
+            ..Self::new(message, 1)
+        }
+    }
+}

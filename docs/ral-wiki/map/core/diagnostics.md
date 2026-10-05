@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2339a364
-generated_at_date: 2026-09-22
+generated_at_commit: 22d70dff
+generated_at_date: 2026-10-05
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -60,15 +60,21 @@ project it — a trail entry, `try`'s error — carry an optional
 `` site: `just [script, line, col] | `none ``.
 
 Parse and type errors render against the source they were just handed, so their
-entry points still take `(file, source)` strings: a module's *compile* error is
-surfaced by the loader as a plain message, never reaching the runtime renderer.
-A run that never reached evaluation carries its `StaticDiagnostics` (`run.rs`)
-instead of registering into the session's `SourceDb`: the spanned arm
-(`Compile`, wrapping a `CompileError` of `Parse` or `Types`) holds its own `Source`, since a failed compile leaves no
-live span to justify a permanent, unreclaimable registry slot; `Host` is a
-spanless pre-run failure (an unknown hook, a non-ground argument). This is what
-every host on the wire renders through `Report::Static`
-([[map/core/engine-protocol|engine-protocol]]).
+entry points still take `(file, source)` strings. **A compile failure carries
+its own text**: `Uncompiled` (`lib.rs`) pairs the `CompileError`, of `Parse`
+or `Types`, with its `Source` instead of registering into the session's
+`SourceDb`, since a failed compile leaves no live span to justify a permanent,
+unreclaimable registry slot. A run that never reached evaluation carries one
+in its `StaticDiagnostics` (`run.rs`) — `Compile(Uncompiled)`, beside `Host`, a
+spanless pre-run failure (an unknown hook, a non-ground argument) — which is
+what every host on the wire renders through `Report::Static`
+([[map/core/engine-protocol|engine-protocol]]). A file loaded at runtime — a
+`use`d module, the rc, a plugin, a capability profile — carries one on the
+runtime `Error` instead, as `Error::uncompiled`, from the loaders' one compile
+door (`modules::check_source`). Its `message` stays the plain sentence a `try`
+handler reads (`use: parse error: …`), and its `span` is left to the break
+path's stamp, so `$err[site]` names the `use` that failed: the compile span
+cannot go there, its peeked `FileId` being the one the next registration mints.
 
 ## Rendering — `core/src/diagnostic.rs`
 
@@ -80,10 +86,14 @@ one-liner is used instead. The per-stage entry points are
 (resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
 `shell_warning` for unstructured command-layer output. Every caret report is one `CaretReport` — code, message, primary and optional
 secondary `LabelRange`, hint — so the single ariadne core takes the bundle
-rather than a spread of arguments. Color is gated through `ansi::use_color`. `format_static_diagnostics` is `StaticDiagnostics`'s own
-renderer — the one place a static failure becomes text and an exit status (2
-parse, 1 type, the host error's own otherwise) together, so every host prints
-the same report.
+rather than a spread of arguments. Color is gated through `ansi::use_color`.
+`render_uncompiled` is the one place a compile failure becomes text, beside
+its exit status (2 parse, 1 type). `format_static_diagnostics` dispatches a
+static failure's `Uncompiled` to it, or renders a `Host` error with that
+error's own status; `format_runtime_error_auto` dispatches to it ahead of
+either runtime form whenever the `Error` carries one. So a broken plugin,
+module, rc or profile prints, at every door, the report its own run as a
+script would.
 
 `format_runtime_error_auto` picks between the two by asking where the error
 came from, not what the input looked like: it takes `compact_root:

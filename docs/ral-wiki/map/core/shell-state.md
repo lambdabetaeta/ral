@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1776d222
-generated_at_date: 2026-09-26
+generated_at_commit: 22d70dff
+generated_at_date: 2026-10-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -202,7 +202,7 @@ checkpoint, since a run never writes it.
   re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
   clock, and a lease is renewed by reference at both harvest seams — the
   run's own compiled program, and a runtime-compiled `use` load
-  (`check_source` / `compile_toplevel` in `core/src/builtins/modules.rs`) —
+  (`check_source` in `core/src/builtins/modules.rs`) —
   each reading `ir::referenced_names` off what it just compiled
   ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install

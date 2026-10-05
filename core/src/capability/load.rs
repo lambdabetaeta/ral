@@ -112,10 +112,7 @@ pub fn apply_session_profiles(
 
 fn wrap(virtual_path: &str, e: Break) -> Break {
     match e {
-        Break::Error(err) => Break::Error(crate::types::Error::new(
-            format!("capability file {virtual_path}: {}", err.message),
-            err.exit_code(),
-        )),
+        Break::Error(err) => Break::Error(err.context(format!("capability file {virtual_path}"))),
         other @ Break::Escape(_) => other,
     }
 }

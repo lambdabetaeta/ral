@@ -2412,7 +2412,7 @@ use: circular dependency: a.ral -> b.ral -> a.ral
 
 The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
 
-`use` checks filesystem read authority before reading. A denied load fails before the module body runs. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `use:`.
+`use` checks filesystem read authority before reading. A denied load fails before the module body runs. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the failure reads the plain message, and its `site` is the `use`.
 
 ### 10.5. Persistent sessions
 

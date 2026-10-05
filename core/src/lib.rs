@@ -88,9 +88,9 @@ pub(crate) fn compile(source: &str) -> Result<Toplevel, ParseError> {
     parse(source).and_then(|ast| elaborate(&ast, std::collections::HashSet::default(), ""))
 }
 
-/// Why [`compile_and_typecheck`] produced no toplevel, kept structured so
-/// the rendering choice stays at the call site.
-#[derive(Debug)]
+/// Why [`compile_and_typecheck`] produced no toplevel, kept structured until
+/// it is rendered.
+#[derive(Debug, Clone)]
 pub enum CompileError {
     Parse(ParseError),
     Types(Vec<TypeError>),
@@ -102,16 +102,22 @@ impl std::fmt::Display for CompileError {
         match self {
             Self::Parse(e) => write!(f, "{e}"),
             Self::Types(errors) => {
-                for (i, e) in errors.iter().enumerate() {
-                    if i > 0 {
-                        writeln!(f)?;
-                    }
-                    write!(f, "{e}")?;
-                }
-                Ok(())
+                let lines: Vec<String> = errors.iter().map(|e| e.kind.render_message()).collect();
+                f.write_str(&lines.join("\n"))
             }
         }
     }
+}
+
+/// A [`CompileError`] with the text its carets point into.
+///
+/// That text is never registered in the session's
+/// [`SourceDb`](source::SourceDb): a failed compile leaves no live span behind,
+/// and the registry is append-only because live spans index it.
+#[derive(Debug, Clone)]
+pub struct Uncompiled {
+    pub error: CompileError,
+    pub source: source::Source,
 }
 
 /// Parse, elaborate, and typecheck `source` against the live session.

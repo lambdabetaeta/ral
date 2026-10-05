@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e2b7067b
-generated_at_date: 2026-09-23
+generated_at_commit: 22d70dff
+generated_at_date: 2026-10-05
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
@@ -178,7 +178,13 @@ safe inside editor callbacks where no dispatch may run.
   which takes a name alone, passes the empty map. The door then commits the
   hooks and aliases and enquires `` `repl-plugin `loaded ``; any failure
   past the commit — the host's refusal included — rolls the plugin's whole
-  namespace back. The engine keeps its own registry of what it committed,
+  namespace back. A failed `load-plugin` is printed, not raised, through
+  `errfmt::report_failed_load`, as a failed rc `plugins:` entry is: a plugin
+  that does not compile shows the caret report it would as a script
+  ([[map/core/diagnostics|diagnostics]]), then `ral: plugin 'NAME': skipped,
+  since it does not compile`, since the report names only the file. The
+  `plugins-check` recipe greps stderr for `plugin 'NAME':`, which that line
+  and a runtime failure's message both carry. The engine keeps its own registry of what it committed,
   `ReplScratch.plugins` (`{name, aliases}`), for `check_not_loaded` and
   unload. Unloading is the exact inverse: the host is told first and may
   refuse, then the hooks and aliases go. A load inside a `spawn`ed worker,

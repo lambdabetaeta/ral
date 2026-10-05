@@ -11,6 +11,7 @@ use ral_core::source::Span;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Mooring, Settled};
 use ral_core::{Shell, Value, diagnostic};
 
+use super::super::errfmt::report_failed_load;
 use super::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
 
 /// Why a startup file stopped.
@@ -18,6 +19,8 @@ use super::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
 enum Stop {
     Exit(i32),
     Failed(String),
+    /// Failed, and already reported in full.
+    Reported,
 }
 
 /// Report a failure and carry on; an `exit` ends the boot.
@@ -29,6 +32,7 @@ fn tolerate<T>(outcome: Result<T, Stop>, fallback: T) -> Settled<T> {
             diagnostic::cmd_error("ral", &msg);
             Ok(fallback)
         }
+        Err(Stop::Reported) => Ok(fallback),
     }
 }
 
@@ -111,13 +115,10 @@ fn rc_config(path: &str, mooring: &Mooring, shell: &mut Shell) -> Result<Map, St
     }
 }
 
-/// Read, check, and evaluate one startup file for its caller's contract.
-///
-/// Checked against the live session, so an earlier file's bindings are in
-/// scope for a later one, and compiled against the `FileId` `evaluate_checked`
-/// registers the text under, so the spans of what the file defines keep
-/// naming it for the whole session. `contract` holds the returned row to a
-/// declared table in the same check.
+/// Read and evaluate one startup file for its caller's contract, checked
+/// against the live session, so an earlier file's bindings are in scope for a
+/// later one. `contract` holds the returned row to a declared table in the
+/// same check.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
@@ -130,37 +131,12 @@ fn evaluate(
 ) -> Result<Value, Stop> {
     let src = std::fs::read_to_string(path).map_err(|e| Stop::Failed(format!("{path}: {e}")))?;
     let src = ral_core::source::normalize_source_text(src);
-    let file = shell.sources().next_id();
-    let annotated = match ral_core::compile_and_typecheck(
-        &src,
-        shell.session_schemes(),
-        file,
-        path,
-        contract,
-    ) {
-        Ok(annotated) => annotated,
-        Err(ral_core::CompileError::Parse(e)) => {
-            return Err(Stop::Failed(format!("{path}: {e}")));
-        }
-        Err(ral_core::CompileError::Types(errs)) => {
-            eprint!(
-                "{}",
-                diagnostic::format_type_errors_ariadne(path, &src, &errs)
-            );
-            return Err(Stop::Failed(format!("{path}: skipped due to type errors")));
-        }
-    };
-    let comp = std::sync::Arc::new(annotated);
-    match ral_core::builtins::modules::evaluate_checked(mooring, shell, &comp, &src, path) {
+    match ral_core::builtins::modules::evaluate_source(mooring, shell, &src, path, contract) {
         Ok(v) => Ok(v),
         Err(Break::Error(e)) => {
-            eprint!(
-                "{}",
-                diagnostic::format_runtime_error_auto(shell.sources(), &e, None)
-            );
-            Err(Stop::Failed(format!(
-                "{path}: sourcing stopped at the error above"
-            )))
+            let ran = "sourcing stopped at the error above";
+            report_failed_load(shell, path, &e, Some(ran));
+            Err(Stop::Reported)
         }
         Err(Break::Escape(Escape::Exit(code))) => Err(Stop::Exit(code)),
     }
@@ -254,11 +230,13 @@ mod tests {
     }
 
     /// A malformed literal rc key is a type error, caught before the file
-    /// runs at all.
+    /// runs at all: the literal itself would evaluate without complaint.
     #[test]
     fn rc_bad_literal_field_is_a_type_error() {
-        let err = failure(rc("return [edit_mode: 42]\n"));
-        assert!(err.contains("skipped due to type errors"), "{err}");
+        assert!(matches!(
+            rc("return [edit_mode: 42]\n"),
+            Err(Stop::Reported)
+        ));
     }
 
     #[test]

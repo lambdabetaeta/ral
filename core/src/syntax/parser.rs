@@ -25,7 +25,7 @@ use std::fmt;
 
 // ── Parse Error ──────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,
     /// The offending token, or the opening delimiter for a lexer error.

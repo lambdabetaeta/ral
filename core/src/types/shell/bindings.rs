@@ -297,8 +297,8 @@ mod tests {
 /// harvest: every persistent top-level install routes through
 /// `Shell::note_define` and gets leased while deeper-scope writes
 /// are recorded nowhere, and a committed run's referenced names renew at both
-/// harvest seams — `run`'s own compiled program, and `check_source`'s /
-/// `compile_toplevel`'s runtime-compiled loads. Driven through the public
+/// harvest seams — `run`'s own compiled program, and `check_source`'s
+/// runtime-compiled loads. Driven through the public
 /// `run` door, no exarch involved: the same harness shape as
 /// `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
@@ -704,7 +704,7 @@ mod chokepoint_tests {
     }
 
     /// A `use`d file's reference to a caller-scope name the outer run's own
-    /// program never mentions still renews — the `compile_toplevel` harvest
+    /// program never mentions still renews — the `check_source` harvest
     /// seam, not the run's-own-program seam, catches this one.
     #[test]
     fn used_module_reference_renews() {
@@ -723,7 +723,7 @@ mod chokepoint_tests {
         assert_eq!(
             last_used_of(&shell, "used_ref_x"),
             epoch(&shell),
-            "a used file's own reference must renew via compile_toplevel's harvest"
+            "a used file's own reference must renew via check_source's harvest"
         );
     }
 

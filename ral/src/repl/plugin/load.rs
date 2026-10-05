@@ -21,6 +21,7 @@ use ral_core::{Shell, Value, diagnostic};
 use std::borrow::Cow;
 
 use super::super::enquiry::{Enquiry, PluginNote};
+use super::super::errfmt::report_failed_load;
 use super::load_err;
 use super::manifest::{self, ManifestHandlers};
 
@@ -35,13 +36,9 @@ fn position(shell: &Shell, name: &str) -> Option<usize> {
 fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
     // through it stands on its own defaults.
-    if let Err(Break::Error(e)) = load_plugin(
-        as_str(&args[0], "load-plugin")?,
-        &Map::new(),
-        mooring,
-        shell,
-    ) {
-        diagnostic::cmd_error("load-plugin", &e.message);
+    let name = as_str(&args[0], "load-plugin")?;
+    if let Err(Break::Error(e)) = load_plugin(name, &Map::new(), mooring, shell) {
+        report_failed_load(shell, &format!("plugin '{name}'"), &e, None);
     }
     Ok(Value::Unit)
 }

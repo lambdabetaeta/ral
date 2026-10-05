@@ -2,9 +2,29 @@
 //!
 //! Plugin diagnostics live here.  The full ariadne-rendered errors come
 //! from `ral_core::diagnostic`; these helpers handle the shorter,
-//! REPL-styled notices — disable and warning, not error.
+//! REPL-styled notices — disable and warning — and the line that says what
+//! a failed load left out.
 
 use ral_core::ansi::{self, BOLD_YELLOW, RESET};
+use ral_core::types::Error;
+use ral_core::{Shell, diagnostic};
+
+/// Print a failed load's report, then `ral: {what}: …` saying how far it got:
+/// skipped whole if it never compiled, which a compile report cannot say, or
+/// else `ran`, for a caller with that to say.
+pub(super) fn report_failed_load(shell: &Shell, what: &str, e: &Error, ran: Option<&str>) {
+    eprint!(
+        "{}",
+        diagnostic::format_runtime_error_auto(shell.sources(), e, None)
+    );
+    let why = match e.uncompiled {
+        Some(_) => Some("skipped, since it does not compile"),
+        None => ran,
+    };
+    if let Some(why) = why {
+        diagnostic::cmd_error("ral", &format!("{what}: {why}"));
+    }
+}
 
 /// Format the circuit-breaker's disable notice: `plugin '<name>': hook
 /// '<kind>' disabled for this session (<reason>)`.  Returned as a string (no
