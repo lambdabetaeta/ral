@@ -206,9 +206,8 @@ impl Nudges {
             Err(ProviderError::Truncated { .. }) => {
                 self.repair("truncated".into(), TRUNCATED_MESSAGE, log)
             }
-            // A reply is final; a cancel was asked for; a turn cap would only
-            // buy another MAX_TURNS; every other provider error is the
-            // transport's own.
+            // A reply is final; a cancel was asked for; every other provider
+            // error is the transport's own.
             _ => None,
         }
     }

@@ -182,9 +182,8 @@ impl Avatar {
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.deliberate(&active, Some(item.text()), item.continues(), emit)
         }));
-        // A provider error, a turn cap or an unwind can leave the session
-        // mid-protocol; quiesce now so the next prompt — nudge or user — is
-        // admissible.
+        // A provider error or an unwind can leave the session mid-protocol;
+        // quiesce now so the next prompt — nudge or user — is admissible.
         self.abort_unready();
         let outcome: Result<Outcome, ProviderError> = match attempt {
             Ok(Ok(outcome)) => Ok(outcome),
@@ -508,7 +507,6 @@ fn agent_outcome(r: &Result<Outcome, ProviderError>) -> AgentOutcome {
         Ok(Outcome::Complete | Outcome::Empty) => AgentOutcome::Failed(NO_REPLY_REASON.into()),
         Ok(Outcome::Stopped { reason }) => AgentOutcome::Stopped(reason.clone()),
         Ok(Outcome::Cancelled) => AgentOutcome::Cancelled,
-        Ok(Outcome::Capped) => AgentOutcome::Stopped("turn cap reached".into()),
         Err(e) => AgentOutcome::Failed(e.summary()),
     }
 }

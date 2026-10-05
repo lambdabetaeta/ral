@@ -359,7 +359,7 @@ abandon unfinished children, but never leave live agents registered beneath a
 node that has answered — and **parks**, waiting for a message under its idle
 lease. `` exarch-agents `message `` wakes it into a new exchange; a later `reply`
 overwrites the deposit and notifies again. Only a non-reply finish — failure,
-turn cap, cancellation — settles the entry at once, with its one-line tag.
+stop, cancellation — settles the entry at once, with its one-line tag.
 
 ## Focus is presentation; the idle lease is lifecycle
 

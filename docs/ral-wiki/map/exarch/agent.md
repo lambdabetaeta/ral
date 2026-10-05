@@ -255,11 +255,9 @@ Three nested loops, the same for trunk and child alike:
   the partial, so a `continue` nudge keeps the work as context; *with* captured
   tool calls it dispatches them and continues instead, since returning `Truncated`
   there would strand the protocol in `AwaitingToolResults` and fail the nudge's
-  next `append_user` (X6). A hard `MAX_TURNS` ceiling (250) ends a deliberation whose
-  model never stops calling tools — the headless/autonomous counterpart to
-  interactive Esc — returning `deliberate::Outcome::Capped`. That outcome matches no
-  nudge rule, so `attend` treats it as terminal; re-attending would only spend
-  the ceiling again.
+  next `append_user` (X6). Nothing bounds the number of round-trips: a
+  deliberation ends when the model stops calling tools, or on a cancel or a
+  provider error.
 - **A severed seat runs nothing more.** `attend` breaks at the first
   severance it sees and every park quiesces behind one; `run_batch` answers
   each call left in the batch with the `EngineLost` sentence, and
@@ -422,11 +420,8 @@ reading alone is the whole message. Durability is the log's job, so the nudge
 never asks the model to write state to files.
 
 Everything else is accepted as-is, unspent, and deliberately so: `Replied` (a
-reply is final), `Cancelled` (the human asked), `Capped` (a nudge would only
-buy the deliberation another `MAX_TURNS` after it already burned 250 round
-trips without quiescing — the wrong channel for a terminal condition, which
-already reaches its consumer through `AgentOutcome::Stopped("turn cap
-reached")`), and every unclassified provider error (the transport's own).
+reply is final), `Cancelled` (the human asked), and every unclassified
+provider error (the transport's own).
 
 `Nudges` owns the repair budget `used` and the pin digest last told
 (`pinned_told`); the ladder latches are `gauge::Gauges`' (below), and the

@@ -3262,8 +3262,8 @@ mod tests {
     /// [`crate::bus::AgentOutcome::Cancelled`] to the parent inbox.
     #[test]
     fn ms_lease_child_never_renewed_is_cancelled() {
-        // The ttl must expire well inside the round-trip loop's own
-        // `MAX_TURNS` cap, so the lease and not that cap ends the exchange.
+        // The ttl must expire well inside the scripted round-trips, so the
+        // lease and not the script's end finishes the exchange.
         let ttl = Duration::from_millis(25);
         let parent = Avatar::for_test_with(crate::agent::TestTrunk {
             lease: ttl,

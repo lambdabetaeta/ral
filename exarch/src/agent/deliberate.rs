@@ -1,7 +1,6 @@
 //! One prompt run to quiescence against the provider.
 //!
-//! [`Avatar::deliberate`] drives the provider until it stops calling tools,
-//! bounded by [`MAX_TURNS`] since a headless run has no Esc to hand.
+//! [`Avatar::deliberate`] drives the provider until it stops calling tools.
 //! Auto-eviction is weighed at every turn boundary, against the thresholds in
 //! [`gauge`](crate::agent::gauge); the standing-condition warnings ride the
 //! steering channel at a tool boundary.  [`Avatar::attend`] is the loop around
@@ -20,8 +19,7 @@ use std::io;
 use std::sync::Arc;
 
 /// Outcome of one [`Avatar::deliberate`].  [`Self::Empty`] and
-/// [`Self::Stopped`] become nudges, [`Self::Cancelled`] and [`Self::Capped`]
-/// do not.
+/// [`Self::Stopped`] become nudges, [`Self::Cancelled`] does not.
 #[derive(Debug)]
 pub enum Outcome {
     /// The model spoke and called no tool.
@@ -35,9 +33,6 @@ pub enum Outcome {
         reason: String,
     },
     Cancelled,
-    /// Hit [`MAX_TURNS`] without a tool-call-free reply.  Terminal and
-    /// nudge-free: re-attending would just spend another [`MAX_TURNS`].
-    Capped,
 }
 
 /// Why a deliberation ended short of an [`Outcome`].
@@ -71,11 +66,6 @@ impl From<io::Error> for Fault {
         Self::Log(error.to_string())
     }
 }
-
-/// Hard ceiling on provider round-trips in one [`Avatar::deliberate`].  The
-/// interactive frontend has Esc to halt a runaway; headless and autonomous runs
-/// have nothing.  Generous enough that no genuine deliberation reaches it.
-const MAX_TURNS: u32 = 250;
 
 impl Avatar {
     /// Run one deliberation: optionally commit `prompt`, then drive the
@@ -112,12 +102,7 @@ impl Avatar {
                 .append_user(p, continues)
                 .map_err(Fault::Log)?;
         }
-        let mut n = 0u32;
         loop {
-            n += 1;
-            if n > MAX_TURNS {
-                return Ok(self.capped());
-            }
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand, so there is no point in
             // the loop where the work at issue could leave.
@@ -415,18 +400,6 @@ impl Avatar {
     fn cancelled(&self) -> Outcome {
         self.log.lock().quiesce(QuiesceReason::Cancelled);
         Outcome::Cancelled
-    }
-
-    /// The turn count would exceed [`MAX_TURNS`].  History is left mid-protocol
-    /// for the attend loop's per-item quiesce to wind back; the [`StopReason`]
-    /// reaches the headless JSON so a harness can tell a cap from a completion.
-    fn capped(&self) -> Outcome {
-        self.note_error(&format!(
-            "turn cap reached ({MAX_TURNS} provider round-trips); ending the deliberation"
-        ));
-        self.recorder()
-            .transient(Transient::StopReason("turn_cap".into()));
-        Outcome::Capped
     }
 }
 

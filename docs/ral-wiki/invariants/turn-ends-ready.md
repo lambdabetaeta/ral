@@ -33,12 +33,12 @@ phases exist to prevent.
 
 The invariant that keeps the loop sound: **`Agent::take_up` never hands control
 back to `Agent::attend`'s loop until a fresh prompt is admissible, however the
-exchange ended** — a clean reply, a user cancellation, the turn cap, or a
-surfaced provider error. `Agent::deliberate` commits a prompt (or a tool-result
-batch) before the round-trip it drives, so a failure or a capped turn count
-between that commit and the next assistant reply leaves the machine in an
-`AwaitingAssistant*` phase with no reply recorded. That phase is now a legal
-resting place, and costs nothing: `replied`/`cancelled` call `AgentLog::quiesce`
+exchange ended** — a clean reply, a user cancellation, or a surfaced provider
+error. `Agent::deliberate` commits a prompt (or a tool-result batch) before the
+round-trip it drives, so a failure between that commit and the next assistant
+reply leaves the machine in an `AwaitingAssistant*` phase with no reply
+recorded. That phase is now a legal resting place, and costs nothing:
+`replied`/`cancelled` call `AgentLog::quiesce`
 with `QuiesceReason::Replied`/`Cancelled`, `take_up` calls
 `quiesce(QuiesceReason::Aborted)` whenever `is_ready` does not already hold —
 whether `deliberate` returned cleanly or was caught out of a panic — and
