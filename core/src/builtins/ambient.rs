@@ -41,8 +41,11 @@ pub(super) fn user(shell: &Shell) -> Result<Value, Error> {
     crate::path::user_name(shell.env_overrides())
         .map(Value::string)
         .ok_or_else(|| {
-            Error::new("`user` needs USER (or USERNAME on Windows), and neither is set", 1)
-                .with_hint("set USER, e.g. `within [env: [USER: \"me\"]] { … }`")
+            Error::new(
+                "`user` needs USER (or USERNAME on Windows), and neither is set",
+                1,
+            )
+            .with_hint("set USER, e.g. `within [env: [USER: \"me\"]] { … }`")
         })
 }
 
