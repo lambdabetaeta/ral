@@ -42,9 +42,13 @@ echo !{slice hello 1 3}
 if !{re-match '\.ral$' 'hello.ral'} { echo 'matches' }
 # Expected: matches
 
-# shell-quote
-echo !{shell-quote 'hello world'}
+# posix-quote
+echo !{posix-quote 'hello world'}
 # Expected: 'hello world'
+
+# ral-quote: bare where a bare word reads back the same, else the lightest quote
+echo !{ral-quote hello} !{ral-quote 'hello world'} !{ral-quote '007'} !{ral-quote #'it's'#} !{ral-quote ##'a'#b'##}
+# Expected: hello 'hello world' '007' #'it's'# ##'a'#b'##
 
 # has
 let m = [:, a: 1, b: 2]

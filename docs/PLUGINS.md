@@ -97,7 +97,7 @@ needs to know.
 | `_ed-accept` | `Returns Unit` | run buffer on return |
 | `_ed-tui` | `∀ν α. {ν α} → Returns [output: Str, status: Int]` | suspend editor, run body, capture stdout |
 | `_ed-history` | `Str → Int → Returns [Str]` | prefix search (limit 0 = all) |
-| `_ed-parse` | `Returns [words: [Str], current: Int, offset: Int]` | tokenise buffer |
+| `_ed-parse` | `Returns [words: [Str], current: Int, offset: Int]` | the simple command at the cursor |
 | `_ed-ghost` | `Str → Returns Unit` | set suggestion after cursor |
 | `_ed-highlight` | `[[start: Int, end: Int, style: Str]] → Returns Unit` | set spans |
 | `_ed-state` | `α:data → {α → Returns α} → Returns α` | per-plugin persistent cell |
@@ -123,13 +123,14 @@ status 1 rather than raised.
 **`_ed-history`.** Entries are returned most recent first,
 deduplicated. `_ed-history '' 0` returns the full history.
 
-**`parse`.** Returns tokens of the simple command containing the
-cursor. `current` is the token the cursor is in or immediately
-after; `offset` is its character index in the buffer. Empty buffer
-and unparseable input both yield `[words: [], current: 0, offset: 0]`.
-The current implementation is a whitespace-aware tokeniser that
-respects single and double quotes and splits on shell metacharacters;
-it does not yet use the full ral parser.
+**`_ed-parse`.** Returns the words of the simple command around the
+cursor: ral's own tokens, split at `|`, `?`, `;`, newlines and braces,
+with any `{` or `[` still open read as closed, since a buffer is
+routinely mid-block. `words[current]` is the word the cursor touches
+and `offset` its character index; a cursor in whitespace stands on a
+fresh `''` spliced in at its own offset, as bash's `COMP_CWORD` does.
+`words` is empty exactly when the buffer does not lex, as inside an
+open quote.
 
 **`ghost`.** Empty string clears. Ghost text is a display artifact,
 not part of `text`. Last writer wins across plugins.
@@ -410,275 +411,177 @@ without a wrapping block.
 
 ## 10 Examples
 
-### 10.1 CTRL-T — insert files at cursor
+The fzf plugins port fzf's own `key-bindings.zsh` and `completion.zsh`.
+What those scripts share — the option stack, the fzf-tmux switch, the
+exit statuses — is one module, `plugins/lib/fzf.ral`, which each plugin
+binds with `use` at its top level, where the path resolves beside the
+plugin file.
 
-Ported from fzf's `key-bindings.zsh`. Reads `$FZF_CTRL_T_COMMAND`,
-`$FZF_CTRL_T_OPTS`, `$FZF_DEFAULT_OPTS`, `$FZF_DEFAULT_OPTS_FILE` (its
-contents are spliced into the option stack rather than passed through
-as a file), and renders in a tmux pane/popup via fzf-tmux when
-`$TMUX_PANE` and one of `$FZF_TMUX` / `$FZF_TMUX_OPTS` say to.
+### 10.1 The shared module
 
 ```
-return { |options|
-    let key = get $options key "ctrl-t"
-    let _handler = { |ctx|
-        let cmd = try { return !{env}[FZF_CTRL_T_COMMAND] } { |_| return "" }
-        let user = try { return !{env}[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return !{env}[FZF_CTRL_T_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = !{env}[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return !{env}[FZF_TMUX_HEIGHT] } { |_| return "" }
-        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
-        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=file,dir,follow,hidden --scheme=path\n$fopts\n$user $extra -m"
-        let pane = try { return !{env}[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return !{env}[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return !{env}[FZF_TMUX_OPTS] } { |_| return "" }
-        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
-            if !{is-empty $ftm_opts} {
-                return ["-d$height"]
-            } else {
-                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
-            }
-        } else { return [] }
-        let r = _ed-tui {
-            within [env: [
-                FZF_DEFAULT_COMMAND: $cmd,
-                FZF_DEFAULT_OPTS_FILE: "",
-                FZF_DEFAULT_OPTS: $opts,
-            ]] {
-                if $[not !{is-empty $tmux_args}] {
-                    fzf-tmux ...$tmux_args --
-                } else {
-                    fzf
-                }
-            }
-        }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let quoted = intercalate " " !{map $shell-quote !{re-split "\n" $r[output]}}
-            _ed-insert "$quoted "
-        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-            fail [status: $r[status], message: "fzf: $r[output]"]
-        }
-        return ()
-    }
+# What fzf's shell integrations share (__fzf_defaults, __fzfcmd and
+# __fzf_comprun in key-bindings.zsh and completion.zsh), for the fzf-* plugins.
 
-    return [
-        name: "fzf-files",
-        keybindings: [[key: $key, handler: $_handler]],
-    ]
+## $name, or `default` when it is unset or empty: sh's ${name:-default}.
+let var = { |name default| let v = get !{env} $name ''; if !{is-empty $v} { $default } else { $v } }
+
+## Run fzf as fzf's own widgets do — `ours` before the user's options file and
+## FZF_DEFAULT_OPTS, `theirs` after, in a tmux popup when $FZF_TMUX asks — over
+## `walk $command (fzf's walker when '') or `items $list, and give `k` the picks.
+let pick = { |ours theirs src args k|
+    let h = var FZF_TMUX_HEIGHT 40%
+    let [output: out, status: s] = _ed-tui {
+        within [
+            env: [
+                FZF_DEFAULT_OPTS: "--height $h --min-height 20+ --bind=ctrl-z:ignore $ours\n!{from-string < !{var FZF_DEFAULT_OPTS_FILE ''} ? ''}\n!{var FZF_DEFAULT_OPTS ''} $theirs",
+                FZF_DEFAULT_OPTS_FILE: '',
+            ],
+            handlers: [fzf: { |a|
+                if $[not !{is-empty !{var TMUX_PANE ''}} && (!{var FZF_TMUX '0'} != '0' || not !{is-empty !{var FZF_TMUX_OPTS ''}})] {
+                    fzf-tmux ...!{posix-split !{var FZF_TMUX_OPTS "-d$h"}} -- ...$a
+                } else { fzf ...$a }
+            }],
+        ] {
+            case $src [
+                `walk:  { |c| within [env: [FZF_DEFAULT_COMMAND: $c]] { fzf --print0 ...$args } },
+                `items: { |xs| to-string !{intercalate "\0" $xs} | fzf --read0 --print0 ...$args },
+            ]
+        }
+    }
+    if $[$s == 0] { k !{re-find-matches '[^\x00]+' $out} } elsif $[$s != 1 && $s != 130] { fail [status: $s, message: "fzf: $out"] }
 }
 ```
 
-### 10.2 ALT-C — cd to selected directory
+`pick` stacks fzf's options as upstream's `__fzf_defaults` does: `ours`,
+then the contents of `$FZF_DEFAULT_OPTS_FILE`, then `$FZF_DEFAULT_OPTS`,
+then `theirs`. Upstream's `__fzfcmd` becomes a handler on `fzf`, which
+sends every call to `fzf-tmux` when `$TMUX_PANE` and `$FZF_TMUX` or
+`$FZF_TMUX_OPTS` say so. `` `walk $command `` runs fzf over that command,
+or over fzf's own walker when it is empty; `` `items $list `` feeds the
+list. Items and picks travel NUL-separated, so neither a file name nor
+a multi-line history entry is ever split. `k` runs only on a selection:
+fzf's 1 (no match) and 130 (Esc) leave the line alone, and any other
+status fails.
 
-Ported the same way as 11.1, walking directories instead of files and
-selecting a single pick (`+m`). Uses `_ed-push` + `_ed-accept` to
-mirror zsh's `push-line` + `accept-line`: the buffer is saved and
-restored on the next prompt while the `cd` runs immediately. The
-target path is resolved with the `absolute-path` builtin (lexical,
-zsh `:a`-style — no filesystem access, unlike `resolve-path`).
+### 10.2 CTRL-T — insert files at cursor
 
 ```
-return { |options|
-    let key = get $options key "alt-c"
-    let _handler = { |ctx|
-        let cmd = try { return !{env}[FZF_ALT_C_COMMAND] } { |_| return "" }
-        let user = try { return !{env}[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return !{env}[FZF_ALT_C_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = !{env}[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return !{env}[FZF_TMUX_HEIGHT] } { |_| return "" }
-        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
-        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=dir,follow,hidden --scheme=path\n$fopts\n$user $extra +m"
-        let pane = try { return !{env}[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return !{env}[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return !{env}[FZF_TMUX_OPTS] } { |_| return "" }
-        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
-            if !{is-empty $ftm_opts} {
-                return ["-d$height"]
-            } else {
-                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
-            }
-        } else { return [] }
-        let r = _ed-tui {
-            within [env: [
-                FZF_DEFAULT_COMMAND: $cmd,
-                FZF_DEFAULT_OPTS_FILE: "",
-                FZF_DEFAULT_OPTS: $opts,
-            ]] {
-                if $[not !{is-empty $tmux_args}] {
-                    fzf-tmux ...$tmux_args --
-                } else {
-                    fzf
-                }
-            }
+# fzf-files — CTRL-T puts the picked paths at the cursor, as fzf's
+# key-bindings.zsh does.  Reads $FZF_CTRL_T_COMMAND and $FZF_CTRL_T_OPTS.
+# Options: key (default ctrl-t).
+
+let [pick: pick, var: var] = use 'lib/fzf.ral'
+
+{ |options| [
+    name: fzf-files,
+    keybindings: [[key: !{get $options key ctrl-t}, handler: { |_|
+        pick '--reverse --walker=file,dir,follow,hidden --scheme=path' "!{var FZF_CTRL_T_OPTS ''} -m" `walk !{var FZF_CTRL_T_COMMAND ''} [] { |ps|
+            _ed-insert "!{intercalate ' ' !{map $ral-quote $ps}} "
         }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let resolved = absolute-path $r[output]
+    }]],
+] }
+```
+
+`ral-quote` renders each path as ral source; `posix-quote` would not
+do, since a bare `007` reads back as the number 7.
+
+### 10.3 ALT-C — cd to selected directory
+
+```
+# fzf-cd — ALT-C cds into the picked directory, as fzf's key-bindings.zsh
+# does: the line being typed is pushed, and comes back at the next prompt.
+# Reads $FZF_ALT_C_COMMAND and $FZF_ALT_C_OPTS.  Options: key (default alt-c).
+
+let [pick: pick, var: var] = use 'lib/fzf.ral'
+
+{ |options| [
+    name: fzf-cd,
+    keybindings: [[key: !{get $options key alt-c}, handler: { |_|
+        pick '--reverse --walker=dir,follow,hidden --scheme=path' "!{var FZF_ALT_C_OPTS ''} +m" `walk !{var FZF_ALT_C_COMMAND ''} [] { |[d]|
             _ed-push
-            _ed-set [text: `set "cd !{shell-quote $resolved}", cursor: `set 0]
+            _ed-set [text: `set "cd !{ral-quote !{absolute-path $d}}", cursor: `keep]
             _ed-accept
-        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-            fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return ()
-    }
-
-    return [
-        name: "fzf-cd",
-        keybindings: [[key: $key, handler: $_handler]],
-    ]
-}
+    }]],
+] }
 ```
 
-### 10.3 CTRL-R — history search
+`+m` makes the pick single, and `{ |[d]| … }` binds it. `_ed-push` and
+`_ed-accept` are zsh's `push-line` and `accept-line`: the `cd` runs at
+once and the line being typed returns at the next prompt.
+`absolute-path` resolves lexically, as zsh's `cd` then `$PWD` does,
+leaving symlinks as written.
 
-Ported from fzf's `key-bindings.zsh`. History entries flow
-NUL-separated (`--read0`/`--print0`) so multi-line commands survive
-intact; `--multi` allows picking more than one entry, and multiple
-picks join with newlines into the buffer (upstream's ctrl-r is
-single-pick — this port isn't). `alt-r:toggle-raw` and `--wrap-sign`
-are additional fzf features not in the original zsh integration.
-Upstream's `-n2..,..` is omitted: there is no event-number column
-here.
+### 10.4 CTRL-R — history search
 
 ```
-return { |options|
-    let key = get $options key "ctrl-r"
-    let _handler = { |ctx|
-        let query = _ed-lbuffer
-        let entries = _ed-history "" 0
-        let user = try { return !{env}[FZF_DEFAULT_OPTS] } { |_| return "" }
-        let extra = try { return !{env}[FZF_CTRL_R_OPTS] } { |_| return "" }
-        let fopts = try { let optsf = !{env}[FZF_DEFAULT_OPTS_FILE]; return !{from-string < $optsf} } { |_| return "" }
-        let height_env = try { return !{env}[FZF_TMUX_HEIGHT] } { |_| return "" }
-        let height = if !{is-empty $height_env} { return "40%" } else { return $height_env }
-        let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore\n$fopts\n$user --scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi $extra"
-        let pane = try { return !{env}[TMUX_PANE] } { |_| return "" }
-        let ftm = try { return !{env}[FZF_TMUX] } { |_| return "" }
-        let ftm_opts = try { return !{env}[FZF_TMUX_OPTS] } { |_| return "" }
-        let tmux_args = if $[not !{is-empty $pane} && ((not !{is-empty $ftm} && not !{equal $ftm "0"}) || not !{is-empty $ftm_opts})] {
-            if !{is-empty $ftm_opts} {
-                return ["-d$height"]
-            } else {
-                try { return !{shell-split $ftm_opts} } { |_| return ["-d$height"] }
-            }
-        } else { return [] }
-        let hist_nul = intercalate "\0" $entries
-        let r = _ed-tui {
-            within [env: [
-                FZF_DEFAULT_OPTS_FILE: "",
-                FZF_DEFAULT_OPTS: $opts,
-            ]] {
-                if $[not !{is-empty $tmux_args}] {
-                    to-string $hist_nul | fzf-tmux ...$tmux_args -- "--query" $query --read0 --print0
-                } else {
-                    to-string $hist_nul | fzf "--query" $query --read0 --print0
+# fzf-history — CTRL-R replaces the line with the picked history entries,
+# newline-joined, as fzf's key-bindings.zsh does; the line so far is the
+# query.  Reads $FZF_CTRL_R_OPTS.  Options: key (default ctrl-r).
+
+let [pick: pick, var: var] = use 'lib/fzf.ral'
+
+{ |options| [
+    name: fzf-history,
+    keybindings: [[key: !{get $options key ctrl-r}, handler: { |_|
+        pick '' "--scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi !{var FZF_CTRL_R_OPTS ''}" `items !{_ed-history '' 0} [--query, !{_ed-lbuffer}] { |ps|
+            let t = intercalate "\n" !{map { |p| re-replace-all '\n+$' '' $p } $ps}
+            _ed-set [text: `set $t, cursor: `set !{length $t}]
+        }
+    }]],
+] }
+```
+
+Upstream's `-n2..,..` skips an event-number column, and
+`_ed-history` has none to skip.
+
+### 10.5 TAB — `**`-trigger completion
+
+`plugins/fzf-completion.ral` binds `tab` with a guard, so a plain tab
+still reaches ral's own completer and only a word ending in the trigger
+(`**`, or `$FZF_COMPLETION_TRIGGER` at load) claims the key. `_ed-parse`
+supplies the command word, the word before the cursor's, and the word
+itself; a map from command word to completer stands in for upstream's
+`_fzf_complete_<command>` functions, with each of
+`$FZF_COMPLETION_DIR_COMMANDS` mapped to the directory completer and
+path completion as the default:
+
+```
+{ |options|
+    let trigger = get $options trigger !{get !{env} FZF_COMPLETION_TRIGGER '**'}
+    [
+        name: fzf-completion,
+        keybindings: [[
+            key: tab,
+            guard: !{intercalate '' ['\S\s+\S*', !{re-replace-all '[.^$*+?()\[\]{}|\\]' '\$0' $trigger}, '$']},
+            handler: { |_|
+                let [words: ws, current: i, offset: o] = _ed-parse
+                let lb = _ed-lbuffer
+                let n = $[!{length $lb} - $o - !{length $trigger}]
+                if $[not !{is-empty $ws} && $n >= 0] {
+                    let [cmd, ..._] = $ws
+                    let t = union !{fold { |m d| [...$m, $d: $_dirs] } [:] !{words !{get !{env} FZF_COMPLETION_DIR_COMMANDS 'cd rmdir'}}} $_by_cmd
+                    let complete = if !{has $t $cmd} { $t[$cmd] } else { $_files }
+                    complete [prefix: !{slice $lb $o $n}, prev: !{last ['', ...!{take $i $ws}]}, lbuf: !{slice $lb 0 $o}]
                 }
-            }
-        }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let picks = filter { |p| return $[not !{is-empty $p}] } !{re-split "\0" $r[output]}
-            let cleaned = map { |p| return !{re-replace "\n*\$" "" $p} } $picks
-            let joined = intercalate "\n" $cleaned
-            _ed-set [text: `set $joined, cursor: `set !{length $joined}]
-        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-            fail [status: $r[status], message: "fzf: $r[output]"]
-        }
-        return ()
-    }
-
-    return [
-        name: "fzf-history",
-        keybindings: [[key: $key, handler: $_handler]],
+            },
+        ]],
     ]
 }
 ```
 
-### 10.4 TAB — `**`-trigger completion
+Path and directory completion walk below the word's longest existing
+directory, the rest of the word being the query, as upstream's
+`__fzf_generic_path_completion` does. ssh and telnet complete hosts from
+`~/.ssh/config`, `~/.ssh/config.d/*`, `/etc/ssh/ssh_config`,
+`~/.ssh/known_hosts` and `/etc/hosts`, parsed in ral rather than awk;
+kill completes PIDs from `ps`. ral has no `export`, `unset` or
+`unalias` to complete, and plugin options cannot carry blocks, so
+upstream's `_fzf_compgen_*` and `_fzf_comprun` overrides have no
+counterpart.
 
-Ported from fzf's `completion.zsh`. Binds `tab` with a `guard` regex
-so that plain tab still falls through to ral's built-in completer;
-only a word ending in the trigger (`**` by default, `$FZF_COMPLETION_TRIGGER`
-at load time) claims the key. Dispatches on the command word to the
-left of the trigger: path/dir completion via `fzf --walker` for most
-commands (`cd`/`rmdir` get dir-only completion via
-`$FZF_COMPLETION_DIR_COMMANDS`), host completion for `ssh`/`telnet`
-(parsed from `~/.ssh/config`, `~/.ssh/known_hosts`, `/etc/hosts`,
-`/etc/ssh/ssh_config` — no `awk`), and PID completion for `kill`. Not
-ported: `export`/`unset`/`unalias` completers, `~user` expansion,
-quoted multi-word prefixes, and the `_fzf_compgen_*` /
-`_fzf_comprun` override hooks.
-
-The manifest, the guard construction, and the dispatch handler:
-
-```
-return { |options|
-    let env_trigger = try { return !{env}[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
-    let trigger = get $options trigger $env_trigger
-
-    let _envor = { |name default|
-        try { return !{env}[$name] } { |_| return $default }
-    }
-
-    # Guard: a word, a gap, then the current word ending in the trigger —
-    # upstream's "tokens > 1 and LBUFFER ends with trigger" check.
-    let _guard-for = { |t|
-        if !{is-empty $t} { return '\S\s+\S*$' } else {
-            let esc = re-replace-all '([.^$*+?()\[\]{}|\\])' '\${1}' $t
-            return !{intercalate '' ['\S\s+\S*', $esc, '$']}
-        }
-    }
-    let tab_guard = _guard-for $trigger
-```
-
-```
-    let _handler = { |ctx|
-        let text = _ed-text
-        let cur = _ed-cursor
-        let lb = _ed-lbuffer
-        let p = _ed-parse
-        let cw = _cur-word $p $text $cur $lb
-        let word = $cw[word]
-        let wn = length $word
-        let tn = length $trigger
-        if $[$wn < $tn] { return () }
-        if $[$tn > 0 && not !{equal !{slice $word $[$wn - $tn] $tn} $trigger}] { return () }
-        let prefix = slice $word 0 $[$wn - $tn]
-        let lbuf = slice $text 0 $cw[off]
-        let seg = last !{re-split '[|;&\n]' $lbuf}
-        let segw = words $seg
-        let cmd = _first-or $segw ''
-        let prev = _last-or $segw ''
-        let d_cmds = words !{_envor 'FZF_COMPLETION_DIR_COMMANDS' 'cd rmdir'}
-        if !{elem $cmd $d_cmds} {
-            _path-complete $prefix $lbuf 'dir'
-        } elsif $[!{equal $cmd 'ssh'} && !{elem $prev ['-i', '-F', '-E']}] {
-            _path-complete $prefix $lbuf 'path'
-        } elsif !{equal $cmd 'ssh'} {
-            _list-complete !{_with-user $prefix !{_hosts}} $prefix $lbuf '+m'
-        } elsif !{equal $cmd 'telnet'} {
-            _list-complete !{_hosts} $prefix $lbuf '+m'
-        } elsif !{equal $cmd 'kill'} {
-            _kill-complete $prefix $lbuf
-        } else {
-            _path-complete $prefix $lbuf 'path'
-        }
-        return ()
-    }
-
-    return [
-        name: 'fzf-completion',
-        keybindings: [[key: 'tab', handler: $_handler, guard: $tab_guard]],
-    ]
-}
-```
-
-The elided body defines `_path-complete` (walks up from the prefix's
-nearest existing directory ancestor, then runs `fzf --walker` rooted
-there), `_list-complete` and `_kill-complete` (feed a candidate list
-or `ps` output to plain `fzf`), and the host-list readers
-`_cfg-hosts` / `_known-hosts` / `_etc-hosts` / `_hosts`.
-
-### 10.5 Syntax highlight (sketch)
+### 10.6 Syntax highlight (sketch)
 
 ```
 let _handler = { |ev|
@@ -718,9 +621,10 @@ releases.
   full prompt string, which is adequate for left-prompt decoration
   but leaves no clean place to contribute to a right-prompt.
 
-- **Full parser in `_ed-parse`.** Replace the whitespace tokeniser
-  with the real ral lexer/parser so that `_ed-parse` returns exactly
-  the same tokens the shell would execute.
+- **The parser in `_ed-parse`.** `_ed-parse` splits the lexer's
+  tokens at separators; reading the parser's simple command instead
+  would also see a cursor inside `$[…]`, a list literal, or a redirect
+  target for what it is.
 
 - **Highlight-style overrides.** A `highlight_styles` key in ralrc
   that remaps each named style to terminal attributes.

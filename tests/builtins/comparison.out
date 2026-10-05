@@ -6,5 +6,5 @@ true true
 [2, 9, 10]
 [10, 9, 2]
 [a, bb, ccc]
-<native upper> <native lower> <native dedent> <native shell-quote> <native shell-split>
+<native upper> <native lower> <native dedent> <native posix-quote> <native posix-split>
 comparison tests done

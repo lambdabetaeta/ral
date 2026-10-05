@@ -3738,9 +3738,12 @@ unless there is exactly one match. Regex operations use the explicit `re-`
 prefix: `re-match`, `re-split`, `re-find-match`, `re-find-matches`,
 `re-replace`, and `re-replace-all`.
 
-`shell-quote` produces a safely quoted shell word; `shell-split` parses shell
-word syntax. They are explicit conversions, not an invitation for ral values to
-be re-lexed automatically.
+`ral-quote` renders a string as one ral word that reads back as that string:
+bare where it can be, quoted where a bare word would read differently, so
+`'007'` stays text. `posix-quote` and `posix-split` are the same pair for POSIX
+shell words, for `sh` and for tools such as fzf that split their options that
+way. All three are explicit conversions, not an invitation for ral values to be
+re-lexed automatically.
 
 `int`, `float`, and `str` convert scalar values. `round x places` returns a
 `Float`, rounds halves away from zero, and accepts 0 through 308 decimal places.
@@ -4275,7 +4278,7 @@ Cursor and span offsets count Unicode characters, not UTF-8 bytes.
 | `_ed-push` | Save the current buffer on a stack and clear it for another command. |
 | `_ed-accept` | Execute the resulting buffer immediately when the handler returns. |
 | `_ed-history prefix limit` | Return matching history, most recent first; zero means no limit. |
-| `_ed-parse` | Return `[words, current, offset]` for the simple command at the cursor. |
+| `_ed-parse` | Return `[words, current, offset]` for the simple command at the cursor, open blocks read as closed: `words[current]` is the word the cursor touches, or a spliced-in `''` when it sits in whitespace, and `offset` is that word's start. `words` is empty when the buffer does not lex. |
 | `_ed-ghost text` | Set suggestion text; an empty string clears it. |
 | `_ed-highlight spans` | Replace highlight spans of shape `[start, end, style]`; an empty list clears them. |
 | `_ed-state default updater` | Read, transform, store, and return one persistent cell belonging to the plugin. |

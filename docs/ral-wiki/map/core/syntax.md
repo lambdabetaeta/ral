@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8d868e18
-generated_at_date: 2026-09-30
+generated_at_commit: b499072e
+generated_at_date: 2026-10-05
 covers_paths: [core/src/syntax/]
 ---
 
@@ -71,10 +71,15 @@ sees raw bytes and bare words.
 - `group.rs` — pre-pass detecting mutually recursive binding groups, consumed by
   the [[map/core/elaboration|elaborator]].
 - `quote.rs` — bare-word classification (`is_bare_word`, `quote_word`,
-  `quote_word_if_needed`), shared with the [[map/repl|REPL]]. It is the dual of
-  `WordLiteral::classify`: a string may go bare only where the numeral grammar
-  declines it, since a bare `007` would read back as the number 7.
-- `tag.rs`, `free_refs.rs` — variant-label tagging and free-reference scans.
+  `quote_word_if_needed`), shared with the [[map/repl|REPL]] and the
+  `ral-quote` builtin. It is the dual of `WordLiteral::classify`: a string may
+  go bare only where the numeral grammar declines it, since a bare `007` would
+  read back as the number 7.
+- `tag.rs` — `TAG_PREFIX`, the sigil that marks a variant label. `free_refs.rs`
+  — free-reference scans.
+- `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer
+  for the exarch and synod highlighters, so neither carries a second parser of
+  its own.
 
 **Recursion is bounded by a single shared depth cap, so adversarial nesting
 rejects cleanly instead of overflowing the stack.** One `NESTING_DEPTH_LIMIT`

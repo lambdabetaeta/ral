@@ -1,265 +1,76 @@
-# fzf-completion — '**' trigger completion via fzf, ported from fzf's
-# completion.zsh (junegunn/fzf).  Binds tab with a guard regex; tab
-# without the trigger falls through to ral's built-in completer.
-# Ports: path/dir completion (fzf --walker), ssh/telnet host completion,
-# kill PID completion.  Respects $FZF_COMPLETION_TRIGGER (read at load
-# time; reload after changing it), $FZF_COMPLETION_OPTS / PATH_OPTS /
-# DIR_OPTS, $FZF_COMPLETION_DIR_COMMANDS (default 'cd rmdir' — ral has
-# no pushd), $FZF_DEFAULT_OPTS, $FZF_TMUX_HEIGHT.  Not ported:
-# export/unset/unalias completers, fzf-tmux, _fzf_compgen_*/_fzf_comprun
-# overrides, ~user expansion, quoted multi-word prefixes.
-#
-# Options:  trigger   completion trigger (default '**')
+# fzf-completion — the trigger (default `**`) then tab completes the word with
+# fzf, as fzf's completion.zsh does: directories after
+# $FZF_COMPLETION_DIR_COMMANDS (default `cd rmdir`), hosts after ssh and
+# telnet, PIDs after kill, paths elsewhere.  Reads $FZF_COMPLETION_TRIGGER (at
+# load), $FZF_COMPLETION_OPTS, $FZF_COMPLETION_PATH_OPTS and
+# $FZF_COMPLETION_DIR_OPTS.  Options: trigger.
 
-return { |options|
-    let env_trigger = try { return !{env}[FZF_COMPLETION_TRIGGER] } { |_| return '**' }
-    let trigger = get $options trigger $env_trigger
+let [pick: pick, var: var] = use 'lib/fzf.ral'
 
-    let _envor = { |name default|
-        try { return !{env}[$name] } { |_| return $default }
-    }
+## The word becomes the picks, each rendered, joined, and closed with `tail`.
+let _complete = { |ours src args render tail lbuf|
+    pick $ours !{var FZF_COMPLETION_OPTS ''} $src $args { |ps| _ed-set-lbuffer "$lbuf!{intercalate ' ' !{map $render $ps}}$tail" }
+}
 
-    # Guard: a word, a gap, then the current word ending in the trigger —
-    # upstream's "tokens > 1 and LBUFFER ends with trigger" check.
-    let _guard-for = { |t|
-        if !{is-empty $t} { return '\S\s+\S*$' } else {
-            let esc = re-replace-all '([.^$*+?()\[\]{}|\\])' '\${1}' $t
-            return !{intercalate '' ['\S\s+\S*', $esc, '$']}
+## `dir` split at its longest existing directory, as [root, query].
+let _split = { |dir q|
+    if !{re-match '^[^/]*$' $dir} { ['', "$dir$q"] }
+    elsif !{is-dir $dir} { [$dir, $q] }
+    else { _split !{re-replace-all '[^/]+/*$' '' $dir} "!{re-find-match '[^/]+/*$' $dir}$q" }
+}
+
+## Walk below the word's longest existing directory; the rest is the query.
+let _walk = { |flags walker opts render tail [prefix: p, lbuf: l]|
+    let [root, q] = _split !{if !{re-match '^~(/|$)' $p} { "!{home}!{slice $p 1 $[!{length $p} - 1]}" } else { $p }} ''
+    _complete '--reverse --scheme=path' `walk '' [...$flags, -q, $q, --walker, $walker, "--walker-root=!{if !{is-empty $root} { '.' } else { re-replace-all '(.)/+$' '$1' $root }}", ...!{posix-split !{var $opts ''}}] $render $tail $l
+}
+let _files = _walk [-m] file,dir,follow,hidden FZF_COMPLETION_PATH_OPTS $ral-quote ' '
+let _dirs = _walk [] dir,follow FZF_COMPLETION_DIR_OPTS { |d| ral-quote "!{re-replace-all '/+$' '' $d}/" } ''
+
+## Pick from `items`; the word is the query.
+let _list = { |args items render [prefix: p, lbuf: l]| _complete --reverse `items $items [...$args, -q, $p] $render ' ' $l }
+
+## ssh's configs, known_hosts and /etc/hosts, sorted and unique: __fzf_list_hosts.
+let _hosts = {
+    let read = { |f| from-lines < $f ? [] }
+    let host = '(?i)^\s*host(name)?\s*[\s=]'
+    keys !{fold { |m h| [...$m, $h: ()] } [:] [
+        ...!{flat-map { |l| filter { |w| $[not !{re-match '[*?%]' $w}] } !{words !{re-replace-all '#.*' '' !{re-replace-all $host '' $l}}} } !{filter { |l| re-match $host $l } !{flat-map $read [~/.ssh/config, ...!{glob ~/.ssh/config.d/* ? []}, /etc/ssh/ssh_config]}}},
+        ...!{flat-map { |m| re-split ',' !{re-replace-all '[\[\]]|:[^,]*' '' $m} } !{flat-map { |l| re-find-matches '^[\[\]a-zA-Z0-9.,:-]+' $l } !{read ~/.ssh/known_hosts}}},
+        ...!{flat-map { |l| filter { |h| $[$h != '0.0.0.0'] } !{drop 1 !{words !{re-replace-all '#.*' '' $l}}} } !{read /etc/hosts}},
+    ]}
+}
+
+## Completers by command word: upstream's _fzf_complete_<command>.
+let _by_cmd = [:,
+    ssh: { |c|
+        if !{elem $c[prev] [-i, -F, -E]} { _files $c } else {
+            let u = re-find-match '^[^@]*@' $c[prefix] ? ''
+            _list [+m] !{map { |h| "$u$h" } !{_hosts}} $id $c
         }
-    }
-    let tab_guard = _guard-for $trigger
+    },
+    telnet: { |c| _list [+m] !{_hosts} $id $c },
+    kill: { |c| _list [-m, --header-lines=1, --no-preview, --wrap] !{lines !{ps -eo user,pid,ppid,start,time,command 2> /dev/null ? ps -eo user,pid,ppid,time,args 2> /dev/null ? ps --everyone --full --windows}} { |l| !{words $l}[1] } $c },
+]
 
-    let _base-opts = { |extra|
-        let user = _envor 'FZF_DEFAULT_OPTS' ''
-        let copts = _envor 'FZF_COMPLETION_OPTS' ''
-        let height = _envor 'FZF_TMUX_HEIGHT' '40%'
-        return "--height $height --min-height 20+ --bind=ctrl-z:ignore $extra $user $copts"
-    }
-
-    # ── path / dir completion (upstream __fzf_generic_path_completion) ──
-
-    let _expand = { |p|
-        let plen = length $p
-        if !{re-match '^~/' $p} {
-            let rest = slice $p 1 $[$plen - 1]
-            return "!{home}$rest"
-        } elsif !{equal $p '~'} { return !{home} } else { return $p }
-    }
-
-    let _initial-dir = { |base|
-        if !{re-match '/' $base} { return $base } else { return '' }
-    }
-
-    let _parent = { |d|
-        let s = re-replace-all '/+$' '' $d
-        return !{re-replace-all '[^/]*$' '' $s}
-    }
-
-    let _walk = { |dir|
-        if $[not !{is-empty $dir} && not !{is-dir $dir}] {
-            _walk !{_parent $dir}
-        } else { return $dir }
-    }
-
-    let _leftover = { |base dir|
-        if !{is-empty $dir} { return $base } else {
-            let dn = length $dir
-            let bn = length $base
-            if !{equal !{slice $base 0 $dn} $dir} {
-                let rest = slice $base $dn $[$bn - $dn]
-                return !{re-replace-all '^/' '' $rest}
-            } else { return $base }
-        }
-    }
-
-    let _norm-dir = { |d|
-        if !{is-empty $d} { return '.' }
-        elsif !{equal $d '/'} { return '/' }
-        else { return !{re-replace-all '/+$' '' $d} }
-    }
-
-    let _path-complete = { |prefix lbuf kind|
-        if !{re-match '\$\(|<\(|>\(|:=|`' $prefix} { return () }
-        let base = _expand $prefix
-        let dir = _walk !{_initial-dir $base}
-        let leftover = _leftover $base $dir
-        let root = _norm-dir $dir
-        let opts = _base-opts '--reverse --scheme=path'
-        if !{equal $kind 'dir'} {
-            let rest = shell-split !{_envor 'FZF_COMPLETION_DIR_OPTS' ''}
-            let r = _ed-tui {
-                within [env: [FZF_DEFAULT_OPTS: $opts, FZF_DEFAULT_OPTS_FILE: '', FZF_DEFAULT_COMMAND: '']] {
-                    fzf +m -q $leftover '--walker' 'dir,follow' "--walker-root=$root" ...$rest
+{ |options|
+    let trigger = get $options trigger !{get !{env} FZF_COMPLETION_TRIGGER '**'}
+    [
+        name: fzf-completion,
+        keybindings: [[
+            key: tab,
+            guard: !{intercalate '' ['\S\s+\S*', !{re-replace-all '[.^$*+?()\[\]{}|\\]' '\$0' $trigger}, '$']},
+            handler: { |_|
+                let [words: ws, current: i, offset: o] = _ed-parse
+                let lb = _ed-lbuffer
+                let n = $[!{length $lb} - $o - !{length $trigger}]
+                if $[not !{is-empty $ws} && $n >= 0] {
+                    let [cmd, ..._] = $ws
+                    let t = union !{fold { |m d| [...$m, $d: $_dirs] } [:] !{words !{get !{env} FZF_COMPLETION_DIR_COMMANDS 'cd rmdir'}}} $_by_cmd
+                    let complete = if !{has $t $cmd} { $t[$cmd] } else { $_files }
+                    complete [prefix: !{slice $lb $o $n}, prev: !{last ['', ...!{take $i $ws}]}, lbuf: !{slice $lb 0 $o}]
                 }
-            }
-            if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-                let one = re-replace-all '/+$' '' $r[output]
-                let quoted = shell-quote "$one/"
-                _ed-set-lbuffer "$lbuf$quoted"
-            } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-                fail [status: $r[status], message: "fzf: $r[output]"]
-            }
-        } else {
-            let rest = shell-split !{_envor 'FZF_COMPLETION_PATH_OPTS' ''}
-            let r = _ed-tui {
-                within [env: [FZF_DEFAULT_OPTS: $opts, FZF_DEFAULT_OPTS_FILE: '', FZF_DEFAULT_COMMAND: '']] {
-                    fzf -m -q $leftover '--walker' 'file,dir,follow,hidden' "--walker-root=$root" ...$rest
-                }
-            }
-            if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-                let quoted = map $shell-quote !{lines $r[output]}
-                let matches = intercalate ' ' $quoted
-                _ed-set-lbuffer "$lbuf$matches "
-            } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-                fail [status: $r[status], message: "fzf: $r[output]"]
-            }
-        }
-        return ()
-    }
-
-    # ── hosts (upstream __fzf_list_hosts, parsed in ral, no awk) ──
-
-    let _read-lines = { |p| try { return !{from-lines < $p} } { |_| return [] } }
-
-    let _cfg-hosts = { |file|
-        flat-map { |line|
-            if !{re-match '(?i)^[ \t]*host(name)?[ \t=]' $line} {
-                let body = re-replace-all '(?i)^[ \t]*host(name)?[ \t=]+' '' $line
-                let clean = re-replace-all '#.*$' '' $body
-                filter { |w| return $[not !{re-match '[*?%]' $w}] } !{words $clean}
-            } else { return [] }
-        } !{_read-lines $file}
-    }
-
-    let _known-hosts = { |file|
-        flat-map { |line|
-            if !{re-match '^[\[\]a-zA-Z0-9.,:-]' $line} {
-                let f = re-replace-all '\s.*$' '' $line
-                map { |part|
-                    let s = re-replace-all '[\[\]]' '' $part
-                    return !{re-replace-all ':[^,]*$' '' $s}
-                } !{re-split ',' $f}
-            } else { return [] }
-        } !{_read-lines $file}
-    }
-
-    let _etc-hosts = { |file|
-        flat-map { |line|
-            let clean = re-replace-all '#.*$' '' $line
-            let f = words $clean
-            if !{is-empty $f} { return [] } else {
-                filter { |h| return $[not !{equal $h '0.0.0.0'}] } !{drop 1 $f}
-            }
-        } !{_read-lines $file}
-    }
-
-    let _hosts = {
-        let home = home
-        let extra = try { return !{glob '~/.ssh/config.d/*'} } { |_| return [] }
-        let cfgs = ["$home/.ssh/config", ...$extra, '/etc/ssh/ssh_config']
-        let all = [...!{flat-map $_cfg-hosts $cfgs}, ...!{_known-hosts "$home/.ssh/known_hosts"}, ...!{_etc-hosts '/etc/hosts'}]
-        return !{sort-list !{nub $all}}
-    }
-
-    # ── list-fed completers (upstream _fzf_complete) ──
-
-    let _list-complete = { |cands prefix lbuf mode|
-        let opts = _base-opts '--reverse'
-        let r = _ed-tui {
-            within [env: [FZF_DEFAULT_OPTS: $opts, FZF_DEFAULT_OPTS_FILE: '']] {
-                to-lines $cands | fzf $mode -q $prefix
-            }
-        }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let matches = intercalate ' ' !{lines $r[output]}
-            _ed-set-lbuffer "$lbuf$matches "
-        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-            fail [status: $r[status], message: "fzf: $r[output]"]
-        }
-        return ()
-    }
-
-    let _with-user = { |prefix hosts|
-        if !{re-match '@' $prefix} {
-            let user = re-replace-all '@.*$' '' $prefix
-            map { |h| return "$user@$h" } $hosts
-        } else { return $hosts }
-    }
-
-    let _kill-complete = { |prefix lbuf|
-        let opts = _base-opts '--reverse'
-        let r = _ed-tui {
-            within [env: [FZF_DEFAULT_OPTS: $opts, FZF_DEFAULT_OPTS_FILE: '']] {
-                ps -eo 'user,pid,ppid,start,time,command' | fzf -m '--header-lines=1' --no-preview --wrap -q $prefix
-            }
-        }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
-            let pids = map { |l| let f = words $l; return $f[1] } !{lines $r[output]}
-            let matches = intercalate ' ' $pids
-            _ed-set-lbuffer "$lbuf$matches "
-        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
-            fail [status: $r[status], message: "fzf: $r[output]"]
-        }
-        return ()
-    }
-
-    # ── current word, command word, dispatch (upstream fzf-completion) ──
-
-    let _cur-word = { |p text cur lbuf|
-        let fb = {
-            let w = try { return !{re-find-match '\S+$' $lbuf} } { |_| return '' }
-            return [word: $w, off: $[$cur - !{length $w}]]
-        }
-        if $[not !{is-empty $p[words]} && $p[offset] <= $cur] {
-            let off = $p[offset]
-            let raw = slice $text $off $[$cur - $off]
-            if !{re-match '^\S*$' $raw} { return [word: $raw, off: $off] } else { return !$fb }
-        } else { return !$fb }
-    }
-
-    let _first-or = { |xs default|
-        if !{is-empty $xs} { return $default } else { return $xs[0] }
-    }
-    let _last-or = { |xs default|
-        if !{is-empty $xs} { return $default } else { return !{last $xs} }
-    }
-
-    let _handler = { |ctx|
-        let text = _ed-text
-        let cur = _ed-cursor
-        let lb = _ed-lbuffer
-        let p = _ed-parse
-        let cw = _cur-word $p $text $cur $lb
-        let word = $cw[word]
-        let wn = length $word
-        let tn = length $trigger
-        if $[$wn < $tn] { return () }
-        if $[$tn > 0 && not !{equal !{slice $word $[$wn - $tn] $tn} $trigger}] { return () }
-        let prefix = slice $word 0 $[$wn - $tn]
-        let lbuf = slice $text 0 $cw[off]
-        let seg = last !{re-split '[|;&\n]' $lbuf}
-        let segw = words $seg
-        let cmd = _first-or $segw ''
-        let prev = _last-or $segw ''
-        let d_cmds = words !{_envor 'FZF_COMPLETION_DIR_COMMANDS' 'cd rmdir'}
-        if !{elem $cmd $d_cmds} {
-            _path-complete $prefix $lbuf 'dir'
-        } elsif $[!{equal $cmd 'ssh'} && !{elem $prev ['-i', '-F', '-E']}] {
-            _path-complete $prefix $lbuf 'path'
-        } elsif !{equal $cmd 'ssh'} {
-            _list-complete !{_with-user $prefix !{_hosts}} $prefix $lbuf '+m'
-        } elsif !{equal $cmd 'telnet'} {
-            _list-complete !{_hosts} $prefix $lbuf '+m'
-        } elsif !{equal $cmd 'kill'} {
-            _kill-complete $prefix $lbuf
-        } else {
-            _path-complete $prefix $lbuf 'path'
-        }
-        return ()
-    }
-
-    return [
-        name: 'fzf-completion',
-        keybindings: [[key: 'tab', handler: $_handler, guard: $tab_guard]],
+            },
+        ]],
     ]
 }

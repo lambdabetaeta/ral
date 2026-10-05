@@ -97,7 +97,7 @@ examples-check:
 # Drives the REPL load path examples-check can't reach: an rc naming exactly
 # one plugin, a fresh XDG_CONFIG_HOME per plugin so none can mask another's
 # failure, RAL_PATH pointed at this checkout's plugins/. A failing plugin
-# prints `ral: plugin 'NAME': ...` on stderr and the REPL carries on regardless
+# reports `plugin 'NAME': ...` on stderr and the REPL carries on regardless
 # (exit 0), so that line — not the exit status — is the failure signal.
 [unix]
 plugins-check:
@@ -110,9 +110,9 @@ plugins-check:
         mkdir -p "$dir/ral"
         printf "return [plugins: ['%s': [:]]]" "$name" > "$dir/ral/rc"
         out=$(echo 'echo ok' | XDG_CONFIG_HOME="$dir" RAL_PATH="{{justfile_directory()}}/plugins" cargo run -p ral --quiet -- -i 2>&1)
-        if echo "$out" | grep -q "ral: plugin '$name':"; then
+        if echo "$out" | grep -q "plugin '$name':"; then
             echo "plugins-check: $name failed to load"
-            echo "$out" | grep "ral: plugin '$name':"
+            echo "$out" | grep "plugin '$name':"
             fail=1
         fi
     done

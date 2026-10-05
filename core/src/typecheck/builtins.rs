@@ -418,7 +418,7 @@ pub(crate) fn fs_file_info_ty() -> Ty {
 }
 
 /// Per-builtin scheme factories, one function per registered *shape*: entries
-/// that share one (`upper`, `lower`, `dedent`, `shell-quote`) reuse a single
+/// that share one (`upper`, `lower`, `dedent`, `ral-quote`) reuse a single
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{

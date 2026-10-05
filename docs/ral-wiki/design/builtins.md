@@ -44,7 +44,7 @@ The core entries group by what they compute:
   value: `map { |x| echo $x } $xs` captures each call's output as a `String`.
 - **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
-  `re-replace-all` `string-replace` `shell-quote` `shell-split`.
+  `re-replace-all` `string-replace` `ral-quote` `posix-quote` `posix-split`.
 - **Parsing** — `int` `float` `str`: value→scalar coercions.
 - **Structure & comparison** — `length` `is-empty` `keys` `has` `equal` `lt` `gt`:
   ad-hoc-polymorphic, dispatched on the runtime value's shape.

@@ -81,18 +81,23 @@ pub(super) fn builtin_lines(args: &[Value]) -> Settled<Value> {
     lossy_line_list(read_lines("lines", s.as_bytes()))
 }
 
-pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
-    let s = as_str(&args[0], "shell-split")?;
+pub(super) fn builtin_posix_split(args: &[Value]) -> Settled<Value> {
+    let s = as_str(&args[0], "posix-split")?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(s)
-        .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
+        .ok_or_else(|| sig("posix-split: malformed input (unterminated quote?)".to_string()))?;
     Ok(Value::list(parts.into_iter().map(Value::string).collect()))
 }
 
-pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
-    let s = as_str(&args[0], "shell-quote")?;
-    let quoted = shlex::try_quote(s).map_err(|e| sig(format!("shell-quote: {e}")))?;
+pub(super) fn builtin_posix_quote(args: &[Value]) -> Settled<Value> {
+    let s = as_str(&args[0], "posix-quote")?;
+    let quoted = shlex::try_quote(s).map_err(|e| sig(format!("posix-quote: {e}")))?;
     Ok(Value::string(quoted))
+}
+
+pub(super) fn builtin_ral_quote(args: &[Value]) -> Settled<Value> {
+    let s = as_str(&args[0], "ral-quote")?;
+    Ok(Value::string(crate::syntax::quote_word(s)))
 }
 
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {

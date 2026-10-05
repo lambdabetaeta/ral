@@ -11,7 +11,7 @@ use ral_core::builtins::util::as_str;
 use ral_core::serial::FOValue;
 use ral_core::serial::datum::Datum;
 use ral_core::source::Span as ByteSpan;
-use ral_core::syntax::lexer::{Token, lex};
+use ral_core::syntax::lexer::{LexError, LexErrorKind, Token, lex};
 use ral_core::typecheck::builtins::{
     closed_record, closed_variant, fun, graded, mk_scheme as scheme, open_record, pure, thunk,
 };
@@ -316,73 +316,98 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
         return s.clone();
     }
     let start = span.start as usize;
-    let end = span.end as usize;
+    // A `$[` that `lex_open` closed ends past `text`.
+    let end = (span.end as usize).min(text.len());
     match tok {
         Token::DoubleQuoted(_) => text[start + 1..end.saturating_sub(1).max(start + 1)].to_string(),
         _ => text[start..end].to_string(),
     }
 }
 
-/// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
+/// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — the simple
+/// command at the cursor.  `words` is empty exactly when the buffer does not lex.
 pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-parse", shell)?;
     shell.check_editor_read("parse")?;
     let EditorSnapshot { text, cursor, .. } = snapshot(shell, mooring)?;
+    let (words, current, offset) = parse_at(&text, cursor).unwrap_or_default();
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "buffer offsets, far below i64::MAX"
+    )]
+    let (current, offset) = (current as i64, offset as i64);
+    Ok(Value::map(vec![
+        (
+            "words".into(),
+            Value::list(words.into_iter().map(Value::string).collect()),
+        ),
+        ("current".into(), Value::Int(current)),
+        ("offset".into(), Value::Int(offset)),
+    ]))
+}
 
-    let empty = || {
-        Value::map(vec![
-            ("words".into(), Value::list(vec![])),
-            ("current".into(), Value::Int(0)),
-            ("offset".into(), Value::Int(0)),
-        ])
-    };
-
-    if text.is_empty() {
-        return Ok(empty());
-    }
-
-    // A buffer that doesn't lex is mid-typing (an open quote, an open
-    // brace, …) rather than a well-formed command line; there is nothing
-    // sound to tokenize yet, so report no words rather than guessing.
-    let Ok(tokens) = lex(&text) else {
-        return Ok(empty());
-    };
-
-    let words: Vec<(usize, String)> = tokens
+/// The words of the simple command around char offset `cursor`, the index of
+/// the word the cursor touches, and that word's char offset.  A cursor in a gap
+/// gets a fresh `""` spliced in at its own offset, so `words[current]` is
+/// always the word being typed (bash's `COMP_CWORD`, zsh's `CURRENT`).
+fn parse_at(text: &str, cursor: usize) -> Option<(Vec<String>, usize, usize)> {
+    let at = char_to_byte(text, cursor);
+    let tokens = lex_open(text)?;
+    let start = tokens
+        .iter()
+        .rposition(|(tok, span)| separates(tok) && span.end as usize <= at)
+        .map_or(0, |i| i + 1);
+    let end = tokens[start..]
+        .iter()
+        .position(|(tok, _)| separates(tok))
+        .map_or(tokens.len(), |i| start + i);
+    let (spans, mut words): (Vec<(usize, usize)>, Vec<String>) = tokens[start..end]
         .iter()
         .filter(|(tok, _)| is_word_token(tok))
-        .map(|(tok, span)| (span.start as usize, word_text(&text, tok, *span)))
-        .collect();
-
-    if words.is_empty() {
-        return Ok(empty());
+        .map(|(tok, span)| {
+            (
+                (span.start as usize, span.end as usize),
+                word_text(text, tok, *span),
+            )
+        })
+        .unzip();
+    if let Some(i) = spans.iter().position(|&(s, e)| s <= at && at <= e) {
+        return Some((words, i, byte_to_char(text, spans[i].0)));
     }
+    let i = spans.iter().take_while(|&&(_, e)| e < at).count();
+    words.insert(i, String::new());
+    Some((words, i, cursor))
+}
 
-    // Determine which word the cursor is in/after.
-    let cursor_byte = char_to_byte(&text, cursor);
-
-    let mut current = 0usize;
-    let mut offset = 0usize;
-    for (idx, (word_start, _)) in words.iter().enumerate() {
-        if *word_start <= cursor_byte {
-            current = idx;
-            offset = *word_start;
+/// `text`'s tokens, closing each `{` or `[` still open at the end — an
+/// editor's buffer is routinely mid-block.  `None` for any other lex failure.
+fn lex_open(text: &str) -> Option<Vec<(Token, ByteSpan)>> {
+    let mut source = Cow::Borrowed(text);
+    loop {
+        match lex(&source) {
+            Ok(tokens) => return Some(tokens),
+            Err(LexError {
+                kind: LexErrorKind::UnterminatedBalanced { close, .. },
+                ..
+            }) => {
+                source.to_mut().push(close);
+            }
+            Err(_) => return None,
         }
     }
+}
 
-    let offset_chars = byte_to_char(&text, offset);
-
-    let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::string(w)).collect();
-
-    #[allow(clippy::cast_possible_wrap, reason = "word index, far below i64::MAX")]
-    let current_i = current as i64;
-    #[allow(clippy::cast_possible_wrap, reason = "word index, far below i64::MAX")]
-    let offset_i = offset_chars as i64;
-    Ok(Value::map(vec![
-        ("words".into(), Value::list(word_values)),
-        ("current".into(), Value::Int(current_i)),
-        ("offset".into(), Value::Int(offset_i)),
-    ]))
+/// Tokens that end one simple command and begin the next.
+fn separates(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Pipe
+            | Token::Question
+            | Token::Semi
+            | Token::Newline
+            | Token::LBrace
+            | Token::RBrace
+    )
 }
 
 // ─── Output channels ─────────────────────────────────────────────────────────
@@ -742,7 +767,7 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     BuiltinEntry::new(
         Cow::Borrowed("_ed-parse"),
         scheme_parse,
-        "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
+        "_ed-parse  — the simple command at the cursor as [words, current, offset]: words[current] is the word being typed, offset its start.",
         BuiltinBody::Static(builtin_ed_parse),
     ),
     BuiltinEntry::new(
@@ -905,6 +930,49 @@ mod tests {
         let (result, writes) = run_with_cell(FOValue::Int { value: 4 });
         assert!(matches!(result, Ok(Value::Int(5))), "{result:?}");
         assert_eq!(writes, 1);
+    }
+
+    /// `parse_at` over `marked`, whose `▮` is the cursor.
+    fn parse(marked: &str) -> Option<(Vec<String>, usize, usize)> {
+        let at = marked.find('▮').expect("a cursor mark");
+        parse_at(&marked.replace('▮', ""), marked[..at].chars().count())
+    }
+
+    fn w(words: &[&str]) -> Vec<String> {
+        words.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    #[test]
+    fn ed_parse_reads_the_simple_command_at_the_cursor() {
+        assert_eq!(parse("ssh me@h**▮"), Some((w(&["ssh", "me@h**"]), 1, 4)));
+        assert_eq!(
+            parse("ls -l | ssh h▮ ; cd x"),
+            Some((w(&["ssh", "h"]), 1, 12))
+        );
+        assert_eq!(parse("ls▮| wc"), Some((w(&["ls"]), 0, 0)));
+        assert_eq!(parse("cat a▮ b"), Some((w(&["cat", "a", "b"]), 1, 4)));
+        assert_eq!(parse("echo é▮"), Some((w(&["echo", "é"]), 1, 5)));
+    }
+
+    /// A cursor between words is on a fresh empty word, at its own offset.
+    #[test]
+    fn ed_parse_splices_an_empty_word_into_a_gap() {
+        assert_eq!(parse("▮"), Some((w(&[""]), 0, 0)));
+        assert_eq!(parse("ls | ssh ▮"), Some((w(&["ssh", ""]), 1, 9)));
+        assert_eq!(parse("cp a ▮ b"), Some((w(&["cp", "a", "", "b"]), 2, 5)));
+    }
+
+    /// An open block is the editor's ordinary state, not a lex failure; an
+    /// open string is.
+    #[test]
+    fn ed_parse_reads_inside_an_open_block_but_not_an_open_string() {
+        assert_eq!(parse("try { cd ~/pr▮"), Some((w(&["cd", "~/pr"]), 1, 9)));
+        assert_eq!(
+            parse("within [dir: a] {\n  ssh ▮"),
+            Some((w(&["ssh", ""]), 1, 24))
+        );
+        assert_eq!(parse("echo $[1 +▮"), Some((w(&["echo", "$[1 +"]), 1, 5)));
+        assert_eq!(parse("echo 'open▮"), None);
     }
 
     /// A non-Int cursor is refused at the door, before any request is put.

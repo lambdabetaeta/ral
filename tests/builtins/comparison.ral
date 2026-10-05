@@ -35,6 +35,6 @@ echo !{sort-list-by { |s| length $s } ['ccc', 'a', 'bb']}
 
 # A bare arity-one builtin in command position is a discarded function, but
 # `$name` takes the value: application, not position, is the one arity gate
-echo $upper $lower $dedent $shell-quote $shell-split
+echo $upper $lower $dedent $posix-quote $posix-split
 
 echo 'comparison tests done'

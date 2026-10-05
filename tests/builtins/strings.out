@@ -12,6 +12,7 @@ local
 ell
 matches
 'hello world'
+hello 'hello world' '007' #'it's'# ##'a'#b'##
 has a
 no c
 string tests done

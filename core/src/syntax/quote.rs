@@ -3,9 +3,9 @@
 //!
 //! Ral's single-quoted strings have no escapes, so a body containing `'`
 //! is written hash-bumped: `n` `#`s then `'`, closing only on `'` then
-//! `n` `#`s.  These are ral's rules, not POSIX's — the `shell-quote`
-//! builtin in `core/src/builtins/strings.rs` keeps POSIX semantics so it
-//! round-trips with `shell-split`.
+//! `n` `#`s.  These are ral's rules, not POSIX's: `ral-quote` is this
+//! module, while `posix-quote` keeps POSIX semantics so it round-trips with
+//! `posix-split`.
 
 use std::borrow::Cow;
 

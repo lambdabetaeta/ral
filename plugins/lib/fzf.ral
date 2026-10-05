@@ -1,0 +1,31 @@
+# What fzf's shell integrations share (__fzf_defaults, __fzfcmd and
+# __fzf_comprun in key-bindings.zsh and completion.zsh), for the fzf-* plugins.
+
+## $name, or `default` when it is unset or empty: sh's ${name:-default}.
+let var = { |name default| let v = get !{env} $name ''; if !{is-empty $v} { $default } else { $v } }
+
+## Run fzf as fzf's own widgets do — `ours` before the user's options file and
+## FZF_DEFAULT_OPTS, `theirs` after, in a tmux popup when $FZF_TMUX asks — over
+## `walk $command (fzf's walker when '') or `items $list, and give `k` the picks.
+let pick = { |ours theirs src args k|
+    let h = var FZF_TMUX_HEIGHT 40%
+    let [output: out, status: s] = _ed-tui {
+        within [
+            env: [
+                FZF_DEFAULT_OPTS: "--height $h --min-height 20+ --bind=ctrl-z:ignore $ours\n!{from-string < !{var FZF_DEFAULT_OPTS_FILE ''} ? ''}\n!{var FZF_DEFAULT_OPTS ''} $theirs",
+                FZF_DEFAULT_OPTS_FILE: '',
+            ],
+            handlers: [fzf: { |a|
+                if $[not !{is-empty !{var TMUX_PANE ''}} && (!{var FZF_TMUX '0'} != '0' || not !{is-empty !{var FZF_TMUX_OPTS ''}})] {
+                    fzf-tmux ...!{posix-split !{var FZF_TMUX_OPTS "-d$h"}} -- ...$a
+                } else { fzf ...$a }
+            }],
+        ] {
+            case $src [
+                `walk:  { |c| within [env: [FZF_DEFAULT_COMMAND: $c]] { fzf --print0 ...$args } },
+                `items: { |xs| to-string !{intercalate "\0" $xs} | fzf --read0 --print0 ...$args },
+            ]
+        }
+    }
+    if $[$s == 0] { k !{re-find-matches '[^\x00]+' $out} } elsif $[$s != 1 && $s != 130] { fail [status: $s, message: "fzf: $out"] }
+}

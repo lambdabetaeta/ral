@@ -1,0 +1,46 @@
+# Test: posix-split — POSIX tokenization of shell-quoted strings.
+
+let assert_eq = { |name expected actual|
+    if $[not !{equal $expected $actual}] {
+        warn "FAIL: $name"
+        warn "  expected: !{to-json $expected}"
+        warn "  actual:   !{to-json $actual}"
+        fail [status: 1, message: "assertion failed: $name"]
+    }
+}
+
+# Empty string → empty list.
+assert_eq 'empty'        []                      !{posix-split ''}
+
+# Plain whitespace split.
+assert_eq 'plain'        [a, b, c]               !{posix-split 'a b c'}
+
+# Single quotes group words together.
+let sq_expected = [--preview, 'bat --color=always {}']
+assert_eq 'single-quote' $sq_expected !{posix-split "--preview 'bat --color=always {}'"}
+
+# Double quotes group too.
+assert_eq 'double-quote' $sq_expected !{posix-split '--preview "bat --color=always {}"'}
+
+# Backslash escapes next char.
+assert_eq 'backslash'    ['a b', c]              !{posix-split 'a\ b c'}
+
+# Collapsed whitespace.
+assert_eq 'tabs'         [x, y, z]               !{posix-split "x\ty  z"}
+
+# Real-world fzf opts.
+let fzf_expected = [--preview, 'bat --color=always {}', --preview-window=right:50%]
+assert_eq 'fzf-opts' $fzf_expected !{posix-split "--preview 'bat --color=always {}' --preview-window=right:50%"}
+
+# posix-quote is its inverse.
+let tricky = #'it's "$x" a\b'#
+assert_eq 'round-trip' [$tricky] !{posix-split !{posix-quote $tricky}}
+
+# Unmatched quote → error, caught by try.  Handler returns a list (matching
+# the body's `posix-split` return type) so the two branches unify.
+let _ = try { posix-split "oops 'unterminated" } { |err|
+    echo 'unterminated rejected'
+    return []
+}
+
+echo 'posix-split tests done'

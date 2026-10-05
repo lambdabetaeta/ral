@@ -2,7 +2,7 @@
 
 # Strings — direct builtins: upper, lower, re-split, re-match,
 # re-replace, re-replace-all, string-replace, intercalate, slice,
-# re-find-match, re-find-matches, dedent, shell-quote, shell-split, lines.
+# re-find-match, re-find-matches, dedent, ral-quote, posix-quote, posix-split, lines.
 # Regex builtins carry the `re-` prefix because the first argument is
 # a regex, not a literal substring; `string-replace` is the
 # literal-string counterpart that demands an exactly-once match.
