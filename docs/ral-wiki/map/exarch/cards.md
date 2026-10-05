@@ -175,12 +175,12 @@ placement, framing in its agent's hue at the register's own margin.
 
 ## Block — derived disclosure and aggregation
 
-`BlockKind::Card { card, landing, at }` (`tui/block.rs`) carries the render
+`BlockKind::Card { card, landing, dial }` (`tui/block.rs`) carries the render
 document, a `Landing` (`Effect`/`Write`/`Surfaced`/`Announced`, shared with
 `bus/card`'s own `landing()`) telling the mirror whether the card is a
-foldable effect or a barrier, and the
-`Detail` rung it is read at. Disclosure is **derived**, not named: a card
-holding a `diff` is dialable (`dialable()` → `Card::has_diff()`) and reads as
+foldable effect or a barrier, and its `Dial`, the rung it is read at.
+Disclosure is **derived**, not named: `BlockKind::card` gives a card a `Dial`
+exactly when it holds a `diff` (`Card::has_diff()`), and such a card reads as
 its header alone at `Tally`, its first `DIFF_PEEK_ROWS` rows at `Summary` —
 the rung it opens at — or the complete diff at `Full`; a card of only
 `text`/`fields`/`measure`/`raw` is inert, rendered whole. The rail shape is `▎`
@@ -237,7 +237,7 @@ card (one canonical original-vs-final diff grouped into hunks by `similar`) at
 the edit, where both texts are already in hand; a committed `>` reads what
 landed against the empty side instead, an all-adds diff rather than a shape of
 its own. Both cards retain every hunk; disclosure belongs to the renderer, so
-`Tally` is the header, `Summary` its first twenty rows, and `Full` the
+`Tally` is the header, `Summary` its first ten rows, and `Full` the
 complete diff. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` carries
 only the `-around` readers, the tasks kit, and the goal pins

@@ -281,7 +281,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    its `▸` part; every other kind is a barrier that pushes its own block and
    ends the group. Blocks, their record ids and `user.log` are all in arrival
    order, and so is the group — only its two parts are read in a fixed order.
-   Each part carries its own `Detail`, so one group answers two dials and
+   Each part carries its own `Dial` — the `Detail` rung it is read at and the
+   floor a cycle wraps to — so one group answers two dials and
    `Scrollback::block_at` reports which part a row belongs to; the deliberation's
    two rungs are its grain header or the whole thing. The `∴` part also
    answers to one standing rung, `/thinking`'s datum: `Tabs::thinking` holds it
@@ -289,7 +290,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    every group on screen while every group still to arrive is born there. That
    rung starts at `Detail::Summary`, so a session opens with deliberation read
    as its grain and bulk — including the live one, whose header is a magnitude
-   growing in place rather than text streaming past.
+   growing in place rather than text streaming past. `Block::dial` is the one
+   answer to which part of a block has a dial: whether a part is dialable and
+   what a click does both read it, as does the rung a one-part block renders at.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as a box indented `CARD_INDENT`

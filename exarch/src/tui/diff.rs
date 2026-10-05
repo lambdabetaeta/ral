@@ -12,7 +12,7 @@ use ratatui::{
 
 /// Diff rows a `Summary` shows before the elision: enough to read the change,
 /// not enough to bury the transcript under it.
-pub(super) const DIFF_PEEK_ROWS: usize = 20;
+pub(super) const DIFF_PEEK_ROWS: usize = 10;
 
 /// A [`crate::bus::card::Mark::Diff`]'s body at `width`, graded by disclosure: `Tally` the header
 /// alone, `Summary` its first [`DIFF_PEEK_ROWS`] rows, `Full` every hunk.  No

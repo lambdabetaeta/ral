@@ -131,15 +131,22 @@ pub(super) enum Detail {
     Full,
 }
 
-impl Detail {
-    /// One rung up, the ceiling wrapping to `floor`, so a dial walks every
+/// A dialable part's rung, and the floor a cycle past [`Detail::Full`] wraps to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Dial {
+    at: Detail,
+    floor: Detail,
+}
+
+impl Dial {
+    /// One rung up, the ceiling wrapping to the floor, so a dial walks every
     /// reachable rung rather than toggling the extremes.
-    fn next(self, floor: Self) -> Self {
-        match self {
-            Self::Tally => Self::Summary,
-            Self::Summary => Self::Full,
-            Self::Full => floor,
-        }
+    fn cycle(&mut self) {
+        self.at = match self.at {
+            Detail::Tally => Detail::Summary,
+            Detail::Summary => Detail::Full,
+            Detail::Full => self.floor,
+        };
     }
 }
 
@@ -156,11 +163,11 @@ pub(super) enum Part {
 /// A group's `∴` part: each stretch of thinking the fold committed, in
 /// arrival order; the mass of the prose they became — the deliberation
 /// grain's denominator, which the commit cannot carry, being recorded before
-/// the prose it precedes — and the rung the part is read at.
+/// the prose it precedes — and the dial the part is read by.
 pub(super) struct Thinking {
     text: Vec<String>,
     answer_chars: u32,
-    at: Detail,
+    dial: Dial,
 }
 
 impl Thinking {
@@ -168,7 +175,10 @@ impl Thinking {
         Self {
             text: Vec::new(),
             answer_chars: 0,
-            at,
+            dial: Dial {
+                at,
+                floor: Detail::Summary,
+            },
         }
     }
 
@@ -202,8 +212,8 @@ impl Thinking {
 pub(super) struct Group {
     thinking: Thinking,
     calls: Vec<group::Call>,
-    /// The `▸` part's own rung, dialled apart from the `∴` part's.
-    run: Detail,
+    /// The `▸` part's own dial, apart from the `∴` part's.
+    run: Dial,
     /// Which part the last member arrived on — what an open line grows.
     last: Part,
 }
@@ -228,7 +238,10 @@ impl Group {
         let mut group = Self {
             thinking: Thinking::new(thinking),
             calls: Vec::new(),
-            run: Detail::Summary,
+            run: Dial {
+                at: Detail::Summary,
+                floor: Detail::Tally,
+            },
             last: Part::Run,
         };
         let _ = group.grow(member);
@@ -318,7 +331,7 @@ pub(super) enum BlockKind {
         subject: Option<String>,
         payload: String,
         failed: bool,
-        at: Detail,
+        dial: Dial,
     },
     /// An async subagent's result, landed in root's scrollback.  Its own kind
     /// because prose cannot carry `name`/`elapsed`/`error` and a card would
@@ -329,12 +342,12 @@ pub(super) enum BlockKind {
         elapsed: Duration,
     },
     /// A render document a kit surfaced — a stack of [`Card`] marks
-    /// re-rendered from data at every width.  Only one holding a `diff` mark
-    /// is dialable.
+    /// re-rendered from data at every width.  Its `dial` is `Some` exactly
+    /// when it holds a `diff` mark.
     Card {
         card: Card,
         landing: Landing,
-        at: Detail,
+        dial: Option<Dial>,
     },
     /// A summary-less tool call, inert under the shut triangle.  `details` is
     /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
@@ -347,16 +360,38 @@ pub(super) enum BlockKind {
 }
 
 impl BlockKind {
+    /// An act at its opening rung: its row, the payload cut to its column.
+    pub(super) fn act(
+        verb: String,
+        subject: Option<String>,
+        payload: String,
+        failed: bool,
+    ) -> Self {
+        Self::Act {
+            verb,
+            subject,
+            payload,
+            failed,
+            dial: Dial {
+                at: Detail::Summary,
+                floor: Detail::Summary,
+            },
+        }
+    }
+
     /// A card at its opening rung: a diff arrives as its first rows, so the
     /// change is read before it is measured; every other card is inert and
     /// renders whole.
     pub(super) fn card(card: Card, landing: Landing) -> Self {
-        let at = if card.has_diff() {
-            Detail::Summary
-        } else {
-            Detail::Full
-        };
-        Self::Card { card, landing, at }
+        let dial = card.has_diff().then_some(Dial {
+            at: Detail::Summary,
+            floor: Detail::Tally,
+        });
+        Self::Card {
+            card,
+            landing,
+            dial,
+        }
     }
 }
 
@@ -653,17 +688,28 @@ impl Block {
         true
     }
 
-    /// The lowest rung `part` of this block reduces to — `None` where the
-    /// part has no dial.  A run and a diff have numbers to reduce to; a
-    /// deliberation and an act have only their header.
-    fn floor(&self, part: Part) -> Option<Detail> {
+    /// `part`'s dial, `None` where the part has none — the one answer every
+    /// question of disclosure reads.
+    fn dial(&self, part: Part) -> Option<Dial> {
         match (&self.kind, part) {
             (BlockKind::Group(g), Part::Thinking) => {
-                (!g.thinking.is_empty()).then_some(Detail::Summary)
+                (!g.thinking.is_empty()).then_some(g.thinking.dial)
             }
-            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(Detail::Tally),
-            (BlockKind::Act { .. }, Part::Run) => Some(Detail::Summary),
-            (BlockKind::Card { card, .. }, Part::Run) => card.has_diff().then_some(Detail::Tally),
+            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(g.run),
+            (BlockKind::Act { dial, .. }, Part::Run) => Some(*dial),
+            (BlockKind::Card { dial, .. }, Part::Run) => *dial,
+            _ => None,
+        }
+    }
+
+    fn dial_mut(&mut self, part: Part) -> Option<&mut Dial> {
+        match (&mut self.kind, part) {
+            (BlockKind::Group(g), Part::Thinking) => {
+                (!g.thinking.is_empty()).then_some(&mut g.thinking.dial)
+            }
+            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(&mut g.run),
+            (BlockKind::Act { dial, .. }, Part::Run) => Some(dial),
+            (BlockKind::Card { dial, .. }, Part::Run) => dial.as_mut(),
             _ => None,
         }
     }
@@ -671,20 +717,15 @@ impl Block {
     /// Whether `part` is dialable — a property of its kind, not its rung, so
     /// a click on its glyph claims the gesture even at the ceiling.
     pub(super) fn dialable(&self, part: Part) -> bool {
-        self.floor(part).is_some()
+        self.dial(part).is_some()
     }
 
     /// One click on `part`: a rung up, wrapping at the ceiling to its floor.
-    pub(super) fn dial(&mut self, part: Part) -> bool {
-        let Some(floor) = self.floor(part) else {
+    pub(super) fn cycle(&mut self, part: Part) -> bool {
+        let Some(dial) = self.dial_mut(part) else {
             return false;
         };
-        match (&mut self.kind, part) {
-            (BlockKind::Group(g), Part::Thinking) => g.thinking.at = g.thinking.at.next(floor),
-            (BlockKind::Group(g), Part::Run) => g.run = g.run.next(floor),
-            (BlockKind::Act { at, .. } | BlockKind::Card { at, .. }, _) => *at = at.next(floor),
-            _ => return false,
-        }
+        dial.cycle();
         self.memo = None;
         true
     }
@@ -692,9 +733,9 @@ impl Block {
     /// Move this block's deliberation to the standing `/thinking` rung.
     pub(super) fn set_thinking(&mut self, at: Detail) {
         if let BlockKind::Group(g) = &mut self.kind
-            && g.thinking.at != at
+            && g.thinking.dial.at != at
         {
-            g.thinking.at = at;
+            g.thinking.dial.at = at;
             self.memo = None;
         }
     }
@@ -775,13 +816,13 @@ impl Block {
         if let BlockKind::Group(g) = &self.kind {
             let mut rows = Vec::new();
             if !g.thinking.is_empty() || !open.is_empty() {
-                let body = g.deliberation(at.unwrap_or(g.thinking.at), content, open);
+                let body = g.deliberation(at.unwrap_or(g.thinking.dial.at), content, open);
                 let glyph = rail::span(RailKind::Thinking, agent, Some(g.thinking.lines(open)));
                 rows.extend(Row::rail(body, Some(glyph)));
             }
             let split = rows.len();
             if !g.calls.is_empty() {
-                let run = at.unwrap_or(g.run);
+                let run = at.unwrap_or(g.run.at);
                 let body = group::body(&g.calls, run, content.into());
                 let glyph = rail::span(
                     RailKind::ToolCall(run >= Detail::Full),
@@ -796,7 +837,8 @@ impl Block {
             }
             return (rows, split);
         }
-        let mut lines = self.body(content, at.unwrap_or(Detail::Full), open);
+        let rung = self.dial(Part::Run).map_or(Detail::Full, |d| d.at);
+        let mut lines = self.body(content, at.unwrap_or(rung), open);
         // Prose is the one body that opens flush, so a lead answer would abut
         // the work above it; the mirror folds this blank against any trailing
         // one, so the gap never doubles.
@@ -953,13 +995,12 @@ mod tests {
 
     fn act(verb: &str, subject: Option<&str>, payload: &str, failed: bool) -> Block {
         Block::new(
-            BlockKind::Act {
-                verb: verb.into(),
-                subject: subject.map(str::to_string),
-                payload: payload.into(),
+            BlockKind::act(
+                verb.into(),
+                subject.map(str::to_string),
+                payload.into(),
                 failed,
-                at: Detail::Summary,
-            },
+            ),
             None,
         )
     }
@@ -1224,18 +1265,18 @@ mod tests {
     fn each_part_walks_its_own_rungs() {
         let mut lone = thinking("weighing it");
         assert!(lone.dialable(Part::Thinking) && !lone.dialable(Part::Run));
-        assert!(lone.dial(Part::Thinking));
+        assert!(lone.cycle(Part::Thinking));
 
         let mut group = run("read it");
         assert!(group.dialable(Part::Run) && !group.dialable(Part::Thinking));
         let rungs = |b: &Block| match &b.kind {
-            BlockKind::Group(g) => (g.thinking.at, g.run),
+            BlockKind::Group(g) => (g.thinking.dial.at, g.run.at),
             _ => panic!("a group"),
         };
         assert_eq!(rungs(&group).1, Detail::Summary, "work arrives collapsed");
-        assert!(group.dial(Part::Run));
+        assert!(group.cycle(Part::Run));
         assert_eq!(rungs(&group).1, Detail::Full);
-        assert!(group.dial(Part::Run));
+        assert!(group.cycle(Part::Run));
         assert_eq!(rungs(&group).1, Detail::Tally, "a run wraps to its tally");
     }
 

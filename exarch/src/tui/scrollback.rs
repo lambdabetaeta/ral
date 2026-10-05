@@ -594,7 +594,7 @@ impl Scrollback {
             Item::Barrier(BlockKind::Card {
                 card,
                 landing: Landing::Surfaced,
-                at,
+                dial,
             }) => {
                 let spare = match self.blocks.last_mut() {
                     Some(tail) => tail.merge_diff(card),
@@ -605,7 +605,7 @@ impl Scrollback {
                         BlockKind::Card {
                             card,
                             landing: Landing::Surfaced,
-                            at,
+                            dial,
                         },
                         Some(seq),
                     ));
@@ -736,7 +736,7 @@ impl Scrollback {
     pub(super) fn cycle_block(&mut self, hit: Hit) -> bool {
         self.blocks
             .get_mut(hit.block)
-            .is_some_and(|b| b.dial(hit.part))
+            .is_some_and(|b| b.cycle(hit.part))
     }
 
     /// Set the rung every group's deliberation reads at: the groups on screen
@@ -1004,13 +1004,12 @@ impl Scrollback {
                 subject,
                 payload,
                 failed,
-            } => vec![Item::Barrier(BlockKind::Act {
-                verb: verb.clone(),
-                subject: subject.clone(),
-                payload: payload.clone(),
-                failed: *failed,
-                at: Detail::Summary,
-            })],
+            } => vec![Item::Barrier(BlockKind::act(
+                verb.clone(),
+                subject.clone(),
+                payload.clone(),
+                *failed,
+            ))],
             K::SubagentDone {
                 name,
                 error,
