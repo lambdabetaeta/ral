@@ -11,7 +11,7 @@
 //!   ghost-text hinter, and plugin syntax highlighting.
 //! - [`config`]   -- RC file discovery, sourcing, and application, run
 //!   engine-side inside the boot door.
-//! - [`cursor`]   -- ANSI cursor-position queries (Unix only).
+//! - [`cursor`]   -- The zsh-style partial-line marker before each prompt.
 //! - [`enquiry`]  -- The `repl-editor` and `repl-plugin` enquiry classes.
 //! - [`errfmt`]   -- REPL-specific error formatting helpers.
 //! - [`exec`]     -- One input line's dispatch and its lifecycle hooks.

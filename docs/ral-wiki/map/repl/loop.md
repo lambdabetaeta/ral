@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e43ce37
-generated_at_date: 2026-09-23
+generated_at_commit: 375e8477
+generated_at_date: 2026-10-05
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
@@ -218,5 +218,9 @@ the structural worksheet projection, and completion live in
   process-global behind an `RwLock`, set once from the boot's answer.
 - `errfmt.rs` — the REPL-styled plugin notices (the breaker's disable notice,
   a plugin warning), beside core's full ariadne renderer.
-- `cursor.rs` — Unix cursor-column query for the zsh-style partial-line
-  marker.
+- `cursor.rs` — the zsh-style partial-line marker, written before each
+  rustyline prompt. On Unix it is `PROMPT_SP`'s fill-and-erase — `%`, then
+  `width − 1` spaces, then `\r\x1b[K` — which leaves the `%` only when the
+  fill wrapped off a partial line, and asks the terminal nothing, so keys
+  typed while a command ran reach the editor intact. On Windows the console
+  API, which likewise reads no input, reports the cursor column directly.

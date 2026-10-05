@@ -138,7 +138,7 @@ impl Frontend for RustylineFrontend {
         // helper refresh (cheap engine state only — the `PATH` enumeration
         // waits for the first Tab, so nothing here delays the prompt), history
         // snapshot, editor-hook reset.
-        if self.terminal.ui_round_trips_ok() {
+        if self.terminal.ui_controls_ok() {
             super::super::cursor::partial_line_marker();
         }
         if let Some(h) = self.rl.helper_mut() {
@@ -180,7 +180,7 @@ impl Frontend for RustylineFrontend {
                 // *then* flush plugin diagnostics so they land on a durable
                 // line above the next prompt.  Order matters: printing
                 // before the escape would have its line clobbered.
-                if self.terminal.ui_round_trips_ok() {
+                if self.terminal.ui_controls_ok() {
                     let _ = std::io::stdout().write_all(b"\x1b[A\r\x1b[K");
                     let _ = std::io::stdout().flush();
                 }

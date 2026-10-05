@@ -21,7 +21,9 @@ structural = ["dep:ratatui", "dep:ansi-to-tui", "dep:prompt-editor"]
 
 [dependencies]
 ral-core  = { path = "../core" }
-rustyline  = "=18.0.1"
+# buffer-redux: input read past an accepted line (type-ahead) carries over to
+# the next readline instead of being dropped.
+rustyline  = { version = "=18.0.1", features = ["buffer-redux"] }
 # The structural frontend (--surface structural): a ratatui inline-viewport
 # app projecting the live shell's types, bindings, and handles.  Same major
 # as exarch's, so the workspace resolves one build.

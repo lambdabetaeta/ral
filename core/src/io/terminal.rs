@@ -140,14 +140,15 @@ impl TerminalState {
         !self.mode.is_minimal() && self.supports_ansi && !self.no_color
     }
 
-    /// Terminal round-trip queries (CPR, DA, OSC) are appropriate.
-    pub fn ui_round_trips_ok(&self) -> bool {
+    /// UI may write control sequences (cursor motion, mode switches, OSC).
+    /// `NO_COLOR` does not block them: they are structure, not color.
+    pub fn ui_controls_ok(&self) -> bool {
         self.startup_stdout_tty && !self.mode.is_minimal()
     }
 
     /// Terminal title may be set via OSC 0/2 sequences.
     pub fn ui_title_ok(&self) -> bool {
-        self.ui_round_trips_ok()
+        self.ui_controls_ok()
     }
 
     /// 24-bit foreground/background colors may be emitted.
@@ -155,20 +156,19 @@ impl TerminalState {
         self.ui_ansi_ok() && self.truecolor
     }
 
-    /// OSC 8 hyperlinks may be emitted.  `NO_COLOR` does not block them: they
-    /// are structure, not color.
+    /// OSC 8 hyperlinks may be emitted.
     pub fn ui_hyperlinks_ok(&self) -> bool {
-        self.ui_round_trips_ok() && self.hyperlinks
+        self.ui_controls_ok() && self.hyperlinks
     }
 
     /// OSC 52 clipboard writes may be emitted.
     pub fn ui_clipboard_write_ok(&self) -> bool {
-        self.ui_round_trips_ok() && self.clipboard_write
+        self.ui_controls_ok() && self.clipboard_write
     }
 
     /// Bracketed-paste mode may be enabled by the line editor.
     pub(crate) fn ui_bracketed_paste_ok(&self) -> bool {
-        self.ui_round_trips_ok() && self.bracketed_paste
+        self.ui_controls_ok() && self.bracketed_paste
     }
 
     /// Diagnostics may emit ANSI.  Separate from `ui_ansi_ok` because stderr
@@ -465,10 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn ui_round_trips_ok_gates() {
-        assert!(make_state(InteractiveMode::Auto, true, false, true).ui_round_trips_ok());
-        assert!(!make_state(InteractiveMode::Auto, true, false, false).ui_round_trips_ok());
-        assert!(!make_state(InteractiveMode::Minimal, true, false, true).ui_round_trips_ok());
+    fn ui_controls_ok_gates() {
+        assert!(make_state(InteractiveMode::Auto, true, false, true).ui_controls_ok());
+        assert!(!make_state(InteractiveMode::Auto, true, false, false).ui_controls_ok());
+        assert!(!make_state(InteractiveMode::Minimal, true, false, true).ui_controls_ok());
     }
 
     #[test]
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_clipboard_write_ok_tracks_round_trips() {
+    fn ui_clipboard_write_ok_tracks_controls() {
         let mut s = make_state(InteractiveMode::Auto, true, false, true);
         s.clipboard_write = true;
         assert!(s.ui_clipboard_write_ok());
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_bracketed_paste_ok_tracks_round_trips() {
+    fn ui_bracketed_paste_ok_tracks_controls() {
         let mut s = make_state(InteractiveMode::Auto, true, false, true);
         s.bracketed_paste = true;
         assert!(s.ui_bracketed_paste_ok());
