@@ -133,8 +133,19 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
         .then_some("ral")
 }
 
-/// Carries the JSON-encoded [`SandboxProjection`] into a re-exec'd ral process.
-const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
+/// Carries the JSON-encoded [`Entry`] into a re-exec'd ral process.
+const SANDBOX_ENTRY_FLAG: &str = "--sandbox-entry";
+
+/// What a confined re-exec of ral enters: the projection, which Seatbelt
+/// compiles in the child on macOS; on Linux only the Landlock entry, its
+/// admits opened by the parent in the host, where the grant's paths mean what
+/// they meant.  Windows confines from the parent and enters nothing.
+#[cfg(target_os = "macos")]
+pub(crate) type Entry = SandboxProjection;
+#[cfg(target_os = "linux")]
+pub(crate) type Entry = linux::landlock::Entry;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) type Entry = serde::de::IgnoredAny;
 
 /// Tail of a per-command host re-exec: once `early_init` has entered the
 /// process sandbox, [`serve_sandbox_exec`] `execve`s the program inside it.
@@ -180,6 +191,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
                 program: "/bin/true",
                 args: &[],
                 image: None,
+                admits: &[],
             },
             policy,
             None,
@@ -268,6 +280,7 @@ pub fn restricted_envelope_launches() -> bool {
                 program: "/bin/true",
                 args: &[],
                 image: None,
+                admits: &[],
             },
             &projection,
             None,
@@ -333,18 +346,18 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 }
 
 /// All sandbox startup work, returning argv stripped of
-/// `--sandbox-projection`.
+/// `--sandbox-entry`.
 ///
-/// Pins this binary and, on Unix, enters the OS process sandbox when a
-/// projection was supplied — Seatbelt on macOS, Landlock inside the bwrap
+/// Pins this binary and, on Unix, enters the OS process sandbox when an
+/// [`Entry`] was supplied — Seatbelt on macOS, Landlock inside the bwrap
 /// envelope on Linux.  Windows confines the child from the parent instead.
 ///
 /// # Errors
-/// A malformed `--sandbox-projection`, one on a platform that never emits it,
+/// A malformed `--sandbox-entry`, one on a platform that never emits it,
 /// or a failure to enter the sandbox.
 pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
-    let (policy, stripped) = strip_policy_arg(argv)?;
-    // So a per-command `--sandbox-projection` child re-execs this binary and
+    let (entry, stripped) = strip_entry_arg(argv)?;
+    // So a per-command `--sandbox-entry` child re-execs this binary and
     // not whatever the on-disk path holds by then.
     reexec::register_sandbox_self();
     // Before any shell exists, so no session can choose its own launcher.
@@ -365,7 +378,7 @@ pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
             windows::session::boot_recover();
         }
     }
-    reexec::maybe_enter_process_sandbox(policy.as_ref())?;
+    reexec::maybe_enter_process_sandbox(entry.as_ref())?;
     Ok(stripped)
 }
 
@@ -387,7 +400,7 @@ pub fn teardown_session() {
 /// First [`early_init`], then the per-command re-exec tails on the argv it
 /// leaves — the `--ral-bundled-tool` multicall via
 /// [`crate::try_run_bundled_tool`], and on Unix the host `execve` via
-/// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-projection`
+/// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-entry`
 /// child is confined before its tail runs.  The stripped argv is discarded, so
 /// the `ral` binary, which parses a CLI out of it, calls [`early_init`] itself.
 pub fn serve_sandbox_early_init() -> Option<u8> {
@@ -403,22 +416,22 @@ pub fn serve_sandbox_early_init() -> Option<u8> {
     }
 }
 
-/// Split a leading `--sandbox-projection <json>` off `raw`: the parsed policy,
+/// Split a leading `--sandbox-entry <json>` off `raw`: the parsed entry,
 /// then the arguments that remain.
 ///
 /// Leading by construction — [`launch`] emits it as the first argument of the
 /// confined re-exec — so a later occurrence is part of the `--ral-sandbox-exec`
 /// tail, an argument of the command the child is about to run, and must reach
-/// it verbatim rather than be read as a second projection.
-fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxProjection>, Vec<String>), String> {
+/// it verbatim rather than be read as a second entry.
+fn strip_entry_arg(raw: &[String]) -> Result<(Option<Entry>, Vec<String>), String> {
     match raw.split_first() {
-        Some((flag, tail)) if flag == SANDBOX_PROJECTION_FLAG => {
+        Some((flag, tail)) if flag == SANDBOX_ENTRY_FLAG => {
             let (json, rest) = tail
                 .split_first()
-                .ok_or("ral: --sandbox-projection requires a JSON argument")?;
-            let policy = serde_json::from_str(json)
-                .map_err(|e| format!("ral: invalid sandbox policy JSON: {e}"))?;
-            Ok((Some(policy), rest.to_vec()))
+                .ok_or("ral: --sandbox-entry requires a JSON argument")?;
+            let entry = serde_json::from_str(json)
+                .map_err(|e| format!("ral: invalid sandbox entry JSON: {e}"))?;
+            Ok((Some(entry), rest.to_vec()))
         }
         _ => Ok((None, raw.to_vec())),
     }
@@ -455,7 +468,7 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{NET_ENFORCED, SANDBOX_PROJECTION_FLAG, projection_enforceable, strip_policy_arg};
+    use super::{NET_ENFORCED, SANDBOX_ENTRY_FLAG, projection_enforceable, strip_entry_arg};
     use crate::types::SandboxProjection;
 
     #[test]
@@ -495,38 +508,30 @@ mod tests {
         );
     }
 
+    /// `{"net":true}` is an entry on every platform: a projection on macOS,
+    /// an unconfined exec on Linux, and ignored on Windows.
     #[test]
-    fn strip_policy_arg_extracts_json_and_preserves_other_args() {
-        let (policy, args) = strip_policy_arg(&[
-            "--sandbox-projection".into(),
-            r#"{"fs":{"kind":"restricted","rules":{"read_prefixes":["/tmp"]}},"net":true}"#.into(),
+    fn strip_entry_arg_extracts_json_and_preserves_other_args() {
+        let (entry, args) = strip_entry_arg(&[
+            SANDBOX_ENTRY_FLAG.into(),
+            r#"{"net":true}"#.into(),
             "-c".into(),
             "echo hi".into(),
         ])
-        .expect("policy args");
-        assert_eq!(
-            policy,
-            Some(SandboxProjection {
-                fs: crate::types::FsProjection::Restricted(crate::types::FsRules {
-                    read_prefixes: vec!["/tmp".to_string()],
-                    ..crate::types::FsRules::default()
-                }),
-                net: true,
-                exec: crate::types::ExecProjection::default(),
-            })
-        );
+        .expect("entry args");
+        assert!(entry.is_some());
         assert_eq!(args, vec!["-c", "echo hi"]);
     }
 
     #[test]
-    fn strip_policy_arg_leaves_the_exec_tail_untouched() {
+    fn strip_entry_arg_leaves_the_exec_tail_untouched() {
         let tail = [
             crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string(),
             "rg".to_string(),
-            SANDBOX_PROJECTION_FLAG.to_string(),
+            SANDBOX_ENTRY_FLAG.to_string(),
             "not json".to_string(),
         ];
-        let (policy, args) = strip_policy_arg(&tail).expect("a tail is not a projection");
+        let (policy, args) = strip_entry_arg(&tail).expect("a tail is not a projection");
         assert!(policy.is_none());
         assert_eq!(args, tail);
     }

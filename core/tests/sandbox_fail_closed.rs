@@ -10,7 +10,7 @@
 //!
 //! Imports `common` for its `#[ctor]`, which runs `serve_sandbox_early_init`
 //! so the re-exec child enters Seatbelt and `execve`s the target rather than
-//! landing in libtest and dying on `--sandbox-projection` — a failure for the
+//! landing in libtest and dying on `--sandbox-entry` — a failure for the
 //! wrong reason.  macOS-only: the one backend that confines an in-tree re-exec
 //! end-to-end without a helper binary (`bwrap` is often absent in CI).
 //! `projection_enforceable`'s own fail-closed axis is unit-tested in `sandbox`.

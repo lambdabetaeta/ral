@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: f4e88bce
+generated_at_commit: 7f61632a
 verified_at_commit: f4e88bce
 anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecRule, emit_exec_rules, Sbpl]
 ---
@@ -61,10 +61,13 @@ visible in the grant and its dump.
 `file-read* process-exec`, a deny or veto `process-exec` only — exec denies do
 not deny reads, which are fs's. Landlock is allow-list only: it admits the
 base, ral and every allowing rule, and renders no deny; each file being
-emitted once at its final verdict, the allows stand as they are. Exec paths
-are real and frozen at grant, so rendering adds only the firmlink twin and
-never reads the disk; Landlock admits only paths that are their own real path
-and opens each without following symlinks.
+emitted once at its final verdict, the allows stand as they are. Exec rules
+carry `RealPath`s to the backends, and `render_real`, the one way from one to
+a kernel spelling, adds only the firmlink twin and never reads the disk, so a
+frozen grant cannot widen to a symlink's new target. Landlock judges inside
+the bwrap envelope, whose names bwrap minted by following host symlinks, so
+the parent opens each admit in the host with `RESOLVE_NO_SYMLINKS` and the
+payload builds its ruleset from the inherited fds.
 
 ## Declared limits
 

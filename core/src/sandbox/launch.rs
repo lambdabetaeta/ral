@@ -8,9 +8,10 @@
 //! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
 //!
 //! macOS and Linux share one trampoline: the payload is *ral*, carrying the
-//! folded projection and the target as its argv tail ([`trampoline_tail`]), so
+//! sandbox entry and the target as its argv tail ([`trampoline_tail`]), so
 //! the child enters the process sandbox in `early_init` and only then becomes
-//! the target.  On Linux the trampoline runs inside the bwrap envelope, which
+//! the target.  macOS's entry is the projection; Linux's names only the exec
+//! admits the parent opened in the host, which the payload inherits.  On Linux the trampoline runs inside the bwrap envelope, which
 //! is what makes the Landlock layer possible at all: a domain handling any fs
 //! right forbids `mount(2)`, bwrap's first act.  Windows has no trampoline —
 //! its `LowBox` token is applied at the parent's spawn.
@@ -101,7 +102,7 @@ pub(crate) fn sandboxed_command(
 /// (`super::windows::session::confine`), so there is no re-exec into the
 /// sandbox as on macOS/Linux.  A bundled tool is therefore a plain
 /// `ral --ral-bundled-tool <tool> …` self-placement carrying no
-/// `--sandbox-projection`: a Windows child has nothing to enter, and
+/// `--sandbox-entry`: a Windows child has nothing to enter, and
 /// `super::reexec::maybe_enter_process_sandbox` fails closed if it sees one.
 #[cfg(windows)]
 fn windows_sandboxed_command(
@@ -139,8 +140,8 @@ fn windows_sandboxed_command(
     Ok(launch)
 }
 
-/// The argv every confined re-exec of ral carries: the folded projection the
-/// child enters in `early_init`, then the program it becomes inside that
+/// The argv every confined re-exec of ral carries: the [`Entry`](super::Entry)
+/// the child enters in `early_init`, then the program it becomes inside that
 /// confinement — a bundled tool run in-process under the `--ral-bundled-tool`
 /// tail, a host file `execve`d by [`serve_sandbox_exec`], by the path the
 /// in-process guard judged, under the `--ral-sandbox-exec` one.
@@ -151,16 +152,13 @@ fn windows_sandboxed_command(
 /// install`) would launch a foreign build under our confinement, and Linux
 /// re-execs by the on-disk name, exactly where a swap lands.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn trampoline_tail(
-    projection: &crate::types::SandboxProjection,
-    admitted: &Admitted,
-) -> Settled<Vec<String>> {
+pub(super) fn trampoline_tail(entry: &super::Entry, admitted: &Admitted) -> Settled<Vec<String>> {
     if let Some(pinned) = super::reexec::SANDBOX_SELF.get() {
         super::reexec::verify_unswapped(pinned).map_err(Break::Error)?;
     }
-    let json = serde_json::to_string(projection).map_err(|e| {
+    let json = serde_json::to_string(entry).map_err(|e| {
         Break::Error(Error::new(
-            format!("sandbox: failed to encode projection: {e}"),
+            format!("sandbox: failed to encode the sandbox entry: {e}"),
             1,
         ))
     })?;
@@ -173,7 +171,7 @@ pub(super) fn trampoline_tail(
     };
     let args = admitted.args();
     let mut tail = Vec::with_capacity(args.len() + 4);
-    tail.push(super::SANDBOX_PROJECTION_FLAG.to_string());
+    tail.push(super::SANDBOX_ENTRY_FLAG.to_string());
     tail.push(json);
     tail.push(sentinel.to_string());
     tail.push(name.into_owned());
@@ -207,7 +205,9 @@ fn linux_sandboxed_command(
             1,
         ))
     })?;
-    let tail = trampoline_tail(projection, admitted)?;
+    let (entry, admits) = super::linux::landlock::prepare(projection, host.landlock)
+        .map_err(|e| Break::Error(Error::new(e, 1)))?;
+    let tail = trampoline_tail(&entry, admitted)?;
     let image = match admitted.program() {
         Program::File { path, .. } => Some(path.to_string_lossy()),
         Program::Tool(_) => None,
@@ -218,6 +218,7 @@ fn linux_sandboxed_command(
             program: &self_path.to_string_lossy(),
             args: &tail,
             image: image.as_deref(),
+            admits: &admits,
         },
         projection,
         Some(cwd.as_str()),
@@ -361,8 +362,8 @@ mod tests {
         )
         .expect("build macOS host command");
         let args = argv(&cmd);
-        // ral --sandbox-projection <json> --ral-sandbox-exec /bin/sh -c …
-        assert_eq!(args[0], super::super::SANDBOX_PROJECTION_FLAG);
+        // ral --sandbox-entry <json> --ral-sandbox-exec /bin/sh -c …
+        assert_eq!(args[0], super::super::SANDBOX_ENTRY_FLAG);
         let decoded: SandboxProjection =
             serde_json::from_str(&args[1]).expect("projection round-trips");
         assert_eq!(decoded, projection);
@@ -380,7 +381,7 @@ mod tests {
         )
         .expect("build macOS bundled command");
         let args = argv(&cmd);
-        assert_eq!(args[0], super::super::SANDBOX_PROJECTION_FLAG);
+        assert_eq!(args[0], super::super::SANDBOX_ENTRY_FLAG);
         assert_eq!(args[2], crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG);
         assert_eq!(args[3], "ls");
         assert_eq!(args[4], "-l");
@@ -557,10 +558,10 @@ mod tests {
             .position(|a| a == "--")
             .expect("bwrap -- separator");
         assert!(chdir < sep, "--chdir must precede the -- separator");
-        // ral --sandbox-projection <json> --ral-sandbox-exec /bin/sh -c …
+        // ral --sandbox-entry <json> --ral-sandbox-exec /bin/sh -c …
         let self_arg0 = super::super::reexec::self_arg0().expect("own path");
         assert_eq!(args[sep + 1], self_arg0.to_string_lossy());
-        assert_eq!(args[sep + 2], super::super::SANDBOX_PROJECTION_FLAG);
+        assert_eq!(args[sep + 2], super::super::SANDBOX_ENTRY_FLAG);
         let decoded: SandboxProjection =
             serde_json::from_str(&args[sep + 3]).expect("projection round-trips");
         assert_eq!(decoded, projection);
@@ -600,7 +601,7 @@ mod tests {
             .iter()
             .position(|a| a == "--")
             .expect("bwrap -- separator");
-        assert_eq!(args[sep + 2], super::super::SANDBOX_PROJECTION_FLAG);
+        assert_eq!(args[sep + 2], super::super::SANDBOX_ENTRY_FLAG);
         assert_eq!(
             args[sep + 4],
             crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG

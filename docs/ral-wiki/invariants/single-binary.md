@@ -12,10 +12,10 @@ behind a hidden sentinel flag, never a sibling helper:
   since a ral-written stage now runs on a thread of the parent process rather
   than a child of its own, and a bundled tool re-execs as
   `--ral-bundled-tool <tool>` whether standalone or a stage;
-- an `fs`/`net` [[design/grant|grant]] confines an external child by
-  re-execing it under `--sandbox-projection <json> --ral-sandbox-exec <host>`
-  (macOS) or entering the OS sandbox directly (Linux `bwrap`, Windows
-  AppContainer at spawn — no child re-exec there), confined by the
+- an `fs`/`net`/`exec` [[design/grant|grant]] confines an external child by
+  re-execing ral under `--sandbox-entry <json> --ral-sandbox-exec <host>`
+  (macOS directly, Linux inside `bwrap`), or at spawn on Windows (an
+  AppContainer, no child re-exec there), confined by the
   `sandbox_projection` of the live [[design/grant|grant]];
 - a wire-seat agent hatch re-execs an engine child under `--engine`, seeded
   from an `EngineSeed` the parent packs ([[map/core/transport|transport]]).

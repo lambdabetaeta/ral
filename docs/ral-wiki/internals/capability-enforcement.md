@@ -315,7 +315,7 @@ child:
   returns the payload's group, `ForegroundDecision` never hands an envelope the
   terminal, and a pipeline collector addresses each confined stage's envelope
   beside its own group ([[internals/pipeline-execution|pipeline execution]]);
-- *macOS* re-execs a tiny launcher — `ral --sandbox-projection <json>
+- *macOS* re-execs a tiny launcher — `ral --sandbox-entry <json>
   --ral-sandbox-exec <path>` for a host file, the absolute path the guard
   judged, or `--ral-bundled-tool <tool>` for a bundled tool — that enters
   Seatbelt in `early_init` (`maybe_enter_process_sandbox`) from the projection

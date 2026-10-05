@@ -238,7 +238,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 }
 
 /// Refuse to spawn a foreign build: `sandbox::launch` calls this before
-/// every per-command `--sandbox-projection` re-exec, to catch an executable
+/// every per-command `--sandbox-entry` re-exec, to catch an executable
 /// swapped on disk since registration.
 ///
 /// Every Unix: the trampoline is exec'd by name on both, so the Linux fd pin
@@ -274,34 +274,32 @@ pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
 
 // ── Process sandbox entry ────────────────────────────────────────────────
 
-/// Enter the OS sandbox for this process if a projection was supplied: macOS
-/// enters Seatbelt, Linux the Landlock layer — inside the bwrap envelope the
-/// parent has already built around us, which is the only place it can be
-/// entered, a domain handling any fs right forbidding `mount(2)`.  Windows
-/// confines a child from the parent with an `AppContainer` token, so there the
-/// flag is a regression to the Unix shape, or forged, and is refused rather
-/// than run unconfined.
-pub(super) fn maybe_enter_process_sandbox(
-    policy: Option<&crate::types::SandboxProjection>,
-) -> Result<(), String> {
-    let Some(policy) = policy else {
+/// Enter the OS sandbox for this process if an [`Entry`](super::Entry) was
+/// supplied: macOS enters Seatbelt, Linux the Landlock layer — inside the
+/// bwrap envelope the parent has already built around us, which is the only
+/// place it can be entered, a domain handling any fs right forbidding
+/// `mount(2)`.  Windows confines a child from the parent with an
+/// `AppContainer` token, so there the flag is a regression to the Unix shape,
+/// or forged, and is refused rather than run unconfined.
+pub(super) fn maybe_enter_process_sandbox(entry: Option<&super::Entry>) -> Result<(), String> {
+    let Some(entry) = entry else {
         return Ok(());
     };
     #[cfg(target_os = "macos")]
     {
-        super::macos::enter_current_process(policy)
+        super::macos::enter_current_process(entry)
     }
     #[cfg(target_os = "linux")]
     {
-        super::linux::landlock::enter(policy)
+        super::linux::landlock::enter(entry)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = policy;
+        let _ = entry;
         Err(format!(
             "ral: {} is not entered on {}: confinement is applied to a child from outside, \
              never by the child itself; refusing to run unconfined",
-            super::SANDBOX_PROJECTION_FLAG,
+            super::SANDBOX_ENTRY_FLAG,
             std::env::consts::OS
         ))
     }

@@ -11,7 +11,8 @@ use super::NormalizedPrefix;
 /// Ordered as the host identifies files: by path components off Windows, by
 /// [`windows_identity_components`](super::lex::windows_identity_components)
 /// on it — so two keys naming one file are one key in a map.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct RealPath(PathBuf);
 
 impl RealPath {
@@ -42,7 +43,7 @@ impl RealPath {
         super::lex::identity_depth(&self.0.to_string_lossy(), cfg!(windows))
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }

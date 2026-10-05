@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f4e88bce
+generated_at_commit: 7f61632a
 generated_at_date: 2026-10-05
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -195,7 +195,8 @@ spawn; both Unix
 backends additionally render the same rules into the kernel, catching the
 re-execs the in-process guard never sees (`sh -c`, `find -exec`) — macOS as
 Seatbelt `process-exec` forms in rule order, Linux as a Landlock `Execute`
-ruleset the payload enters inside the bwrap envelope (`linux/landlock.rs`;
+ruleset the payload enters inside the bwrap envelope over admits the parent
+opened in the host (`linux/landlock.rs`;
 Landlock being allow-list only, a deny *inside* an allowed directory stays
 with the in-process guard there). `carriers.rs` computes what the kernel
 must admit beside them for a script to start: system-vouched `#!`
@@ -212,12 +213,12 @@ unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process guards apply unchanged
 (`docs/SPEC.md` §12.11).
 
-- `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
+- `early_init(argv)` — startup: consumes `--sandbox-entry`, pins
   `SANDBOX_SELF` and, on Linux, the bwrap envelope (`linux::register_envelope`,
-  walked on the process's own `PATH` before any shell exists), on macOS enters
-  the OS sandbox for a per-command
-  `--sandbox-projection` child (`maybe_enter_process_sandbox`; Linux and
-  Windows confine from the parent and refuse the flag), and on Windows
+  walked on the process's own `PATH` before any shell exists), on Unix enters
+  the OS sandbox for a per-command `--sandbox-entry` child
+  (`maybe_enter_process_sandbox`; Windows confines from the parent and
+  refuses the flag), and on Windows
   runs the boot-time orphan sweep (`windows::session::boot_recover`) that
   deletes a crashed prior session's AppContainer profiles and restores the
   per-session ACEs of any legacy pre-capability ledger. A test binary is
@@ -241,9 +242,9 @@ device for `net` to govern; the in-process guards apply unchanged
   `Unguarded` on Windows, which has no parent-side self re-exec for a guard
   to protect. On Unix
   `maybe_enter_process_sandbox` enters the OS sandbox in a per-command
-  `--sandbox-projection` child; on Windows there is no child re-entry at all —
+  `--sandbox-entry` child; on Windows there is no child re-entry at all —
   confinement is the AppContainer token the *parent* attaches at
-  `CreateProcessW`, so a supplied `--sandbox-projection` is rejected as an
+  `CreateProcessW`, so a supplied `--sandbox-entry` is rejected as an
   error (no legitimate caller emits it), and the pinned self serves to grant
   the container read on the bundled-tool re-exec image. `verify_unswapped`,
   the parent-side swap guard, is `cfg(target_os = "macos")`: only macOS
@@ -264,19 +265,27 @@ device for `net` to govern; the in-process guards apply unchanged
   by the absolute path the guard judged, or a `Program::Tool` placed as
   `ral --ral-bundled-tool <tool>`. macOS
   and Linux share one trampoline argv, `trampoline_tail`: the payload is the
-  pinned ral itself, `ral --sandbox-projection <json>` followed by either
+  pinned ral itself, `ral --sandbox-entry <json>` followed by either
   `--ral-sandbox-exec <path>` or `--ral-bundled-tool <tool>`, so the child
-  enters the process sandbox in `early_init` from the projection alone and
-  only then becomes the target, `serve_sandbox_exec` `execve`ing that path
+  enters the process sandbox in `early_init` from the entry alone and only
+  then becomes the target, `serve_sandbox_exec` `execve`ing that path
   inside the confinement.
   macOS spawns that trampoline directly; Linux spawns it under `bwrap`
   (`make_command_with_policy`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. That order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
-  `make_command_with_policy` therefore takes a `Payload { program, args, image
-  }` — `program` is the trampoline, `image` the host binary it will exec in
-  turn — and binds both read-only where absolute, since bwrap cannot exec what
+  The entry differs by kernel. macOS's is the projection, which Seatbelt
+  compiles in the child. Linux's names no path: inside the envelope every
+  name is one bwrap minted by following host symlinks, so none can be trusted
+  to reach the file a grant froze. `landlock::prepare` instead opens each exec
+  admit in the parent, in the host, with `RESOLVE_NO_SYMLINKS`, and the entry
+  only counts them; the payload inherits them from fd 200 and builds its
+  ruleset from the fds, adding only `Refer` on its own root, which exists
+  nowhere else. `make_command_with_policy` therefore takes a `Payload {
+  program, args, image, admits }` — `program` is the trampoline, `image` the
+  host binary it will exec in turn, `admits` the opened fds — and binds both
+  executables read-only where absolute, since bwrap cannot exec what
   it cannot see, with every allowing `ExecRule::File`, carriers included, not
   already under a bind. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its

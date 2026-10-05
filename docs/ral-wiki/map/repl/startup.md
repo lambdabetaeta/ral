@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e2b7067b
+generated_at_commit: 7f61632a
 generated_at_date: 2026-09-23
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -47,7 +47,7 @@ two-staged around the sandbox:
   `test_helper::try_run_test_helper`.
 - **Sandbox entry** — `ral_core::sandbox::early_init(&argv)` returns the
   *stripped* post-init argv together with an optional exit. It consumes
-  `--sandbox-projection`, pins the binary, and enters the OS
+  `--sandbox-entry`, pins the binary, and enters the OS
   [[map/core/capabilities|sandbox]] for a confined re-exec.
 - **Confined-child tails**, dispatched on the stripped argv *after* `early_init`
   so a projected child enters the sandbox first, then runs the target inside it:

@@ -1,7 +1,7 @@
 //! macOS sandbox using the Seatbelt (`sandbox_init`) API.
 //!
-//! Only the per-command re-exec child is confined: it carries
-//! `--sandbox-projection`, enters the profile at startup through
+//! Only the per-command re-exec child is confined: it carries the projection
+//! under `--sandbox-entry`, enters the profile at startup through
 //! `enter_current_process`, then execs the target — a host binary via
 //! `--ral-sandbox-exec`, or a bundled tool in-process — which inherits the
 //! confinement.  The parent ral process is never confined; authorising a
@@ -10,7 +10,7 @@
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
 //! one allow/deny bit rather than an endpoint list.
 
-use crate::path::{Rendered, render_paths, rendered_ancestors};
+use crate::path::{Rendered, render_paths, render_real, rendered_ancestors};
 use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Write};
@@ -167,13 +167,18 @@ pub(crate) const RENDERS_EXEC: bool = true;
 /// expansion is not valid UTF-8, which [`render_paths`] refuses.
 fn emit_exec_rules(
     lines: &mut Vec<String>,
-    exec: &ExecProjection<Rendered>,
+    exec: &ExecProjection,
     freeze_admitted_set: bool,
 ) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
         lines.push("(allow process-exec)".to_string());
         return Ok(());
     };
+    let mut rendered = Vec::with_capacity(rules.len());
+    for rule in rules {
+        rendered.extend(rule.try_flat_map(render_real)?);
+    }
+    let rules = rendered;
     // Toolchains (`gcc → cc1 → as → ld`) arrive through the grant, `system:`
     // among them; only the loader base is ambient.
     let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
@@ -406,14 +411,14 @@ mod tests {
 
     fn dir(path: &str, allow: bool) -> ExecRule {
         ExecRule::Dir {
-            path: path.into(),
+            path: crate::path::RealPath::assumed(path),
             allow,
         }
     }
 
     fn file(path: &str, allow: bool) -> ExecRule {
         ExecRule::File {
-            path: path.into(),
+            path: crate::path::RealPath::assumed(path),
             allow,
         }
     }

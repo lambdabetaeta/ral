@@ -174,7 +174,7 @@ impl ExecRules {
     pub(crate) fn kernel(&self, carriers: &BTreeSet<RealPath>) -> Vec<ExecRule> {
         let dirs = self.dirs.iter().map(|(d, &allow)| {
             let dir = ExecRule::Dir {
-                path: d.to_string(),
+                path: d.clone(),
                 allow,
             };
             (Rank::Dir(d.depth()), dir)
@@ -183,7 +183,7 @@ impl ExecRules {
         let files = files.into_iter().map(|f| {
             let allow = !self.kernel_verdict(f, carriers).is_denied();
             let file = ExecRule::File {
-                path: f.to_string(),
+                path: f.clone(),
                 allow,
             };
             (Rank::Exact, file)
@@ -507,12 +507,8 @@ mod tests {
             .iter()
             .rev()
             .find_map(|rule| match rule {
-                ExecRule::Dir { path, allow } => {
-                    real.within(&RealPath::assumed(path)).then_some(*allow)
-                }
-                ExecRule::File { path, allow } => {
-                    (*real == RealPath::assumed(path)).then_some(*allow)
-                }
+                ExecRule::Dir { path, allow } => real.within(path).then_some(*allow),
+                ExecRule::File { path, allow } => (real == path).then_some(*allow),
                 ExecRule::Veto(name) => (name_key(&real.name()) == name.as_str()).then_some(false),
             })
             .unwrap_or(false)
@@ -548,11 +544,10 @@ mod tests {
     }
 
     fn kernel_file(kernel: &[ExecRule], f: &RealPath) -> Vec<bool> {
-        let want = f.to_string();
         kernel
             .iter()
             .filter_map(|rule| match rule {
-                ExecRule::File { path, allow } if *path == want => Some(*allow),
+                ExecRule::File { path, allow } if path == f => Some(*allow),
                 _ => None,
             })
             .collect()

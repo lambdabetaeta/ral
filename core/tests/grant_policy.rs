@@ -272,9 +272,10 @@ fn projection_admits(exec: &ExecProjection, resolved: &str) -> bool {
         .rev()
         .find_map(|rule| match rule {
             ExecRule::Dir { path, allow } => {
+                let path = path.to_string();
                 (resolved == path || resolved.starts_with(&format!("{path}/"))).then_some(*allow)
             }
-            ExecRule::File { path, allow } => (resolved == path).then_some(*allow),
+            ExecRule::File { path, allow } => (resolved == path.to_string()).then_some(*allow),
             ExecRule::Veto(name) => (base == Some(name.as_str())).then_some(false),
         })
         .unwrap_or(false)
@@ -314,10 +315,9 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
         panic!("exec should be restricted, got {:?}", projection.exec);
     };
     assert!(
-        rules.contains(&ExecRule::File {
-            path: git.clone(),
-            allow: true
-        }),
+        rules.iter().any(
+            |rule| matches!(rule, ExecRule::File { path, allow: true } if path.to_string() == git)
+        ),
         "the path key covered by the sibling allow dir must reach the rules, got {rules:?}"
     );
 

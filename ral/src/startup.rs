@@ -73,7 +73,7 @@ pub(crate) fn identify() -> Invocation {
         }
     };
 
-    // Served after the strip: a `--sandbox-projection` child enters the OS
+    // Served after the strip: a `--sandbox-entry` child enters the OS
     // sandbox first, then runs the target confined.
     if let Some(code) = ral_core::sandbox::serve_sandbox_exec(&argv) {
         return Invocation::Exit(ExitCode::from(code));

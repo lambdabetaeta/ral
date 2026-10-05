@@ -41,7 +41,7 @@
 //! so its `#[ctor::ctor]` runs `serve_sandbox_early_init` — that is what
 //! lets a per-command re-exec child actually enter Seatbelt and run the
 //! confined target. Without it the re-exec child would land in the
-//! libtest framework and crash on the unknown `--sandbox-projection`
+//! libtest framework and crash on the unknown `--sandbox-entry`
 //! flag, "failing" for the wrong reason and proving nothing.
 //!
 //! Gated to macOS, matching `sandbox_fail_closed.rs` and the end-to-end

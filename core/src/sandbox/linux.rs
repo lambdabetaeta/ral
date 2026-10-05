@@ -11,8 +11,8 @@
 //! whole — so `SandboxProjection::net` is a bit, not a list.
 //!
 //! The payload is always ral's own trampoline (`super::launch`), which enters
-//! the [`landlock`] layer rendering `policy.exec` and only then becomes the
-//! target: that order is forced, a Landlock domain handling any fs right
+//! the [`landlock`] layer over the exec admits it inherits and only then
+//! becomes the target: that order is forced, a Landlock domain handling any fs right
 //! forbidding the `mount(2)` bwrap opens with.
 
 mod host;
@@ -22,7 +22,7 @@ pub(crate) mod seccomp;
 pub(crate) use host::HostEnvelope;
 
 use super::reexec::Pinned;
-use crate::path::{PathShape, Rendered, render_paths};
+use crate::path::{PathShape, Rendered, render_paths, render_real};
 use crate::types::{ExecProjection, ExecRule, FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -74,6 +74,9 @@ pub(crate) struct Payload<'a> {
     pub(crate) args: &'a [String],
     /// A host binary the payload execs in turn, bound RO beside `program`.
     pub(crate) image: Option<&'a str>,
+    /// The Landlock exec admits, opened in the host, which the payload
+    /// inherits from [`ADMIT_FD_BASE`] (`landlock::prepare`).
+    pub(crate) admits: &'a [std::os::fd::OwnedFd],
 }
 
 /// Build the [`Command`] that runs `payload` under the pinned `envelope` for
@@ -84,8 +87,8 @@ pub(crate) struct Payload<'a> {
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
 /// twin names.  `policy.exec` has no counterpart in the argv: bwrap filters
-/// mounts and syscalls, not exec by path, so it is rendered by [`landlock`]
-/// and entered by the payload *inside* this envelope.
+/// mounts and syscalls, not exec by path, so [`landlock`] opens its admits
+/// here in the host, and the payload enters them *inside* this envelope.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
@@ -138,17 +141,13 @@ pub(crate) fn make_command_with_policy(
     // A file the exec layer admits, carriers among them, is useless unless
     // the envelope shows it.
     if let ExecProjection::Restricted(exec) = &rendered.exec {
-        let unbound: Vec<Rendered> = exec
-            .iter()
-            .filter_map(|rule| match rule {
-                ExecRule::File { path, allow: true }
-                    if !ro_binds.iter().any(|bind| path.within(bind)) =>
-                {
-                    Some(path.clone())
-                }
-                _ => None,
-            })
-            .collect();
+        let mut unbound = Vec::new();
+        for rule in exec {
+            if let ExecRule::File { path, allow: true } = rule {
+                unbound.extend(render_real(path)?);
+            }
+        }
+        unbound.retain(|path| !ro_binds.iter().any(|bind| path.within(bind)));
         ro_binds.extend(unbound);
     }
     ro_binds.sort();
@@ -231,6 +230,7 @@ pub(crate) fn make_command_with_policy(
             .map_err(|e| format!("sandbox: {e}"))?;
         apply_seccomp(&mut c, programs);
     }
+    inherit_admits(&mut c, payload.admits)?;
     c.arg("--");
     c.arg(payload.program);
     c.args(payload.args);
@@ -337,6 +337,9 @@ const INFO_FD: libc::c_int = 100;
 /// First of the seccomp programs' fds, `apply_seccomp` parking program `i` at
 /// `SECCOMP_FD_BASE + i`.
 const SECCOMP_FD_BASE: libc::c_int = 101;
+/// First of the Landlock exec admits, `inherit_admits` installing admit `i`
+/// at `ADMIT_FD_BASE + i`; clear of the seccomp run.
+const ADMIT_FD_BASE: libc::c_int = 200;
 
 /// Both ends of a `Kept` launch's `--info-fd` pipe.  Our copy of the write
 /// end must outlive the fork that gives bwrap its own, then go: a read
@@ -402,6 +405,31 @@ fn open_info_fd(c: &mut Command) -> Result<InfoFd, String> {
     }
     c.args(["--info-fd", &INFO_FD.to_string()]);
     Ok(InfoFd { reader, writer })
+}
+
+/// Install `admits` at [`ADMIT_FD_BASE`] onward, `CLOEXEC` cleared so bwrap
+/// hands them to the payload.  Each is lifted above the run first, so no
+/// install lands on an admit not yet moved.
+fn inherit_admits(c: &mut Command, admits: &[std::os::fd::OwnedFd]) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let above = libc::c_int::try_from(admits.len())
+        .ok()
+        .and_then(|n| ADMIT_FD_BASE.checked_add(n))
+        .ok_or("landlock: too many exec admits to inherit")?;
+    let lifted = admits
+        .iter()
+        .map(|fd| rustix::io::fcntl_dupfd_cloexec(fd, above))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("landlock: cannot lift an exec admit above fd {above}: {e}"))?;
+    unsafe {
+        c.pre_exec(move || {
+            for (at, fd) in (ADMIT_FD_BASE..).zip(&lifted) {
+                install_inherited(fd.as_raw_fd(), at)?;
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
@@ -587,6 +615,7 @@ fn default_ro_binds() -> Vec<String> {
 mod tests {
     use super::{HostEnvelope, Payload, Pinned, make_command_with_policy};
     use crate::capability::Program;
+    use crate::path::RealPath;
     use crate::sandbox::launch::{Ownership, admitted, trampoline_tail};
     use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
@@ -644,6 +673,7 @@ mod tests {
             program: "/bin/true",
             args: &[],
             image: None,
+            admits: &[],
         };
         make_command_with_policy(&stand_in(), payload, policy, None, ownership, host)
             .expect("ASCII paths render")
@@ -717,6 +747,7 @@ mod tests {
             program: "/bin/true",
             args: &[],
             image: None,
+            admits: &[],
         };
         for (label, policy, cwd, stood_up) in [
             ("ungranted", &granted, "/ral-ungranted/cwd", true),
@@ -835,6 +866,7 @@ mod tests {
                 program: "/bin/true",
                 args: &[],
                 image: Some(&script),
+                admits: &[],
             },
             &policy,
             None,
@@ -869,11 +901,13 @@ mod tests {
     ) -> Option<std::process::Output> {
         let sh = "/bin/sh";
         let program = Program::file(sh.into()).expect("/bin/sh exists");
+        let (entry, admits) =
+            super::landlock::prepare(policy, host.landlock).expect("the admits open");
         let tail = trampoline_tail(
-            policy,
+            &entry,
             &admitted(program, &["-c".to_string(), script.to_string()]),
         )
-        .expect("the projection encodes");
+        .expect("the entry encodes");
         let self_path = crate::sandbox::reexec::self_arg0().expect("own path");
         let self_path = self_path.to_string_lossy();
         let (mut cmd, info_fd) = make_command_with_policy(
@@ -882,6 +916,7 @@ mod tests {
                 program: &self_path,
                 args: &tail,
                 image: Some(sh),
+                admits: &admits,
             },
             policy,
             None,
@@ -1400,6 +1435,7 @@ mod tests {
                 program: "/bin/true",
                 args: &[],
                 image: None,
+                admits: &[],
             },
             &unrestricted(),
             None,
@@ -1729,18 +1765,20 @@ mod tests {
         }
     }
 
-    /// The command directories, plus whatever a test adds.  The loader and
-    /// ral's own binary need no naming: `Layer::render` folds them in.
+    /// The command directories, plus whatever a test adds, by their real
+    /// paths as a grant freezes them.  The loader and ral's own binary need
+    /// no naming: `Layer::render` folds them in.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
+        let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
         let dirs = ["/bin", "/usr/bin"]
             .iter()
             .chain(dirs)
             .map(|d| ExecRule::Dir {
-                path: (*d).to_string(),
+                path: real(d),
                 allow: true,
             });
         let files = paths.iter().map(|p| ExecRule::File {
-            path: (*p).to_string(),
+            path: real(p),
             allow: true,
         });
         ExecProjection::Restricted(dirs.chain(files).collect())

@@ -55,22 +55,21 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
     )
 }
 
-/// `path` and its firmlink twin, with no canonicalisation and no disk access:
-/// for a path already real.
+/// `real` and its firmlink twin, never re-resolved: a frozen grant names
+/// what it named, not what a symlink since put there reaches.
 ///
 /// # Errors
 ///
 /// As [`render_paths`].
-#[allow(clippy::disallowed_methods)]
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn render_real(path: &str) -> Result<Vec<Rendered>, String> {
-    let names = std::iter::once(std::path::Path::new(path));
-    Ok(super::canon::spelled(names, |p| {
-        super::canon::with_firmlink_twins(vec![p.to_path_buf()])
-    })?
-    .into_iter()
-    .map(Rendered)
-    .collect())
+pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
+    let names = std::iter::once(real.as_path());
+    Ok(
+        super::canon::spelled(names, |p| super::canon::with_firmlink_twins(vec![p.to_path_buf()]))?
+            .into_iter()
+            .map(Rendered)
+            .collect(),
+    )
 }
 
 /// Proper ancestors of already-rendered names, themselves rendered — sorted,
@@ -159,6 +158,30 @@ mod tests {
         let err = render_paths(&[link.to_str().expect("temp path is UTF-8")])
             .expect_err("a non-UTF-8 expansion must fail closed");
         assert!(err.contains("not valid UTF-8"), "got {err:?}");
+    }
+
+    /// A frozen real path whose name has since become a symlink renders to
+    /// that name alone, never to where the link now leads.
+    #[cfg(unix)]
+    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
+    #[test]
+    fn a_real_path_since_symlinked_never_renders_its_new_target() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&allowed).expect("allowed");
+        std::fs::create_dir(&outside).expect("outside");
+        let real = super::super::RealPath::of(&allowed).expect("allowed is real");
+        std::fs::remove_dir(&allowed).expect("remove");
+        std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
+
+        let outside = outside.canonicalize().expect("outside exists");
+        for name in render_real(&real).expect("ASCII path renders") {
+            assert!(
+                !std::path::Path::new(name.as_str()).starts_with(&outside),
+                "{name:?} lies under {outside:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
