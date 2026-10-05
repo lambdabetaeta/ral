@@ -6,8 +6,7 @@ import { enterConversation } from "./conversation.js";
 // The assistant picker: one option per account×model, rebuilt every
 // time a menu arrives — the instant `list_models` reply, and the later
 // `models-refreshed` event once the live listing is in. Left hidden
-// when there is nothing to choose between, so `currentChoice()` can
-// fall back to the backend's own default. `key` is the account's id —
+// when there is nothing to choose between. `key` is the account's id —
 // what a `start_conversation` call names it by — and `label` is only
 // ever shown, never sent back: two accounts can share a display label.
 let assistantOptions = [];  // [{ key, model, label, reasoning }]
@@ -26,7 +25,7 @@ function currentAssistantSelection() {
 // and every later refresh alike — is shaped into the assistant and
 // effort selects through here, preserving whichever (provider, model)
 // pair is already chosen when it still exists in the fresh list rather
-// than always resetting to the default.
+// than always resetting to the first.
 function renderPicker(menu) {
   const providers = (menu && menu.providers) || [];
   const efforts = (menu && menu.efforts) || [];
@@ -56,25 +55,15 @@ function renderPicker(menu) {
   const survivedIdx = previousAssistant
     ? assistantOptions.findIndex((o) => o.key === previousAssistant.key && o.model === previousAssistant.model)
     : -1;
-  let preselect = 0;
-  if (survivedIdx >= 0) {
-    preselect = survivedIdx;
-  } else {
-    const first = providers[0];
-    if (first && first.default_model) {
-      const idx = assistantOptions.findIndex((o) => o.key === first.account && o.model === first.default_model);
-      if (idx >= 0) preselect = idx;
-    }
-  }
-  if (assistantOptions.length > 0) select.value = String(preselect);
+  if (assistantOptions.length > 0) select.value = String(Math.max(survivedIdx, 0));
 
   // Never hide the picker mid-interaction if the current pick
   // survives: hide only when there is nothing left to choose between
-  // AND the survivor, if any, is just the default rather than a
+  // AND the survivor, if any, is just the first option rather than a
   // deliberate pick.
-  const selectedBeyondDefault = survivedIdx > 0;
+  const selectedBeyondFirst = survivedIdx > 0;
   $("assistant-field").style.display =
-    assistantOptions.length >= 2 || selectedBeyondDefault ? "" : "none";
+    assistantOptions.length >= 2 || selectedBeyondFirst ? "" : "none";
 
   const effortSelect = /** @type {HTMLSelectElement} */ ($("effort-select"));
   effortSelect.innerHTML = "";
@@ -134,9 +123,8 @@ initAssistantPicker();
 // The assistant field can be hidden while still holding the one option
 // there was to offer (a single account, a single model): a hidden
 // field is not an absent choice, so its option and whatever effort was
-// picked for it still have to reach the backend. Only a genuinely
-// empty menu — no provider at all — falls back to `null`, the old,
-// choice-less behaviour.
+// picked for it still have to reach the backend. An empty menu has no
+// choice to give, and answers `null`.
 function currentChoice() {
   if (assistantOptions.length === 0) return null;
   const hidden = $("assistant-field").style.display === "none";
@@ -168,5 +156,12 @@ $("pick-folder").addEventListener("click", async () => {
     showError("start-error", String(err));
     return;
   }
-  if (chosen) enterConversation(chosen, currentChoice());
+  if (!chosen) return;
+  // The menu can empty while the folder dialog is open.
+  const choice = currentChoice();
+  if (!choice) {
+    showError("start-error", "Which assistant should answer? None is on offer yet — sign in, or wait for its models to load.");
+    return;
+  }
+  enterConversation(chosen, choice);
 });

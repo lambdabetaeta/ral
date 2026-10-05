@@ -165,7 +165,7 @@ pub fn run() -> Result<(), String> {
     // no picker, so it must be told one.
     if model.is_empty() && headless {
         return Err(format!(
-            "'{}' has no default model — pass --model NAME for a headless run",
+            "no model chosen for '{}' — pass --model NAME for a headless run",
             provider::identity::label(&account, &available)
         ));
     }
@@ -364,14 +364,21 @@ fn resolve_initial_selection(
         .as_ref()
         .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
 
+    // A saved model or route means nothing on any account but the one that
+    // saved it.
+    let saved_on = |account: &provider::Account| {
+        saved_account
+            .as_ref()
+            .is_some_and(|saved| saved.id == account.id)
+    };
+
     let (account, model) = match (provider_override, model_override) {
         (Some(pname), _) => {
             let account = provider::models::resolve_pinned_provider(pname, available)?;
-            let model = match model_override {
-                Some(m) => m.to_string(),
-                None => account.service.default_model.clone().ok_or_else(|| {
-                    format!("'{pname}' has no default model — also pass --model NAME")
-                })?,
+            let model = match (model_override, &saved) {
+                (Some(m), _) => m.to_string(),
+                (None, Some(s)) if saved_on(&account) => s.model.clone(),
+                (None, _) => String::new(),
             };
             (account, model)
         }
@@ -383,8 +390,8 @@ fn resolve_initial_selection(
             if let (Some(s), Some(account)) = (&saved, &saved_account) {
                 (account.clone(), s.model.clone())
             } else {
-                // No default model is no reason to refuse to launch: open with
-                // the model unset — the empty sentinel — so the interactive
+                // Nothing saved is no reason to refuse to launch: open with the
+                // model unset — the empty sentinel — so the interactive
                 // frontend lands on its `/model` hint. `run` rejects that for
                 // a headless launch.
                 let account = available.first().ok_or("no provider available")?.clone();
@@ -395,17 +402,10 @@ fn resolve_initial_selection(
                         provider::identity::label(&account, available)
                     );
                 }
-                let model = account.service.default_model.clone().unwrap_or_default();
-                (account, model)
+                (account, String::new())
             }
         }
     };
-    // The route names an `OpenRouter` serving provider, so it means nothing on
-    // any account but the one that saved it.
-    let route = saved.and_then(|s| s.route).filter(|_| {
-        saved_account
-            .as_ref()
-            .is_some_and(|saved| saved.id == account.id)
-    });
+    let route = saved.and_then(|s| s.route).filter(|_| saved_on(&account));
     Ok((account, model, tuning, route))
 }

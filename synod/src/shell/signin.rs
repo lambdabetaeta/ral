@@ -103,9 +103,9 @@ pub fn sign_in(
         let done = match outcome {
             Ok(signed_in) => {
                 // The live listing, not the instant one, and emitted before
-                // the sign-in is announced done: a plan account brings no
-                // default model with it, so until its models have been
-                // fetched there is nothing the account could answer with.
+                // the sign-in is announced done: an account brings no model
+                // of its own, so until its models have been fetched there is
+                // nothing it could answer with.
                 // The window is told it is signed in once it is signed in
                 // *and* has something to say it with.
                 super::refresh_menu_now(&app);

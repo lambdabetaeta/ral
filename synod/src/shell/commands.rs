@@ -207,7 +207,7 @@ pub fn start_conversation(
     state: State<'_, Running>,
     accounts: State<'_, super::Accounts>,
     folder: String,
-    choice: Option<Choice>,
+    choice: Choice,
 ) -> Result<(), String> {
     accounts.resolved()?;
     spawn_conversation(app, state.slot(), folder, choice);
@@ -381,7 +381,7 @@ fn spawn_conversation(
     app: AppHandle,
     slot: Arc<Mutex<Option<Handle>>>,
     folder: String,
-    choice: Option<Choice>,
+    choice: Choice,
 ) {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -440,7 +440,7 @@ fn run_conversation(
     emitter: Emitter,
     superseded: Option<JoinHandle<()>>,
     folder: String,
-    choice: Option<Choice>,
+    choice: Choice,
     receiver: mpsc::Receiver<String>,
     baseline_stop: synod::workspace::manifest::Stop,
 ) {
@@ -470,7 +470,7 @@ fn run_conversation(
 fn converse(
     emitter: &Emitter,
     folder: &str,
-    choice: Option<Choice>,
+    choice: Choice,
     receiver: &mpsc::Receiver<String>,
     baseline_stop: &synod::workspace::manifest::Stop,
 ) -> ConversationEnded {

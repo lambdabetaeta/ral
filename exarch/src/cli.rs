@@ -24,8 +24,9 @@ pub struct Cli {
     /// provider that lists this model. A `vendor/model` name can fall back to a
     /// routing provider, and a bare name can fall back to the only available
     /// provider. If you omit this option, Exarch restores the model saved for
-    /// the current project or uses the first provider's default. An explicit
-    /// choice is saved for the next run.
+    /// the current project; with nothing saved, no model is chosen, and you
+    /// pick one with `/model`. A headless run with nothing to restore needs
+    /// this option. An explicit choice is saved for the next run.
     #[arg(long)]
     pub model: Option<String>,
     /// Choose the provider or signed-in account that Exarch uses when it starts.
@@ -34,8 +35,9 @@ pub struct Cli {
     /// an account handle shown by `exarch accounts`. Exarch asks you to be more
     /// specific if the name matches several accounts. With `--model`, Exarch
     /// uses the pair exactly as given, even if the provider does not list that
-    /// model. Without `--model`, Exarch uses the provider's default. An explicit
-    /// choice is saved for the next run.
+    /// model. Without `--model`, Exarch restores the model saved for this
+    /// account in the current project, or else leaves you to pick one with
+    /// `/model`. An explicit choice is saved for the next run.
     #[arg(long)]
     pub provider: Option<String>,
     /// Run one headless exchange with this prompt.

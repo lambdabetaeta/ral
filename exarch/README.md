@@ -47,17 +47,17 @@ is auto-discovered and available; no flag names a provider. The keys are
 read into memory and scrubbed from the environment at startup so no
 spawned child inherits them.
 
-| provider       | key env var          | default model             |
-|----------------|----------------------|---------------------------|
-| `anthropic`    | `ANTHROPIC_API_KEY`  | `claude-opus-4`           |
-| `openai`       | `OPENAI_API_KEY`     | `gpt-5.5`                 |
-| `openrouter`   | `OPENROUTER_API_KEY` | `anthropic/claude-opus-4` |
-| `deepseek`     | `DEEPSEEK_API_KEY`   | `deepseek-chat`           |
-| `gemini`       | `GEMINI_API_KEY`     | `gemini-2.5-pro`          |
-| `opencode-zen` | `OPENCODE_API_KEY`   | `glm-5.1`                 |
-| `opencode-go`  | `OPENCODE_API_KEY`   | `glm-5.2`                 |
-| `xai`          | `XAI_API_KEY`        | `grok-4.3`                |
-| `qwen`         | `DASHSCOPE_API_KEY`  | `qwen3.6-plus`            |
+| provider       | key env var          |
+|----------------|----------------------|
+| `anthropic`    | `ANTHROPIC_API_KEY`  |
+| `openai`       | `OPENAI_API_KEY`     |
+| `openrouter`   | `OPENROUTER_API_KEY` |
+| `deepseek`     | `DEEPSEEK_API_KEY`   |
+| `gemini`       | `GEMINI_API_KEY`     |
+| `opencode-zen` | `OPENCODE_API_KEY`   |
+| `opencode-go`  | `OPENCODE_API_KEY`   |
+| `xai`          | `XAI_API_KEY`        |
+| `qwen`         | `DASHSCOPE_API_KEY`  |
 
 `opencode-zen` and `opencode-go` share one `OPENCODE_API_KEY` — one account
 key, two endpoints — so setting it makes both available. A key value with a
@@ -89,8 +89,9 @@ selection persists per project under `$XDG_STATE_HOME/exarch/<project>/`
 Because it lives outside the working directory, the sandboxed agent cannot
 reach it. For headless or scripted runs, `--model <name>` sets the initial
 model (its provider is resolved as the available provider whose list
-contains it). With no `--model` and no saved selection, the first available
-provider's default model is used.
+contains it). No provider is given a model of its own: with no `--model`
+and no saved selection, exarch opens with none chosen and asks for `/model`,
+and a headless run must pass `--model`.
 
 Every path above goes through XDG with Linux-shaped defaults, even on
 Windows: config lives under `%USERPROFILE%\.config\exarch`, state (session

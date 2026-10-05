@@ -182,26 +182,21 @@ on. ral has no optional record field and no null: absence is *data*, carried
 by a variant ([[invariants/optionality-via-variants|optionality-via-variants]]),
 so both fields are required and their values carry the optionality —
 `` `inherit `` or `` `named <Str> ``. The record row therefore stays closed,
-and a misspelled field stays a static error. The four rows:
+and a misspelled field stays a static error.
 
-| `provider` | `model` | the child runs on |
-| --- | --- | --- |
-| `` `inherit `` | `` `inherit `` | the parent's `Arc<Provider>`, shared verbatim, allocating nothing |
-| `` `inherit `` | `` `named m `` | the parent's account and credential, model `m` |
-| `` `named p `` | `` `inherit `` | account `p`: the parent's model if `p` is the parent's own account, else `p`'s service default model — refused, naming `model`, when that service has none |
-| `` `named p `` | `` `named m `` | account `p`, model `m` |
+Each field is read on its own: `` `inherit `` takes the parent's half, and
+`` `named `` names another — an account by `resolve_pinned_provider`, a model
+by its name. A pair that comes out as the parent's own shares the parent's
+`Arc<Provider>` verbatim, allocating nothing. Any other must be one its account
+lists: `Bureau::reselect` checks it against that account's listing (the cache,
+else one fetch with the catalog unlocked — the listing minting reads for the
+context window anyway) and refuses an unlisted model, or one whose listing
+cannot be fetched, before any child exists.
 
 Tuning (effort, temperature, `top_p`) and the output cap are the operator's
-knobs rather than part of a model's identity, so they inherit in every row; the
+knobs rather than part of a model's identity, so they always inherit; the
 `OpenRouter` route names a serving provider and survives only where the
-resolved account is the parent's. **No catalog, no network, no inference**:
-because `` `inherit `` *states* which account the child is on, a bare `model`
-never has to be attributed to one, so a spawn can never block the fleet on a
-model-list round trip, nor be refused because a cold catalog left a name
-unattributable. That is the one deliberate divergence from the CLI, where
-`--model` with no `--provider` must work out which account serves it — an
-inference that exists only because a human typed no provider at all, whereas a
-spawn always types one.
+resolved account is the parent's.
 
 `provider::Bureau` is what makes any of this possible: `Provider::build` needs
 an engine and a credential that no `Provider` retains, so the bureau names that

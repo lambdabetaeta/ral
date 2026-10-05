@@ -112,7 +112,7 @@ impl App {
     /// one email still read apart on the status line.
     pub fn update_live_model(&mut self, p: &Provider, accounts: &[Account]) {
         let status_provider = crate::provider::identity::label(p.account(), accounts);
-        // A declared service can launch with no model at all.
+        // Until `/model` chooses one, the model is the empty sentinel.
         self.status_model = if p.model().is_empty() {
             format!("{status_provider} · no model — run /model")
         } else {

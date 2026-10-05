@@ -653,12 +653,12 @@ A builtin spawn may say otherwise. `` exarch-agents `start ``'s `provider` and
 `model` fields each name `` `inherit `` or `` `named <Str> ``, and
 `ExarchDesk::child_provider` reads them **before the `SeatKind` split**, so
 both arms share one resolution and a refusal unwinds nothing — no adopted
-fork, no forked log, no dialled listener. `` `inherit ``/``
-`inherit `` short-circuits to the parent's own `Arc<Provider>`, allocating
-nothing; anything else goes through `provider::Bureau::reselect`, which
-inherits the parent's tuning and output cap, keeps its `OpenRouter` route only
-where the account is unchanged, and mints on the session's engine
-([[map/exarch/provider|provider]]). A scripted session holds
+fork, no forked log, no dialled listener. A selection that resolves to the
+parent's own pair shares the parent's `Arc<Provider>`, allocating nothing; any
+other goes through `provider::Bureau::reselect`, which refuses a model the
+account does not list, inherits the parent's tuning and output cap, keeps its
+`OpenRouter` route only where the account is unchanged, and mints on the
+session's engine ([[map/exarch/provider|provider]]). A scripted session holds
 `Bureau::Scripted` and refuses, saying it mints nothing.
 
 The one `AgentLog::fork` call site — the desk's `child`, behind both `start`

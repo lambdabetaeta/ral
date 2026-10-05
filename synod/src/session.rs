@@ -14,9 +14,7 @@
 //! [`Conversation::begin`] opens a folder onto a booted machine and an
 //! agent, [`Conversation::exchange`] drives one message through it, and
 //! [`Conversation::end`] shuts the machine down.  Provider and model are
-//! either named by the window (a menu choice) or resolved the old way —
-//! whichever one account is set up on this computer, and its default
-//! model.
+//! always named by the window, as a menu choice.
 //!
 //! The store is shared and grows: [`sign_in`] can add to it, so a `ChatGPT`
 //! plan signed in from the window becomes available to the very next
@@ -82,10 +80,9 @@ pub fn prepare() -> Result<CredentialStore, String> {
 ///
 /// `effort`'s absence and `effort: Some("auto")` are deliberately distinct:
 /// leaving it unset carries [`provider::Tuning::initial`]'s thinking-on
-/// default forward untouched, exactly as an unspecified choice always has;
-/// naming `"auto"` is a request to send no reasoning option on the wire at
-/// all, landing on `effort: None` the same way, but *chosen* rather than
-/// defaulted.
+/// default forward untouched; naming `"auto"` is a request to send no
+/// reasoning option on the wire at all, landing on `effort: None` the same
+/// way, but *chosen* rather than defaulted.
 #[derive(serde::Deserialize)]
 pub struct Choice {
     /// An [`AccountId`](exarch::provider::identity::AccountId) rendering, as
@@ -141,18 +138,16 @@ impl Conversation {
     /// and start the agent over it.
     ///
     /// `choice` names a provider, model, and effort from [`menu`]'s or
-    /// [`refresh_menu`]'s listing; `None` takes what this computer offers —
-    /// whichever one account is set up on it, that account's default model,
-    /// and [`provider::Tuning::initial`]'s thinking-on effort. A chosen
-    /// effort that [`provider::pricing::caps_or_default`] positively knows
-    /// the model does not take is masked to `None` regardless of what was
-    /// asked for — the model would otherwise refuse the request outright.
+    /// [`refresh_menu`]'s listing. A chosen effort that
+    /// [`provider::pricing::caps_or_default`] positively knows the model does
+    /// not take is masked to `None` regardless of what was asked for — the
+    /// model would otherwise refuse the request outright.
     ///
     /// # Errors
     /// Returns `Err` if this computer cannot start a virtual machine at all
     /// — the wrong platform, missing boot media, or an unsigned build — if
-    /// the folder cannot be granted, if no model account is set up (or a
-    /// named one has vanished), if the chosen effort names no rung on
+    /// the folder cannot be granted, if no model account is set up (or the
+    /// chosen one has vanished), if the chosen effort names no rung on
     /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
     /// be made, if the system prompt cannot be assembled, if the agent
     /// cannot be started, or if guest networking cannot start. Guest
@@ -181,7 +176,7 @@ impl Conversation {
     pub fn begin(
         folder: &Path,
         holdings: &Holdings,
-        choice: Option<Choice>,
+        choice: Choice,
         baseline_stop: &workspace::manifest::Stop,
         baseline_progress: Box<dyn FnMut(u64) + Send>,
     ) -> Result<(Self, Opening), String> {
@@ -572,12 +567,9 @@ struct Selected {
 /// window's, whose menu only ever hands back what it was given.
 ///
 /// # Errors
-/// Returns `Err` if this computer has no account set up, if `choice` names
-/// one that has since gone, or if the sole account names no default model.
-fn select_account(
-    store: &Mutex<CredentialStore>,
-    choice: Option<Choice>,
-) -> Result<Selected, String> {
+/// Returns `Err` if this computer has no account set up, or if `choice`
+/// names one that has since gone.
+fn select_account(store: &Mutex<CredentialStore>, choice: Choice) -> Result<Selected, String> {
     let store = store.lock_ignore_poison();
     let available = store.available();
     if available.is_empty() {
@@ -588,19 +580,13 @@ fn select_account(
                 .into(),
         );
     }
-    let (account, model, effort) = if let Some(Choice {
+    let Choice {
         account,
         model,
         effort,
-    }) = choice
-    {
-        let account = resolve_account(&account, &available)
-            .ok_or("the chosen account is no longer available on this computer")?;
-        (account, model, effort)
-    } else {
-        let (account, model) = choose(&available)?;
-        (account, model, None)
-    };
+    } = choice;
+    let account = resolve_account(&account, &available)
+        .ok_or("the chosen account is no longer available on this computer")?;
     let label = identity::label(&account, &available);
     // Everything the caller does next is slow, and none of it is the
     // store's business.
@@ -665,27 +651,6 @@ fn net_seat(
         },
     )
     .map_err(|e| format!("could not start guest networking: {e}"))
-}
-
-/// The account and model for a run whose [`Choice`] left both unnamed:
-/// whichever one account is set up on this computer, and its default
-/// model. An account that names no default model is a question for the
-/// user, refused in the same plain register as having no account at all —
-/// there is no menu entry left to answer it with.
-fn choose(available: &[Account]) -> Result<(Account, String), String> {
-    let account = &available[0];
-    account
-        .service
-        .default_model
-        .clone()
-        .map(|model| (account.clone(), model))
-        .ok_or_else(|| {
-            format!(
-                "the account set up on this computer ('{}') does not say which model to \
-                 use — ask whoever administers this computer to set one up.",
-                identity::label(account, available)
-            )
-        })
 }
 
 /// The tuning [`Choice::effort`] resolves to, masked against what the

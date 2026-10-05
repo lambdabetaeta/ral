@@ -408,9 +408,9 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 }
 
 /// Make the token `login_flow` already persisted live in this session's
-/// credential store and catalog. No provider swap: a `ChatGPT` account has no
-/// built-in default model, so the user picks one through `/model`; and a
-/// re-login upserts the very cell the focused tab already reads through.
+/// credential store and catalog. No provider swap: an account names no model
+/// of its own, so the user picks one through `/model`; and a re-login upserts
+/// the very cell the focused tab already reads through.
 fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
     let admitted = ctx.bureau.admit(token);
     let (id, label) = match admitted {

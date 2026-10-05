@@ -32,7 +32,7 @@ export function show(name) {
 export const state = {
   /** @type {string | null} */
   folder: null,
-  choice: null,  // { provider, model, effort } picked on the start screen, or null for the default
+  choice: null,  // { account, model, effort } picked on the start screen
   busy: false,   // an exchange is in flight
   alive: false,  // the assistant is currently running
 };

@@ -376,15 +376,10 @@ so the model has the address before it asks for one.
   each `` `inherit `` or `` `named <Str> ``, and both are always written:
   ral has no optional field, so absence is *data* carried by a variant
   ([[invariants/optionality-via-variants|optionality-via-variants]]) and the
-  record row stays closed. `` `inherit ``/`` `inherit `` shares the parent's
-  `Arc<Provider>` verbatim; a named `model` alone keeps the parent's account
-  and credential; a named `provider` alone runs the parent's model when it
-  resolves to the parent's own account, else that account's service default
-  model, refused naming `model` when the service publishes none. Because
-  `` `inherit `` *states* which account the child is on, a named model never
-  has to be attributed to one, so the desk resolves a provider name with
-  `resolve_pinned_provider` and never touches the catalog: a spawn can never
-  block the fleet on a model-list round trip. Fuel bounds delegation depth,
+  record row stays closed. `` `inherit `` takes the parent's half and
+  `` `named `` another; the parent's own pair shares its `Arc<Provider>`
+  verbatim, and any other is minted by `Bureau::reselect`, which refuses a
+  model the account does not list. Fuel bounds delegation depth,
   not fan-out — refused only once the caller's own `fuel` reaches zero.
   `` `cancel <name> `` is descendant-only, resolved by name and enforced at
   the desk; a scope violation raises. `` `message [to: …, text: …] `` is not:

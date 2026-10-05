@@ -285,9 +285,8 @@ and `with_catalog` are the rest of the surface. The two halves are shared
 (`Arc<Mutex<_>>`) rather than owned, so two hosts compose: exarch builds one
 bureau over its own pair in `run()`, while synod keeps the same pair as
 application-wide window state and mints an engine per conversation. They are
-two mutexes and not one because a spawn touches only the store while the
-picker's pump touches only the catalog — under a single lock a spawn would
-queue behind a model-list fetch for nothing.
+two mutexes and not one so that a credential read never queues behind a
+catalog fold, which writes the disk cache under its lock.
 
 **Lock discipline**, synod's own rule inherited: locked briefly, never across
 a network call, a picker frame, or a machine boot; and the converse, that a UI

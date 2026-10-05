@@ -106,9 +106,6 @@ pub struct Service {
     pub name: ServiceName,
     pub endpoint: Option<String>,
     pub adapter: AdapterKind,
-    /// `None` for chatgpt and for declared endpoints, which name no model of
-    /// their own; the selection then has to come from `--model` or the catalog.
-    pub default_model: Option<String>,
     pub auth: Auth,
     /// The sole authority on whether this service's turns cost money.
     pub billing: Billing,
@@ -163,14 +160,13 @@ pub enum Billing {
 }
 
 impl Service {
-    /// An endpoint the user declared: metered, unrouted, unmetered by any
-    /// readout, and suggesting no model.
+    /// An endpoint the user declared: metered, unrouted, and unmetered by any
+    /// readout.
     pub fn declared(name: ServiceName, endpoint: String, adapter: AdapterKind, auth: Auth) -> Self {
         Self {
             name,
             endpoint: Some(endpoint),
             adapter,
-            default_model: None,
             auth,
             billing: Billing::Metered,
             routes: false,
@@ -292,23 +288,20 @@ fn unqualified(account: &Account) -> String {
 
 /// The built-in table: nine key-bearing services plus chatgpt.
 pub fn built_in_services() -> Vec<Service> {
-    let keyed =
-        |name, endpoint: Option<&str>, adapter, default_model: &str, env, billing, meter| Service {
-            name: ServiceName::built_in(name),
-            endpoint: endpoint.map(str::to_string),
-            adapter,
-            default_model: Some(default_model.to_string()),
-            auth: Auth::Env(String::from(env)),
-            billing,
-            routes: false,
-            meter,
-        };
+    let keyed = |name, endpoint: Option<&str>, adapter, env, billing, meter| Service {
+        name: ServiceName::built_in(name),
+        endpoint: endpoint.map(str::to_string),
+        adapter,
+        auth: Auth::Env(String::from(env)),
+        billing,
+        routes: false,
+        meter,
+    };
     vec![
         keyed(
             "anthropic",
             None,
             AdapterKind::Anthropic,
-            "claude-opus-4",
             "ANTHROPIC_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -317,7 +310,6 @@ pub fn built_in_services() -> Vec<Service> {
             "openai",
             None,
             AdapterKind::OpenAIResp,
-            "gpt-5.5",
             "OPENAI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -328,7 +320,6 @@ pub fn built_in_services() -> Vec<Service> {
                 "openrouter",
                 Some("https://openrouter.ai/api/v1/"),
                 AdapterKind::OpenAI,
-                "anthropic/claude-opus-4",
                 "OPENROUTER_API_KEY",
                 Billing::Metered,
                 Meter::OpenRouterCredits,
@@ -338,7 +329,6 @@ pub fn built_in_services() -> Vec<Service> {
             "deepseek",
             None,
             AdapterKind::DeepSeek,
-            "deepseek-chat",
             "DEEPSEEK_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -347,7 +337,6 @@ pub fn built_in_services() -> Vec<Service> {
             "gemini",
             None,
             AdapterKind::Gemini,
-            "gemini-2.5-pro",
             "GEMINI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -357,7 +346,6 @@ pub fn built_in_services() -> Vec<Service> {
             "opencode-zen",
             Some("https://opencode.ai/zen/v1/"),
             AdapterKind::OpenAI,
-            "glm-5.1",
             "OPENCODE_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -366,7 +354,6 @@ pub fn built_in_services() -> Vec<Service> {
             "opencode-go",
             Some("https://opencode.ai/zen/go/v1/"),
             AdapterKind::OpenAI,
-            "glm-5.2",
             "OPENCODE_API_KEY",
             Billing::FlatRate,
             Meter::Unpublished,
@@ -375,7 +362,6 @@ pub fn built_in_services() -> Vec<Service> {
             "xai",
             None,
             AdapterKind::Xai,
-            "grok-4.3",
             "XAI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -384,7 +370,6 @@ pub fn built_in_services() -> Vec<Service> {
             "qwen",
             Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/"),
             AdapterKind::OpenAI,
-            "qwen3.6-plus",
             "DASHSCOPE_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
@@ -406,7 +391,6 @@ pub fn chatgpt_service() -> Service {
         name: ServiceName::built_in("chatgpt"),
         endpoint: None,
         adapter: AdapterKind::OpenAIResp,
-        default_model: None,
         auth: Auth::OAuth,
         billing: Billing::FlatRate,
         routes: false,
@@ -421,7 +405,6 @@ pub fn scripted_service() -> Service {
         name: ServiceName::built_in("scripted"),
         endpoint: None,
         adapter: AdapterKind::OpenAIResp,
-        default_model: None,
         auth: Auth::Unnamed,
         billing: Billing::Metered,
         routes: false,

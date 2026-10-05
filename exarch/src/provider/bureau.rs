@@ -17,7 +17,7 @@ use ral_core::sync::LockExt;
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
 use super::models::{Listed, LiveSource, ModelCatalog, ModelSource};
-use super::{Account, Backend, Engine, Provider, Rations, Tuning, oauth, pricing};
+use super::{Account, Backend, Engine, Provider, Rations, Tuning, identity, oauth, pricing};
 use crate::bootstrap::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
@@ -25,9 +25,9 @@ use crate::bootstrap::App;
 /// Exarch builds one bureau over its own; synod keeps them as
 /// application-wide state and mints an engine per conversation.
 ///
-/// The store and catalog are two mutexes and not one because the spawn path
-/// touches only the store and the picker's pump only the catalog; under a
-/// single lock a spawn would queue behind a model-list fetch for no reason.
+/// The store and catalog are two mutexes and not one so that a credential
+/// read never queues behind a catalog fold, which writes the disk cache under
+/// its lock.
 ///
 /// Lock discipline: the store and catalog are locked briefly, and never across
 /// a network call, a picker frame, or a machine boot. [`Bureau::admit`] is the
@@ -86,6 +86,20 @@ pub(super) fn resolve_window(
         .and_then(|models| models.iter().find(|m| m.id == model))
         .and_then(|m| m.context_window)
         .or_else(|| fallback(model))
+}
+
+/// Refuse `model` unless `listed`, the serving account's listing, holds it.
+fn served(listed: Option<&[Listed]>, model: &str, label: &str) -> Result<(), String> {
+    let listed = listed
+        .ok_or_else(|| format!("could not list the models '{label}' serves to check '{model}'"))?;
+    if listed.iter().any(|m| m.id == model) {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{label}' does not list model '{model}' — name one it serves, or a provider that \
+             serves this one"
+        ))
+    }
 }
 
 /// `account`'s listing: the catalog's cache, else one fetch made with the
@@ -166,19 +180,28 @@ impl Bureau {
     }
 
     /// Mint a provider that differs from `current` only in its account and
-    /// model — the spawn's door, where a child's selection is decided.
+    /// model — the spawn's door, where a child's selection is checked against
+    /// the account's own listing.
     ///
     /// Tuning and the output cap are the operator's knobs rather than part of
     /// a model's identity, so they carry across whatever the selection.
     ///
     /// # Errors
-    /// As [`Bureau::build`].
+    /// As [`Bureau::build`], and if `account` does not list `model`.
     pub fn reselect(
         &self,
         current: &Provider,
         account: &Account,
         model: String,
     ) -> Result<Arc<Provider>, String> {
+        let Self::Live { holdings, .. } = self else {
+            return Err(mints_nothing());
+        };
+        served(
+            listing_of(holdings, account).as_deref(),
+            &model,
+            &identity::label(account, &self.available()),
+        )?;
         self.build(
             account,
             model,
@@ -288,5 +311,21 @@ mod tests {
     #[test]
     fn no_listing_and_no_fallback_is_unknown() {
         assert_eq!(resolve_window(None, "m", |_| None), None);
+    }
+
+    #[test]
+    fn a_listed_model_is_served() {
+        assert_eq!(served(Some(&[listed("m", None)]), "m", "acct"), Ok(()));
+    }
+
+    #[test]
+    fn an_unlisted_model_is_refused_naming_both_halves() {
+        let err = served(Some(&[listed("other", None)]), "m", "acct").unwrap_err();
+        assert!(err.contains("'acct'") && err.contains("'m'"), "got: {err}");
+    }
+
+    #[test]
+    fn no_listing_refuses_rather_than_guessing() {
+        assert!(served(None, "m", "acct").is_err());
     }
 }

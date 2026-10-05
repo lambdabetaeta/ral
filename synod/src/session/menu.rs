@@ -42,9 +42,8 @@ pub struct ProviderChoice {
     /// What the window shows for this entry — [`identity::label`],
     /// set-relative to every account [`menu`] or [`refresh_menu`] offers.
     pub label: String,
-    pub default_model: Option<String>,
-    /// Whatever the catalog honestly knows for this provider — at minimum
-    /// the famous default, never blocking on a network fetch to build.
+    /// Whatever the catalog honestly knows for this provider, never blocking
+    /// on a network fetch to build.
     pub models: Vec<ModelChoice>,
 }
 
@@ -66,9 +65,7 @@ pub struct ModelMenu {
 ///
 /// No network touched: each provider's models come from whatever `catalog`
 /// already has cached — a fresh disk entry carried over from an earlier
-/// session, or nothing at all — merged with the famous default so a
-/// provider with no cache still offers its one well-known model.
-/// [`refresh_menu`] is the complete listing, fetched live; this is the
+/// session, or nothing at all. [`refresh_menu`] is the complete listing, fetched live; this is the
 /// instant one the window shows while that runs.
 pub fn menu<S>(store: &Mutex<CredentialStore>, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
@@ -153,19 +150,13 @@ where
     }
 }
 
-/// `default` first, then `listed`, deduped and each tagged by `caps`.
+/// `listed`, each tagged by `caps`.
 ///
 /// `caps` is injected rather than reached for globally, so this stays pure
 /// and a test can stub it with no live pricing catalog behind it.
-fn offers(
-    default: Option<&str>,
-    listed: Vec<String>,
-    caps: impl Fn(&str) -> pricing::ModelCaps,
-) -> Vec<ModelChoice> {
-    default
-        .map(str::to_string)
+fn offers(listed: Vec<String>, caps: impl Fn(&str) -> pricing::ModelCaps) -> Vec<ModelChoice> {
+    listed
         .into_iter()
-        .chain(listed.into_iter().filter(|m| Some(m.as_str()) != default))
         .map(|name| {
             let reasoning = caps(&name).supports("reasoning");
             ModelChoice { name, reasoning }
@@ -173,9 +164,8 @@ fn offers(
         .collect()
 }
 
-/// One account's entry: its cached models (if any) merged with its
-/// service's default, each carrying whether the pricing catalog knows it
-/// reasons.
+/// One account's entry: its cached models (if any), each carrying whether
+/// the pricing catalog knows it reasons.
 fn provider_choice<S>(
     account: &Account,
     available: &[Account],
@@ -184,14 +174,11 @@ fn provider_choice<S>(
 where
     S: ModelSource,
 {
-    let default_model = account.service.default_model.clone();
     let cached = catalog.cached(&account.id).unwrap_or_default();
-    let models = offers(default_model.as_deref(), cached, pricing::caps_or_default);
     ProviderChoice {
         account: account.id.as_str().to_string(),
         label: identity::label(account, available),
-        default_model,
-        models,
+        models: offers(cached, pricing::caps_or_default),
     }
 }
 
@@ -259,87 +246,54 @@ mod tests {
     }
 
     #[test]
-    fn the_default_comes_first_and_is_not_repeated() {
-        let out = offers(
-            Some("claude-3-5"),
-            vec!["claude-haiku-4".to_string(), "claude-3-5".to_string()],
-            |_| pricing::ModelCaps::default(),
-        );
-        assert_eq!(offered(&out), vec!["claude-3-5", "claude-haiku-4"]);
-    }
-
-    #[test]
-    fn no_default_leaves_the_listed_order_alone() {
-        let out = offers(None, vec!["a".to_string(), "b".to_string()], |_| {
+    fn offers_keep_the_listed_order() {
+        let out = offers(vec!["b".to_string(), "a".to_string()], |_| {
             pricing::ModelCaps::default()
         });
-        assert_eq!(offered(&out), vec!["a", "b"]);
+        assert_eq!(offered(&out), vec!["b", "a"]);
     }
 
     #[test]
     fn reasoning_is_tagged_per_model_from_the_injected_caps() {
-        let out = offers(
-            None,
-            vec!["reasoner".to_string(), "chat".to_string()],
-            |m| pricing::ModelCaps {
+        let out = offers(vec!["reasoner".to_string(), "chat".to_string()], |m| {
+            pricing::ModelCaps {
                 supported_parameters: if m == "reasoner" {
                     vec!["reasoning".to_string()]
                 } else {
                     vec!["temperature".to_string()]
                 },
                 ..Default::default()
-            },
-        );
+            }
+        });
         assert!(out[0].reasoning);
         assert!(!out[1].reasoning);
     }
 
     #[test]
-    fn menu_with_nothing_cached_offers_the_service_default_alone() {
+    fn menu_with_nothing_cached_offers_no_model() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
         let available = [fam("anthropic")];
 
         let menu = menu_from(&available, &mut catalog);
 
         assert_eq!(menu.providers.len(), 1);
-        assert_eq!(
-            model_names(&menu.providers[0]),
-            vec![fam("anthropic").service.default_model.unwrap()]
-        );
+        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
         assert_eq!(menu.efforts.first().map(String::as_str), Some("auto"));
         assert_eq!(menu.default_effort, "med");
     }
 
     #[test]
-    fn menu_with_a_cached_list_puts_the_default_first_and_dedupes_it() {
+    fn menu_with_a_cached_list_offers_it_in_order() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
         let anthropic = fam("anthropic");
-        let default = anthropic.service.default_model.clone().unwrap();
         catalog.record(
             &anthropic.id,
-            vec![
-                Listed::bare("claude-haiku-4"),
-                Listed::bare(default.clone()),
-            ],
+            vec![Listed::bare("model-b"), Listed::bare("model-a")],
         );
 
         let menu = menu_from(std::slice::from_ref(&anthropic), &mut catalog);
 
-        assert_eq!(
-            model_names(&menu.providers[0]),
-            vec![default, "claude-haiku-4".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_chatgpt_style_account_with_no_service_default_starts_empty() {
-        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let account = Account::chatgpt("work-account", "work-account");
-
-        let menu = menu_from(std::slice::from_ref(&account), &mut catalog);
-
-        assert!(menu.providers[0].default_model.is_none());
-        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
+        assert_eq!(model_names(&menu.providers[0]), vec!["model-b", "model-a"]);
     }
 
     #[test]
@@ -361,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_menu_leaves_a_failed_fetch_uncached_but_still_shows_the_default() {
+    fn refresh_menu_leaves_a_failed_fetch_uncached_and_offers_nothing() {
         let deepseek = fam("deepseek");
         let mut lists = Lists::new();
         lists.insert(deepseek.id.clone(), Err("network down".to_string()));
@@ -369,10 +323,7 @@ mod tests {
 
         let menu = refresh_menu_for(std::slice::from_ref(&deepseek), &catalog);
 
-        assert_eq!(
-            model_names(&menu.providers[0]),
-            vec![deepseek.service.default_model.clone().unwrap()]
-        );
+        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
         assert_eq!(catalog.lock_ignore_poison().cached(&deepseek.id), None);
     }
 }

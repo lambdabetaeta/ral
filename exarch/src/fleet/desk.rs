@@ -417,12 +417,10 @@ impl ExarchDesk {
         self.spawn_child(child, name, spec.prompt)
     }
 
-    /// The child's provider: the parent's own `Arc` verbatim when neither
-    /// half names a selection, and a freshly minted one otherwise.
-    ///
-    /// No catalog and no network: `` `inherit `` *states* which account the
-    /// child is on, so a named model never has to be attributed to one, and a
-    /// spawn can never block the fleet on a model-list round trip.
+    /// The child's provider: the parent's own `Arc` verbatim when the
+    /// selection resolves to the parent's own pair, and otherwise one minted
+    /// by [`Bureau::reselect`](crate::provider::Bureau::reselect), which
+    /// refuses a model the account does not list.
     fn child_provider(
         &self,
         provider: &Selection,
@@ -430,30 +428,22 @@ impl ExarchDesk {
     ) -> Result<Arc<Provider>, Error> {
         let s = &self.services;
         let current = s.agent.current_provider();
-        if matches!((provider, model), (Selection::Inherit, Selection::Inherit)) {
-            return Ok(current);
-        }
         let refused = |why: String| Error::new(format!("`exarch-agents `start` refused: {why}"), 1);
         let bureau = &s.fleet.launch.bureau;
-        let available = bureau.available();
         let account = match provider {
             Selection::Inherit => current.account().clone(),
             Selection::Named(name) => {
-                crate::provider::models::resolve_pinned_provider(name, &available)
+                crate::provider::models::resolve_pinned_provider(name, &bureau.available())
                     .map_err(refused)?
             }
         };
         let model = match model {
+            Selection::Inherit => current.model().to_string(),
             Selection::Named(model) => model.clone(),
-            Selection::Inherit if account.id == current.account().id => current.model().to_string(),
-            Selection::Inherit => account.service.default_model.clone().ok_or_else(|| {
-                refused(format!(
-                    "'{}' publishes no default model, so a child sent to it must be told which \
-                     one to run — write `model: `named '<model>'` rather than `` `inherit ``",
-                    crate::provider::identity::label(&account, &available)
-                ))
-            })?,
         };
+        if account.id == current.account().id && model == current.model() {
+            return Ok(current);
+        }
         bureau.reselect(&current, &account, model).map_err(refused)
     }
     /// Take up the fork a builtin body left for this desk: adopt it out of
@@ -2346,6 +2336,20 @@ mod tests {
             Arc::ptr_eq(&parent, &child),
             "the child must share the parent's provider, not a rebuild of it"
         );
+    }
+
+    /// Spelling out the parent's own model is the same pair, so the same `Arc`.
+    #[test]
+    fn naming_the_parents_own_pair_hands_the_child_its_provider() {
+        let desk = desk();
+        let parent = desk.services.agent.current_provider();
+        let child = desk
+            .child_provider(
+                &Selection::Inherit,
+                &Selection::Named(parent.model().into()),
+            )
+            .expect("the parent's own pair needs no minting");
+        assert!(Arc::ptr_eq(&parent, &child));
     }
 
     /// A scripted session mints nothing, so a spawn that names a selection is
