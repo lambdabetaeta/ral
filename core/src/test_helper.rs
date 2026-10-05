@@ -10,14 +10,22 @@
 /// `Some(code)` means this process was such a re-exec and must exit now.
 ///
 /// Every test binary calls this from a `#[ctor]`; the integration binaries
-/// share the one in `core/tests/common/mod.rs`.  `try_run_test_helper` is
+/// share the one in `core/tests/common/mod.rs`.  The pgid probe is
 /// deliberately absent: its flag is served by the real `ral` binary.
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
     crate::uutils::init_signal_dispositions();
-    crate::try_run_pipeline_anchor()
-        .or_else(crate::sandbox::serve_sandbox_early_init)
-        .or_else(try_birth_detached)
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let role = crate::classify(&argv);
+    match role {
+        crate::Invocation::PipelineAnchor => Some(crate::serve_pipeline_anchor()),
+        #[cfg(unix)]
+        crate::Invocation::DetachBirth { trace, marker } => {
+            crate::sandbox::early_init(&role);
+            Some(serve_detach_birth(trace, marker))
+        }
+        _ => crate::sandbox::serve_sandbox_early_init(&role),
+    }
 }
 
 /// The prelude a test binary bakes at runtime, cached for every call this
@@ -40,58 +48,45 @@ pub const DETACH_BIRTH_FLAG: &str = "--ral-test-detach-birth";
 /// `detach` promises survival across the *full* exit of its host, so the host
 /// must be a process a test can outlive rather than a scope it can leave; the
 /// trace is the only sign of a survivor whose streams no one here can name.
-fn try_birth_detached() -> Option<u8> {
-    #[cfg(unix)]
-    {
-        let mut args = std::env::args_os().skip(1);
-        if args.next()? != DETACH_BIRTH_FLAG {
-            return None;
+#[cfg(unix)]
+fn serve_detach_birth(trace: &std::ffi::OsStr, marker: &std::ffi::OsStr) -> u8 {
+    let (trace, marker) = (trace.to_string_lossy(), marker.to_string_lossy());
+    let mut shell = crate::boot::boot_shell(
+        crate::io::TerminalState::default(),
+        test_prelude(),
+        &crate::boot::HostSurface::default(),
+    );
+    shell.install_builtins(crate::builtins::DETACH_BUILTIN);
+    shell.arm_detach(1);
+    let report = shell.run(crate::RunRequest {
+        run: crate::protocol::Run {
+            program: crate::protocol::Program::Source(format!(
+                "let d = detach #'the survivor a test outlives'# \
+                 /bin/sh -c 'while :; do echo {marker}; echo {marker} >&2; \
+                 echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"
+            )),
+            script_name: "<detach-birth>".into(),
+            caps: crate::types::GrantStack::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: crate::RunIo::Inherit,
+            terminal: crate::RequestedTerminalAccess::Leased,
+            stdin: crate::RunStdin::Inherit,
+            trail: None,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        fork: None,
+    });
+    u8::from(!matches!(
+        report,
+        crate::RunReport::Ran {
+            ending: crate::run::Ending::Settled { .. },
+            ..
         }
-        let (trace, marker) = (
-            args.next()?.to_string_lossy().into_owned(),
-            args.next()?.to_string_lossy().into_owned(),
-        );
-        let mut shell = crate::boot::boot_shell(
-            crate::io::TerminalState::default(),
-            test_prelude(),
-            &crate::boot::HostSurface::default(),
-        );
-        shell.install_builtins(crate::builtins::DETACH_BUILTIN);
-        shell.arm_detach(1);
-        let report = shell.run(crate::RunRequest {
-            run: crate::protocol::Run {
-                program: crate::protocol::Program::Source(format!(
-                    "let d = detach #'the survivor a test outlives'# \
-                     /bin/sh -c 'while :; do echo {marker}; echo {marker} >&2; \
-                     echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"
-                )),
-                script_name: "<detach-birth>".into(),
-                caps: crate::types::GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: crate::RunIo::Inherit,
-                terminal: crate::RequestedTerminalAccess::Leased,
-                stdin: crate::RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-        });
-        Some(u8::from(!matches!(
-            report,
-            crate::RunReport::Ran {
-                ending: crate::run::Ending::Settled { .. },
-                ..
-            }
-        )))
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
+    ))
 }
 
 /// Tail flag of the pgid probe below, spelled out literally in `ral/tests/pipeline.rs`.
@@ -102,55 +97,40 @@ pub(crate) const PGID_CHECK_FLAG: &str = "--ral-test-pgid-check";
 /// stderr — plus `tcpgrp:<tag>=<tcgetpgrp(2)>` when stderr is a tty — and
 /// exit 0.
 ///
-/// A test can thus confirm a stage joined the pgid its parent set. `None`
-/// falls through to the normal CLI.
+/// A test can thus confirm a stage joined the pgid its parent set.
 ///
 /// The `ral` and `exarch` binaries dispatch this from `main`, because the
 /// tests spawn a real `ral` as a pipeline stage.  Stderr is the probe: a
 /// stage's stdin and stdout are rerouted through pipes while stderr is
 /// inherited, so it alone reports the parent's terminal — a tty under the
 /// PTY tests, a pipe under cargo's capture, whatever lies further upstream.
-pub fn try_run_test_helper() -> Option<u8> {
-    #[cfg(unix)]
-    {
-        use std::fmt::Write as _;
-        use std::io::{IsTerminal, Write};
+#[cfg(unix)]
+pub fn serve_pgid_check(tag: Option<&std::ffi::OsStr>) -> u8 {
+    use std::fmt::Write as _;
+    use std::io::{IsTerminal, Write};
 
-        let mut args = std::env::args_os();
-        let _argv0 = args.next();
-        let flag = args.next()?;
-        if flag != PGID_CHECK_FLAG {
-            return None;
-        }
-        let tag = args
-            .next()
-            .map_or_else(|| "stage".into(), |t| t.to_string_lossy().into_owned());
-        let pgid = unsafe { libc::getpgrp() };
-        let stderr_fd = libc::STDERR_FILENO;
+    let tag = tag.map_or_else(|| "stage".into(), |t| t.to_string_lossy());
+    let pgid = unsafe { libc::getpgrp() };
+    let stderr_fd = libc::STDERR_FILENO;
 
-        // One buffer, one `write_all`: `eprintln!` emits a syscall per format
-        // substitution, and stages sharing a stderr interleave their bytes
-        // (`pgid:pgid:downup==…`).  A write under PIPE_BUF is atomic.
-        let mut buf = String::new();
-        let _ = writeln!(&mut buf, "pgid:{tag}={pgid}");
-        if std::io::stderr().is_terminal() {
-            let fg = unsafe { libc::tcgetpgrp(stderr_fd) };
-            if fg >= 0 {
-                let _ = writeln!(&mut buf, "tcpgrp:{tag}={fg}");
-            }
+    // One buffer, one `write_all`: `eprintln!` emits a syscall per format
+    // substitution, and stages sharing a stderr interleave their bytes
+    // (`pgid:pgid:downup==…`).  A write under PIPE_BUF is atomic.
+    let mut buf = String::new();
+    let _ = writeln!(&mut buf, "pgid:{tag}={pgid}");
+    if std::io::stderr().is_terminal() {
+        let fg = unsafe { libc::tcgetpgrp(stderr_fd) };
+        if fg >= 0 {
+            let _ = writeln!(&mut buf, "tcpgrp:{tag}={fg}");
         }
-        let _ = std::io::stderr().write_all(buf.as_bytes());
-        // A reader stage that exits before its writer is done makes ral end
-        // that writer (SPEC §7.6), so the probe holds its stdin open to EOF
-        // rather than racing its own upstream's report.  A tty never sees
-        // EOF; `/dev/null` sees it at once.
-        if !std::io::stdin().is_terminal() {
-            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
-        }
-        Some(0)
     }
-    #[cfg(not(unix))]
-    {
-        None
+    let _ = std::io::stderr().write_all(buf.as_bytes());
+    // A reader stage that exits before its writer is done makes ral end
+    // that writer (SPEC §7.6), so the probe holds its stdin open to EOF
+    // rather than racing its own upstream's report.  A tty never sees
+    // EOF; `/dev/null` sees it at once.
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
     }
+    0
 }

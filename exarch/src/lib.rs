@@ -44,34 +44,31 @@ pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
         narrow: policy::base_layer,
     }];
 
-/// Pre-`main` trampoline shared by the binary and every test binary: dress a
-/// sandbox-IPC child's fresh shell with exarch's host builtins, then serve
-/// any helper re-exec.
+/// The full pre-`main` dispatch, shared by the binary's `main` and every test
+/// `#[ctor]`.
 ///
-/// The pipeline anchor re-execs the running binary, which under `cargo test`
-/// is the libtest harness, so the flag must be served before libtest sees
-/// argv and rejects it.
-pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
-    ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
-    #[cfg(unix)]
-    if std::env::args().any(|a| a == "--engine") {
-        ral_core::engine::run_engine(&INSTALLERS);
-    }
-    if let Some(code) = ral_core::try_run_pipeline_anchor() {
-        return Some(code);
-    }
-    if let Some(code) = ral_core::test_helper::try_run_test_helper() {
-        return Some(code);
-    }
-    None
-}
-
-/// The full pre-`main` dispatch — helper re-execs, then the OS-sandbox stage —
-/// shared by the binary's `main` and every test `#[ctor]`.
+/// Dress a sandbox-IPC child's fresh shell with exarch's host builtins, then
+/// serve whichever helper or sandbox re-exec this process is.  The pipeline
+/// anchor re-execs the running binary, which under `cargo test` is the libtest
+/// harness, so the flag must be served before libtest sees argv and rejects it.
 ///
 /// `Some(code)` means this process is a re-exec child that should exit now.
 pub fn dispatch_pre_main() -> Option<u8> {
-    install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
+    ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match ral_core::classify(&argv) {
+        #[cfg(unix)]
+        ral_core::Invocation::Engine => {
+            ral_core::sandbox::register_self_for_helpers();
+            ral_core::engine::run_engine(&INSTALLERS)
+        }
+        ral_core::Invocation::PipelineAnchor => Some(ral_core::serve_pipeline_anchor()),
+        #[cfg(unix)]
+        ral_core::Invocation::PgidCheck { tag } => {
+            Some(ral_core::test_helper::serve_pgid_check(tag))
+        }
+        role => ral_core::sandbox::serve_sandbox_early_init(&role),
+    }
 }
 
 /// [`dispatch_pre_main`], and the exit its answer calls for — one expression,

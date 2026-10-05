@@ -14,7 +14,7 @@
 //!
 //! `argv[0]` is always the on-disk path, whichever mechanism carried it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[cfg(unix)]
@@ -30,7 +30,6 @@ pub(super) struct Pinned {
     pin: Pin,
     /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
     exec_path: PathBuf,
-    #[cfg_attr(windows, allow(dead_code))]
     arg0: PathBuf,
 }
 
@@ -46,6 +45,19 @@ impl Pinned {
         })
     }
 
+    /// The on-disk path the pin was taken from: `argv[0]` of every exec, and
+    /// what bwrap execs the trampoline by, its fresh `/proc` binding no
+    /// `/proc/self/fd` target.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(super) fn arg0(&self) -> &Path {
+        &self.arg0
+    }
+
+    /// What `execve` is handed to run the pinned file.
+    pub(super) fn exec_path(&self) -> &Path {
+        &self.exec_path
+    }
+
     /// Exec the pinned file under its on-disk name, which `exec_path` on
     /// Linux is not.  The program is an absolute path, so the child's `PATH`
     /// — the shell's override included — is never consulted.
@@ -56,15 +68,9 @@ impl Pinned {
     )]
     pub(super) fn command(&self) -> std::process::Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = std::process::Command::new(&self.exec_path);
-        cmd.arg0(&self.arg0);
+        let mut cmd = std::process::Command::new(self.exec_path());
+        cmd.arg0(self.arg0());
         cmd
-    }
-
-    /// The on-disk path the pin was taken from.
-    #[cfg(target_os = "linux")]
-    pub(super) fn arg0(&self) -> &std::path::Path {
-        &self.arg0
     }
 
     /// Where the pinned inode lives *now*, after any rename since boot, so a
@@ -76,7 +82,7 @@ impl Pinned {
         reason = "[silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
     )]
     pub(super) fn current_path(&self) -> std::io::Result<PathBuf> {
-        std::fs::read_link(&self.exec_path)
+        std::fs::read_link(self.exec_path())
     }
 
     /// Whether `meta` is the pinned inode, under whatever name — a hard link
@@ -107,40 +113,44 @@ impl Pinned {
     /// envelope to ask about.
     #[cfg(target_os = "linux")]
     pub(super) fn writable_by_us(&self) -> bool {
-        rustix::fs::access(&self.exec_path, rustix::fs::Access::WRITE_OK).is_ok()
+        rustix::fs::access(self.exec_path(), rustix::fs::Access::WRITE_OK).is_ok()
     }
-}
 
-/// The pinned `argv[0]`, or the live `current_exe()`.  Every Linux launch
-/// execs this — the trampoline is the envelope's only payload — and it is the
-/// on-disk name because bwrap mounts a fresh `/proc`, in which a
-/// `/proc/self/fd` target would neither bind nor resolve.
-#[cfg(target_os = "linux")]
-pub(super) fn self_arg0() -> std::io::Result<PathBuf> {
-    match SANDBOX_SELF.get() {
-        Some(s) => Ok(s.arg0.clone()),
-        None => std::env::current_exe(),
+    /// Refuse to spawn a foreign build: `sandbox::launch` calls this wherever
+    /// it issues a warrant, to catch an executable swapped on disk since
+    /// registration.
+    ///
+    /// Every Unix: the trampoline is exec'd by name on both, so the Linux fd
+    /// pin is no protection here.  Windows never re-execs itself.
+    #[cfg(unix)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+    )]
+    pub(super) fn verify(&self) -> Result<(), Error> {
+        let arg0 = self.arg0();
+        let meta = std::fs::metadata(arg0).map_err(|e| {
+            Error::new(
+                format!(
+                    "sandbox eval: verify self: cannot stat {}: {e}",
+                    arg0.display()
+                ),
+                1,
+            )
+        })?;
+        if self.is_inode(&meta) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                format!(
+                    "ral binary at {} changed since startup; \
+                     restart to pick up the new build",
+                    arg0.display()
+                ),
+                1,
+            ))
+        }
     }
-}
-
-/// The pinned exec path for the Seatbelt `(literal …)` self-admit clause
-/// that lets a bundled-tool re-exec run under a restricted profile.
-#[cfg(target_os = "macos")]
-pub(super) fn self_exec_path_string() -> Option<String> {
-    SANDBOX_SELF
-        .get()
-        .map(|s| s.exec_path.to_string_lossy().into_owned())
-}
-
-/// The exec path `windows::session::confine` stamps readable for the
-/// `AppContainer`, so the bundled-tool re-exec can load its own image.
-/// `None` leaves it ungranted, readable only if the fs projection covers it.
-#[cfg(windows)]
-pub(super) fn self_exec_path() -> Option<PathBuf> {
-    if let Some(s) = SANDBOX_SELF.get() {
-        return Some(s.exec_path.clone());
-    }
-    std::env::current_exe().ok()
 }
 
 /// How `exec_path` stays bound to the binary we registered.
@@ -165,11 +175,23 @@ enum Pin {
 
 pub(super) static SANDBOX_SELF: OnceLock<Pinned> = OnceLock::new();
 
+/// ral's own pin, which a sandboxed launch cannot go without: unpinned, ral
+/// cannot vouch that the copy it re-execs is itself.
+#[cfg(unix)]
+pub(super) fn own() -> Result<&'static Pinned, String> {
+    SANDBOX_SELF.get().ok_or_else(|| {
+        "sandbox: ral could not pin its own program at startup (is its executable \
+         missing or unreadable?), so it cannot vouch that the sandboxed copy is \
+         itself; refusing to launch it"
+            .to_string()
+    })
+}
+
 /// Pin our own executable for the rest of the process's life.
 ///
-/// Idempotent, and silent on failure: unpinned we still sandbox, since
-/// `super::self_command` falls back to the live `current_exe`, but we lose
-/// swap protection and, on macOS, the Seatbelt self-admit clause.
+/// Idempotent, and silent on failure: unpinned, the unconfined helpers still
+/// run, since `super::self_command` falls back to the live `current_exe`, but
+/// a sandboxed launch is refused ([`own`]).
 pub(super) fn register_sandbox_self() {
     if SANDBOX_SELF.get().is_some() {
         return;
@@ -235,72 +257,4 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     Some((Pin::Unguarded, arg0.to_path_buf()))
-}
-
-/// Refuse to spawn a foreign build: `sandbox::launch` calls this before
-/// every per-command `--sandbox-entry` re-exec, to catch an executable
-/// swapped on disk since registration.
-///
-/// Every Unix: the trampoline is exec'd by name on both, so the Linux fd pin
-/// is no protection here.  Windows never re-execs itself.
-#[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
-)]
-pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
-    let meta = std::fs::metadata(&s.arg0).map_err(|e| {
-        Error::new(
-            format!(
-                "sandbox eval: verify self: cannot stat {}: {e}",
-                s.arg0.display()
-            ),
-            1,
-        )
-    })?;
-    if s.is_inode(&meta) {
-        Ok(())
-    } else {
-        Err(Error::new(
-            format!(
-                "ral binary at {} changed since startup; \
-                 restart to pick up the new build",
-                s.arg0.display()
-            ),
-            1,
-        ))
-    }
-}
-
-// ── Process sandbox entry ────────────────────────────────────────────────
-
-/// Enter the OS sandbox for this process if an [`Entry`](super::Entry) was
-/// supplied: macOS enters Seatbelt, Linux the Landlock layer — inside the
-/// bwrap envelope the parent has already built around us, which is the only
-/// place it can be entered, a domain handling any fs right forbidding
-/// `mount(2)`.  Windows confines a child from the parent with an
-/// `AppContainer` token, so there the flag is a regression to the Unix shape,
-/// or forged, and is refused rather than run unconfined.
-pub(super) fn maybe_enter_process_sandbox(entry: Option<&super::Entry>) -> Result<(), String> {
-    let Some(entry) = entry else {
-        return Ok(());
-    };
-    #[cfg(target_os = "macos")]
-    {
-        super::macos::enter_current_process(entry)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        super::linux::landlock::enter(entry)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = entry;
-        Err(format!(
-            "ral: {} is not entered on {}: confinement is applied to a child from outside, \
-             never by the child itself; refusing to run unconfined",
-            super::SANDBOX_ENTRY_FLAG,
-            std::env::consts::OS
-        ))
-    }
 }

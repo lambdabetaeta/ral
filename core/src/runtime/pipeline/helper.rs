@@ -76,62 +76,48 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
     Ok(cmd)
 }
 
-/// Hidden anchor dispatch from the binary entrypoint; `None` when argv names
-/// no anchor and the ordinary CLI should run.
-pub fn try_run_pipeline_anchor() -> Option<u8> {
-    let mut args = std::env::args_os();
-    let _argv0 = args.next();
-    let mode = args.next()?;
+/// Serve the pipeline anchor, which exits before [`crate::sandbox::early_init`]
+/// would pin it, with SIGPIPE at its default.
+pub fn serve_pipeline_anchor() -> u8 {
     #[cfg(unix)]
     {
         crate::sandbox::register_self_for_helpers();
-        // Before the mode check, so every argv-bearing ral gets it: Rust's
-        // runtime ignores SIGPIPE, but a ral child producing under a foreign
-        // shell's pipeline must still die of it.
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        }
+        crate::uutils::init_signal_dispositions();
     }
-    (mode == ANCHOR_FLAG).then(serve_anchor)
+    serve_anchor()
 }
 
-/// Hidden bundled-tool dispatch (`ral --ral-bundled-tool <tool> <args...>`).
-/// `args` is the post-`early_init` argv sans the binary name, so the OS sandbox
-/// is already entered and the tool runs confined.
-#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
-    use crate::uutils;
-
-    let (flag, rest) = args.split_first()?;
-    if flag != BUNDLED_TOOL_FLAG {
-        return None;
-    }
-    let Some((tool, tool_args)) = rest.split_first() else {
+/// Serve the bundled-tool multicall (`ral --ral-bundled-tool <tool> <args...>`):
+/// unconfined, run under whatever sandbox the process already inherited.
+/// `args` is the tool's name, then its arguments.
+pub(crate) fn serve_bundled_tool(args: &[std::ffi::OsString]) -> u8 {
+    let Some((tool, tool_args)) = args.split_first() else {
         crate::diagnostic::cmd_error("ral", &format!("{BUNDLED_TOOL_FLAG} requires a tool name"));
-        return Some(2);
+        return 2;
     };
+    run_bundled(&tool.to_string_lossy(), tool_args.to_vec())
+}
+
+/// Run bundled `tool` in this process: the multicall's body, and a confined
+/// warrant's once its confinement is entered.
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+pub(crate) fn run_bundled(tool: &str, args: Vec<std::ffi::OsString>) -> u8 {
+    use crate::uutils;
+    // Rust's runtime ignores SIGPIPE, which would turn a write to a closed
+    // pipe into an error exit.
+    #[cfg(unix)]
+    uutils::init_signal_dispositions();
     if !uutils::is_uutils_tool(tool) {
         crate::diagnostic::cmd_error("ral", &format!("'{tool}' is not a bundled tool"));
-        return Some(127);
+        return 127;
     }
-
-    let exit_code = uutils::invoke_bundled(tool, tool_args);
-    #[allow(
-        clippy::cast_sign_loss,
-        reason = "clamp(0, 255) bounds the value to the u8 range before the cast"
-    )]
-    Some(exit_code.clamp(0, 255) as u8)
+    u8::try_from(uutils::invoke_bundled(tool, args).clamp(0, 255)).unwrap_or(u8::MAX)
 }
 
-/// With no bundled tool linked in the sentinel is unreachable, but still
-/// recognised, so it fails as a clear diagnostic rather than a clap usage
-/// error.
+/// With no bundled tool linked in, a tool is unreachable, but still answered
+/// with a clear diagnostic rather than a clap usage error.
 #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
-pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
-    let flag = args.first()?;
-    if flag != BUNDLED_TOOL_FLAG {
-        return None;
-    }
+pub(crate) fn run_bundled(_tool: &str, _args: Vec<std::ffi::OsString>) -> u8 {
     crate::diagnostic::cmd_error("ral", "no bundled tools are available in this build");
-    Some(127)
+    127
 }

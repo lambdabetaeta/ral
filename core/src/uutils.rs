@@ -167,13 +167,14 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
 
 /// Run bundled `tool` here, combining `uumain`'s return with the exit-code
 /// cell.  Argv slot 0 carries the tool name for every tool; [`uutils_invoke`]'s
-/// `rg` arm drops it again.  The sole caller is the `ral --ral-bundled-tool`
-/// child entrypoint (`try_run_bundled_tool`), which inherits its execution
-/// context from the exec, so the process-global cell is this process's own.
+/// `rg` arm drops it again.  The sole caller is `run_bundled`, the body of a
+/// re-exec child — the `--ral-bundled-tool` multicall, or a confined warrant —
+/// which inherits its execution context from the exec, so the process-global
+/// cell is this process's own.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-pub(crate) fn invoke_bundled(tool: &str, args: &[String]) -> i32 {
+pub(crate) fn invoke_bundled(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
-        .chain(args.iter().map(std::ffi::OsString::from))
+        .chain(args)
         .collect();
     reset_exit_code();
     let code = uutils_invoke(tool, os_args);

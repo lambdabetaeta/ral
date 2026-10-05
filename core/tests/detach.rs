@@ -31,6 +31,7 @@ use ral_core::serial::FOValue;
 use ral_core::sync::LockExt as _;
 use ral_core::types::{GrantStack, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -309,9 +310,10 @@ fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
     );
 }
 
-/// A launch that is admitted and then fails — the path head names a file, so
-/// it passes vet, but no program, so the kernel refuses it — must give its
-/// reservation back.  The budget is whole-life and monotone for
+/// A launch that is admitted and then fails — the path head names an
+/// executable script whose `#!` interpreter does not exist, so it passes vet
+/// and `execve` refuses it with ENOENT, which `execvp` does not retry — must
+/// give its reservation back.  The budget is whole-life and monotone for
 /// births; a failed launch birthed nothing, so it spends nothing.
 #[test]
 fn a_launch_that_fails_after_admission_gives_the_slot_back() {
@@ -320,7 +322,14 @@ fn a_launch_that_fails_after_admission_gives_the_slot_back() {
     // One birth in the whole session: had the failed launch counted, the
     // real birth below would be refused for exhaustion instead.
     shell.arm_detach(1);
-    let message = refusal(&mut shell, "detach #'never born'# /etc/hosts");
+    let dir = tempfile::tempdir().unwrap();
+    let no_interpreter = dir.path().join("no-interpreter");
+    std::fs::write(&no_interpreter, "#!/nonexistent/ral-test-interpreter\n").unwrap();
+    std::fs::set_permissions(&no_interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let message = refusal(
+        &mut shell,
+        &format!("detach #'never born'# {}", no_interpreter.display()),
+    );
     assert!(
         message.contains("cannot launch"),
         "the refusal must come from the failed spawn, not from vet or exhaustion, got {message:?}"

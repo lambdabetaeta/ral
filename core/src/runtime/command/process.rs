@@ -113,12 +113,7 @@ pub(crate) fn spawn_error(
         );
     }
 
-    let failure = match e.kind() {
-        std::io::ErrorKind::NotFound => SpawnFailure::NotFound,
-        std::io::ErrorKind::PermissionDenied => SpawnFailure::PermissionDenied { found: None },
-        _ => SpawnFailure::Io(e.to_string()),
-    };
-    Break::Error(Error::spawn_failure(name, failure))
+    Break::Error(Error::spawn_failure(name, SpawnFailure::from(e)))
 }
 
 /// Wrap an I/O error from pipe creation or cloning as a [`Break`].

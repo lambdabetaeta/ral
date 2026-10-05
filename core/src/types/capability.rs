@@ -165,21 +165,10 @@ pub struct FsPolicy {
 /// render time — which is exactly what `N` is.  Flattening away `namespace`
 /// forecloses a projection that distinguishes guest prefixes from host ones;
 /// no backend ever saw that distinction, so enforcement is unchanged.
-///
-/// `pinned_dirs` is `serde(skip)` because it is *derived*, never authored:
-/// [`SandboxProjection::rendered`] mints it from `deny_paths` and
-/// `write_prefixes`, so a forged `--sandbox-entry` can neither fabricate
-/// a pin nor drop one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-// Spelled out because the skipped field would otherwise drag an `N: Default`
-// bound onto the impl, which a name minted only by expansion cannot meet.
-#[serde(deny_unknown_fields, bound(deserialize = "N: Deserialize<'de>"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsRules<N> {
-    #[serde(default)]
     pub read_prefixes: Vec<N>,
-    #[serde(default)]
     pub write_prefixes: Vec<N>,
-    #[serde(default)]
     pub deny_paths: Vec<N>,
     /// The ancestor closure of every *rendered* `deny_paths` entry that lies
     /// within some *rendered* write name.  The macOS backend pins each
@@ -191,14 +180,12 @@ pub struct FsRules<N> {
     /// surface chain and its resolved chain are pinned, and an alias
     /// `W/alias → W/top/deep` with deny `W/alias/secret` pins `W/top` too —
     /// an ancestor chain only the resolved spelling reveals.
-    #[serde(skip)]
     pub(crate) pinned_dirs: Vec<N>,
 }
 
 /// Empty under any naming: rules over no paths, the shape a backend falls back
-/// to at the unrestricted top.  Hand-written for the same reason as the serde
-/// bound above — the derive would demand `N: Default`, which a name minted only
-/// by expansion cannot meet.
+/// to at the unrestricted top.  Hand-written because the derive would demand
+/// `N: Default`, which a name minted only by expansion cannot meet.
 impl<N> Default for FsRules<N> {
     fn default() -> Self {
         Self {
@@ -216,8 +203,7 @@ impl<N> Default for FsRules<N> {
 /// passes it through with broad `file-read*`/`file-write*` on macOS,
 /// `--dev-bind / /` on Linux. An empty `Restricted` is the other extreme: fs
 /// was attenuated to nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "rules", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsProjection<N = String> {
     Unrestricted,
     Restricted(FsRules<N>),
@@ -254,8 +240,7 @@ impl<N> FsProjection<N> {
 /// Paths are [`RealPath`]s, frozen at grant, and stay so until the backend
 /// that needs other spellings renders them with [`render_real`], which never
 /// re-resolves one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "rules", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecProjection<N = RealPath> {
     Unrestricted,
     Restricted(Vec<ExecRule<N>>),
@@ -264,8 +249,7 @@ pub enum ExecProjection<N = RealPath> {
 /// One kernel exec rule.  A `Veto` stays `String` while paths are `N`: a bare
 /// name is not a path, so rendering it stops typechecking rather than
 /// emitting a rule for `/git`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecRule<N = RealPath> {
     Dir { path: N, allow: bool },
     File { path: N, allow: bool },
@@ -330,23 +314,16 @@ impl<N> ExecProjection<N> {
 /// `sandbox_projection` in `core/src/capability/sandbox.rs` after meet-folding
 /// the whole stack.
 ///
-/// The platform backends `sandbox::linux` and `sandbox::macos` render it;
-/// on macOS it rides the internal `--sandbox-entry` flag to a re-exec'd
-/// child. Unlike a [`Capabilities`] frame, no further composition can widen
-/// it.
+/// The platform backends `sandbox::linux` and `sandbox::macos` render it, in
+/// the launching process. Unlike a [`Capabilities`] frame, no further
+/// composition can widen it.
 ///
 /// `N` is how the projection *names* the objects its fs rules rule over;
-/// exec rules name real paths throughout.  Only the surface instance crosses
-/// the wire, and structurally so: the derives
-/// generate `impl<N: Serialize>` bounds while [`Rendered`] implements neither
-/// serde trait, so shipping one host's expansion of one host's filesystem into
-/// another's rules does not compile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// exec rules name real paths throughout.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProjection<N = String> {
-    #[serde(default)]
     pub fs: FsProjection<N>,
     pub net: bool,
-    #[serde(default)]
     pub exec: ExecProjection,
 }
 

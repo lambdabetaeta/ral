@@ -580,6 +580,7 @@ mod tests {
             kernel_file(&rules.kernel(&BTreeSet::new()), &real("/x/bash")),
             [false]
         );
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(rules.allowed_files().count(), 0);
     }
 

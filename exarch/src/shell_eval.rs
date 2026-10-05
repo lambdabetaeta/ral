@@ -1251,12 +1251,15 @@ keep-bottom
             return;
         }
         let engine = fresh();
-        let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+        // Found by its argv: under `--unshare-pid` a pid it printed would be
+        // the namespace's, not the host's.
+        let marker = format!("sleep 30.{}", std::process::id());
+        let cmd = format!("/bin/sh -c '{marker} & wait'");
         let t0 = std::time::Instant::now();
         let r = run_shell_direct(
             &engine,
             &projecting_caps(),
-            cmd,
+            &cmd,
             2,
             &crate::record::Emitter::none(),
         );
@@ -1280,24 +1283,26 @@ keep-bottom
             "a timed-out sandboxed call reports the timeout exit code; stderr was: {stderr}"
         );
 
-        let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
-            .lines()
-            .next()
-            .and_then(|l| l.trim().parse().ok())
-            .expect("the sandboxed grandchild printed its pid on stdout");
-        let mut alive = true;
+        let alive = || {
+            let ps = std::process::Command::new("ps")
+                .args(["-A", "-o", "args="])
+                .output()
+                .expect("ps lists the host's processes");
+            String::from_utf8_lossy(&ps.stdout)
+                .lines()
+                .any(|args| args.trim() == marker)
+        };
+        let mut survived = true;
         for _ in 0..50 {
-            if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
-                .is_err()
-            {
-                alive = false;
+            if !alive() {
+                survived = false;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(
-            !alive,
-            "the sandboxed forked grandchild (pid {gc_pid}) outlived the timeout"
+            !survived,
+            "the sandboxed forked grandchild (`{marker}`) outlived the timeout"
         );
     }
 

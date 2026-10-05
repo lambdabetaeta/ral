@@ -29,12 +29,15 @@ AppContainer profiles on Windows, a no-op elsewhere — before surrendering the
 exit code.
 
 - **Pre-`main` trampoline.** Before any setup, `dispatch_pre_main` short-circuits
-  a re-exec child, returning `Option<u8>`: `install_child_hooks_and_serve_helpers`
-  (set the child-shell extension that dresses a sandbox-IPC child with exarch's
-  host builtins; hand core `policy::base_layer` as its grant narrower, since core
+  a re-exec child, returning `Option<u8>`: it sets the child-shell extension that
+  dresses a sandbox-IPC child with exarch's host builtins, then `match`es on
+  `ral_core::classify(argv)` — the one pure classifier of ral's hidden roles
+  ([[map/repl/startup|startup]]). The `Engine` arm pins ral and runs the engine
+  over exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
   carries no base-tag lexicon of its own and a wire-seeded child resolves its own
-  layer while booting; then serve the `--engine`, `--ral-pipeline-anchor`, and
-  test-helper re-execs) `.or_else` the OS-sandbox stage ([[map/core/capabilities|`serve_sandbox_early_init`]]).
+  layer while booting); `PipelineAnchor` and the test probes are served directly;
+  every other role goes to the OS-sandbox stage
+  ([[map/core/capabilities|`serve_sandbox_early_init`]]).
   `main` and **every test `#[ctor]` run this identical function** — they differ
   only in how they act on `Some` (exit vs return the `u8`). A test binary reaches
   `main` only through libtest yet is the same

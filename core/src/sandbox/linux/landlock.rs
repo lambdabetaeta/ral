@@ -4,7 +4,9 @@
 //! a pid namespace.  Entered by the payload itself, never before bwrap: a
 //! domain handling any fs right forbids `mount(2)`, bwrap's first act.  Its
 //! admits are opened by the parent, in the host, never through a symlink
-//! ([`prepare`]); the payload inherits them as fds ([`Entry`]).
+//! ([`prepare`]); the payload inherits them as fds from
+//! [`ADMIT_FD_BASE`](super::super::warrant::ADMIT_FD_BASE), its warrant
+//! counting them.
 //!
 //! Declared gap: Landlock is allow-list only and cannot remove part of an
 //! allowed directory, so denies and vetoes render nothing here — a deny
@@ -12,9 +14,9 @@
 //! directory holds only at the in-process guard on Linux, where Seatbelt
 //! would carry it into the kernel.
 
+use super::super::warrant::ExecAdmits;
 use crate::path::{Rendered, render_paths, render_real};
 use crate::types::{ExecProjection, ExecRule, SandboxProjection};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -108,19 +110,8 @@ impl fmt::Display for Landlock {
 /// ruleset [`Layer::enter`] builds below.
 pub(crate) const RENDERS_EXEC: bool = true;
 
-/// What crosses into the envelope for the trampoline to enter.  Never a
-/// path: every name in there is one bwrap minted by following host symlinks,
-/// so none can be trusted to reach the file a grant froze.  The parent opens
-/// each admit in the host instead, and the payload inherits them as fds from
-/// [`super::ADMIT_FD_BASE`].
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Entry {
-    /// `Some(n)`: exec is confined to the `n` inherited admits.
-    exec_admits: Option<usize>,
-}
-
-/// The ruleset as a value, admits named by `A`: rendered paths in the parent,
-/// so it can be tested on any host and printed in the profile dump, and the
+/// The ruleset as a value, admits named by `A`: [`Admit`]s in the parent, so
+/// it can be tested on any host and printed in the profile dump, and the
 /// inherited fds in the payload, which enters it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layer<A> {
@@ -155,7 +146,49 @@ impl<A> Layer<A> {
     }
 }
 
-impl Layer<Rendered> {
+/// A name the exec layer admits: an allowed directory with the hierarchy
+/// beneath it, or a file alone.  The kind must survive to the open, where an
+/// inode may since have changed type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Admit<N> {
+    File(N),
+    Hierarchy(N),
+}
+
+impl<N: Ord> Admit<N> {
+    fn name(&self) -> &N {
+        let (Self::File(name) | Self::Hierarchy(name)) = self;
+        name
+    }
+
+    /// Sorted by name, a file before the hierarchy of the same name.
+    fn key(&self) -> (&N, bool) {
+        (self.name(), matches!(self, Self::Hierarchy(_)))
+    }
+}
+
+impl Admit<Rendered> {
+    /// The inode this admit names, opened here in the host, never through a
+    /// symlink.  `None` for a file admit whose inode has since become a
+    /// directory: it admitted that name alone, never what lies beneath.
+    fn open(&self) -> Result<Option<OwnedFd>, Error> {
+        use rustix::fs::{FileType, fstat};
+        let path = self.name().as_str();
+        let fd = open(path)?;
+        if matches!(self, Self::File(_)) {
+            let stat = fstat(&fd).map_err(|errno| Error::StatAdmit {
+                path: path.to_string(),
+                source: io::Error::from(errno),
+            })?;
+            if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+                return Ok(None);
+            }
+        }
+        Ok(Some(fd))
+    }
+}
+
+impl Layer<Admit<Rendered>> {
     /// The layer `exec` asks of a kernel at `abi`.
     fn render(exec: &ExecProjection, abi: Abi) -> Result<Option<Self>, String> {
         Ok(Self::at(admits(exec)?, abi))
@@ -171,19 +204,26 @@ impl Layer<Rendered> {
 /// A path this host cannot spell in Unicode: an admit is never
 /// approximated, and dropping it silently would deny every exec with a bare
 /// `EACCES`.
-fn admits(exec: &ExecProjection) -> Result<Option<Vec<Rendered>>, String> {
+fn admits(exec: &ExecProjection) -> Result<Option<Vec<Admit<Rendered>>>, String> {
     let ExecProjection::Restricted(rules) = exec else {
         return Ok(None);
     };
     let base: Vec<String> = platform_base().into_iter().chain([self_path()?]).collect();
-    let mut admits = render_paths(&base)?;
+    let mut admits: Vec<Admit<Rendered>> =
+        render_paths(&base)?.into_iter().map(Admit::File).collect();
     for rule in rules {
-        if let ExecRule::Dir { path, allow: true } | ExecRule::File { path, allow: true } = rule {
-            admits.extend(render_real(path)?);
+        match rule {
+            ExecRule::Dir { path, allow: true } => {
+                admits.extend(render_real(path)?.into_iter().map(Admit::Hierarchy));
+            }
+            ExecRule::File { path, allow: true } => {
+                admits.extend(render_real(path)?.into_iter().map(Admit::File));
+            }
+            _ => {}
         }
     }
-    admits.retain(|p| is_real(p.as_str()));
-    admits.sort();
+    admits.retain(|a| is_real(a.name().as_str()));
+    admits.sort_by(|a, b| a.key().cmp(&b.key()));
     admits.dedup();
     Ok(Some(admits))
 }
@@ -247,29 +287,50 @@ fn admit(
         })
 }
 
-/// The entry for a launch under `policy`, and the admits it counts, opened
-/// here in the host.  A kernel without Landlock gets no exec layer.
+/// The admits for a launch under `policy`, opened here in the host, and how
+/// many the payload is to enter: [`ExecAdmits::Unconfined`] leaves exec
+/// unconfined.  Never a path: every name inside the envelope is one bwrap
+/// minted by following host symlinks, so none can be trusted to reach the file
+/// a grant froze.
 ///
 /// # Errors
-/// As [`admits`], or an admit that stopped being a real path since.
+/// An exec-restricting grant on a kernel without Landlock, which would
+/// otherwise run with no kernel exec layer; as [`admits`]; or an admit that
+/// stopped being a real path since.
 pub(crate) fn prepare(
     policy: &SandboxProjection,
     landlock: Landlock,
-) -> Result<(Entry, Vec<OwnedFd>), String> {
-    let admits = match landlock.abi() {
-        Some(_) => admits(&policy.exec)?,
-        None => None,
+) -> Result<(ExecAdmits, Vec<OwnedFd>), String> {
+    if let Some(why) = unenforceable(&policy.exec, landlock) {
+        return Err(why);
+    }
+    let admits = admits(&policy.exec)?;
+    let mut fds = Vec::new();
+    for admit in admits.iter().flatten() {
+        fds.extend(admit.open().map_err(|e| e.to_string())?);
+    }
+    let exec = admits.map_or(ExecAdmits::Unconfined, |_| ExecAdmits::Inherited(fds.len()));
+    Ok((exec, fds))
+}
+
+/// The refusal for an exec-restricting grant where `landlock` offers no ABI to
+/// enforce it, `None` for any other pairing.
+fn unenforceable(exec: &ExecProjection, landlock: Landlock) -> Option<String> {
+    if !matches!(exec, ExecProjection::Restricted(_)) || landlock.abi().is_some() {
+        return None;
+    }
+    let cause = match landlock {
+        Landlock::Unprobed(errno) => format!(
+            "its Landlock probe failed ({})",
+            io::Error::from_raw_os_error(errno)
+        ),
+        _ => "Landlock is unavailable".to_string(),
     };
-    let fds = admits
-        .iter()
-        .flatten()
-        .map(|path| open(path.as_str()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let entry = Entry {
-        exec_admits: admits.map(|admits| admits.len()),
-    };
-    Ok((entry, fds))
+    Some(format!(
+        "landlock: this kernel cannot enforce the grant's limits on which programs may run, \
+         because {cause}; ral refuses rather than run them unchecked.  Is the kernel older \
+         than 5.13, or does it have Landlock disabled?"
+    ))
 }
 
 /// Take ownership of the `n` admits the parent installed, so they close
@@ -280,7 +341,7 @@ fn inherited(n: usize) -> Result<Vec<OwnedFd>, String> {
         .map(|i| {
             let fd = libc::c_int::try_from(i)
                 .ok()
-                .and_then(|i| super::ADMIT_FD_BASE.checked_add(i))
+                .and_then(|i| super::super::warrant::ADMIT_FD_BASE.checked_add(i))
                 .ok_or("landlock: too many exec admits to inherit")?;
             // SAFETY: open, by F_GETFD, and owned by nothing else in this
             // process: the parent installed it for this call alone.
@@ -297,19 +358,24 @@ fn inherited(n: usize) -> Result<Vec<OwnedFd>, String> {
 /// `statfs.f_type` of a 9P mount, whose server implements no Landlock hook.
 const V9FS_MAGIC: u64 = 0x0102_1997;
 
-impl fmt::Display for Layer<Rendered> {
+impl fmt::Display for Layer<Admit<Rendered>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.exec {
             None => writeln!(f, "landlock: exec unconfined (projection unrestricted)")?,
             Some(exec) => {
                 writeln!(f, "landlock: exec confined to {} paths:", exec.admits.len())?;
                 for admit in &exec.admits {
-                    let note = if on_9p(admit.as_str()) {
+                    let name = admit.name().as_str();
+                    let note = if on_9p(name) {
                         " (inert: 9P implements no Landlock hooks)"
                     } else {
                         ""
                     };
-                    writeln!(f, "  {}{note}", admit.as_str())?;
+                    let slash = match admit {
+                        Admit::File(_) => "",
+                        Admit::Hierarchy(_) => "/",
+                    };
+                    writeln!(f, "  {name}{slash}{note}")?;
                 }
                 writeln!(
                     f,
@@ -358,15 +424,15 @@ fn open(path: &str) -> Result<OwnedFd, Error> {
     })
 }
 
-/// The running binary, admitted unconditionally so a bundled-tool re-exec
-/// need not be named by every policy — as macOS admits its own exec path.
+/// The running binary, admitted unconditionally: a ral run inside starts its
+/// own bundled tools and pipeline anchors by re-executing it, so no policy
+/// names it — as macOS admits its own exec path.
 fn self_path() -> Result<String, String> {
-    let path = super::super::reexec::self_arg0()
-        .map_err(|e| format!("landlock: cannot resolve ral's own path: {e}"))?;
-    path.into_os_string().into_string().map_err(|p| {
+    let path = super::super::reexec::own()?.arg0();
+    path.to_str().map(str::to_owned).ok_or_else(|| {
         format!(
             "landlock: ral's own path {} is not Unicode, so it cannot be admitted",
-            p.display()
+            path.display()
         )
     })
 }
@@ -417,6 +483,10 @@ pub(crate) enum Error {
         path: String,
         source: io::Error,
     },
+    StatAdmit {
+        path: String,
+        source: io::Error,
+    },
     RestrictSelf(landlock::RulesetError),
     PartiallyEnforced,
 }
@@ -437,6 +507,9 @@ impl fmt::Display for Error {
                  {source}. It was a real path when the layer was rendered, so something \
                  removed or replaced it since: a race, not a policy error."
             ),
+            Self::StatAdmit { path, source } => {
+                write!(f, "landlock: cannot stat the admit {path}: {source}")
+            }
             Self::RestrictSelf(e) => write!(f, "landlock: landlock_restrict_self failed: {e}"),
             Self::PartiallyEnforced => write!(
                 f,
@@ -447,12 +520,27 @@ impl fmt::Display for Error {
     }
 }
 
-/// Enter the layer `entry` describes, in the current process.  A kernel with
-/// no Landlock enters nothing: absence is a declared, unheld invariant, and
-/// there is no layer to apply.
-pub(crate) fn enter(entry: &Entry) -> Result<(), String> {
-    let admits = entry.exec_admits.map(inherited).transpose()?;
+/// Enter the layer over the `exec_admits` inherited admits, in the current
+/// process, [`ExecAdmits::Unconfined`] leaving exec unconfined.  A kernel with
+/// no Landlock enters nothing when no exec layer was promised: absence is a
+/// declared, unheld invariant, and there is no layer to apply.
+///
+/// # Errors
+/// A promised exec layer on a kernel that now finds no Landlock: running on
+/// would leave the target unconfined.
+pub(crate) fn enter(exec_admits: &ExecAdmits) -> Result<(), String> {
+    let admits = match *exec_admits {
+        ExecAdmits::Unconfined => None,
+        ExecAdmits::Inherited(n) => Some(inherited(n)?),
+    };
     let abi = match Landlock::probe() {
+        Landlock::Absent if admits.is_some() => {
+            return Err(
+                "landlock: the launch confined exec with Landlock, but this process finds none; \
+                 refusing to run unconfined"
+                    .to_string(),
+            );
+        }
         Landlock::Absent => return Ok(()),
         unprobed @ Landlock::Unprobed(_) => {
             return Err(format!("landlock: {unprobed}; refusing to run confined"));
@@ -470,7 +558,10 @@ pub(crate) fn enter(entry: &Entry) -> Result<(), String> {
 pub(crate) fn dump(policy: &SandboxProjection, landlock: Landlock) {
     let abi = match landlock {
         Landlock::Absent => {
-            eprintln!("landlock layer: none (no Landlock on this kernel)");
+            match unenforceable(&policy.exec, landlock) {
+                Some(why) => eprintln!("--- landlock layer error ---\n{why}"),
+                None => eprintln!("landlock layer: none (no Landlock on this kernel)"),
+            }
             return;
         }
         unprobed @ Landlock::Unprobed(_) => {
@@ -490,6 +581,7 @@ pub(crate) fn dump(policy: &SandboxProjection, landlock: Landlock) {
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
+    use crate::types::FsProjection;
     use std::io::Write;
 
     fn restricted(allow_paths: Vec<&str>, denies: bool) -> ExecProjection {
@@ -515,7 +607,7 @@ mod tests {
         ExecProjection::Restricted(rules)
     }
 
-    fn layer(exec: &ExecProjection, abi: Abi) -> Option<Layer<Rendered>> {
+    fn layer(exec: &ExecProjection, abi: Abi) -> Option<Layer<Admit<Rendered>>> {
         Layer::render(exec, abi).expect("ASCII paths render")
     }
 
@@ -572,10 +664,12 @@ mod tests {
             .and_then(|l| l.exec)
             .expect("exec admits")
             .admits;
-        let own = super::super::super::reexec::self_arg0().expect("own path");
+        let own = super::super::super::reexec::own().expect("ral pins itself");
         assert!(
-            admits.iter().any(|a| a.as_str() == own.to_string_lossy()),
-            "a bundled-tool re-exec must not need naming in the policy: {admits:?}"
+            admits
+                .iter()
+                .any(|a| a.name().as_str() == own.arg0().to_string_lossy()),
+            "ral's own binary must not need naming in the policy: {admits:?}"
         );
     }
 
@@ -591,11 +685,11 @@ mod tests {
             .expect("exec admits")
             .admits;
         assert!(
-            admits.iter().any(|a| a.as_str() == kept),
+            admits.iter().any(|a| a.name().as_str() == kept),
             "an existing admit must survive: {admits:?}"
         );
         assert!(
-            !admits.iter().any(|a| a.as_str() == gone),
+            !admits.iter().any(|a| a.name().as_str() == gone),
             "an admit that names nothing cannot be opened at entry: {admits:?}"
         );
     }
@@ -614,9 +708,60 @@ mod tests {
             .expect("exec admits")
             .admits;
         assert!(
-            !admits.iter().any(|a| a.as_str() == allowed),
+            !admits.iter().any(|a| a.name().as_str() == allowed),
             "a symlink would admit its target: {admits:?}"
         );
+    }
+
+    /// A file admit is its own name only: a confined child with write access
+    /// can have swapped the file for a directory, which must then admit nothing.
+    #[test]
+    fn a_file_admit_that_is_now_a_directory_admits_nothing_beneath() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = crate::path::RealPath::assumed(tmp.path().canonicalize().expect("real"));
+        let fds = |rules: Vec<ExecRule>| {
+            let policy = SandboxProjection {
+                fs: FsProjection::Unrestricted,
+                net: true,
+                exec: ExecProjection::Restricted(rules),
+            };
+            let (exec, fds) = prepare(&policy, Landlock::At(Abi(9))).expect("prepares");
+            assert_eq!(
+                exec,
+                ExecAdmits::Inherited(fds.len()),
+                "the count is of the fds handed over"
+            );
+            fds.len()
+        };
+        let base = fds(Vec::new());
+        let file = ExecRule::File {
+            path: dir.clone(),
+            allow: true,
+        };
+        let hierarchy = ExecRule::Dir {
+            path: dir,
+            allow: true,
+        };
+        assert_eq!(fds(vec![file]), base, "a directory cannot be a file admit");
+        assert_eq!(fds(vec![hierarchy]), base + 1);
+    }
+
+    /// Landlock is the only kernel exec layer on Linux, so a grant that limits
+    /// which programs run is refused where there is none, not run unchecked.
+    #[test]
+    fn an_exec_restricting_grant_is_refused_without_landlock() {
+        let policy = |exec| SandboxProjection {
+            exec,
+            ..SandboxProjection::default()
+        };
+        for landlock in [Landlock::Absent, Landlock::Unprobed(libc::EPERM)] {
+            let why = prepare(&policy(restricted(Vec::new(), false)), landlock)
+                .expect_err("a restricted exec grant needs Landlock");
+            assert!(why.contains("Landlock") && why.contains("5.13"), "{why}");
+            let (exec, fds) = prepare(&policy(ExecProjection::Unrestricted), landlock)
+                .expect("an unrestricted exec grant needs no kernel layer");
+            assert_eq!((exec, fds.len()), (ExecAdmits::Unconfined, 0));
+        }
     }
 
     #[test]

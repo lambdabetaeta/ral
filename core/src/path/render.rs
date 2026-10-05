@@ -64,12 +64,12 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
     let names = std::iter::once(real.as_path());
-    Ok(
-        super::canon::spelled(names, |p| super::canon::with_firmlink_twins(vec![p.to_path_buf()]))?
-            .into_iter()
-            .map(Rendered)
-            .collect(),
-    )
+    Ok(super::canon::spelled(names, |p| {
+        super::canon::with_firmlink_twins(vec![p.to_path_buf()])
+    })?
+    .into_iter()
+    .map(Rendered)
+    .collect())
 }
 
 /// Proper ancestors of already-rendered names, themselves rendered — sorted,

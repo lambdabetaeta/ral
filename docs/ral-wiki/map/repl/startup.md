@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7f61632a
-generated_at_date: 2026-09-23
+generated_at_commit: 1eee86cd
+generated_at_date: 2026-10-05
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -18,49 +18,54 @@ roles.
 the process dispositions, asks `startup::identify()` what this process is, and
 runs the session named. `identify` answers with a two-armed `Invocation`:
 `Shell(Mode)`, or `Exit(ExitCode)` for a re-exec child that has already done
-its work (and for an invocation refused before it could become one).
+its work.
 
 ## Pre-`main` dispatch
 
-Before argv is parsed, `main` refuses to run setuid — the shell inherits the
-caller's environment and must not run elevated, and neither must any re-exec
-child, so the refusal precedes the whole chain rather than trailing it —
-restores the Unix signal dispositions, and runs a chain of self-re-exec stages
-that can short-circuit the process. Each core stage returns an `Option<u8>`
-exit code, which `identify` lifts to `Invocation::Exit`. The chain is
-two-staged around the sandbox:
+**One pure classifier names the hidden role a process was started for, and
+every entry point `match`es on its answer.** `ral_core::classify(argv)`
+(`core/src/invocation.rs`) reads the first argument alone and returns an
+`Invocation`: `Engine`, `PipelineAnchor`, `PgidCheck`, `DetachBirth`,
+`Warrant`, `BundledTool`, or `Shell`. Flag precedence and disjointness live
+there and nowhere else — a flag a script was given, or a tool's own `--engine`,
+names no role. `ral`'s `identify`, `exarch::dispatch_pre_main` and the test
+helper `#[ctor]` each match on it. Before argv is parsed, `main` refuses to run
+setuid — the shell inherits the caller's environment and must not run
+elevated, and neither must any re-exec child, so the refusal precedes the whole
+chain — and restores the Unix signal dispositions. Then, per role:
 
-- **Engine entry** (Unix) — `--engine` hands the process to
-  `ral_core::engine::run_engine(&engine::INSTALLERS)` before anything else,
-  so a wire-engine child boots through the very recipes the in-process
-  front-ends boot through. `startup::engine::INSTALLERS` holds two
-  `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface, decoding
-  `Attach.config` as `ReplConfig {login}`) and `batch` (`boot_batch` over the
-  batch surface, decoding `BatchConfig {args}`), each registering the boot
-  door. Both share one grant policy, a refusal (`no_seeded_children`),
-  because the shell spawns no child engines and has no base-tag lexicon to
-  resolve a grant against.
-- **Helper trampolines** — `try_run_pipeline_anchor` (`--ral-pipeline-anchor`,
-  the one multicall re-exec a pipeline uses: a stage itself runs on
-  a thread of the parent process, but a multi-stage pipeline needs one
-  process to hold its pgid open for its whole life) and
-  `test_helper::try_run_test_helper`.
-- **Sandbox entry** — `ral_core::sandbox::early_init(&argv)` returns the
-  *stripped* post-init argv together with an optional exit. It consumes
-  `--sandbox-entry`, pins the binary, and enters the OS
-  [[map/core/capabilities|sandbox]] for a confined re-exec.
-- **Confined-child tails**, dispatched on the stripped argv *after* `early_init`
-  so a projected child enters the sandbox first, then runs the target inside it:
-  `ral_core::sandbox::serve_sandbox_exec` (`--ral-sandbox-exec <program> …`
-  `execve`s the host program inside the Seatbelt just entered) and
-  `ral_core::try_run_bundled_tool` (`--ral-bundled-tool <tool> …` runs the
-  bundled coreutils/ripgrep image in-process, confined). A bundled tool runs as
-  an external child whenever process semantics are required
+- **Engine** (Unix) — pins ral (`register_self_for_helpers`) and hands the
+  process to `ral_core::engine::run_engine(&engine::INSTALLERS)`, so a
+  wire-engine child boots through the very recipes the in-process front-ends
+  boot through. `startup::engine::INSTALLERS` holds two `EngineInstaller`s:
+  `repl` (`boot_repl` over the REPL surface, decoding `Attach.config` as
+  `ReplConfig {login}`) and `batch` (`boot_batch` over the batch surface,
+  decoding `BatchConfig {args}`), each registering the boot door. Both share
+  one grant policy, a refusal (`no_seeded_children`), because the shell spawns
+  no child engines and has no base-tag lexicon to resolve a grant against.
+- **Pipeline anchor** — `serve_pipeline_anchor` (`--ral-pipeline-anchor`, the
+  one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
+  parent process, but a multi-stage pipeline needs one process to hold its pgid
+  open for its whole life). **Test probes** (`PgidCheck`, `DetachBirth`) are
+  served by `test_helper`, `serve_pgid_check` and `serve_detach_birth`.
+- **Everything else** goes to `ral_core::sandbox::serve_sandbox_early_init`,
+  which serves a **confined child** (`Warrant`) first, by `serve_warrant`
+  alone, before `early_init`, so the child pins and opens nothing before it is
+  confined. `ral --warrant` is the whole argv of a confined re-exec: the child
+  takes its warrant off fd 99, enters the OS
+  [[map/core/capabilities|sandbox]], and only then `execve`s the host program
+  or runs the bundled tool in-process. Windows refuses it. Any other role runs
+  `early_init`, which pins the binary (and, on Linux, bwrap) and does nothing
+  else, and a **bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool>
+  …`) then runs the bundled coreutils/ripgrep image in-process, under whatever
+  sandbox the process already inherited. A bundled tool runs as an external
+  child whenever process semantics are required
   ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
   and each external child launches under the effective policy
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
+  `None` leaves a `Shell`.
 
-Both tails exit here, never reaching clap.
+The roles that are not the shell exit here, never reaching clap.
 
 ## Modes
 

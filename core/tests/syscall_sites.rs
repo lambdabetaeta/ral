@@ -126,8 +126,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/diag.rs", "silent:ps-sample"),
     ("core/src/sandbox/diag/linux.rs", "silent:journal-read"),
     ("core/src/sandbox/diag/macos.rs", "silent:log-show"),
-    ("core/src/sandbox/launch.rs", "silent:respawn-exec"),
-    ("core/src/sandbox/launch.rs", "silent:respawn-spawn"),
     ("core/src/sandbox/linux.rs", "silent:own-cgroup"),
     ("core/src/sandbox/linux.rs", "surface:bwrap-launch"),
     ("core/src/sandbox/linux/host.rs", "silent:bwrap-host-probe"),
@@ -136,6 +134,8 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/reexec.rs", "silent:pin-stat"),
     ("core/src/sandbox/reexec.rs", "silent:pinned-exec"),
     ("core/src/sandbox/reexec.rs", "silent:verify-stat"),
+    ("core/src/sandbox/warrant.rs", "silent:respawn-exec"),
+    ("core/src/sandbox/warrant.rs", "silent:respawn-spawn"),
     ("core/src/sandbox/windows/dacl.rs", "silent:dacl-apply"),
     (
         "core/src/sandbox/windows/dacl.rs",

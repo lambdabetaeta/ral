@@ -427,7 +427,7 @@ pub(crate) struct Programs {
 
 impl Programs {
     /// Every compiled program, in a fixed order — this order only numbers the
-    /// fds `apply_seccomp` parks them at; the kernel evaluates every stacked
+    /// slots the envelope inherits them at; the kernel evaluates every stacked
     /// filter independently and keeps the most severe result, so which
     /// program lands on which fd carries no meaning.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &[u8]> {

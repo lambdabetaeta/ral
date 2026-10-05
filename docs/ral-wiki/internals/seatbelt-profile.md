@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f4e88bce
+verified_at_commit: 1eee86cd
 verified_at_date: 2026-10-05
-anchors: [build_profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+anchors: [build_profile, Profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -30,7 +30,12 @@ cost of saying the second in the first:
   ([[internals/capability-enforcement|capability-enforcement]]). Linux pays
   nothing here: a mount is anchored to an inode.
 - **Order.** Seatbelt is last-match-wins, so every deny is emitted after every
-  allow in the profile, not merely after its own.
+  allow in the profile, not merely after its own. `Profile` is a record whose
+  field order *is* that precedence — fs allows, exec rules, exec ancestors,
+  freeze, fs denies, pins, net — and its `Display` writes the sections in it.
+- **ral's own file.** A sandboxed command must not swap the ral that confines
+  its children, so in every profile ral's file is write-denied and its
+  ancestors unlink-denied, whatever the grant.
 
 The lens this gives: when the profile and ral disagree, ask first whether ral
 is asking for more than the kernel's resolver would — the walk bug was exactly
@@ -58,8 +63,9 @@ through the grant.
 not attenuate exec at the OS layer. `Restricted` first admits Rosetta's
 runtime (`/Library/Apple/usr`, the one `Exec`-tagged system path) and ral's own
 binary in one `(allow file-read* process-exec …)` — Seatbelt needs both
-operations to spawn; an operand-less form is an unconditional allow, so an
-empty base emits nothing. Then each of the projection's rules, already in
+operations to spawn; ral is admitted because a ral run inside the sandbox
+starts its own bundled tools and pipeline anchors by re-executing this binary.
+An operand-less form is an unconditional allow, so an empty base emits nothing. Then each of the projection's rules, already in
 `Rank` order, becomes one `Sbpl` form: an allowing dir or file
 `(allow file-read* process-exec (subpath|literal …))`, a denying one
 `(deny process-exec …)`, a veto `(deny process-exec (regex #"/name$"))`,
@@ -67,8 +73,8 @@ the name wherever it resolves. Last-match-wins over that order is the
 in-process guard's precedence, carriers included
 ([[decisions/261004_exec-carriers|exec-carriers]]). **Exec denies deny no
 reads**: reading is fs's to decide, and a veto would otherwise hide every
-same-named file. Allowed files get their ancestor chains. Bundled tools
-re-exec ral itself (`--ral-bundled-tool`; the per-tool check is `vet`'s),
+same-named file. Allowed files and directories get their ancestor chains. Bundled tools
+re-exec ral itself (a warrant naming the tool; the per-tool check is `vet`'s),
 and Apple's compiler chain is grant data, under `system:`. This layer still
 cannot see argv, so `Only` renders as an allow; its job is the
 interpreter-bypass class the guard never sees (`sh -c`, `env`, `xargs`,

@@ -9,6 +9,7 @@
 //! never consults them.
 
 use crate::path::RealPath;
+use crate::path::walk::MAX_HOPS;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -51,15 +52,23 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 /// The real path of `path` if only the system can have written it: walked
 /// from `/` one component at a time, every directory and the file itself
 /// neither owned nor writable by this euid, and every symlink not owned by
-/// it.  Root owns everything, so it trusts nothing: that fails closed.
+/// it.  Root owns everything, so it trusts nothing: that fails closed.  The
+/// final object must be a regular file: a carrier is bound read-only whole, so
+/// a directory would expose its tree.
 pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
-    const MAX_LINKS: usize = 40;
     if !path.is_absolute() {
         return None;
     }
     let me = rustix::process::geteuid().as_raw();
     let system_only = |path: &Path, uid: u32| {
-        uid != me && rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_err()
+        uid != me
+            && rustix::fs::accessat(
+                rustix::fs::CWD,
+                path,
+                rustix::fs::Access::WRITE_OK,
+                rustix::fs::AtFlags::EACCESS,
+            )
+            .is_err()
     };
     let mut walked = PathBuf::from("/");
     if !system_only(&walked, rustix::fs::stat(&walked).ok()?.st_uid) {
@@ -84,10 +93,13 @@ pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
                 let stat = rustix::fs::lstat(&next).ok()?;
                 if rustix::fs::FileType::from_raw_mode(stat.st_mode).is_symlink() {
                     links += 1;
-                    if stat.st_uid == me || links > MAX_LINKS {
+                    if stat.st_uid == me || links > MAX_HOPS {
                         return None;
                     }
                     let target = rustix::fs::readlink(&next, Vec::new()).ok()?;
+                    if target.to_bytes().is_empty() {
+                        return None;
+                    }
                     let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
                     push(&mut pending, &target);
                 } else if system_only(&next, stat.st_uid) {
@@ -98,7 +110,11 @@ pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
             }
         }
     }
-    RealPath::of(&walked).ok()
+    let stat = rustix::fs::stat(&walked).ok()?;
+    rustix::fs::FileType::from_raw_mode(stat.st_mode)
+        .is_file()
+        .then(|| RealPath::of(&walked).ok())
+        .flatten()
 }
 
 /// The interpreter on `path`'s `#!` line: the kernels' grammar narrowed to the
@@ -292,6 +308,22 @@ mod tests {
         let link = root.join("sh");
         std::os::unix::fs::symlink(sh, &link).expect("symlink");
         assert_eq!(trusted_real(&link), None);
+    }
+
+    #[test]
+    fn a_directory_is_no_carrier() {
+        for dir in ["/", "/usr", "/usr/bin", "/bin"] {
+            assert_eq!(trusted_real(Path::new(dir)), None, "{dir}");
+        }
+    }
+
+    #[test]
+    fn an_empty_link_is_no_carrier() {
+        let (_dir, root) = temp_root();
+        let link = root.join("empty");
+        if std::os::unix::fs::symlink("", &link).is_ok() {
+            assert_eq!(trusted_real(&link), None);
+        }
     }
 
     #[test]

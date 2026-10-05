@@ -46,10 +46,12 @@ pub use lex::{
 };
 pub(crate) use prefix_set::{PrefixSet, covers, meet_prefixes};
 pub(crate) use real::RealPath;
+#[cfg(unix)]
+pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
-pub(crate) use render::{Rendered, render_paths, render_real};
+pub(crate) use render::{Rendered, render_paths};
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;

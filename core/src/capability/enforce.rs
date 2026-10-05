@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
         use super::{FsVerdict, fs_verdict};
-        crate::sandbox::early_init(&[]).expect("pins register");
+        crate::sandbox::early_init(&crate::Invocation::Shell);
         let open = GrantStack::of(Capabilities::default());
         let resolver = Resolver::shell_less();
         let own = std::env::current_exe().expect("own path");
@@ -445,5 +445,31 @@ mod tests {
             admits_read(&grants, &real.join("SKILL.md")),
             "the deny is the entry, not the whole read region"
         );
+    }
+
+    /// Default APFS answers `SECRET` with `secret`: the walk must spell it as
+    /// stored, or the deny on `secret` never meets the access.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_case_variant_spelling_meets_the_deny() {
+        use crate::path::walk::{Leaf, walk};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let secret = root.join("secret");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("key"), "x").unwrap();
+        if !root.join("SECRET").exists() {
+            return;
+        }
+        let grants = stack(FsPolicy {
+            read_prefixes: vec![NormalizedPrefix::from_surface(&root)],
+            deny_paths: vec![NormalizedPrefix::from_surface(&secret)],
+            ..FsPolicy::default()
+        });
+        let resolver = Resolver::shell_less();
+        let rp = resolver.resolve(&root.join("SECRET/key").to_string_lossy());
+        let located = walk(&rp, Leaf::Resolve).unwrap();
+        assert_eq!(located.real(), secret.join("key"));
+        assert!(!admits_read(&grants, located.real()));
     }
 }

@@ -30,7 +30,12 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 /// [`Resolver::resolve`](super::Resolver::resolve).
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
-    std::fs::canonicalize(p)
+    let real = std::fs::canonicalize(p)?;
+    // Darwin's realpath(3) drops a trailing slash every lookup reads as "a directory".
+    if p.as_os_str().as_encoded_bytes().ends_with(b"/") && !real.is_dir() {
+        return Err(std::io::ErrorKind::NotADirectory.into());
+    }
+    Ok(real)
 }
 
 /// Resolves the longest existing prefix of `p` and re-appends the unresolved
@@ -185,6 +190,21 @@ mod tests {
     fn strict_errors_on_missing_path() {
         let r = canonicalise_strict(Path::new("/this/should/not/exist/anywhere"));
         assert!(r.is_err());
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
+    #[test]
+    fn strict_refuses_a_trailing_slash_on_a_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "").unwrap();
+        let slashed = |p: &Path| PathBuf::from(format!("{}/", p.display()));
+        assert_eq!(
+            canonicalise_strict(&slashed(&file)).unwrap_err().kind(),
+            std::io::ErrorKind::NotADirectory
+        );
+        assert!(canonicalise_strict(&slashed(dir.path())).is_ok());
     }
 
     #[test]

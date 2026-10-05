@@ -4,7 +4,8 @@
 elaborator, typechecker, evaluator, the bundled coreutils and grep, and the
 capability sandbox are all linked into the one binary — none is a separate
 program ral shells out to. Every re-exec is a *multicall* of this same binary
-behind a hidden sentinel flag, never a sibling helper:
+behind a hidden sentinel flag, never a sibling helper — the flag is the first
+argument, and `ral_core::classify` is the one place that reads it:
 
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`
@@ -13,10 +14,11 @@ behind a hidden sentinel flag, never a sibling helper:
   than a child of its own, and a bundled tool re-execs as
   `--ral-bundled-tool <tool>` whether standalone or a stage;
 - an `fs`/`net`/`exec` [[design/grant|grant]] confines an external child by
-  re-execing ral under `--sandbox-entry <json> --ral-sandbox-exec <host>`
-  (macOS directly, Linux inside `bwrap`), or at spawn on Windows (an
-  AppContainer, no child re-exec there), confined by the
-  `sandbox_projection` of the live [[design/grant|grant]];
+  re-execing ral as `ral --warrant` (macOS directly, Linux inside `bwrap`),
+  the confinement to enter and the program to become arriving on a descriptor
+  rather than argv, or at spawn on Windows (an AppContainer, no child re-exec
+  there), confined by the `sandbox_projection` of the live
+  [[design/grant|grant]];
 - a wire-seat agent hatch re-execs an engine child under `--engine`, seeded
   from an `EngineSeed` the parent packs ([[map/core/transport|transport]]).
 

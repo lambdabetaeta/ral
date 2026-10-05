@@ -22,6 +22,7 @@ use cap_primitives::fs::{
     open_dir_nofollow, read_base_dir, read_link_contents, remove_file, rename, stat,
 };
 use cap_primitives::time::SystemTime as CapTime;
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
@@ -29,10 +30,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use super::ResolvedPath;
-use super::lex::fold_dots;
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
-const MAX_HOPS: usize = 40;
+pub(crate) const MAX_HOPS: usize = 40;
 
 /// An object named exactly: the handle of its directory, its name there, and
 /// the symlink-free path the walk assembled.
@@ -143,7 +143,7 @@ pub(crate) enum Leaf {
 /// [`MAX_HOPS`], or the root itself, which is nobody's leaf.
 pub(crate) fn walk(rp: &ResolvedPath, leaf: Leaf) -> io::Result<Located> {
     let mut path = rp.as_path().to_path_buf();
-    for _ in 0..MAX_HOPS {
+    for _ in 0..=MAX_HOPS {
         match descend(&path, leaf)? {
             Step::Object(located) => return Ok(located),
             Step::Link(spliced) => path = spliced,
@@ -170,43 +170,145 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
         comps.next();
     }
     let names: Vec<&OsStr> = comps.map(Component::as_os_str).collect();
-    let Some((leaf, dirs)) = names.split_last() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the root directory is not a file",
-        ));
+    let (dirs, leaf) = match names.split_last() {
+        None => return Err(root_is_no_file()),
+        Some((last, _)) if *last == ".." => (&names[..], None),
+        Some((last, dirs)) => (dirs, Some(*last)),
     };
-    let mut dir = open_ambient_dir(&real, ambient_authority())?;
+    let mut at = Cursor {
+        dir: open_ambient_dir(&real, ambient_authority())?,
+        parents: Vec::new(),
+        real,
+    };
     for (i, name) in dirs.iter().enumerate() {
-        match open_search_dir(&dir, name) {
-            Ok(next) => {
-                dir = next;
-                real.push(name);
-            }
+        if *name == ".." {
+            at.up();
+            continue;
+        }
+        match open_search_dir(&at.dir, name) {
+            Ok(next) => at.enter(name, next),
             Err(e) => {
-                if !is_symlink(&dir, name) {
+                if !is_symlink(&at.dir, name) {
                     return Err(e);
                 }
-                return splice(&dir, &real, name, &names[i + 1..]).map(Step::Link);
+                return splice(&at.dir, &at.real, name, &names[i + 1..]).map(Step::Link);
             }
         }
     }
-    if leaf_mode == Leaf::Resolve && is_symlink(&dir, leaf) {
-        return splice(&dir, &real, leaf, &[]).map(Step::Link);
+    let Cursor {
+        mut dir,
+        mut parents,
+        mut real,
+    } = at;
+    // A trailing `..` denotes the directory just reached.
+    let leaf = if let Some(leaf) = leaf {
+        leaf.to_os_string()
+    } else {
+        let name = real.file_name().ok_or_else(root_is_no_file)?.to_os_string();
+        real.pop();
+        dir = parents.pop().ok_or_else(root_is_no_file)?;
+        name
+    };
+    if leaf_mode == Leaf::Resolve && is_symlink(&dir, &leaf) {
+        return splice(&dir, &real, &leaf, &[]).map(Step::Link);
     }
-    real.push(leaf);
-    let real = dealias(&dir, leaf, real);
-    Ok(Step::Object(Located {
-        dir,
-        leaf: leaf.to_os_string(),
-        real,
-    }))
+    real.push(spelled(&dir, &leaf));
+    #[cfg(windows)]
+    let real = dealias(&dir, &leaf, real);
+    Ok(Step::Object(Located { dir, leaf, real }))
 }
 
-/// Everywhere but Windows a name has one spelling, and the walk's own is it.
-#[cfg(not(windows))]
-fn dealias(_dir: &File, _leaf: &OsStr, real: PathBuf) -> PathBuf {
-    real
+fn root_is_no_file() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "the root directory is not a file",
+    )
+}
+
+/// Where the walk stands: a directory handle, the handles of its ancestors in
+/// the walked (link-free) prefix, and that prefix.  Keeping the ancestors makes
+/// `..` physical without a path-based reopen.
+struct Cursor {
+    dir: File,
+    parents: Vec<File>,
+    real: PathBuf,
+}
+
+impl Cursor {
+    fn enter(&mut self, name: &OsStr, next: File) {
+        self.real.push(spelled(&self.dir, name));
+        self.parents.push(std::mem::replace(&mut self.dir, next));
+    }
+
+    /// `..`, as the kernel takes it; the root is its own parent.
+    fn up(&mut self) {
+        if let Some(parent) = self.parents.pop() {
+            self.dir = parent;
+            self.real.pop();
+        }
+    }
+}
+
+/// The name as the directory stores it.  Everywhere but macOS a name has one
+/// spelling, and the walk's own is it.
+#[cfg(not(target_os = "macos"))]
+fn spelled<'a>(_dir: &File, name: &'a OsStr) -> Cow<'a, OsStr> {
+    Cow::Borrowed(name)
+}
+
+/// Default APFS ignores case and Unicode normalisation, so `SECRET` and
+/// `secret` are one entry and a grant frozen through `realpath` — which
+/// answers in stored spellings — would never match an access in another.
+/// The stored name is asked of the directory handle the walk holds, without
+/// following: `F_GETPATH` may answer with the spelling the lookup used.  An
+/// absent name, a create target, keeps the caller's.
+#[cfg(target_os = "macos")]
+fn spelled<'a>(dir: &File, name: &'a OsStr) -> Cow<'a, OsStr> {
+    stored_name(dir, name).map_or(Cow::Borrowed(name), Cow::Owned)
+}
+
+#[cfg(target_os = "macos")]
+fn stored_name(dir: &File, name: &OsStr) -> Option<OsString> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    // A length word, an attrreference, then the NUL-terminated name.
+    const HEAD: usize = 4 + std::mem::size_of::<libc::attrreference_t>();
+    let c_name = CString::new(name.as_bytes()).ok()?;
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_NAME,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buf = [0u32; 128];
+    // SAFETY: `dir` is a live descriptor, `c_name` a NUL-terminated string,
+    // and `list` and `buf` outlive the call, which writes at most the
+    // `size_of_val(&buf)` bytes it is told of.
+    let rc = unsafe {
+        libc::getattrlistat(
+            dir.as_raw_fd(),
+            c_name.as_ptr(),
+            (&raw mut list).cast(),
+            buf.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buf),
+            libc::c_ulong::from(libc::FSOPT_NOFOLLOW),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).collect();
+    let offset = i32::from_ne_bytes(bytes[4..8].try_into().ok()?);
+    let len = u32::from_ne_bytes(bytes[8..HEAD].try_into().ok()?) as usize;
+    // The offset is relative to the attrreference, which starts at byte 4.
+    let start = usize::try_from(i64::from(offset) + 4).ok()?;
+    let stored = bytes.get(start..start + len.checked_sub(1)?)?;
+    Some(OsString::from_vec(stored.to_vec()))
 }
 
 /// Windows keeps a second, 8.3 name for an entry whose own is too long for
@@ -307,9 +409,8 @@ fn is_symlink(dir: &File, name: &OsStr) -> bool {
 }
 
 /// The name with `link` replaced by its target — anchored at the link's own
-/// directory when relative — and `rest` re-appended, then folded.  Folding
-/// here is sound because `real` holds no symlinks, so a lexical `..` is the
-/// physical parent.
+/// directory when relative — and `rest` re-appended.  Left unfolded: a `..`
+/// from the target is the kernel's, physical, and [`descend`] takes it so.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-link-read] Reads a symlink's target to splice into the remaining name. Path resolution, not the model's data I/O."
@@ -322,7 +423,7 @@ fn splice(dir: &File, real: &Path, link: &OsStr, rest: &[&OsStr]) -> io::Result<
         real.join(target)
     };
     spliced.extend(rest);
-    Ok(fold_dots(&spliced))
+    Ok(spliced)
 }
 
 fn nofollow(opts: &mut OpenOptions) -> &mut OpenOptions {
@@ -685,5 +786,29 @@ mod tests {
             "a swapped-in leaf link must not be followed"
         );
         assert!(!tmp.path().join("elsewhere").exists());
+    }
+
+    /// A `..` from a link target is the kernel's: physical, so it climbs out
+    /// of the link's target, not out of the link's place.
+    #[test]
+    fn a_dotdot_from_a_link_target_is_physical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = root(&tmp);
+        std::fs::create_dir_all(dir.join("x/y")).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("x/y"), dir.join("sub/lnk")).unwrap();
+        std::os::unix::fs::symlink("sub/lnk/../f", dir.join("L")).unwrap();
+        assert_eq!(located(&dir, "L").unwrap().real(), dir.join("x/f"));
+    }
+
+    #[test]
+    fn a_dotdot_through_a_missing_directory_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = root(&tmp);
+        std::os::unix::fs::symlink("missing/../f", dir.join("L")).unwrap();
+        let Err(err) = located(&dir, "L") else {
+            panic!("the kernel gives ENOENT");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }

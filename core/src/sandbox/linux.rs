@@ -21,10 +21,17 @@ pub(crate) mod seccomp;
 
 pub(crate) use host::HostEnvelope;
 
+use super::launch::Ownership;
 use super::reexec::Pinned;
+use super::warrant::{
+    ADMIT_FD_BASE, ARGS_FD, INFO_FD, SECCOMP_FD_BASE, inherit, nul_terminated, parcel,
+};
 use crate::path::{PathShape, Rendered, render_paths, render_real};
 use crate::types::{ExecProjection, ExecRule, FsProjection, SandboxProjection};
-use std::os::unix::process::CommandExt;
+use std::ffi::{OsStr, OsString};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -71,55 +78,125 @@ pub(super) fn envelope() -> Result<&'static Pinned, &'static str> {
 #[derive(Clone, Copy)]
 pub(crate) struct Payload<'a> {
     pub(crate) program: &'a str,
-    pub(crate) args: &'a [String],
+    pub(crate) args: &'a [&'a str],
     /// A host binary the payload execs in turn, bound RO beside `program`.
     pub(crate) image: Option<&'a str>,
-    /// The Landlock exec admits, opened in the host, which the payload
-    /// inherits from [`ADMIT_FD_BASE`] (`landlock::prepare`).
-    pub(crate) admits: &'a [std::os::fd::OwnedFd],
+    /// What the payload inherits past bwrap, each at its slot: the warrant
+    /// and the Landlock exec admits (`super::launch`).
+    pub(crate) handoff: &'a [(BorrowedFd<'a>, libc::c_int)],
 }
 
-/// Build the [`Command`] that runs `payload` under the pinned `envelope` for
-/// `policy`: binds derived from the policy prefixes, `deny_paths` overlaid
-/// last.
+/// bwrap's options as they are built: [`Command`]'s two appenders, and
+/// nothing that could open a descriptor.
+#[derive(Default)]
+struct Argv(Vec<OsString>);
+
+impl Argv {
+    fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+        self.0.push(arg.as_ref().to_owned());
+        self
+    }
+
+    fn args(&mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> &mut Self {
+        for arg in args {
+            self.arg(arg);
+        }
+        self
+    }
+}
+
+/// [`bwrap_argv`] as the [`Command`] that runs it: `bwrap --args 98 --
+/// <payload>`, the options in a sealed parcel at their slot beside the seccomp
+/// programs, the `--info-fd` peer and the payload's handoff, every descriptor
+/// through one [`inherit`].  bwrap takes options alone from `--args`, so the
+/// payload rides its argv.
+///
+/// The second element of the return is `Kept`'s `--info-fd` peer — see
+/// [`InfoFd`].
+pub(crate) fn make_command_with_policy(
+    envelope: &Pinned,
+    payload: Payload,
+    policy: &SandboxProjection,
+    chdir: Option<&str>,
+    ownership: Ownership,
+    host: HostEnvelope,
+) -> Result<(Command, Option<InfoFd>), String> {
+    let options = bwrap_argv(envelope, payload, policy, chdir, ownership, host)?;
+    let parcel = |name: &str, bytes: &[u8]| {
+        parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))
+    };
+    let args = parcel(
+        "ral-bwrap-args",
+        &nul_terminated(options.iter().map(|arg| arg.as_bytes()))?,
+    )?;
+    let seccomp = seccomp_programs()?
+        .into_iter()
+        .map(|program| parcel("ral-seccomp", program))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lent = vec![(args.as_fd(), ARGS_FD)];
+    lent.extend(
+        seccomp
+            .iter()
+            .map(AsFd::as_fd)
+            .zip(seccomp_fds(seccomp.len())?),
+    );
+    lent.extend_from_slice(payload.handoff);
+    let info = (ownership == Ownership::Kept)
+        .then(crate::process::cloexec_socketpair)
+        .transpose()
+        .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
+    let mut c = envelope.command();
+    c.args(["--args", &ARGS_FD.to_string(), "--", payload.program])
+        .args(payload.args);
+    let writer = inherit(
+        &mut c,
+        &lent,
+        info.as_ref().map(|(_, writer)| (writer.as_fd(), INFO_FD)),
+    )?;
+    let info = info
+        .zip(writer)
+        .map(|((reader, _), writer)| InfoFd { reader, writer });
+    Ok((c, info))
+}
+
+/// The bwrap options that confine `payload` under `policy`: binds derived
+/// from the policy prefixes, `deny_paths` overlaid last.  Descriptors appear
+/// by slot number alone; [`make_command_with_policy`] opens them.
 ///
 /// Every name is taken from `policy.rendered()`, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
 /// twin names.  `policy.exec` has no counterpart in the argv: bwrap filters
 /// mounts and syscalls, not exec by path, so [`landlock`] opens its admits
-/// here in the host, and the payload enters them *inside* this envelope.
+/// in the host, and the payload enters them *inside* this envelope.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
 /// logical cwd; the profile dump, which spawns nothing, passes `None`.
 ///
 /// `ownership` decides two ties between the session and the envelope:
-/// death (`--die-with-parent`) and address (`--info-fd`, returned alongside
-/// this `Command`).  A surrendered (detached) launch carries
-/// neither: the survivor must not be killed by our death, and there is no
-/// session left here to address once we stop watching it.  Confinement
-/// itself — the mounts, the seccomp filter — is otherwise identical.
+/// death (`--die-with-parent`) and address (`--info-fd`).  A surrendered
+/// (detached) launch carries neither: the survivor must not be killed by our
+/// death, and there is no session left here to address once we stop watching
+/// it.  Confinement itself — the mounts, the seccomp filter — is otherwise
+/// identical.
 ///
 /// The render is pure in `host`, so a test can assert an argv for a host it
 /// is not running on.
-///
-/// The second element of the return is `Kept`'s `--info-fd` pipe, whose
-/// write end the caller must keep until it has spawned — see [`InfoFd`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
 )]
-pub(crate) fn make_command_with_policy(
+pub(crate) fn bwrap_argv(
     envelope: &Pinned,
     payload: Payload,
     policy: &SandboxProjection,
     chdir: Option<&str>,
-    ownership: super::launch::Ownership,
+    ownership: Ownership,
     host: HostEnvelope,
-) -> Result<(Command, Option<InfoFd>), String> {
+) -> Result<Vec<OsString>, String> {
     let rendered = policy.rendered()?;
-    let mut c = envelope.command();
+    let mut c = Argv::default();
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
     // below rather than per prefix.
     let rules = rendered.fs.rules().cloned().unwrap_or_default();
@@ -168,12 +245,10 @@ pub(crate) fn make_command_with_policy(
     if host.private_cgroup {
         c.arg("--unshare-cgroup");
     }
-    let info_fd = if ownership == super::launch::Ownership::Kept {
+    if ownership == Ownership::Kept {
         c.arg("--die-with-parent");
-        Some(open_info_fd(&mut c)?)
-    } else {
-        None
-    };
+        c.args(["--info-fd", &INFO_FD.to_string()]);
+    }
     if !policy.net {
         c.arg("--unshare-net");
     }
@@ -223,18 +298,42 @@ pub(crate) fn make_command_with_policy(
     for bind in &denied_binds {
         DenyMask::over(bind).render(&mut c);
     }
+    for at in seccomp_fds(seccomp_programs()?.len())? {
+        c.args(["--add-seccomp-fd", &at.to_string()]);
+    }
+    Ok(c.0)
+}
+
+/// The envelope's seccomp programs, each stacked by its own
+/// `--add-seccomp-fd` (bwrap refuses that beside `--seccomp`): the kernel
+/// applies every installed filter and keeps the most severe result, so which
+/// program lands on which slot carries no meaning.  None off the two arches
+/// the deny-set is compiled for.
+fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let programs = seccomp::Filter::ENVELOPE
+        seccomp::Filter::ENVELOPE
             .programs()
-            .map_err(|e| format!("sandbox: {e}"))?;
-        apply_seccomp(&mut c, programs);
+            .map(|programs| programs.iter().collect())
+            .map_err(|e| format!("sandbox: {e}"))
     }
-    inherit_admits(&mut c, payload.admits)?;
-    c.arg("--");
-    c.arg(payload.program);
-    c.args(payload.args);
-    Ok((c, info_fd))
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// The slots `n` seccomp programs land at, from [`SECCOMP_FD_BASE`] and
+/// short of the admits.
+fn seccomp_fds(n: usize) -> Result<std::iter::Take<std::ops::Range<libc::c_int>>, String> {
+    let slots = SECCOMP_FD_BASE..ADMIT_FD_BASE;
+    if n > slots.len() {
+        return Err(format!(
+            "seccomp: {n} programs overrun the {} slots reserved for them",
+            slots.len()
+        ));
+    }
+    Ok(slots.take(n))
 }
 
 /// The files a launch execs — the envelope, and the trampoline bwrap execs by
@@ -263,7 +362,7 @@ fn pinned_binaries(envelope: &Pinned) -> Result<Vec<std::path::PathBuf>, String>
 ///
 /// By hand, `/dev/pts` is the host's, so a pty opened inside is not the
 /// envelope's own.  An absent node is dropped: binding one costs the launch.
-fn render_dev(c: &mut Command, host: HostEnvelope) {
+fn render_dev(c: &mut Argv, host: HostEnvelope) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
         return;
@@ -302,7 +401,7 @@ fn render_dev(c: &mut Command, host: HostEnvelope) {
 /// from the op bwrap has.  Without the namespace the host's tree is the true
 /// one.  Over the projection's binds, so a grant reading `/sys` wholesale
 /// still gets the tree its `/proc` describes.
-fn render_cgroup(c: &mut Command, host: HostEnvelope) {
+fn render_cgroup(c: &mut Argv, host: HostEnvelope) {
     const TREE: &str = "/sys/fs/cgroup";
     let source = if host.private_cgroup {
         own_cgroup().map(|own| format!("{TREE}{own}"))
@@ -331,22 +430,14 @@ fn own_cgroup() -> Option<String> {
         .then(|| own.trim_end_matches('/').to_string())
 }
 
-/// The envelope's fixed fd table: the one that is always present goes first,
-/// the run whose length varies with the deny-set starts right after it.
-const INFO_FD: libc::c_int = 100;
-/// First of the seccomp programs' fds, `apply_seccomp` parking program `i` at
-/// `SECCOMP_FD_BASE + i`.
-const SECCOMP_FD_BASE: libc::c_int = 101;
-/// First of the Landlock exec admits, `inherit_admits` installing admit `i`
-/// at `ADMIT_FD_BASE + i`; clear of the seccomp run.
-const ADMIT_FD_BASE: libc::c_int = 200;
-
-/// Both ends of a `Kept` launch's `--info-fd` pipe.  Our copy of the write
-/// end must outlive the fork that gives bwrap its own, then go: a read
-/// reaches EOF only once every write end is closed.
+/// Both ends of a `Kept` launch's `--info-fd` socketpair — a socket, which
+/// unlike a pipe no same-uid process can reopen through `/proc/<pid>/fd` to
+/// forge a `child-pid`.  Our copy of bwrap's end, the lifted one, must
+/// outlive the fork that gives bwrap its own, then go: a read reaches EOF
+/// only once every copy of that end is closed.
 pub(super) struct InfoFd {
-    reader: os_pipe::PipeReader,
-    writer: os_pipe::PipeWriter,
+    reader: UnixStream,
+    writer: OwnedFd,
 }
 
 impl InfoFd {
@@ -364,72 +455,6 @@ impl InfoFd {
         let info: Info = serde_json::from_reader(reader).ok()?;
         crate::process::Pgid::from_raw(info.child_pid)
     }
-}
-
-/// Move `src` to the fixed descriptor `at` with `CLOEXEC` cleared, for bwrap
-/// to inherit.  Post-fork: async-signal-safe calls only.
-unsafe fn install_inherited(src: libc::c_int, at: libc::c_int) -> std::io::Result<()> {
-    unsafe {
-        // `dup2(n, n)` is a no-op, and the close would then shut the fd being installed.
-        if src != at {
-            if libc::dup2(src, at) < 0 {
-                let failed = std::io::Error::last_os_error();
-                libc::close(src);
-                return Err(failed);
-            }
-            libc::close(src);
-        }
-        let flags = libc::fcntl(at, libc::F_GETFD);
-        if flags < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if libc::fcntl(at, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
-/// Open the `--info-fd` pipe for a `Kept` launch and register the write
-/// end at [`INFO_FD`], `CLOEXEC` cleared so it survives into `bwrap` —
-/// the `apply_seccomp` pattern.  `--info-fd` itself is appended here so a
-/// caller cannot pass one without the other.
-///
-/// The `pre_exec` closure captures only the raw fd, so the returned write
-/// end must still be open in the parent at fork time for `dup2` to find it.
-fn open_info_fd(c: &mut Command) -> Result<InfoFd, String> {
-    let (reader, writer) = crate::process::cloexec_pipe().map_err(|e| e.to_string())?;
-    let write_fd = std::os::fd::AsRawFd::as_raw_fd(&writer);
-    unsafe {
-        c.pre_exec(move || install_inherited(write_fd, INFO_FD));
-    }
-    c.args(["--info-fd", &INFO_FD.to_string()]);
-    Ok(InfoFd { reader, writer })
-}
-
-/// Install `admits` at [`ADMIT_FD_BASE`] onward, `CLOEXEC` cleared so bwrap
-/// hands them to the payload.  Each is lifted above the run first, so no
-/// install lands on an admit not yet moved.
-fn inherit_admits(c: &mut Command, admits: &[std::os::fd::OwnedFd]) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    let above = libc::c_int::try_from(admits.len())
-        .ok()
-        .and_then(|n| ADMIT_FD_BASE.checked_add(n))
-        .ok_or("landlock: too many exec admits to inherit")?;
-    let lifted = admits
-        .iter()
-        .map(|fd| rustix::io::fcntl_dupfd_cloexec(fd, above))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("landlock: cannot lift an exec admit above fd {above}: {e}"))?;
-    unsafe {
-        c.pre_exec(move || {
-            for (at, fd) in (ADMIT_FD_BASE..).zip(&lifted) {
-                install_inherited(fd.as_raw_fd(), at)?;
-            }
-            Ok(())
-        });
-    }
-    Ok(())
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
@@ -471,7 +496,7 @@ impl<'p> DenyMask<'p> {
         }
     }
 
-    fn render(self, c: &mut Command) {
+    fn render(self, c: &mut Argv) {
         match self {
             Self::EmptyDir(path) => {
                 c.args(["--perms", "0000", "--tmpfs", path]);
@@ -481,88 +506,6 @@ impl<'p> DenyMask<'p> {
             }
             Self::OnItsTarget | Self::LeftAbsent => {}
         }
-    }
-}
-
-/// Stack every compiled program, one `--add-seccomp-fd` each (bwrap refuses it
-/// beside `--seccomp`) — the kernel applies every installed filter and keeps
-/// the most severe result, so which program lands on which fd carries no
-/// meaning.  Each is parked in its own memfd, `CLOEXEC` cleared so it survives
-/// the exec into `bwrap`, which reads them and applies them to itself and
-/// everything it spawns.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn apply_seccomp(cmd: &mut Command, programs: &'static seccomp::Programs) {
-    let bytes: Vec<&'static [u8]> = programs.iter().collect();
-    for (i, _) in bytes.iter().enumerate() {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "a handful of stacked programs, never near c_int::MAX"
-        )]
-        let fd = SECCOMP_FD_BASE + i as libc::c_int;
-        cmd.args(["--add-seccomp-fd", &fd.to_string()]);
-    }
-    unsafe {
-        cmd.pre_exec(move || {
-            for (i, filter) in bytes.iter().enumerate() {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_possible_wrap,
-                    reason = "a handful of stacked programs, never near c_int::MAX"
-                )]
-                let fd = SECCOMP_FD_BASE + i as libc::c_int;
-                park_seccomp_program(filter, fd)?;
-            }
-            Ok(())
-        });
-    }
-}
-
-/// Park `filter`'s bytes in a fresh memfd, `dup2`'d onto `fd` with `CLOEXEC`
-/// cleared.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn park_seccomp_program(filter: &[u8], fd: libc::c_int) -> std::io::Result<()> {
-    unsafe {
-        let name = c"seccomp".as_ptr();
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "memfd_create returns a small fd or -1, both within c_int"
-        )]
-        let memfd = libc::syscall(libc::SYS_memfd_create, name, 0u32) as libc::c_int;
-        if memfd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut written = 0usize;
-        while written < filter.len() {
-            let n = libc::write(
-                memfd,
-                filter[written..].as_ptr().cast::<libc::c_void>(),
-                filter.len() - written,
-            );
-            if n < 0 {
-                libc::close(memfd);
-                return Err(std::io::Error::last_os_error());
-            }
-            if n == 0 {
-                libc::close(memfd);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "seccomp memfd write returned 0",
-                ));
-            }
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "n > 0 is guaranteed: the n < 0 and n == 0 branches return above"
-            )]
-            {
-                written += n as usize;
-            }
-        }
-        if libc::lseek(memfd, 0, libc::SEEK_SET) < 0 {
-            libc::close(memfd);
-            return Err(std::io::Error::last_os_error());
-        }
-        install_inherited(memfd, fd)
     }
 }
 
@@ -613,10 +556,10 @@ fn default_ro_binds() -> Vec<String> {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{HostEnvelope, Payload, Pinned, make_command_with_policy};
+    use super::{HostEnvelope, Payload, Pinned, bwrap_argv, make_command_with_policy};
     use crate::capability::Program;
     use crate::path::RealPath;
-    use crate::sandbox::launch::{Ownership, admitted, trampoline_tail};
+    use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
@@ -664,23 +607,33 @@ mod tests {
         Pinned::open(std::env::current_exe().expect("own path")).expect("own binary pins")
     }
 
+    const TRUE: Payload<'static> = Payload {
+        program: "/bin/true",
+        args: &[],
+        image: None,
+        handoff: &[],
+    };
+
+    fn options(
+        payload: Payload,
+        policy: &SandboxProjection,
+        chdir: Option<&str>,
+        ownership: Ownership,
+        host: HostEnvelope,
+    ) -> Vec<String> {
+        bwrap_argv(&stand_in(), payload, policy, chdir, ownership, host)
+            .expect("ASCII paths render")
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
     fn argv_on(
         host: HostEnvelope,
         policy: &SandboxProjection,
         ownership: Ownership,
     ) -> Vec<String> {
-        let payload = Payload {
-            program: "/bin/true",
-            args: &[],
-            image: None,
-            admits: &[],
-        };
-        make_command_with_policy(&stand_in(), payload, policy, None, ownership, host)
-            .expect("ASCII paths render")
-            .0
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        options(TRUE, policy, None, ownership, host)
     }
 
     fn argv(policy: &SandboxProjection) -> Vec<String> {
@@ -743,30 +696,12 @@ mod tests {
         let dir = workdir("cwd-stand-in");
         let dir_s = dir.to_string_lossy().into_owned();
         let granted = deny_within(&dir, &[]);
-        let payload = Payload {
-            program: "/bin/true",
-            args: &[],
-            image: None,
-            admits: &[],
-        };
         for (label, policy, cwd, stood_up) in [
             ("ungranted", &granted, "/ral-ungranted/cwd", true),
             ("root", &granted, "/", false),
             ("unrestricted", &unrestricted(), "/ral-ungranted/cwd", false),
         ] {
-            let args: Vec<String> = make_command_with_policy(
-                &stand_in(),
-                payload,
-                policy,
-                Some(cwd),
-                Ownership::Kept,
-                WHOLE,
-            )
-            .expect("ASCII paths render")
-            .0
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+            let args = options(TRUE, policy, Some(cwd), Ownership::Kept, WHOLE);
             let mask = position_of(&args, &["--perms", "0555", "--tmpfs", cwd]);
             assert_eq!(mask.is_some(), stood_up, "{label}: {args:?}");
             if let Some(mask) = mask {
@@ -860,24 +795,11 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        let args: Vec<String> = make_command_with_policy(
-            &stand_in(),
-            Payload {
-                program: "/bin/true",
-                args: &[],
-                image: Some(&script),
-                admits: &[],
-            },
-            &policy,
-            None,
-            Ownership::Kept,
-            WHOLE,
-        )
-        .expect("ASCII paths render")
-        .0
-        .get_args()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
+        let image = Payload {
+            image: Some(&script),
+            ..TRUE
+        };
+        let args = options(image, &policy, None, Ownership::Kept, WHOLE);
         let real = std::fs::canonicalize(&interp)
             .unwrap()
             .to_string_lossy()
@@ -885,6 +807,36 @@ mod tests {
         assert!(
             !args.contains(&real),
             "an interpreter the user could have swapped in must not be bound: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trampoline execs the target in turn, so bwrap must let it see the
+    /// file — under its real name, since bwrap will not mount onto a symlink —
+    /// and start it in the logical cwd.
+    #[test]
+    fn the_target_is_bound_by_its_real_name_and_entered_from_the_cwd() {
+        let sh = Payload {
+            image: Some("/bin/sh"),
+            ..TRUE
+        };
+        let dir = workdir("target-bind");
+        let args = options(
+            sh,
+            &deny_within(&dir, &[]),
+            Some("/"),
+            Ownership::Kept,
+            WHOLE,
+        );
+        let real_sh = std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+        let real_sh = real_sh.to_string_lossy();
+        assert!(
+            position_of(&args, &["--ro-bind", &real_sh, &real_sh]).is_some(),
+            "the host image must be bound read-only into the envelope: {args:?}"
+        );
+        assert!(
+            position_of(&args, &["--chdir", "/"]).is_some(),
+            "the payload must start in the logical cwd: {args:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -899,31 +851,16 @@ mod tests {
         policy: &SandboxProjection,
         script: &str,
     ) -> Option<std::process::Output> {
-        let sh = "/bin/sh";
-        let program = Program::file(sh.into()).expect("/bin/sh exists");
-        let (entry, admits) =
-            super::landlock::prepare(policy, host.landlock).expect("the admits open");
-        let tail = trampoline_tail(
-            &entry,
-            &admitted(program, &["-c".to_string(), script.to_string()]),
-        )
-        .expect("the entry encodes");
-        let self_path = crate::sandbox::reexec::self_arg0().expect("own path");
-        let self_path = self_path.to_string_lossy();
-        let (mut cmd, info_fd) = make_command_with_policy(
+        let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
+        let (mut cmd, info_fd) = enveloped(
             envelope,
-            Payload {
-                program: &self_path,
-                args: &tail,
-                image: Some(sh),
-                admits: &admits,
-            },
+            host,
             policy,
+            &admitted(sh, &["-c".to_string(), script.to_string()]),
             None,
             Ownership::Kept,
-            host,
         )
-        .expect("ASCII paths render");
+        .expect("the launch builds");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
         // Kept open across the fork inside `output()` for `pre_exec`'s `dup2`.
@@ -1427,16 +1364,12 @@ mod tests {
 
     /// The launcher is the file pinned at boot, named by descriptor: no
     /// `PATH` — the shell's override included — has any say in what runs.
+    /// Its own argv is the slot its options arrive on, then the payload.
     #[test]
     fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         let (cmd, _info_fd) = make_command_with_policy(
             &stand_in(),
-            Payload {
-                program: "/bin/true",
-                args: &[],
-                image: None,
-                admits: &[],
-            },
+            TRUE,
             &unrestricted(),
             None,
             Ownership::Kept,
@@ -1448,6 +1381,8 @@ mod tests {
             program.starts_with("/proc/self/fd/"),
             "the envelope must be exec'd by pinned descriptor: {program}"
         );
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--args", "98", "--", "/bin/true"], "{args:?}");
     }
 
     /// Whatever the projection bound, both files a launch execs go read-only

@@ -18,6 +18,7 @@ pub(crate) mod engine_seed;
 pub mod evaluator;
 pub mod exit_hints;
 pub mod host;
+pub mod invocation;
 pub mod io;
 pub mod ir;
 pub mod path;
@@ -57,11 +58,12 @@ pub mod wire;
 // The host surface. A host imports a run from here; it does not reach the
 // evaluator or syntax layers through the crate root.
 pub use boot::HostSurface;
+pub use invocation::{Invocation, classify};
 pub use run::{
     Captured, Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
     StaticDiagnostics,
 };
-pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_anchor};
+pub use runtime::pipeline::helper::serve_pipeline_anchor;
 pub use spawn_grant::SpawnGrant;
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{

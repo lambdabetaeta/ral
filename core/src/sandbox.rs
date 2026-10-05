@@ -1,8 +1,8 @@
 //! OS-level confinement for the children a `grant` block spawns.
 //!
 //! Platform backends (`linux`, `macos`, `windows`), the per-command
-//! launcher (`launch`), binary pinning and re-exec (`reexec`), kernel-denial
-//! diagnostics (`diag`).
+//! launcher (`launch`) and its handoff to a confined re-exec (`warrant`),
+//! binary pinning and re-exec (`reexec`), kernel-denial diagnostics (`diag`).
 //!
 //! Exec is checked everywhere by `capability::check_exec`, the in-process guard.
 //! Both Unix backends also render the allow-list into the kernel, catching the
@@ -21,9 +21,12 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod reexec;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod warrant;
 #[cfg(windows)]
 mod windows;
 
+use crate::Invocation;
 use crate::types::{SandboxProjection, Shell};
 #[cfg(unix)]
 use std::process::Command;
@@ -53,11 +56,11 @@ pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
 
 // `runtime::command::process::build_command` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
-// already confines it; `serve_sandbox_exec` is the Unix trampoline's tail,
-// run once the process sandbox is entered.
+// already confines it; `serve_warrant` is the trampoline's side, entering the
+// confinement before it becomes the program.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use carriers::carriers;
-pub use launch::serve_sandbox_exec;
+pub use launch::serve_warrant;
 pub(crate) use launch::{Ownership, sandboxed_command};
 
 // Called by the command runners on a failure that ran under an active OS
@@ -133,26 +136,8 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
         .then_some("ral")
 }
 
-/// Carries the JSON-encoded [`Entry`] into a re-exec'd ral process.
-const SANDBOX_ENTRY_FLAG: &str = "--sandbox-entry";
-
-/// What a confined re-exec of ral enters: the projection, which Seatbelt
-/// compiles in the child on macOS; on Linux only the Landlock entry, its
-/// admits opened by the parent in the host, where the grant's paths mean what
-/// they meant.  Windows confines from the parent and enters nothing.
-#[cfg(target_os = "macos")]
-pub(crate) type Entry = SandboxProjection;
-#[cfg(target_os = "linux")]
-pub(crate) type Entry = linux::landlock::Entry;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) type Entry = serde::de::IgnoredAny;
-
-/// Tail of a per-command host re-exec: once `early_init` has entered the
-/// process sandbox, [`serve_sandbox_exec`] `execve`s the program inside it.
-/// Distinct from `--ral-bundled-tool`, which runs a bundled tool in-process
-/// rather than execing a host binary.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
+/// The confined re-exec's whole argv, its warrant arriving on a descriptor.
+pub(crate) const WARRANT_FLAG: &str = "--warrant";
 
 /// Debug switch: set to any value to make [`dump_profile_if_requested`] print
 /// the OS-sandbox profile that would be installed.
@@ -185,26 +170,30 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             }
         };
         let host = linux::HostEnvelope::probe(envelope);
-        match linux::make_command_with_policy(
+        let payload = linux::Payload {
+            program: "/bin/true",
+            args: &[],
+            image: None,
+            handoff: &[],
+        };
+        match linux::bwrap_argv(
             envelope,
-            linux::Payload {
-                program: "/bin/true",
-                args: &[],
-                image: None,
-                admits: &[],
-            },
+            payload,
             policy,
             None,
             launch::Ownership::Kept,
             host,
         ) {
-            Ok((cmd, _info_fd)) => {
-                let mut line = envelope.arg0().display().to_string();
-                for arg in cmd.get_args() {
-                    line.push(' ');
-                    line.push_str(&arg.to_string_lossy());
-                }
-                eprint!("--- bwrap argv ---\n{line}\n--- host envelope ---\n{host}");
+            Ok(options) => {
+                let options: Vec<_> = options.iter().map(|arg| arg.to_string_lossy()).collect();
+                eprint!(
+                    "--- bwrap argv ---\n{} --args {} -- {}\n--- bwrap --args ---\n{}\n\
+                     --- host envelope ---\n{host}",
+                    envelope.arg0().display(),
+                    warrant::ARGS_FD,
+                    payload.program,
+                    options.join(" "),
+                );
                 if envelope.writable_by_us() {
                     eprintln!(
                         "envelope writable by this uid: {} — any process running as you can \
@@ -280,7 +269,7 @@ pub fn restricted_envelope_launches() -> bool {
                 program: "/bin/true",
                 args: &[],
                 image: None,
-                admits: &[],
+                handoff: &[],
             },
             &projection,
             None,
@@ -323,10 +312,10 @@ pub(crate) fn apply_child_limits_in_pipeline(
     }
 }
 
-/// Pin this executable for the Unix pipeline anchor, which serves its mode
-/// and exits before [`early_init`] would have pinned it.
+/// Pin this executable for a role served before [`early_init`] — the pipeline
+/// anchor and the engine — whose sandboxed launches need ral pinned.
 #[cfg(unix)]
-pub(crate) fn register_self_for_helpers() {
+pub fn register_self_for_helpers() {
     reexec::register_sandbox_self();
 }
 
@@ -345,22 +334,17 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
     Ok(Command::new(exe))
 }
 
-/// All sandbox startup work, returning argv stripped of
-/// `--sandbox-entry`.
-///
-/// Pins this binary and, on Unix, enters the OS process sandbox when an
-/// [`Entry`] was supplied — Seatbelt on macOS, Landlock inside the bwrap
-/// envelope on Linux.  Windows confines the child from the parent instead.
-///
-/// # Errors
-/// A malformed `--sandbox-entry`, one on a platform that never emits it,
-/// or a failure to enter the sandbox.
-pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
-    let (entry, stripped) = strip_entry_arg(argv)?;
-    // So a per-command `--sandbox-entry` child re-execs this binary and
-    // not whatever the on-disk path holds by then.
+/// All sandbox startup work, before any shell exists: pin this binary and,
+/// on Linux, the bwrap envelope, so no session can choose its own launcher.
+#[cfg_attr(
+    not(windows),
+    allow(
+        unused_variables,
+        reason = "only Windows asks whether this is a re-exec child"
+    )
+)]
+pub fn early_init(role: &Invocation<'_>) {
     reexec::register_sandbox_self();
-    // Before any shell exists, so no session can choose its own launcher.
     #[cfg(target_os = "linux")]
     linux::register_envelope();
     // Reclaim what a crashed prior session left registered — its AppContainer
@@ -369,17 +353,12 @@ pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
     // session sweeps: a confined re-exec child could not reach the ledger from
     // inside its AppContainer anyway.
     #[cfg(windows)]
-    {
-        use crate::runtime::pipeline::helper::{ANCHOR_FLAG, BUNDLED_TOOL_FLAG};
-        let is_reexec_child = argv
-            .iter()
-            .any(|a| a == BUNDLED_TOOL_FLAG || a == ANCHOR_FLAG);
-        if !is_reexec_child {
-            windows::session::boot_recover();
-        }
+    if !matches!(
+        role,
+        Invocation::BundledTool(_) | Invocation::PipelineAnchor
+    ) {
+        windows::session::boot_recover();
     }
-    reexec::maybe_enter_process_sandbox(entry.as_ref())?;
-    Ok(stripped)
 }
 
 /// Delete this session's `AppContainer` profiles.  Grant ACEs stay: they are
@@ -394,46 +373,23 @@ pub fn teardown_session() {
     windows::session::teardown();
 }
 
-/// The whole pre-`main` sandbox stage as one `Option<u8>`, for exarch and
-/// the test ctors.
+/// The whole pre-`main` sandbox stage as one `Option<u8>`, for `ral`, exarch
+/// and the test ctors, over the role [`classify`](crate::classify) named.
 ///
-/// First [`early_init`], then the per-command re-exec tails on the argv it
-/// leaves — the `--ral-bundled-tool` multicall via
-/// [`crate::try_run_bundled_tool`], and on Unix the host `execve` via
-/// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-entry`
-/// child is confined before its tail runs.  The stripped argv is discarded, so
-/// the `ral` binary, which parses a CLI out of it, calls [`early_init`] itself.
-pub fn serve_sandbox_early_init() -> Option<u8> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    match early_init(&argv) {
-        Ok(stripped) => {
-            serve_sandbox_exec(&stripped).or_else(|| crate::try_run_bundled_tool(&stripped))
-        }
-        Err(e) => {
-            eprintln!("ral: sandbox init: {e}");
-            Some(1)
-        }
+/// A confined re-exec child is served first, and by [`serve_warrant`] alone:
+/// [`early_init`] opens pins its confinement would hand the target.  Any other
+/// role runs [`early_init`], and the `--ral-bundled-tool` multicall is then
+/// served.
+pub fn serve_sandbox_early_init(role: &Invocation<'_>) -> Option<u8> {
+    if let Invocation::Warrant(extra) = role {
+        return Some(serve_warrant(extra));
     }
-}
-
-/// Split a leading `--sandbox-entry <json>` off `raw`: the parsed entry,
-/// then the arguments that remain.
-///
-/// Leading by construction — [`launch`] emits it as the first argument of the
-/// confined re-exec — so a later occurrence is part of the `--ral-sandbox-exec`
-/// tail, an argument of the command the child is about to run, and must reach
-/// it verbatim rather than be read as a second entry.
-fn strip_entry_arg(raw: &[String]) -> Result<(Option<Entry>, Vec<String>), String> {
-    match raw.split_first() {
-        Some((flag, tail)) if flag == SANDBOX_ENTRY_FLAG => {
-            let (json, rest) = tail
-                .split_first()
-                .ok_or("ral: --sandbox-entry requires a JSON argument")?;
-            let entry = serde_json::from_str(json)
-                .map_err(|e| format!("ral: invalid sandbox entry JSON: {e}"))?;
-            Ok((Some(entry), rest.to_vec()))
+    early_init(role);
+    match role {
+        Invocation::BundledTool(args) => {
+            Some(crate::runtime::pipeline::helper::serve_bundled_tool(args))
         }
-        _ => Ok((None, raw.to_vec())),
+        _ => None,
     }
 }
 
@@ -468,7 +424,7 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{NET_ENFORCED, SANDBOX_ENTRY_FLAG, projection_enforceable, strip_entry_arg};
+    use super::{NET_ENFORCED, projection_enforceable};
     use crate::types::SandboxProjection;
 
     #[test]
@@ -506,33 +462,5 @@ mod tests {
             projection_enforceable(&p_net_false).is_ok(),
             "net: false must be enforceable on Windows via the AppContainer backend"
         );
-    }
-
-    /// `{"net":true}` is an entry on every platform: a projection on macOS,
-    /// an unconfined exec on Linux, and ignored on Windows.
-    #[test]
-    fn strip_entry_arg_extracts_json_and_preserves_other_args() {
-        let (entry, args) = strip_entry_arg(&[
-            SANDBOX_ENTRY_FLAG.into(),
-            r#"{"net":true}"#.into(),
-            "-c".into(),
-            "echo hi".into(),
-        ])
-        .expect("entry args");
-        assert!(entry.is_some());
-        assert_eq!(args, vec!["-c", "echo hi"]);
-    }
-
-    #[test]
-    fn strip_entry_arg_leaves_the_exec_tail_untouched() {
-        let tail = [
-            crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string(),
-            "rg".to_string(),
-            SANDBOX_ENTRY_FLAG.to_string(),
-            "not json".to_string(),
-        ];
-        let (policy, args) = strip_entry_arg(&tail).expect("a tail is not a projection");
-        assert!(policy.is_none());
-        assert_eq!(args, tail);
     }
 }

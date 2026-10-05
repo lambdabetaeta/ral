@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f4e88bce
+verified_at_commit: 1eee86cd
 verified_at_date: 2026-10-05
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, allow_region, deny_region, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
+anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, allow_region, deny_region, GrantStack, sandboxed_command, build_command, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_argv, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -67,7 +67,10 @@ the root through *search* handles — the right to resolve names through a
 directory, not to read it, so the walk asks of an ancestor exactly what the
 kernel's resolver asks and a sandbox's metadata-only ancestor rule suffices —
 never letting the kernel follow a symlink, splicing each link it meets into
-the remaining name itself, and
+the remaining name itself — a `..` is the kernel's, physical, climbing out
+of a link's target rather than its place, and on macOS each component is
+spelled as the directory stores it, so a case-variant name meets the deny
+frozen under its stored spelling — and
 judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
 canonical by construction). The `Located` then performs the open, stat,
 staging, rename and unlink relative to the directory handle with
@@ -119,8 +122,9 @@ spawned process does on its own.**
   renders the rules as `process-exec` forms, catching re-execs the in-process
   guard never sees (`sh -c`, `find -exec`); on Linux a Landlock domain entered
   inside the bwrap envelope carries their allows into the kernel, Landlock
-  being unable to subtract inside an allowed directory
-  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
+  being unable to subtract inside an allowed directory, so on Linux an exec
+  deny or veto under an allowed directory is not yet enforced by the kernel
+  layer ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
   AppContainer on Windows has no path-exec filter, so there the in-process
   guard stands alone and check-to-exec timing stays open. The kernel's list is
   `ExecRules::kernel` of the very table in the `Admitted`, ordered by `Rank`
@@ -275,7 +279,7 @@ and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
 replace-by-rename at the pinned path reaches it. In-place rewriting of the
 pinned inode — the one change a pin by descriptor cannot see — is closed on
 both sides of the dispatch boundary: for a confined child by the envelope
-itself, `make_command_with_policy` read-only binding the envelope's own file
+itself, `bwrap_argv` read-only binding the envelope's own file
 after the projection's binds, `/` wholesale under `Unrestricted` included, and
 before the masks, the Linux twin of macOS's `freeze_admitted_set`; for ral's
 own writes by the `Guarded` verdict above. What stays open is another same-uid
@@ -309,21 +313,54 @@ child:
   `/proc/self` is its own, and `ps` under any grant shows the envelope alone.
   bwrap never execs the payload in place — a monitor clones a namespace init,
   which forks the payload — so a `Kept` launch reads the payload's pid back
-  over `--info-fd` (`InfoFd`); that pid, a session leader by `--new-session`,
-  is the group every ladder signals, and the monitor is addressed by nobody.
+  over `--info-fd` (`InfoFd`, a socketpair, which no same-uid process can
+  reopen through `/proc` to forge a `child-pid`); that pid, a session leader by
+  `--new-session`, is the group every ladder signals, and the monitor is
+  addressed by nobody.
   `Launch::spawn` places an enveloped launch `NewLeader` whatever was asked and
   returns the payload's group, `ForegroundDecision` never hands an envelope the
   terminal, and a pipeline collector addresses each confined stage's envelope
   beside its own group ([[internals/pipeline-execution|pipeline execution]]);
-- *macOS* re-execs a tiny launcher — `ral --sandbox-entry <json>
-  --ral-sandbox-exec <path>` for a host file, the absolute path the guard
-  judged, or `--ral-bundled-tool <tool>` for a bundled tool — that enters
-  Seatbelt in `early_init` (`maybe_enter_process_sandbox`) from the projection
-  alone and then `execve`s exactly that path;
+- *macOS* re-execs a tiny launcher, `ral --warrant`: the Seatbelt profile,
+  compiled in the parent, and the program to become — a host file, the absolute
+  path the guard judged, or a bundled tool — arrive in its warrant, and
+  `serve_warrant` enters Seatbelt from the profile alone and then `execve`s
+  exactly that path;
 - *Windows* attaches the projection's AppContainer LowBox
   `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
   (`windows::session::confine`), so the parent's spawn is the confinement
   point — no re-exec child.
+
+**The confined child is handed what to enter, and what to become, on a
+descriptor.** Both Unix backends re-exec ral as `ral --warrant`, whose whole
+argv names nothing: the confinement and the program arrive in a `Warrant` the
+parent compiled, on fd 99. The warrant crosses on a channel no other process
+can write — on Linux a sealed memfd, since a same-uid process may reopen any
+descriptor through `/proc` and a sealed copy is as read-only as ours, read back
+and checked once sealed; on macOS, which has no `/proc`, the read end of a
+socketpair whose writer closes before the child exists. The child refuses an
+unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
+re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
+--warrant`: `bwrap_argv` is pure and returns bwrap's options alone, which bwrap
+takes from `--args`. The descriptors a confined launch hands down — bwrap's
+`--args`, the warrant, `--info-fd`, the seccomp programs, the Landlock admits —
+sit at fixed slots defined once, and one `inherit` places them all; the child
+closes the range once it is confined, so the program inherits none.
+`serve_warrant` runs before `early_init`, so the trampoline pins and opens
+nothing ahead of its confinement. Nothing runs unconfined: a failure before
+the program starts exits 126, a missing program 127; an `execve` refusal takes
+its code from the same `SpawnFailure` the in-process spawn uses.
+
+*Failing closed is the handoff's whole stance.* The warrant's `Confinement`
+(`Seatbelt(profile)` on macOS, `ExecAdmits` on Linux) is the one thing the child
+enters, and `Warrant::confine` is the only road to the program — after the
+confinement is entered and the handoff closed — so no code path runs a program
+unconfined. On Linux the parent's `prepare` refuses a restricting exec grant
+where Landlock is unavailable, a file admit that has become a directory is
+dropped rather than widened to a hierarchy, and the child's `enter` refuses if
+the warrant promised exec rules and finds no Landlock. A sandboxed launch needs
+ral's own pin (`reexec::own`) and re-verifies it (`Pinned::verify`) before
+issuing a warrant; unpinned, it refuses.
 
 On Windows filesystem authority is *path*-keyed, and the token selects. Each
 `(canonical path, kind)` grant derives a deterministic capability SID from a
@@ -379,8 +416,8 @@ signals the confined child subtree from outside it. Extra signal authority
 descendants, but it does nothing to free a parent stuck on the IPC edge.
 
 A bundled coreutil's filesystem access has no in-process guard, so under a
-restrictive grant it is never inlined: it is spawned as a `ral --ral-bundled-tool
-<tool>` child that receives the same per-command sandbox as any external, which
+restrictive grant it is never inlined: it is spawned as a re-exec child of ral — `--ral-bundled-tool
+<tool>`, or a warrant naming the tool — that receives the same per-command sandbox as any external, which
 is what floors it
 ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]];
 [[decisions/260617_sandbox-external-children|sandbox-external-children]]).

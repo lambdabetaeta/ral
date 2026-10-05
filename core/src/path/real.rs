@@ -11,8 +11,7 @@ use super::NormalizedPrefix;
 /// Ordered as the host identifies files: by path components off Windows, by
 /// [`windows_identity_components`](super::lex::windows_identity_components)
 /// on it — so two keys naming one file are one key in a map.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug)]
 pub struct RealPath(PathBuf);
 
 impl RealPath {

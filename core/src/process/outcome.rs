@@ -213,6 +213,16 @@ pub enum SpawnFailure {
     Io(String),
 }
 
+impl From<&std::io::Error> for SpawnFailure {
+    fn from(e: &std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => Self::NotFound,
+            std::io::ErrorKind::PermissionDenied => Self::PermissionDenied { found: None },
+            _ => Self::Io(e.to_string()),
+        }
+    }
+}
+
 /// What a `WaitOutcome` amounts to for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandFailure {

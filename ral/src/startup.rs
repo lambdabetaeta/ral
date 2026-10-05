@@ -7,7 +7,8 @@
 //! `exarch::dispatch_pre_main`.
 
 use crate::cli::Mode;
-use ral_core::diagnostic;
+use ral_core::Invocation as Role;
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 /// What a `ral` process turned out to be.
@@ -50,39 +51,25 @@ pub(crate) fn adopt_process_dispositions() {
 /// Serve whichever re-exec child this process is, or read argv as a shell
 /// invocation.
 pub(crate) fn identify() -> Invocation {
-    // The engine never returns: it takes the process over on fd 3.
-    #[cfg(unix)]
-    if std::env::args().any(|a| a == "--engine") {
-        ral_core::engine::run_engine(&engine::INSTALLERS);
-    }
-
-    // Served off raw argv, which these read for themselves.
-    if let Some(code) = ral_core::try_run_pipeline_anchor() {
-        return Invocation::Exit(ExitCode::from(code));
-    }
-    if let Some(code) = ral_core::test_helper::try_run_test_helper() {
-        return Invocation::Exit(ExitCode::from(code));
-    }
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let argv = match ral_core::sandbox::early_init(&argv) {
-        Ok(stripped) => stripped,
-        Err(e) => {
-            diagnostic::cmd_error("ral", &e);
-            return Invocation::Exit(ExitCode::from(1));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
+    match ral_core::classify(&argv) {
+        // The engine never returns: it takes the process over on fd 3.
+        #[cfg(unix)]
+        Role::Engine => {
+            ral_core::sandbox::register_self_for_helpers();
+            ral_core::engine::run_engine(&engine::INSTALLERS)
         }
-    };
-
-    // Served after the strip: a `--sandbox-entry` child enters the OS
-    // sandbox first, then runs the target confined.
-    if let Some(code) = ral_core::sandbox::serve_sandbox_exec(&argv) {
-        return Invocation::Exit(ExitCode::from(code));
+        Role::PipelineAnchor => Invocation::Exit(ExitCode::from(ral_core::serve_pipeline_anchor())),
+        #[cfg(unix)]
+        Role::PgidCheck { tag } => {
+            Invocation::Exit(ExitCode::from(ral_core::test_helper::serve_pgid_check(tag)))
+        }
+        role => match ral_core::sandbox::serve_sandbox_early_init(&role) {
+            Some(code) => Invocation::Exit(ExitCode::from(code)),
+            None => Invocation::Shell(Mode::from_argv(&args)),
+        },
     }
-    if let Some(code) = ral_core::try_run_bundled_tool(&argv) {
-        return Invocation::Exit(ExitCode::from(code));
-    }
-
-    Invocation::Shell(Mode::from_argv(&argv))
 }
 
 /// What an engine of this binary boots into: `repl` for the interactive

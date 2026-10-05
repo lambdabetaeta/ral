@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7f61632a
+generated_at_commit: 1eee86cd
 generated_at_date: 2026-10-05
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -112,7 +112,11 @@ plus `which.rs` for PATH search.
   link into the name and re-walking, and hands back a `Located` — the
   directory handle, the leaf, and the symlink-free `real` path — whose every
   operation is handle-relative with `FollowSymlinks::No` (`cap-primitives`
-  supplies the `*at` calls on Unix and Windows);
+  supplies the `*at` calls on Unix and Windows). A `..` is physical, the
+  kernel's rule, even from a link target (the user's own path keeps its
+  logical fold); names are spelled as the disk stores them on macOS
+  (`getattrlistat`), so case-variant names meet their deny; the splice count
+  is bounded by `MAX_HOPS`, which `carriers::trusted_real` shares;
 - match — `lex::path_within`, the form-blind containment kernel, which folds
   `starts_with_identity` over the alias pairs; under Windows path semantics that comparison unifies case,
   `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
@@ -200,7 +204,8 @@ opened in the host (`linux/landlock.rs`;
 Landlock being allow-list only, a deny *inside* an allowed directory stays
 with the in-process guard there). `carriers.rs` computes what the kernel
 must admit beside them for a script to start: system-vouched `#!`
-interpreters and macOS shims, by `trusted_real`, never `env`'s target
+interpreters and macOS shims, by `trusted_real` — regular files only, judged
+against the effective uid — never `env`'s target
 ([[decisions/261004_exec-carriers|exec-carriers]]). The AppContainer on
 Windows has no path-exec filter, so there the in-process guard stands alone (the deny-by-default fs projection still bounds
 which images a child can *read*, and so load, at all).
@@ -213,43 +218,44 @@ unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process guards apply unchanged
 (`docs/SPEC.md` §12.11).
 
-- `early_init(argv)` — startup: consumes `--sandbox-entry`, pins
-  `SANDBOX_SELF` and, on Linux, the bwrap envelope (`linux::register_envelope`,
-  walked on the process's own `PATH` before any shell exists), on Unix enters
-  the OS sandbox for a per-command `--sandbox-entry` child
-  (`maybe_enter_process_sandbox`; Windows confines from the parent and
-  refuses the flag), and on Windows
-  runs the boot-time orphan sweep (`windows::session::boot_recover`) that
-  deletes a crashed prior session's AppContainer profiles and restores the
-  per-session ACEs of any legacy pre-capability ledger. A test binary is
+- `early_init(&role)` — startup: pins `SANDBOX_SELF` and, on Linux, the bwrap
+  envelope (`linux::register_envelope`, walked on the process's own `PATH`
+  before any shell exists), and on Windows runs the boot-time orphan sweep
+  (`windows::session::boot_recover`) that deletes a crashed prior session's
+  AppContainer profiles and restores the per-session ACEs of any legacy
+  pre-capability ledger. A test binary is
   the same [[invariants/single-binary|multicall executable]] a confined child
   re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
-  reaches `main` only through libtest); `serve_sandbox_early_init` is the shared
-  `Option<u8>` building block the pre-`main` dispatch uses for that — run by
-  `main` and every test `#[ctor]` alike, surfacing the re-exec child's exit code
-  so the caller can terminate, then serving the per-command re-exec tails
-  (`serve_sandbox_exec` for a host external, `try_run_bundled_tool` for a bundled
-  tool). Skip it and `SANDBOX_SELF` stays unpinned, so the per-command launcher
-  cannot pin the binary it re-execs.
+  reaches `main` only through libtest); `serve_sandbox_early_init(&role)` is the
+  shared `Option<u8>` building block the pre-`main` dispatch uses for that, over
+  the role `core/src/invocation.rs`'s `classify` named — run by `main` and every
+  test `#[ctor]` alike, surfacing the re-exec child's exit code so the caller can
+  terminate. It serves a `Warrant` role first (`serve_warrant`), so the
+  trampoline pins and opens nothing before it is confined, then runs
+  `early_init`, then the `BundledTool` multicall (`serve_bundled_tool`). The
+  engine and pipeline-anchor arms pin ral themselves
+  (`register_self_for_helpers`) before they run. Skip it and `SANDBOX_SELF`
+  stays unpinned, so the per-command launcher cannot pin the binary it
+  re-execs.
 - `reexec.rs` — `Pinned`, an executable pinned at boot: the one shape every
   `Command` the sandbox execs is built from, so nothing a session does to its
   environment can choose the file. Two are pinned: this executable
   (`SANDBOX_SELF`), so a confined re-exec runs the same binary even under an
-  on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). The `Pin`
+  on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). Its
+  methods are `arg0` (the on-disk path, `argv[0]` of every exec), `exec_path`
+  (what `execve` is handed) and `verify`; `reexec::own()` is ral's own pin as a
+  `Result`, so a sandboxed launch refuses when ral could not pin itself. The `Pin`
   variants say where a swap is even askable: `Fd` on Linux (the retained
   descriptor, so `/proc/self/fd/N` resolves to the boot inode), `Stat` on
   macOS (a `(dev, ino)` snapshot re-checked before each spawn), and
   `Unguarded` on Windows, which has no parent-side self re-exec for a guard
-  to protect. On Unix
-  `maybe_enter_process_sandbox` enters the OS sandbox in a per-command
-  `--sandbox-entry` child; on Windows there is no child re-entry at all —
-  confinement is the AppContainer token the *parent* attaches at
-  `CreateProcessW`, so a supplied `--sandbox-entry` is rejected as an
-  error (no legitimate caller emits it), and the pinned self serves to grant
-  the container read on the bundled-tool re-exec image. `verify_unswapped`,
-  the parent-side swap guard, is `cfg(target_os = "macos")`: only macOS
-  re-execs the *pinned self* parent-side (Linux re-execs through the fd, where
-  a swap is already moot; Windows has no parent-side self re-exec).
+  to protect. On Windows there is no child re-entry at all — confinement is
+  the AppContainer token the *parent* attaches at `CreateProcessW`, so a child
+  asking to confine itself (`--warrant`) is refused with 126, and the pinned
+  self serves to grant the container read on the bundled-tool re-exec image.
+  `Pinned::verify`, the parent-side swap guard, runs wherever a warrant is
+  issued, on both Unix backends: each execs the trampoline by name, so the
+  Linux fd pin protects nothing there.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -262,39 +268,66 @@ device for `net` to govern; the in-process guards apply unchanged
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
-  by the absolute path the guard judged, or a `Program::Tool` placed as
-  `ral --ral-bundled-tool <tool>`. macOS
-  and Linux share one trampoline argv, `trampoline_tail`: the payload is the
-  pinned ral itself, `ral --sandbox-entry <json>` followed by either
-  `--ral-sandbox-exec <path>` or `--ral-bundled-tool <tool>`, so the child
-  enters the process sandbox in `early_init` from the entry alone and only
-  then becomes the target, `serve_sandbox_exec` `execve`ing that path
-  inside the confinement.
-  macOS spawns that trampoline directly; Linux spawns it under `bwrap`
+  by the absolute path the guard judged, or a `Program::Tool`. macOS
+  and Linux share one trampoline: the pinned ral itself, whose whole argv is
+  `ral --warrant` (`WARRANT_FLAG`). The confinement to enter and the program to
+  run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
+  the parent. The confinement is the `Confinement` trait — `spell`, `parse`,
+  `enter` — implemented on macOS by `Seatbelt(String)`, the profile
+  `macos::build_profile` compiled, and on Linux by `ExecAdmits`, the count of
+  Landlock exec admits the parent opened in the host or `Unconfined`;
+  the program is a `Run`, `File(path, args)` or `Tool(tool, args)`.
+  `Warrant::confine` is the only way to the program: receive and verify the
+  warrant, enter the confinement (`macos::apply_profile`, `landlock::enter`),
+  close the handoff range, and yield a `Confined`, whose `run` `execve`s the
+  host program or runs the bundled tool in-process (`run_bundled`, shared with
+  the `--ral-bundled-tool` multicall). `serve_warrant` serves the child: a
+  failure before the program starts exits 126, and an `execve` refusal takes its
+  code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
+  program.
+  The encoding is NUL-terminated fields behind a `ral-warrant/1` magic,
+  canonical (decode re-encodes and compares) and at most 8 MiB. It rides fd 99,
+  never argv: a sealed memfd on Linux, checked again after sealing, and on macOS
+  a prefilled socketpair whose writer closes before the child exists; the child
+  refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
+  defined once in `warrant.rs`: 98 bwrap `--args`, 99 the warrant, 100
+  `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
+  `/proc`), 101.. the seccomp programs (sealed memfds), 200.. the Landlock
+  admits. One `inherit` lifts every source above every target and a single
+  `pre_exec` `dup2`s each home; the child closes 98..200 once confined, and
+  `landlock::enter` consumes the admits.
+  macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`make_command_with_policy`), giving the full shape **bwrap → ral trampoline
-  → Landlock → `execve`**. That order is forced rather than chosen: a Landlock
+  → Landlock → `execve`**. The real argv is `bwrap --args 98 -- <ral>
+  --warrant`: `bwrap_argv` is pure and returns bwrap's options alone, which
+  bwrap takes from `--args`, and the profile dump prints both. The order is
+  forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
-  The entry differs by kernel. macOS's is the projection, which Seatbelt
-  compiles in the child. Linux's names no path: inside the envelope every
+  Linux's confinement names no path: inside the envelope every
   name is one bwrap minted by following host symlinks, so none can be trusted
   to reach the file a grant froze. `landlock::prepare` instead opens each exec
-  admit in the parent, in the host, with `RESOLVE_NO_SYMLINKS`, and the entry
-  only counts them; the payload inherits them from fd 200 and builds its
-  ruleset from the fds, adding only `Refer` on its own root, which exists
-  nowhere else. `make_command_with_policy` therefore takes a `Payload {
-  program, args, image, admits }` — `program` is the trampoline, `image` the
-  host binary it will exec in turn, `admits` the opened fds — and binds both
-  executables read-only where absolute, since bwrap cannot exec what
-  it cannot see, with every allowing `ExecRule::File`, carriers included, not
-  already under a bind. Windows builds the
+  admit — an `Admit`, `File` or `Hierarchy` — in the parent, in the host, with
+  `RESOLVE_NO_SYMLINKS`, and the warrant only counts them; a file admit whose
+  path has since become a directory is dropped, not admitted as a hierarchy, and
+  `prepare` refuses a restricting exec projection where Landlock is unavailable.
+  The payload builds its
+  ruleset from the inherited fds, adding only `Refer` on its own root, which
+  exists nowhere else, and fails closed if a warrant promising admits finds no
+  Landlock. `make_command_with_policy` takes a `Payload { program, args, image,
+  handoff }` — `program` is the trampoline, `args` its `--warrant`, `image` the
+  host binary it will exec in turn, `handoff` the `(fd, slot)` pairs the payload
+  inherits past bwrap — and `bwrap_argv` binds both executables read-only where
+  absolute, since bwrap cannot exec what it cannot see, with every allowing
+  `ExecRule::File`, carriers included, not already under a bind. `--chdir`,
+  ral's own path and the image path refuse non-UTF-8 rather than go lossy into
+  bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
-  spawn is the confinement point — never a re-exec child; the
-  `--ral-sandbox-exec` sentinel and `serve_sandbox_exec`'s execve arm are
-  `cfg(any(target_os = "linux", target_os = "macos"))`, Windows alone emitting
-  no tail. The launcher also takes an `Ownership` (`Kept` / `Surrendered`, the
-  second variant `cfg(unix)` since only there does the verb that makes the
+  spawn is the confinement point — never a re-exec child; a bundled tool there
+  is a plain `ral --ral-bundled-tool <tool>` carrying no warrant, and
+  `serve_warrant` refuses `--warrant` outright. The launcher also takes an
+  `Ownership` (`Kept` / `Surrendered`, the second variant `cfg(unix)` since only there does the verb that makes the
   distinction exist): it reaches the Linux backend alone, which decides the
   two ties between the session and the envelope — death (`--die-with-parent`)
   and address (`--info-fd`) — so a `detach`ed survivor keeps the birthing
@@ -302,7 +335,9 @@ device for `net` to govern; the in-process guards apply unchanged
   ([[map/core/runtime|runtime]]). The grant body itself evaluates
   locally, external children being confined per-command
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap: the
+- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`; `Profile`, a record whose
+  field order is the rule precedence, and in every profile ral's own file is
+  write-denied and its ancestors unlink-denied), `linux.rs` (bwrap: the
   `Pinned` envelope, exec'd by descriptor and never by name, its own file
   read-only bound inside every envelope after the projection's binds; the
   argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
@@ -414,7 +449,7 @@ formal capability calculus.
 Every `fs`/process constructor in this layer is a reviewed *syscall site*: the
 workspace bans the raw constructors via clippy `disallowed_methods`, so each call
 site carries an `#[allow(… reason = "[…]")]` classifying it as a surfaced
-exec image (`Launch::new`, `make_command_with_policy`), silent infrastructure (the self re-exec, the
+exec image (`Launch::new`, `bwrap_argv`), silent infrastructure (the self re-exec, the
 `ps` denial sampler, the boot-time binary pin, the stamp-store and profile-ledger
 lifecycle), or
 test scaffolding. The site
