@@ -181,7 +181,7 @@ Internals:
   `PipeNode::launch`/`join`; runtime re-enters the machine only through
   `machine::evaluate` (a stage's `(comp, env)`, from `pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
-  body in process, OS confinement being per-child in `build_command`
+  body in process, OS confinement being per-child in `build_launch`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `audit.rs` — trail recording (`run_native`, the one audited call site for
   every native).

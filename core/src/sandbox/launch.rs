@@ -1,5 +1,5 @@
 //! Confining one external or bundled child under the platform's OS sandbox.
-//! `build_command` in `runtime::command::process` routes here whenever a
+//! `build_launch` in `runtime::command::process` routes here whenever a
 //! projection is active and no guest jail already confines the child.
 //!
 //! Env, cwd and resource limits are the caller's, layered on the returned
@@ -17,6 +17,8 @@
 //! bwrap's first act.  Windows has no trampoline — its `LowBox` token is
 //! applied at the parent's spawn.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::reexec::Pinned;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -138,7 +140,7 @@ fn windows_sandboxed_command(
                 launch.arg(tool);
                 launch.args(args);
                 // The confined child is ral.exe itself; the token must load it.
-                let image = match super::reexec::SANDBOX_SELF.get() {
+                let image = match super::reexec::OWN.get() {
                     Some(own) => Some(own.exec_path().to_path_buf()),
                     None => std::env::current_exe().ok(),
                 };
@@ -151,15 +153,12 @@ fn windows_sandboxed_command(
 
 /// Issue the warrant for `admitted` under `confinement`, parcelled for
 /// [`WARRANT_FD`].  The one point both Unix backends pass on their way to
-/// re-exec ral by its on-disk name, so the anti-swap guard belongs here: a
+/// re-exec `own` by its on-disk name, so the anti-swap guard belongs here: a
 /// build swapped in since boot (a mid-session `cargo install`) would
 /// otherwise run under our confinement.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn issue(confinement: Native, admitted: &Admitted) -> Settled<OwnedFd> {
-    super::reexec::own()
-        .map_err(refused)?
-        .verify()
-        .map_err(Break::Error)?;
+fn issue(own: &Pinned, confinement: Native, admitted: &Admitted) -> Settled<OwnedFd> {
+    own.verify().map_err(Break::Error)?;
     Warrant::new(confinement, admitted)
         .parcel()
         .map_err(refused)
@@ -183,11 +182,6 @@ fn linux_sandboxed_command(
     let envelope = super::linux::envelope()
         .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
     let host = super::linux::HostEnvelope::probe(envelope);
-    if let unprobed @ super::linux::landlock::Landlock::Unprobed(_) = host.landlock {
-        return Err(Break::Error(super::confinement_unavailable(
-            &unprobed.to_string(),
-        )));
-    }
     let cwd = shell.cwd();
     let cwd = faithful(&cwd, "the working directory")?;
     enveloped(envelope, host, projection, admitted, Some(cwd), ownership)
@@ -211,7 +205,7 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
 /// target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
-    envelope: &super::reexec::Pinned,
+    envelope: &Pinned,
     host: super::linux::HostEnvelope,
     projection: &crate::types::SandboxProjection,
     admitted: &Admitted,
@@ -221,8 +215,8 @@ pub(super) fn enveloped(
     let own = super::reexec::own().map_err(refused)?;
     let program = faithful(own.arg0(), "ral's own path")?;
     let (exec_admits, admits) =
-        super::linux::landlock::prepare(projection, host.landlock).map_err(refused)?;
-    let warrant = issue(exec_admits, admitted)?;
+        super::linux::landlock::open_admits(projection, host.landlock).map_err(Break::Error)?;
+    let warrant = issue(own, exec_admits, admitted)?;
     let handoff: Vec<_> = std::iter::once((warrant.as_fd(), WARRANT_FD))
         .chain(
             admits
@@ -237,7 +231,7 @@ pub(super) fn enveloped(
         }
         crate::capability::Program::Tool(_) => None,
     };
-    super::linux::make_command_with_policy(
+    super::linux::bwrap_command(
         envelope,
         super::linux::Payload {
             program,
@@ -253,17 +247,18 @@ pub(super) fn enveloped(
     .map_err(refused)
 }
 
-/// macOS: re-exec ral with the compiled profile in its warrant, so the child
-/// enters Seatbelt and only then becomes the target.
+/// macOS: re-exec the pinned ral `issue` verified, with the compiled profile
+/// in its warrant, so the child enters Seatbelt and only then becomes the
+/// target.
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     admitted: &Admitted,
 ) -> Settled<Command> {
+    let own = super::reexec::own().map_err(refused)?;
     let profile = super::macos::build_profile(projection).map_err(refused)?;
-    let warrant = issue(Seatbelt(profile), admitted)?;
-    let mut cmd = super::self_command()
-        .map_err(|e| refused(format!("sandbox: failed to pin self for re-exec: {e}")))?;
+    let warrant = issue(own, Seatbelt(profile), admitted)?;
+    let mut cmd = own.command();
     cmd.arg(super::WARRANT_FLAG);
     super::warrant::inherit(&mut cmd, &[(warrant.as_fd(), WARRANT_FD)], None).map_err(refused)?;
     Ok(cmd)
@@ -517,7 +512,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_launch_is_the_pinned_envelope_running_the_warrant_trampoline() {
-        super::super::linux::register_envelope();
+        super::super::linux::pin_envelope();
         if super::super::linux::envelope().is_err() {
             eprintln!("skipping: this host has no bwrap to pin");
             return;

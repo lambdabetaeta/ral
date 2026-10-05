@@ -11,7 +11,7 @@ use crate::types::{Break, Error, RefusedArg, Settled, Shell, Value};
 
 use super::head::Head;
 
-/// A vetted call, ready for [`super::process::build_command`].  `shown` is the
+/// A vetted call, ready for [`super::process::build_launch`].  `shown` is the
 /// name diagnostics and audit report; `admitted` is what runs, with what.
 pub(crate) struct SpawnPlan {
     pub(crate) shown: String,

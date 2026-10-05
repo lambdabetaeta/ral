@@ -227,7 +227,7 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  identity, `vet`, `build_command` (`core/src/runtime/command/detach.rs`), so the
+  identity, `vet`, `build_launch` (`core/src/runtime/command/detach.rs`), so the
   grant judges the call exactly as it judges any exec and a head a handler in
   scope intercepts is refused, birthing nothing: a handler runs inside this
   session, so there is nothing to detach (to run the real program, `^name`). Only the last
@@ -255,7 +255,7 @@ of the child's pgid.
   asked of the live grant stack (`GrantStack::permits_detach`) and answered as
   a refusal, `detach: false`
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
-- A survivor born under a projection **keeps it for life**. `build_command`
+- A survivor born under a projection **keeps it for life**. `build_launch`
   renders the frame's confinement into the launch exactly as for a child the
   session keeps; `Ownership::Surrendered` drops only the two ties between the
   session and the envelope — death (`--die-with-parent`, which against a double

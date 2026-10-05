@@ -197,18 +197,15 @@ pub(crate) fn install_wire_shell(
     Ok(())
 }
 
-/// A fresh shell wearing the host's builtin surface and `prelude`'s baked
-/// tier: `Shell::new` carries core's manifest alone, so the child-shell hook
-/// reinstalls the rest — and seats the prelude — before any [`WireDecoder`]
-/// is built against it, since a native value crossing the wire re-links
-/// against this shell's own manifest.
+/// A fresh shell carrying core's manifest and `prelude`'s baked tier, seated
+/// before any [`WireDecoder`] is built against it: a native value crossing the
+/// wire re-links against this shell's own manifest.
 ///
 /// Test-only scaffolding: production hydration goes through
 /// [`crate::boot::boot_shell`], which takes its `HostSurface` directly.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn bare_child_shell(prelude: &crate::boot::BakedPrelude) -> Shell {
     let mut shell = Shell::new(crate::io::TerminalState::default());
-    crate::sandbox::run_child_shell_extension(&mut shell);
     crate::builtins::register(&mut shell, prelude.comp());
     shell
 }

@@ -61,7 +61,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
   - `detach.rs` is that same machinery — `Head`, `vet`,
-    `build_command` — up to the one act that differs: the child is born by
+    `build_launch` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
     What replaces the handle is a first-order `{pid, desc}` receipt. The
@@ -144,7 +144,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   — at any nesting depth — is a process. Ordinary application and bind do not
   enter this runtime.
   - A bundled (uutils) head routes `Direct` like any external, its
-    `ral --ral-bundled-tool` child the image chosen by `command::build_command`
+    `ral --ral-bundled-tool` child the image chosen by `command::build_launch`
     — nothing in the pipeline distinguishes a bundled head from a host binary,
     so both classify as `External` carrying the resolved `Head`.
     Value-style composition is evaluator application, never a stage-transport
@@ -282,7 +282,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   RAL-owned effects are decided in process by `capability::check_*`
   ([[map/core/capabilities|capabilities]]), and child-owned effects are
   kernel-backed at *external dispatch*: when a projection is active,
-  `command::build_command` obtains a confined `process::Launch` via
+  `command::build_launch` obtains a confined `process::Launch` via
   `projection_enforceable` / `sandboxed_command` — per-command Seatbelt /
   bwrap confinement on Unix; on Windows the LowBox token of the
   projection's own AppContainer profile, carrying the per-path fs
@@ -291,7 +291,7 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
   and net/fs fail-closed fires when a child is
   actually spawned, not at grant-body entry
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-  Inside a *guest*, `build_command` takes neither projection branch:
+  Inside a *guest*, `build_launch` takes neither projection branch:
   `shell.guest_jail()` marks every spawn as already confined by the spawn
   jail — a fresh unprivileged uid and a per-exec cgroup,
   `process/jail.rs` ([[map/core/io-process|io-process]]) — since bwrap

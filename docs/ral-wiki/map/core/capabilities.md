@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1eee86cd
+generated_at_commit: b6b75996
 generated_at_date: 2026-10-05
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -218,29 +218,29 @@ unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process guards apply unchanged
 (`docs/SPEC.md` §12.11).
 
-- `early_init(&role)` — startup: pins `SANDBOX_SELF` and, on Linux, the bwrap
-  envelope (`linux::register_envelope`, walked on the process's own `PATH`
+- `boot(&role)` — startup: pins ral's own executable (`reexec::OWN`) and, on Linux, the bwrap
+  envelope (`linux::pin_envelope`, walked on the process's own `PATH`
   before any shell exists), and on Windows runs the boot-time orphan sweep
   (`windows::session::boot_recover`) that deletes a crashed prior session's
   AppContainer profiles and restores the per-session ACEs of any legacy
   pre-capability ledger. A test binary is
   the same [[invariants/single-binary|multicall executable]] a confined child
   re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
-  reaches `main` only through libtest); `serve_sandbox_early_init(&role)` is the
-  shared `Option<u8>` building block the pre-`main` dispatch uses for that, over
-  the role `core/src/invocation.rs`'s `classify` named — run by `main` and every
-  test `#[ctor]` alike, surfacing the re-exec child's exit code so the caller can
-  terminate. It serves a `Warrant` role first (`serve_warrant`), so the
-  trampoline pins and opens nothing before it is confined, then runs
-  `early_init`, then the `BundledTool` multicall (`serve_bundled_tool`). The
-  engine and pipeline-anchor arms pin ral themselves
-  (`register_self_for_helpers`) before they run. Skip it and `SANDBOX_SELF`
-  stays unpinned, so the per-command launcher cannot pin the binary it
-  re-execs.
+  reaches `main` only through libtest). `serve_pre_main(&role, installers)`
+  (`core/src/sandbox.rs`) is the one pre-`main` dispatch, over the role
+  `core/src/invocation.rs`'s `classify` named — run by `ral`, exarch and every
+  test `#[ctor]` alike, surfacing a served role's exit code so the caller can
+  terminate. It serves a `Warrant` role first (`serve_warrant`), before any
+  pin, so the trampoline pins and opens nothing before it is confined; the
+  pipeline anchor and the pgid probe spawn nothing and run unpinned. Every
+  other role — the engine, the `BundledTool` multicall, the shell — runs
+  `boot` first, so an `--engine` process has bwrap pinned exactly as the
+  shell does. Skip it and `OWN` stays unpinned, so the per-command
+  launcher refuses to re-exec a binary it cannot vouch for.
 - `reexec.rs` — `Pinned`, an executable pinned at boot: the one shape every
   `Command` the sandbox execs is built from, so nothing a session does to its
   environment can choose the file. Two are pinned: this executable
-  (`SANDBOX_SELF`), so a confined re-exec runs the same binary even under an
+  (`OWN`), so a confined re-exec runs the same binary even under an
   on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). Its
   methods are `arg0` (the on-disk path, `argv[0]` of every exec), `exec_path`
   (what `execve` is handed) and `verify`; `reexec::own()` is ral's own pin as a
@@ -263,8 +263,8 @@ device for `net` to govern; the in-process guards apply unchanged
   this host cannot establish, whether `projection_enforceable` saw it coming,
   there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
   first launch that needs it), or the pinned envelope failed to spawn.
-- `Launch::new` (`process/launch.rs`) — builds the unsandboxed external exec image; `build_command` (`runtime/command/process.rs`) reaches it directly when no projection is active.
-- `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
+- `Launch::new` (`process/launch.rs`) — builds the unsandboxed external exec image; `build_launch` (`runtime/command/process.rs`) reaches it directly when no projection is active.
+- `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
@@ -295,33 +295,40 @@ device for `net` to govern; the in-process guards apply unchanged
   `/proc`), 101.. the seccomp programs (sealed memfds), 200.. the Landlock
   admits. One `inherit` lifts every source above every target and a single
   `pre_exec` `dup2`s each home; the child closes 98..200 once confined, and
-  `landlock::enter` consumes the admits.
+  `landlock::enter` consumes the admits. `bwrap_command` refuses to launch if
+  bwrap's pin fd sits on one of these slots: the `dup2` would close it before
+  the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
-  (`make_command_with_policy`), giving the full shape **bwrap → ral trampoline
+  (`bwrap_command`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. The real argv is `bwrap --args 98 -- <ral>
-  --warrant`: `bwrap_argv` is pure and returns bwrap's options alone, which
+  --warrant`: `bwrap_options` is pure and returns bwrap's options alone, which
   bwrap takes from `--args`, and the profile dump prints both. The order is
   forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
   Linux's confinement names no path: inside the envelope every
   name is one bwrap minted by following host symlinks, so none can be trusted
-  to reach the file a grant froze. `landlock::prepare` instead opens each exec
+  to reach the file a grant froze. `landlock::open_admits` instead opens each exec
   admit — an `Admit`, `File` or `Hierarchy` — in the parent, in the host, with
   `RESOLVE_NO_SYMLINKS`, and the warrant only counts them; a file admit whose
   path has since become a directory is dropped, not admitted as a hierarchy, and
-  `prepare` refuses a restricting exec projection where Landlock is unavailable.
+  `open_admits` refuses a restricting exec projection where Landlock is unavailable.
   The payload builds its
   ruleset from the inherited fds, adding only `Refer` on its own root, which
   exists nowhere else, and fails closed if a warrant promising admits finds no
-  Landlock. `make_command_with_policy` takes a `Payload { program, args, image,
+  Landlock. `bwrap_command` takes a `Payload { program, args, image,
   handoff }` — `program` is the trampoline, `args` its `--warrant`, `image` the
   host binary it will exec in turn, `handoff` the `(fd, slot)` pairs the payload
-  inherits past bwrap — and `bwrap_argv` binds both executables read-only where
+  inherits past bwrap — and `bwrap_options` binds both executables read-only where
   absolute, since bwrap cannot exec what it cannot see, with every allowing
-  `ExecRule::File`, carriers included, not already under a bind. `--chdir`,
-  ral's own path and the image path refuse non-UTF-8 rather than go lossy into
-  bwrap's argv. Windows builds the
+  `ExecRule::File`, carriers included, not already under a bind. Both go in by
+  their real names, so where the image's spelled name — a link, or under one —
+  lies under no bind, a restricted envelope adds `--symlink <real> <image>` in
+  its own tmpfs: one more name for the file the grant admits, no more bytes;
+  such a spelling with a `..` is refused instead, bwrap being unable to make it
+  faithfully. `--chdir`,
+  ral's own path, the image path and the real names both executables are bound
+  by refuse non-UTF-8 rather than go lossy into bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
   spawn is the confinement point — never a re-exec child; a bundled tool there
@@ -449,9 +456,9 @@ formal capability calculus.
 Every `fs`/process constructor in this layer is a reviewed *syscall site*: the
 workspace bans the raw constructors via clippy `disallowed_methods`, so each call
 site carries an `#[allow(… reason = "[…]")]` classifying it as a surfaced
-exec image (`Launch::new`, `bwrap_argv`), silent infrastructure (the self re-exec, the
-`ps` denial sampler, the boot-time binary pin, the stamp-store and profile-ledger
-lifecycle), or
+exec image (`Launch::new`), silent infrastructure (the self re-exec, the
+pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
+boot-time binary pin, the stamp-store and profile-ledger lifecycle), or
 test scaffolding. The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
 the sites are only declared and accounted, with `core/tests/syscall_sites.rs`

@@ -8,12 +8,14 @@ pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
-/// Block reading stdin to EOF — the parent's `AnchorProcess::finish` closing
-/// its release pipe.  Every termination signal is swallowed and reported
-/// instead; the three stop signals are ignored outright, so the anchor never
-/// stops and never needs resuming.
+/// Serve the pipeline anchor: block reading stdin to EOF — the parent's
+/// `AnchorProcess::finish` closing its release pipe.  It spawns nothing, so
+/// it pins nothing.  SIGPIPE is at its default; every termination signal is
+/// swallowed and reported instead; the three stop signals are ignored
+/// outright, so the anchor never stops and never needs resuming.
 #[cfg(unix)]
-fn serve_anchor() -> u8 {
+pub(crate) fn serve_anchor() -> u8 {
+    crate::uutils::init_signal_dispositions();
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         unsafe {
             libc::signal(sig, report_signal as *const () as libc::sighandler_t);
@@ -37,10 +39,11 @@ extern "C" fn report_signal(sig: libc::c_int) {
     }
 }
 
-/// Every console event is swallowed, Ctrl-Break included: the group's grace
-/// is for its stages, never the anchor holding the group open.
+/// Serve the pipeline anchor: block reading stdin to EOF.  Every console
+/// event is swallowed, Ctrl-Break included: the group's grace is for its
+/// stages, never the anchor holding the group open.
 #[cfg(windows)]
-fn serve_anchor() -> u8 {
+pub(crate) fn serve_anchor() -> u8 {
     extern "system" fn swallow(_: u32) -> windows_sys::core::BOOL {
         windows_sys::Win32::Foundation::TRUE
     }
@@ -74,17 +77,6 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
     let mut cmd = crate::process::Launch::new(exe);
     cmd.arg(flag);
     Ok(cmd)
-}
-
-/// Serve the pipeline anchor, which exits before [`crate::sandbox::early_init`]
-/// would pin it, with SIGPIPE at its default.
-pub fn serve_pipeline_anchor() -> u8 {
-    #[cfg(unix)]
-    {
-        crate::sandbox::register_self_for_helpers();
-        crate::uutils::init_signal_dispositions();
-    }
-    serve_anchor()
 }
 
 /// Serve the bundled-tool multicall (`ral --ral-bundled-tool <tool> <args...>`):

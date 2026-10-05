@@ -10,22 +10,20 @@
 /// `Some(code)` means this process was such a re-exec and must exit now.
 ///
 /// Every test binary calls this from a `#[ctor]`; the integration binaries
-/// share the one in `core/tests/common/mod.rs`.  The pgid probe is
-/// deliberately absent: its flag is served by the real `ral` binary.
+/// share the one in `core/tests/common/mod.rs`.  Core's dispatch serves every
+/// role, with no engine installers to offer, and leaves the detach-birth
+/// fixture pinned for this function to serve.
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
     crate::uutils::init_signal_dispositions();
     let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let role = crate::classify(&argv);
-    match role {
-        crate::Invocation::PipelineAnchor => Some(crate::serve_pipeline_anchor()),
-        #[cfg(unix)]
-        crate::Invocation::DetachBirth { trace, marker } => {
-            crate::sandbox::early_init(&role);
-            Some(serve_detach_birth(trace, marker))
-        }
-        _ => crate::sandbox::serve_sandbox_early_init(&role),
+    let served = crate::sandbox::serve_pre_main(&role, &[]);
+    #[cfg(unix)]
+    if let crate::Invocation::DetachBirth { trace, marker } = role {
+        return Some(serve_detach_birth(trace, marker));
     }
+    served
 }
 
 /// The prelude a test binary bakes at runtime, cached for every call this
@@ -99,13 +97,13 @@ pub(crate) const PGID_CHECK_FLAG: &str = "--ral-test-pgid-check";
 ///
 /// A test can thus confirm a stage joined the pgid its parent set.
 ///
-/// The `ral` and `exarch` binaries dispatch this from `main`, because the
-/// tests spawn a real `ral` as a pipeline stage.  Stderr is the probe: a
+/// Core's pre-`main` dispatch serves it in every binary, the real `ral` the
+/// tests spawn as a pipeline stage included.  Stderr is the probe: a
 /// stage's stdin and stdout are rerouted through pipes while stderr is
 /// inherited, so it alone reports the parent's terminal — a tty under the
 /// PTY tests, a pipe under cargo's capture, whatever lies further upstream.
 #[cfg(unix)]
-pub fn serve_pgid_check(tag: Option<&std::ffi::OsStr>) -> u8 {
+pub(crate) fn serve_pgid_check(tag: Option<&std::ffi::OsStr>) -> u8 {
     use std::fmt::Write as _;
     use std::io::{IsTerminal, Write};
 

@@ -2,12 +2,11 @@
 //!
 //! `ral` re-execs itself to be several things that are not a shell: a wire
 //! engine, a pipeline anchor, a bundled uutils tool, an OS-sandbox stage, a
-//! test helper. Each is served here and exits, never reaching clap — which
-//! would reject the argv that summoned it. Exarch opens the same way, through
-//! `exarch::dispatch_pre_main`.
+//! test helper. Core's `serve_pre_main` serves each and exits, never reaching
+//! clap — which would reject the argv that summoned it. Exarch opens through
+//! the same dispatch.
 
 use crate::cli::Mode;
-use ral_core::Invocation as Role;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -51,24 +50,15 @@ pub(crate) fn adopt_process_dispositions() {
 /// Serve whichever re-exec child this process is, or read argv as a shell
 /// invocation.
 pub(crate) fn identify() -> Invocation {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
-    match ral_core::classify(&argv) {
-        // The engine never returns: it takes the process over on fd 3.
-        #[cfg(unix)]
-        Role::Engine => {
-            ral_core::sandbox::register_self_for_helpers();
-            ral_core::engine::run_engine(&engine::INSTALLERS)
-        }
-        Role::PipelineAnchor => Invocation::Exit(ExitCode::from(ral_core::serve_pipeline_anchor())),
-        #[cfg(unix)]
-        Role::PgidCheck { tag } => {
-            Invocation::Exit(ExitCode::from(ral_core::test_helper::serve_pgid_check(tag)))
-        }
-        role => match ral_core::sandbox::serve_sandbox_early_init(&role) {
-            Some(code) => Invocation::Exit(ExitCode::from(code)),
-            None => Invocation::Shell(Mode::from_argv(&args)),
-        },
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match ral_core::sandbox::serve_pre_main(&ral_core::classify(&argv), &engine::INSTALLERS) {
+        Some(code) => Invocation::Exit(ExitCode::from(code)),
+        None => Invocation::Shell(Mode::from_argv(
+            &argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )),
     }
 }
 

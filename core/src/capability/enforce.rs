@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
         use super::{FsVerdict, fs_verdict};
-        crate::sandbox::early_init(&crate::Invocation::Shell);
+        crate::sandbox::boot(&crate::Invocation::Shell);
         let open = GrantStack::of(Capabilities::default());
         let resolver = Resolver::shell_less();
         let own = std::env::current_exe().expect("own path");

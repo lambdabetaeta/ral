@@ -266,8 +266,8 @@ impl Launch {
     }
 
     #[cfg(unix)]
-    pub(crate) fn apply_unix_resource_limits(&mut self) {
-        crate::sandbox::apply_resource_limits(&mut self.cmd);
+    pub(crate) fn forbid_core_dumps(&mut self) {
+        crate::sandbox::forbid_core_dumps(&mut self.cmd);
     }
 
     #[cfg(unix)]
@@ -285,7 +285,7 @@ impl Launch {
 
     /// Prepare this exec's transient cgroup and register the pre-exec that
     /// puts the child in it at the plan's unprivileged uid/gid.  Called from
-    /// `build_command` in `runtime/command/process.rs` when the shell carries
+    /// `build_launch` in `runtime/command/process.rs` when the shell carries
     /// a [`GuestJail`](crate::process::jail::GuestJail).
     ///
     /// # Errors

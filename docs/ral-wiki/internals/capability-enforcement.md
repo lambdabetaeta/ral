@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1eee86cd
 verified_at_date: 2026-10-05
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, allow_region, deny_region, GrantStack, sandboxed_command, build_command, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_argv, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
+anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, allow_region, deny_region, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -118,7 +118,7 @@ spawned process does on its own.**
 
 - *Exec* — guarded in-process on every platform: `check_exec` judges the
   program and its argv *before* the spawn and returns `Admitted`, the token
-  `build_command` launches from. On macOS the Seatbelt profile additionally
+  `build_launch` launches from. On macOS the Seatbelt profile additionally
   renders the rules as `process-exec` forms, catching re-execs the in-process
   guard never sees (`sh -c`, `find -exec`); on Linux a Landlock domain entered
   inside the bwrap envelope carries their allows into the kernel, Landlock
@@ -272,14 +272,14 @@ as the file it is, so that file is never chosen by name at spawn time — where
 the only environment in scope is the one built for the payload, `PATH`
 override included, and `Command::new("bwrap")` would have let a `within [env:
 [PATH: …]]` or a planted binary earlier on `PATH` supply code that runs before
-any confinement. Instead `early_init` pins bwrap (`linux::register_envelope`)
+any confinement. Instead `sandbox::boot` pins bwrap (`linux::pin_envelope`)
 on the absolute entries of the `PATH` ral was started with, before any shell
 exists, as a `reexec::Pinned` — the same fd-pin ral uses for its own re-exec —
 and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
 replace-by-rename at the pinned path reaches it. In-place rewriting of the
 pinned inode — the one change a pin by descriptor cannot see — is closed on
 both sides of the dispatch boundary: for a confined child by the envelope
-itself, `bwrap_argv` read-only binding the envelope's own file
+itself, `bwrap_options` read-only binding the envelope's own file
 after the projection's binds, `/` wholesale under `Unrestricted` included, and
 before the masks, the Linux twin of macOS's `freeze_admitted_set`; for ral's
 own writes by the `Guarded` verdict above. What stays open is another same-uid
@@ -297,12 +297,12 @@ body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
 process, and `transport::dispatch` just runs that body locally — nested grants
 compose by intersecting authority on the evaluator's `GrantStack`, which is not a
 process boundary ([[design/grant|grant]]). Confinement happens one level down, at
-external dispatch. When `build_command` (`runtime/command/process.rs`) spawns an
+external dispatch. When `build_launch` (`runtime/command/process.rs`) spawns an
 admitted external or bundled child under a restrictive projection, it routes
 through `sandboxed_command` (`sandbox/launch.rs`), which confines that *one*
 child:
 
-- *Linux* wraps each child in `bwrap` via `make_command_with_policy`, threading
+- *Linux* wraps each child in `bwrap` via `bwrap_command`, threading
   the logical cwd in as `--chdir`; a cwd the grant does not cover gets an empty
   `0555` tmpfs stand-in laid before the binds (which hide it where they do
   cover it), so a grant narrower than the cwd still runs commands, as under
@@ -341,12 +341,12 @@ and checked once sealed; on macOS, which has no `/proc`, the read end of a
 socketpair whose writer closes before the child exists. The child refuses an
 unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
 re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
---warrant`: `bwrap_argv` is pure and returns bwrap's options alone, which bwrap
+--warrant`: `bwrap_options` is pure and returns bwrap's options alone, which bwrap
 takes from `--args`. The descriptors a confined launch hands down — bwrap's
 `--args`, the warrant, `--info-fd`, the seccomp programs, the Landlock admits —
 sit at fixed slots defined once, and one `inherit` places them all; the child
 closes the range once it is confined, so the program inherits none.
-`serve_warrant` runs before `early_init`, so the trampoline pins and opens
+`serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
 nothing ahead of its confinement. Nothing runs unconfined: a failure before
 the program starts exits 126, a missing program 127; an `execve` refusal takes
 its code from the same `SpawnFailure` the in-process spawn uses.
@@ -355,10 +355,11 @@ its code from the same `SpawnFailure` the in-process spawn uses.
 (`Seatbelt(profile)` on macOS, `ExecAdmits` on Linux) is the one thing the child
 enters, and `Warrant::confine` is the only road to the program — after the
 confinement is entered and the handoff closed — so no code path runs a program
-unconfined. On Linux the parent's `prepare` refuses a restricting exec grant
-where Landlock is unavailable, a file admit that has become a directory is
-dropped rather than widened to a hierarchy, and the child's `enter` refuses if
-the warrant promised exec rules and finds no Landlock. A sandboxed launch needs
+unconfined. On Linux the parent's `open_admits` refuses every launch whose
+Landlock probe failed and a restricting exec grant where Landlock is absent, a
+file admit that has become a directory is dropped rather than widened to a
+hierarchy, and the child's `enter` refuses if its own probe fails, or if the
+warrant promised exec rules and finds no Landlock. A sandboxed launch needs
 ral's own pin (`reexec::own`) and re-verifies it (`Pinned::verify`) before
 issuing a warrant; unpinned, it refuses.
 
@@ -380,7 +381,7 @@ tree stays dark, and one moved out of an rw tree keeps that tree's capability, s
 path-based rules and object-sticky stamps agree only while the tree is still
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 
-The launcher pins the *current binary* (`SANDBOX_SELF`, fixed at `early_init`) so
+The launcher pins the *current binary* (`reexec::OWN`, fixed at `sandbox::boot`) so
 an on-disk swap cannot subvert it. Because confinement is per-command, it
 engages only when a child is actually spawned: a `grant [net: false] { … }` with no
 external child does not fail closed, and an offline request on a backend without

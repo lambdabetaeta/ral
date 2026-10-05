@@ -4,7 +4,7 @@
 //!
 //! Pipeline stages never reach [`run`] — they take
 //! [`super::pipeline::PipeNode::launch`] — but share `vet` and
-//! `build_command` with it, so both paths resolve and confine a call the
+//! `build_launch` with it, so both paths resolve and confine a call the
 //! same way.
 
 use crate::process::Group;
@@ -24,7 +24,7 @@ pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use head::Head;
-pub(crate) use process::{build_command, spawn_error};
+pub(crate) use process::{build_launch, spawn_error};
 pub(crate) use redirect::{
     PendingWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
     open_write,
@@ -52,7 +52,7 @@ pub(crate) fn run(
     // Confinement can run for minutes on Windows, so the run's scope goes in
     // with it and is read again on the way out: a wall that expired mid-stamp
     // must not be discovered only once the child is already running.
-    let mut command = build_command(
+    let mut command = build_launch(
         &rc,
         crate::sandbox::Ownership::Kept,
         shell,

@@ -1,6 +1,6 @@
 //! Binary pinning for the per-command OS sandbox.
 //!
-//! `sandbox::early_init` pins every executable the sandbox will later exec on
+//! `sandbox::boot` pins every executable the sandbox will later exec on
 //! the session's behalf — ral itself everywhere, and on Linux the bwrap
 //! envelope — so a launch runs the file we booted with and not whatever a
 //! mid-session `cargo install`, a PATH override, or a confined child's write
@@ -26,7 +26,7 @@ use crate::types::Error;
 /// `Command` the sandbox execs is ever built from, so nothing a session does
 /// to its environment can choose the file.
 pub(super) struct Pinned {
-    #[allow(dead_code)]
+    #[cfg_attr(windows, allow(dead_code))]
     pin: Pin,
     /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
     exec_path: PathBuf,
@@ -85,6 +85,14 @@ impl Pinned {
         std::fs::read_link(self.exec_path())
     }
 
+    /// The descriptor `exec_path` names.
+    #[cfg(target_os = "linux")]
+    pub(super) fn raw_fd(&self) -> std::ffi::c_int {
+        use std::os::fd::AsRawFd;
+        let Pin::Fd { fd, .. } = &self.pin;
+        fd.as_raw_fd()
+    }
+
     /// Whether `meta` is the pinned inode, under whatever name — a hard link
     /// names it too.  Never on Windows, where nothing is pinned.
     #[cfg_attr(windows, allow(unused_variables))]
@@ -117,8 +125,8 @@ impl Pinned {
     }
 
     /// Refuse to spawn a foreign build: `sandbox::launch` calls this wherever
-    /// it issues a warrant, to catch an executable swapped on disk since
-    /// registration.
+    /// it issues a warrant, to catch an executable swapped on disk since it
+    /// was pinned.
     ///
     /// Every Unix: the trampoline is exec'd by name on both, so the Linux fd
     /// pin is no protection here.  Windows never re-execs itself.
@@ -153,13 +161,14 @@ impl Pinned {
     }
 }
 
-/// How `exec_path` stays bound to the binary we registered.
+/// How `exec_path` stays bound to the binary we pinned.
 enum Pin {
     /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode;
     /// `(dev, ino)` is that inode's identity for [`Pinned::is_inode`].
+    /// Close-on-exec, so no child inherits it: `execve` opens the target
+    /// before closing the fd, which suffices for an ELF, never a `#!` script.
     #[cfg(target_os = "linux")]
     Fd {
-        #[allow(dead_code)]
         fd: std::os::fd::OwnedFd,
         dev: u64,
         ino: u64,
@@ -173,13 +182,13 @@ enum Pin {
     Unguarded,
 }
 
-pub(super) static SANDBOX_SELF: OnceLock<Pinned> = OnceLock::new();
+pub(super) static OWN: OnceLock<Pinned> = OnceLock::new();
 
 /// ral's own pin, which a sandboxed launch cannot go without: unpinned, ral
 /// cannot vouch that the copy it re-execs is itself.
 #[cfg(unix)]
 pub(super) fn own() -> Result<&'static Pinned, String> {
-    SANDBOX_SELF.get().ok_or_else(|| {
+    OWN.get().ok_or_else(|| {
         "sandbox: ral could not pin its own program at startup (is its executable \
          missing or unreadable?), so it cannot vouch that the sandboxed copy is \
          itself; refusing to launch it"
@@ -192,15 +201,15 @@ pub(super) fn own() -> Result<&'static Pinned, String> {
 /// Idempotent, and silent on failure: unpinned, the unconfined helpers still
 /// run, since `super::self_command` falls back to the live `current_exe`, but
 /// a sandboxed launch is refused ([`own`]).
-pub(super) fn register_sandbox_self() {
-    if SANDBOX_SELF.get().is_some() {
+pub(super) fn pin_self() {
+    if OWN.get().is_some() {
         return;
     }
     let Ok(arg0) = std::env::current_exe() else {
         return;
     };
     if let Some(pinned) = Pinned::open(arg0) {
-        let _ = SANDBOX_SELF.set(pinned);
+        let _ = OWN.set(pinned);
     }
 }
 
@@ -218,16 +227,13 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     let file = std::fs::File::open(arg0).ok()?;
     let meta = file.metadata().ok()?;
     let fd: OwnedFd = file.into();
-    // Rust opens with FD_CLOEXEC set; clear it, or the fd dies in the
-    // execve and `/proc/self/fd/<N>` has nothing to resolve to.
-    let raw = fd.as_raw_fd();
-    let _ = rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty());
+    let exec_path = crate::path::proc_fd_path(fd.as_raw_fd());
     let pin = Pin::Fd {
         fd,
         dev: meta.dev(),
         ino: meta.ino(),
     };
-    Some((pin, crate::path::proc_fd_path(raw)))
+    Some((pin, exec_path))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -248,8 +254,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 
 /// Windows pinning cannot fail because it does nothing: no fd to open, no
 /// inode to snapshot, only the path to carry.  The `Option` is the shape
-/// `register_sandbox_self` shares with the Unix arms, which can genuinely
-/// fail.
+/// `pin_self` shares with the Unix arms, which can genuinely fail.
 #[cfg(windows)]
 #[allow(
     clippy::unnecessary_wraps,

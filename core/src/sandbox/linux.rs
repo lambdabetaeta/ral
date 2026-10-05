@@ -1,4 +1,4 @@
-//! Linux sandbox: the bubblewrap (`bwrap`) argv that confines one external
+//! Linux sandbox: the bubblewrap (`bwrap`) options that confine one external
 //! child.  bwrap is never the payload: its monitor clones a namespace init
 //! which forks the payload, whose `setsid` (`--new-session`) makes its pid the
 //! group of everything inside — the group ral addresses, read over
@@ -35,7 +35,7 @@ use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// The bubblewrap binary's name: what [`register_envelope`] walks `PATH` for,
+/// The bubblewrap binary's name: what [`pin_envelope`] walks `PATH` for,
 /// and what a message calls it.  Never handed to `exec` — every launch goes
 /// through the [`Pinned`] envelope.
 pub(super) const BWRAP: &str = "bwrap";
@@ -44,15 +44,17 @@ static ENVELOPE: OnceLock<Pinned> = OnceLock::new();
 
 /// Pin bwrap for the rest of the process's life, found on the `PATH` this
 /// process was started with — never a shell's, none exists yet — and only in
-/// its absolute entries.  Idempotent, and silent where bwrap is absent:
-/// [`envelope`] says so at the first launch that needs it.
-pub(super) fn register_envelope() {
+/// its absolute entries, each valid UTF-8 or skipped: the search takes a
+/// string.  Idempotent, and silent where bwrap is absent: [`envelope`] says
+/// so at the first launch that needs it.
+pub(super) fn pin_envelope() {
     if ENVELOPE.get().is_some() {
         return;
     }
-    let host_path = std::env::var("PATH").unwrap_or_default();
-    let absolute: Vec<&str> = host_path
-        .split(':')
+    #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
+    let host_path = std::env::var_os("PATH").unwrap_or_default();
+    let absolute: Vec<String> = std::env::split_paths(&host_path)
+        .filter_map(|entry| entry.into_os_string().into_string().ok())
         .filter(|entry| crate::path::is_absolute(entry))
         .collect();
     let located = crate::path::which::locate(
@@ -89,9 +91,9 @@ pub(crate) struct Payload<'a> {
 /// bwrap's options as they are built: [`Command`]'s two appenders, and
 /// nothing that could open a descriptor.
 #[derive(Default)]
-struct Argv(Vec<OsString>);
+struct Options(Vec<OsString>);
 
-impl Argv {
+impl Options {
     fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.0.push(arg.as_ref().to_owned());
         self
@@ -105,15 +107,15 @@ impl Argv {
     }
 }
 
-/// [`bwrap_argv`] as the [`Command`] that runs it: `bwrap --args 98 --
+/// [`bwrap_options`] as the [`Command`] that runs it: `bwrap --args 98 --
 /// <payload>`, the options in a sealed parcel at their slot beside the seccomp
 /// programs, the `--info-fd` peer and the payload's handoff, every descriptor
 /// through one [`inherit`].  bwrap takes options alone from `--args`, so the
 /// payload rides its argv.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
-/// [`InfoFd`].
-pub(crate) fn make_command_with_policy(
+/// [`InfoFd`].  Refused where the envelope's pin sits on one of those slots.
+pub(crate) fn bwrap_command(
     envelope: &Pinned,
     payload: Payload,
     policy: &SandboxProjection,
@@ -121,7 +123,8 @@ pub(crate) fn make_command_with_policy(
     ownership: Ownership,
     host: HostEnvelope,
 ) -> Result<(Command, Option<InfoFd>), String> {
-    let options = bwrap_argv(envelope, payload, policy, chdir, ownership, host)?;
+    let programs = seccomp_programs()?;
+    let options = bwrap_options(envelope, payload, policy, &programs, chdir, ownership, host)?;
     let parcel = |name: &str, bytes: &[u8]| {
         parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))
     };
@@ -129,7 +132,7 @@ pub(crate) fn make_command_with_policy(
         "ral-bwrap-args",
         &nul_terminated(options.iter().map(|arg| arg.as_bytes()))?,
     )?;
-    let seccomp = seccomp_programs()?
+    let seccomp = programs
         .into_iter()
         .map(|program| parcel("ral-seccomp", program))
         .collect::<Result<Vec<_>, _>>()?;
@@ -145,14 +148,20 @@ pub(crate) fn make_command_with_policy(
         .then(crate::process::cloexec_socketpair)
         .transpose()
         .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
+    let kept = info.as_ref().map(|(_, writer)| (writer.as_fd(), INFO_FD));
+    // ral's own pin needs no such check: bwrap execs the trampoline by name.
+    let pin = envelope.raw_fd();
+    if lent.iter().chain(&kept).any(|&(_, at)| at == pin) {
+        return Err(format!(
+            "sandbox: ral's pinned bwrap sits on descriptor {pin}, a slot the confined \
+             launch hands down; refusing rather than exec what lands there (was ral \
+             started with that many files open?)"
+        ));
+    }
     let mut c = envelope.command();
     c.args(["--args", &ARGS_FD.to_string(), "--", payload.program])
         .args(payload.args);
-    let writer = inherit(
-        &mut c,
-        &lent,
-        info.as_ref().map(|(_, writer)| (writer.as_fd(), INFO_FD)),
-    )?;
+    let writer = inherit(&mut c, &lent, kept)?;
     let info = info
         .zip(writer)
         .map(|((reader, _), writer)| InfoFd { reader, writer });
@@ -161,14 +170,21 @@ pub(crate) fn make_command_with_policy(
 
 /// The bwrap options that confine `payload` under `policy`: binds derived
 /// from the policy prefixes, `deny_paths` overlaid last.  Descriptors appear
-/// by slot number alone; [`make_command_with_policy`] opens them.
+/// by slot number alone, one `--add-seccomp-fd` per program in `seccomp`;
+/// [`bwrap_command`] opens them.
 ///
 /// Every name is taken from `policy.rendered()`, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
-/// twin names.  `policy.exec` has no counterpart in the argv: bwrap filters
+/// twin names.  `policy.exec` has no counterpart in the options: bwrap filters
 /// mounts and syscalls, not exec by path, so [`landlock`] opens its admits
 /// in the host, and the payload enters them *inside* this envelope.
+///
+/// The image is bound by its real name alone, so where the name it was
+/// spelled by — a link, or under one — lies outside every bind, a `--symlink`
+/// makes that name in the envelope's own tmpfs: the trampoline's `execve`
+/// reaches the very file the grant admits, by one more name and no more bytes.
+/// A spelling with a `..`, which bwrap cannot make faithfully, is refused.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
@@ -181,26 +197,23 @@ pub(crate) fn make_command_with_policy(
 /// it.  Confinement itself — the mounts, the seccomp filter — is otherwise
 /// identical.
 ///
-/// The render is pure in `host`, so a test can assert an argv for a host it
+/// The render is pure in `host`, so a test can assert options for a host it
 /// is not running on.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
-)]
-pub(crate) fn bwrap_argv(
+pub(crate) fn bwrap_options(
     envelope: &Pinned,
     payload: Payload,
     policy: &SandboxProjection,
+    seccomp: &[&[u8]],
     chdir: Option<&str>,
     ownership: Ownership,
     host: HostEnvelope,
 ) -> Result<Vec<OsString>, String> {
     let rendered = policy.rendered()?;
-    let mut c = Argv::default();
+    let mut c = Options::default();
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
     // below rather than per prefix.
     let rules = rendered.fs.rules().cloned().unwrap_or_default();
-    let mut ro_binds = render_paths(&default_ro_binds())?;
+    let mut ro_binds = render_paths(default_ro_binds())?;
     ro_binds.extend(rules.read_prefixes);
     // bwrap cannot `execvp` what it cannot see, and the default prefixes
     // miss Nix store paths, ~/.cargo/bin and the like — an unbound exe
@@ -208,12 +221,18 @@ pub(crate) fn bwrap_argv(
     // siblings stay under whatever the caller's `fs:` capability declared.
     // By its real name: bwrap refuses a symlink as a mount destination, and
     // `/bin/sh` is one on every merged-/usr distribution.
-    for exe in [Some(payload.program), payload.image].into_iter().flatten() {
-        if crate::path::is_absolute(exe) {
-            let real = crate::path::canon::canonicalise_strict(std::path::Path::new(exe))
-                .map_err(|e| format!("sandbox: {exe} is not on the host to bind: {e}"))?;
-            ro_binds.extend(render_paths(&[real.to_string_lossy()])?);
-        }
+    let absolute = |exe: &&str| crate::path::is_absolute(exe);
+    let program = Some(payload.program)
+        .filter(absolute)
+        .map(real_name)
+        .transpose()?;
+    let image = payload
+        .image
+        .filter(absolute)
+        .map(|image| real_name(image).map(|real| (image, real)))
+        .transpose()?;
+    for real in program.iter().chain(image.iter().map(|(_, real)| real)) {
+        ro_binds.extend(render_paths(&[real])?);
     }
     // A file the exec layer admits, carriers among them, is useless unless
     // the envelope shows it.
@@ -224,7 +243,7 @@ pub(crate) fn bwrap_argv(
                 unbound.extend(render_real(path)?);
             }
         }
-        unbound.retain(|path| !ro_binds.iter().any(|bind| path.within(bind)));
+        unbound.retain(|path| !ro_binds.iter().any(|bind| bind.holds(path.as_str())));
         ro_binds.extend(unbound);
     }
     ro_binds.sort();
@@ -276,6 +295,11 @@ pub(crate) fn bwrap_argv(
             // After them, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
             render_dev(&mut c, host);
+            if let Some((spelled, real)) = &image
+                && needs_link(spelled, real, ro_binds.iter().chain(&rw_binds))?
+            {
+                c.arg("--symlink").arg(real).arg(spelled);
+            }
         }
         FsProjection::Unrestricted => {
             // `--bind` would skip device nodes.  `/proc` goes over the root:
@@ -298,10 +322,47 @@ pub(crate) fn bwrap_argv(
     for bind in &denied_binds {
         DenyMask::over(bind).render(&mut c);
     }
-    for at in seccomp_fds(seccomp_programs()?.len())? {
+    for at in seccomp_fds(seccomp.len())? {
         c.args(["--add-seccomp-fd", &at.to_string()]);
     }
     Ok(c.0)
+}
+
+/// `exe`'s real name, the one bwrap can bind.
+#[allow(clippy::disallowed_methods)]
+fn real_name(exe: &str) -> Result<String, String> {
+    crate::path::canon::canonicalise_strict(std::path::Path::new(exe))
+        .map_err(|e| format!("sandbox: {exe} is not on the host to bind: {e}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            format!(
+                "sandbox: {exe} resolves to a path that is not valid UTF-8, and bwrap \
+                 cannot be given it faithfully"
+            )
+        })
+}
+
+/// Whether a restricted envelope, which binds only the image's `real` file,
+/// must make the name it was `spelled` by: not where that name is the file,
+/// or lies under a bind that already shows it — and an error where bwrap
+/// could not make it.
+fn needs_link<'a>(
+    spelled: &str,
+    real: &str,
+    mut binds: impl Iterator<Item = &'a Rendered>,
+) -> Result<bool, String> {
+    if spelled == real || binds.any(|bind| bind.holds(spelled)) {
+        return Ok(false);
+    }
+    // Inside, `..` would climb a plain directory, not the link's target.
+    if spelled.split('/').any(|part| part == "..") {
+        return Err(format!(
+            "sandbox: {spelled} leads to {real}, but inside the sandbox only {real} is \
+             visible: grant read on its directory, or name {real} directly",
+        ));
+    }
+    Ok(true)
 }
 
 /// The envelope's seccomp programs, each stacked by its own
@@ -309,7 +370,7 @@ pub(crate) fn bwrap_argv(
 /// applies every installed filter and keeps the most severe result, so which
 /// program lands on which slot carries no meaning.  None off the two arches
 /// the deny-set is compiled for.
-fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
+pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         seccomp::Filter::ENVELOPE
@@ -346,7 +407,7 @@ fn pinned_binaries(envelope: &Pinned) -> Result<Vec<std::path::PathBuf>, String>
             .current_path()
             .map_err(|e| format!("bwrap: the pinned envelope has no path any more: {e}"))?,
     ];
-    if let Some(own) = super::reexec::SANDBOX_SELF.get() {
+    if let Some(own) = super::reexec::OWN.get() {
         paths.push(
             own.current_path()
                 .map_err(|e| format!("ral: the pinned trampoline has no path any more: {e}"))?,
@@ -362,7 +423,7 @@ fn pinned_binaries(envelope: &Pinned) -> Result<Vec<std::path::PathBuf>, String>
 ///
 /// By hand, `/dev/pts` is the host's, so a pty opened inside is not the
 /// envelope's own.  An absent node is dropped: binding one costs the launch.
-fn render_dev(c: &mut Argv, host: HostEnvelope) {
+fn render_dev(c: &mut Options, host: HostEnvelope) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
         return;
@@ -401,7 +462,7 @@ fn render_dev(c: &mut Argv, host: HostEnvelope) {
 /// from the op bwrap has.  Without the namespace the host's tree is the true
 /// one.  Over the projection's binds, so a grant reading `/sys` wholesale
 /// still gets the tree its `/proc` describes.
-fn render_cgroup(c: &mut Argv, host: HostEnvelope) {
+fn render_cgroup(c: &mut Options, host: HostEnvelope) {
     const TREE: &str = "/sys/fs/cgroup";
     let source = if host.private_cgroup {
         own_cgroup().map(|own| format!("{TREE}{own}"))
@@ -496,7 +557,7 @@ impl<'p> DenyMask<'p> {
         }
     }
 
-    fn render(self, c: &mut Argv) {
+    fn render(self, c: &mut Options) {
         match self {
             Self::EmptyDir(path) => {
                 c.args(["--perms", "0000", "--tmpfs", path]);
@@ -515,8 +576,8 @@ impl<'p> DenyMask<'p> {
 /// describes the host, not the envelope: `class/net` is the mounter's netns
 /// whatever `--unshare-net` did, `class/dmi` and `bus` name the machine.  A
 /// grant that wants it reads `/sys` by name.
-fn default_ro_binds() -> Vec<String> {
-    [
+fn default_ro_binds() -> &'static [&'static str] {
+    &[
         "/bin",
         "/usr",
         "/lib",
@@ -544,10 +605,6 @@ fn default_ro_binds() -> Vec<String> {
         // Linuxbrew: a system prefix that happens to live under /home.
         "/home/linuxbrew/.linuxbrew",
     ]
-    .iter()
-    .filter(|path| crate::path::exists(path))
-    .map(|path| (*path).to_string())
-    .collect()
 }
 
 #[cfg(test)]
@@ -556,8 +613,8 @@ fn default_ro_binds() -> Vec<String> {
     reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{HostEnvelope, Payload, Pinned, bwrap_argv, make_command_with_policy};
-    use crate::capability::Program;
+    use super::{HostEnvelope, Payload, Pinned, bwrap_command, bwrap_options, seccomp_programs};
+    use crate::capability::{Admitted, Program};
     use crate::path::RealPath;
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
@@ -601,8 +658,9 @@ mod tests {
         }
     }
 
-    /// This test binary stands in for bwrap where only the argv is read: the
-    /// render tests need no bwrap on the host, and no payload shares its name.
+    /// This test binary stands in for bwrap where only the options are read:
+    /// the render tests need no bwrap on the host, and no payload shares its
+    /// name.
     fn stand_in() -> Pinned {
         Pinned::open(std::env::current_exe().expect("own path")).expect("own binary pins")
     }
@@ -621,14 +679,23 @@ mod tests {
         ownership: Ownership,
         host: HostEnvelope,
     ) -> Vec<String> {
-        bwrap_argv(&stand_in(), payload, policy, chdir, ownership, host)
-            .expect("ASCII paths render")
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        let seccomp = seccomp_programs().expect("seccomp programs compile");
+        bwrap_options(
+            &stand_in(),
+            payload,
+            policy,
+            &seccomp,
+            chdir,
+            ownership,
+            host,
+        )
+        .expect("ASCII paths render")
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
     }
 
-    fn argv_on(
+    fn options_on(
         host: HostEnvelope,
         policy: &SandboxProjection,
         ownership: Ownership,
@@ -636,8 +703,8 @@ mod tests {
         options(TRUE, policy, None, ownership, host)
     }
 
-    fn argv(policy: &SandboxProjection) -> Vec<String> {
-        argv_on(WHOLE, policy, Ownership::Kept)
+    fn options_for(policy: &SandboxProjection) -> Vec<String> {
+        options_on(WHOLE, policy, Ownership::Kept)
     }
 
     fn position_of(args: &[String], mask: &[&str]) -> Option<usize> {
@@ -651,7 +718,7 @@ mod tests {
         std::fs::write(&denied, "capabilities").unwrap();
 
         let policy = deny_within(&dir, &[&denied]);
-        let args = argv(&policy);
+        let args = options_for(&policy);
         let bind = position_of(&args, &["--bind", &dir.to_string_lossy()]);
         let mask = position_of(
             &args,
@@ -675,7 +742,7 @@ mod tests {
         let denied = dir.join(".git");
         std::fs::create_dir_all(&denied).unwrap();
 
-        let args = argv(&deny_within(&dir, &[&denied]));
+        let args = options_for(&deny_within(&dir, &[&denied]));
         assert!(
             position_of(
                 &args,
@@ -744,7 +811,7 @@ mod tests {
             ("writable", &under_write, deny_within(&dir, &[&under_write])),
             ("read-only", &under_read, read_only),
         ] {
-            let args = argv(&policy);
+            let args = options_for(&policy);
             assert!(
                 !args.contains(&denied.to_string_lossy().into_owned()),
                 "no mount may land on an absent deny beneath a {bind} bind: {args:?}"
@@ -753,8 +820,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Naming a symlink in argv costs the whole launch, so the mask goes on
-    /// the resolved twin — which the backend derives at render time, the
+    /// Naming a symlink in the options costs the whole launch, so the mask goes
+    /// on the resolved twin — which the backend derives at render time, the
     /// projection naming only the link.
     #[test]
     fn a_symlinked_deny_is_masked_at_its_target_and_never_at_the_link() {
@@ -764,7 +831,7 @@ mod tests {
         std::fs::write(&target, "PRIVATE KEY").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let args = argv(&deny_within(&dir, &[&link]));
+        let args = options_for(&deny_within(&dir, &[&link]));
         assert!(
             position_of(
                 &args,
@@ -841,10 +908,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Through the very argv a launch builds: the payload is the trampoline,
-    /// which enters the Landlock layer before `execve`ing `/bin/sh`.  A broken
-    /// trampoline is exactly what these tests exist to catch, so even the
-    /// positive control goes this way.
+    /// `real/tool`, runnable, under a fresh work dir with `linkdir -> real`
+    /// beside it: the dir, and the tool's real path.
+    fn linked_tool(tag: &str) -> (std::path::PathBuf, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = workdir(tag);
+        let tool = dir.join("real/tool");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("linkdir")).unwrap();
+        let tool = std::fs::canonicalize(&tool).unwrap();
+        (dir, tool.to_string_lossy().into_owned())
+    }
+
+    /// The trampoline execs the image by the name it was spelled with, and
+    /// only the real file is bound: outside every bind that name must be made,
+    /// after the binds; under one it already resolves, and bwrap could not
+    /// make it.
+    #[test]
+    fn a_linked_image_outside_every_bind_is_given_its_spelled_name() {
+        let (dir, real) = linked_tool("image-link");
+        let spelled = format!("{}/linkdir/tool", dir.display());
+        let image = Payload {
+            image: Some(&spelled),
+            ..TRUE
+        };
+        let elsewhere = workdir("image-link-elsewhere");
+
+        let args = options(
+            image,
+            &deny_within(&elsewhere, &[]),
+            None,
+            Ownership::Kept,
+            WHOLE,
+        );
+        let bind = position_of(&args, &["--ro-bind", &real, &real])
+            .unwrap_or_else(|| panic!("the real file must be bound: {args:?}"));
+        let link = position_of(&args, &["--symlink", &real, &spelled])
+            .unwrap_or_else(|| panic!("the spelled name must be made: {args:?}"));
+        assert!(bind < link, "the link must go on after the binds: {args:?}");
+
+        let args = options(image, &deny_within(&dir, &[]), None, Ownership::Kept, WHOLE);
+        assert!(
+            !args.contains(&spelled),
+            "a name under the grant's bind already resolves: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// Inside the envelope a `..` climbs a plain directory, not the link's
+    /// target, so a name bwrap cannot make faithfully refuses the launch,
+    /// naming both spellings.
+    #[test]
+    fn a_dotted_image_outside_every_bind_is_refused_by_both_its_names() {
+        let (dir, real) = linked_tool("image-link-dotted");
+        let dotted = format!("{}/linkdir/../real/tool", dir.display());
+        let elsewhere = workdir("image-link-dotted-elsewhere");
+        let seccomp = seccomp_programs().expect("seccomp programs compile");
+        let refused = bwrap_options(
+            &stand_in(),
+            Payload {
+                image: Some(&dotted),
+                ..TRUE
+            },
+            &deny_within(&elsewhere, &[]),
+            &seccomp,
+            None,
+            Ownership::Kept,
+            WHOLE,
+        )
+        .expect_err("a name bwrap cannot make must refuse the launch");
+        assert!(
+            refused.contains(&dotted) && refused.contains(&real),
+            "the refusal must name both spellings: {refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// `/bin/sh -c script`, through [`run_admitted`].
     fn run_confined(
         envelope: &Pinned,
         host: HostEnvelope,
@@ -852,15 +996,26 @@ mod tests {
         script: &str,
     ) -> Option<std::process::Output> {
         let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
-        let (mut cmd, info_fd) = enveloped(
+        run_admitted(
             envelope,
             host,
             policy,
             &admitted(sh, &["-c".to_string(), script.to_string()]),
-            None,
-            Ownership::Kept,
         )
-        .expect("the launch builds");
+    }
+
+    /// Through the very argv a launch builds: the payload is the trampoline,
+    /// which enters the Landlock layer before `execve`ing the admitted
+    /// program.  A broken trampoline is exactly what these tests exist to
+    /// catch, so even the positive control goes this way.
+    fn run_admitted(
+        envelope: &Pinned,
+        host: HostEnvelope,
+        policy: &SandboxProjection,
+        admitted: &Admitted,
+    ) -> Option<std::process::Output> {
+        let (mut cmd, info_fd) = enveloped(envelope, host, policy, admitted, None, Ownership::Kept)
+            .expect("the launch builds");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
         // Kept open across the fork inside `output()` for `pre_exec`'s `dup2`.
@@ -872,7 +1027,7 @@ mod tests {
     /// it cannot — bwrap absent, or user namespaces unavailable — a spawning
     /// test proves nothing either way and says so on the way out.
     fn envelope_launches(policy: &SandboxProjection) -> Option<&'static Pinned> {
-        super::register_envelope();
+        super::pin_envelope();
         let Ok(envelope) = super::envelope() else {
             eprintln!("skipping: this host has no bwrap to pin");
             return None;
@@ -900,7 +1055,7 @@ mod tests {
     /// The whole regression: `xdg:config` readable, `xdg:config/gcloud`
     /// denied, and no gcloud ever installed — the mask over that absent name
     /// had bwrap `mkdir` a mountpoint on a read-only bind, and its `EROFS`
-    /// killed every external command under the grant.  The argv was
+    /// killed every external command under the grant.  The options were
     /// well-formed throughout, so only a spawn catches it.
     #[test]
     fn an_absent_deny_under_a_read_only_bind_still_lets_the_body_run() {
@@ -961,7 +1116,8 @@ mod tests {
     /// `mkdir` its mountpoint straight onto the host: one launch under
     /// `deny: ['cwd:/.env']` and the user's project held an `.env` directory
     /// their own tools could then never write.  Only a spawn sees it — the
-    /// argv was well-formed, and the mount was correct inside the namespace.
+    /// options were well-formed, and the mount was correct inside the
+    /// namespace.
     #[test]
     fn building_an_envelope_never_creates_a_denied_name_on_the_host() {
         let dir = workdir("deny-absent-spawn-rw");
@@ -990,7 +1146,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No argv assertion can catch a mask that makes bwrap exit before it
+    /// No options assertion can catch a mask that makes bwrap exit before it
     /// execs anything, so this one spawns the envelope too.
     #[test]
     fn a_denied_path_refuses_every_access_while_the_body_still_runs() {
@@ -1072,19 +1228,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Only a spawn shows the trampoline's `execve` reaching the name the user
+    /// spoke: `~/.local/bin/uv`, a link into `~/.local/share/uv` with neither
+    /// granted, reported 127.  The link is a name, not a bind: the real file's
+    /// siblings stay out of sight.
+    #[test]
+    fn a_linked_image_outside_the_grant_runs_and_shows_none_of_its_siblings() {
+        let (dir, real) = linked_tool("image-link-spawn");
+        let secret = std::path::Path::new(&real).with_file_name("secret");
+        std::fs::write(&secret, "SECRET-BYTES").unwrap();
+        std::fs::write(
+            &real,
+            format!(
+                "#!/bin/sh\n\
+                 echo READY\n\
+                 cat '{secret}' 2>/dev/null || echo SECRET-REFUSED\n",
+                secret = secret.display(),
+            ),
+        )
+        .unwrap();
+        let elsewhere = workdir("image-link-spawn-elsewhere");
+        let policy = deny_within(&elsewhere, &[]);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+
+        let tool = Program::file(dir.join("linkdir/tool")).expect("the tool exists");
+        let out = run_admitted(
+            envelope,
+            HostEnvelope::probe(envelope),
+            &policy,
+            &admitted(tool, &[]),
+        )
+        .expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            stdout.contains("READY"),
+            "the spelled name did not run inside the envelope: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !stdout.contains("SECRET-BYTES"),
+            "a sibling of the real file reached the child: {stdout}"
+        );
+        assert!(
+            stdout.contains("SECRET-REFUSED"),
+            "the real file's sibling must stay out of sight: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
     /// The fallback is the same `/dev`, and only where the host refuses one.
     #[test]
     fn a_host_that_refuses_dev_gets_the_same_shape_by_hand() {
         let dir = workdir("dev-render");
         let policy = deny_within(&dir, &[]);
 
-        let mounted = argv(&policy);
+        let mounted = options_for(&policy);
         assert!(
             position_of(&mounted, &["--dev", "/dev"]).is_some(),
             "a host that mounts --dev must be given it: {mounted:?}"
         );
 
-        let by_hand = argv_on(
+        let by_hand = options_on(
             HostEnvelope {
                 virtual_dev: false,
                 ..WHOLE
@@ -1161,7 +1369,7 @@ mod tests {
         for (host, probed) in [(WHOLE, true), (masked, false)] {
             for policy in [&unrestricted(), &restricted] {
                 for ownership in [Ownership::Kept, Ownership::Surrendered] {
-                    let args = argv_on(host, policy, ownership);
+                    let args = options_on(host, policy, ownership);
                     for flag in ["--unshare-ipc", "--unshare-uts"] {
                         assert!(
                             args.iter().any(|a| a == flag),
@@ -1199,7 +1407,7 @@ mod tests {
                 ["--bind", dir_s.as_ref(), dir_s.as_ref()],
             ),
         ] {
-            let args = argv(&policy);
+            let args = options_for(&policy);
             assert!(
                 position_of(&args, &["--ro-bind", "/sys", "/sys"]).is_none(),
                 "{label}: the host's /sys must not be bound wholesale: {args:?}"
@@ -1212,7 +1420,7 @@ mod tests {
                 "{label}: the tree goes over the projection's binds: {args:?}"
             );
         }
-        let restricted = argv(&deny_within(&dir, &[]));
+        let restricted = options_for(&deny_within(&dir, &[]));
         assert!(
             position_of(
                 &restricted,
@@ -1225,7 +1433,7 @@ mod tests {
             .is_some(),
             "a program must still count its cpus: {restricted:?}"
         );
-        let shared = argv_on(
+        let shared = options_on(
             HostEnvelope {
                 private_cgroup: false,
                 ..WHOLE
@@ -1240,7 +1448,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What the argv cannot show: that a program inside reads its own limits
+    /// What the options cannot show: that a program inside reads its own limits
     /// where its `/proc/self/cgroup` says they are, and finds no interface
     /// the netns it is in does not have.
     #[test]
@@ -1340,10 +1548,10 @@ mod tests {
                 vec![["--proc", "/proc"], ["--dev", "/dev"], ["--tmpfs", "/tmp"]],
             ),
         ] {
-            let args = argv(&policy);
+            let args = options_for(&policy);
             let at = |piece: &[&str]| {
                 position_of(&args, piece)
-                    .unwrap_or_else(|| panic!("{label}: no {piece:?} in the argv: {args:?}"))
+                    .unwrap_or_else(|| panic!("{label}: no {piece:?} in the options: {args:?}"))
             };
             for bind in &binds {
                 for mount in &fresh {
@@ -1367,7 +1575,7 @@ mod tests {
     /// Its own argv is the slot its options arrive on, then the payload.
     #[test]
     fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
-        let (cmd, _info_fd) = make_command_with_policy(
+        let (cmd, _info_fd) = bwrap_command(
             &stand_in(),
             TRUE,
             &unrestricted(),
@@ -1385,15 +1593,34 @@ mod tests {
         assert_eq!(args, ["--args", "98", "--", "/bin/true"], "{args:?}");
     }
 
+    /// A pin on a handoff slot would be closed by the `dup2` before bwrap's
+    /// exec, which would then run whatever landed there.
+    #[test]
+    fn a_pin_on_a_handoff_slot_is_refused() {
+        use std::os::fd::AsFd;
+        let pin = stand_in();
+        let lent = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let handoff = [(lent.as_fd(), pin.raw_fd())];
+        let payload = Payload {
+            handoff: &handoff,
+            ..TRUE
+        };
+        let Err(e) = bwrap_command(&pin, payload, &unrestricted(), None, Ownership::Kept, WHOLE)
+        else {
+            panic!("a pin on a handoff slot must be refused");
+        };
+        assert!(e.contains(&format!("descriptor {}", pin.raw_fd())), "{e}");
+    }
+
     /// Whatever the projection bound, both files a launch execs go read-only
     /// over it, before the masks.  The two names coincide here, the stand-in
     /// envelope being this test binary.
     #[test]
     fn the_envelope_binary_is_read_only_inside_every_envelope() {
-        crate::sandbox::reexec::register_sandbox_self();
+        crate::sandbox::reexec::pin_self();
         let own = std::fs::canonicalize(stand_in().arg0()).expect("resolve the stand-in");
         let own = own.to_string_lossy().into_owned();
-        let trampoline = crate::sandbox::reexec::SANDBOX_SELF
+        let trampoline = crate::sandbox::reexec::OWN
             .get()
             .expect("ral pins itself")
             .current_path()
@@ -1412,7 +1639,7 @@ mod tests {
                 ["--bind", dir_s.as_ref(), dir_s.as_ref()],
             ),
         ] {
-            let args = argv(&policy);
+            let args = options_for(&policy);
             let bound = position_of(&args, &bind).expect("the projection's bind");
             let mask = position_of(
                 &args,
@@ -1446,8 +1673,8 @@ mod tests {
             net: false,
             exec: crate::types::ExecProjection::default(),
         };
-        let kept = argv_on(WHOLE, &policy, Ownership::Kept);
-        let surrendered = argv_on(WHOLE, &policy, Ownership::Surrendered);
+        let kept = options_on(WHOLE, &policy, Ownership::Kept);
+        let surrendered = options_on(WHOLE, &policy, Ownership::Surrendered);
 
         assert!(
             kept.contains(&"--die-with-parent".to_string()),

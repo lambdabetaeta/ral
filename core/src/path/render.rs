@@ -28,10 +28,10 @@ impl Rendered {
         &self.0
     }
 
-    /// Whether this name is `dir` or lies under it.
+    /// Whether `spelled`, taken as written, is this name or lies under it.
     #[cfg(target_os = "linux")]
-    pub(crate) fn within(&self, dir: &Self) -> bool {
-        super::lex::path_within_str(&self.0, &dir.0)
+    pub(crate) fn holds(&self, spelled: &str) -> bool {
+        super::lex::path_within_str(spelled, &self.0)
     }
 }
 

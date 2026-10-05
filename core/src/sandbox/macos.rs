@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn mac_profile_emits_only_system_base_when_restricted_to_empty() {
-        super::super::reexec::register_sandbox_self();
+        super::super::reexec::pin_self();
         let profile = build_profile(&restricted(FsProjection::default(), Vec::new())).unwrap();
         // An empty rule list still admits the platform base — ral itself —
         // just as an empty fs grant still admits libc and dyld.
@@ -774,8 +774,8 @@ mod tests {
     /// a spelling execve never presents and the ral run inside it cannot
     /// re-exec itself.
     ///
-    /// `register_sandbox_self` pins this test binary, which is the only handle
-    /// on what the profile will name; where that path touches no firmlink and
+    /// `pin_self` pins this test binary, which is the only handle on what the
+    /// profile will name; where that path touches no firmlink and
     /// no symlink its class is a singleton and the loop degenerates to "the
     /// literal is present".  The compile-time guarantee — `escape_path` takes
     /// only [`Rendered`] — is what holds on such a host.
@@ -794,8 +794,8 @@ mod tests {
 
     /// Ral's own spellings, as the profile will name them.
     fn own_names() -> Vec<crate::path::Rendered> {
-        super::super::reexec::register_sandbox_self();
-        let own = super::super::reexec::own().expect("registration pins this test binary");
+        super::super::reexec::pin_self();
+        let own = super::super::reexec::own().expect("pin_self pins this test binary");
         crate::path::render_paths(&[own.exec_path().to_string_lossy()]).unwrap()
     }
 

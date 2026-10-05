@@ -3,6 +3,8 @@
 //! Platform backends (`linux`, `macos`, `windows`), the per-command
 //! launcher (`launch`) and its handoff to a confined re-exec (`warrant`),
 //! binary pinning and re-exec (`reexec`), kernel-denial diagnostics (`diag`).
+//! Every ral-family process starts in [`serve_pre_main`], which lives here
+//! because what it decides is when each role is pinned.
 //!
 //! Exec is checked everywhere by `capability::check_exec`, the in-process guard.
 //! Both Unix backends also render the allow-list into the kernel, catching the
@@ -27,34 +29,11 @@ mod warrant;
 mod windows;
 
 use crate::Invocation;
-use crate::types::{SandboxProjection, Shell};
+use crate::types::SandboxProjection;
 #[cfg(unix)]
 use std::process::Command;
-use std::sync::OnceLock;
 
-/// Host-supplied constructor a re-exec'd child calls to rebuild its
-/// [`HostSurface`](crate::boot::HostSurface): a wire shell cannot carry one across
-/// processes, its entries being function pointers, and `Shell::new` installs
-/// core's manifest alone.  `subprocess::bare_child_shell` runs the hook before
-/// any [`crate::serial::WireDecoder`] is built, so the child's own manifest is
-/// what re-links a captured native's name.
-static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::boot::HostSurface> = OnceLock::new();
-
-/// Register the host's builtin surface for re-exec'd children.  Must be
-/// called before [`early_init`]; subsequent calls are silently ignored.
-pub fn set_child_shell_extension(surface: fn() -> crate::boot::HostSurface) {
-    let _ = CHILD_SHELL_HOOK.set(surface);
-}
-
-/// Test-only: `subprocess::bare_child_shell`'s only caller.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
-    if let Some(surface) = CHILD_SHELL_HOOK.get() {
-        surface().install_into_shell(shell);
-    }
-}
-
-// `runtime::command::process::build_command` routes an external/bundled child
+// `runtime::command::process::build_launch` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
 // already confines it; `serve_warrant` is the trampoline's side, entering the
 // confinement before it becomes the program.
@@ -81,9 +60,10 @@ const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", wi
 // exec-only grant is worth an OS sandbox at all.  Each backend declares its
 // own `RENDERS_EXEC` beside the code that renders it, so a backend gaining
 // exec rendering switches the trigger on there, rather than in a second list
-// here that can be forgotten.  Landlock absent from a running kernel is
-// *not* an exception: the envelope is still built and
-// `linux::landlock::enter` simply has nothing to enter.
+// here that can be forgotten.  Landlock absent from a running kernel leaves
+// the trigger on: `linux::landlock::open_admits` refuses a restricting exec
+// grant there, and only an unrestricted exec projection launches with nothing
+// to enter.
 #[cfg(target_os = "linux")]
 pub(crate) use linux::landlock::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(target_os = "macos")]
@@ -130,7 +110,7 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
     if linux::envelope().is_ok_and(|envelope| envelope.is_inode(&meta)) {
         return Some(linux::BWRAP);
     }
-    reexec::SANDBOX_SELF
+    reexec::OWN
         .get()
         .is_some_and(|own| own.is_inode(&meta))
         .then_some("ral")
@@ -139,15 +119,15 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
 /// The confined re-exec's whole argv, its warrant arriving on a descriptor.
 pub(crate) const WARRANT_FLAG: &str = "--warrant";
 
-/// Debug switch: set to any value to make [`dump_profile_if_requested`] print
-/// the OS-sandbox profile that would be installed.
+/// Debug switch: set to any value to make [`dump_profile`] print the
+/// OS-sandbox profile that would be installed.
 pub(crate) const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
 
 /// Print the OS-sandbox profile for `policy` to stderr when
 /// [`SANDBOX_DUMP_PROFILE_ENV`] is set.
 // A presence probe on a debug switch, not a basedir lookup.
 #[allow(clippy::disallowed_methods)]
-pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
+pub fn dump_profile(policy: &crate::types::SandboxProjection) {
     if std::env::var_os(SANDBOX_DUMP_PROFILE_ENV).is_none() {
         return;
     }
@@ -176,14 +156,18 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             image: None,
             handoff: &[],
         };
-        match linux::bwrap_argv(
-            envelope,
-            payload,
-            policy,
-            None,
-            launch::Ownership::Kept,
-            host,
-        ) {
+        let options = linux::seccomp_programs().and_then(|seccomp| {
+            linux::bwrap_options(
+                envelope,
+                payload,
+                policy,
+                &seccomp,
+                None,
+                launch::Ownership::Kept,
+                host,
+            )
+        });
+        match options {
             Ok(options) => {
                 let options: Vec<_> = options.iter().map(|arg| arg.to_string_lossy()).collect();
                 eprint!(
@@ -222,9 +206,8 @@ pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 
 /// Assign OS-level resource limits to an already-spawned child.
 ///
-/// Windows only: `pre_exec` does not exist there, so a Job Object caps the tree
-/// at `ACTIVE_PROCESS_CAP` after the spawn.  On Unix `apply_resource_limits`
-/// set them before exec, and this is a no-op.
+/// Windows only: a Job Object caps the tree at `ACTIVE_PROCESS_CAP` after the
+/// spawn.  On Unix `forbid_core_dumps` ran before exec, and this is a no-op.
 #[cfg_attr(
     not(windows),
     allow(
@@ -252,6 +235,7 @@ pub(crate) fn apply_child_limits(child: &crate::process::ChildHandle) {
 )]
 pub fn restricted_envelope_launches() -> bool {
     use crate::types::{FsProjection, FsRules};
+    use std::sync::OnceLock;
     static LAUNCHES: OnceLock<bool> = OnceLock::new();
     *LAUNCHES.get_or_init(|| {
         let projection = SandboxProjection {
@@ -259,11 +243,11 @@ pub fn restricted_envelope_launches() -> bool {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        linux::register_envelope();
+        linux::pin_envelope();
         let Ok(envelope) = linux::envelope() else {
             return false;
         };
-        linux::make_command_with_policy(
+        linux::bwrap_command(
             envelope,
             linux::Payload {
                 program: "/bin/true",
@@ -312,13 +296,6 @@ pub(crate) fn apply_child_limits_in_pipeline(
     }
 }
 
-/// Pin this executable for a role served before [`early_init`] — the pipeline
-/// anchor and the engine — whose sandboxed launches need ral pinned.
-#[cfg(unix)]
-pub fn register_self_for_helpers() {
-    reexec::register_sandbox_self();
-}
-
 /// Re-exec the current ral binary, preferring the pinned self-path so helpers
 /// stay bound to the boot-time build even if the on-disk path is swapped.
 #[cfg(unix)]
@@ -327,7 +304,7 @@ pub fn register_self_for_helpers() {
     reason = "[silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline anchor, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
 pub(crate) fn self_command() -> std::io::Result<Command> {
-    if let Some(s) = reexec::SANDBOX_SELF.get() {
+    if let Some(s) = reexec::OWN.get() {
         return Ok(s.command());
     }
     let exe = std::env::current_exe()?;
@@ -343,20 +320,16 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
         reason = "only Windows asks whether this is a re-exec child"
     )
 )]
-pub fn early_init(role: &Invocation<'_>) {
-    reexec::register_sandbox_self();
+pub(crate) fn boot(role: &Invocation<'_>) {
+    reexec::pin_self();
     #[cfg(target_os = "linux")]
-    linux::register_envelope();
+    linux::pin_envelope();
     // Reclaim what a crashed prior session left registered — its AppContainer
     // profiles, and any per-session grant ACEs a pre-capability ledger still
-    // records.  Only a primary
-    // session sweeps: a confined re-exec child could not reach the ledger from
-    // inside its AppContainer anyway.
+    // records.  Only a primary session sweeps: a confined re-exec child could
+    // not reach the ledger from inside its AppContainer anyway.
     #[cfg(windows)]
-    if !matches!(
-        role,
-        Invocation::BundledTool(_) | Invocation::PipelineAnchor
-    ) {
+    if !matches!(role, Invocation::BundledTool(_)) {
         windows::session::boot_recover();
     }
 }
@@ -367,40 +340,64 @@ pub fn early_init(role: &Invocation<'_>) {
 /// Windows only, and idempotent, so the portable shutdown seams that call it
 /// (`ral`'s `Drop for Session`, `exarch`'s `main`) cost nothing elsewhere.  A
 /// session that never reaches the seam leaves its DACL ledger for the next
-/// start's boot sweep in [`early_init`] to reclaim.
+/// start's [`boot`] to sweep.
 pub fn teardown_session() {
     #[cfg(windows)]
     windows::session::teardown();
 }
 
-/// The whole pre-`main` sandbox stage as one `Option<u8>`, for `ral`, exarch
-/// and the test ctors, over the role [`classify`](crate::classify) named.
+/// Serve the role [`classify`](crate::classify) named: the one pre-`main`
+/// dispatch, for `ral`, exarch and the test ctors alike.
 ///
-/// A confined re-exec child is served first, and by [`serve_warrant`] alone:
-/// [`early_init`] opens pins its confinement would hand the target.  Any other
-/// role runs [`early_init`], and the `--ral-bundled-tool` multicall is then
-/// served.
-pub fn serve_sandbox_early_init(role: &Invocation<'_>) -> Option<u8> {
-    if let Invocation::Warrant(extra) = role {
-        return Some(serve_warrant(extra));
-    }
-    early_init(role);
-    match role {
-        Invocation::BundledTool(args) => {
-            Some(crate::runtime::pipeline::helper::serve_bundled_tool(args))
+/// `Some(code)` is a served role's exit; `None` leaves the process, pinned, to
+/// its caller — the shell, or a test binary's own fixture.
+///
+/// The order is the sandbox's.  A confined re-exec is served by
+/// [`serve_warrant`] alone, pinning and opening nothing before it is confined;
+/// the anchor and the pgid probe spawn nothing, so pin nothing.  Every other
+/// role boots first, the engine included: its grant-confined launches need
+/// the pinned envelope as much as the shell's.
+#[cfg_attr(
+    not(unix),
+    allow(unused_variables, reason = "only a Unix engine reads its installers")
+)]
+pub fn serve_pre_main(
+    role: &Invocation<'_>,
+    installers: &'static [crate::engine::EngineInstaller],
+) -> Option<u8> {
+    use crate::runtime::pipeline::helper::{serve_anchor, serve_bundled_tool};
+    match *role {
+        Invocation::Warrant(extra) => Some(serve_warrant(extra)),
+        Invocation::PipelineAnchor => Some(serve_anchor()),
+        #[cfg(unix)]
+        Invocation::PgidCheck { tag } => Some(crate::test_helper::serve_pgid_check(tag)),
+        #[cfg(unix)]
+        Invocation::Engine => {
+            boot(role);
+            crate::engine::run_engine(installers)
         }
-        _ => None,
+        Invocation::BundledTool(args) => {
+            boot(role);
+            Some(serve_bundled_tool(args))
+        }
+        #[cfg(unix)]
+        Invocation::DetachBirth { .. } => {
+            boot(role);
+            None
+        }
+        Invocation::Shell => {
+            boot(role);
+            None
+        }
     }
 }
 
-/// Install `pre_exec` hooks: no core dumps anywhere, plus a 512-process
-/// `RLIMIT_NPROC` cap off macOS as fork-bomb mitigation.  Darwin counts
-/// `RLIMIT_NPROC` against the whole real UID rather than the sandboxed subtree,
-/// so lowering it there starves a busy desktop session of spawn slots
-/// (`EAGAIN`); Seatbelt still gates `process-fork`, so macOS waits for a
-/// subtree-scoped mechanism.
+/// Forbid `cmd`'s child core dumps: a `pre_exec` hook zeroes `RLIMIT_CORE`.
+/// No process cap: `RLIMIT_NPROC` counts every task of the real UID, not the
+/// confined subtree, so any cap low enough to stop a fork bomb starves a busy
+/// desktop session of spawn slots (`EAGAIN`).
 #[cfg(unix)]
-pub(crate) fn apply_resource_limits(cmd: &mut Command) {
+pub(crate) fn forbid_core_dumps(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {
@@ -409,14 +406,6 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
                 rlim_max: 0,
             };
             libc::setrlimit(libc::RLIMIT_CORE, &raw const zero);
-            #[cfg(not(target_os = "macos"))]
-            {
-                let nproc = libc::rlimit {
-                    rlim_cur: 512,
-                    rlim_max: 512,
-                };
-                libc::setrlimit(libc::RLIMIT_NPROC, &raw const nproc);
-            }
             Ok(())
         });
     }

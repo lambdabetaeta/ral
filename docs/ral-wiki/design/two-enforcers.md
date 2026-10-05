@@ -89,7 +89,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which path may be `execve`d (not which code runs) | Landlock `Execute` ruleset | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — which subcommand, and a deny inside an allowed directory | in-process guard | the guard stands alone |
-| die with parent, new session, no core, nproc cap, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
+| die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | reported: the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |

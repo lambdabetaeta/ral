@@ -127,7 +127,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/diag/linux.rs", "silent:journal-read"),
     ("core/src/sandbox/diag/macos.rs", "silent:log-show"),
     ("core/src/sandbox/linux.rs", "silent:own-cgroup"),
-    ("core/src/sandbox/linux.rs", "surface:bwrap-launch"),
     ("core/src/sandbox/linux/host.rs", "silent:bwrap-host-probe"),
     ("core/src/sandbox/reexec.rs", "silent:pin-locate"),
     ("core/src/sandbox/reexec.rs", "silent:pin-open"),

@@ -23,47 +23,58 @@ its work.
 ## Pre-`main` dispatch
 
 **One pure classifier names the hidden role a process was started for, and
-every entry point `match`es on its answer.** `ral_core::classify(argv)`
+one dispatch serves it.** `ral_core::classify(argv)`
 (`core/src/invocation.rs`) reads the first argument alone and returns an
 `Invocation`: `Engine`, `PipelineAnchor`, `PgidCheck`, `DetachBirth`,
 `Warrant`, `BundledTool`, or `Shell`. Flag precedence and disjointness live
 there and nowhere else — a flag a script was given, or a tool's own `--engine`,
-names no role. `ral`'s `identify`, `exarch::dispatch_pre_main` and the test
-helper `#[ctor]` each match on it. Before argv is parsed, `main` refuses to run
-setuid — the shell inherits the caller's environment and must not run
-elevated, and neither must any re-exec child, so the refusal precedes the whole
-chain — and restores the Unix signal dispositions. Then, per role:
+names no role. `ral_core::sandbox::serve_pre_main(&role, installers)` is the
+one place a role is served: `ral`'s `identify`, `exarch::dispatch_pre_main`
+and the test helper `#[ctor]` each hand it the role and their own engine
+installers, and differ only in what they do with its `Option<u8>`. It lives
+in `sandbox` because what it decides is when each role is pinned. Before argv
+is parsed, `main` refuses to run setuid — the shell inherits the caller's
+environment and must not run elevated, and neither must any re-exec child, so
+the refusal precedes the whole chain — and restores the Unix signal
+dispositions. Then, per role:
 
-- **Engine** (Unix) — pins ral (`register_self_for_helpers`) and hands the
-  process to `ral_core::engine::run_engine(&engine::INSTALLERS)`, so a
-  wire-engine child boots through the very recipes the in-process front-ends
-  boot through. `startup::engine::INSTALLERS` holds two `EngineInstaller`s:
-  `repl` (`boot_repl` over the REPL surface, decoding `Attach.config` as
-  `ReplConfig {login}`) and `batch` (`boot_batch` over the batch surface,
-  decoding `BatchConfig {args}`), each registering the boot door. Both share
-  one grant policy, a refusal (`no_seeded_children`), because the shell spawns
-  no child engines and has no base-tag lexicon to resolve a grant against.
-- **Pipeline anchor** — `serve_pipeline_anchor` (`--ral-pipeline-anchor`, the
+- **Confined child** (`Warrant`) — served by `serve_warrant` alone, before any
+  pin, so the child pins and opens nothing before it is confined.
+  `ral --warrant` is the whole argv of a confined re-exec: the child takes its
+  warrant off fd 99, enters the OS [[map/core/capabilities|sandbox]], and only
+  then `execve`s the host program or runs the bundled tool in-process. Windows
+  refuses it.
+- **Pipeline anchor** — `serve_anchor` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
-  open for its whole life). **Test probes** (`PgidCheck`, `DetachBirth`) are
-  served by `test_helper`, `serve_pgid_check` and `serve_detach_birth`.
-- **Everything else** goes to `ral_core::sandbox::serve_sandbox_early_init`,
-  which serves a **confined child** (`Warrant`) first, by `serve_warrant`
-  alone, before `early_init`, so the child pins and opens nothing before it is
-  confined. `ral --warrant` is the whole argv of a confined re-exec: the child
-  takes its warrant off fd 99, enters the OS
-  [[map/core/capabilities|sandbox]], and only then `execve`s the host program
-  or runs the bundled tool in-process. Windows refuses it. Any other role runs
-  `early_init`, which pins the binary (and, on Linux, bwrap) and does nothing
-  else, and a **bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool>
-  …`) then runs the bundled coreutils/ripgrep image in-process, under whatever
-  sandbox the process already inherited. A bundled tool runs as an external
-  child whenever process semantics are required
-  ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
-  and each external child launches under the effective policy
-  ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-  `None` leaves a `Shell`.
+  open for its whole life). **Pgid probe** (`PgidCheck`, Unix) —
+  `test_helper::serve_pgid_check`, served by every binary, since the tests
+  spawn a real `ral` as a pipeline stage. Neither spawns anything, so neither
+  is pinned.
+- **Every other role** runs `sandbox::boot` first, which pins the binary (and, on
+  Linux, bwrap) and, on Windows, sweeps what a crashed prior session left registered.
+  - **Engine** (Unix) — then hands the process to
+    `ral_core::engine::run_engine(installers)`, pinned exactly as the shell
+    is: its grant-confined launches need the envelope as much as the shell's.
+    `ral` passes `startup::engine::INSTALLERS`, so a wire-engine child boots
+    through the very recipes the in-process front-ends boot through. The table
+    holds two `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface,
+    decoding `Attach.config` as `ReplConfig {login}`) and `batch`
+    (`boot_batch` over the batch surface, decoding `BatchConfig {args}`), each
+    registering the boot door. Both share one grant policy, a refusal
+    (`no_seeded_children`), because the shell spawns no child engines and has
+    no base-tag lexicon to resolve a grant against.
+  - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
+    then runs the bundled coreutils/ripgrep image in-process, under whatever
+    sandbox the process already inherited. A bundled tool runs as an external
+    child whenever process semantics are required
+    ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
+    and each external child launches under the effective policy
+    ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
+  - **Shell** — `None`, and `identify` answers `Shell(Mode)`. The test-only
+    `DetachBirth` is `None` too: the test helper, which passes no engine
+    installers, serves that fixture itself (`serve_detach_birth`) once the
+    dispatch has pinned it.
 
 The roles that are not the shell exit here, never reaching clap.
 

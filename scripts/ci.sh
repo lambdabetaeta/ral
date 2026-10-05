@@ -35,9 +35,9 @@ cd "$(dirname "$0")/.."
 # inside the container in linux-box mode — reports the platform cargo actually
 # targets, so no second rule here has to predict it.
 
-# Docker, not podman: docker is rootful, so --privileged is real host
-# privilege.  Rootless podman's is namespace-root only, and the envelope tests
-# then exercise their fallback arm, never the namespace.
+# The docker CLI, whatever engine answers its socket.  --privileged is real
+# host privilege only under a rootful engine; a rootless podman machine gives
+# namespace-root, and the envelope tests then take their fallback arm.
 if [ "$MODE" = linux-box ]; then
     command -v docker >/dev/null 2>&1 || {
         echo 'ci.sh: linux-box needs docker on PATH' >&2

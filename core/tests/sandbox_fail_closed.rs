@@ -2,13 +2,13 @@
 
 //! Fail-closed at **external dispatch**: a grant body evaluates in process,
 //! and what confines the commands it spawns is the per-command launcher
-//! (`runtime::command::process::build_command`), so a child writing outside
+//! (`runtime::command::process::build_launch`), so a child writing outside
 //! the grant is held by Seatbelt at spawn.  Each test pairs a positive control
 //! (a write inside the grant lands) with a denial (one outside never appears);
 //! the control is load-bearing — a blanket deny would fail it, a disabled
 //! sandbox would let the denied write land.
 //!
-//! Imports `common` for its `#[ctor]`, which runs `serve_sandbox_early_init`
+//! Imports `common` for its `#[ctor]`, which runs `serve_pre_main`
 //! so the re-exec child enters Seatbelt and `execve`s the target rather than
 //! landing in libtest and dying on `--warrant` — a failure for the
 //! wrong reason.  macOS-only: the one backend that confines an in-tree re-exec

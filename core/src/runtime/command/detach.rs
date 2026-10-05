@@ -18,7 +18,7 @@ use crate::process::StdioSpec;
 use crate::types::{AuditIo, CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
 use super::head::Head;
-use super::process::build_command;
+use super::process::build_launch;
 use super::vet::vet;
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
@@ -100,7 +100,7 @@ pub(crate) fn detach(
     // one moment it still can — and the abandoned launch's reservation, still
     // uncommitted, gives the slot straight back. Only a spawned survivor ever
     // spends one.
-    let mut launch = build_command(
+    let mut launch = build_launch(
         &plan,
         crate::sandbox::Ownership::Surrendered,
         shell,

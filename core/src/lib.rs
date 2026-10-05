@@ -63,7 +63,6 @@ pub use run::{
     Captured, Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
     StaticDiagnostics,
 };
-pub use runtime::pipeline::helper::serve_pipeline_anchor;
 pub use spawn_grant::SpawnGrant;
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{

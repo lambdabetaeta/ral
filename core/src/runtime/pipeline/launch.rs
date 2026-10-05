@@ -148,7 +148,7 @@ fn launch_external_stage_direct(
     slot: &Slot,
 ) -> Settled<ExternalStage> {
     let rc = command::vet(head, args, cx.shell)?;
-    let mut cmd = command::build_command(
+    let mut cmd = command::build_launch(
         &rc,
         crate::sandbox::Ownership::Kept,
         cx.shell,

@@ -13,7 +13,7 @@ use super::vet::SpawnPlan;
 ///
 /// `ownership` reaches only the Linux bwrap backend, which ties the envelope
 /// to this process's death unless the child is being surrendered.
-pub(crate) fn build_command(
+pub(crate) fn build_launch(
     plan: &SpawnPlan,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
@@ -54,7 +54,7 @@ pub(crate) fn build_command(
     apply_env(&mut cmd, shell);
     #[cfg(unix)]
     if shell.has_active_capabilities() {
-        cmd.apply_unix_resource_limits();
+        cmd.forbid_core_dumps();
     }
     #[cfg(target_os = "linux")]
     if let Some(jail) = jail {
