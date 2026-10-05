@@ -42,7 +42,7 @@ fn repl(args: &[&str], envs: &[(&str, PathBuf)], input: &str) -> Output {
     }
 }
 
-/// A temp `$XDG_CONFIG_HOME` holding `ral/rc`, beside an empty `$HOME`, so a
+/// A temp `XDG_CONFIG_HOME` holding `ral/rc`, beside an empty `HOME`, so a
 /// spawned session discovers exactly this rc and no profile of the real user.
 /// The returned directory must outlive the run.
 fn rc_home(rc: &str) -> (TempDir, Vec<(&'static str, PathBuf)>) {
@@ -56,7 +56,7 @@ fn rc_home(rc: &str) -> (TempDir, Vec<(&'static str, PathBuf)>) {
 
 // ── The rc file reaches the session ────────────────────────────────────────
 
-/// An rc under `$XDG_CONFIG_HOME/ral/rc` is found, evaluated, and every part
+/// An rc under `XDG_CONFIG_HOME/ral/rc` is found, evaluated, and every part
 /// of it observed: the startup block runs, the bindings are in scope, and the
 /// theme's `value_prefix` is what the printer uses.  `--norc` on the identical
 /// invocation suppresses all of it — which is what proves the first half came
@@ -297,7 +297,7 @@ fn an_alias_ending_in_cd_installs_with_no_trailing_write() {
     );
     assert!(
         marker.exists(),
-        "the alias must actually have run `cd ~`, landing `touch` in $HOME"
+        "the alias must actually have run `cd ~`, landing `touch` in the home directory"
     );
     drop(dir);
 }
@@ -320,7 +320,7 @@ fn an_alias_whose_if_join_is_all_value_still_installs() {
     );
     assert!(
         marker.exists(),
-        "the alias must actually have run `cd ~`, landing `touch` in $HOME"
+        "the alias must actually have run `cd ~`, landing `touch` in the home directory"
     );
     drop(dir);
 }

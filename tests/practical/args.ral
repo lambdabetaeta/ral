@@ -1,14 +1,14 @@
 #!/usr/bin/env ral
 
-# Test: script arguments via $ARGS
+# Test: script arguments via args
 
-let [name, ...rest] = $ARGS
+let [name, ...rest] = args
 
 echo "hello, $name"
 
 if $[!{length $rest} > 0] {
-    echo "extra args: $rest"
-} {}
+    echo "extra args: !{intercalate ', ' $rest}"
+}
 
 # Run as:
 #   ral tests/practical/args.ral world
@@ -16,4 +16,4 @@ if $[!{length $rest} > 0] {
 #
 #   ral tests/practical/args.ral world foo bar
 #   Expected: hello, world
-#             extra args: [foo, bar]
+#             extra args: foo, bar

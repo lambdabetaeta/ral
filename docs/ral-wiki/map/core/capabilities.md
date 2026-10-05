@@ -164,7 +164,7 @@ private to `resolved.rs`, and outside the module the surface leaves the type
 only as a *string* (`as_str`, `into_string`) for rendering. That is enforced
 rather than documented because the `xdg:` freeze guard once chose the form for
 itself — asking on the surface while the check it guarded matched the resolved
-form — and read a symlink out of `$HOME` as contained.
+form — and read a symlink out of `HOME` as contained.
 
 `prefix_set.rs` therefore contributes only the *set*-level algebra, pure and
 disk-free: `covers` is the one *fs* containment judgment, keyed on
@@ -177,7 +177,7 @@ carries an allow beneath a deny. `PrefixSet::resolve` is the lone door here that
 never frozen (a `~`-headed fs prefix).
 
 XDG base directories resolve through one resolver, `basedir.rs`
-(`XdgKind`, `resolve_xdg`): an absolute `$XDG_*_HOME` override else the
+(`XdgKind`, `resolve_xdg`): an absolute `XDG_*_HOME` override else the
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
 rather than inheriting a fabricated home (the Windows sandbox ledger takes the

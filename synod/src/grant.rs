@@ -8,7 +8,7 @@
 //! is reading the entire answer to "what can synod touch?".
 //!
 //! The answer is deliberately small.  The grant is *topology as policy* —
-//! credentials, `$HOME`, and the user's other folders are out of reach by
+//! credentials, `HOME`, and the user's other folders are out of reach by
 //! absence, not by a rule that could be argued with.  The network is the
 //! one axis topology cannot settle alone: the guest has a wire, and what
 //! it may say on it is a host-side allowlist, checked one layer out from
@@ -615,7 +615,7 @@ mod tests {
     }
 
     /// The home folder, and anything containing it, are one law: a grant
-    /// must not contain the user's home.  Uses the real `$HOME` rather
+    /// must not contain the user's home.  Uses the real `HOME` rather
     /// than a synthetic one, so no test has to mutate the environment.
     #[test]
     fn the_home_folder_and_its_parents_are_refused() {
@@ -624,12 +624,12 @@ mod tests {
         };
         assert!(
             refusal(&home).contains("your whole home folder"),
-            "granting $HOME should be refused"
+            "granting HOME should be refused"
         );
         if let Some(parent) = home.parent().filter(|p| p.parent().is_some()) {
             assert!(
                 refusal(parent).contains("contains your home folder"),
-                "granting a folder above $HOME should be refused"
+                "granting a folder above HOME should be refused"
             );
         }
     }
@@ -921,7 +921,7 @@ mod tests {
             let path = sh.resolve(&format!("{home}/.ssh/id_ed25519"));
             assert!(
                 sh.check_fs_read(&path).is_err(),
-                "the office grant must not reach into $HOME"
+                "the office grant must not reach into HOME"
             );
         });
     }

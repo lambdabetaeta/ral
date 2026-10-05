@@ -5,7 +5,7 @@
 # `--preserve-status` only moves the collision to 143.  Racing the job against
 # a sleeper makes the deadline a value, `expired, that no exit code can forge.
 
-let [secs, target] = $ARGS
+let [secs, target] = args
 
 let job = watch "tests" { within [dir: $target] { ./run-tests } ; return `finished }
 let alarm = spawn { sleep !{int $secs} ; return `expired }

@@ -105,7 +105,7 @@ USAGE
     ral -i              force the interactive REPL
 
 SCRIPT ARGUMENTS
-    Arguments after <script> or <code> are available as $ARGS. Script files \
+    Arguments after <script> or <code> are available through `args`. Script files \
 also bind $SCRIPT to the script path; -c and the REPL leave $SCRIPT unbound.
 
 STARTUP FILES
@@ -192,8 +192,8 @@ struct Cli {
 
     /// Run the next argument as ral source code.
     ///
-    /// Ral puts every later argument in `$ARGS`, even when it starts with a
-    /// hyphen. For example, `ral -c 'show $ARGS' one two` runs the given source
+    /// Ral puts every later argument in `args`, even when it starts with a
+    /// hyphen. For example, `ral -c 'show !{args}' one two` runs the given source
     /// with `one` and `two` as its arguments. Inline code does not bind
     /// `$SCRIPT`.
     #[arg(short = 'c')]
@@ -242,8 +242,8 @@ struct Cli {
     /// Give ral a script or the arguments that follow `-c`.
     ///
     /// Without `-c`, the first ARG is the script path and the remaining values
-    /// become `$ARGS`; ral also binds `$SCRIPT` to the path. With `-c`, the
-    /// first ARG is source code and the remaining values become `$ARGS`. Use
+    /// become `args`; ral also binds `$SCRIPT` to the path. With `-c`, the
+    /// first ARG is source code and the remaining values become `args`. Use
     /// `--` before a script path that starts with a hyphen.
     #[arg(last = true, value_name = "ARG")]
     rest: Vec<String>,

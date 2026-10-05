@@ -12,7 +12,7 @@ let repo_root = resolve-path "$here/../.."
 
 cargo install --force --path "$repo_root/exarch" 
 
-let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "~/.cargo" }
+let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let exarch_bin    = "$cargo_home/bin/exarch"
 let kernel     = uname -s
 

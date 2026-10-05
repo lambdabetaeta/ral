@@ -13,8 +13,7 @@ use super::ty::{CompTy, Grade, Label, Producer, Row, Ty};
 use super::unify::WeakSource;
 use crate::ir::{
     Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec, GroupNode,
-    IrPattern, Name, Phrase, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry,
-    is_gensym,
+    IrPattern, Name, Phrase, Toplevel, Val, ValListElem, ValMapEntry, ValRecordEntry, is_gensym,
 };
 use crate::source::Span;
 use crate::source::Spanned;
@@ -1964,12 +1963,7 @@ impl Inferencer<'_> {
             }
             CompKind::Index { target, keys } => self.infer_index(target, keys),
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
-            CompKind::Observe(reg) => CompTy::pure(match reg {
-                Register::Cwd | Register::User | Register::Tilde(_) => Ty::String,
-                Register::Args => Ty::List(Box::new(Ty::String)),
-                Register::Nproc => Ty::Int,
-                Register::Env => Ty::Map(Box::new(Ty::String)),
-            }),
+            CompKind::Tilde(_) => CompTy::pure(Ty::String),
             CompKind::If { cond, then, else_ } => {
                 let cond_ty = self.infer_val(&cond.item);
                 // Underline just the cond, not the whole `if … else …` form.

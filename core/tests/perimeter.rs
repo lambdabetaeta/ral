@@ -8,7 +8,7 @@
 //! of programs that put every boundary under a `let`, a lambda, a recursive
 //! function and a reference.
 //!
-//! The enumeration of tables is not the whole perimeter: `$ENV` (typed
+//! The enumeration of tables is not the whole perimeter: `env` (typed
 //! `Map String`) and a bound head that is not a block (`HeadBoundToValue`) were
 //! casts in term rules, and `tests/reject` pins both.
 

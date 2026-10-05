@@ -5,7 +5,7 @@
 # a fixed early column and the mount tail is rejoined intact, so a spaced
 # path survives whole.
 
-let [pct] = $ARGS
+let [pct] = args
 let threshold = int $pct
 
 let rows = drop 1 !{df -P | from-lines}

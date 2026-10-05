@@ -1,0 +1,2 @@
+# contains: names the file being compiled, not a name you can bind
+let SCRIPT = 1

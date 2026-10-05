@@ -9,9 +9,9 @@
 #   aliases   — Map of name → command aliases
 #   edit_mode — String: emacs (default) or vi
 #
-# The following variables are available inside a prompt block:
-#   $USER    — current username
-#   $CWD     — current working directory (~ substituted for home)
+# The following builtins are available inside a prompt block:
+#   user     — current username
+#   cwd      — current working directory
 
 # ANSI escape sequences for prompt colouring.
 let red   = "\e[31m"
@@ -34,11 +34,11 @@ return [
         proj: ~/src/project,
     ],
 
-    # Prompt block.  Return a string; $USER and $CWD are in scope.
+    # Prompt block.  Return a string; `user` and `cwd` are in scope.
     prompt: {
         let lbracket = '['
         let rbracket = ']'
-        return "$red$lbracket $USER $rbracket$reset $blue$CWD$reset $ "
+        return "$red$lbracket !{user} $rbracket$reset $blue!{cwd}$reset $ "
     },
 
     # Aliases expand before external-command lookup.

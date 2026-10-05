@@ -5,7 +5,7 @@
 # Here `from-csv` decodes RFC 4180, so the quoted comma stays one field and the
 # columns are picked by name out of the typed records.
 
-let [path, ...cols] = $ARGS
+let [path, ...cols] = args
 
 let rows = from-csv < $path
 

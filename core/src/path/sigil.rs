@@ -6,7 +6,7 @@
 //!
 //! `~` and `xdg:` expand both at runtime (stage 1 of [`crate::path::Resolver`])
 //! and at policy freeze; the other three are freeze-only, and resolve exactly
-//! once, so a later `chdir` or `$TMPDIR` change cannot retroactively widen a
+//! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
 //! grant.  XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::path::basedir`]); `gitdir:` follows a worktree `.git` pointer via
 //! [`crate::path::discover_git_dir`] — only as far as a git directory that
@@ -79,7 +79,7 @@ pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
         };
     }
     if let Some(t) = TildePath::parse(input) {
-        return t.expand(home).unwrap_or_else(|| input.to_string());
+        return home.map_or_else(|| input.to_string(), |home| t.expand(home));
     }
     input.to_string()
 }
@@ -129,15 +129,15 @@ pub fn freeze_path_list(
 /// frozen entry is sigil-free and in the normal form the in-process guard matches against.
 ///
 /// Two sigils read a source the session does not own, and each guards it in the
-/// terms of what would otherwise author the grant: an `$XDG_*_HOME` must land
+/// terms of what would otherwise author the grant: an `XDG_*_HOME` must land
 /// under `home` ([`resolve_xdg_safe`]), and a `.git` pointer file must be
 /// answered by a git directory that claims the working tree
 /// ([`crate::path::discover_git_dir`]).  `tempdir:` alone trusts its source as
-/// given, `$TMPDIR` being the launching user's to set.
+/// given, `TMPDIR` being the launching user's to set.
 ///
 /// # Errors
-/// An unknown `xdg:` token, an `xdg:` path that escapes `$HOME` once folded, an
-/// unset `$HOME` under a home-relative sigil (`~`, `xdg:`), or a `.git` pointer
+/// An unknown `xdg:` token, an `xdg:` path that escapes `HOME` once folded, an
+/// unset `HOME` under a home-relative sigil (`~`, `xdg:`), or a `.git` pointer
 /// no git directory claims.
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
@@ -157,15 +157,16 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
         return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {
-        let expanded = t
-            .expand(ctx.home())
+        let expanded = ctx
+            .home()
+            .map(|home| t.expand(home))
             .ok_or_else(|| PolicyError::new(home_unknown_message()))?;
         return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
     }
     Ok(NormalizedPrefix::freeze(Path::new(entry)))
 }
 
-/// The one answer for a home-relative sigil where nothing binds `$HOME`: `~`
+/// The one answer for a home-relative sigil where nothing binds `HOME`: `~`
 /// and `xdg:` fail for the same reason and take the same two fixes.
 fn home_unknown_message() -> String {
     "HOME is unset, so `~/...` and `xdg:...` tokens in the policy \
@@ -206,12 +207,12 @@ fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
 /// objects — so the freeze guard and the fs guard cannot disagree.  Both
 /// sides are folded and canonicalised: `xdg:config/../../etc` collapses to
 /// `/etc` rather than stepping over the guard and collapsing at match time, a
-/// `$XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a
+/// `XDG_*_HOME` pointing *through* a symlink is judged where it lands, and a
 /// HOME that is itself a symlink (macOS `/home`) still contains its own
 /// subdirectories.
 ///
 /// That guard is stated in `home`'s terms, so an unknown home leaves an
-/// `xdg:` grant unanswerable — an absolute `$XDG_*_HOME` included, since there
+/// `xdg:` grant unanswerable — an absolute `XDG_*_HOME` included, since there
 /// would then be nothing to contain it.
 #[allow(clippy::disallowed_methods)]
 fn resolve_xdg_safe(
@@ -366,7 +367,7 @@ mod tests {
         }
     }
 
-    /// A context where nothing binds `$HOME` — the shape every home-relative
+    /// A context where nothing binds `HOME` — the shape every home-relative
     /// sigil must refuse.
     fn homeless_ctx(cwd: &Path) -> FreezeCtx<'_> {
         FreezeCtx { home: None, cwd }
@@ -398,7 +399,7 @@ mod tests {
             &ctx("/h", Path::new("/cwd")),
         )
         .unwrap();
-        // macOS `$TMPDIR` ends in `/`, which folding strips — so compare
+        // macOS `TMPDIR` ends in `/`, which folding strips — so compare
         // against the same kernel rather than a literal.
         let temp = std::env::temp_dir();
         let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
@@ -430,7 +431,7 @@ mod tests {
         assert!(err.contains("outside HOME"), "{err}");
     }
 
-    /// The escape the surface form hides: `$XDG_DATA_HOME` naming a link
+    /// The escape the surface form hides: `XDG_DATA_HOME` naming a link
     /// *inside* HOME whose target is outside it.  The fs guard matches the
     /// symlink-followed form, so the freeze guard must ask it there too.
     // Unix-only: `std::os::unix::fs::symlink`, and `/etc` is a Unix root.
@@ -535,7 +536,7 @@ mod tests {
         assert_eq!(expand_path_prefix("~/foo", Some("/h")), "/h/foo");
     }
 
-    /// A home-relative sigil has no answer where nothing binds `$HOME`.  The
+    /// A home-relative sigil has no answer where nothing binds `HOME`.  The
     /// freeze refuses and says which env var is missing; the runtime twin
     /// passes the entry through literally, a prefix matching nothing being the
     /// fail-closed reading on that side.  Neither fabricates `/.gitconfig`.
@@ -568,7 +569,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn xdg_subpath_is_appended() {
-        // Only the tail is asserted: the base moves with `$XDG_CACHE_HOME`.
+        // Only the tail is asserted: the base moves with `XDG_CACHE_HOME`.
         let out = expand_path_prefix("xdg:cache/foo", Some("/h"));
         assert!(out.ends_with("/foo"), "got {out}");
     }

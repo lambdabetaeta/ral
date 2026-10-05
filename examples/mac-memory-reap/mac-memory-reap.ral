@@ -5,7 +5,7 @@
 # count, kill and check are three matchers.  Hardening means a pid census in
 # awk, killed by pid, recalled every time; ral counts and kills one typed list.
 
-if !{is-empty $ARGS} {
+if !{is-empty !{args}} {
     warn 'usage: mac-memory-reap.ral APP...'
     exit 2
 }
@@ -39,7 +39,7 @@ let snapshot = !$census
 let counted = !{map { |app|
     let procs = matching $snapshot $app
     return [app: $app, procs: $procs, kb: !{sum !{map { |p| $p[rss] } $procs}}]
-} $ARGS}
+} !{args}}
 
 for $counted { |c| echo "$c[app]: !{length $c[procs]} procs, $[$c[kb] / 1024] MB" }
 

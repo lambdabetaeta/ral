@@ -1,7 +1,7 @@
-# Test: $ENV, within [env:]
+# Test: env, within [env:]
 
 # Read environment
-echo $ENV[HOME]
+echo !{env}[HOME]
 # Expected: user's home directory
 
 # within [env:] scoped override

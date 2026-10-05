@@ -198,7 +198,7 @@ fn prove_the_host_can_dial_in(
     transport.attach(Attach::new(
         INSTALLER_TAG,
         workspace,
-        // The guest's own tmpfs, as every seat on this wire uses for `$HOME`.
+        // The guest's own tmpfs, as every seat on this wire uses for `HOME`.
         std::path::PathBuf::from("/tmp"),
     ));
     if let Err(severed) = transport.await_attached() {

@@ -24,7 +24,7 @@ if $[!{is-file '/bin/sh'}] {
     cargo +stable install --force --locked --path ral-sh
 }
 
-let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "~/.cargo" }
+let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"
 let kernel     = uname -s
 

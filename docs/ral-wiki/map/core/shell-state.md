@@ -350,7 +350,7 @@ Methods on `Shell` live by concern, one submodule each:
 
 - `init.rs` — construction, the startup env-var seeding pass into
   `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]),
-  and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into `$env`;
+  and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into the environment (`env`);
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];

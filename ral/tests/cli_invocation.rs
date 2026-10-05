@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 // Integration tests for the argv surface itself: how a script's positional
-// arguments reach `$ARGS` / `$SCRIPT`, and how a script piped on stdin is
+// arguments reach `args` / `$SCRIPT`, and how a script piped on stdin is
 // run and located in diagnostics.  The unit tests in `ral/src/cli.rs` stop
 // at the parsed `Mode`; these carry it through to evaluated output.
 
@@ -66,14 +66,14 @@ fn run_stdin(args: &[&str], script: &str) -> Output {
 
 #[test]
 fn script_positionals_reach_args_and_script() {
-    // `$ARGS` holds the trailing positionals and nothing else — the script
-    // path is `$SCRIPT`, not `$ARGS[0]` — and flag-shaped arguments are
+    // `args` holds the trailing positionals and nothing else — the script
+    // path is `$SCRIPT`, not `!{args}[0]` — and flag-shaped arguments are
     // forwarded rather than eaten by clap (`--version` and `-n` are both
     // real ral flags).
     let tmp = fresh_tmp_path("ral_cli_args", "ral");
     std::fs::write(
         &tmp,
-        "echo !{length $ARGS}\necho ...$ARGS\necho !{basename $SCRIPT}\n",
+        "echo !{length !{args}}\necho ...!{args}\necho !{basename $SCRIPT}\n",
     )
     .unwrap();
     let name = tmp.file_name().unwrap().to_string_lossy().into_owned();

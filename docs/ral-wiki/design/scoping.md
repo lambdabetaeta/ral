@@ -19,8 +19,8 @@ The duality matches the right model to each:
   inside a restricted block and respect that restriction without code changes.
 
 An environment variable follows the dynamic side of this split: it is read as
-`$env[KEY]`, never as a bare lexical name, and a `within [env: …]` overlay is
-seen by `$env`, `~`, child processes, and PATH resolution alike
+`!{env}[KEY]`, never as a bare lexical name, and a `within [env: …]` overlay is
+seen by `env`, `~`, child processes, and PATH resolution alike
 ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]).
 
 Each dynamic frame nests by its own algebra:

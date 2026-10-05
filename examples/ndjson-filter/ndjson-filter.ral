@@ -5,7 +5,7 @@
 # reports only the last record, so one non-object line errors on stderr and
 # still exits 0.  Here one `has` does both, and omitting it raises, not lies.
 
-let [path, field, want] = $ARGS
+let [path, field, want] = args
 
 let matches = { |r|
     if !{has $r $field} { return !{equal !{str $r[$field]} $want} }

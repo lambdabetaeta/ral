@@ -1,9 +1,8 @@
 //! Prompt construction.
 //!
 //! The prompt body is a registered hook at `Session/"prompt"`, dispatched
-//! like any other hook.  CWD and USER are ambient pseudo-variables read by
-//! the prompt body directly.  Plugins may transform the result via the
-//! `prompt` lifecycle hook.
+//! like any other hook.  The prompt body reads `cwd` and `user` directly.
+//! Plugins may transform the result via the `prompt` lifecycle hook.
 
 use ral_core::protocol::Transport;
 use ral_core::serial::FOValue;
@@ -175,12 +174,16 @@ mod tests {
         assert_eq!(render_src(src), "[ ok ]");
     }
 
-    // ambient pseudo-variables ($CWD, $USER) are live.
+    // the ambient reads `cwd` and `user` are live.
 
     #[test]
-    fn prompt_block_sees_pseudo_vars() {
-        let result = render_src("return { return \"$USER:$CWD\" }");
-        // Split at the first colon: a Windows `$CWD` carries a drive
+    #[allow(
+        clippy::literal_string_with_formatting_args,
+        reason = "`!{…}` is ral splice syntax in the source under test"
+    )]
+    fn prompt_block_sees_ambient_reads() {
+        let result = render_src("return { return \"!{user}:!{cwd}\" }");
+        // Split at the first colon: a Windows `cwd` carries a drive
         // colon of its own, and it lies to the right of this one.
         let (user, cwd) = result
             .split_once(':')

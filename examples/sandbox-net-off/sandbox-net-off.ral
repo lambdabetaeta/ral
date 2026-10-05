@@ -5,7 +5,7 @@
 # Bash needs a probe, `rc=$?` not `if`, only 6/7 admitted, no `< <(…)`, every
 # time.  A `grant` refuses to spawn where it cannot confine: nothing to check.
 
-let [registry, lockfile] = $ARGS
+let [registry, lockfile] = args
 let no-network = [6, 7]
 
 let resolved = grant [net: false] {

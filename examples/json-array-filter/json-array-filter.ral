@@ -5,7 +5,7 @@
 # wrong elements, while `user-name` parses as subtraction and jq refuses to
 # compile.  Here it indexes a record: there is no program text to splice into.
 
-let [path, field, want] = $ARGS
+let [path, field, want] = args
 
 let rows = from-json < $path
 

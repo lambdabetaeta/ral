@@ -121,7 +121,7 @@ The projection rule splits on *how the key is given*, not only on the target
   error: *"only lists (key: Integer) and maps (key: String) accept a key
   computed at runtime — for a record field, use a static name."*
 
-`$ENV` is `Map String`, so `$ENV[$name]` and `$ENV[HOME]` alike are `String`:
+`env` is `F (Map String)`, so `!{env}[$name]` and `!{env}[HOME]` alike are `String`:
 every value shares one type, and a key you don't know until run time still has
 a known result type.
 

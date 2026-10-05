@@ -401,7 +401,7 @@ mod tests {
     /// enters typed code only through a boundary.  A row whose scheme
     /// quantifies a variable only its result mentions is such a door, so each
     /// must be a boundary or diverge.  The enumeration is not the whole
-    /// perimeter: two casts lived in term rules rather than in Σ — `$ENV`,
+    /// perimeter: two casts lived in term rules rather than in Σ — `env`,
     /// typed `Map String`, and a bound head that is not a block, refused as
     /// `HeadBoundToValue` — and `tests/reject` pins those.  The exarch and
     /// plugin tables are swept by their own crates through the same predicate

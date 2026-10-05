@@ -1,4 +1,4 @@
 # codes: T0071
 # contains: environment variables are read as
-# contains: $ENV[EDITOR]
+# contains: !{env}[EDITOR]
 echo $EDITOR

@@ -116,7 +116,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
-    let result = run_on(&mut shell, "return $ENV[RAL_TEST_ENV]").expect("evaluate $ENV");
+    let result = run_on(&mut shell, "return !{env}[RAL_TEST_ENV]").expect("evaluate env");
     assert_eq!(result, Value::string("override"));
 }
 

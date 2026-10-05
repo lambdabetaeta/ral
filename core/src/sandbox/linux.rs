@@ -597,7 +597,7 @@ fn default_ro_binds() -> &'static [&'static str] {
         "/etc/ca-certificates",
         "/etc/pki",
         // getpwuid/getgrgid sit in libc startup paths: without these many
-        // programs cannot even resolve $HOME.
+        // programs cannot even resolve HOME.
         "/etc/passwd",
         "/etc/group",
         // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).

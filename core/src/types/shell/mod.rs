@@ -83,7 +83,7 @@ pub struct Context {
     pub(crate) hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
 
     // ── dynamic context, not attenuable ─────────────────────────────────
-    /// Invocation positionals (`$ARGS`, `$1`, …), from the command line or `source`.
+    /// Invocation positionals (`args`), from the command line or `source`.
     pub(crate) args: Vec<String>,
     pub(crate) modules: Modules,
 }
@@ -407,10 +407,6 @@ mod tests {
     use super::*;
     use crate::types::Nursery;
     use std::sync::Mutex;
-
-    // The pseudo-variable reads (`$CWD`, `$USER`, …) live and are
-    // tested at `evaluator::observe`, their one reader, hoisted out of
-    // lexical-scope lookup into the `Observe` computation form.
 
     /// A `Fork::Listen` run has no pen, and says so rather than reusing the
     /// absent-host sentence: the two are different situations.

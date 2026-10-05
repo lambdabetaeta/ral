@@ -7,7 +7,7 @@
 
 let outcome = par { |f|
     return [path: $f, ok: !{succeeds { gzip -kf -- $f }}]
-} $ARGS 4
+} !{args} 4
 
 let by = group-by { |r|
     if $r[ok] { return 'gzipped' } else { return 'failed' }

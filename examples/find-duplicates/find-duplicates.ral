@@ -5,13 +5,13 @@
 # whole path as a value; `group-by` buckets on the hash, never on a
 # re-split line.
 
-let [root] = $ARGS
+let [root] = args
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 
 let hashed = par { |p|
     return [hash: !{sha256sum $p | from-words}[0], path: $p]
-} $files $NPROC
+} $files !{nproc}
 
 let buckets = group-by { |r| return $r[hash] } $hashed
 let dupes = filter { |h| $[!{length $buckets[$h]} > 1] } !{keys $buckets}

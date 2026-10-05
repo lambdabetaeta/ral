@@ -21,11 +21,11 @@ use crate::types::{
 };
 
 use super::assemble;
+use super::expr;
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
 use super::scope::{WithinScope, WithinUndo};
 use super::val::{form, form_options, interpolate_piece, spread_type_err};
-use super::{expr, observe};
 
 // ── The stack ─────────────────────────────────────────────────────────
 
@@ -519,7 +519,9 @@ impl Machine {
                 }
             }
 
-            CompKind::Observe(reg) => Focus::Return(Terminal::Value(observe::observe(reg, shell)?)),
+            CompKind::Tilde(path) => Focus::Return(Terminal::Value(Value::string(
+                path.expand(&crate::builtins::ambient::home_dir(shell)?),
+            ))),
 
             CompKind::Force(val) => Self::force_val(val, env, mooring, shell)?,
 

@@ -6,7 +6,7 @@
 //! drift apart.
 //!
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
-//! every platform, macOS included.  An `$XDG_*_HOME` override counts only when
+//! every platform, macOS included.  An `XDG_*_HOME` override counts only when
 //! it is absolute, per the spec's rule that relative values are ignored.
 
 use std::path::{Path, PathBuf};
@@ -77,13 +77,13 @@ impl XdgKind {
 /// Resolve an XDG kind: an absolute `XDG_*_HOME`, else `home` joined with the
 /// kind's [default suffix](XdgKind::default_suffix).
 ///
-/// `home` is the caller's, never a process-level `$HOME` lookup, so a
+/// `home` is the caller's, never a process-level `HOME` lookup, so a
 /// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
 /// The `XDG_*_HOME` vars themselves still come from the process environment.
 ///
 /// `None` when nothing absolute resolves: no home to default under, and no
 /// absolute override to stand in for one.  An unknown home is thus not the
-/// same question as an absolute `$XDG_CONFIG_HOME` — that one is still
+/// same question as an absolute `XDG_CONFIG_HOME` — that one is still
 /// answerable, and answered.
 #[allow(clippy::disallowed_methods)]
 pub fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {

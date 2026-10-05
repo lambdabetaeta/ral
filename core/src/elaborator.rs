@@ -16,10 +16,9 @@
 
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GENSYM_PREFIX,
-    GroupNode, HandlerArmV, IrPattern, Name, OptionsV, Phrase, Register, Toplevel, Val,
-    ValListElem, ValMapEntry, ValRecordEntry,
+    GroupNode, HandlerArmV, IrPattern, Name, OptionsV, Phrase, Toplevel, Val, ValListElem,
+    ValMapEntry, ValRecordEntry,
 };
-use crate::path::tilde::TildePath;
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
@@ -131,12 +130,11 @@ impl Elaborator {
         match pat {
             Pattern::Wildcard => IrPattern::Wildcard,
             Pattern::Name(n) => {
-                if let Some((_, reading)) = reserved_register(n) {
+                if n.as_ref() == "SCRIPT" {
                     self.error.get_or_insert_with(|| ParseError {
-                        message: format!(
-                            "${n} is a reading of {reading}, not a name you can bind; \
-                             choose another name"
-                        ),
+                        message: "$SCRIPT names the file being compiled, not a name you can \
+                                  bind; choose another name"
+                            .into(),
                         span: self.current_span,
                         lex_kind: None,
                         incomplete: false,
@@ -440,17 +438,11 @@ impl Elaborator {
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone().into()))),
             Ast::Variable(s) => {
-                let v = if let Some((register, _)) = reserved_register(s) {
-                    let observed = comp!(self, CompKind::Observe(register));
-                    self.hoist(observed, binds)
-                } else {
-                    self.variable_val(s)
-                };
-                comp!(self, CompKind::Return(v))
+                comp!(self, CompKind::Return(self.variable_val(s)))
             }
             Ast::Word(Word::Tilde(path)) => {
-                let observed = comp!(self, CompKind::Observe(Register::Tilde(path.clone())));
-                let v = self.hoist(observed, binds);
+                let tilde = comp!(self, CompKind::Tilde(path.clone()));
+                let v = self.hoist(tilde, binds);
                 comp!(self, CompKind::Return(v))
             }
 
@@ -1213,23 +1205,6 @@ fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
     }
 }
 
-/// The reserved pseudo-variables: a store read, and the English name of
-/// what it reads, for the "not a name you can bind" diagnostic.
-fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
-    Some(match name {
-        "ENV" => (Register::Env, "the shell's environment"),
-        "ARGS" => (Register::Args, "the shell's arguments"),
-        "NPROC" => (Register::Nproc, "the machine's processor count"),
-        "CWD" => (Register::Cwd, "the shell's working directory"),
-        "USER" => (Register::User, "the current user"),
-        "HOME" => (
-            Register::Tilde(TildePath { suffix: None }),
-            "the current user's home directory",
-        ),
-        _ => return None,
-    })
-}
-
 /// Sugar bare `exit` / `quit` into `exit 0` / `quit 0`.  The builtin tolerates
 /// zero args, but ral's fixed-arity rule gives it one `Int` slot; supplying the
 /// status here spares the typechecker a zero-arg special case.
@@ -1267,8 +1242,8 @@ fn prelude_scope() -> Arc<HashSet<String>> {
 /// `RAL_DUMP_IR` dumps the result to stderr on the way out.
 ///
 /// # Errors
-/// `$SCRIPT` referenced where `name` carries no script identity; a pattern
-/// binding a reserved pseudo-variable name.
+/// `$SCRIPT` referenced where `name` carries no script identity, or bound by
+/// a pattern.
 #[allow(
     clippy::implicit_hasher,
     reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
@@ -1301,6 +1276,7 @@ pub fn elaborate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::tilde::TildePath;
     use crate::syntax::parser::parse;
 
     /// Head name, args, and whether the head was written `^name`.
@@ -1726,28 +1702,8 @@ mod tests {
         assert_eq!(g1.shape()[1].0.as_ref(), "g");
     }
 
-    #[test]
-    fn cwd_reference_hoists_one_observe_cwd() {
-        let ast = parse("echo $CWD").expect("parse");
-        let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
-        let Phrase::Run(comp) = &top.phrases[0].item else {
-            panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
-        };
-        let CompKind::Bind {
-            comp: rhs, rest, ..
-        } = &comp.item
-        else {
-            panic!(
-                "expected a Bind over the hoisted temporary, got {:?}",
-                comp.item
-            );
-        };
-        assert!(matches!(rhs.item, CompKind::Observe(Register::Cwd)));
-        assert!(matches!(rest.item, CompKind::Exec(_)));
-    }
-
-    fn is_home_observe(comp: &Comp) -> bool {
-        comp.item == CompKind::Observe(Register::Tilde(TildePath { suffix: None }))
+    fn is_home_tilde(comp: &Comp) -> bool {
+        comp.item == CompKind::Tilde(TildePath { suffix: None })
     }
 
     /// The hoisted read and what follows it, from `comp`'s outermost bind.
@@ -1764,31 +1720,25 @@ mod tests {
     }
 
     #[test]
-    fn home_reference_is_the_tilde_observe() {
-        let ast = parse("echo $HOME").expect("parse");
+    fn tilde_path_hoists_one_tilde() {
+        let ast = parse("echo ~/x").expect("parse");
         let comp = elaborate_one(&ast, HashSet::new(), "");
         let (rhs, _, rest) = hoisted(&comp);
-        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        assert_eq!(
+            rhs.item,
+            CompKind::Tilde(TildePath {
+                suffix: Some("/x".into())
+            })
+        );
         assert!(matches!(rest.item, CompKind::Exec(_)));
     }
 
     #[test]
-    fn let_home_is_a_parse_error_naming_the_reading() {
-        let ast = parse("let HOME = 1").expect("parse");
-        let err = elaborate(&ast, HashSet::new(), "").expect_err("expected a ParseError");
-        assert!(
-            err.message.contains("home directory"),
-            "message did not name the reading: {}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn leading_tilde_in_a_string_interpolates_the_home_observe() {
+    fn leading_tilde_in_a_string_interpolates_the_home_tilde() {
         let ast = parse(r#""~/x""#).expect("parse");
         let comp = elaborate_one(&ast, HashSet::new(), "");
         let (rhs, pattern, rest) = hoisted(&comp);
-        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        assert!(is_home_tilde(rhs), "got {:?}", rhs.item);
         let IrPattern::Name(tmp) = pattern else {
             panic!("expected a named temporary, got {pattern:?}");
         };
@@ -1802,26 +1752,15 @@ mod tests {
     }
 
     #[test]
-    fn let_of_lone_tilde_observes_rather_than_runs() {
+    fn let_of_lone_tilde_reads_rather_than_runs() {
         let ast = parse("let h = ~").expect("parse");
         let top = elaborate(&ast, HashSet::new(), "").expect("elaborate");
         let Phrase::Define { comp, .. } = &top.phrases[0].item else {
             panic!("expected a Define, got {:?}", top.phrases[0].item);
         };
         let (rhs, _, rest) = hoisted(comp);
-        assert!(is_home_observe(rhs), "got {:?}", rhs.item);
+        assert!(is_home_tilde(rhs), "got {:?}", rhs.item);
         assert!(matches!(rest.item, CompKind::Return(Val::Variable(_))));
-    }
-
-    #[test]
-    fn let_cwd_is_a_parse_error_naming_the_reading() {
-        let ast = parse("let CWD = 1").expect("parse");
-        let err = elaborate(&ast, HashSet::new(), "").expect_err("expected a ParseError");
-        assert!(
-            err.message.contains("working directory"),
-            "message did not name the reading: {}",
-            err.message
-        );
     }
 
     /// A literal with no spread stays value syntax; one with a spread is a

@@ -1,9 +1,9 @@
-//! Named subpaths under the XDG bases, plus the legacy `$HOME/.<name>`
+//! Named subpaths under the XDG bases, plus the legacy `~/.<name>`
 //! form, for `ral`'s own config and data files.
 //!
 //! The bases come from [`resolve_xdg`], the resolver the `xdg:` grant
 //! sigil also expands through.  `None` throughout means nothing absolute
-//! resolved: `$HOME` unset and no absolute `$XDG_*_HOME` override.
+//! resolved: `HOME` unset and no absolute `XDG_*_HOME` override.
 
 use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ pub fn xdg_data_subpath(subpath: &str) -> Option<PathBuf> {
     base(XdgKind::Data).map(|base| base.join(subpath))
 }
 
-/// `$HOME/<dot_name>` (e.g. `home_dot(".ralrc")`) — the single-file
+/// `~/<dot_name>` (e.g. `home_dot(".ralrc")`) — the single-file
 /// convention rc loaders probe as a fallback to the XDG form.
 #[allow(
     clippy::disallowed_methods,

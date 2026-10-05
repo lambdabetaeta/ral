@@ -5,7 +5,7 @@
 # file prints nothing and exits 0, so callers read the failure as "empty
 # config".  Here an empty result is a list, and an unreadable path still fails.
 
-let [path] = $ARGS
+let [path] = args
 
 let kept = filter { |l| re-match '^\s*[^#\s]' $l } !{from-lines < $path}
 

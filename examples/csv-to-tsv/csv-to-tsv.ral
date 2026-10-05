@@ -5,11 +5,11 @@
 # RFC-4180 scanner, LC_ALL=C for the column sort, and a temp file so a refusal
 # leaves no half TSV — every time.  Here from-csv reads; the check runs first.
 
-if $[!{length $ARGS} != 1] {
+if $[!{length !{args}} != 1] {
     warn 'usage: csv-to-tsv.ral FILE'
     exit 2
 }
-let [path] = $ARGS
+let [path] = args
 
 let rows = from-csv < $path
 if !{is-empty $rows} {

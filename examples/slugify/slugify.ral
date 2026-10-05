@@ -5,7 +5,7 @@
 # widened range then admits it, so "Éclair Ñoño" slugs to bytes that are not
 # valid UTF-8.  Here `lower`/`re-replace-all` fold Strings in-process.
 
-let [path] = $ARGS
+let [path] = args
 
 let slug = { |title|
     let dashed = re-replace-all '[^a-z0-9]+' '-' !{lower $title}

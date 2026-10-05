@@ -80,10 +80,10 @@ pub fn load_capabilities_from_path(
 /// is ever flattened away by a sibling that is silent on the same key.
 ///
 /// One `FreezeCtx` serves every load, so every profile resolves its sigils
-/// against the same home and cwd, and an `xdg:` path escaping `$HOME` is
+/// against the same home and cwd, and an `xdg:` path escaping `HOME` is
 /// rejected at the profile that names it.  Failures carry a bare mechanism
 /// message; the caller prepends provenance (`--capabilities`, a config key).
-/// The home is the shell's effective `$HOME` — the override chain — the same
+/// The home is the shell's effective `HOME` — the override chain — the same
 /// anchor `eval_grant` freezes against.
 ///
 /// # Errors

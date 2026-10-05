@@ -1736,7 +1736,7 @@ mod tests {
     }
 
     /// If `>~` swallowed the `~` in `>~/path`, the redirect would target
-    /// `/path` instead of `$HOME/path`.
+    /// `/path` instead of `~/path`.
     #[test]
     fn redirect_gt_then_tilde_path() {
         let toks = tok_types("echo hi >~/dir");

@@ -5,7 +5,7 @@
 # list mapped over each record, so the projection comes back in the order
 # asked for, repeats included.
 
-let [path, ...cols] = $ARGS
+let [path, ...cols] = args
 
 let rows = from-csv < $path
 

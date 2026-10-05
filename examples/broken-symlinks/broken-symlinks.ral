@@ -5,7 +5,7 @@
 # and the link is reported broken anyway — then printf writes that same
 # name back unquoted, as two fields.  `from-csv`/`to-csv` quote for you.
 
-let [root, waivers] = $ARGS
+let [root, waivers] = args
 
 let waived = map { |r| return $r[link] } !{from-csv < $waivers}
 let links  = filter { |p| is-link $p } !{glob "$root/**/*"}

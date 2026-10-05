@@ -9,7 +9,7 @@ cd "$root/outer"
 # An absolute, a no-op and a relative `cd` inside `within [dir:]` stay in its cell
 within [dir: "$root/inner"] { cd "$root/inner/sub"; cwd-is "$root/inner/sub" }
 cwd-is "$root/outer"
-within [dir: "$root/inner"] { cd $CWD; cwd-is "$root/inner" }
+within [dir: "$root/inner"] { cd !{cwd}; cwd-is "$root/inner" }
 cwd-is "$root/outer"
 within [dir: "$root/inner"] { cd sub; cwd-is "$root/inner/sub" }
 cwd-is "$root/outer"

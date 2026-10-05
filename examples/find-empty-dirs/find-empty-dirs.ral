@@ -5,7 +5,7 @@
 # is exempt inside a condition's command substitution.  Here `list-dir` raises
 # on an unreadable directory, so it is reported as undecided, never as empty.
 
-let [root] = $ARGS
+let [root] = args
 
 let scan = { |dir|
     let listing = try { return `ok !{list-dir $dir} } { |_| return `denied () }

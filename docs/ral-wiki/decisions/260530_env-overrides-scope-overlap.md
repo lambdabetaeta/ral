@@ -15,7 +15,7 @@ overlays *mean* under [[design/scoping|dynamic scoping]], not a mechanical
 cleanup. It is recorded here as an open thread, not a resolved decision.
 
 Resolved by [[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]: the
-environment lives in `env_overrides` alone and is read as `$env[KEY]`; the
+environment lives in `env_overrides` alone and is read as `!{env}[KEY]`; the
 lexical-scope copy is gone, so there is nothing left to drift.
 
 See also [[map/core|core]].

@@ -4,6 +4,6 @@
 # imposes locale collation.  Here it is a difference: lines of A that B
 # does not contain, in A's own order, no sorting required.
 
-let [a, b] = $ARGS
+let [a, b] = args
 let bs = from-lines < $b
 for !{from-lines < $a} { |l| if $[not !{contains $bs $l}] { echo $l } }

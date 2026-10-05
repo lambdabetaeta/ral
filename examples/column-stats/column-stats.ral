@@ -5,7 +5,7 @@
 # min, max and the median position are silently wrong.  Here every field
 # is parsed once by `float`, and `sort-list` orders those very values.
 
-let [path, field] = $ARGS
+let [path, field] = args
 
 let rows = from-csv < $path
 

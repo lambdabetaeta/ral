@@ -5,7 +5,7 @@
 # exit 0.  Correct bash keeps data out of `-w`, holds each row against `set -e`, and
 # orders per-job files by index, every time.  A ral worker returns a url/code record.
 
-if !{is-empty $ARGS} {
+if !{is-empty !{args}} {
     fail [status: 2, message: 'usage: http-status URL...']
 } else {
     return ()
@@ -18,7 +18,7 @@ let probe = { |u|
     return [url: $u, code: $code]
 }
 
-let results = par $probe $ARGS $NPROC
+let results = par $probe !{args} !{nproc}
 
 for $results { |r| echo "$r[code] $r[url]" }
 

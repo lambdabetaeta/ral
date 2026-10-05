@@ -59,7 +59,7 @@ const HOUSE_RULES: &str = "house-rules.md";
 /// 6. **Network** (`data/network.md`) — a fixed package-site allowlist, not
 ///    the web.
 /// 7. **Host** — [`host_section`], synod's own: guest truths only.
-///    Exarch's section reports this process's cwd, user, `$HOME` and git
+///    Exarch's section reports this process's cwd, user, `HOME` and git
 ///    state — host facts that are all false inside the machine the agent
 ///    actually works in — so synod composes when now is, where the agent
 ///    stands, and the scratch space around the shared grant summary

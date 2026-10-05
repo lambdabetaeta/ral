@@ -5,7 +5,7 @@
 # wrapper cannot tell 22 (HTTP 4xx) from 28 (timeout) from 6 (DNS).
 # `retry` re-raises the last error verbatim: curl's status becomes ral's.
 
-let [url] = $ARGS
+let [url] = args
 
 let fetch = { curl -fsS --max-time 10 -- $url }
 

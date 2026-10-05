@@ -152,9 +152,8 @@ impl Shell {
         }
     }
 
-    /// Look `name` up in the lexical scope chain, natives included — *not*
-    /// the pseudo-variable namespace [`Self::lookup_value_name`] also
-    /// consults.  The read dual of [`Self::set_var`] / [`Self::bind_value`].
+    /// Look `name` up in the lexical scope chain, natives included.  The read
+    /// dual of [`Self::set_var`] / [`Self::bind_value`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
         crate::types::lookup(name, &self.env, &self.sig)
     }

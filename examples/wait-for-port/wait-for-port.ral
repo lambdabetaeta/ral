@@ -5,7 +5,7 @@
 # runs 75s.  Then the deadline needs re-testing before the sleep as well, and the
 # bare `((…))` guarding lest a false one exit under set -e.  A race just holds.
 
-let [target, port, secs] = $ARGS
+let [target, port, secs] = args
 
 let probe = { |interval|
     if !{succeeds { nc -z -G 1 -w 1 -- $target $port 2> /dev/null }} { return `up }

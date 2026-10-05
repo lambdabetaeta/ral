@@ -5,7 +5,7 @@
 # output line through CONVFMT `%.6g`, so 1234567.89 prints as 1.23457e+06.
 # Here `float` refuses such a field before a single row is printed.
 
-let [path, rowkey, colkey, valcol] = $ARGS
+let [path, rowkey, colkey, valcol] = args
 
 let rows = from-csv < $path
 

@@ -292,7 +292,7 @@ it already has; it never adds one.
 
 Patterns take values apart:
 
-    let [first, ...rest] = $ARGS
+    let [first, ...rest] = args
     let [host: host, port: port] = $config
     let [name: name, address: [city: city]] = $person
 
@@ -451,18 +451,19 @@ last line need not end at all. `to-lines` ends every line with `\n`.
 A script begins:
 
     #!/usr/bin/env ral
-    let [target, port] = $ARGS
+    let [target, port] = args
     echo "deploying to $target on $port"
 
-`$ARGS` contains only user arguments. Forward them with `...$ARGS`. `$SCRIPT`
-is the current file's path, `$ENV` is a read-only map of environment variables,
-and `$NPROC` is the CPU count.
+`args` returns only user arguments. Forward them with `...!{args}`. `$SCRIPT`
+is the current file's path. The shell's own state is read by builtins, not
+variables: `env` is a map of environment variables, `nproc` is the CPU count,
+and `cwd`, `home`, and `user` are what they say.
 
 Use `within` for a scoped directory or environment:
 
     within [dir: build] {
         cmake ..
-        make -j $NPROC
+        make -j !{nproc}
     }
 
     within [env: [RUST_LOG: debug, PORT: 8080]] {
@@ -587,8 +588,8 @@ The other concurrency tools use the same handles:
 
     race [$first, $second]   # first result; cancel the rest
     cancel $handle
-    par { |file| convert $file } $files $NPROC
-    watch build { make -j $NPROC }
+    par { |file| convert $file } $files !{nproc}
+    watch build { make -j !{nproc} }
 
 `par` is a bounded parallel `map` and preserves input order. `watch` streams
 labelled output. Spawned blocks inherit immutable values, so there is no shared
@@ -703,11 +704,11 @@ This script writes a JSON manifest of a directory's regular files:
 
     #!/usr/bin/env ral
 
-    if $[!{length $ARGS} != 2] {
+    if $[!{length !{args}} != 2] {
         fail [status: 2, message: 'usage: manifest ROOT OUTPUT.json']
     }
 
-    let [root, output] = $ARGS
+    let [root, output] = args
 
     if $[not !{is-dir $root}] {
         fail [status: 2, message: "not a directory: $root"]
@@ -750,7 +751,7 @@ that turn data back into source text.
 | `a && b` | `a` then `b`; failure already stops the sequence |
 | <code>a &#124;&#124; b</code> | `a ? b` |
 | `set -e` | always on |
-| `$@` | `$ARGS`; forward with `...$ARGS` |
+| `$@` | `args`; forward with `...!{args}` |
 | `export KEY=value` | `within [env: [KEY: value]] { … }` |
 | `cd dir` in a script | `within [dir: dir] { … }` |
 | `trap cleanup EXIT` | `guard { body } { cleanup }` |

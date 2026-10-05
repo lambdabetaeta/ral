@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 /// absolute paths.
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
-/// against the session's `$HOME` and working directory as it loads, so the
+/// against the session's `HOME` and working directory as it loads, so the
 /// widening and every layer push run on already-resolved bundles.  Each restrict
 /// file's own path joins a deny layer, putting the bytes that shape the
 /// agent's permissions beyond its reach; the extend-base file does not,

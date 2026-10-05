@@ -5,7 +5,7 @@
 # key is `float` of a named column: a column that moved is still found,
 # a column that is gone and a cell that is not a number both fail loudly.
 
-let [path, field] = $ARGS
+let [path, field] = args
 
 let rows = from-csv < $path
 

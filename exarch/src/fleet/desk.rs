@@ -220,7 +220,7 @@ pub(crate) struct HostServices {
     /// Who the acts are committed on behalf of, read once at install: the
     /// desk holds no `Shell` to ask, and a host act's principal is the host's.
     /// `None` where the host names nobody, the same fact `Context::principal`
-    /// reports for an unbound `$USER` in the same record.
+    /// reports for an unbound `USER` in the same record.
     pub principal: Option<String>,
 }
 

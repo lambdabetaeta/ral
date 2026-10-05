@@ -125,9 +125,9 @@ fn render(name: &CommandName, ctx: &Context) -> String {
     match name {
         CommandName::Bare(name) => name.to_string(),
         CommandName::Path(path) => path.clone(),
-        CommandName::TildePath(path) => path
-            .expand(ctx.home().as_deref())
-            .unwrap_or_else(|| path.to_literal()),
+        CommandName::TildePath(path) => ctx
+            .home()
+            .map_or_else(|| path.to_literal(), |home| path.expand(&home)),
     }
 }
 

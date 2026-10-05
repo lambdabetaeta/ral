@@ -19,6 +19,7 @@ use crate::types::{
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
+pub(crate) mod ambient;
 mod codecs;
 mod collections;
 pub(crate) mod concurrency;
@@ -282,8 +283,23 @@ builtin_registry! {
         doc: "ask <prompt>  — prompt for interactive input, return string.",
         call: |args, _mooring, _shell| misc::builtin_ask(args).map_err(Break::from), },
     Cwd { names: ["cwd"], ty: scheme::pure_string,
-        doc: "cwd  — return the current working directory as a String.",
-        call: |_args, _mooring, shell| Ok(Value::string(shell.cwd().to_string_lossy())), },
+        doc: "cwd  — the shell's working directory, absolute.",
+        call: |_args, _mooring, shell| Ok(ambient::cwd(shell)), },
+    Env { names: ["env"], ty: scheme::pure_string_map,
+        doc: "env  — the environment as a Map of String to String: the host process environment under any `within [env: …]` overlay. PWD and OLDPWD are absent; the working directory is `cwd`.",
+        call: |_args, _mooring, shell| Ok(ambient::env(shell)), },
+    Args { names: ["args"], ty: scheme::pure_strs,
+        doc: "args  — the program's arguments as [String]: those after the script path or the -c source. Empty in the REPL.",
+        call: |_args, _mooring, shell| Ok(ambient::args(shell)), },
+    User { names: ["user"], ty: scheme::pure_string,
+        doc: "user  — the current user: USER, or USERNAME where appropriate, from the effective environment.",
+        call: |_args, _mooring, shell| ambient::user(shell).map_err(Break::from), },
+    Home { names: ["home"], ty: scheme::pure_string,
+        doc: "home  — the current user's home directory, the one `~` abbreviates: HOME, or USERPROFILE where appropriate, from the effective environment.",
+        call: |_args, _mooring, shell| ambient::home_dir(shell).map(Value::string).map_err(Break::from), },
+    Nproc { names: ["nproc"], ty: scheme::pure_int,
+        doc: "nproc  — available processor parallelism as an Int, never less than 1.",
+        call: |_args, _mooring, _shell| Ok(ambient::nproc()), },
     Chdir { names: ["cd"], ty: scheme::chdir,
         doc: "cd <path>  — change the shell working directory; gated by shell.chdir capability. `cd ~` goes home.",
         call: |args, _mooring, shell| shell::builtin_chdir(args, shell), },

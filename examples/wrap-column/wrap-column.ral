@@ -4,7 +4,7 @@
 # budget is spent in `length`, which counts Unicode scalars, and `words`
 # splits on real whitespace — so the wrap lands where you can see it.
 
-let [width, path] = $ARGS
+let [width, path] = args
 let w = int $width
 
 for !{from-lines < $path} { |line|

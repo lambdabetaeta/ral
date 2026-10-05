@@ -225,7 +225,7 @@ impl NormalizedPrefix {
     /// ([`resolved_path`](Self::resolved_path)), so the choice of form is
     /// made here — never by a caller holding a `&Path`.  The `xdg:` freeze
     /// guard made that choice for itself once, and read a symlink out of
-    /// `$HOME` as contained.
+    /// `HOME` as contained.
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"

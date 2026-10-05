@@ -4,7 +4,7 @@
 # file is renamed with a garbage ".name" suffix.  Here `ext` inspects
 # the basename and yields '' when there is no extension.
 
-let [root, prefix] = $ARGS
+let [root, prefix] = args
 
 let ext = { |name|
     case !{extension $name} [

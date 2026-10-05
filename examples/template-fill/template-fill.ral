@@ -5,13 +5,13 @@
 # Here the template is split on the placeholder regex once and rejoined with the
 # values verbatim: no value is re-scanned, and the bytes read are the bytes out.
 
-let [path] = $ARGS
+let [path] = args
 let pat = '\$\{[A-Z_][A-Z0-9_]*\}'
 
 let tpl = from-string < $path
 
 let values = map { |ph|
-    get $ENV !{slice $ph 2 $[!{length $ph} - 3]} ''
+    get !{env} !{slice $ph 2 $[!{length $ph} - 3]} ''
 } !{re-find-matches $pat $tpl}
 
 let [lead, ...gaps] = re-split $pat $tpl

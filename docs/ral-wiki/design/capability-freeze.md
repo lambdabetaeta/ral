@@ -26,9 +26,9 @@ returning. In that pass it:
   `FreezeCtx { home, cwd }` (and `tempdir:` against the process temp dir);
 - **rejects** an `xdg:` value that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
-- **rejects** a `~` or `xdg:` entry where nothing binds `$HOME`: no base to
+- **rejects** a `~` or `xdg:` entry where nothing binds `HOME`: no base to
   resolve against, and the escape guard just above is itself stated in `home`'s
-  terms, so an absolute `$XDG_*_HOME` cannot stand in for one. Old rule, long
+  terms, so an absolute `XDG_*_HOME` cannot stand in for one. Old rule, long
   unreachable — boot seeding used to substitute `.` for an unset `HOME`, so the
   guard saw a home that was merely wrong, and such a grant fell through to the
   relative-entry rejection below carrying advice about the wrong problem
@@ -87,7 +87,7 @@ the world.
 ## The XDG-escape guard is a per-profile invariant
 
 Because freeze runs once per profile *as it loads*, the escape check fires on
-**any** input profile that names an `xdg:` path resolving outside `$HOME` —
+**any** input profile that names an `xdg:` path resolving outside `HOME` —
 whether or not later composition would keep that path. A `restrict` profile that
 mentions an escaping `xdg:data` is rejected even if a `meet` would have
 intersected it away.
@@ -95,10 +95,10 @@ intersected it away.
 The guard asks its containment question on the form the *in-process guard*
 matches, here the `fs` one, which authorises objects, so the form is the
 symlink-followed `resolved` one, asked with `path_within` — the same alias-aware
-predicate `covers` and `covering` use — and with `$HOME` canonicalised on the
+predicate `covers` and `covering` use — and with `HOME` canonicalised on the
 other side. Asking it of the surface spelling instead read
-`XDG_DATA_HOME=$HOME/link`, with `link → /etc`, as contained: the surface stayed
-under `$HOME` while the frozen `resolved` form — the only one `fs` enforcement
+`XDG_DATA_HOME=~/link`, with `link → /etc`, as contained: the surface stayed
+under `HOME` while the frozen `resolved` form — the only one `fs` enforcement
 ever sees — was `/etc`.
 
 A freeze guard and an in-process guard that judge different forms of the same

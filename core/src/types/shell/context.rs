@@ -1,5 +1,5 @@
-//! `impl Context`: verbs over the dynamic context — env overrides, `$HOME` /
-//! `$USER`, and the [`Resolver`] bound to the live home/cwd pair.
+//! `impl Context`: verbs over the dynamic context — env overrides, `HOME` /
+//! `USER`, and the [`Resolver`] bound to the live home/cwd pair.
 //!
 //! [`Context`] is the `Shell::context` field that `Shell::inherit_from` and
 //! `Shell::spawn_thread` clone into a child.  `PWD` stays out of
@@ -39,13 +39,13 @@ impl Context {
         }
     }
 
-    /// Effective `$HOME` via [`crate::path::home`]: these overrides first, then
+    /// Effective `HOME` via [`crate::path::home`]: these overrides first, then
     /// the host env, `None` when neither binds.
     pub(crate) fn home(&self) -> Option<String> {
         crate::path::home(&self.env_overrides)
     }
 
-    /// The `$USER` stamped on observations.  Overrides only, with no
+    /// The `USER` stamped on observations.  Overrides only, with no
     /// host-env fallback, so it names nobody until a front end has run
     /// [`Shell::seed_default_env_vars`](super::Shell::seed_default_env_vars).
     /// An empty binding names nobody either.

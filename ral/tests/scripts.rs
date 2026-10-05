@@ -18,7 +18,7 @@ const GOLDEN_SKIP: &[&str] = &[
     // non-portable / nondeterministic output
     "log-processor", // nondeterministic line counts between runs
     "devops",        // prints hostname / username
-    "environment",   // prints $HOME
+    "environment",   // prints the home directory
     "pipes",         // prints OS-specific `ls` error text
     "concurrency",   // `spawn { /bin/false }` — status differs by platform
                      // (`/bin/false` is 127 not-found on macOS, 1 on Linux)

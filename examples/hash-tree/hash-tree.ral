@@ -5,7 +5,7 @@
 # half a hash onto half a path, a dozen per 6000 files — and `wc -l` still
 # counts 6000.  `par` distributes and collects values: no stream to tear.
 
-let [root, ...rest] = $ARGS
+let [root, ...rest] = args
 let workers = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
 
 let walk = { |dir|

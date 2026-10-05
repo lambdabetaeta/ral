@@ -5,7 +5,7 @@
 # removed.  `guard` is lexical: each cleanup belongs to its own block, nests,
 # and runs on failure and on `exit`.
 
-let [source-dir, archive] = $ARGS
+let [source-dir, archive] = args
 
 let with-scratch = { |body|
     let dir = temp-dir

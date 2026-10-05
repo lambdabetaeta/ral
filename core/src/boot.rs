@@ -126,7 +126,7 @@ fn describe_comp(kind: &CompKind) -> &'static str {
     match kind {
         CompKind::If { .. } => "`if …`",
         CompKind::Case { .. } => "`case …`",
-        CompKind::Observe(_) => "a store read",
+        CompKind::Tilde(_) => "a `~` path",
         CompKind::App { .. } => "a call",
         CompKind::Exec(_) => "a command",
         CompKind::Bind { .. } => "`to`",

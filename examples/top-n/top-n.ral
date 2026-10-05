@@ -5,7 +5,7 @@
 # buffer.  `sort -rn` on a non-numeric column scores every key 0 and exits 0.
 # Here `take` bounds the list with no pipe, and `float` refuses that column.
 
-let [path, field, n] = $ARGS
+let [path, field, n] = args
 
 let rows = !{from-csv < $path}
 let ranked = reverse !{sort-list-by { |r| return !{float $r[$field]} } $rows}

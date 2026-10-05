@@ -5,7 +5,7 @@
 # then drops — all silent.  Here an escape run becomes a byte list that
 # `from-string` decodes; the data never reaches a format string.
 
-let [query] = $ARGS
+let [query] = args
 let digits = re-find-matches '.' '0123456789abcdef'
 
 let nybble = { |c|

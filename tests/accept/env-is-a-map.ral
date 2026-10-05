@@ -1,6 +1,6 @@
-let home = $ENV[HOME]
+let home = !{env}[HOME]
 echo "home: $home"
-let names = keys $ENV
+let names = keys !{env}
 echo !{length $names}
 let m = [:, a: 1]
 echo $[$m[a] + 1]

@@ -4,6 +4,6 @@
 # order and drags in locale collation.  Here membership is `contains`,
 # so lines match unsorted and the first file's order is preserved.
 
-let [a, b] = $ARGS
+let [a, b] = args
 let bs = from-lines < $b
 for !{from-lines < $a} { |l| if !{contains $bs $l} { echo $l } }

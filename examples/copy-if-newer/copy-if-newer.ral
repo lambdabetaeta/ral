@@ -5,7 +5,7 @@
 # unreadable source answers false, printing "up to date" and exiting 0 with
 # the destination left stale.  Here a stat that fails raises its errno.
 
-let [from, dest] = $ARGS
+let [from, dest] = args
 
 let info = !{file-info !{resolve-path $from}}
 

@@ -641,7 +641,7 @@ fn control_seat(
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
         ),
         cwd,
-        // Home is the guest scratch, not the workspace: `$HOME` is where
+        // Home is the guest scratch, not the workspace: `HOME` is where
         // XDG-defaulting tools drop caches and dotfiles, and pointed at
         // `/work` that litter would land among the user's own documents —
         // and in every change report.

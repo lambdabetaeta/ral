@@ -11,7 +11,7 @@ let scan = { |path|
     return [text: $clean, removed: $[!{length $body} - !{length $clean}]]
 }
 
-for $ARGS { |path|
+for !{args} { |path|
     let [text: text, removed: removed] = !{$scan $path}
     if $[$removed > 0] {
         to-string $text > $path

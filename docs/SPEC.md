@@ -402,9 +402,9 @@ Some characters depend on their position:
 - `#` starts a comment only at the start of a word. It remains literal inside
   a word.
 - `~` at the start of a word, standing alone or followed by `/`, abbreviates
-  `$HOME`, the current user's home directory (§10.2): `~/src` is
-  `$HOME/src`. Anywhere else `~` is an ordinary character, so `foo~bar` and
-  `~bob/x` are plain words.
+  the current user's home directory, which `home` returns (§10.2): `~/src`
+  is `"!{home}/src"`. Anywhere else `~` is an ordinary character, so `foo~bar`
+  and `~bob/x` are plain words.
 - `,` separates items while `[...]` is the innermost form. Outside brackets,
   it can be part of a word, as in `--features=a,b`.
 - `:` is punctuation before whitespace, a newline, `]`, or the end of input.
@@ -612,7 +612,7 @@ after them. To index a delimited form, wrap it: `"$[!{cmd}[k]]"`.
 
 A double-quoted string that begins with `~` followed by `/` or by the closing
 quote begins with the home directory, exactly as a bare word does (§3.5):
-`"~/x"` and `"$HOME/x"` mean the same. A `~` anywhere else in the string, and
+`"~/x"` and `"!{home}/x"` mean the same. A `~` anywhere else in the string, and
 any `~` in a literal string, is text; `"\~/x"` begins with a literal `~`.
 
 The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
@@ -765,7 +765,7 @@ a list. Any other key (`$m[$k]`) is computed: an `Int` indexes a list and a
 fixed once for the whole program, so a helper that indexes with a computed key
 is accepted at the one container type its program uses and refused when
 nothing fixes which. The prelude's `get $m key default` supplies a fallback.
-`$ENV` is a map of strings, so `$ENV[HOME]` is a `String`.
+`env` returns a map of strings, so `!{env}[HOME]` is a `String`.
 A missing key, an out-of-range list index, a key of the wrong kind, or an
 attempt to index another value kind is an error.
 
@@ -863,10 +863,10 @@ add-rate 5                   # 15
 The function keeps the first `rate`. A binding at its call site cannot change
 that captured value.
 
-Every name is known before the program runs. Reading `$name` where no binding,
-builtin, or register of that name is in scope is a static error, not a failure
-at run time, and ral suggests the nearest names that are in scope. Environment
-variables are not names: read them as `$ENV[NAME]`.
+Every name is known before the program runs. Reading `$name` where no binding
+or builtin of that name is in scope is a static error, not a failure at run
+time, and ral suggests the nearest names that are in scope. Environment
+variables are not names: read them as `!{env}[NAME]`.
 
 ```ral
 echo $colur                  # error: undefined variable: $colur
@@ -2105,7 +2105,7 @@ let show = { echo $place }
 within [env: [MODE: 'test']] {
     let place = 'call site'
     show                 # prints "definition"
-    echo $ENV[MODE]      # prints "test"
+    echo !{env}[MODE]    # prints "test"
 }
 ```
 
@@ -2184,15 +2184,15 @@ within [dir: 'src'] {
 
 The scoped directory is used by ral path operations, relative executable lookup, redirects, module lookup, and external children. ral does not change the process-wide working directory; each child is launched in the effective logical directory. This avoids races between concurrent workers.
 
-The working directory is one piece of shell state: `cd` sets it, and `$CWD`, `cwd`, and every relative path read it. `dir` makes `within` a local handler for that state. `within` saves the working directory, sets it to `dir`, runs the body, and restores what it saved when the body returns, fails, or escapes. A `cd` inside the body therefore moves only the scope's directory:
+The working directory is one piece of shell state: `cd` sets it, and `cwd` and every relative path read it. `dir` makes `within` a local handler for that state. `within` saves the working directory, sets it to `dir`, runs the body, and restores what it saved when the body returns, fails, or escapes. A `cd` inside the body therefore moves only the scope's directory:
 
 ```ral
 cd /usr
 within [dir: /usr/share] {
     cd man
-    echo $CWD        # prints "/usr/share/man"
+    echo !{cwd}      # prints "/usr/share/man"
 }
-echo $CWD            # prints "/usr"
+echo !{cwd}          # prints "/usr"
 ```
 
 Setting the directory on entry is not a `cd`, so `shell: [chdir: false]` does not refuse it; a `cd` in the body still needs `chdir`. A `within` without `dir` leaves the working directory alone, and a `cd` inside it persists.
@@ -2209,7 +2209,7 @@ within [env: [PATH: 'tools:/usr/bin', DEBUG: true]] {
 }
 ```
 
-An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `$ENV`, `$USER`, `$HOME`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
+An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `env`, `user`, `home`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
 
 `PWD` and `OLDPWD` cannot be set through `within env`. `PWD` is ral’s logical cwd, so use `cd` or `within dir` instead; ral keeps no previous directory, so there is no `OLDPWD`. Lists, maps, blocks, handles, and other non-scalar environment values are rejected.
 
@@ -2306,17 +2306,17 @@ A script is parsed and typechecked before it starts. Runtime-loaded files are pa
 
 ### 10.1. Program arguments and identity
 
-Arguments after a script path or `-c` program are available through `$ARGS` as a list of strings:
+Arguments after a script path or `-c` program are returned by `args` as a list of strings:
 
 ```text
 ral deploy.ral staging eu-west
 ```
 
 ```ral
-let [environment, region] = $ARGS
+let [environment, region] = args
 ```
 
-`$ARGS` does not include the ral executable, the script path, or the `-c` source text. It is empty in the REPL and for a program read from standard input.
+`args` does not include the ral executable, the script path, or the `-c` source text. It is empty in the REPL and for a program read from standard input.
 
 `$SCRIPT` identifies the file containing the reference:
 
@@ -2332,38 +2332,38 @@ Without an explicit script or `-c`, ral starts the REPL when standard input is a
 
 A successful batch program exits with status 0. `exit n` exits with `n`. Parse errors, type errors, runtime errors, and failed external commands produce a nonzero status and an explanatory diagnostic. Process exit statuses are reduced to the range 0 through 255.
 
-### 10.2. Ambient program values
+### 10.2. Ambient reads
 
-The following names describe the live shell:
+The live shell is read by six nullary builtins:
 
-| Name | Value |
-|---|---|
-| `$ENV` | Environment variables as a map of `String` to `String`. |
-| `$CWD` | The logical working directory, absolute. |
-| `$HOME` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment; the directory `~` abbreviates. |
-| `$USER` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
-| `$NPROC` | Available processor parallelism as an `Int`, never less than 1. |
-| `$ARGS` | The current program’s argument strings. |
+| Name | Type | Value |
+|---|---|---|
+| `env` | `F (Map String)` | Environment variables as a map of `String` to `String`. |
+| `cwd` | `F String` | The logical working directory, absolute. |
+| `home` | `F String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment; the directory `~` abbreviates. |
+| `user` | `F String` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
+| `nproc` | `F Int` | Available processor parallelism, never less than 1. |
+| `args` | `F [String]` | The current program's argument strings. |
 
-These values are computed when read. They are not mutable shell variables.
+Each is a computation: a `let` of one binds what it returns, and `!{…}` splices it. Each is also an ordinary native: a lexical binding of the same name shadows it, and `^env` runs the program of that name.
 
 The recorded command status is not among them: there is no status register a
 program can read. A failure is an `Err` that carries its own status, and `try`
 binds that record, so the status is in hand exactly where a program is deciding
 what to do about it. Elsewhere it is only what the process exits with.
 
-`$ENV` combines the host process environment with any active ral overrides. An inner override wins:
+`env` combines the host process environment with any active ral overrides. An inner override wins:
 
 ```ral
 within [env: [MODE: 'test', USER: 'builder']] {
-    echo $ENV[MODE]
-    echo $USER
+    echo !{env}[MODE]
+    echo !{user}
 }
 ```
 
-Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, `$HOME`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
+Environment overrides are dynamically scoped. They affect `env`, `user`, `home`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
 
-`PWD` and `OLDPWD` are deliberately absent from `$ENV`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD` and their actual process working directory from this logical state, and no `OLDPWD`: ral keeps no previous directory.
+`PWD` and `OLDPWD` are deliberately absent from `env`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD` and their actual process working directory from this logical state, and no `OLDPWD`: ral keeps no previous directory.
 
 `cd path` changes the session’s logical working directory. It resolves `path` as every path builtin does, path-prefix sigils included. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
 
@@ -2390,7 +2390,7 @@ The module’s final expression is evaluated, but `use` returns the bindings rat
 
 `use` is a checked boundary (§7.3): the record is admitted against the fields the script reads, so a read of a name the module does not export fails at the `use`, and each exported function is held to the type the script uses it at.
 
-`use` first resolves a path relative to the containing file, or relative to `$CWD` when there is no containing file. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
+`use` first resolves a path relative to the containing file, or relative to `cwd` when there is no containing file. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
 
 ### 10.4. Module freshness, cycles, and errors
 
@@ -2939,7 +2939,7 @@ Capability paths must be absolute after expansion. These sigils make portable ab
 - `tempdir:` — the platform temporary directory at decode time;
 - `gitdir:` — the current repository’s real Git directory, or `cwd:` outside a repository. Where `.git` is a file naming that directory, the directory must name the working tree back — as a linked worktree’s `gitdir` file does, and as a `--separate-git-dir` repository’s `core.worktree` setting does — since the file itself lies inside the tree the grant confines.
 
-Sigils, `.` and `..`, environment-derived bases, and symlink identities are frozen when the inline grant or profile is decoded. Later `cd`, `$HOME`, `$TMPDIR`, XDG, or repository changes do not retarget the grant.
+Sigils, `.` and `..`, environment-derived bases, and symlink identities are frozen when the inline grant or profile is decoded. Later `cd`, `HOME`, `TMPDIR`, XDG, or repository changes do not retarget the grant.
 
 Ordinary relative paths are rejected. Use `cwd:relative/path` when that is intended.
 
@@ -4021,7 +4021,7 @@ return [
     surface: readline,
     recursion_limit: 1024,
 
-    prompt: { return "!{abbreviate-home $CWD} ❯ " },
+    prompt: { return "!{abbreviate-home !{cwd}} ❯ " },
     env: [EDITOR: 'vim', PAGER: 'less'],
     bindings: [work: '/srv/work'],
     aliases: [ll: { |args| ls -lh ...$args }],
@@ -4358,7 +4358,7 @@ ral -- task.ral --force
 ral -c '--version'
 ```
 
-Script arguments are available through `$ARGS` and the positional forms such as `$1`. `$SCRIPT` is a lexical string containing the source file’s name. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
+Script arguments are returned by `args`. `$SCRIPT` is a lexical string containing the source file’s name. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
 
 ### 16.2. Batch processing
 
@@ -4442,7 +4442,7 @@ For tools that pass traditional shell flags blindly, ral accepts:
 
 ral seeds a stable dynamic environment at boot. Inherited values win; otherwise it supplies defaults for `PATH`, `SHELL`, `TERM`, and `LANG`. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
 
-`PWD` and `OLDPWD` are not exposed through `$ENV`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
+`PWD` and `OLDPWD` are not exposed through `env`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
 
 `RAL_PATH` is a platform-separated list used to find modules and plugins. `RAL_TIMING`, when present, prints batch phase timings to stderr.
 

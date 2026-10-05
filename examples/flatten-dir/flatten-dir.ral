@@ -5,7 +5,7 @@
 # that were never copied.  Piping into the loop catches the status but scopes
 # the counters to a subshell.  Here `glob` fails, and `fold` threads a value.
 
-let [root, dst] = $ARGS
+let [root, dst] = args
 mkdir -p $dst
 
 let files = filter { |p| is-file $p } !{glob "$root/**/*"}

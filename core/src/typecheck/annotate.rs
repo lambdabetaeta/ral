@@ -233,7 +233,7 @@ fn annotate_comp(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> Comp {
             group: annotate_rec_group(group, ctx, eta),
             index: *index,
         },
-        CompKind::Observe(reg) => CompKind::Observe(reg.clone()),
+        CompKind::Tilde(path) => CompKind::Tilde(path.clone()),
         CompKind::If { cond, then, else_ } => CompKind::If {
             cond: annotate_spanned_val(cond, ctx),
             then: annotate_spanned_val(then, ctx),

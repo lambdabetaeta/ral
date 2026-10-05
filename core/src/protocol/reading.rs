@@ -234,7 +234,7 @@ pub fn cwd(t: &dyn Transport) -> Result<PathBuf, ProbeError> {
     read::<String>(t, Class::Cwd, None).map(PathBuf::from)
 }
 
-/// The engine's `$HOME`, through its own env overlay.
+/// The engine's `HOME`, through its own env overlay.
 ///
 /// # Errors
 /// As [`cwd`].

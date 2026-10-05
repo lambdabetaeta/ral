@@ -29,7 +29,7 @@ echo !{deep 10000}
 # Tail calls do not escape a grant or a within: the attenuation is still in force at depth 0
 let chdir-at-bottom = { |n| if $[$n <= 0] { cd /tmp } else { chdir-at-bottom $[$n - 1] } }
 try { grant [shell: [chdir: false]] { chdir-at-bottom 2 } } { |_| echo 'grant survives the tail call' }
-let probe-env = { |n| if $[$n <= 0] { return $ENV[MARK] } else { probe-env $[$n - 1] } }
+let probe-env = { |n| if $[$n <= 0] { return !{env}[MARK] } else { probe-env $[$n - 1] } }
 echo !{within [env: [MARK: inside]] { probe-env 3 }}
 let probe-handled = { |n| if $[$n <= 0] { return !{within-probe} } else { probe-handled $[$n - 1] } }
 echo !{within [handlers: [within-probe: { |args| to-string pong }]] { probe-handled 3 }}

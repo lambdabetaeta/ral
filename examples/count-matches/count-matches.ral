@@ -5,7 +5,7 @@
 # the missing file as zero, drops it from the report, and exits 0.  Here the
 # count is `length` of a filtered list, and an unreadable file raises.
 
-let [pat, ...files] = $ARGS
+let [pat, ...files] = args
 
 let counted = filter { |c| return $[$c[n] > 0] } !{map { |f|
     return [file: $f, n: !{length !{filter { |l| re-match $pat $l } !{from-lines < $f}}}]

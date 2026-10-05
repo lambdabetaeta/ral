@@ -5,7 +5,7 @@
 # Here a pipeline fails whole on any failing stage, and `?` takes the first
 # arm that succeeds.
 
-let [repo] = $ARGS
+let [repo] = args
 
 within [dir: $repo] {
     git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's@^origin/@@'

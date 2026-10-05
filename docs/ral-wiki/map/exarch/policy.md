@@ -46,7 +46,7 @@ Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
 directory, and the platform's live tool roots inside
 `ral_core::capability`'s decode pass — so composition runs entirely on
 already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
-An `xdg:` path escaping `$HOME` is rejected at the profile that names it, before
+An `xdg:` path escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::capability::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error

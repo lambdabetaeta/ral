@@ -1161,7 +1161,7 @@ fn unbound_variable_hint(name: &str, suggestions: &[String]) -> String {
         .chars()
         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
     {
-        return format!("environment variables are read as `$ENV[{name}]`");
+        return format!("environment variables are read as `!{{env}}[{name}]`");
     }
     "check the spelling, or define it with `let` before this line".into()
 }

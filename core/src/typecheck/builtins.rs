@@ -751,6 +751,12 @@ pub mod scheme {
 
     scheme!(pure_string: pure Ty::String);
 
+    scheme!(pure_int: pure Ty::Int);
+
+    scheme!(pure_strs: pure Ty::List(Box::new(Ty::String)));
+
+    scheme!(pure_string_map: pure Ty::Map(Box::new(Ty::String)));
+
     scheme!(pure_bool: pure Ty::Bool);
 
     // ── Host-backed queries ───────────────────────────────────────────────

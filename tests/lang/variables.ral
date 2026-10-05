@@ -24,8 +24,8 @@ echo !{str !{return ()}}
 let m = [done: ()]
 echo !{str $m[done]}
 
-# $NPROC is a positive integer
-echo $[$NPROC > 0]
+# nproc is a positive integer
+echo $[!{nproc} > 0]
 # Expected: true
 
 # In a `let` right-hand side, a bare name is applied

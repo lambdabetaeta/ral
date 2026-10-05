@@ -1,0 +1,17 @@
+# Test: the shell's ambient state is read by builtins, not variables
+
+# nproc is a positive integer
+echo $[!{nproc} > 0]
+
+# env is a map without PWD
+echo !{has !{env} PWD}
+
+# a scoped env shows through user
+within [env: [USER: bob]] { echo !{user} }
+
+# home is what ~ abbreviates
+echo !{equal "!{home}/x" "~/x"}
+
+# a let of a read binds what it returns
+let h = home
+echo !{equal $h !{home}}

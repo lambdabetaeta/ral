@@ -12,12 +12,12 @@
 # centred on a given 1-based line — composing them is one loop, no
 # parsing — and tags each line with its number.
 
-if !{is-empty $ARGS} {
+if !{is-empty !{args}} {
     warn 'usage: grep-context.ral PATTERN [DIR]'
     exit 2
 }
 
-let [pattern, ...rest] = $ARGS
+let [pattern, ...rest] = args
 let where = if !{is-empty $rest} { return '.' } else { return $rest[0] }
 
 within [dir: $where] {

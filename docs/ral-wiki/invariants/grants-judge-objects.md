@@ -38,8 +38,8 @@ choice. Nothing outside `core/src/path/` is:
 
 A guard must ask on the form its check matches. The one time it did not, the
 `xdg:` freeze guard asked containment of the surface while the check it guarded
-matched the resolved form, and read `XDG_DATA_HOME=$HOME/link`, `link → /etc`, as
-contained inside `$HOME` (fixed in `a5b0a525`).
+matched the resolved form, and read `XDG_DATA_HOME=~/link`, `link → /etc`, as
+contained inside `HOME` (fixed in `a5b0a525`).
 
 See also [[design/capability-carriers|capability-carriers]],
 [[design/two-enforcers|two-enforcers]],

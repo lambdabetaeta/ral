@@ -493,9 +493,7 @@ impl Mentions for Comp {
             }
             // The group is a nested node: its own occ, not a walk.
             CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
-            // No `Register` variant carries a name reference: a register is
-            // read from the store, never looked up by name.
-            CompKind::Observe(_) => {}
+            CompKind::Tilde(_) => {}
             CompKind::If { cond, then, else_ } => {
                 cond.item.mentions(out);
                 then.item.mentions(out);
@@ -674,8 +672,9 @@ pub enum CompKind {
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
     Rec { group: Arc<GroupNode>, index: usize },
-    /// A read of the store, in computation position: what `$CWD` and `~/x` are.
-    Observe(Register),
+    /// A `~` or `~/x` in value position: the home directory with the suffix
+    /// appended. Never a value, since reading the store is an effect.
+    Tilde(TildePath),
     /// `if V T E` with `V : Bool` and `T, E : U C`; the chosen arm is forced.
     /// Every form that suspends a command takes a thunk, so an arm is a literal
     /// block or a thunk in hand.
@@ -786,19 +785,6 @@ impl CommandWord {
             Self::Name(n) | Self::External(n) => n,
         }
     }
-}
-
-/// A read of the shell's store, in computation position: what `$CWD`,
-/// `$ENV`, `$HOME` and `~` are. Never a value — reading the store is an
-/// effect, so it names a register rather than being spelled as one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Register {
-    Env,
-    Args,
-    Nproc,
-    Cwd,
-    User,
-    Tilde(TildePath),
 }
 
 /// An `Occ` naming exactly `names`, for tests elsewhere in the crate that
@@ -927,9 +913,7 @@ mod tests {
             group: rec_group,
             index: 0,
         });
-        let observe = Spanned::synthetic(CompKind::Observe(Register::Tilde(TildePath {
-            suffix: None,
-        })));
+        let tilde = Spanned::synthetic(CompKind::Tilde(TildePath { suffix: None }));
         let if_ = Spanned::synthetic(CompKind::If {
             cond: Spanned::synthetic(var("r_if_cond")),
             then: svar("r_if_then"),
@@ -1035,7 +1019,7 @@ mod tests {
             Arc::new(index),
             Arc::new(interpolation),
             Arc::new(rec),
-            Arc::new(observe),
+            Arc::new(tilde),
             Arc::new(if_),
             Arc::new(case),
             Arc::new(scope_try),

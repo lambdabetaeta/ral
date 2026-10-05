@@ -54,13 +54,13 @@ impl Shell {
     /// [`Cwd`](crate::types::Cwd) so later reads never resyscall.
     ///
     /// Called once by every front end, so ral code — which reads these as
-    /// `$ENV[KEY]` — sees one baseline whoever launched the process.  `SHLVL`
+    /// `!{env}[KEY]` — sees one baseline whoever launched the process.  `SHLVL`
     /// is incremented rather than passed through, as in every other shell.
     /// `PWD` is not seeded here: it is the cwd cell, which `apply_env` in
     /// `core/src/runtime/command/process.rs` threads into each child.
     #[allow(
         clippy::disallowed_methods,
-        reason = "host-env: seeding the baseline $ENV at boot — the host process env is the source the overlay later shadows"
+        reason = "host-env: seeding the baseline `env` at boot — the host process env is the source the overlay later shadows"
     )]
     pub(crate) fn seed_default_env_vars(&mut self) {
         let home = crate::host::home();
@@ -128,7 +128,7 @@ impl Shell {
             .to_string();
         self.context.set_env_var("SHLVL", shlvl);
 
-        // Compile-time facts, in `$ENV` so rc can branch on the machine
+        // Compile-time facts, in `env` so rc can branch on the machine
         // without shelling out to `uname`.
         for (k, v) in [
             ("OS_NAME", crate::host::os_name()),

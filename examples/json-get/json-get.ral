@@ -5,6 +5,6 @@
 # those keys and indexes lead to, and a missing one fails loudly
 # rather than printing null.
 
-let [path, dotted] = $ARGS
+let [path, dotted] = args
 let leaf = from-json-at !{re-split '\.' $dotted} < $path
 to-json $leaf

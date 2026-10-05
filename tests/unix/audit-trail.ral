@@ -62,7 +62,7 @@ echo !{length !{commands $grant_report}}
 echo !{commands $grant_report}[0][argv][0]
 
 # within is transparent too
-let within_report = audit { within [dir: $CWD] { /bin/echo 'inside' } }
+let within_report = audit { within [dir: !{cwd}] { /bin/echo 'inside' } }
 echo !{length !{commands $within_report}}
 echo !{commands $within_report}[0][argv][0]
 

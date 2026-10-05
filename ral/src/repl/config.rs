@@ -79,7 +79,7 @@ const DEFAULT_RC: &str = "\
     # recursion_limit:  100000,      # maximum machine-frame recursion depth
 
     # prompt: {
-    #     return \"!{abbreviate-home $CWD} $ \"
+    #     return \"!{abbreviate-home !{cwd}} $ \"
     # },
 
     # env: [
@@ -123,7 +123,7 @@ pub(super) fn create_default_rc() -> Option<String> {
         })
         .or_else(|| {
             let dot = ral_core::path::config::home_dot(".ralrc")?;
-            // Legacy single-file layout: the "dir" is `$HOME`, since
+            // Legacy single-file layout: the "dir" is the home directory, since
             // there is no per-app subdirectory to create before
             // writing `.ralrc` itself.
             let dir = dot.parent()?.to_path_buf();

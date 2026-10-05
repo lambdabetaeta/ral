@@ -6,7 +6,6 @@ pub(crate) mod audit;
 pub(crate) mod capture;
 pub(crate) mod expr;
 pub(crate) mod machine;
-pub(crate) mod observe;
 pub(crate) mod pattern;
 pub(crate) mod redirect;
 pub(crate) mod scope;

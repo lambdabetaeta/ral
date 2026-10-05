@@ -5,7 +5,7 @@
 # paths and the extension is taken from the basename alone, so nothing
 # is re-lexed and no directory leaks into a bucket.
 
-let [root] = $ARGS
+let [root] = args
 
 let nonblank = { |p|
     length !{filter { |l| return !{re-match '\S' $l} } !{from-lines < $p}}

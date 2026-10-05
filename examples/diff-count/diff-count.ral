@@ -4,7 +4,7 @@
 # files, or a file with nothing added, abort the script.  Here a count is
 # `length` of a filtered list; no exit status ever enters the reckoning.
 
-let [old, new] = $ARGS
+let [old, new] = args
 let olds = from-lines < $old
 let news = from-lines < $new
 

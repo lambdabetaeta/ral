@@ -380,13 +380,13 @@ impl Shell {
         self.session.stack_limit = n;
     }
 
-    /// The invocation positionals (`$ARGS`, `$1`, …) a CLI host passes after
+    /// The invocation positionals (`args`) a CLI host passes after
     /// the program path.
     pub fn set_args(&mut self, args: Vec<String>) {
         self.context.args = args;
     }
 
-    /// The acting principal: `$USER` from the dynamic env, with no host-env
+    /// The acting principal: `USER` from the dynamic env, with no host-env
     /// fallback, so it names nobody until a front end seeds it.
     pub fn principal(&self) -> Option<String> {
         self.context.principal()

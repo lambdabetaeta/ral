@@ -5,7 +5,7 @@
 # Here `keys` is typed `Map → [Str]`: an array or scalar fails loudly,
 # and each key stays one value all the way through the comparison.
 
-let docs = map { |p| return [file: $p, keys: !{keys !{from-json < $p}}] } $ARGS
+let docs = map { |p| return [file: $p, keys: !{keys !{from-json < $p}}] } !{args}
 let every-key = sort-list !{nub !{flat-map { |d| return $d[keys] } $docs}}
 
 for $docs { |d|

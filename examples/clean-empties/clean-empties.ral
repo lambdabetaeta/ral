@@ -5,7 +5,7 @@
 # to a mktemp file and check it before any rm, and recall -mindepth 1 and printf's
 # one-NUL empty list every time.  Here the walk is one expression, raising first.
 
-let [root] = $ARGS
+let [root] = args
 let dir = !{resolve-path $root}
 
 let found   = filter { |p| is-file $p } !{glob "$dir/**/*"}

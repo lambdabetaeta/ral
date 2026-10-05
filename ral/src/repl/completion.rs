@@ -322,7 +322,7 @@ fn is_cmd_pos(before_token: &str) -> bool {
 fn expand_tilde(dir: &str) -> Option<String> {
     ral_core::path::tilde::TildePath::parse(dir).map_or_else(
         || Some(dir.to_string()),
-        |t| t.expand(ral_core::host::home().as_deref()),
+        |t| ral_core::host::home().map(|home| t.expand(&home)),
     )
 }
 

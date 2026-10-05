@@ -1,8 +1,8 @@
 ---
 status: accepted
 generated_at_commit: 05420f58
-verified_at_commit: 05420f58
-anchors: [TildePath, scan_bare_word, scan_double_quoted, parse_head, reserved_register, apply_chdir]
+verified_at_commit: f52a58a9
+anchors: [TildePath, scan_bare_word, scan_double_quoted, parse_head, apply_chdir]
 ---
 
 # One tilde rule
@@ -34,7 +34,7 @@ Each of these failed for a reason only the implementation knew:
   string is a splice of the same store read a bare `~` is (`Register::Tilde`),
   followed by ordinary content, so `"~/x"` and `"$HOME/x"` are one and the
   same.
-- **`$HOME` is a register.** A reserved pseudo-variable like `$USER`, it reads
+- **`$HOME` is a register.** A reserved register like `$USER`, it reads
   `HOME`, or `USERPROFILE` where appropriate, from the effective environment,
   so `within [env: [HOME: …]]` is honoured; `~` is its abbreviation.
   `let HOME = …` is refused like `let CWD = …`.
@@ -108,6 +108,11 @@ statement.
 `core/src/path/tilde.rs` (`TildePath::parse`, `TildePath::expand`,
 `abbreviate_home`), `core/src/syntax/lexer.rs` (`scan_bare_word`,
 `scan_double_quoted`), `core/src/syntax/parser.rs` (`parse_head`),
-`core/src/elaborator.rs` (`reserved_register`),
-`core/src/evaluator/observe.rs`, `core/src/types/shell/cwd.rs`
+`core/src/types/shell/cwd.rs`
 (`apply_chdir`).
+
+> **Amended 2026-10-05.** `$HOME` is not a register: `home` is a nullary
+> builtin and `~` abbreviates it, still through its own IR node
+> (`CompKind::Tilde`). `$CWD` and `$USER` went the same way, so `"$HOME/x"`
+> is spelled `"~/x"` and `"!{abbreviate-home !{cwd}} ❯ "` is the short prompt
+> ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).

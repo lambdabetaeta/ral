@@ -416,7 +416,7 @@ impl ModelCatalog<LiveSource> {
     }
 }
 
-/// `None` when no cache base resolves (`$HOME` unset, no absolute override) —
+/// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
     let dir = app.xdg_dir(ral_core::path::basedir::XdgKind::Cache);

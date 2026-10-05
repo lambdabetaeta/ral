@@ -154,14 +154,14 @@ mod tests {
         shell.with_capabilities(caps, |sh| ral_core::test_access::admits_file(sh, real))
     }
 
-    /// Every bake-in names `~`/`xdg:` paths, so a host with no `$HOME` cannot
+    /// Every bake-in names `~`/`xdg:` paths, so a host with no `HOME` cannot
     /// load one at all — said here rather than by each test failing obscurely.
     fn host_home() -> String {
         ral_core::host::home()
-            .expect("these profiles name `~`/`xdg:` paths, so the test host needs $HOME")
+            .expect("these profiles name `~`/`xdg:` paths, so the test host needs HOME")
     }
 
-    /// Every bake-in must load against the real `$HOME`, so a broken profile
+    /// Every bake-in must load against the real `HOME`, so a broken profile
     /// fails at `cargo test` rather than at a user's first invocation.
     #[cfg(unix)]
     #[test]

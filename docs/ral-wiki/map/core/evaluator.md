@@ -185,11 +185,11 @@ Internals:
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `audit.rs` — trail recording (`run_native`, the one audited call site for
   every native).
-- `observe.rs` — `observe`, the one reader of `ir::Register`
-  ([[map/core/ir|ir]]): the six pseudo-variables (`$ENV`, `$ARGS`, `$NPROC`,
-  `$CWD`, `$USER`, `$HOME`) and a `~`-path awaiting `HOME`, as a total match
-  rather than a string dispatch. `$SCRIPT` is not among them — the elaborator
-  bakes it to a literal, so no runtime reader exists.
+- A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
+  through `builtins::ambient::home_dir`. The six ambient reads (`cwd`, `env`,
+  `args`, `user`, `home`, `nproc`) are natives in `builtins/ambient.rs`
+  ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
+  `$SCRIPT` is neither — the elaborator bakes it to a literal.
 
 Hot loops poll a cancellation flag cooperatively
 ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]).

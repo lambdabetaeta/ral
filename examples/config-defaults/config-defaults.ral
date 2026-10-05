@@ -5,7 +5,7 @@
 # objects prints two merged configs and exits 0.  Here `from-json` decodes
 # a single value or raises, so both files are a hard error.
 
-let [path] = $ARGS
+let [path] = args
 
 let default-config = to-string #'{"host": "localhost", "port": 8080, "tls": {"enabled": false, "ca": ""}}'# | from-json
 let config = from-json < $path

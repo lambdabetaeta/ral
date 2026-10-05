@@ -4,7 +4,7 @@
 //! an ordinary character, so `~bob` and `a~b` are plain text.
 //! [`TildePath::expand`] and [`abbreviate_home`] are inverses.
 //!
-//! Also the `$HOME`/`$USER` lookups, which pin the env var each one reads;
+//! Also the `HOME`/`USER` lookups, which pin the env var each one reads;
 //! `path.rs` re-exports them.
 
 use serde::{Deserialize, Serialize};
@@ -35,10 +35,9 @@ impl TildePath {
         })
     }
 
-    /// `home` followed by the suffix; `None` iff `home` is.
-    pub fn expand(&self, home: Option<&str>) -> Option<String> {
-        let suffix = self.suffix.as_deref().unwrap_or_default();
-        Some(format!("{}{suffix}", home?))
+    /// `home` followed by the suffix.
+    pub fn expand(&self, home: &str) -> String {
+        format!("{home}{}", self.suffix.as_deref().unwrap_or_default())
     }
 
     /// The spelling this parsed from.
@@ -122,9 +121,9 @@ fn windows_strip_home(path: &str, home: &str) -> String {
     }
 }
 
-// ── $HOME / $USER lookup ──────────────────────────────────────────────
+// ── HOME / USER lookup ──────────────────────────────────────────────
 
-/// `$HOME`, then `$USERPROFILE` (Windows), each read from `env_overrides`
+/// `HOME`, then `USERPROFILE` (Windows), each read from `env_overrides`
 /// before the host env; `None` when nothing binds one.
 ///
 /// An empty binding counts as none: `HOME=` names no directory, and admitting
@@ -136,7 +135,7 @@ pub fn home(env_overrides: &crate::types::EnvVars) -> Option<String> {
     bound(env_overrides, "HOME").or_else(|| bound(env_overrides, "USERPROFILE"))
 }
 
-/// `$USER`, then `$USERNAME` (Windows), overrides before the host env; `None`
+/// `USER`, then `USERNAME` (Windows), overrides before the host env; `None`
 /// when nothing binds one.  Same discipline as [`home`] — the prompt and the
 /// audit trail each name their own placeholder.
 pub fn user_name(env_overrides: &crate::types::EnvVars) -> Option<String> {
@@ -173,18 +172,8 @@ mod tests {
 
     #[test]
     fn expansion_appends_the_suffix_to_home() {
-        assert_eq!(tilde(None).expand(Some("/h")), Some("/h".into()));
-        assert_eq!(
-            tilde(Some("/sub")).expand(Some("/h")),
-            Some("/h/sub".into())
-        );
-    }
-
-    /// No home, no expansion: never a `~/x` rooted at `/x`.
-    #[test]
-    fn expansion_without_home_is_none() {
-        assert_eq!(tilde(None).expand(None), None);
-        assert_eq!(tilde(Some("/.gitconfig")).expand(None), None);
+        assert_eq!(tilde(None).expand("/h"), "/h");
+        assert_eq!(tilde(Some("/sub")).expand("/h"), "/h/sub");
     }
 
     #[test]

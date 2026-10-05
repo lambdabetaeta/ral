@@ -58,6 +58,8 @@ a different prelude from its host and only the wire hid it.
 - **Store reads are computations.** `$CWD`, `$ENV`, `$ARGS`, `$NPROC`, `$USER`
   and `~`-paths are `Observe`, hoisted like `$[…]`; the five names are
   reserved (S8). Closing a value therefore needs no shell.
+  Amended 2026-10-05: the store read left is `~` (`CompKind::Tilde`); the six
+  ambient reads are natives ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
 - **The cap counts frames, and is checked before the effect.** `stack_limit`
   (default 100 000) replaces 1024 host frames; `reserve` runs before any
   sink swap, redirect entry or grant push, so a refused push leaks nothing

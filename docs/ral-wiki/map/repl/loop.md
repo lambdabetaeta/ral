@@ -198,8 +198,8 @@ the structural worksheet projection, and completion live in
 
 - `prompt.rs` — `render` dispatches the registered `Session/"prompt"` hook,
   registered with capture: its return value is the prompt, a returned unit
-  falls back to its captured stdout. USER and CWD are ambient
-  pseudo-variables the prompt body reads directly. Plugin `prompt` hooks
+  falls back to its captured stdout. The prompt body reads `user` and `cwd`,
+  the ambient builtins, directly. Plugin `prompt` hooks
   fold over the result, each a dispatch; the terminal title is written
   separately. A failing prompt — one whose value cannot cross included —
   falls back to the default `❯ `, printing its diagnostic when it differs

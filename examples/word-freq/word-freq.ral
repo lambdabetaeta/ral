@@ -5,7 +5,7 @@
 # so one file yields different words and counts than under a UTF-8 locale.
 # Here a word is a `\p{L}+` match folded by `lower`, and no locale is read.
 
-let [path, n] = $ARGS
+let [path, n] = args
 
 let counted = group-by $id !{map $lower !{re-find-matches #'\p{L}+'# !{from-string < $path}}}
 let ranked = reverse !{sort-list-by { |w| return !{length $counted[$w]} } !{keys $counted}}

@@ -5,7 +5,7 @@
 # GNU split silently widens, so correctness depends on which split is installed.
 # Here the suffix width is derived from the chunk count: no capacity to exhaust.
 
-let [input, n] = $ARGS
+let [input, n] = args
 
 let per-chunk = int $n
 let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerate !{from-lines < $input}}

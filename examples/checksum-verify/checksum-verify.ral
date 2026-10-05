@@ -5,7 +5,7 @@
 # with no final newline loses its last entry unverified.  Here the lines are a
 # list and the hash/name split is explicit, so neither happens.
 
-let [manifest] = $ARGS
+let [manifest] = args
 let base = dirname $manifest
 
 let entries = map { |line|
@@ -20,7 +20,7 @@ let checked = par { |[want: want, file: file]|
         return !{sha256sum -- "$base/$file" | from-words}[0]
     } { |_| return '' }
     return [file: $file, ok: !{equal $want $got}]
-} $entries $NPROC
+} $entries !{nproc}
 
 for $checked { |[file: file, ok: ok]|
     echo "!{if $ok { return 'OK' } else { return 'FAILED' }}  $file"

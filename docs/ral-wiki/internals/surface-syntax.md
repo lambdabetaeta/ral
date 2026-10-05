@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 8d868e18
+verified_at_commit: f52a58a9
 verified_at_date: 2026-09-30
 anchors: [lex, parse, Head, DelimKind, scan_token_group, scan_splice, WordLiteral::classify, is_bare_word]
 ---
@@ -35,8 +35,8 @@ stores the stream in `StringPart::Splice`; the parser reads it with the
 ordinary `parse_atom`. So `"!$d"` is the same `Force(Variable)` as `!$d`.
 A leading `~` before `/` or the closing quote is a splice too:
 `scan_double_quoted` reads it as the bare `~` it would be outside, one read of
-the home register followed by ordinary text, so `"~/x"` and `"$HOME/x"` are
-one string; `\~` escapes it, and a literal string never splices.
+the home directory followed by ordinary text, so `"~/x"` is one string; `\~`
+escapes it, and a literal string never splices.
 Outside a string nothing is fused: `$xs[0]` is a variable followed by a
 bracket group, and `parse_atom` reads the adjacency, as it does for `!{f}[k]`.
 

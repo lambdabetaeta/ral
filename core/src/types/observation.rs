@@ -29,7 +29,7 @@ pub struct Observation {
     /// door.
     pub start: i64,
     pub end: i64,
-    /// `$USER` at the time of observing; `None` where nothing named one.
+    /// `USER` at the time of observing; `None` where nothing named one.
     pub principal: Option<String>,
     pub what: Observed,
 }

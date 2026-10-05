@@ -3,7 +3,7 @@
 //!
 //! [`crate::boot`] boots a `Shell` *in* a host process; this only reports
 //! on one.  The live probes ([`git`], [`now`]) yield `None` rather than
-//! erroring, so a caller stitching them into a prompt or an `$ENV`
+//! erroring, so a caller stitching them into a prompt or an `env`
 //! baseline stays well-formed on a bare or exotic host.
 
 use std::process::Command;
@@ -94,7 +94,7 @@ pub fn now() -> Option<String> {
 // is re-exported so host facts have one address.
 pub use crate::path::process_cwd as cwd;
 
-/// `$HOME` (then `$USERPROFILE` on Windows) read from the host process env
+/// `HOME` (then `USERPROFILE` on Windows) read from the host process env
 /// alone; `None` when nothing binds one.
 ///
 /// This is a host fact — where the tool itself is installed and who launched
@@ -111,7 +111,7 @@ pub fn home() -> Option<String> {
     path::home(&EnvVars::new())
 }
 
-/// `$USER` (then `$USERNAME` on Windows) from the host process env alone.
+/// `USER` (then `USERNAME` on Windows) from the host process env alone.
 ///
 /// `None` when nothing binds one.  Same discipline as [`home`] —
 /// overlay-holding code goes through [`crate::path::user_name`], and the
