@@ -9,7 +9,7 @@
 
 use exarch::bootstrap::App;
 use exarch::provider::identity::{AccountId, ServiceName};
-use exarch::provider::models::{ModelCatalog, ModelSource, ProviderEndpoint};
+use exarch::provider::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,14 +25,24 @@ struct FakeSource {
 }
 
 impl ModelSource for FakeSource {
-    fn list(&self, _account: &AccountId) -> Result<Vec<String>, String> {
+    fn list(&self, _account: &AccountId) -> Result<Vec<Listed>, String> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
-        Ok(vec!["claude-opus-4".into(), "claude-haiku-4".into()])
+        Ok(listed())
     }
 
     fn endpoints(&self, _model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         Err("this scenario never routes".into())
     }
+}
+
+fn listed() -> Vec<Listed> {
+    vec![
+        Listed {
+            id: "claude-opus-4".into(),
+            context_window: Some(200_000),
+        },
+        Listed::bare("claude-haiku-4"),
+    ]
 }
 
 fn read_cache(path: &Path) -> serde_json::Value {
@@ -70,21 +80,23 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
     assert_eq!(catalog().list(&anthropic), Some(models.clone()));
     assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
-    // The next session's memo is empty, so a hit here is the file's doing.
+    // The next session's memo is empty, so a hit here is the file's doing,
+    // and the windows survive the round trip.
     let mut session = catalog();
     assert_eq!(session.cached(&anthropic), Some(models.clone()));
+    assert_eq!(session.cached_listing(&anthropic), Some(listed()));
     assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
     // A second account lands beside the first rather than over it.
-    session.record(&account_id("deepseek"), vec!["deepseek-chat".into()]);
+    session.record(&account_id("deepseek"), vec![Listed::bare("deepseek-chat")]);
     let mut file = read_cache(&path);
     assert_eq!(
         file["providers"]["anthropic"]["models"],
-        serde_json::json!(models)
+        serde_json::to_value(listed()).unwrap()
     );
     assert_eq!(
         file["providers"]["deepseek"]["models"],
-        serde_json::json!(["deepseek-chat"])
+        serde_json::json!([{"id": "deepseek-chat", "context_window": null}])
     );
 
     // Aged past the TTL, the entry stops being served and is refetched.

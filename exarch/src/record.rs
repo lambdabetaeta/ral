@@ -292,6 +292,8 @@ pub enum Forensic {
         session_id: AgentId,
         parent: Option<AgentId>,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
         /// What the account was called when the session started — a
         /// snapshot, the right thing for a log to hold even once a sibling
         /// account arrives or a workspace is renamed.
@@ -311,6 +313,8 @@ pub enum Forensic {
     },
     SessionResumed {
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
         #[serde(rename = "provider")]
         label: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -372,6 +376,8 @@ pub enum Forensic {
     /// from `SessionStarted` once the run outlives its first selection.
     ModelChanged {
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
         #[serde(rename = "provider")]
         label: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

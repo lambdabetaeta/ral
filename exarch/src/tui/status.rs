@@ -56,8 +56,7 @@ pub(super) fn rule_line(
     ));
     spans.push(Span::styled(SEP, Style::default().fg(SLATE)));
 
-    // `None` is a catalog miss in `provider::pricing`, not a zero-size window:
-    // drop the segment rather than ramp against a guessed denominator.
+    // An unknown window keeps its column and reads `?`.
     if let Some(cap) = context_window
         && cap > 0
     {
@@ -71,6 +70,11 @@ pub(super) fn rule_line(
         let pct = pct.min(999);
         spans.extend(ctx_ramp(pct));
         spans.push(Span::styled(format!(" {pct}%"), Style::default().fg(SLATE)));
+    } else {
+        spans.push(Span::styled(
+            format!("ctx {}  ?", " ".repeat(CTX_BAR_W)),
+            Style::default().fg(SLATE),
+        ));
     }
 
     // Absent when the whole buffer fits, which is what `None` means here.

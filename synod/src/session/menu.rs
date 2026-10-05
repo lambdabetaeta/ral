@@ -199,7 +199,7 @@ where
 mod tests {
     use super::*;
     use exarch::provider::identity::AccountId;
-    use exarch::provider::models::ProviderEndpoint;
+    use exarch::provider::models::{Listed, ProviderEndpoint};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -212,7 +212,7 @@ mod tests {
         Account::of_service(service)
     }
 
-    type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, String>>;
 
     /// A fake [`ModelSource`] whose list is shared (not forked) across a
     /// clone, so a background-fetch thread run by [`Listing::open`] serves
@@ -231,7 +231,7 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, id: &AccountId) -> Result<Vec<String>, String> {
+        fn list(&self, id: &AccountId) -> Result<Vec<Listed>, String> {
             self.lists
                 .lock_ignore_poison()
                 .get(id)
@@ -246,7 +246,7 @@ mod tests {
 
     fn one(id: AccountId, models: &[&str]) -> Lists {
         let mut m = BTreeMap::new();
-        m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
+        m.insert(id, Ok(models.iter().map(|m| Listed::bare(*m)).collect()));
         m
     }
 
@@ -317,7 +317,10 @@ mod tests {
         let default = anthropic.service.default_model.clone().unwrap();
         catalog.record(
             &anthropic.id,
-            vec!["claude-haiku-4".to_string(), default.clone()],
+            vec![
+                Listed::bare("claude-haiku-4"),
+                Listed::bare(default.clone()),
+            ],
         );
 
         let menu = menu_from(std::slice::from_ref(&anthropic), &mut catalog);

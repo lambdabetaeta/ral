@@ -52,7 +52,6 @@ fn root_config(run_dir: &Path) -> RootConfig {
         system: "system".into(),
         caps: ral_core::types::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
-        model: "test-model".into(),
         account: RecordedAccount::for_test("test"),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),

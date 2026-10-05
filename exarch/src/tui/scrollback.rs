@@ -680,14 +680,9 @@ impl Scrollback {
     }
 
     /// The turn's degradation floor, graded against the session's billed input.
-    /// Both terms are the fold's own: the model in force names the denominator
-    /// through the catalog.
+    /// Both terms are the fold's own: the model in force carries its window.
     fn context_floor(&self) -> u8 {
-        let window = self
-            .fold
-            .model()
-            .and_then(|(model, _)| crate::provider::pricing::context_window(model));
-        super::fidelity::context_floor(self.fold.usage().input, window)
+        super::fidelity::context_floor(self.fold.usage().input, self.fold.context_window())
     }
 
     // ── interaction ──────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 //! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! rendered `user.log`.
 
-use crate::agent::build::RecordedAccount;
+use crate::agent::build::{RecordedAccount, RecordedModel};
 use crate::agent::nudge::Spent;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
@@ -207,7 +207,7 @@ pub struct AgentLog {
     dir: PathBuf,
     /// Held, with [`Self::account`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
-    model: String,
+    model: RecordedModel,
     account: RecordedAccount,
     /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
     sessions_root: PathBuf,
@@ -252,14 +252,14 @@ impl AgentLog {
     pub fn root(
         sessions_root: &Path,
         session_id: AgentId,
-        model: &str,
+        model: &RecordedModel,
         account: &RecordedAccount,
         system_prompt_bytes: usize,
     ) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             sessions_root.to_path_buf(),
             session_id,
-            model.to_string(),
+            model.clone(),
             account.clone(),
         )?;
         s.record_started(None, system_prompt_bytes, crate::bootstrap::now_unix_ms())?;
@@ -282,7 +282,8 @@ impl AgentLog {
         let scratch = tempfile::Builder::new()
             .prefix("exarch-agent-log-test-")
             .tempdir()?;
-        let log = Self::root(scratch.path(), session_id, model, account, 0)?;
+        let model = RecordedModel::for_test(model);
+        let log = Self::root(scratch.path(), session_id, &model, account, 0)?;
         Ok(Self {
             _scratch: Some(scratch),
             ..log
@@ -303,13 +304,13 @@ impl AgentLog {
         &self,
         child_id: AgentId,
         system_prompt_bytes: usize,
-        model: &str,
+        model: &RecordedModel,
         account: &RecordedAccount,
     ) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
             child_id,
-            model.to_string(),
+            model.clone(),
             account.clone(),
         )?;
         s.record_started(
@@ -347,7 +348,7 @@ impl AgentLog {
                 dir.display()
             )));
         }
-        let (context, model, label) =
+        let (context, name, label) =
             crate::record::model::resume(&record_path).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -367,7 +368,10 @@ impl AgentLog {
         let mut resumed = Self {
             id: session_id,
             dir,
-            model,
+            model: RecordedModel {
+                name,
+                context_window: None,
+            },
             account,
             sessions_root: sessions_root.to_path_buf(),
             #[cfg(test)]
@@ -396,15 +400,16 @@ impl AgentLog {
     /// Returns an error if the resumed breadcrumb cannot be appended.
     pub fn record_resumed(
         &mut self,
-        model: &str,
+        model: &RecordedModel,
         account: &RecordedAccount,
         system_prompt_bytes: usize,
         at_unix_ms: u64,
     ) -> io::Result<()> {
-        self.model = model.to_string();
+        self.model = model.clone();
         self.account = account.clone();
         self.record_forensic(Forensic::SessionResumed {
-            model: self.model.clone(),
+            model: self.model.name.clone(),
+            context_window: self.model.context_window,
             label: self.account.label.clone(),
             service: Some(self.account.service.clone()),
             account: Some(self.account.id.clone()),
@@ -815,7 +820,7 @@ impl AgentLog {
     fn open_fresh(
         sessions_root: PathBuf,
         session_id: AgentId,
-        model: String,
+        model: RecordedModel,
         account: RecordedAccount,
     ) -> io::Result<Self> {
         let dir = Self::dir_of(&sessions_root, session_id);
@@ -858,7 +863,8 @@ impl AgentLog {
         Forensic::SessionStarted {
             session_id: self.id,
             parent,
-            model: self.model.clone(),
+            model: self.model.name.clone(),
+            context_window: self.model.context_window,
             label: self.account.label.clone(),
             service: Some(self.account.service.clone()),
             account: Some(self.account.id.clone()),
@@ -1400,7 +1406,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -1966,7 +1972,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2023,7 +2029,7 @@ mod tests {
             .fork(
                 1,
                 0,
-                "other-model",
+                &RecordedModel::for_test("other-model"),
                 &RecordedAccount::for_test("other-provider"),
             )
             .expect("child log");
@@ -2076,7 +2082,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2104,7 +2110,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2136,7 +2142,7 @@ mod tests {
         let live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2164,7 +2170,7 @@ mod tests {
         let live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2189,7 +2195,7 @@ mod tests {
         let live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2223,7 +2229,7 @@ mod tests {
         let live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2255,7 +2261,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2290,7 +2296,7 @@ mod tests {
         let child = AgentLog::root(
             sessions.path(),
             1,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2330,7 +2336,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2373,7 +2379,7 @@ mod tests {
             let mut live = AgentLog::root(
                 sessions.path(),
                 0,
-                "model",
+                &RecordedModel::for_test("model"),
                 &RecordedAccount::for_test("provider"),
                 0,
             )
@@ -2452,7 +2458,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2486,7 +2492,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2528,7 +2534,12 @@ mod tests {
     fn mnemon(parent: &AgentLog, child_id: AgentId) -> AgentLog {
         let inherited = parent.inherited_context();
         let mut child = parent
-            .fork(child_id, 0, "model", &RecordedAccount::for_test("provider"))
+            .fork(
+                child_id,
+                0,
+                &RecordedModel::for_test("model"),
+                &RecordedAccount::for_test("provider"),
+            )
             .expect("child log");
         child.import_context(inherited).expect("import");
         child
@@ -2610,7 +2621,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2672,7 +2683,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2734,7 +2745,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2791,7 +2802,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2817,7 +2828,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2853,7 +2864,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2914,7 +2925,7 @@ mod tests {
         let mut ancestor = AgentLog::root(
             ancestry.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2935,7 +2946,7 @@ mod tests {
         let mut live = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -2981,7 +2992,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -3025,7 +3036,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )
@@ -3073,7 +3084,7 @@ mod tests {
         let mut parent = AgentLog::root(
             sessions.path(),
             0,
-            "model",
+            &RecordedModel::for_test("model"),
             &RecordedAccount::for_test("provider"),
             0,
         )

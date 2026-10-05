@@ -6,7 +6,7 @@
 //! names the outcomes, [`Fetches`] pumps the threads, [`Listing`] joins them.
 
 use super::identity::AccountId;
-use super::models::{ModelCatalog, ModelSource, ProviderEndpoint};
+use super::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint, names};
 use std::collections::BTreeMap;
 
 /// One background fetch's state, over an account's model list
@@ -79,7 +79,7 @@ impl<K, T> Fetches<K, T> {
 /// seeded from the catalog's caches, completed by a [`Fetches`] pump.
 pub struct Listing {
     states: BTreeMap<AccountId, ModelsState>,
-    fetches: Fetches<AccountId, Vec<String>>,
+    fetches: Fetches<AccountId, Vec<Listed>>,
 }
 
 impl Listing {
@@ -111,8 +111,9 @@ impl Listing {
         let mut changed = Vec::new();
         for (account, result) in self.fetches.landed() {
             let state = match result {
-                Ok(models) => {
-                    catalog.record(&account, models.clone());
+                Ok(listed) => {
+                    let models = names(&listed);
+                    catalog.record(&account, listed);
                     ModelsState::Loaded(models)
                 }
                 Err(reason) => ModelsState::Failed(reason),
@@ -127,7 +128,7 @@ impl Listing {
     /// Catalog-free by design: a caller holding the catalog behind a lock
     /// (synod's `refresh_menu`) folds the successes in afterward through
     /// [`ModelCatalog::record`], never holding it across the network.
-    pub fn settle(self) -> Vec<(AccountId, Result<Vec<String>, String>)> {
+    pub fn settle(self) -> Vec<(AccountId, Result<Vec<Listed>, String>)> {
         self.fetches.settle()
     }
 
@@ -155,7 +156,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<Listed>, String>>;
 
     /// A fake [`ModelSource`] whose state is shared, not forked, across a clone
     /// — so a background thread's fetch is counted where the test can see it.
@@ -179,7 +180,7 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, account: &AccountId) -> Result<Vec<String>, String> {
+        fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.lists
                 .lock_ignore_poison()
@@ -197,7 +198,7 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert(
             account.clone(),
-            Ok(models.iter().map(ToString::to_string).collect()),
+            Ok(models.iter().map(|m| Listed::bare(*m)).collect()),
         );
         m
     }
@@ -220,7 +221,7 @@ mod tests {
         let anthropic = Account::built_in("anthropic");
         let source = FakeSource::new(one(&anthropic.id, &["claude-opus-4"]));
         let mut catalog = ModelCatalog::memo_only(source.clone());
-        catalog.record(&anthropic.id, vec!["claude-opus-4".into()]);
+        catalog.record(&anthropic.id, vec![Listed::bare("claude-opus-4")]);
 
         let listing = Listing::open(vec![anthropic.id.clone()], &mut catalog);
 
@@ -298,7 +299,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
-            (anthropic.id, Ok(vec!["claude-opus-4".to_string()]))
+            (anthropic.id, Ok(vec![Listed::bare("claude-opus-4")]))
         );
         assert_eq!(results[1], (openai.id, Err("no key".to_string())));
     }

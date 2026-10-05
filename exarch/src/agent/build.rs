@@ -147,6 +147,34 @@ impl RecordedAccount {
     }
 }
 
+/// A session's model, snapshotted for the record: its name and the context
+/// window its provider reported when the selection was minted.
+#[derive(Clone, Debug)]
+pub struct RecordedModel {
+    pub name: String,
+    pub context_window: Option<u64>,
+}
+
+impl RecordedModel {
+    /// The one place a live selection becomes a log header's model.
+    pub fn of(provider: &Provider) -> Self {
+        Self {
+            name: provider.model().to_string(),
+            context_window: provider.context_window(),
+        }
+    }
+
+    /// A snapshot for tests that only care that *something* is recorded; not
+    /// `#[cfg(test)]` for the reason [`RecordedAccount::for_test`] is not.
+    #[doc(hidden)]
+    pub fn for_test(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            context_window: None,
+        }
+    }
+}
+
 /// How a trunk is driven — which fixes whether it holds `reply` and whom it
 /// waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +206,6 @@ pub struct RootConfig {
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
     pub run_dir: std::path::PathBuf,
-    pub model: String,
     pub account: RecordedAccount,
     pub trunk: Trunk,
     /// What requests advertise; empty for `--chat`, whose prompt then takes
@@ -348,13 +375,12 @@ impl Avatar {
         root_seat: RootSeat,
         provider: Arc<Provider>,
         id: AgentId,
-        open: impl FnOnce(&Path, &str, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
+        open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, usize) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let RootConfig {
             system,
             caps,
             run_dir,
-            model,
             account,
             trunk,
             tools,
@@ -431,7 +457,12 @@ impl Avatar {
                 TRUNK_NAME,
             )
         };
-        let (log, opened) = open(&sessions_root, &model, &account, system_prompt.len())?;
+        let (log, opened) = open(
+            &sessions_root,
+            &RecordedModel::of(&provider),
+            &account,
+            system_prompt.len(),
+        )?;
         // The policy's one verdict the tree reads; the ledger is the host's.
         let search = egress.policy.search;
         let fleet = Fleet::new(
@@ -642,7 +673,7 @@ impl Avatar {
         let log = AgentLog::root(
             &sessions_root,
             id,
-            "test-model",
+            &RecordedModel::for_test("test-model"),
             &RecordedAccount::for_test("test"),
             system_prompt.len(),
         )?;
@@ -749,7 +780,6 @@ mod tests {
             system: "system".into(),
             caps: ral_core::types::GrantStack::root(),
             run_dir: run_dir.to_path_buf(),
-            model: "test-model".into(),
             account: RecordedAccount::for_test("test"),
             trunk: Trunk::Attended,
             tools: Toolset::offered(false),
@@ -1273,7 +1303,7 @@ mod tests {
         let mut log = AgentLog::root(
             &sessions,
             0,
-            "old-model",
+            &RecordedModel::for_test("old-model"),
             &RecordedAccount::for_test("old-provider"),
             0,
         )
@@ -1286,7 +1316,6 @@ mod tests {
 
         let (agent, resumed) = Avatar::resume(
             RootConfig {
-                model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),
                 ..root_config(dir.path(), 0)
             },
@@ -1398,7 +1427,7 @@ mod tests {
         let log = AgentLog::root(
             &sessions,
             0,
-            "old-model",
+            &RecordedModel::for_test("old-model"),
             &RecordedAccount::for_test("old-provider"),
             0,
         )
@@ -1409,7 +1438,6 @@ mod tests {
 
         let (root, _) = Avatar::resume(
             RootConfig {
-                model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),
                 ..root_config(dir.path(), 1)
             },

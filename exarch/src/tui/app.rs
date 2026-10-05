@@ -122,7 +122,7 @@ impl App {
             let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
             format!("{status_provider}/{} ({effort})", p.model())
         };
-        self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
+        self.context_window = p.context_window();
     }
 
     /// Whether the focused tab has an agent to steer.  Root's own handle

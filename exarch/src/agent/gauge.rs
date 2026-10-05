@@ -79,7 +79,7 @@ impl Gauges {
 
 /// Fallback eviction trigger, in serialised model-view bytes, for
 /// `Avatar::evict` — used only when the model's context window is unknown
-/// (a native provider with no fetched catalog).  A known window goes
+/// (no source reports it).  A known window goes
 /// through [`eviction_due`] instead.
 pub(crate) const EVICT_THRESHOLD: usize = 500 * 1024;
 

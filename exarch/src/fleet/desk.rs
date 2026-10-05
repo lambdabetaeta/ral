@@ -559,7 +559,7 @@ impl ExarchDesk {
                 .fork(
                     crate::agent::fresh_id(),
                     system_prompt.len(),
-                    provider.model(),
+                    &crate::agent::RecordedModel::of(&provider),
                     &account,
                 )
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;

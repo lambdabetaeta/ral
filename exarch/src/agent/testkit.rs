@@ -330,7 +330,6 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             system: "system".into(),
             caps: ral_core::types::GrantStack::root(),
             run_dir,
-            model: "test-model".into(),
             account: RecordedAccount::for_test("test"),
             trunk,
             tools,

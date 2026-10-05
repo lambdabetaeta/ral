@@ -141,7 +141,6 @@ fn main() {
         system: "you are a helpful office assistant".to_string(),
         caps: GrantStack::root(),
         run_dir,
-        model: "test-model".to_string(),
         account: RecordedAccount {
             label: "test".to_string(),
             service: "scripted".to_string(),

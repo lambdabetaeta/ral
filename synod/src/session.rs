@@ -256,13 +256,12 @@ impl Conversation {
             engine: Engine::new(),
             holdings: holdings.clone(),
         });
-        let provider = bureau.build(&account, model.clone(), &tuning, None, None)?;
+        let provider = bureau.build(&account, model, &tuning, None, None)?;
 
         let config = exarch::agent::RootConfig {
             system,
             caps: ral_core::types::GrantStack::of(caps),
             run_dir,
-            model,
             account: RecordedAccount {
                 label: label.clone(),
                 service: account.service.name.as_str().to_string(),

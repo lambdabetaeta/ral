@@ -80,6 +80,8 @@ pub struct Provider {
     max_tokens_override: Option<u32>,
     tuning: Tuning,
     route: Option<String>,
+    /// Resolved once, when the bureau mints this selection.
+    context_window: Option<u64>,
 }
 
 /// A live transport over the shared [`Engine`], or a scripted replay so
@@ -109,6 +111,7 @@ impl Provider {
         max_tokens_override: Option<u32>,
         tuning: Tuning,
         route: Option<String>,
+        context_window: Option<u64>,
     ) -> Self {
         Self {
             backend,
@@ -117,6 +120,7 @@ impl Provider {
             max_tokens_override,
             tuning,
             route,
+            context_window,
         }
     }
 
@@ -128,6 +132,7 @@ impl Provider {
             model.to_string(),
             None,
             Tuning::default(),
+            None,
             None,
         )
     }
@@ -170,9 +175,10 @@ impl Provider {
         }
     }
 
-    /// This model's context window when the pricing catalog knows it.
+    /// This model's context window as its provider, or failing that the
+    /// pricing catalog, reported it when the selection was minted.
     pub fn context_window(&self) -> Option<u64> {
-        pricing::context_window(&self.model)
+        self.context_window
     }
 
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and

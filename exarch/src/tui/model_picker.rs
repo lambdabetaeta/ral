@@ -201,6 +201,7 @@ fn apply_model_switch(
             return;
         }
     };
+    let context_window = new_provider.context_window();
     provider.swap(new_provider);
     tui.app.update_live_model(&provider.current(), &available);
     let state_dir = crate::bootstrap::EXARCH.project_dir(info.cwd);
@@ -219,6 +220,7 @@ fn apply_model_switch(
     }
     if let Err(error) = recorder.emit(crate::record::Forensic::ModelChanged {
         model: model.to_string(),
+        context_window,
         label,
         service: Some(account.service.name.as_str().to_string()),
         account: Some(account.id.as_str().to_string()),

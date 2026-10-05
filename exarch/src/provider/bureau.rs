@@ -16,8 +16,8 @@ use ral_core::sync::LockExt;
 
 use super::allowance::{LiveMeters, Survey};
 use super::credential::CredentialStore;
-use super::models::{LiveSource, ModelCatalog};
-use super::{Account, Backend, Engine, Provider, Rations, Tuning, oauth};
+use super::models::{Listed, LiveSource, ModelCatalog, ModelSource};
+use super::{Account, Backend, Engine, Provider, Rations, Tuning, oauth, pricing};
 use crate::bootstrap::App;
 
 /// The credentials, model catalog, and allowance record an application shares.
@@ -75,6 +75,37 @@ fn route_across(current: &Provider, account: &Account) -> Option<String> {
         .filter(|_| current.account.id == account.id)
 }
 
+/// `model`'s window: the serving account's own listing if it reports one, else
+/// `fallback`, else unknown.
+pub(super) fn resolve_window(
+    listed: Option<&[Listed]>,
+    model: &str,
+    fallback: impl FnOnce(&str) -> Option<u64>,
+) -> Option<u64> {
+    listed
+        .and_then(|models| models.iter().find(|m| m.id == model))
+        .and_then(|m| m.context_window)
+        .or_else(|| fallback(model))
+}
+
+/// `account`'s listing: the catalog's cache, else one fetch made with the
+/// catalog unlocked. A failed fetch is no listing.
+fn listing_of(holdings: &Holdings, account: &Account) -> Option<Vec<Listed>> {
+    let source = {
+        let mut catalog = holdings.catalog.lock_ignore_poison();
+        if let Some(listed) = catalog.cached_listing(&account.id) {
+            return Some(listed);
+        }
+        catalog.source().clone()
+    };
+    let listed = source.list(&account.id).ok()?;
+    holdings
+        .catalog
+        .lock_ignore_poison()
+        .record(&account.id, listed.clone());
+    Some(listed)
+}
+
 /// What a scripted bureau answers every request for a provider with.
 fn mints_nothing() -> String {
     "this session replays a scripted provider and mints no others".into()
@@ -111,6 +142,11 @@ impl Bureau {
         let credential = roster
             .credential(&account.id)
             .ok_or_else(|| format!("{} has no resolved credential", roster.label(account)))?;
+        let context_window = resolve_window(
+            listing_of(holdings, account).as_deref(),
+            &model,
+            pricing::context_window,
+        );
         let transport = engine.transport_for(account, &model, credential);
         let backend = Backend::Live {
             engine: Arc::clone(engine),
@@ -125,6 +161,7 @@ impl Bureau {
             max_tokens,
             tuning.clone(),
             route,
+            context_window,
         )))
     }
 
@@ -220,5 +257,36 @@ mod tests {
     fn the_route_is_dropped_on_another_account() {
         let parent = parent();
         assert_eq!(route_across(&parent, &Account::built_in("anthropic")), None);
+    }
+
+    fn listed(id: &str, window: Option<u64>) -> Listed {
+        Listed {
+            id: id.into(),
+            context_window: window,
+        }
+    }
+
+    #[test]
+    fn a_listed_window_beats_the_fallback() {
+        let models = [listed("m", Some(10))];
+        assert_eq!(resolve_window(Some(&models), "m", |_| Some(99)), Some(10));
+    }
+
+    #[test]
+    fn a_listed_model_without_a_window_falls_back() {
+        let models = [listed("m", None)];
+        assert_eq!(resolve_window(Some(&models), "m", |_| Some(99)), Some(99));
+    }
+
+    #[test]
+    fn an_unlisted_model_falls_back() {
+        let models = [listed("other", Some(10))];
+        assert_eq!(resolve_window(Some(&models), "m", |_| Some(99)), Some(99));
+        assert_eq!(resolve_window(None, "m", |_| Some(99)), Some(99));
+    }
+
+    #[test]
+    fn no_listing_and_no_fallback_is_unknown() {
+        assert_eq!(resolve_window(None, "m", |_| None), None);
     }
 }

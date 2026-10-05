@@ -19,8 +19,8 @@ pub(super) struct Fidelity {
 }
 
 /// Bucket `last_input` against the model's context window into a `0..=3`
-/// floor.  A `None` window — an unlisted model, or a turn before the
-/// catalog loads — reads as sound rather than as pressure.
+/// floor.  A `None` window — a model no source reports — reads as sound
+/// rather than as pressure.
 pub(super) fn context_floor(last_input: u64, context_window: Option<u64>) -> u8 {
     match context_window {
         Some(cap) if cap > 0 => {

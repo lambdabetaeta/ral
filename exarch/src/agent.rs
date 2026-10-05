@@ -57,7 +57,7 @@ pub(crate) mod testkit;
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
 pub(crate) use build::{Build, fresh_id};
-pub use build::{RecordedAccount, RootConfig, RootSeat, Trunk};
+pub use build::{RecordedAccount, RecordedModel, RootConfig, RootSeat, Trunk};
 pub use dial::Dial;
 pub use log::Resumed;
 pub use seat::{EngineLost, EnginePhase};

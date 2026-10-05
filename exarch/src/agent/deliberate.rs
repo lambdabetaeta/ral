@@ -694,7 +694,7 @@ mod tests {
         use crate::agent::gauge::PRESSURE_THRESHOLD_FALLBACK;
         const EXCHANGES: usize = 6;
         let mut session = Avatar::for_test("system").unwrap();
-        // A scripted model has no catalogued context window, so the gauge
+        // A scripted model has no known context window, so the gauge
         // reads bytes: sized between the soft line and the eviction trigger,
         // so pressure is due and nothing has been shed yet.
         {

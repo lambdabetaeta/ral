@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0714e80c
-generated_at_date: 2026-09-29
+generated_at_commit: 4e80e33f
+generated_at_date: 2026-10-05
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -304,9 +304,20 @@ beside `dial`.
 **The picker asks each provider for its own names and retains manual entry as
 the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
-- API-key providers list through genai's `all_model_names`.
+- Anthropic, DeepSeek and Gemini list through exarch's own `GET /models`
+  (paged to the end for Anthropic and Gemini), because each reports a context
+  window genai discards; other API-key providers list through genai's
+  `all_model_names`. Every listing is `Vec<Listed { id, context_window }>`,
+  and the picker sees only the names.
 - ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
-  their live OAuth cell after the common stale-token check.
+  their live OAuth cell after the common stale-token check; each entry's
+  `context_window` is kept.
+- `Bureau::build` resolves a selection's context window once, at mint: the
+  serving account's own listing (cache, else one fetch made with the catalog
+  unlocked), else the OpenRouter catalog, else unknown. `Provider` owns the
+  value; the record carries it (`SessionStarted`, `SessionResumed`,
+  `ModelChanged`), so a tab's fold reads it without a catalog. The status line
+  draws an unknown window as `?`.
 - `/login` admits an account mid-session through
   `CredentialStore::add_oauth`; that operation returns the id and the exact
   shared `Credential`, which `ModelCatalog::add_credential` admits through
@@ -431,8 +442,9 @@ panic (X8).
   DeepSeek models use the local rate table — DeepSeek's own first-party card,
   doubling inside its weekday UTC peak windows, where the catalog would price
   a third-party OpenRouter host — before any OpenRouter alias; other providers
-  use the catalog. The catalog also supplies `ModelCaps` (context window and
-  supported request parameters) for startup and picker decisions. Offline
+  use the catalog. The catalog also supplies `ModelCaps` (supported request
+  parameters, and the context window only as the fallback when the serving
+  account's listing reports none) for startup and picker decisions. Offline
   starts degrade to `—`.
 
 ## The wire door

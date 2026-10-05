@@ -221,12 +221,11 @@ pub fn run() -> Result<(), String> {
     // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
     let bureau = Arc::new(Bureau::Live { engine, holdings });
-    let provider = bureau.build(&account, model.clone(), &tuning, route, c.max_tokens)?;
+    let provider = bureau.build(&account, model, &tuning, route, c.max_tokens)?;
     let config = agent::RootConfig {
         system,
         caps,
         run_dir: run_dir.clone(),
-        model,
         account: recorded_account,
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.

@@ -157,6 +157,8 @@ pub struct Blocks {
     /// The model in force: the one the session opened under, and then each
     /// [`Forensic::ModelChanged`]'s.
     model: Option<(String, String)>,
+    /// The window the provider reported for [`Self::model`], when it did.
+    context_window: Option<u64>,
     /// The [`Seq`] of the first block this fold ever held, remembered past
     /// eviction — the door [`Self::blocks`] no longer names once the window
     /// has moved off the session's opening block.
@@ -191,6 +193,11 @@ impl Blocks {
     /// its head bookend, onward.
     pub fn model(&self) -> Option<(&str, &str)> {
         self.model.as_ref().map(|(m, p)| (m.as_str(), p.as_str()))
+    }
+
+    /// The context window the model in force was minted with, if known.
+    pub fn context_window(&self) -> Option<u64> {
+        self.context_window
     }
 
     /// Fold one witnessed fact in, reporting what it moved.  A record the
@@ -349,10 +356,26 @@ impl Blocks {
             // A head bookend opens the session under a model exactly as a
             // switch names one mid-session, so all three land in the memo and
             // none of them draws a block.
-            Forensic::SessionStarted { model, label, .. }
-            | Forensic::SessionResumed { model, label, .. }
-            | Forensic::ModelChanged { model, label, .. } => {
+            Forensic::SessionStarted {
+                model,
+                label,
+                context_window,
+                ..
+            }
+            | Forensic::SessionResumed {
+                model,
+                label,
+                context_window,
+                ..
+            }
+            | Forensic::ModelChanged {
+                model,
+                label,
+                context_window,
+                ..
+            } => {
                 self.model = Some((model, label));
+                self.context_window = context_window;
                 Delta::Quiet
             }
         }
@@ -498,5 +521,21 @@ mod tests {
             Some(Seq::new(1)),
             "the session's opening block is remembered past its eviction"
         );
+    }
+
+    #[test]
+    fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
+        let change = |window| Forensic::ModelChanged {
+            model: "m".into(),
+            context_window: window,
+            label: "p".into(),
+            service: None,
+            account: None,
+        };
+        let mut memo = Blocks::default();
+        let _ = memo.step_forensic(Seq::new(1), change(Some(200_000)));
+        assert_eq!(memo.context_window(), Some(200_000));
+        let _ = memo.step_forensic(Seq::new(2), change(None));
+        assert_eq!(memo.context_window(), None);
     }
 }
