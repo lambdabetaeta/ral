@@ -9,9 +9,10 @@
 
 use crate::capability::Program;
 use crate::ir::CommandName;
-use crate::path::{PathSearch, RealPath, tilde::expand_tilde_path};
+use crate::path::{PathSearch, RealPath, is_executable_file, tilde::expand_tilde_path};
 use crate::process::SpawnFailure;
 use crate::types::{Context, Error};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -24,7 +25,7 @@ pub(crate) struct Head {
 #[derive(Clone, Debug)]
 pub(crate) enum Missing {
     NotFound,
-    /// The file a `PATH` walk stopped at, which lacks `+x`.
+    /// The file named or found, which cannot be run.
     NotExecutable(PathBuf),
 }
 
@@ -58,7 +59,13 @@ impl Head {
 impl Program {
     /// The file `path` names, which the launcher will run as spelled.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
-        let real = RealPath::of(&path).map_err(|_| Missing::NotFound)?;
+        let real = RealPath::of(&path).map_err(|e| match e.kind() {
+            ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound,
+            _ => Missing::NotExecutable(path.clone()),
+        })?;
+        if !is_executable_file(&path) {
+            return Err(Missing::NotExecutable(path));
+        }
         Ok(Self::File { path, real })
     }
 }
@@ -101,15 +108,15 @@ fn suffixed(shown: &str, ctx: &Context) -> Option<String> {
 }
 
 /// Where the launcher's child finds `shown`: anchored at the cwd it starts
-/// in.  Off Windows only `.` folds, because the kernel walks a `..` after the
-/// links before it, and folding first would judge a different file.  Win32
-/// folds `..` lexically itself, and an absolute path keeps `CreateProcessW`
-/// off the process cwd.
+/// in.  Off Windows spelled as the user wrote it, the kernel walking it: a
+/// fold would judge a different file than a `..` after a link, or a trailing
+/// `/`, reaches.  Win32 folds `..` lexically itself, and an absolute path
+/// keeps `CreateProcessW` off the process cwd.
 fn launch_path(shown: &str, ctx: &Context) -> PathBuf {
     if cfg!(windows) {
         return ctx.resolver().resolve(shown).into_inner();
     }
-    ctx.launch_cwd().join(shown).components().collect()
+    ctx.launch_cwd().join(shown)
 }
 
 /// Surface rendering of `name`: bare and path heads verbatim, tilde heads
@@ -231,6 +238,37 @@ mod tests {
         let head = std::env::temp_dir().join("no-such-dir").join("configure");
         let head = Head::resolve(&path_head(&head), &shell.context);
         assert!(matches!(head.program, Err(Missing::NotFound)));
+    }
+
+    /// The kernel refuses `file/` with ENOTDIR, so a trailing slash must not
+    /// be folded away into a runnable spelling.
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_slash_on_a_file_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = plant(tmp.path(), "tool");
+        let shell = Shell::default();
+        let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
+        let head = Head::resolve(&CommandName::Path(head), &shell.context);
+        assert!(matches!(head.program, Err(Missing::NotFound)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_head_that_cannot_be_run_is_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let shell = Shell::default();
+        for head in [file.as_path(), tmp.path()] {
+            let head = Head::resolve(&path_head(head), &shell.context);
+            assert!(
+                matches!(head.program, Err(Missing::NotExecutable(_))),
+                "{head:?}"
+            );
+        }
     }
 
     /// There is nothing to judge in an absent file: classification lets the

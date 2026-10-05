@@ -93,10 +93,15 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 /// surface — the two names already reach the same inode.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
-    let mut out = vec![p.to_path_buf(), canonicalise_lenient(p)];
-    let toggles: Vec<PathBuf> = out.iter().filter_map(|q| firmlink_toggle(q)).collect();
-    out.extend(toggles);
-    out
+    with_firmlink_twins(vec![p.to_path_buf(), canonicalise_lenient(p)])
+}
+
+/// `names` and the firmlink toggle of each.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
+    let toggles: Vec<PathBuf> = names.iter().filter_map(|q| firmlink_toggle(q)).collect();
+    names.extend(toggles);
+    names
 }
 
 /// Engine behind [`render_paths`](super::render_paths).  Dedup keys on the
@@ -109,10 +114,19 @@ pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
 pub(crate) fn match_variants_paths<'a>(
     paths: impl Iterator<Item = &'a Path>,
 ) -> Result<Vec<String>, String> {
+    spelled(paths, match_variants)
+}
+
+/// The names `variants` gives each path, deduped and refused unless UTF-8.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn spelled<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    variants: impl Fn(&Path) -> Vec<PathBuf>,
+) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for p in paths {
-        for v in match_variants(p) {
+        for v in variants(p) {
             if seen.insert(v.clone()) {
                 // `{v:?}`, not `.display()`: `Display` would paper over the
                 // fault with the very U+FFFD substitution being refused.

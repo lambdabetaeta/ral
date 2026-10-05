@@ -14,6 +14,7 @@ use crate::path::{Rendered, render_paths};
 use crate::types::{ExecProjection, ExecRule, SandboxProjection};
 use std::fmt;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::sync::OnceLock;
 
 /// A Landlock ABI level, as `landlock_create_ruleset` reports it.
@@ -151,7 +152,7 @@ impl Layer {
                 });
                 let mut admits: Vec<Rendered> = allowed
                     .chain(render_paths(&base)?)
-                    .filter(|p| crate::path::exists(p.as_str()))
+                    .filter(|p| is_real(p.as_str()))
                     .collect();
                 admits.sort();
                 admits.dedup();
@@ -259,18 +260,31 @@ impl fmt::Display for Layer {
     }
 }
 
+/// Landlock attaches to the inode a path reaches, so only a path that is its
+/// own real path may be admitted.
+#[allow(clippy::disallowed_methods)]
+fn is_real(path: &str) -> bool {
+    crate::path::canon::canonicalise_strict(std::path::Path::new(path))
+        .is_ok_and(|real| real == std::path::Path::new(path))
+}
+
 fn on_9p(path: &str) -> bool {
     rustix::fs::statfs(path).is_ok_and(|s| u64::try_from(s.f_type).is_ok_and(|t| t == V9FS_MAGIC))
 }
 
-fn open(path: &str) -> Result<landlock::PathFd, Error> {
-    landlock::PathFd::new(path).map_err(|e| Error::OpenAdmit {
+/// Never through a symlink: a rule attaches to the inode the open reaches.
+fn open(path: &str) -> Result<OwnedFd, Error> {
+    use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+    openat2(
+        CWD,
+        path,
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|errno| Error::OpenAdmit {
         path: path.to_string(),
-        source: match e {
-            landlock::PathFdError::OpenCall { source, .. } => source,
-            // The crate's enum is non_exhaustive; any future variant still means the open failed.
-            other => io::Error::other(other.to_string()),
-        },
+        source: io::Error::from(errno),
     })
 }
 
@@ -512,6 +526,25 @@ mod tests {
         assert!(
             !admits.iter().any(|a| a.as_str() == gone),
             "an admit that names nothing cannot be opened at entry: {admits:?}"
+        );
+    }
+
+    #[test]
+    fn an_admit_that_is_now_a_symlink_is_not_admitted() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside");
+        let allowed = tmp.path().join("allowed");
+        std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
+        let allowed = allowed.to_string_lossy().into_owned();
+
+        let admits = layer(&restricted(vec![&allowed], false), Abi(9))
+            .and_then(|l| l.exec)
+            .expect("exec admits")
+            .admits;
+        assert!(
+            !admits.iter().any(|a| a.as_str() == allowed),
+            "a symlink would admit its target: {admits:?}"
         );
     }
 

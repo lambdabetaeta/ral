@@ -40,8 +40,9 @@ authorise the object; this does the same for exec.
   `verdict(a ∧ b, p) = verdict(a, p) ∧ verdict(b, p)` for every program. A
   property test over a fixed universe checks it. Compiled afresh on every
   question, since a bare key follows the host `PATH`.
-- **Kernel.** `ExecRules::kernel` emits the same rules, carriers spliced in,
-  sorted by `Rank` ascending (denies after allows within a rank), so the
+- **Kernel.** `ExecRules::kernel` emits the same rules, each file once at its
+  final verdict (carriers counted), sorted by `Rank` ascending (denies after
+  allows within a rank), so the
   kernel's last-match-wins is highest-rank-wins by construction. A second
   property test checks a model of last-match-wins over that list against
   `verdict`. See [[decisions/261004_exec-carriers|exec-carriers]].
@@ -56,9 +57,11 @@ authorise the object; this does the same for exec.
 - **`Head { shown, program: Result<Program, Missing> }`**
   (`runtime/command/head.rs`). A bundled name is its tool with no walk; any
   other bare name is the effective `PATH`'s hit; a path head is anchored at
-  the launch cwd with only `.` folded, because the kernel walks a `..` after
-  the links before it (Windows folds `..` itself and gets an absolute path).
-  A head with no program carries `Missing::{NotFound, NotExecutable}`, never
+  the launch cwd and spelled as written, because the kernel walks a `..` after
+  the links before it and honours a trailing `/` (Windows folds `..` itself
+  and gets an absolute path). A path head that is not an executable file has
+  no program, so no grant judges it before launch. A head with no program
+  carries `Missing::{NotFound, NotExecutable}`, never
   reaches the guard, and `vet` reports 127 or 126.
 - **`Admitted`**: what `check_exec` returns, holding the program, its argv and
   the table that judged it, with private fields. `SpawnPlan` carries it,

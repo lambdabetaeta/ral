@@ -55,6 +55,24 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
     )
 }
 
+/// `path` and its firmlink twin, with no canonicalisation and no disk access:
+/// for a path already real.
+///
+/// # Errors
+///
+/// As [`render_paths`].
+#[allow(clippy::disallowed_methods)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn render_real(path: &str) -> Result<Vec<Rendered>, String> {
+    let names = std::iter::once(std::path::Path::new(path));
+    Ok(super::canon::spelled(names, |p| {
+        super::canon::with_firmlink_twins(vec![p.to_path_buf()])
+    })?
+    .into_iter()
+    .map(Rendered)
+    .collect())
+}
+
 /// Proper ancestors of already-rendered names, themselves rendered — sorted,
 /// deduped, root excluded, exactly as [`proper_ancestors`](super::proper_ancestors)
 /// leaves them.

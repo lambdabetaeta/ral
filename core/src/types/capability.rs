@@ -14,7 +14,7 @@
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
 //! at the call by [`GrantStack::permits_detach`] and reaches no projection.
 
-use crate::path::{NormalizedPrefix, Rendered, render_paths, rendered_pins};
+use crate::path::{NormalizedPrefix, Rendered, render_paths, render_real, rendered_pins};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -167,7 +167,7 @@ pub struct FsPolicy {
 /// no backend ever saw that distinction, so enforcement is unchanged.
 ///
 /// `pinned_dirs` is `serde(skip)` because it is *derived*, never authored:
-/// [`SandboxProjection::traverse`] mints it from `deny_paths` and
+/// [`SandboxProjection::rendered`] mints it from `deny_paths` and
 /// `write_prefixes`, so a forged `--sandbox-projection` can neither fabricate
 /// a pin nor drop one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,7 +187,7 @@ pub struct FsRules<N> {
     /// directory itself (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r`
     /// when the write prefix root is the ancestor) and the denied bytes
     /// resurface at a name no deny rule covers.  Rendering runs before the
-    /// ancestor walk (`SandboxProjection::traverse`), so both a deny's
+    /// ancestor walk (`SandboxProjection::rendered`), so both a deny's
     /// surface chain and its resolved chain are pinned, and an alias
     /// `W/alias → W/top/deep` with deny `W/alias/secret` pins `W/top` too —
     /// an ancestor chain only the resolved spelling reveals.
@@ -355,33 +355,31 @@ impl<N> Default for SandboxProjection<N> {
 }
 
 impl SandboxProjection<String> {
-    /// Rename every path in the projection through `f`, ordering and deduping
-    /// each fs set once on the way and deriving `pinned_dirs` from the result.
+    /// Every path in the projection as the names the kernel may present it
+    /// by, ordering and deduping each fs set once on the way and deriving
+    /// `pinned_dirs` from the result.  After this call no rule a backend
+    /// emits can name a spelling the kernel will not present.
     ///
     /// The completeness guarantee is structural, not promised: the input is
     /// destructured exhaustively, the output constructed exhaustively, and the
     /// only way to obtain a `Vec<Rendered>` or an `ExecRule<Rendered>` is to
-    /// call `f`.  A path set added
-    /// later therefore fails to compile until it too is threaded — which is
-    /// the point, since every under-enforcement of this class has been someone
-    /// forgetting to expand one new list.
+    /// render.  A path set added later therefore fails to compile until it
+    /// too is threaded — which is the point, since every under-enforcement of
+    /// this class has been someone forgetting to expand one new list.
     ///
     /// Pins are derived here rather than carried because they are a *function*
     /// of the deny paths and the write prefixes — but only once both are
     /// rendered: containment before expansion and after do not commute, since
     /// a name reached only through a symlinked chain has ancestors the
-    /// surface spelling never mentions.  So `f` runs on the deny and write
-    /// sets first, and the ancestor walk runs on their rendered output.
+    /// surface spelling never mentions.  So the deny and write sets render
+    /// first, and the ancestor walk runs on their rendered output.
     ///
     /// # Errors
     ///
-    /// Whatever `f` refuses; [`render_paths`] refuses a name whose expansion
-    /// it cannot spell faithfully.
+    /// A name whose expansion cannot be spelled faithfully, as
+    /// [`render_paths`] refuses it.
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn traverse(
-        &self,
-        f: impl Fn(&[String]) -> Result<Vec<Rendered>, String>,
-    ) -> Result<SandboxProjection<Rendered>, String> {
+    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
         let Self { fs, net, exec } = self;
         let ordered = |ps: &[String]| -> Vec<String> {
             ps.iter()
@@ -400,11 +398,11 @@ impl SandboxProjection<String> {
                 // authority — see [`FsRules::pinned_dirs`].
                 pinned_dirs: _,
             }) => {
-                let write_prefixes = f(&ordered(write_prefixes))?;
-                let deny_paths = f(&ordered(deny_paths))?;
+                let write_prefixes = render_paths(&ordered(write_prefixes))?;
+                let deny_paths = render_paths(&ordered(deny_paths))?;
                 let pinned_dirs = rendered_pins(&deny_paths, &write_prefixes);
                 FsProjection::Restricted(FsRules {
-                    read_prefixes: f(&ordered(read_prefixes))?,
+                    read_prefixes: render_paths(&ordered(read_prefixes))?,
                     write_prefixes,
                     deny_paths,
                     pinned_dirs,
@@ -414,10 +412,13 @@ impl SandboxProjection<String> {
         let exec = match exec {
             ExecProjection::Unrestricted => ExecProjection::Unrestricted,
             // Order is precedence here, so the rules are neither sorted nor deduped.
+            // Exec paths are real, frozen at grant: rendering adds only the
+            // firmlink twin, as re-resolving could widen a grant to a
+            // symlink's new target.
             ExecProjection::Restricted(rules) => {
                 let mut rendered = Vec::with_capacity(rules.len());
                 for rule in rules {
-                    rendered.extend(rule.try_flat_map(|path| f(std::slice::from_ref(path)))?);
+                    rendered.extend(rule.try_flat_map(|path| render_real(path))?);
                 }
                 ExecProjection::Restricted(rendered)
             }
@@ -427,18 +428,6 @@ impl SandboxProjection<String> {
             net: *net,
             exec,
         })
-    }
-
-    /// [`traverse`](Self::traverse) under this host's own name-class
-    /// expansion — the one call a backend makes, after which no rule it emits
-    /// can name a spelling the kernel will not present.
-    ///
-    /// # Errors
-    ///
-    /// As [`render_paths`].
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
-        self.traverse(render_paths)
     }
 }
 
@@ -765,7 +754,7 @@ fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<Nor
 mod lattice_tests;
 
 #[cfg(test)]
-mod traverse_tests {
+mod rendered_tests {
     use super::*;
 
     /// The pins the traversal derives, through the real renderer — pins are
@@ -889,5 +878,41 @@ mod traverse_tests {
         assert!(rules[veto + 1..].iter().all(
             |r| matches!(r, ExecRule::File { path, allow: false } if path.as_str().ends_with("/usr/bin/git"))
         ));
+    }
+
+    /// Exec paths are frozen real names: a dir since replaced by a symlink
+    /// must not render into the link's new target.
+    #[cfg(unix)]
+    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
+    #[test]
+    fn a_replaced_exec_dir_does_not_render_into_its_new_target() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&allowed).expect("allowed");
+        std::fs::create_dir(&outside).expect("outside");
+        let projection = SandboxProjection {
+            exec: ExecProjection::Restricted(vec![ExecRule::Dir {
+                path: allowed.to_string_lossy().into_owned(),
+                allow: true,
+            }]),
+            ..SandboxProjection::default()
+        };
+        std::fs::remove_dir(&allowed).expect("remove");
+        std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
+
+        let ExecProjection::Restricted(rules) = projection.rendered().expect("renders").exec else {
+            panic!("restricted in, restricted out");
+        };
+        let real = outside.canonicalize().expect("outside exists");
+        for rule in &rules {
+            let ExecRule::Dir { path, .. } = rule else {
+                panic!("only a dir went in");
+            };
+            assert!(
+                !std::path::Path::new(path.as_str()).starts_with(&real),
+                "{path:?} lies under {real:?}"
+            );
+        }
     }
 }

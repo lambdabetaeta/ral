@@ -49,7 +49,7 @@ pub(crate) use real::RealPath;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
-pub(crate) use render::{Rendered, render_paths};
+pub(crate) use render::{Rendered, render_paths, render_real};
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;

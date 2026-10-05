@@ -156,35 +156,40 @@ impl ExecRules {
         most_specific(self.covering(real)).unwrap_or(Verdict::Deny)
     }
 
+    /// What the kernel is to make of `real`: the table's rules, and a carrier
+    /// as an allow ranked under an exact rule.
+    fn kernel_verdict(&self, real: &RealPath, carriers: &BTreeSet<RealPath>) -> Verdict {
+        let carrier = carriers
+            .contains(real)
+            .then_some((Rank::Carrier, Verdict::Allow));
+        most_specific(self.matching(Subject::File(real)).chain(carrier)).unwrap_or(Verdict::Deny)
+    }
+
     /// The kernel's rules, in ascending [`Rank`] so last-match-wins is
     /// [`most_specific`]; within a rank denies follow allows, as equal ranks
-    /// meet.  The kernel cannot see argv, so `Only` is an allow; tools are not
-    /// rendered, the kernel seeing ral's own binary for them.
+    /// meet.  Each file is emitted once, at its final verdict, so an
+    /// allow-only renderer (Landlock) may keep the allows as they stand.  The
+    /// kernel cannot see argv, so `Only` is an allow; tools are not rendered,
+    /// the kernel seeing ral's own binary for them.
     pub(crate) fn kernel(&self, carriers: &BTreeSet<RealPath>) -> Vec<ExecRule> {
-        let file = |p: &RealPath, allow| ExecRule::File {
-            path: p.to_string(),
-            allow,
-        };
-        let mut ranked: Vec<_> = (self.dirs.iter())
-            .map(|(d, &allow)| {
-                let dir = ExecRule::Dir {
-                    path: d.to_string(),
-                    allow,
-                };
-                (Rank::Dir(d.depth()), dir)
-            })
-            .chain(carriers.iter().map(|c| (Rank::Carrier, file(c, true))))
-            .chain(
-                self.files
-                    .iter()
-                    .map(|(f, v)| (Rank::Exact, file(f, !v.is_denied()))),
-            )
-            .chain(
-                self.vetoes
-                    .iter()
-                    .map(|n| (Rank::Veto, ExecRule::Veto(n.clone()))),
-            )
-            .collect();
+        let dirs = self.dirs.iter().map(|(d, &allow)| {
+            let dir = ExecRule::Dir {
+                path: d.to_string(),
+                allow,
+            };
+            (Rank::Dir(d.depth()), dir)
+        });
+        let files: BTreeSet<&RealPath> = self.files.keys().chain(carriers).collect();
+        let files = files.into_iter().map(|f| {
+            let allow = !self.kernel_verdict(f, carriers).is_denied();
+            let file = ExecRule::File {
+                path: f.to_string(),
+                allow,
+            };
+            (Rank::Exact, file)
+        });
+        let vetoes = (self.vetoes.iter()).map(|n| (Rank::Veto, ExecRule::Veto(n.clone())));
+        let mut ranked: Vec<_> = dirs.chain(files).chain(vetoes).collect();
         ranked.sort_by_key(|(rank, rule)| {
             let allows = matches!(
                 rule,
@@ -199,9 +204,8 @@ impl ExecRules {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
         self.files
-            .iter()
-            .filter(|(_, v)| !v.is_denied())
-            .map(|(real, _)| real)
+            .keys()
+            .filter(|real| !self.verdict(Subject::File(real)).is_denied())
     }
 }
 
@@ -539,6 +543,66 @@ mod tests {
                     expected,
                     "{f}\nrules = {rules:?}\ncarriers = {carriers:?}\nkernel = {kernel:?}"
                 );
+            }
+        }
+    }
+
+    fn kernel_file(kernel: &[ExecRule], f: &RealPath) -> Vec<bool> {
+        let want = f.to_string();
+        kernel
+            .iter()
+            .filter_map(|rule| match rule {
+                ExecRule::File { path, allow } if *path == want => Some(*allow),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn carriers(ps: &[&str]) -> BTreeSet<RealPath> {
+        ps.iter().map(|p| real(p)).collect()
+    }
+
+    #[test]
+    fn a_carrier_with_an_exact_deny_is_denied_to_the_kernel() {
+        let rules: ExecRules = std::iter::once(file("/x/c", Verdict::Deny)).collect();
+        let kernel = rules.kernel(&carriers(&["/x/c"]));
+        assert_eq!(kernel_file(&kernel, &real("/x/c")), [false]);
+    }
+
+    #[test]
+    fn a_carrier_whose_name_is_vetoed_is_not_allowed() {
+        let rules: ExecRules = std::iter::once(Rule::Veto("c".into())).collect();
+        let kernel = rules.kernel(&carriers(&["/x/c"]));
+        assert_eq!(kernel_file(&kernel, &real("/x/c")), [false]);
+    }
+
+    #[test]
+    fn an_exact_allow_whose_name_is_vetoed_is_denied_and_not_listed() {
+        let rules: ExecRules = [file("/x/bash", Verdict::Allow), Rule::Veto("bash".into())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            kernel_file(&rules.kernel(&BTreeSet::new()), &real("/x/bash")),
+            [false]
+        );
+        assert_eq!(rules.allowed_files().count(), 0);
+    }
+
+    #[test]
+    fn each_file_is_emitted_once() {
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let files: Vec<RealPath> = FILES.iter().map(|p| real(p)).collect();
+        for _ in 0..500 {
+            let rules = table(&mut rng);
+            let carriers: BTreeSet<RealPath> = files
+                .iter()
+                .filter(|_| rng.below(2) == 0)
+                .cloned()
+                .collect();
+            let kernel = rules.kernel(&carriers);
+            for f in &files {
+                let n = kernel_file(&kernel, f).len();
+                assert!(n <= 1, "{f} appears {n} times in {kernel:?}");
             }
         }
     }

@@ -60,7 +60,11 @@ visible in the grant and its dump.
 **Renderers.** Seatbelt emits one form per rule in order: an allow admits
 `file-read* process-exec`, a deny or veto `process-exec` only — exec denies do
 not deny reads, which are fs's. Landlock is allow-list only: it admits the
-base, ral and every allowing rule, and renders no deny.
+base, ral and every allowing rule, and renders no deny; each file being
+emitted once at its final verdict, the allows stand as they are. Exec paths
+are real and frozen at grant, so rendering adds only the firmlink twin and
+never reads the disk; Landlock admits only paths that are their own real path
+and opens each without following symlinks.
 
 ## Declared limits
 
