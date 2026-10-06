@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 451d1ab5
-generated_at_date: 2026-09-22
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md, exarch/data/context.md]
 ---
 
@@ -46,12 +46,16 @@ exit code.
 - **Subcommands** (`cli.rs`) run an out-of-band action and exit before any session
   setup: `login` / `logout` / `accounts` manage signed-in ChatGPT accounts (see
   below), `--model` and the session flags are ignored on this path.
-- **Session.** Absent a subcommand, `run` resolves the initial provider+model
-  (`--provider` pins the identity; `--effort` names a rung of the `/model`
-  picker's own `EFFORT_LADDER`; `--chat` drops the system prompt and all
-  tools). The saved project selection is the ground each of those is laid
-  over, and any of them being given saves the result back, so a flag and the
-  picker leave the same trace. Then `run` composes the capability lattice
+- **Session.** Absent a subcommand, `run` settles what to open on
+  (`--provider` pins the identity; `--model` names a model its account must
+  list; `--effort` names a rung of the `/model` picker's own `EFFORT_LADDER`;
+  `--chat` drops the system prompt and all tools). The saved project selection
+  is the ground each of those is laid over. A pair the flags name must build or
+  the launch fails; a saved pair that no longer builds, or no pair at all,
+  opens the picker alone on the screen before any session exists (`tui::choose`)
+  — or, headless, fails asking for `--model`. A session is therefore born with a
+  listed model and never holds none, and the pair it opens on is saved back, so
+  a flag and the picker leave the same trace. Then `run` composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the trunk
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`

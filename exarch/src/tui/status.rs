@@ -47,11 +47,7 @@ pub(super) fn rule_line(
     // every frame.
     spans.push(Span::styled(SEP, Style::default().fg(SLATE)));
     spans.push(Span::styled(
-        if status_model.is_empty() {
-            "…".to_owned()
-        } else {
-            status_model.to_owned()
-        },
+        status_model.to_owned(),
         Style::default().fg(SLATE),
     ));
     spans.push(Span::styled(SEP, Style::default().fg(SLATE)));

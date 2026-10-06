@@ -3,9 +3,9 @@
 //! An account's model list is that account's to know: Anthropic, `DeepSeek` and
 //! Gemini list through their own endpoints ([`native`]), other API-key services
 //! through genai, `ChatGPT` accounts through the Codex backend. A listing
-//! carries each model's context window where the wire reports one. Fetching is
-//! lazy and never load-bearing — a list that fails, or that omits the wanted
-//! model, still leaves manual entry.
+//! carries each model's context window where the wire reports one. The
+//! listing is the authority on which models an account serves: a model it
+//! does not name is never run on that account.
 //!
 //! All network I/O sits behind [`ModelSource`], so tests drive the resolution
 //! logic against a fake; the unit tests here take [`ModelCatalog::memo_only`],
@@ -23,6 +23,7 @@ use ral_core::sync::LockExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 mod native;
@@ -68,8 +69,7 @@ pub trait ModelSource {
     /// `account`'s full model list.
     ///
     /// # Errors
-    /// Returns `Err` with a message describing why the fetch failed; the
-    /// caller degrades to manual entry.
+    /// Returns `Err` with a message describing why the fetch failed.
     fn list(&self, account: &AccountId) -> Result<Vec<Listed>, String>;
 
     /// The upstream serving providers `OpenRouter` lists for `model`. Only a
@@ -370,19 +370,6 @@ impl<S: ModelSource> ModelCatalog<S> {
         self.endpoints_memo.insert(model.to_string(), endpoints);
     }
 
-    /// `account`'s model names: the memo, then a fresh disk entry, then a live
-    /// fetch that refreshes both. `None` on failure — callers degrade to
-    /// manual entry.
-    pub fn list(&mut self, account: &AccountId) -> Option<Vec<String>> {
-        if let Some(listed) = self.cached_listing(account) {
-            return Some(names(&listed));
-        }
-        let listed = self.source.list(account).ok()?;
-        let models = names(&listed);
-        self.record(account, listed);
-        Some(models)
-    }
-
     /// `account`'s model names if already cached, never fetching.
     /// `Listing::open` fills from this on open and spawns a fetch only where
     /// it returns `None`.
@@ -461,6 +448,27 @@ pub fn names(listed: &[Listed]) -> Vec<String> {
     listed.iter().map(|m| m.id.clone()).collect()
 }
 
+/// `account`'s listing: the catalog's cache, else one fetch made with the
+/// catalog unlocked and folded back in.
+///
+/// # Errors
+/// The fetch's own reason, when nothing is cached and the fetch fails.
+pub fn listing_of<S: ModelSource + Clone>(
+    catalog: &Mutex<ModelCatalog<S>>,
+    account: &AccountId,
+) -> Result<Vec<Listed>, String> {
+    let source = {
+        let mut catalog = catalog.lock_ignore_poison();
+        if let Some(listed) = catalog.cached_listing(account) {
+            return Ok(listed);
+        }
+        catalog.source().clone()
+    };
+    let listed = source.list(account)?;
+    catalog.lock_ignore_poison().record(account, listed.clone());
+    Ok(listed)
+}
+
 /// `None` when no cache base resolves (`HOME` unset, no absolute override) —
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
@@ -485,8 +493,7 @@ fn no_provider_error() -> String {
 ///
 /// `state.json`'s `provider`, or a wire selection. No name arm, ever: a
 /// rendering is compared only against other renderings, never parsed, so a
-/// stale selection can fall back to a default but never lands on a same-named
-/// stranger.
+/// stale selection is lost rather than landing on a same-named stranger.
 pub fn resolve_account(id: &str, available: &[Account]) -> Option<Account> {
     available
         .iter()
@@ -494,63 +501,64 @@ pub fn resolve_account(id: &str, available: &[Account]) -> Option<Account> {
         .cloned()
 }
 
-/// Resolve a `--model` name to the account that should serve it: every
-/// available account whose live list holds it, failing that a name-shape
-/// match.
-///
-/// Fetches on a cache miss, so it runs only for an explicit `--model`.
+/// Resolve a `--model` name to the one available account whose listing
+/// names it.
 ///
 /// # Errors
-/// Returns `Err` if no account is available, if no available account lists
-/// or plausibly serves `name`, or if more than one account's catalog lists
-/// it — a silent arbitrary choice among credentials is exactly the bug this
-/// resolver exists to refuse, so it asks for `--provider` instead.
-pub fn resolve_model_provider<S: ModelSource>(
+/// Returns `Err` if no account is available, if none lists `name` — naming
+/// those whose listing could not be had — or if several do, since a choice
+/// among credentials is the user's to make with `--provider`.
+pub fn resolve_model_provider(
     name: &str,
     available: &[Account],
-    catalog: &mut ModelCatalog<S>,
+    mut listing: impl FnMut(&Account) -> Result<Vec<Listed>, String>,
 ) -> Result<Account, String> {
     if available.is_empty() {
         return Err(no_provider_error());
     }
-    let listed: Vec<&Account> = available
+    let label = |account: &Account| identity::label(account, available);
+    let listings: Vec<_> = available
         .iter()
-        .filter(|account| {
-            catalog
-                .list(&account.id)
-                .is_some_and(|models| models.iter().any(|m| m == name))
-        })
+        .map(|account| (account, listing(account)))
         .collect();
-    match listed.as_slice() {
-        [one] => return Ok((*one).clone()),
-        [] => {}
-        many => {
-            return Err(format!(
-                "model '{name}' is listed by more than one available account ({}) — \
-                 pass --provider to say which",
-                many.iter()
-                    .map(|account| identity::label(account, available))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+    let serving: Vec<&Account> = listings
+        .iter()
+        .filter(|(_, listed)| {
+            listed
+                .as_ref()
+                .is_ok_and(|models| models.iter().any(|m| m.id == name))
+        })
+        .map(|(account, _)| *account)
+        .collect();
+    match serving.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => {
+            let unlisted: Vec<String> = listings
+                .iter()
+                .filter_map(|(account, listed)| {
+                    let why = listed.as_ref().err()?;
+                    Some(format!("{} ({why})", label(account)))
+                })
+                .collect();
+            let unlisted = if unlisted.is_empty() {
+                String::new()
+            } else {
+                format!("; could not list the models of {}", unlisted.join(", "))
+            };
+            Err(format!(
+                "model '{name}' is not listed by any available account ({}){unlisted}",
+                identity::roster(available)
+            ))
         }
+        many => Err(format!(
+            "model '{name}' is listed by more than one available account ({}) — \
+             pass --provider to say which",
+            many.iter()
+                .map(|account| label(account))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
-    // No listed match — fall back to the name's shape. `vendor/model` is a
-    // routing convention; a bare name goes to the sole available account, so
-    // a scripted run with one key set need not name it.
-    if name.contains('/')
-        && let Some(account) = available.iter().find(|account| account.service.routes)
-    {
-        return Ok(account.clone());
-    }
-    if let [only] = available {
-        return Ok(only.clone());
-    }
-    Err(format!(
-        "model '{name}' is not listed by any available account ({}); \
-         pass a model that one of them serves",
-        identity::roster(available)
-    ))
 }
 
 /// Resolve an explicit `--provider` name: an account id, then a service name,
@@ -558,8 +566,6 @@ pub fn resolve_model_provider<S: ModelSource>(
 ///
 /// That is the order a human is likely to type, and the order that lets a bare
 /// service name still mean something once it names several `ChatGPT` accounts.
-/// No listing lookup — that is the point of pinning, so the caller may then
-/// name a model the account does not advertise.
 ///
 /// # Errors
 /// Returns `Err` if no account is available, if `name` answers to none, or
@@ -606,12 +612,15 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::rc::Rc;
 
-    /// Counts fetches, so a test can assert the memo prevents a second one.
+    /// Counts fetches across its clones, so a test can assert the memo
+    /// prevents a second one.
+    #[derive(Clone)]
     struct FakeSource {
-        lists: BTreeMap<AccountId, Result<Vec<Listed>, String>>,
+        lists: Lists,
         endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
-        calls: Cell<usize>,
+        calls: Rc<Cell<usize>>,
     }
 
     impl FakeSource {
@@ -619,7 +628,7 @@ mod tests {
             Self {
                 lists,
                 endpoints: BTreeMap::new(),
-                calls: Cell::new(0),
+                calls: Rc::default(),
             }
         }
 
@@ -655,26 +664,43 @@ mod tests {
         models.iter().map(|m| Listed::bare(*m)).collect()
     }
 
-    fn one(account: &Account, models: &[&str]) -> Lists {
-        let mut m = BTreeMap::new();
-        m.insert(account.id.clone(), Ok(bare(models)));
-        m
+    /// A listing lookup over `lists`, as `resolve_model_provider` takes one.
+    fn lookup(lists: &Lists) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> + '_ {
+        |account| {
+            lists
+                .get(&account.id)
+                .cloned()
+                .unwrap_or_else(|| Err("unreachable".into()))
+        }
     }
 
     #[test]
-    fn lists_then_memoises() {
+    fn a_listing_is_fetched_once_then_served_from_the_memo() {
         let anthropic = Account::built_in("anthropic");
-        let source = FakeSource::new(one(&anthropic, &["claude-opus-4", "claude-haiku-4"]));
-        let mut cat = ModelCatalog::memo_only(source);
-        match cat.list(&anthropic.id) {
-            Some(m) => assert_eq!(m, vec!["claude-opus-4", "claude-haiku-4"]),
-            None => panic!("expected a list"),
-        }
-        let _ = cat.list(&anthropic.id);
+        let lists = Lists::from([(anthropic.id.clone(), Ok(bare(&["model-a", "model-b"])))]);
+        let source = FakeSource::new(lists);
+        let calls = Rc::clone(&source.calls);
+        let catalog = Mutex::new(ModelCatalog::memo_only(source));
         assert_eq!(
-            cat.source.calls.get(),
-            1,
-            "memo must prevent a second fetch"
+            listing_of(&catalog, &anthropic.id),
+            Ok(bare(&["model-a", "model-b"]))
+        );
+        let _ = listing_of(&catalog, &anthropic.id);
+        assert_eq!(calls.get(), 1, "the memo must prevent a second fetch");
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_its_reason_and_caches_nothing() {
+        let deepseek = Account::built_in("deepseek");
+        let lists = Lists::from([(deepseek.id.clone(), Err("network down".to_string()))]);
+        let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(lists)));
+        assert_eq!(
+            listing_of(&catalog, &deepseek.id),
+            Err("network down".to_string())
+        );
+        assert_eq!(
+            catalog.lock_ignore_poison().cached_listing(&deepseek.id),
+            None
         );
     }
 
@@ -698,7 +724,7 @@ mod tests {
 
     #[test]
     fn endpoints_memo_round_trips() {
-        let model = "deepseek/deepseek-chat";
+        let model = "vendor/model-a";
         let mut endpoints = BTreeMap::new();
         endpoints.insert(
             model.to_string(),
@@ -717,50 +743,18 @@ mod tests {
         assert_eq!(cat.cached_endpoints(model), Some(fetched));
     }
 
-    /// The catalog drops the reason on the floor; the picker reads it off the
-    /// source seam instead, for the note beside its manual-entry row.
     #[test]
-    fn failed_fetch_is_none_with_reason_at_the_source() {
-        let deepseek = Account::built_in("deepseek");
-        let mut lists = BTreeMap::new();
-        lists.insert(deepseek.id.clone(), Err("network down".to_string()));
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
-        assert!(cat.list(&deepseek.id).is_none());
-        assert!(
-            cat.source()
-                .list(&deepseek.id)
-                .unwrap_err()
-                .contains("network down")
-        );
-    }
-
-    #[test]
-    fn resolve_prefers_listing_match() {
-        let anthropic = Account::built_in("anthropic");
-        let deepseek = Account::built_in("deepseek");
-        let mut lists = BTreeMap::new();
-        lists.insert(anthropic.id.clone(), Ok(bare(&["claude-opus-4"])));
-        lists.insert(deepseek.id.clone(), Ok(bare(&["deepseek-chat"])));
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
-        let available = [anthropic, deepseek.clone()];
-        assert_eq!(
-            resolve_model_provider("deepseek-chat", &available, &mut cat).unwrap(),
-            deepseek
-        );
-    }
-
-    #[test]
-    fn resolve_prefers_custom_listing_match() {
+    fn resolve_finds_the_account_that_lists_the_model() {
         let anthropic = Account::built_in("anthropic");
         let llama = Account::declared("local-llama");
-        let mut lists = BTreeMap::new();
-        lists.insert(anthropic.id.clone(), Ok(bare(&["claude-opus-4"])));
-        lists.insert(llama.id.clone(), Ok(bare(&["llama-3"])));
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
+        let lists = Lists::from([
+            (anthropic.id.clone(), Ok(bare(&["model-a"]))),
+            (llama.id.clone(), Ok(bare(&["model-b"]))),
+        ]);
         let available = [anthropic, llama.clone()];
         assert_eq!(
-            resolve_model_provider("llama-3", &available, &mut cat).unwrap(),
-            llama
+            resolve_model_provider("model-b", &available, lookup(&lists)),
+            Ok(llama)
         );
     }
 
@@ -768,61 +762,47 @@ mod tests {
     fn resolve_two_accounts_listing_one_model_is_refused_naming_both() {
         let personal = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
         let work = Account::chatgpt("acc-2", "alex@work (Acme Ltd)");
-        let mut lists = BTreeMap::new();
-        lists.insert(personal.id.clone(), Ok(bare(&["gpt-5.5"])));
-        lists.insert(work.id.clone(), Ok(bare(&["gpt-5.5"])));
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
+        let lists = Lists::from([
+            (personal.id.clone(), Ok(bare(&["model-a"]))),
+            (work.id.clone(), Ok(bare(&["model-a"]))),
+        ]);
         let available = [personal, work];
-        let err = resolve_model_provider("gpt-5.5", &available, &mut cat).unwrap_err();
+        let err = resolve_model_provider("model-a", &available, lookup(&lists)).unwrap_err();
         assert!(err.contains("--provider"), "{err}");
         assert!(err.contains("alex@bristol.ac.uk"), "{err}");
         assert!(err.contains("alex@work"), "{err}");
     }
 
+    /// Neither a sole account nor a `vendor/model` shape stands in for a
+    /// listing that names the model.
     #[test]
-    fn resolve_slug_falls_back_to_openrouter() {
-        let anthropic = Account::built_in("anthropic");
+    fn resolve_never_guesses_from_the_name_or_the_roster() {
         let openrouter = Account::built_in("openrouter");
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let available = [anthropic, openrouter.clone()];
-        assert_eq!(
-            resolve_model_provider("x-ai/grok-9", &available, &mut cat).unwrap(),
-            openrouter
-        );
-    }
-
-    /// Even when its list does not contain the name — a scripted run with one
-    /// key set need not name the provider.
-    #[test]
-    fn resolve_bare_name_to_sole_provider() {
-        let anthropic = Account::built_in("anthropic");
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let available = [anthropic.clone()];
-        assert_eq!(
-            resolve_model_provider("claude-future", &available, &mut cat).unwrap(),
-            anthropic
-        );
-    }
-
-    #[test]
-    fn resolve_unknown_with_many_providers_errors() {
-        let available = [
-            Account::built_in("anthropic"),
-            Account::built_in("deepseek"),
-        ];
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let err = resolve_model_provider("mystery", &available, &mut cat).unwrap_err();
+        let lists = Lists::from([(openrouter.id.clone(), Ok(bare(&["vendor/model-a"])))]);
+        let available = [openrouter];
+        let err = resolve_model_provider("vendor/model-b", &available, lookup(&lists)).unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
     }
 
     #[test]
+    fn resolve_names_the_accounts_it_could_not_list() {
+        let anthropic = Account::built_in("anthropic");
+        let deepseek = Account::built_in("deepseek");
+        let lists = Lists::from([
+            (anthropic.id.clone(), Ok(bare(&["model-a"]))),
+            (deepseek.id.clone(), Err("network down".to_string())),
+        ]);
+        let available = [anthropic, deepseek];
+        let err = resolve_model_provider("model-b", &available, lookup(&lists)).unwrap_err();
+        assert!(err.contains("deepseek (network down)"), "got: {err}");
+    }
+
+    #[test]
     fn resolve_with_no_providers_errors() {
-        let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let err = resolve_model_provider("anything", &[], &mut cat).unwrap_err();
+        let err = resolve_model_provider("model-a", &[], lookup(&Lists::new())).unwrap_err();
         assert!(err.contains("no provider available"), "got: {err}");
     }
 
-    /// No catalog is even threaded through — pinning skips the lookup.
     #[test]
     fn pin_provider_matches_by_service_name() {
         let available = [
@@ -878,7 +858,7 @@ mod tests {
     #[test]
     fn codex_models_parse_their_windows() {
         let body: CodexModelsResponse = serde_json::from_value(serde_json::json!({
-            "models": [{"slug": "gpt-5.5", "context_window": 272_000}, {"slug": "gpt-x"}],
+            "models": [{"slug": "model-a", "context_window": 272_000}, {"slug": "model-b"}],
         }))
         .unwrap();
         assert_eq!(body.models[0].context_window, Some(272_000));

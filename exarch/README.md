@@ -88,10 +88,11 @@ selection persists per project under `$XDG_STATE_HOME/exarch/<project>/`
 (beside that project's session logs) and is restored on the next start.
 Because it lives outside the working directory, the sandboxed agent cannot
 reach it. For headless or scripted runs, `--model <name>` sets the initial
-model (its provider is resolved as the available provider whose list
-contains it). No provider is given a model of its own: with no `--model`
-and no saved selection, exarch opens with none chosen and asks for `/model`,
-and a headless run must pass `--model`.
+model (its provider is the one available provider whose list contains it).
+A model its provider does not list is never run. No provider is given a model
+of its own: with no `--model` and nothing saved — or a saved model that no
+longer stands — exarch opens the picker before the session starts, and a
+headless run must pass `--model`.
 
 Every path above goes through XDG with Linux-shaped defaults, even on
 Windows: config lives under `%USERPROFILE%\.config\exarch`, state (session

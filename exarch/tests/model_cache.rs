@@ -9,10 +9,10 @@
 
 use exarch::bootstrap::App;
 use exarch::provider::identity::{AccountId, ServiceName};
-use exarch::provider::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint};
+use exarch::provider::models::{Listed, ModelCatalog, ModelSource, ProviderEndpoint, listing_of};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A key-bearing built-in service's account id is its own name.
 fn account_id(name: &str) -> AccountId {
@@ -20,6 +20,7 @@ fn account_id(name: &str) -> AccountId {
 }
 
 /// One list for every account, counting the fetches no cache could absorb.
+#[derive(Clone)]
 struct FakeSource {
     fetches: Arc<AtomicUsize>,
 }
@@ -38,10 +39,10 @@ impl ModelSource for FakeSource {
 fn listed() -> Vec<Listed> {
     vec![
         Listed {
-            id: "claude-opus-4".into(),
+            id: "model-a".into(),
             context_window: Some(200_000),
         },
-        Listed::bare("claude-haiku-4"),
+        Listed::bare("model-b"),
     ]
 }
 
@@ -74,21 +75,21 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
         )
     };
     let anthropic = account_id("anthropic");
-    let models = vec!["claude-opus-4".to_string(), "claude-haiku-4".to_string()];
+    let models = vec!["model-a".to_string(), "model-b".to_string()];
 
     // A cold catalog fetches once, and persists what it got.
-    assert_eq!(catalog().list(&anthropic), Some(models.clone()));
+    assert_eq!(listing_of(&Mutex::new(catalog()), &anthropic), Ok(listed()));
     assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
     // The next session's memo is empty, so a hit here is the file's doing,
     // and the windows survive the round trip.
     let mut session = catalog();
-    assert_eq!(session.cached(&anthropic), Some(models.clone()));
+    assert_eq!(session.cached(&anthropic), Some(models));
     assert_eq!(session.cached_listing(&anthropic), Some(listed()));
     assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
     // A second account lands beside the first rather than over it.
-    session.record(&account_id("deepseek"), vec![Listed::bare("deepseek-chat")]);
+    session.record(&account_id("deepseek"), vec![Listed::bare("model-c")]);
     let mut file = read_cache(&path);
     assert_eq!(
         file["providers"]["anthropic"]["models"],
@@ -96,7 +97,7 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
     );
     assert_eq!(
         file["providers"]["deepseek"]["models"],
-        serde_json::json!([{"id": "deepseek-chat", "context_window": null}])
+        serde_json::json!([{"id": "model-c", "context_window": null}])
     );
 
     // Aged past the TTL, the entry stops being served and is refetched.
@@ -104,9 +105,9 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
     file["providers"]["anthropic"]["fetched_at"] = stale.into();
     std::fs::write(&path, file.to_string()).expect("rewrite the cache");
 
-    let mut later = catalog();
-    assert_eq!(later.cached(&anthropic), None);
-    assert_eq!(later.list(&anthropic), Some(models));
+    let later = Mutex::new(catalog());
+    assert_eq!(later.lock().unwrap().cached(&anthropic), None);
+    assert_eq!(listing_of(&later, &anthropic), Ok(listed()));
     assert_eq!(fetches.load(Ordering::Relaxed), 2);
     assert!(
         read_cache(&path)["providers"]["anthropic"]["fetched_at"]

@@ -125,14 +125,14 @@
       gap: 4px;
     }
     .actions.needs-sign-in { flex-direction: column-reverse; }
-    #no-account {
+    #menu-note {
       font-size: 15px;
       line-height: 1.55;
       color: var(--ink-soft);
       margin: -14px 0 22px;
       display: none;
     }
-    #no-account.show { display: block; }
+    #menu-note.show { display: block; }
     /* The sign-in's own line: what it is waiting for, and — when the browser
        could not be opened — the link the user has to follow themselves. */
     #sign-in-say, #accounts-say {

@@ -8,7 +8,7 @@
 
 use crate::provider::identity::{self, Account};
 use crate::provider::models::resolve_account;
-use crate::provider::{ReasoningEffort, Tuning};
+use crate::provider::{Provider, ReasoningEffort, Tuning};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -70,6 +70,17 @@ impl State {
         }
     }
 
+    /// The persisted form of `provider`, the selection in force.
+    pub fn of(provider: &Provider, available: &[Account]) -> Self {
+        Self::new(
+            &provider.account,
+            available,
+            &provider.model,
+            &provider.tuning,
+            provider.route.as_deref(),
+        )
+    }
+
     /// The stored tuning as live values; a keyword that no longer parses
     /// ([`ReasoningEffort::from_keyword`]) reads as auto.
     pub fn tuning(&self) -> Tuning {
@@ -85,8 +96,8 @@ impl State {
 
     /// The stored account-id rendering matched against the live `available`
     /// accounts. `None` — an unset key, a dropped `config.ral` entry, a
-    /// signed-out account — leaves the caller to fall back to a default and
-    /// say so; [`Self::provider_name`] is what that message names.
+    /// signed-out account — leaves the caller to ask for a choice and say why;
+    /// [`Self::provider_name`] is what that message names.
     pub fn account(&self, available: &[Account]) -> Option<Account> {
         resolve_account(&self.provider, available)
     }
@@ -173,7 +184,7 @@ mod tests {
             Auth::Env("LOCAL_LLAMA_KEY".into()),
         ));
         let available = [llama.clone()];
-        let state = State::new(&llama, &available, "llama-3", &Tuning::default(), None);
+        let state = State::new(&llama, &available, "model-a", &Tuning::default(), None);
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
@@ -224,7 +235,7 @@ mod tests {
         let state = State::new(
             &anthropic,
             &available,
-            "claude-opus-4",
+            "model-a",
             &tuning,
             Some("deepinfra"),
         );
@@ -242,7 +253,7 @@ mod tests {
         let dir = tmp_dir();
         std::fs::write(
             path_in(&dir),
-            br#"{"provider":"anthropic","model":"claude-opus-4"}"#,
+            br#"{"provider":"anthropic","model":"model-a"}"#,
         )
         .unwrap();
         let loaded = load(&dir).expect("state should load");
@@ -259,7 +270,7 @@ mod tests {
         let dir = tmp_dir();
         std::fs::write(
             path_in(&dir),
-            br#"{"provider":"anthropic","model":"claude-opus-4","effort":"high"}"#,
+            br#"{"provider":"anthropic","model":"model-a","effort":"high"}"#,
         )
         .unwrap();
         let loaded = load(&dir).expect("a pre-change file must still load");

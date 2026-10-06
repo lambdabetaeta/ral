@@ -76,7 +76,6 @@ fn main() {
         .plugin(navigation_guard())
         .manage(commands::Running::default())
         .manage(accounts)
-        .manage(std::sync::Once::new())
         .manage(review::Review::default())
         .manage(signin::SignIn::default())
         .invoke_handler(tauri::generate_handler![

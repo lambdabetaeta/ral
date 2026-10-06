@@ -1,10 +1,12 @@
-//! The `/model` tuning overlay — a floating, bezel-framed modal.
+//! The `/model` tuning overlay — a floating, bezel-framed modal, which a
+//! launch with no model to restore also opens, alone, before its session.
 //!
 //! The rest of the TUI is a flat stack of strips; this one floats over a
 //! [`Clear`]ed centre of the frame and is modal in behaviour too — `App::key`
 //! returns early while an overlay is open, and `model_picker.rs` drives the
 //! keys instead. It edits a model selection together with today's tuning: a
-//! fuzzy-filtered `model · provider` list, the [`EFFORT_LADDER`] rung
+//! fuzzy-filtered `model · provider` list of what each account lists, the
+//! [`EFFORT_LADDER`] rung
 //! `auto · zero · low · med · high · xhigh · max`, temperature, and top-p.
 //!
 //! For an `OpenRouter` `vendor/model` a fifth control appears, listing the
@@ -52,25 +54,21 @@ struct Route {
     slug: String,
 }
 
-/// What a key press resolved to; `model_picker.rs` acts on the non-`None`
-/// outcomes. Cancellation (Esc, Ctrl-C, Ctrl-D) is resolved by the driver
-/// before a key reaches [`Picker::key`], so it never appears here.
-pub enum PickAction {
-    None,
-    /// A listed row, with the live tuning and the chosen serving-provider slug
-    /// (`None` for auto, and for every provider that does not route).
-    Selected(Account, String, Tuning, Option<String>),
-    /// The raw query as a model name, for `model_picker.rs` to resolve against
-    /// the listings — the escape hatch when a fetch failed or the wanted model
-    /// is unlisted. Such a model has no fetched endpoints, so it carries no route.
-    Manual(String, Tuning),
+/// A listed model chosen with Enter.
+///
+/// Its account, the live tuning, and the serving-provider slug (`None` for
+/// auto, and for every provider that does not route). Cancellation (Esc,
+/// Ctrl-C, Ctrl-D) is resolved by the driver before a key reaches
+/// [`Picker::key`], so it never appears here.
+pub struct Pick {
+    pub account: Account,
+    pub model: String,
+    pub tuning: Tuning,
+    pub route: Option<String>,
 }
 
-/// A rendered list row: a listed model, or the synthetic manual-entry row.
-enum Row {
-    Model(Account, String),
-    Manual(String),
-}
+/// A rendered list row: a listed model and the account that lists it.
+type Row = (Account, String);
 
 /// Which control holds the keyboard; it renders bright and the others dim.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -276,6 +274,9 @@ pub struct Picker {
     /// stays a pure component tests can stub; `model_picker.rs` passes
     /// [`crate::provider::pricing::caps_or_default`].
     caps: fn(&str) -> crate::provider::pricing::ModelCaps,
+    /// Why the picker opened, when that is news: a saved selection that no
+    /// longer stands.
+    note: Option<String>,
 }
 
 impl Picker {
@@ -311,7 +312,14 @@ impl Picker {
             temperature: initial.temperature,
             top_p: initial.top_p,
             caps,
+            note: None,
         }
+    }
+
+    /// Open with `note` above the failures, saying why the picker is up.
+    #[must_use]
+    pub fn noting(self, note: Option<String>) -> Self {
+        Self { note, ..self }
     }
 
     /// The row's name, drawn relative to every account open in this picker —
@@ -351,23 +359,19 @@ impl Picker {
             .any(|account| matches!(self.models.get(&account.id), Some(ModelsState::Loading)))
     }
 
-    /// The model on the highlighted row, if it is a listed one — the manual row
-    /// and an empty list have none to gate against. Reads the row slice the
-    /// caller already computed for this frame or key.
+    /// The model on the highlighted row; an empty list has none to gate
+    /// against. Reads the row slice the caller already computed for this frame
+    /// or key.
     fn highlighted_model(&self, rows: &[Row]) -> Option<String> {
-        match rows.get(self.selected) {
-            Some(Row::Model(_, model)) => Some(model.clone()),
-            _ => None,
-        }
+        rows.get(self.selected).map(|(_, model)| model.clone())
     }
 
     /// The highlighted model iff its service routes — `OpenRouter` alone, so
     /// the only one the provider control applies to.
     fn highlighted_or_model(&self, rows: &[Row]) -> Option<String> {
-        match rows.get(self.selected) {
-            Some(Row::Model(account, model)) if account.service.routes => Some(model.clone()),
-            _ => None,
-        }
+        rows.get(self.selected)
+            .filter(|(account, _)| account.service.routes)
+            .map(|(_, model)| model.clone())
     }
 
     /// What the provider control cycles after `auto`, in listed order. Empty
@@ -401,8 +405,8 @@ impl Picker {
     }
 
     /// Whether the highlighted model admits `param`. An unknown model — catalog
-    /// miss, manual row, list still loading — reads as supported, so a row grays
-    /// only when the catalog *positively* reports the parameter absent.
+    /// miss, list still loading — reads as supported, so a row grays only when
+    /// the catalog *positively* reports the parameter absent.
     fn supports(&self, rows: &[Row], param: &str) -> bool {
         match self.highlighted_model(rows) {
             Some(model) => (self.caps)(&model).supports(param),
@@ -427,9 +431,10 @@ impl Picker {
         }
     }
 
-    /// Handle one key press. The driver intercepts Esc, Ctrl-C and Ctrl-D as
-    /// the shared cancel chord before a key reaches here, so this never sees one.
-    pub fn key(&mut self, code: ratatui::crossterm::event::KeyCode) -> PickAction {
+    /// Handle one key press; Enter on a listed row picks it. The driver
+    /// intercepts Esc, Ctrl-C and Ctrl-D as the shared cancel chord before a
+    /// key reaches here, so this never sees one.
+    pub fn key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Option<Pick> {
         use ratatui::crossterm::event::KeyCode;
         match code {
             KeyCode::Enter => {
@@ -467,20 +472,19 @@ impl Picker {
             }
             _ => {}
         }
-        PickAction::None
+        None
     }
 
-    /// Resolve the highlighted row into a selection carrying the live tuning and
-    /// the route in force for that model.
-    fn apply(&self, rows: &[Row]) -> PickAction {
-        match rows.get(self.selected) {
-            Some(Row::Model(account, model)) => {
-                let route = self.active_route(rows).map(str::to_string);
-                PickAction::Selected(account.clone(), model.clone(), self.tuning(rows), route)
-            }
-            Some(Row::Manual(query)) => PickAction::Manual(query.clone(), self.tuning(rows)),
-            None => PickAction::None,
-        }
+    /// Resolve the highlighted row into a pick carrying the live tuning and the
+    /// route in force for that model.
+    fn apply(&self, rows: &[Row]) -> Option<Pick> {
+        let (account, model) = rows.get(self.selected)?;
+        Some(Pick {
+            account: account.clone(),
+            model: model.clone(),
+            tuning: self.tuning(rows),
+            route: self.active_route(rows).map(str::to_string),
+        })
     }
 
     /// The next focus. The provider control joins the cycle only when an
@@ -563,12 +567,13 @@ impl Picker {
         }
     }
 
-    /// The `(provider, model)` pairs matching the fuzzy query, best score first,
+    /// The `(provider, model)` rows matching the fuzzy query, best score first,
     /// ties broken alphabetically on the `label / model` line they matched by.
-    fn query_matches(&self) -> Vec<(Account, String)> {
+    /// The route is not a filter and does not narrow this.
+    fn rows(&self) -> Vec<Row> {
         // Each row carries its own haystack, so no index can pair a row with
         // another's label — two providers may list the very same model name.
-        let mut rows: Vec<(String, (Account, String))> = Vec::new();
+        let mut rows: Vec<(String, Row)> = Vec::new();
         for account in &self.providers {
             if let Some(ModelsState::Loaded(models)) = self.models.get(&account.id) {
                 let label = self.label(account);
@@ -591,37 +596,25 @@ impl Picker {
         .collect()
     }
 
-    /// The query matches, plus a synthetic manual-entry row while the query is
-    /// non-empty, so an unlisted model — or one whose provider's fetch failed —
-    /// is still reachable. The route is not a filter and does not narrow this.
-    fn rows(&self) -> Vec<Row> {
-        let mut rows: Vec<Row> = self
-            .query_matches()
-            .into_iter()
-            .map(|(account, model)| Row::Model(account, model))
-            .collect();
-        let q = self.query.trim();
-        if !q.is_empty() {
-            rows.push(Row::Manual(q.to_string()));
-        }
-        rows
-    }
-
     fn clamp_selection(&mut self) {
         let n = self.rows().len();
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
     }
 
-    /// Providers whose fetch failed, with their reasons — rendered as notes so
-    /// the absent models are explained and the manual fallback is obvious.
-    fn failures(&self) -> Vec<(&Account, &str)> {
-        self.providers
-            .iter()
-            .filter_map(|account| match self.models.get(&account.id) {
-                Some(ModelsState::Failed(reason)) => Some((account, reason.as_str())),
-                _ => None,
-            })
-            .collect()
+    /// The notes under the controls: why the picker opened, then each
+    /// provider whose listing failed, so its absent models are explained.
+    fn notes(&self) -> impl Iterator<Item = String> {
+        let failures =
+            self.providers
+                .iter()
+                .filter_map(|account| match self.models.get(&account.id) {
+                    Some(ModelsState::Failed(reason)) => Some(format!(
+                        "{} — could not list its models: {reason}",
+                        self.label(account)
+                    )),
+                    _ => None,
+                });
+        self.note.iter().cloned().chain(failures)
     }
 
     // --- rendering -----------------------------------------------------------
@@ -638,11 +631,11 @@ impl Picker {
             clippy::cast_possible_truncation,
             reason = "wrapped note-row count; bounded by the tiny catalog"
         )]
-        let failed = self.failed_lines(note_width).len() as u16;
+        let notes = self.note_lines(note_width).len() as u16;
         // bezel + pad + search + status + list + provider + effort + temp +
         // top-p + notes. The provider row is reserved even for a model that
         // does not route, so the overlay's height never jumps.
-        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + failed;
+        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + notes;
         (w, h.min(frame.height.max(3)))
     }
 
@@ -695,7 +688,7 @@ impl Picker {
             Paragraph::new(self.top_p_line(self.supports(&rows, "top_p"))).style(plane),
             top_p,
         );
-        let note_lines = self.failed_lines(notes.width);
+        let note_lines = self.note_lines(notes.width);
         if !note_lines.is_empty() {
             f.render_widget(Paragraph::new(note_lines).style(plane), notes);
         }
@@ -765,7 +758,7 @@ impl Picker {
             .enumerate()
             .skip(start)
             .take(window)
-            .map(|(i, row)| {
+            .map(|(i, (account, model))| {
                 let reversed = |style: Style| {
                     if i == self.selected {
                         style.add_modifier(Modifier::REVERSED)
@@ -773,19 +766,13 @@ impl Picker {
                         style
                     }
                 };
-                match row {
-                    Row::Model(account, m) => Line::from(vec![
-                        Span::styled(m.clone(), reversed(Style::default().fg(CYAN))),
-                        Span::styled(
-                            format!(" · {}", self.label(account)),
-                            reversed(Style::default().fg(SLATE)),
-                        ),
-                    ]),
-                    Row::Manual(q) => Line::from(Span::styled(
-                        format!("use “{q}” as a manual model"),
-                        reversed(Style::default().fg(SLATE).add_modifier(Modifier::ITALIC)),
-                    )),
-                }
+                Line::from(vec![
+                    Span::styled(model.clone(), reversed(Style::default().fg(CYAN))),
+                    Span::styled(
+                        format!(" · {}", self.label(account)),
+                        reversed(Style::default().fg(SLATE)),
+                    ),
+                ])
             })
             .collect();
         f.render_widget(Paragraph::new(lines).style(plane), list_area);
@@ -1030,12 +1017,12 @@ impl Picker {
         )
     }
 
-    /// Each failed-provider note wrapped to `width`, a `⚠ ` opening the first
-    /// row and continuations hanging under it. The reason is wrapped rather
-    /// than truncated — it is the point of the note. Wrapping through
+    /// Each note wrapped to `width`, a `⚠ ` opening the first row and
+    /// continuations hanging under it. The reason is wrapped rather than
+    /// truncated — it is the point of the note. Wrapping through
     /// [`line::push_wrapped`] lets these lines double as the exact height
     /// [`Self::desired_size`] reserves.
-    fn failed_lines(&self, width: u16) -> Vec<Line<'static>> {
+    fn note_lines(&self, width: u16) -> Vec<Line<'static>> {
         const MARKER: &str = "⚠ ";
         const HANG: &str = "  ";
         let style = Style::default().fg(RED).add_modifier(Modifier::BOLD);
@@ -1043,11 +1030,7 @@ impl Picker {
         // hanging indent can push a row past `width`.
         let body_w = (width as usize).saturating_sub(MARKER.chars().count());
         let mut out = Vec::new();
-        for (account, reason) in self.failures() {
-            let text = format!(
-                "{} — fetch failed: {reason} (type a model to enter manually)",
-                self.label(account)
-            );
+        for text in self.notes() {
             line::push_wrapped(&mut out, &text, body_w, |chunk, first| {
                 let lead = if first { MARKER } else { HANG };
                 Line::from(Span::styled(format!("{lead}{chunk}"), style))
@@ -1079,12 +1062,9 @@ mod tests {
         );
         p.set_models(
             &anthropic.id,
-            ModelsState::Loaded(vec!["claude-opus-4".into(), "claude-haiku-4".into()]),
+            ModelsState::Loaded(vec!["model-b".into(), "model-a".into()]),
         );
-        p.set_models(
-            &deepseek.id,
-            ModelsState::Loaded(vec!["deepseek-chat".into()]),
-        );
+        p.set_models(&deepseek.id, ModelsState::Loaded(vec!["model-c".into()]));
         p
     }
 
@@ -1105,10 +1085,10 @@ mod tests {
         p.set_models(
             &openrouter.id,
             ModelsState::Loaded(vec![
-                "anthropic/claude-3".into(),
-                "deepseek/deepseek-chat".into(),
-                "deepseek/deepseek-r1".into(),
-                "openai/gpt-5".into(),
+                "vendor-a/model-a".into(),
+                "vendor-b/model-b".into(),
+                "vendor-b/model-c".into(),
+                "vendor-c/model-d".into(),
             ]),
         );
         p
@@ -1118,10 +1098,7 @@ mod tests {
     fn row_labels(p: &Picker) -> Vec<String> {
         p.rows()
             .into_iter()
-            .filter_map(|r| match r {
-                Row::Model(account, m) => Some(format!("{m} · {}", p.label(&account))),
-                Row::Manual(_) => None,
-            })
+            .map(|(account, m)| format!("{m} · {}", p.label(&account)))
             .collect()
     }
 
@@ -1134,24 +1111,24 @@ mod tests {
         assert_eq!(
             row_labels(&p),
             vec![
-                "claude-haiku-4 · anthropic",
-                "claude-opus-4 · anthropic",
-                "deepseek-chat · deepseek",
+                "model-a · anthropic",
+                "model-b · anthropic",
+                "model-c · deepseek",
             ]
         );
     }
 
-    /// A query's words each narrow the list: `claude 4` keeps only the rows
-    /// whose `label / model` line carries both.
+    /// A query's words each narrow the list: `anthropic model` keeps only the
+    /// rows whose `label / model` line carries both.
     #[test]
     fn a_two_word_query_narrows_by_both_words() {
         let mut p = loaded_picker();
-        for c in "claude 4".chars() {
+        for c in "anthropic model".chars() {
             p.key(KeyCode::Char(c));
         }
         assert_eq!(
             row_labels(&p),
-            vec!["claude-haiku-4 · anthropic", "claude-opus-4 · anthropic"]
+            vec!["model-a · anthropic", "model-b · anthropic"]
         );
     }
 
@@ -1161,10 +1138,10 @@ mod tests {
     fn a_lone_chatgpt_account_row_keeps_its_email() {
         let alex = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
         let mut p = Picker::new(vec![alex.clone()], &Tuning::default(), caps_unknown);
-        p.set_models(&alex.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
+        p.set_models(&alex.id, ModelsState::Loaded(vec!["model-a".into()]));
         assert_eq!(
             row_labels(&p),
-            vec!["gpt-5.5 · chatgpt · alex@bristol.ac.uk"]
+            vec!["model-a · chatgpt · alex@bristol.ac.uk"]
         );
         // The bare service name still matches search.
         for c in "chatgpt".chars() {
@@ -1179,8 +1156,8 @@ mod tests {
     fn flat_rate_provider_rows_are_named_by_their_service_alone() {
         let go = Account::built_in("opencode-go");
         let mut p = Picker::new(vec![go.clone()], &Tuning::default(), caps_unknown);
-        p.set_models(&go.id, ModelsState::Loaded(vec!["glm-5.2".into()]));
-        assert_eq!(row_labels(&p), vec!["glm-5.2 · opencode-go"]);
+        p.set_models(&go.id, ModelsState::Loaded(vec!["model-a".into()]));
+        assert_eq!(row_labels(&p), vec!["model-a · opencode-go"]);
     }
 
     /// Two `ChatGPT` accounts signed in under the same email are two rows, not
@@ -1194,8 +1171,9 @@ mod tests {
             &Tuning::default(),
             caps_unknown,
         );
-        p.set_models(&personal.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
-        p.set_models(&work.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
+        // A model name the fuzzy `acme` cannot spell its way through.
+        p.set_models(&personal.id, ModelsState::Loaded(vec!["x-1".into()]));
+        p.set_models(&work.id, ModelsState::Loaded(vec!["x-1".into()]));
 
         let rows = row_labels(&p);
         assert_eq!(rows.len(), 2);
@@ -1215,49 +1193,34 @@ mod tests {
     }
 
     #[test]
-    fn query_filters_substring_and_appends_manual_row() {
-        let mut p = loaded_picker();
-        for c in "haiku".chars() {
-            p.key(KeyCode::Char(c));
-        }
-        let rows = p.rows();
-        // One model match plus the synthetic manual row.
-        assert_eq!(rows.len(), 2);
-        assert!(matches!(&rows[0], Row::Model(_, m) if m == "claude-haiku-4"));
-        assert!(matches!(&rows[1], Row::Manual(q) if q == "haiku"));
-    }
-
-    #[test]
-    fn provider_substring_narrows() {
+    fn a_query_lists_only_what_matches() {
         let mut p = loaded_picker();
         for c in "deepseek".chars() {
             p.key(KeyCode::Char(c));
         }
-        let model_rows: Vec<_> = p
-            .rows()
-            .into_iter()
-            .filter(|r| matches!(r, Row::Model(..)))
-            .collect();
-        assert_eq!(model_rows.len(), 1);
-        assert!(matches!(
-            &model_rows[0],
-            Row::Model(account, _) if account.service.name.as_str() == "deepseek"
-        ));
+        assert_eq!(row_labels(&p), vec!["model-c · deepseek"]);
+    }
+
+    /// A query nothing lists leaves nothing to pick: no free-text model rides
+    /// past the listing.
+    #[test]
+    fn enter_on_an_unlisted_query_picks_nothing() {
+        let mut p = loaded_picker();
+        for c in "model-z".chars() {
+            p.key(KeyCode::Char(c));
+        }
+        assert_eq!(p.rows(), []);
+        assert!(p.key(KeyCode::Enter).is_none());
     }
 
     #[test]
     fn enter_selects_highlighted_model() {
         let mut p = loaded_picker();
-        // To the second row, anthropic / claude-opus-4.
+        // To the second row, anthropic / model-b.
         p.key(KeyCode::Down);
-        match p.key(KeyCode::Enter) {
-            PickAction::Selected(account, m, _, _)
-                if account.service.name.as_str() == "anthropic" =>
-            {
-                assert_eq!(m, "claude-opus-4");
-            }
-            _ => panic!("expected Selected(anthropic, claude-opus-4)"),
-        }
+        let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
+        assert_eq!(pick.account, Account::built_in("anthropic"));
+        assert_eq!(pick.model, "model-b");
     }
 
     /// A declared service lists and selects exactly like a built-in one.
@@ -1265,29 +1228,10 @@ mod tests {
     fn declared_provider_lists_and_selects() {
         let llama = Account::declared("local-llama");
         let mut p = Picker::new(vec![llama.clone()], &Tuning::default(), caps_unknown);
-        p.set_models(&llama.id, ModelsState::Loaded(vec!["llama-3".into()]));
-        let rows = p.rows();
-        assert!(matches!(&rows[0], Row::Model(account, m) if account == &llama && m == "llama-3"));
-        match p.key(KeyCode::Enter) {
-            PickAction::Selected(account, m, _, _) => {
-                assert_eq!(account, llama);
-                assert_eq!(m, "llama-3");
-            }
-            _ => panic!("expected Selected(local-llama, llama-3)"),
-        }
-    }
-
-    #[test]
-    fn enter_on_manual_row_yields_query() {
-        let mut p = loaded_picker();
-        for c in "claude-future-99".chars() {
-            p.key(KeyCode::Char(c));
-        }
-        // Nothing else matches, so the manual row sits selected at index 0.
-        match p.key(KeyCode::Enter) {
-            PickAction::Manual(q, _) => assert_eq!(q, "claude-future-99"),
-            _ => panic!("expected Manual(claude-future-99)"),
-        }
+        p.set_models(&llama.id, ModelsState::Loaded(vec!["model-a".into()]));
+        let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
+        assert_eq!(pick.account, llama);
+        assert_eq!(pick.model, "model-a");
     }
 
     /// These models do not route, so the cycle skips the provider control:
@@ -1384,17 +1328,16 @@ mod tests {
         p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.05
-        match p.key(KeyCode::Enter) {
-            PickAction::Selected(_, _, tuning, _) => {
-                assert_eq!(
-                    tuning.effort.as_ref().map(ReasoningEffort::variant_name),
-                    Some("high")
-                );
-                assert_eq!(tuning.temperature, Some(0.1));
-                assert_eq!(tuning.top_p, Some(0.05));
-            }
-            _ => panic!("expected Selected with tuning"),
-        }
+        let tuning = p
+            .key(KeyCode::Enter)
+            .expect("a listed row is picked")
+            .tuning;
+        assert_eq!(
+            tuning.effort.as_ref().map(ReasoningEffort::variant_name),
+            Some("high")
+        );
+        assert_eq!(tuning.temperature, Some(0.1));
+        assert_eq!(tuning.top_p, Some(0.05));
     }
 
     #[test]
@@ -1486,8 +1429,8 @@ mod tests {
     #[test]
     fn provider_cycles_serving_endpoints_without_moving_the_model() {
         let mut p = openrouter_picker();
-        p.key(KeyCode::Down); // highlight deepseek/deepseek-chat
-        let model = "deepseek/deepseek-chat";
+        p.key(KeyCode::Down); // highlight vendor-b/model-b
+        let model = "vendor-b/model-b";
         assert_eq!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
         p.set_endpoints(
             model,
@@ -1517,13 +1460,9 @@ mod tests {
         assert_eq!(p.active_route(&p.rows()), None);
 
         p.key(KeyCode::Right); // auto → deepinfra
-        match p.key(KeyCode::Enter) {
-            PickAction::Selected(_, m, _, route) => {
-                assert_eq!(m, model);
-                assert_eq!(route.as_deref(), Some("deepinfra"));
-            }
-            _ => panic!("expected the highlighted model carrying its route"),
-        }
+        let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
+        assert_eq!(pick.model, model);
+        assert_eq!(pick.route.as_deref(), Some("deepinfra"));
     }
 
     /// Moving the highlight off a route's model deactivates it, and coming back
@@ -1531,8 +1470,8 @@ mod tests {
     #[test]
     fn route_is_inactive_off_its_model_and_returns_on_it() {
         let mut p = openrouter_picker();
-        p.key(KeyCode::Down); // deepseek/deepseek-chat
-        let model = "deepseek/deepseek-chat";
+        p.key(KeyCode::Down); // vendor-b/model-b
+        let model = "vendor-b/model-b";
         p.set_endpoints(
             model,
             EndpointsState::Loaded(vec![endpoint("DeepInfra", "deepinfra")]),
@@ -1545,7 +1484,7 @@ mod tests {
             p.key(KeyCode::Tab); // Provider → Effort → Temperature → TopP → Search
         }
         assert_eq!(p.focus, Focus::Search);
-        p.key(KeyCode::Down); // deepseek/deepseek-r1
+        p.key(KeyCode::Down); // vendor-b/model-c
         assert_ne!(p.highlighted_model(&p.rows()).as_deref(), Some(model));
         assert_eq!(
             p.active_route(&p.rows()),
@@ -1573,7 +1512,7 @@ mod tests {
     /// seeds the in-flight state the fetch is not requested again.
     #[test]
     fn focusing_provider_requests_endpoints_once() {
-        let mut p = openrouter_picker(); // first row: anthropic/claude-3
+        let mut p = openrouter_picker(); // first row: vendor-a/model-a
         assert!(
             p.focused_or_model_needing_endpoints().is_none(),
             "nothing requested before the control is focused"
@@ -1582,9 +1521,9 @@ mod tests {
         assert_eq!(p.focus, Focus::Provider);
         assert_eq!(
             p.focused_or_model_needing_endpoints().as_deref(),
-            Some("anthropic/claude-3")
+            Some("vendor-a/model-a")
         );
-        p.set_endpoints("anthropic/claude-3", EndpointsState::Loading);
+        p.set_endpoints("vendor-a/model-a", EndpointsState::Loading);
         assert!(
             p.focused_or_model_needing_endpoints().is_none(),
             "seeding Loading dedups the fetch"

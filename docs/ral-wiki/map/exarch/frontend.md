@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c848c533
-generated_at_date: 2026-10-01
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/log.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -537,7 +537,7 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/highlight.rs` — ral source coloured by ral's own lexer: `highlight_ral`, `highlight_ral_spans`
         - `tui/fidelity.rs` — coherent degradation: `Fidelity`, turn-level `context_floor` and per-block `echo_delta`
         - `tui/select.rs` — drag-selection geometry in text-area columns: `highlight_range` for painting, `plain_slice` for copying
-        - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `PickAction`, `overlay_frame`, `centered`, `render_shadow`
+        - `tui/picker.rs` — the `/model` tuning overlay: `Picker`, `Pick`, `overlay_frame`, `centered`, `render_shadow`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues) and the width vocabulary: `RAIL_W`, `READ_W`, `content_w`, and `Col`, the one column primitive every gutter that holds a cell is built from ([[map/exarch/cards|cards]])
-        - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
+        - `tui/model_picker.rs` — model choice: `drive` over a `Stage` (the live `Tui` for `pick_model` and `apply_model_switch`, or the picker `Alone` for a launch's `choose`); list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`

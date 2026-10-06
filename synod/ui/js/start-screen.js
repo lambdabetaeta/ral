@@ -21,11 +21,32 @@ function currentAssistantSelection() {
   return opt ? { key: opt.key, model: opt.model } : null;
 }
 
+// Why a menu offers nothing to run with: no account at all, models still
+// on their way, every listing failed (each with its reason), or listings
+// that came back empty.
+/**
+ * @param {import("./bindings/ProviderChoice.ts").ProviderChoice[]} providers
+ * @param {boolean} loading
+ */
+function emptyMenuNote(providers, loading) {
+  if (providers.length === 0) {
+    return "No assistant account is set up on this computer yet. Sign in with your ChatGPT plan to begin, or add an API key under Accounts.";
+  }
+  if (loading) {
+    return "Loading the models your accounts offer…";
+  }
+  const failures = providers.flatMap((p) => p.models.state === "failed" ? [p.label + ": " + p.models.reason] : []);
+  return failures.length > 0
+    ? "Could not list the models your accounts offer (" + failures.join("; ") + "). Check your connection, or sign in again."
+    : "Your accounts list no models to work with. Sign in with another account, or add an API key under Accounts.";
+}
+
 // The picker's one render path: every menu payload — the instant reply
 // and every later refresh alike — is shaped into the assistant and
 // effort selects through here, preserving whichever (provider, model)
 // pair is already chosen when it still exists in the fresh list rather
 // than always resetting to the first.
+/** @param {import("./bindings/ModelMenu.ts").ModelMenu | null} menu */
 function renderPicker(menu) {
   const providers = (menu && menu.providers) || [];
   const efforts = (menu && menu.efforts) || [];
@@ -38,7 +59,8 @@ function renderPicker(menu) {
 
   assistantOptions = [];
   for (const p of providers) {
-    for (const m of p.models || []) {
+    if (p.models.state !== "listed") continue;
+    for (const m of p.models.choices) {
       assistantOptions.push({ key: p.account, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
     }
   }
@@ -79,16 +101,18 @@ function renderPicker(menu) {
   // offer it for, regardless of how many models that account lists.
   $("effort-field").style.display = providers.length > 0 ? "" : "none";
 
-  // Nothing to answer with is nothing to start: with no assistant on
-  // offer the folder button waits, and the sign-in becomes the way in.
-  // (An account whose models could not be listed at all lands here too,
-  // and signing in again is the honest thing to offer it as well.)
+  // Nothing to answer with is nothing to start: the folder button waits and
+  // the note says why. Unless the models are merely loading, the sign-in
+  // becomes the way in.
   const nothingToRunWith = assistantOptions.length === 0;
-  $("no-account").classList.toggle("show", nothingToRunWith);
-  $("actions").classList.toggle("needs-sign-in", nothingToRunWith);
+  const loading = providers.some((p) => p.models.state === "loading");
+  const needsSignIn = nothingToRunWith && !loading;
+  $("menu-note").textContent = nothingToRunWith ? emptyMenuNote(providers, loading) : "";
+  $("menu-note").classList.toggle("show", nothingToRunWith);
+  $("actions").classList.toggle("needs-sign-in", needsSignIn);
   /** @type {HTMLButtonElement} */ ($("pick-folder")).disabled = nothingToRunWith;
-  $("pick-folder").className = nothingToRunWith ? "btn-quiet" : "btn-primary";
-  $("sign-in").className = nothingToRunWith ? "btn-primary" : "btn-quiet";
+  $("pick-folder").className = needsSignIn ? "btn-quiet" : "btn-primary";
+  $("sign-in").className = needsSignIn ? "btn-primary" : "btn-quiet";
 
   updateEffortDisabled();
 }

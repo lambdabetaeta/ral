@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d3a540
-generated_at_date: 2026-10-05
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -53,11 +53,11 @@ plus chatgpt — as struct literals rather than a value enum. A declared
 endpoint is the *same struct* parsed from a hand-written `config.ral`, with
 the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
 not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
-`Service::routes` is true for OpenRouter alone, and carries both route pinning
-and the `vendor/model` fallback, so no code compares a service name against
-the string `"openrouter"`. `Service::auth` says what a *declaration* knows
-about the bearer token — `Env(var)`, `OAuth`, or `Unnamed` — and never where
-the secret is kept, which is the one thing exarch and synod disagree about.
+`Service::routes` is true for OpenRouter alone, and carries route pinning, so
+no code compares a service name against the string `"openrouter"`.
+`Service::auth` says what a *declaration* knows about the bearer token —
+`Env(var)`, `OAuth`, or `Unnamed` — and never where the secret is kept, which
+is the one thing exarch and synod disagree about.
 
 **Every map keys on an `AccountId`.** Accounts are owned once, in
 `CredentialStore::all: Vec<Account>`; the store's `ready`, `admitted` and
@@ -292,7 +292,7 @@ catalog fold, which writes the disk cache under its lock.
 a network call, a picker frame, or a machine boot; and the converse, that a UI
 thread never holds either while waiting on an agent thread. `Bureau::admit` is
 the one door that takes both at once, store first. The `/model` overlay's
-`drive_picker` therefore takes the catalog per fold — to open the `Listing`,
+`drive` therefore takes the catalog per fold — to open the `Listing`,
 to pump it, to record endpoints, to clone the fetch seam — and never around
 the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig` and from
 there on the fleet's `Launch`, the one place a run's host settings live,
@@ -300,8 +300,11 @@ beside `dial`.
 
 ## Model catalogs
 
-**The picker asks each provider for its own names and retains manual entry as
-the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
+**An account's own listing is the authority on what it serves.** The picker
+offers only listed models, `--model` alone resolves to the one account whose
+listing names it, and `Bureau::build` refuses any other pair, so no account is
+ever asked for a model it does not list. `ModelCatalog` memoises and
+disk-caches both paths:
 
 - Anthropic, DeepSeek and Gemini list through exarch's own `GET /models`
   (paged to the end for Anthropic and Gemini), because each reports a context
@@ -314,9 +317,11 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - ChatGPT accounts list through `/backend-api/codex/models`, authenticated by
   their live OAuth cell after the common stale-token check; each entry's
   `context_window` is kept.
-- `Bureau::build` resolves a selection's context window once, at mint: the
-  serving account's own listing (cache, else one fetch made with the catalog
-  unlocked), else the OpenRouter catalog, else unknown. `Provider` owns the
+- `Bureau::build` is the one door a selection passes. It reads the serving
+  account's listing once (`models::listing_of`: the cache, else one fetch made
+  with the catalog unlocked), refuses a model the listing does not name, and
+  resolves the context window from it: the listing's own figure, else the
+  OpenRouter catalog, else unknown. `Provider` owns the
   value; the record carries it (`SessionStarted`, `SessionResumed`,
   `ModelChanged`), so a tab's fold reads it without a catalog. The status line
   draws an unknown window as `?`.

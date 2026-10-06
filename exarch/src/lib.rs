@@ -31,7 +31,6 @@ pub mod tui;
 use agent::Avatar;
 use clap::Parser;
 use provider::{Bureau, Engine, Holdings};
-use ral_core::sync::LockExt as _;
 use std::sync::Arc;
 use tui::SessionInfo;
 
@@ -151,33 +150,22 @@ pub fn run() -> Result<(), String> {
     let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
     let holdings = Holdings::new(store, bootstrap::EXARCH);
-    let (account, model, mut tuning, route) = resolve_initial_selection(
-        c.provider.as_deref(),
-        c.model.as_deref(),
-        &state_dir,
-        &available,
-        &mut holdings.catalog.lock_ignore_poison(),
-    )?;
+    // The saved selection is the ground each flag is laid over, so pinning a
+    // model keeps the effort rung the picker last chose rather than resetting it.
+    let saved = provider::state::load(&state_dir);
+    let mut tuning = saved
+        .as_ref()
+        .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
     if let Some(rung) = c.effort.as_deref() {
         tuning.effort = provider::effort_by_label(rung)?;
     }
-    // An unset model means "the `/model` picker will choose"; a headless run has
-    // no picker, so it must be told one.
-    if model.is_empty() && headless {
-        return Err(format!(
-            "no model chosen for '{}' — pass --model NAME for a headless run",
-            provider::identity::label(&account, &available)
-        ));
-    }
-    // Every selection flag is a deliberate choice, remembered like the picker's,
-    // so the next launch in this project restores it.
-    if (c.model.is_some() || c.provider.is_some() || c.effort.is_some()) && !model.is_empty() {
-        let _ = provider::state::save(
-            &state_dir,
-            &provider::state::State::new(&account, &available, &model, &tuning, route.as_deref()),
-        );
-    }
-    let recorded_account = agent::RecordedAccount::of(&account, &available);
+    let opening = opening(
+        c.provider.as_deref(),
+        c.model.as_deref(),
+        saved.as_ref(),
+        &available,
+        |account| provider::models::listing_of(&holdings.catalog, &account.id),
+    )?;
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
@@ -221,12 +209,23 @@ pub fn run() -> Result<(), String> {
     // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
     let bureau = Arc::new(Bureau::Live { engine, holdings });
-    let provider = bureau.build(&account, model, &tuning, route, c.max_tokens)?;
+    let (provider, screen) = open(
+        opening,
+        &tuning,
+        (!headless).then_some(run_dir.as_path()),
+        &bureau,
+        c.max_tokens,
+    )?;
+    // The selection a launch opens with is the one the next launch restores.
+    let _ = provider::state::save(
+        &state_dir,
+        &provider::state::State::of(&provider, &available),
+    );
     let config = agent::RootConfig {
         system,
         caps,
         run_dir: run_dir.clone(),
-        account: recorded_account,
+        account: agent::RecordedAccount::of(provider.account(), &available),
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.
         trunk: if headless {
@@ -271,15 +270,11 @@ pub fn run() -> Result<(), String> {
     if headless {
         headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
-        tui::run(
-            &mut session,
-            &provider,
-            &info,
-            &bureau,
-            &run_dir,
-            seed,
-            c.vi,
-        )
+        let screen = match screen {
+            Some(screen) => screen,
+            None => tui::enter(&run_dir)?,
+        };
+        tui::run(screen, &mut session, &provider, &info, &bureau, seed, c.vi)
     }
 }
 
@@ -347,65 +342,235 @@ fn resolve_run(
     Ok((run_dir, lock, false))
 }
 
-/// The account, model, tuning, and `OpenRouter` route a launch opens with.
+/// An account, one of its models, and the `OpenRouter` route chosen for that
+/// model.
+struct Pair {
+    account: provider::Account,
+    model: String,
+    route: Option<String>,
+}
+
+/// What a launch opens on, before the bureau weighs it.
+enum Opening {
+    /// The pair the flags named; its refusal ends the launch.
+    Named(Pair),
+    /// The pair remembered for this project; its refusal opens the picker over
+    /// these accounts instead.
+    Restored(Pair, Vec<provider::Account>),
+    /// No pair to try: the picker over these accounts, saying why when that
+    /// is news.
+    Choose(Vec<provider::Account>, Option<String>),
+}
+
+/// What the flags and `saved`, the selection remembered for this project, ask
+/// a launch to open on.
 ///
-/// The saved selection is the ground each override is laid over, so pinning a
-/// model keeps the effort rung the picker last chose rather than resetting it.
-fn resolve_initial_selection(
-    provider_override: Option<&str>,
-    model_override: Option<&str>,
-    state_dir: &std::path::Path,
+/// `--model` names a pair outright, on `--provider`'s account or else the one
+/// whose listing names the model. `--provider` alone restores the model saved
+/// for that account, else asks for one. With neither, the saved pair is
+/// restored, else the user is asked. A saved route rides only with the pair it
+/// was chosen for.
+fn opening(
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+    saved: Option<&provider::state::State>,
     available: &[provider::Account],
-    catalog: &mut provider::models::ModelCatalog<provider::models::LiveSource>,
-) -> Result<(provider::Account, String, provider::Tuning, Option<String>), String> {
-    let saved = provider::state::load(state_dir);
-    let saved_account = saved.as_ref().and_then(|s| s.account(available));
-    let tuning = saved
-        .as_ref()
-        .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
-
-    // A saved model or route means nothing on any account but the one that
-    // saved it.
-    let saved_on = |account: &provider::Account| {
-        saved_account
-            .as_ref()
-            .is_some_and(|saved| saved.id == account.id)
-    };
-
-    let (account, model) = match (provider_override, model_override) {
-        (Some(pname), _) => {
-            let account = provider::models::resolve_pinned_provider(pname, available)?;
-            let model = match (model_override, &saved) {
-                (Some(m), _) => m.to_string(),
-                (None, Some(s)) if saved_on(&account) => s.model.clone(),
-                (None, _) => String::new(),
-            };
-            (account, model)
+    listing: impl FnMut(&provider::Account) -> Result<Vec<provider::models::Listed>, String>,
+) -> Result<Opening, String> {
+    let pair = |account: provider::Account, model: String| {
+        let route = saved
+            .filter(|s| s.provider == account.id.as_str() && s.model == model)
+            .and_then(|s| s.route.clone());
+        Pair {
+            account,
+            model,
+            route,
         }
-        (None, Some(name)) => (
-            provider::models::resolve_model_provider(name, available, catalog)?,
-            name.to_string(),
-        ),
-        (None, None) => {
-            if let (Some(s), Some(account)) = (&saved, &saved_account) {
-                (account.clone(), s.model.clone())
-            } else {
-                // Nothing saved is no reason to refuse to launch: open with the
-                // model unset — the empty sentinel — so the interactive
-                // frontend lands on its `/model` hint. `run` rejects that for
-                // a headless launch.
-                let account = available.first().ok_or("no provider available")?.clone();
-                if let Some(s) = &saved {
-                    eprintln!(
-                        "exarch: the saved provider '{}' is no longer available; using {} instead",
-                        s.provider_name,
-                        provider::identity::label(&account, available)
-                    );
+    };
+    let pinned = provider_flag
+        .map(|name| provider::models::resolve_pinned_provider(name, available))
+        .transpose()?;
+    Ok(match (pinned, model_flag) {
+        (Some(account), Some(model)) => Opening::Named(pair(account, model.to_string())),
+        (None, Some(model)) => Opening::Named(pair(
+            provider::models::resolve_model_provider(model, available, listing)?,
+            model.to_string(),
+        )),
+        (Some(account), None) => match saved.filter(|s| s.provider == account.id.as_str()) {
+            Some(s) => Opening::Restored(pair(account.clone(), s.model.clone()), vec![account]),
+            None => Opening::Choose(vec![account], None),
+        },
+        (None, None) => match saved {
+            None => Opening::Choose(available.to_vec(), None),
+            Some(s) => match s.account(available) {
+                Some(account) => {
+                    Opening::Restored(pair(account, s.model.clone()), available.to_vec())
                 }
-                (account, String::new())
-            }
-        }
+                None => Opening::Choose(
+                    available.to_vec(),
+                    Some(format!(
+                        "could not restore the saved model: '{}' is no longer available",
+                        s.provider_name
+                    )),
+                ),
+            },
+        },
+    })
+}
+
+/// The provider a launch opens with: `opening` built, or — when it names no
+/// pair, or a remembered one no longer stands — one chosen on a screen taken
+/// in `attended`, the run directory of a launch with a human at it. That
+/// screen is handed back for the session to keep.
+///
+/// # Errors
+/// If a named pair does not build, if a choice is needed with no human to
+/// make it, or if the user backs out of the picker.
+fn open(
+    opening: Opening,
+    tuning: &provider::Tuning,
+    attended: Option<&std::path::Path>,
+    bureau: &Bureau,
+    max_tokens: Option<u32>,
+) -> Result<(Arc<provider::Provider>, Option<tui::TerminalGuard>), String> {
+    let build =
+        |pair: Pair| bureau.build(&pair.account, pair.model, tuning, pair.route, max_tokens);
+    let choose = |among, why: Option<String>| {
+        let Some(run_dir) = attended else {
+            return Err(format!(
+                "{} — pass --model NAME for a headless run",
+                why.as_deref().unwrap_or("no model chosen")
+            ));
+        };
+        let mut screen = tui::enter(run_dir)?;
+        let pick = tui::choose(&mut screen, bureau, among, tuning, why)?;
+        let provider = bureau.build(
+            &pick.account,
+            pick.model,
+            &pick.tuning,
+            pick.route,
+            max_tokens,
+        )?;
+        Ok((provider, Some(screen)))
     };
-    let route = saved.and_then(|s| s.route).filter(|_| saved_on(&account));
-    Ok((account, model, tuning, route))
+    match opening {
+        Opening::Named(pair) => Ok((build(pair)?, None)),
+        Opening::Restored(pair, among) => match build(pair) {
+            Ok(provider) => Ok((provider, None)),
+            Err(why) => choose(
+                among,
+                Some(format!("could not restore the saved model: {why}")),
+            ),
+        },
+        Opening::Choose(among, why) => choose(among, why),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provider::Account;
+    use provider::models::Listed;
+    use provider::state::State;
+
+    fn saved(account: &Account, model: &str, route: Option<&str>) -> State {
+        State::new(
+            account,
+            std::slice::from_ref(account),
+            model,
+            &provider::Tuning::default(),
+            route,
+        )
+    }
+
+    fn lists(models: &[&str]) -> impl FnMut(&Account) -> Result<Vec<Listed>, String> {
+        let listed: Vec<Listed> = models.iter().map(|m| Listed::bare(*m)).collect();
+        move |_| Ok(listed.clone())
+    }
+
+    #[test]
+    fn a_saved_route_rides_only_with_its_own_pair() {
+        let openrouter = Account::built_in("openrouter");
+        let state = saved(&openrouter, "vendor/model-a", Some("deepinfra"));
+        let available = [openrouter];
+        let route_for = |model| match opening(
+            None,
+            Some(model),
+            Some(&state),
+            &available,
+            lists(&["vendor/model-a", "vendor/model-b"]),
+        ) {
+            Ok(Opening::Named(pair)) => pair.route,
+            _ => panic!("--model names a pair"),
+        };
+        assert_eq!(route_for("vendor/model-a").as_deref(), Some("deepinfra"));
+        assert_eq!(route_for("vendor/model-b"), None);
+    }
+
+    #[test]
+    fn provider_alone_restores_that_accounts_saved_model() {
+        let anthropic = Account::built_in("anthropic");
+        let state = saved(&anthropic, "model-a", None);
+        let available = [anthropic.clone(), Account::built_in("deepseek")];
+        match opening(
+            Some("anthropic"),
+            None,
+            Some(&state),
+            &available,
+            lists(&[]),
+        ) {
+            Ok(Opening::Restored(pair, among)) => {
+                assert_eq!(
+                    (pair.account, pair.model.as_str()),
+                    (anthropic.clone(), "model-a")
+                );
+                assert_eq!(among, [anthropic]);
+            }
+            _ => panic!("the saved model is restored"),
+        }
+    }
+
+    #[test]
+    fn provider_alone_with_nothing_saved_for_it_asks_among_its_models() {
+        let anthropic = Account::built_in("anthropic");
+        let deepseek = Account::built_in("deepseek");
+        let state = saved(&deepseek, "model-a", None);
+        let available = [anthropic.clone(), deepseek];
+        match opening(
+            Some("anthropic"),
+            None,
+            Some(&state),
+            &available,
+            lists(&[]),
+        ) {
+            Ok(Opening::Choose(among, None)) => assert_eq!(among, [anthropic]),
+            _ => panic!("a choice among the named account's models"),
+        }
+    }
+
+    #[test]
+    fn a_vanished_saved_account_asks_and_says_why() {
+        let gone = Account::declared("gone");
+        let state = saved(&gone, "model-a", None);
+        let available = [Account::built_in("anthropic")];
+        match opening(None, None, Some(&state), &available, lists(&[])) {
+            Ok(Opening::Choose(among, Some(why))) => {
+                assert_eq!(among, available);
+                assert!(why.contains("'gone'"), "got: {why}");
+            }
+            _ => panic!("a choice, saying why"),
+        }
+    }
+
+    #[test]
+    fn nothing_saved_and_no_flags_asks_among_every_account() {
+        let available = [
+            Account::built_in("anthropic"),
+            Account::built_in("deepseek"),
+        ];
+        match opening(None, None, None, &available, lists(&[])) {
+            Ok(Opening::Choose(among, None)) => assert_eq!(among, available),
+            _ => panic!("a choice among every account"),
+        }
+    }
 }

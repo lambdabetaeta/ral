@@ -3,7 +3,6 @@
 
 use std::{
     io::{self},
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,8 +16,8 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Avatar},
-    bus::{BusReceiver, FleetBus, Inbox, Pass, Post, Rewrite, Signal},
+    agent::Avatar,
+    bus::{BusReceiver, FleetBus, Pass, Post, Rewrite, Signal},
     provider::{Bureau, Provider},
     record::Emitter as Recorder,
 };
@@ -38,47 +37,28 @@ pub(super) struct Tui {
     pub(super) app: App,
 }
 
-impl Tui {
-    pub fn new(
-        root: &Arc<Agent>,
-        stderr_log: &Path,
-        vi: bool,
-        append_log: bool,
-        inbox: Inbox,
-    ) -> io::Result<Self> {
-        let guard = TerminalGuard::enter(stderr_log)?;
-        let app = App::new(root, vi, append_log, inbox);
-        Ok(Self { guard, app })
-    }
-}
-
-/// Build the [`Tui`], run the worker beside the UI loop, then flush logs and
-/// print the paths and usage on the restored shell.
+/// Build the [`Tui`] on `screen`, run the worker beside the UI loop, then
+/// flush logs and print the paths and usage on the restored shell.
 ///
 /// # Errors
-/// Returns `Err` if terminal setup fails, if drawing the banner fails, or if
-/// the UI render/input loop hits a fatal terminal error.
+/// Returns `Err` if drawing the banner fails, or if the UI render/input loop
+/// hits a fatal terminal error.
 ///
 /// # Panics
 /// Panics if the OS refuses to spawn the agent worker thread.
 pub fn run(
+    screen: TerminalGuard,
     session: &mut Avatar,
     provider: &Arc<Provider>,
     info: &banner::SessionInfo<'_>,
     bureau: &Bureau,
-    run_dir: &Path,
     seed: Option<String>,
     vi: bool,
 ) -> Result<(), String> {
-    let stderr_log = run_dir.join("stderr.log");
-    let mut tui = Tui::new(
-        &session.agent,
-        &stderr_log,
-        vi,
-        info.resumed.is_some(),
-        session.inbox(),
-    )
-    .map_err(|e| format!("ratatui init: {e}"))?;
+    let mut tui = Tui {
+        guard: screen,
+        app: App::new(&session.agent, vi, info.resumed.is_some(), session.inbox()),
+    };
     tui.app.update_live_model(provider, &bureau.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
     // streaming to its tab after the exchange that spawned it ends.
@@ -394,7 +374,7 @@ pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
     k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// What one overlay poll tick resolved to.  `model_picker`'s `drive_picker`
+/// What one overlay poll tick resolved to.  `model_picker`'s `drive`
 /// and `login`'s `drive_login` both run their modal on this tick, so their
 /// cancel chord and release filtering stay identical.
 pub(super) enum OverlayTick {
@@ -410,6 +390,11 @@ pub(super) fn overlay_tick(tui: &mut Tui) -> OverlayTick {
     if draw(&mut tui.app, tui.guard.term()).is_err() {
         return OverlayTick::TerminalLost;
     }
+    overlay_key()
+}
+
+/// Poll up to 100ms for an overlay's next live key, the cancel chord resolved.
+pub(super) fn overlay_key() -> OverlayTick {
     if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
         return OverlayTick::Idle;
     }

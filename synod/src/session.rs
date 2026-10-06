@@ -42,7 +42,7 @@ use ral_core::sync::LockExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub use menu::{ModelChoice, ModelMenu, ProviderChoice, menu, refresh_menu};
+pub use menu::{ModelChoice, ModelMenu, Models, ProviderChoice, menu, refresh_menu};
 pub use opening::Opening;
 pub use signin::{SignInStep, SignedIn, sign_in};
 
@@ -147,10 +147,11 @@ impl Conversation {
     /// Returns `Err` if this computer cannot start a virtual machine at all
     /// — the wrong platform, missing boot media, or an unsigned build — if
     /// the folder cannot be granted, if no model account is set up (or the
-    /// chosen one has vanished), if the chosen effort names no rung on
-    /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
-    /// be made, if the system prompt cannot be assembled, if the agent
-    /// cannot be started, or if guest networking cannot start. Guest
+    /// chosen one has vanished, or no longer lists the chosen model), if the
+    /// chosen effort names no rung on [`provider::EFFORT_LADDER`], if the
+    /// scratch or log directories cannot be made, if the system prompt cannot
+    /// be assembled, if the agent cannot be started, or if guest networking
+    /// cannot start. Guest
     /// networking does not start degraded; a conversation with no network
     /// it can trust is refused outright rather than opened quietly without
     /// one. The baseline walk itself is not among these: it runs on past
@@ -706,19 +707,19 @@ mod tests {
 
     #[test]
     fn resolve_tuning_with_no_effort_keeps_the_thinking_on_default() {
-        let tuning = resolve_tuning(None, "claude-opus-4").unwrap();
+        let tuning = resolve_tuning(None, "model-a").unwrap();
         assert_eq!(tuning, provider::Tuning::initial());
     }
 
     #[test]
     fn resolve_tuning_rejects_an_unknown_effort_label() {
-        let err = resolve_tuning(Some("extreme".into()), "claude-opus-4").unwrap_err();
+        let err = resolve_tuning(Some("extreme".into()), "model-a").unwrap_err();
         assert!(err.contains("extreme"), "got: {err}");
     }
 
     #[test]
     fn resolve_tuning_auto_is_a_deliberate_none_not_an_absence() {
-        let tuning = resolve_tuning(Some("auto".into()), "claude-opus-4").unwrap();
+        let tuning = resolve_tuning(Some("auto".into()), "model-a").unwrap();
         assert!(tuning.effort.is_none());
         assert_ne!(
             tuning,

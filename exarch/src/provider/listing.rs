@@ -18,7 +18,7 @@ pub enum FetchState<T> {
     Failed(String),
 }
 
-/// One account's model-list fetch state; `Failed` still leaves manual entry.
+/// One account's model-list fetch state.
 pub type ModelsState = FetchState<Vec<String>>;
 
 /// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state, keyed
@@ -219,15 +219,15 @@ mod tests {
     #[test]
     fn everything_cached_loads_with_no_fetch() {
         let anthropic = Account::built_in("anthropic");
-        let source = FakeSource::new(one(&anthropic.id, &["claude-opus-4"]));
+        let source = FakeSource::new(one(&anthropic.id, &["model-a"]));
         let mut catalog = ModelCatalog::memo_only(source.clone());
-        catalog.record(&anthropic.id, vec![Listed::bare("claude-opus-4")]);
+        catalog.record(&anthropic.id, vec![Listed::bare("model-a")]);
 
         let listing = Listing::open(vec![anthropic.id.clone()], &mut catalog);
 
         match listing.state(&anthropic.id) {
             Some(ModelsState::Loaded(models)) => {
-                assert_eq!(models, &vec!["claude-opus-4".to_string()]);
+                assert_eq!(models, &vec!["model-a".to_string()]);
             }
             Some(ModelsState::Loading) => panic!("expected Loaded, got Loading"),
             Some(ModelsState::Failed(reason)) => panic!("expected Loaded, got Failed({reason})"),
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn a_miss_loads_in_the_background_and_records_into_the_catalog() {
         let deepseek = Account::built_in("deepseek");
-        let source = FakeSource::new(one(&deepseek.id, &["deepseek-chat"]));
+        let source = FakeSource::new(one(&deepseek.id, &["model-b"]));
         let mut catalog = ModelCatalog::memo_only(source);
 
         let mut listing = Listing::open(vec![deepseek.id.clone()], &mut catalog);
@@ -253,7 +253,7 @@ mod tests {
 
         match listing.state(&deepseek.id) {
             Some(ModelsState::Loaded(models)) => {
-                assert_eq!(models, &vec!["deepseek-chat".to_string()]);
+                assert_eq!(models, &vec!["model-b".to_string()]);
             }
             Some(ModelsState::Loading) => panic!("expected Loaded, got Loading"),
             Some(ModelsState::Failed(reason)) => panic!("expected Loaded, got Failed({reason})"),
@@ -261,7 +261,7 @@ mod tests {
         }
         assert_eq!(
             catalog.cached(&deepseek.id),
-            Some(vec!["deepseek-chat".to_string()])
+            Some(vec!["model-b".to_string()])
         );
     }
 
@@ -288,7 +288,7 @@ mod tests {
     fn settle_returns_every_outstanding_result() {
         let anthropic = Account::built_in("anthropic");
         let openai = Account::built_in("openai");
-        let mut lists = one(&anthropic.id, &["claude-opus-4"]);
+        let mut lists = one(&anthropic.id, &["model-a"]);
         lists.insert(openai.id.clone(), Err("no key".to_string()));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
 
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
-            (anthropic.id, Ok(vec![Listed::bare("claude-opus-4")]))
+            (anthropic.id, Ok(vec![Listed::bare("model-a")]))
         );
         assert_eq!(results[1], (openai.id, Err("no key".to_string())));
     }

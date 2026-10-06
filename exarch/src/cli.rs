@@ -20,24 +20,23 @@ pub struct Cli {
     pub command: Option<Command>,
     /// Choose the model that Exarch uses when it starts.
     ///
-    /// If you do not also use `--provider`, Exarch looks for one available
-    /// provider that lists this model. A `vendor/model` name can fall back to a
-    /// routing provider, and a bare name can fall back to the only available
-    /// provider. If you omit this option, Exarch restores the model saved for
-    /// the current project; with nothing saved, no model is chosen, and you
-    /// pick one with `/model`. A headless run with nothing to restore needs
-    /// this option. An explicit choice is saved for the next run.
+    /// The provider must list the model. If you do not also use `--provider`,
+    /// Exarch uses the one available provider that lists it, and asks you to
+    /// name one if several do. If you omit this option, Exarch restores the
+    /// model saved for the current project; with nothing saved, it asks you to
+    /// pick one before the session starts. A headless run with nothing to
+    /// restore needs this option. The model a run starts with is saved for
+    /// the next run.
     #[arg(long)]
     pub model: Option<String>,
     /// Choose the provider or signed-in account that Exarch uses when it starts.
     ///
     /// Give an account ID, a service name such as `anthropic` or `openai`, or
     /// an account handle shown by `exarch accounts`. Exarch asks you to be more
-    /// specific if the name matches several accounts. With `--model`, Exarch
-    /// uses the pair exactly as given, even if the provider does not list that
-    /// model. Without `--model`, Exarch restores the model saved for this
-    /// account in the current project, or else leaves you to pick one with
-    /// `/model`. An explicit choice is saved for the next run.
+    /// specific if the name matches several accounts. Without `--model`,
+    /// Exarch restores the model saved for this account in the current
+    /// project, or else asks you to pick one of its models before the session
+    /// starts.
     #[arg(long)]
     pub provider: Option<String>,
     /// Run one headless exchange with this prompt.

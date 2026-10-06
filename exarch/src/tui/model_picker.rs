@@ -1,74 +1,122 @@
-//! The `/model` overlay's orchestration.
+//! The model picker's orchestration, over a live session (`/model`) or alone
+//! on the screen before one exists (a launch with no model to restore).
 //!
 //! [`Picker`] is display and input only; this module, its one caller, reaches
 //! the [`Bureau`] holding the credentials, the model catalog, and the network
-//! seam, and turns a resolved [`picker::PickAction`] into a live provider swap
-//! plus a saved [`state::State`]. [`super::login`] mirrors the split.
+//! seam, and turns a [`Pick`] into a live provider swap plus a saved
+//! [`state::State`]. [`super::login`] mirrors the split.
 
 use crate::provider::identity::{self, Account};
 use crate::provider::listing::{Fetches, Listing};
 use crate::provider::models::{ModelSource, ProviderEndpoint};
-use crate::provider::state;
-use crate::provider::{self, Bureau};
+use crate::provider::{Bureau, Tuning, pricing, state};
 
 use super::app::Overlay;
-use super::picker::{self, Picker};
-use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
+use super::picker::{self, Pick, Picker};
+use super::terminal::TerminalGuard;
+use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_key, overlay_tick};
+
+/// Where a picker is drawn and its keys read: over a live session, or alone.
+trait Stage {
+    fn picker(&mut self) -> Option<&mut Picker>;
+    fn tick(&mut self) -> OverlayTick;
+}
+
+impl Stage for Tui {
+    fn picker(&mut self) -> Option<&mut Picker> {
+        self.app.picker_mut()
+    }
+
+    fn tick(&mut self) -> OverlayTick {
+        overlay_tick(self)
+    }
+}
+
+/// The picker alone on the screen, before any session exists.
+struct Alone<'a> {
+    screen: &'a mut TerminalGuard,
+    picker: Picker,
+}
+
+impl Stage for Alone<'_> {
+    fn picker(&mut self) -> Option<&mut Picker> {
+        Some(&mut self.picker)
+    }
+
+    fn tick(&mut self) -> OverlayTick {
+        let picker = &self.picker;
+        if self
+            .screen
+            .term()
+            .draw(|f| picker.render(f, f.area()))
+            .is_err()
+        {
+            return OverlayTick::TerminalLost;
+        }
+        overlay_key()
+    }
+}
+
+/// A picker over `accounts` opened on `tuning`, seeded from whatever the
+/// catalog already holds, and the listing that fetches the rest. `None` when
+/// the bureau is scripted and has no catalog to list from.
+fn open(bureau: &Bureau, accounts: Vec<Account>, tuning: &Tuning) -> Option<(Picker, Listing)> {
+    let ids = accounts.iter().map(|account| account.id.clone()).collect();
+    let listing = bureau.with_catalog(|catalog| Listing::open(ids, catalog))?;
+    let mut picker = Picker::new(accounts, tuning, pricing::caps_or_default);
+    for (id, state) in listing.states() {
+        picker.set_models(id, state.clone());
+    }
+    Some((picker, listing))
+}
 
 pub(super) fn pick_model(tui: &mut Tui, ctx: &CommandCtx<'_>) {
-    let bureau = ctx.bureau;
-    let available = bureau.available();
     // Open on the focused agent's live tuning; a settled one falls back to the
     // defaults.
-    let initial_tuning = tui
+    let tuning = tui
         .app
         .tabs
         .focused_agent()
         .map(|agent| agent.current_provider().tuning().clone())
         .unwrap_or_default();
-    let mut picker = Picker::new(
-        available.clone(),
-        &initial_tuning,
-        crate::provider::pricing::caps_or_default,
-    );
-    // `Picker::new` seeded every row `Loading`, so only the rows `Listing::open`
-    // settled from cache need forwarding; the misses land as `drive_picker` pumps.
-    let ids = available.iter().map(|account| account.id.clone()).collect();
-    // A scripted session has no catalog to list from, so there is nothing to
-    // pick between and no rows to seed.
-    let Some(listing) = bureau.with_catalog(|catalog| Listing::open(ids, catalog)) else {
+    let Some((picker, listing)) = open(ctx.bureau, ctx.bureau.available(), &tuning) else {
         return;
     };
-    for (id, state) in listing.states() {
-        match state {
-            picker::ModelsState::Loaded(models) => {
-                picker.set_models(id, picker::ModelsState::Loaded(models.clone()));
-            }
-            picker::ModelsState::Failed(reason) => {
-                picker.set_models(id, picker::ModelsState::Failed(reason.clone()));
-            }
-            picker::ModelsState::Loading => {}
-        }
-    }
     tui.app.overlay = Some(Overlay::Picker(picker));
-    let outcome = drive_picker(tui, bureau, listing);
+    let pick = drive(tui, ctx.bureau, listing);
     tui.app.overlay = None;
-    if let Some((account, model, tuning, route)) = outcome {
-        apply_model_switch(tui, ctx, &account, &model, &tuning, route.as_ref());
+    if let Some(pick) = pick {
+        apply_model_switch(tui, ctx, &pick);
     }
 }
 
+/// Choose a model before any session exists: the picker alone on `screen`,
+/// over `accounts`, opened on `tuning`, and saying `why` when that is news.
+///
+/// # Errors
+/// If the bureau is scripted and so lists nothing, or if the user backs out.
+pub fn choose(
+    screen: &mut TerminalGuard,
+    bureau: &Bureau,
+    accounts: Vec<Account>,
+    tuning: &Tuning,
+    why: Option<String>,
+) -> Result<Pick, String> {
+    let (picker, listing) =
+        open(bureau, accounts, tuning).ok_or("a scripted session has no models to choose from")?;
+    let mut alone = Alone {
+        screen,
+        picker: picker.noting(why),
+    };
+    drive(&mut alone, bureau, listing).ok_or_else(|| "no model chosen".to_string())
+}
+
 /// Poll keys and landed fetches until the picker resolves; `None` on cancel.
-/// The `route` is the `OpenRouter` serving-provider slug, `None` for auto.
 ///
 /// The catalog is taken per fold rather than held across the loop: the
 /// listing's own fetches run on their own threads, so no frame holds a bureau
 /// lock while one of them is out.
-fn drive_picker(
-    tui: &mut Tui,
-    bureau: &Bureau,
-    mut listing: Listing,
-) -> Option<(Account, String, provider::Tuning, Option<String>)> {
+fn drive(stage: &mut impl Stage, bureau: &Bureau, mut listing: Listing) -> Option<Pick> {
     // Spawned from inside the loop, unlike `listing`, whose fetches are all away
     // before it.
     let mut endpoints: Fetches<String, Vec<ProviderEndpoint>> = Fetches::new();
@@ -78,7 +126,7 @@ fn drive_picker(
             .with_catalog(|catalog| listing.pump(catalog))
             .unwrap_or_default();
         for id in woken {
-            if let (Some(state), Some(p)) = (listing.state(&id), tui.app.picker_mut()) {
+            if let (Some(state), Some(p)) = (listing.state(&id), stage.picker()) {
                 p.set_models(&id, state.clone());
             }
         }
@@ -91,26 +139,25 @@ fn drive_picker(
                 }
                 Err(reason) => picker::EndpointsState::Failed(reason),
             };
-            if let Some(p) = tui.app.picker_mut() {
+            if let Some(p) = stage.picker() {
                 p.set_endpoints(&model, state);
             }
         }
         // Seeding the state is also the dedup: the next poll no longer reports
         // this model as needing a fetch.
-        let needed = tui
-            .app
-            .picker_mut()
+        let needed = stage
+            .picker()
             .and_then(|p| p.focused_or_model_needing_endpoints());
         if let Some(model) = needed {
             let cached = bureau
                 .with_catalog(|catalog| catalog.cached_endpoints(&model))
                 .flatten();
             if let Some(list) = cached {
-                if let Some(p) = tui.app.picker_mut() {
+                if let Some(p) = stage.picker() {
                     p.set_endpoints(&model, picker::EndpointsState::Loaded(list));
                 }
             } else {
-                if let Some(p) = tui.app.picker_mut() {
+                if let Some(p) = stage.picker() {
                     p.set_endpoints(&model, picker::EndpointsState::Loading);
                 }
                 // The seam is cloned out and the fetch runs on its own thread,
@@ -120,65 +167,30 @@ fn drive_picker(
                 }
             }
         }
-        match overlay_tick(tui) {
+        match stage.tick() {
             OverlayTick::TerminalLost | OverlayTick::Cancel => return None,
             OverlayTick::Idle => {}
             OverlayTick::Key(code) => {
-                let action = tui.app.picker_mut()?.key(code);
-                match action {
-                    picker::PickAction::None => {}
-                    picker::PickAction::Selected(account, model, tuning, route) => {
-                        return Some((account, model, tuning, route));
-                    }
-                    picker::PickAction::Manual(query, tuning) => {
-                        let available = bureau.available();
-                        // The one fold that may fetch under the lock: a typed
-                        // name must be attributed before the overlay can close,
-                        // and nothing else takes the catalog while it is up.
-                        let resolved = bureau.with_catalog(|catalog| {
-                            crate::provider::models::resolve_model_provider(
-                                &query, &available, catalog,
-                            )
-                        })?;
-                        match resolved {
-                            Ok(account) => return Some((account, query, tuning, None)),
-                            Err(e) => {
-                                // The dialogue's own failure, not an action on an
-                                // agent, so it lands on root and not the tab a
-                                // switch addresses.
-                                let root = tui.app.tabs.root();
-                                tui.app.push_error(root, &e);
-                            }
-                        }
-                    }
+                if let Some(pick) = stage.picker()?.key(code) {
+                    return Some(pick);
                 }
             }
         }
     }
 }
 
-/// Rebuild the provider for `model` and swap it into the *focused* agent's
+/// Rebuild the provider for `pick` and swap it into the *focused* agent's
 /// handle, which its next turn reads; a failed persist leaves that switch
 /// standing. The switch reaches the trace as a [`Forensic::ModelChanged`] and
 /// the screen as the status bar's live label — never as transcript chatter;
 /// its own failures are view chrome.
 ///
 /// [`Forensic::ModelChanged`]: crate::record::Forensic::ModelChanged
-fn apply_model_switch(
-    tui: &mut Tui,
-    ctx: &CommandCtx<'_>,
-    account: &Account,
-    model: &str,
-    tuning: &provider::Tuning,
-    route: Option<&String>,
-) {
-    let info = ctx.info;
-    let recorder = ctx.recorder;
+fn apply_model_switch(tui: &mut Tui, ctx: &CommandCtx<'_>, pick: &Pick) {
     // Every failure below answers one gesture on this tab, so it lands here —
     // the persist too, whose file is project-wide but whose message is not.
     let focused = tui.app.tabs.focused();
     let available = ctx.bureau.available();
-    let label = identity::label(account, &available);
     // A tab that settled while the picker was open has no handle to swap.
     let Some(agent) = tui.app.tabs.agent(focused) else {
         tui.app
@@ -187,13 +199,12 @@ fn apply_model_switch(
     };
     let provider = agent.provider.clone();
     // The token override is no part of the selection, so it rides across by hand.
-    let current_override = provider.current().max_tokens_override();
-    let new_provider = match ctx.bureau.build(
-        account,
-        model.to_string(),
-        tuning,
-        route.cloned(),
-        current_override,
+    let built = match ctx.bureau.build(
+        &pick.account,
+        pick.model.clone(),
+        &pick.tuning,
+        pick.route.clone(),
+        provider.current().max_tokens_override(),
     ) {
         Ok(built) => built,
         Err(e) => {
@@ -201,30 +212,22 @@ fn apply_model_switch(
             return;
         }
     };
-    let context_window = new_provider.context_window();
-    provider.swap(new_provider);
+    let saved = state::State::of(&built, &available);
+    let context_window = built.context_window();
+    provider.swap(built);
     tui.app.update_live_model(&provider.current(), &available);
-    let state_dir = crate::bootstrap::EXARCH.project_dir(info.cwd);
-    if let Err(e) = state::save(
-        &state_dir,
-        &state::State::new(
-            account,
-            &available,
-            model,
-            tuning,
-            route.map(String::as_str),
-        ),
-    ) {
+    let state_dir = crate::bootstrap::EXARCH.project_dir(ctx.info.cwd);
+    if let Err(e) = state::save(&state_dir, &saved) {
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));
     }
-    if let Err(error) = recorder.emit(crate::record::Forensic::ModelChanged {
-        model: model.to_string(),
+    if let Err(error) = ctx.recorder.emit(crate::record::Forensic::ModelChanged {
+        model: pick.model.clone(),
         context_window,
-        label,
-        service: Some(account.service.name.as_str().to_string()),
-        account: Some(account.id.as_str().to_string()),
+        label: identity::label(&pick.account, &available),
+        service: Some(pick.account.service.name.as_str().to_string()),
+        account: Some(pick.account.id.as_str().to_string()),
     }) {
-        recorder.report_fault(&error);
+        ctx.recorder.report_fault(&error);
     }
 }

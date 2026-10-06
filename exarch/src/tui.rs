@@ -1,6 +1,8 @@
-//! Full-screen TUI frontend: [`run`] holds the terminal — raw mode, alternate
-//! screen, bracketed paste, mouse capture — and the REPL loop the user types
-//! into.
+//! The full-screen TUI frontend.
+//!
+//! [`enter`] takes the terminal — raw mode, alternate screen, bracketed paste,
+//! mouse capture — [`choose`] picks a model on it when a launch has none to
+//! restore, and [`run`] holds it for the REPL loop the user types into.
 //!
 //! The agent core sees only a [`crate::bus::Emitter`] channel. The frontend
 //! is deliberately not a [`crate::bus::Sink`]: it drains the same bus on its
@@ -35,11 +37,24 @@ mod tabs;
 mod terminal;
 mod tui_loop;
 
+use std::path::Path;
 use std::time::Duration;
 
 pub(super) use app::App;
 pub use banner::SessionInfo;
+pub use model_picker::choose;
+pub use picker::Pick;
+pub use terminal::TerminalGuard;
 pub use tui_loop::run;
+
+/// Take the terminal for the TUI — raw mode, the alternate screen, and fd 2
+/// redirected to `run_dir`'s `stderr.log` — before the first thing it shows.
+///
+/// # Errors
+/// If the terminal cannot be put into those modes, or the log not opened.
+pub fn enter(run_dir: &Path) -> Result<TerminalGuard, String> {
+    TerminalGuard::enter(&run_dir.join("stderr.log")).map_err(|e| format!("ratatui init: {e}"))
+}
 
 /// How long a dead subagent's tab survives in the bar, so its last frame is
 /// still readable before `tabs` ages it out.

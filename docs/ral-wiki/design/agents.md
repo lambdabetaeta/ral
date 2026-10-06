@@ -187,16 +187,15 @@ and a misspelled field stays a static error.
 Each field is read on its own: `` `inherit `` takes the parent's half, and
 `` `named `` names another — an account by `resolve_pinned_provider`, a model
 by its name. A pair that comes out as the parent's own shares the parent's
-`Arc<Provider>` verbatim, allocating nothing. Any other must be one its account
-lists: `Bureau::reselect` checks it against that account's listing (the cache,
-else one fetch with the catalog unlocked — the listing minting reads for the
-context window anyway) and refuses an unlisted model, or one whose listing
-cannot be fetched, before any child exists.
+`Arc<Provider>` verbatim, allocating nothing. Any other is minted by
+`Bureau::reselect` through `Bureau::build`, the one door every provider passes,
+which refuses a model its account does not list, or one whose listing cannot be
+had, before any child exists.
 
 Tuning (effort, temperature, `top_p`) and the output cap are the operator's
 knobs rather than part of a model's identity, so they always inherit; the
-`OpenRouter` route names a serving provider and survives only where the
-resolved account is the parent's.
+`OpenRouter` route was chosen for the parent's model, so a child on any other
+pair runs with none.
 
 `provider::Bureau` is what makes any of this possible: `Provider::build` needs
 an engine and a credential that no `Provider` retains, so the bureau names that

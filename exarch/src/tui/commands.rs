@@ -471,18 +471,6 @@ pub(super) fn route_submit(
         // and the line is dropped if that agent died since it was focused.
         None => {
             if focused == root {
-                // A model-less launch would reach the provider with an empty
-                // model and fail on the wire; point at `/model` instead.
-                if tui
-                    .app
-                    .tabs
-                    .agent(root)
-                    .is_some_and(|agent| agent.current_provider().model().is_empty())
-                {
-                    tui.app
-                        .push_error(root, "no model selected — run /model to choose one");
-                    return Ok(());
-                }
                 mailbox.push_user(text);
             } else if let Some(agent) = tui.app.tabs.agent(focused) {
                 agent.mailbox.steer(text);

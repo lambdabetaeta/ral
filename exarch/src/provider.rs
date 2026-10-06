@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn openrouter_route_is_ignored_by_other_providers() {
-        let mut provider = Provider::scripted("gpt-5.5", scripted::Script::new());
+        let mut provider = Provider::scripted("model-a", scripted::Script::new());
         provider.route = Some("deepinfra".into());
         assert_eq!(provider.openrouter_route(), None);
 

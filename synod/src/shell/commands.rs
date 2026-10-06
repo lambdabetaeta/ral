@@ -19,7 +19,7 @@ use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -161,15 +161,11 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 /// per account this computer has credentials for.
 ///
 /// Answers instantly from whatever [`super::Accounts`] already has cached —
-/// a fresh disk entry carried over from an earlier run, or nothing at all
-/// — and, the first time this run calls it, kicks off
+/// a fresh disk entry carried over from an earlier run, or nothing at all,
+/// which the menu shows as loading — and kicks off
 /// [`super::refresh_menu_async`], which emits the result as
-/// `models-refreshed` unconditionally — even when it turns out to equal
-/// this instant menu — so the window is never left waiting on a refresh
-/// that silently agreed with what it already showed.  The managed
-/// [`Once`] makes sure at most one such fetch is ever in flight for the
-/// run: one refresh per run is all the catalog is worth, since its disk
-/// cache already carries its own day-long freshness window.
+/// `models-refreshed` unconditionally, so every list shown loading has a
+/// listing on its way.
 ///
 /// # Errors
 /// Returns the credential scrub's own failure, if startup could not
@@ -178,13 +174,10 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 pub fn list_models(
     app: AppHandle,
     accounts: State<'_, super::Accounts>,
-    refresh_started: State<'_, Once>,
 ) -> Result<synod::session::ModelMenu, String> {
     let Holdings { store, catalog, .. } = accounts.resolved()?;
     let instant = synod::session::menu(store, catalog);
-
-    refresh_started.call_once(|| super::refresh_menu_async(&app));
-
+    super::refresh_menu_async(&app);
     Ok(instant)
 }
 

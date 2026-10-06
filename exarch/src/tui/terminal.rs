@@ -177,9 +177,11 @@ pub fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
     Ok(())
 }
 
-/// RAII guard over the terminal modes and, while it is live, a redirect of fd 2
-/// to a per-process log so `dbg_trace!` cannot tear through the rendered frame.
-/// `Drop` undoes both, so unwinding cannot skip the cleanup.
+/// RAII guard over the terminal modes and a redirect of fd 2.
+///
+/// While it is live, fd 2 goes to a per-process log so `dbg_trace!` cannot
+/// tear through the rendered frame. `Drop` undoes both, so unwinding cannot
+/// skip the cleanup.
 pub struct TerminalGuard {
     term: Term,
     #[cfg(unix)]
@@ -189,6 +191,11 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
+    /// Redirect fd 2 to `stderr_log`, then enter the terminal modes.
+    ///
+    /// # Errors
+    /// If the log cannot be opened or the terminal cannot enter its modes;
+    /// either way nothing is left half-done.
     pub fn enter(stderr_log: &Path) -> io::Result<Self> {
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);

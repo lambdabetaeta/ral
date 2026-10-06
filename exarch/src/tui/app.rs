@@ -112,16 +112,11 @@ impl App {
     /// one email still read apart on the status line.
     pub fn update_live_model(&mut self, p: &Provider, accounts: &[Account]) {
         let status_provider = crate::provider::identity::label(p.account(), accounts);
-        // Until `/model` chooses one, the model is the empty sentinel.
-        self.status_model = if p.model().is_empty() {
-            format!("{status_provider} · no model — run /model")
-        } else {
-            // The rung in force, in the picker's own ladder label: a model the
-            // catalog says takes no reasoning control reads `auto`, which is
-            // what goes on the wire.
-            let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
-            format!("{status_provider}/{} ({effort})", p.model())
-        };
+        // The rung in force, in the picker's own ladder label: a model the
+        // catalog says takes no reasoning control reads `auto`, which is what
+        // goes on the wire.
+        let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
+        self.status_model = format!("{status_provider}/{} ({effort})", p.model());
         self.context_window = p.context_window();
     }
 
@@ -190,7 +185,7 @@ impl App {
         }
     }
 
-    /// Mutable access to the active `/model` picker, for `drive_picker`.
+    /// Mutable access to the active `/model` picker, for `model_picker`'s `drive`.
     pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
         match self.overlay.as_mut() {
             Some(Overlay::Picker(p)) => Some(p),
@@ -411,7 +406,7 @@ impl App {
         if k.kind != KeyEventKind::Press {
             return;
         }
-        // An overlay is exclusive; its own keys are handled by `drive_picker`
+        // An overlay is exclusive; its own keys are handled by `model_picker::drive`
         // and `drive_login`. This guard only stops a stray key leaking through.
         if self.overlay.is_some() {
             return;

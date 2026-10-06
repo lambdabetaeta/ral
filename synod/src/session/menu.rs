@@ -4,12 +4,13 @@
 use exarch::provider::{
     self,
     credential::CredentialStore,
-    identity::{self, Account},
+    identity::{self, Account, AccountId},
     listing::Listing,
     models::{ModelCatalog, ModelSource},
     pricing,
 };
 use ral_core::sync::LockExt;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 /// One model offered for a provider, and whether it takes a reasoning-effort
@@ -28,7 +29,20 @@ pub struct ModelChoice {
     pub reasoning: bool,
 }
 
-/// One account the window can offer, and the models known for it.
+/// What the window knows of one account's models.
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Models {
+    /// Nothing cached yet, and a live listing on its way.
+    Loading,
+    /// The account's models, in its listing's order.
+    Listed { choices: Vec<ModelChoice> },
+    /// The live listing failed; `reason` says why.
+    Failed { reason: String },
+}
+
+/// One account the window can offer, and what is known of its models.
 #[derive(serde::Serialize, Clone, ts_rs::TS)]
 #[ts(export, export_to = "../ui/js/bindings/")]
 pub struct ProviderChoice {
@@ -44,7 +58,7 @@ pub struct ProviderChoice {
     pub label: String,
     /// Whatever the catalog honestly knows for this provider, never blocking
     /// on a network fetch to build.
-    pub models: Vec<ModelChoice>,
+    pub models: Models,
 }
 
 /// The provider picker: one entry per available account, plus the shared
@@ -65,14 +79,19 @@ pub struct ModelMenu {
 ///
 /// No network touched: each provider's models come from whatever `catalog`
 /// already has cached — a fresh disk entry carried over from an earlier
-/// session, or nothing at all. [`refresh_menu`] is the complete listing, fetched live; this is the
-/// instant one the window shows while that runs.
+/// session — and are [`Models::Loading`] otherwise. [`refresh_menu`] is the
+/// complete listing, fetched live; this is the instant one the window shows
+/// while that runs.
 pub fn menu<S>(store: &Mutex<CredentialStore>, catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
     S: ModelSource,
 {
     let available = store.lock_ignore_poison().available();
-    menu_from(&available, &mut catalog.lock_ignore_poison())
+    menu_from(
+        &available,
+        &mut catalog.lock_ignore_poison(),
+        &BTreeMap::new(),
+    )
 }
 
 /// The complete provider picker: every available provider's live model
@@ -120,25 +139,33 @@ where
     pricing::ensure_loaded_blocking();
 
     let mut catalog = catalog.lock_ignore_poison();
+    let mut failed = BTreeMap::new();
     for (id, result) in results {
-        if let Ok(models) = result {
-            catalog.record(&id, models);
+        match result {
+            Ok(models) => catalog.record(&id, models),
+            Err(reason) => {
+                failed.insert(id, reason);
+            }
         }
     }
-    menu_from(available, &mut catalog)
+    menu_from(available, &mut catalog, &failed)
 }
 
 /// Shape `available` into a [`ModelMenu`], reading each provider's model
-/// list from `catalog` without ever fetching — the part [`menu`] and
-/// [`refresh_menu_for`] share once each has decided what belongs in the
-/// catalog.
-fn menu_from<S>(available: &[Account], catalog: &mut ModelCatalog<S>) -> ModelMenu
+/// list from `catalog` without ever fetching, and its listing's failure from
+/// `failed` — the part [`menu`] and [`refresh_menu_for`] share once each has
+/// decided what belongs in the catalog.
+fn menu_from<S>(
+    available: &[Account],
+    catalog: &mut ModelCatalog<S>,
+    failed: &BTreeMap<AccountId, String>,
+) -> ModelMenu
 where
     S: ModelSource,
 {
     let providers = available
         .iter()
-        .map(|account| provider_choice(account, available, catalog))
+        .map(|account| provider_choice(account, available, catalog, failed))
         .collect();
     ModelMenu {
         providers,
@@ -164,30 +191,39 @@ fn offers(listed: Vec<String>, caps: impl Fn(&str) -> pricing::ModelCaps) -> Vec
         .collect()
 }
 
-/// One account's entry: its cached models (if any), each carrying whether
-/// the pricing catalog knows it reasons.
+/// One account's entry: its cached models, each carrying whether the
+/// pricing catalog knows it reasons; else its listing's failure, if `failed`
+/// holds one; else loading.
 fn provider_choice<S>(
     account: &Account,
     available: &[Account],
     catalog: &mut ModelCatalog<S>,
+    failed: &BTreeMap<AccountId, String>,
 ) -> ProviderChoice
 where
     S: ModelSource,
 {
-    let cached = catalog.cached(&account.id).unwrap_or_default();
+    let models = match catalog.cached(&account.id) {
+        Some(listed) => Models::Listed {
+            choices: offers(listed, pricing::caps_or_default),
+        },
+        None => failed
+            .get(&account.id)
+            .map_or(Models::Loading, |reason| Models::Failed {
+                reason: reason.clone(),
+            }),
+    };
     ProviderChoice {
         account: account.id.as_str().to_string(),
         label: identity::label(account, available),
-        models: offers(cached, pricing::caps_or_default),
+        models,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exarch::provider::identity::AccountId;
     use exarch::provider::models::{Listed, ProviderEndpoint};
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     /// A built-in service's sole account — the common case in these tests.
@@ -237,8 +273,12 @@ mod tests {
         m
     }
 
-    fn model_names(choice: &ProviderChoice) -> Vec<String> {
-        choice.models.iter().map(|m| m.name.clone()).collect()
+    /// The names a listed entry offers; `None` while loading or failed.
+    fn model_names(choice: &ProviderChoice) -> Option<Vec<String>> {
+        match &choice.models {
+            Models::Listed { choices } => Some(choices.iter().map(|m| m.name.clone()).collect()),
+            Models::Loading | Models::Failed { .. } => None,
+        }
     }
 
     fn offered(models: &[ModelChoice]) -> Vec<&str> {
@@ -270,14 +310,14 @@ mod tests {
     }
 
     #[test]
-    fn menu_with_nothing_cached_offers_no_model() {
+    fn menu_with_nothing_cached_is_loading() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
         let available = [fam("anthropic")];
 
-        let menu = menu_from(&available, &mut catalog);
+        let menu = menu_from(&available, &mut catalog, &BTreeMap::new());
 
         assert_eq!(menu.providers.len(), 1);
-        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
+        assert!(matches!(menu.providers[0].models, Models::Loading));
         assert_eq!(menu.efforts.first().map(String::as_str), Some("auto"));
         assert_eq!(menu.default_effort, "med");
     }
@@ -291,31 +331,38 @@ mod tests {
             vec![Listed::bare("model-b"), Listed::bare("model-a")],
         );
 
-        let menu = menu_from(std::slice::from_ref(&anthropic), &mut catalog);
+        let menu = menu_from(
+            std::slice::from_ref(&anthropic),
+            &mut catalog,
+            &BTreeMap::new(),
+        );
 
-        assert_eq!(model_names(&menu.providers[0]), vec!["model-b", "model-a"]);
+        assert_eq!(
+            model_names(&menu.providers[0]),
+            Some(vec!["model-b".to_string(), "model-a".to_string()])
+        );
     }
 
     #[test]
     fn refresh_menu_folds_fetched_lists_in_and_serves_them() {
         let account = Account::chatgpt("work-account", "work-account");
-        let source = FakeSource::new(one(account.id.clone(), &["gpt-5.5-codex"]));
+        let source = FakeSource::new(one(account.id.clone(), &["model-a"]));
         let catalog = Mutex::new(ModelCatalog::memo_only(source));
 
         let menu = refresh_menu_for(std::slice::from_ref(&account), &catalog);
 
         assert_eq!(
             model_names(&menu.providers[0]),
-            vec!["gpt-5.5-codex".to_string()]
+            Some(vec!["model-a".to_string()])
         );
         assert_eq!(
             catalog.lock_ignore_poison().cached(&account.id),
-            Some(vec!["gpt-5.5-codex".to_string()])
+            Some(vec!["model-a".to_string()])
         );
     }
 
     #[test]
-    fn refresh_menu_leaves_a_failed_fetch_uncached_and_offers_nothing() {
+    fn refresh_menu_leaves_a_failed_fetch_uncached_and_says_why() {
         let deepseek = fam("deepseek");
         let mut lists = Lists::new();
         lists.insert(deepseek.id.clone(), Err("network down".to_string()));
@@ -323,7 +370,10 @@ mod tests {
 
         let menu = refresh_menu_for(std::slice::from_ref(&deepseek), &catalog);
 
-        assert_eq!(model_names(&menu.providers[0]), Vec::<String>::new());
+        assert!(matches!(
+            &menu.providers[0].models,
+            Models::Failed { reason } if reason == "network down"
+        ));
         assert_eq!(catalog.lock_ignore_poison().cached(&deepseek.id), None);
     }
 }
