@@ -174,8 +174,8 @@ fn elision_row(gutter: Col, note: &str) -> Line<'static> {
 /// The largest number [`push_hunk`] will stamp on `h`, which sizes the gutter.
 /// Walks the same two counters, so the two must move together.
 fn hunk_max_lineno(h: &Hunk) -> u32 {
-    let (mut old, mut new) = (h.start, h.start);
-    let mut max = h.start;
+    let (mut old, mut new) = (h.old, h.new);
+    let mut max = old.max(new);
     for row in &h.rows {
         match row {
             DiffRow::Context(_) => {
@@ -197,10 +197,10 @@ fn hunk_max_lineno(h: &Hunk) -> u32 {
 }
 
 /// Render up to `cap` of `h`'s unified rows, walking an old- and a new-side
-/// counter from `h.start`: a deletion keeps its pre-edit number, an insertion
+/// counter from `h.old` and `h.new`: a deletion keeps its pre-edit number, an insertion
 /// and a context row take their post-edit one.  Returns how many rows it drew.
 fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, cols: DiffCols, cap: usize) -> usize {
-    let (mut old, mut new) = (h.start, h.start);
+    let (mut old, mut new) = (h.old, h.new);
     for row in h.rows.iter().take(cap) {
         match row {
             DiffRow::Context(segs) => {

@@ -673,7 +673,8 @@ mod tests {
         let card = Card(vec![Mark::Diff {
             path: "f.rs".to_string(),
             hunks: vec![Hunk {
-                start: 1,
+                old: 1,
+                new: 1,
                 rows: vec![Row::Del(vec![Seg::plain("x")])],
             }],
         }]);
@@ -688,7 +689,8 @@ mod tests {
                     "mark": "diff",
                     "path": "f.rs",
                     "hunks": [{
-                        "start": 1,
+                        "old": 1,
+                        "new": 1,
                         "rows": [{
                             "tag": "del",
                             "segs": [{ "emph": false, "text": "x" }],

@@ -24,12 +24,12 @@ pub(crate) fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
 /// One grouped hunk of a whole-file diff, carried by a `Mark::Diff`: context,
 /// deletions and insertions interleaved as one unified list of [`Row`]s.
 ///
-/// `start` is the 1-indexed *original* line of the first row; `tui::line`
-/// numbers the gutter by walking from there, advancing an old- and a new-side
-/// counter separately.
+/// `old` and `new` are the 1-indexed lines of the first row before and after
+/// the edit; the gutter walks a counter from each.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hunk {
-    pub start: u32,
+    pub old: u32,
+    pub new: u32,
     pub rows: Vec<Row>,
 }
 
@@ -120,7 +120,8 @@ impl Diff {
                 .collect();
             room -= rows.len();
             hunks.push(Hunk {
-                start: saturating(group[0].old_range().start + 1),
+                old: saturating(group[0].old_range().start + 1),
+                new: saturating(group[0].new_range().start + 1),
                 rows,
             });
         }
@@ -192,6 +193,18 @@ mod tests {
             assert!(row.segs().iter().any(|s| s.emph), "an emphasised run");
             assert!(row.segs().iter().any(|s| !s.emph), "an unchanged run");
         }
+    }
+
+    /// Lines inserted above a hunk shift its new side, not its old.
+    #[test]
+    fn a_later_hunk_starts_each_side_on_its_own_line() {
+        let old = (1..=20).map(|i| i.to_string() + "\n").collect::<String>();
+        let new = format!("a\nb\nc\n{}", old.replace("15\n", "fifteen\n"));
+        let diff = Diff::between(&old, &new);
+        let [_, later] = diff.hunks.as_slice() else {
+            panic!("two hunks");
+        };
+        assert_eq!((later.old, later.new), (13, 16));
     }
 
     /// However much was written, a diff keeps [`KEPT_ROWS`] rows and counts

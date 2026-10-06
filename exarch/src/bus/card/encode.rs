@@ -130,7 +130,8 @@ fn encode_hunks(hunks: &[Hunk]) -> FOValue {
             .iter()
             .map(|h| {
                 record(vec![
-                    ("start", count(h.start)),
+                    ("old", count(h.old)),
+                    ("new", count(h.new)),
                     ("rows", list(h.rows.iter().map(encode_row).collect())),
                 ])
             })
@@ -227,7 +228,8 @@ mod tests {
             Mark::Diff {
                 path: "a.rs".into(),
                 hunks: vec![Hunk {
-                    start: 7,
+                    old: 7,
+                    new: 9,
                     rows: vec![
                         Row::Del(vec![Seg {
                             emph: true,
@@ -254,7 +256,7 @@ mod tests {
                 && matches!(&rows[0].value, FieldVal::Inline(spans) if spans[0].text == "42 passed")
                 && matches!(&rows[1].value, FieldVal::Readout(r) if r.value == 3 && r.max.is_none())));
         assert!(matches!(&got.marks()[3], Mark::Diff { path, hunks }
-            if path == "a.rs" && hunks[0].start == 7
+            if path == "a.rs" && hunks[0].old == 7 && hunks[0].new == 9
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_), Row::Context(_)])
                 && matches!(hunks[0].rows[0].segs(), [Seg { emph: true, .. }])));
         assert!(matches!(&got.marks()[4], Mark::Raw { bytes } if bytes == b"hi"));

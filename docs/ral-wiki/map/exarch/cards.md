@@ -59,8 +59,8 @@ shape is `Variant{label:"card", payload: List<mark>}`; each mark is
 top-level value returns `None` and is dropped. Decoding never fails *within* a
 recognised card: an unknown mark label or role degrades to plain `text`,
 because a card is a deliberate user-facing act, not a sentinel that might be
-malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk a
-`start` line and a `rows` list of `{tag, text}` records; a missing `hunks`
+malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk its
+first line before (`old`) and after (`new`) the edit, and a `rows` list of `{tag, text}` records; a missing `hunks`
 lifts to empty so a bare diff still renders. Detached workers buffer their
 `exarch-surface` calls and replay them on `await`, so a card replays for free.
 

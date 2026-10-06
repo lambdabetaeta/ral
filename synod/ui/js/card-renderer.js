@@ -130,8 +130,8 @@ function renderDiffMark(m) {
   container.appendChild(head);
 
   for (const hunk of m.hunks || []) {
-    let oldNo = hunk.start;
-    let newNo = hunk.start;
+    let oldNo = hunk.old;
+    let newNo = hunk.new;
     for (const row of hunk.rows || []) {
       const line = document.createElement("div");
       line.className = "diff-row " + (row.tag === "add" ? "add" : row.tag === "del" ? "del" : "ctx");
@@ -145,7 +145,7 @@ function renderDiffMark(m) {
         gutter.textContent = newNo + "+";
         newNo++;
       } else {
-        gutter.textContent = oldNo + " ";
+        gutter.textContent = newNo + " ";
         oldNo++;
         newNo++;
       }

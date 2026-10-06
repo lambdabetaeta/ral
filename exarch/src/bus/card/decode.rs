@@ -188,10 +188,11 @@ fn decode_diff(m: &FOValue) -> Option<Mark> {
     Some(Mark::Diff { path, hunks })
 }
 
-/// A missing `start` defaults to 1: hunk rows count from the original line 1.
+/// A missing `old` or `new` defaults to 1, the file's first line.
 fn decode_hunk(m: &FOValue) -> Hunk {
     Hunk {
-        start: count_field(m, "start").unwrap_or(1),
+        old: count_field(m, "old").unwrap_or(1),
+        new: count_field(m, "new").unwrap_or(1),
         rows: items(m, "rows")
             .iter()
             .filter_map(record)
@@ -271,7 +272,8 @@ mod tests {
                     (
                         "hunks",
                         list(vec![map_value(vec![
-                            ("start", int(7)),
+                            ("old", int(7)),
+                            ("new", int(9)),
                             ("rows", list(vec![seg_row("del", "x"), seg_row("add", "y")])),
                         ])]),
                     ),
@@ -297,7 +299,7 @@ mod tests {
         assert_eq!(marks.len(), 5);
         assert!(matches!(&marks[0], Mark::Text { spans } if spans[0].role == Some(Role::Strong)));
         assert!(matches!(&marks[1], Mark::Diff { path, hunks }
-            if path == "a.rs" && hunks[0].start == 7
+            if path == "a.rs" && hunks[0].old == 7 && hunks[0].new == 9
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_)])
                 && hunks[0].rows.iter().map(Row::text).eq(["x", "y"].map(String::from))));
         assert!(matches!(&marks[2], Mark::Fields { rows } if rows[0].label == "tests"));
@@ -314,7 +316,7 @@ mod tests {
             value_to_card(&variant("bogus", map_value(vec![]))).is_none(),
             "an unknown top-level variant is not a card"
         );
-        let bare = mark("diff", vec![("path", s("a.rs")), ("start", int(1))]);
+        let bare = mark("diff", vec![("path", s("a.rs"))]);
         let Card(marks) = value_to_card(&bare).expect("a bare diff lifts");
         assert_eq!(marks.len(), 1);
         assert!(matches!(&marks[0], Mark::Diff { .. }));
