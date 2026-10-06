@@ -17,6 +17,7 @@ use crate::diagnostic::CallSite;
 use crate::serial::FOValue;
 use crate::serial::datum::untag;
 use crate::syntax::ast::WriteMode;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// One fact observed at a door: a command settled, a write committed, a
@@ -59,14 +60,14 @@ pub enum Observed {
         path: String,
         mode: WriteMode,
         outcome: WriteOutcome,
-        /// The whole content that landed, on an atomic commit small enough to
-        /// carry it.  Never a prefix: a card reads a write as the change it
-        /// made, and half a side is not a change.
+        /// The target's whole content once the write landed.  Never a prefix:
+        /// a card reads a write as the change it made, and half a side is not
+        /// a change.
         new_bytes: Option<Vec<u8>>,
-        /// The target's whole prior content, empty for a file that did not yet
-        /// exist.  `None` means the before-image is *unknown* — a target too
-        /// large to read whole — which is not the same fact and must not read
-        /// as a creation.
+        /// The target's whole content before the write, empty for a file that
+        /// did not yet exist.  `None` means the before-image is *unknown* — a
+        /// target too large to read whole — which is not the same fact and
+        /// must not read as a creation.
         old_bytes: Option<Vec<u8>>,
     },
     Read {
@@ -123,12 +124,13 @@ pub enum Decision {
     Flagged,
 }
 
-/// How a write door settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a write door settled, ordered from best to worst.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WriteOutcome {
     Committed,
-    /// The body broke before commit: an atomic temp is discarded, but a
-    /// non-atomic target may be left partly written.
+    /// The body broke before an atomic `>` committed: its staged temp is
+    /// discarded and the target left as it was.  A stream cannot abort.
     Aborted,
     /// The open never succeeded, or the atomic rename failed at commit.
     Failed,

@@ -155,7 +155,7 @@ impl Shell {
 
     /// Whether the live stack admits `op` on a path already located — no
     /// audit, no refusal: the question a door asks about a *side* read it
-    /// may simply forgo, such as a write card's before-image.
+    /// may simply forgo, such as a write's before-image.
     pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
         self.context
             .grants

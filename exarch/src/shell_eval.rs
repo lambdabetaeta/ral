@@ -12,7 +12,7 @@ pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
-use crate::bus::card::{landing, value_to_card, value_to_done};
+use crate::bus::card::{Change, landing, value_to_card, value_to_done, value_to_edit};
 use crate::bus::{AgentId, Emitter, Stamp, Stamped};
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -91,17 +91,19 @@ impl PinDigest {
 /// and by the boundary nudge.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// What the record absorbs: the four shapes the `surface` channel carries,
-/// plus the register writes `exarch-pins` makes — closed and named rather
-/// than borrowed from the bus's vocabulary.
+/// What the record absorbs: the shapes the `surface` channel carries, plus
+/// the register writes `exarch-pins` makes — closed and named rather than
+/// borrowed from the bus's vocabulary.
 ///
 /// `Surface` carries the fact a card *is* (`Card`, `Pin`) rather than one a
-/// printer merely wants a copy of — an observation, a notice, and a done
-/// keep only their structured value, so a printer's own mark tree is built
-/// once, by whoever renders, not eagerly here and thrown away by whoever
-/// records.
+/// printer merely wants a copy of — an observation, a change, a notice, and
+/// a done keep only their structured value, so a printer's own mark tree is
+/// built once, by whoever renders, not eagerly here and thrown away by
+/// whoever records.
 pub enum Surface {
     Observation(Box<Observation>),
+    /// What a write or an edit did to a file.
+    Change(crate::bus::card::Change),
     Card(crate::bus::card::Card),
     Notice(crate::bus::card::Notice),
     Done {
@@ -143,14 +145,18 @@ pub enum Decoded {
 pub fn decode_surface(ev: &FOValue) -> Decoded {
     if let Some(event) = Observation::from_surface(ev) {
         // Core reports every observation it makes and judges none of them;
-        // `landing` is where this host says which it wants.  One core
-        // dispatch is one observation, so a rejected one is dropped outright
-        // rather than offered to the decoders below — deliberately, so it is
-        // `Landed`, not `Unknown`.
-        match landing(&event.what) {
-            Some(_) => Decoded::Surface(Surface::Observation(Box::new(event))),
-            None => Decoded::Landed,
+        // `landing` is where this host says which it wants, and a write is
+        // wanted as the change it made.  One core dispatch is one
+        // observation, so a rejected one is dropped outright rather than
+        // offered to the decoders below — deliberately, so it is `Landed`,
+        // not `Unknown`.
+        match (Change::of(&event.what), landing(&event.what)) {
+            (Some(change), _) => Decoded::Surface(Surface::Change(change)),
+            (None, Some(_)) => Decoded::Surface(Surface::Observation(Box::new(event))),
+            (None, None) => Decoded::Landed,
         }
+    } else if let Some(change) = value_to_edit(ev) {
+        Decoded::Surface(Surface::Change(change))
     } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
         Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
@@ -363,6 +369,7 @@ mod tests {
 
     use super::*;
     use crate::bus::card::Row;
+    use ral_core::types::WriteOutcome;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::protocol::IdentityTransport;
@@ -1521,95 +1528,23 @@ return !{{length $hits}}"
         );
     }
 
-    /// `edit-replace` goes through core's atomic write door — inheriting its
-    /// mode, symlink, and durability preservation — and speaks one surface of
-    /// its own: the whole-file diff, and no `write` observation beside it.
+    /// An edit holds both texts, so it reads as its change however large the
+    /// file around it, and as nothing but that change.
     #[test]
-    fn edit_replace_surfaces_one_whole_file_diff_card() {
-        let engine = fresh();
-        let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
-
-        let (r, records) =
-            run_capturing(&engine, &format!("edit-replace '{path}' 'world' 'friend'"));
-        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        assert_eq!(
-            r.exit,
-            0,
-            "edit-replace must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        assert_eq!(
-            wrote.as_deref(),
-            Some("hello\nfriend\n"),
-            "the edit committed to disk"
-        );
-
-        let obs = observations(&records);
-        assert!(
-            obs.is_empty(),
-            "an edit is one logical surface — its diff — never a write observation too, got {obs:?}"
-        );
-        let cards = cards(&records);
-        assert_eq!(cards.len(), 1, "exactly one card, got {cards:?}");
-        let Some((diffed, hunks)) = cards[0].single_diff() else {
-            panic!("expected a lone diff mark, got {:?}", cards[0])
-        };
-        assert_eq!(diffed, path, "the diff is labelled with the edited path");
-        let rows: Vec<String> = hunks
-            .iter()
-            .flat_map(|h| &h.rows)
-            .map(|r| match r {
-                Row::Context(_) => format!(" {}", r.text()),
-                Row::Del(_) => format!("-{}", r.text()),
-                Row::Add(_) => format!("+{}", r.text()),
-            })
-            .collect();
-        assert_eq!(rows, [" hello", "-world", "+friend"]);
-    }
-
-    /// An edit diffs the two texts it already holds, so no file is too large to
-    /// read as the edit it was — the 64 KiB pre-image cap a committed `>` lives
-    /// under (`old_snapshot_for_diff`) governs a read this path never makes.
-    #[test]
-    fn edit_over_an_oversized_file_still_diffs() {
+    fn an_edit_reads_as_its_change_whatever_the_file_size() {
         let engine = fresh();
         let tail = "x".repeat(70_000);
-        let (dir, path) = scratch_file("edit-oversized", "big.txt", &format!("HEAD\n{tail}"));
+        let (_dir, path) = scratch_file("edit", "big.txt", &format!("HEAD\n{tail}"));
 
         let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
-        let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
-        assert_eq!(
-            r.exit,
-            0,
-            "edit-replace must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        assert_eq!(
-            wrote.as_deref(),
-            Some(format!("TAIL\n{tail}").as_str()),
-            "the edit committed to disk"
-        );
-
-        let cards = cards(&records);
-        assert_eq!(cards.len(), 1, "exactly one card, got {cards:?}");
-        let Some((_, hunks)) = cards[0].single_diff() else {
-            panic!("expected a lone diff mark, got {:?}", cards[0])
-        };
-        let changed: Vec<String> = hunks
-            .iter()
-            .flat_map(|h| &h.rows)
-            .filter(|r| !matches!(r, Row::Context(_)))
-            .map(Row::text)
-            .collect();
-        assert_eq!(
-            changed,
-            ["HEAD", "TAIL"],
-            "the one changed line reads as a diff however large the file around it"
-        );
+        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        assert!(observations(&records).is_empty(), "no write beside the change");
+        let [change] = changes(&records).try_into().expect("one edit, one change");
+        assert_eq!(change.path, path);
+        assert_eq!(unified(&change)[..2], ["-HEAD", "+TAIL"]);
     }
 
-    /// An edit that rebuilds the file byte-for-byte says nothing: a card with
-    /// no hunks would draw an empty block under a path that did not change.
+    /// An edit that rebuilds the file byte-for-byte changed nothing to show.
     #[test]
     fn edit_changing_nothing_surfaces_nothing() {
         let engine = fresh();
@@ -1617,10 +1552,7 @@ return !{{length $hits}}"
 
         let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'two' 'two'"));
         assert_eq!(r.exit, 0, "a no-op edit still succeeds");
-        assert!(
-            cards(&records).is_empty() && observations(&records).is_empty(),
-            "an edit that changed no line raises no surface"
-        );
+        assert!(changes(&records).is_empty() && observations(&records).is_empty());
     }
 
     /// Editing an executable leaves its `0o755` intact: a plain
@@ -1750,17 +1682,29 @@ return !{{length $hits}}"
             .collect()
     }
 
-    /// The [`Card`] carried by each captured [`Display::Card`], in order — the
-    /// surface half [`observations`] drops, for the tools that speak a card
-    /// rather than an observation.
-    fn cards(records: &[crate::record::Record]) -> Vec<crate::bus::card::Card> {
+    /// The [`Change`] carried by each captured [`Display::Change`], in order.
+    fn changes(records: &[crate::record::Record]) -> Vec<Change> {
         records
             .iter()
             .filter_map(|r| match r {
-                crate::record::Record::Display(crate::record::Display::Card { card }) => {
-                    Some(card.clone())
+                crate::record::Record::Display(crate::record::Display::Change { change }) => {
+                    Some(change.clone())
                 }
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// A change's rows as a unified diff spells them.
+    fn unified(change: &Change) -> Vec<String> {
+        let diff = change.diff.as_ref().expect("a change with a diff");
+        diff.hunks
+            .iter()
+            .flat_map(|h| &h.rows)
+            .map(|r| match r {
+                Row::Context(_) => format!(" {}", r.text()),
+                Row::Del(_) => format!("-{}", r.text()),
+                Row::Add(_) => format!("+{}", r.text()),
             })
             .collect()
     }
@@ -1812,211 +1756,45 @@ return !{{length $hits}}"
         );
     }
 
-    /// The WRITE door end to end: one `>` redirect commits an atomic write and
-    /// raises exactly one committed `Write` event.
+    /// A `>` over a file reads as the change it made against what stood
+    /// there, never as a creation.
     #[test]
-    fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use ral_core::syntax::ast::WriteMode;
-        use ral_core::types::WriteOutcome;
+    fn a_write_reads_as_the_change_it_made() {
         let engine = fresh();
-        // No fixture file: the write creates the target.
-        let dir = scratch_dir("cov-write");
-        let path = display_no_trailing_sep(&dir.path().join("b"));
+        let (_dir, path) = scratch_file("write", "b", "hello\nworld\n");
 
-        let (r, records) = run_capturing(&engine, &format!("to-string 'x' > '{path}'"));
-        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        assert_eq!(
-            r.exit,
-            0,
-            "the write redirect must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        assert_eq!(wrote.as_deref(), Some("x"), "the write committed to disk");
-
-        let obs = observations(&records);
-        assert_eq!(
-            obs.len(),
-            1,
-            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
-        );
-        assert_eq!(
-            obs[0],
-            Observed::Write {
-                path,
-                mode: WriteMode::Write,
-                outcome: WriteOutcome::Committed,
-                new_bytes: Some(b"x".to_vec()),
-                // A fresh path's before-image is the empty one, known
-                // exactly — not an unknown one, which `None` is reserved for.
-                old_bytes: Some(Vec::new()),
-            },
-            "the one observation is a committed write of the redirect path"
-        );
+        let (r, records) =
+            run_capturing(&engine, &format!("to-string \"hello\\nfriend\\n\" > '{path}'"));
+        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        let [change] = changes(&records).try_into().expect("one write, one change");
+        assert_eq!((change.path.as_str(), change.outcome), (path.as_str(), WriteOutcome::Committed));
+        assert_eq!(unified(&change), [" hello", "-world", "+friend"]);
     }
 
-    /// A created file reads as the change it is: every line an addition against
-    /// the empty before-image, not a listing of what now stands there.  One
-    /// preview shape for every write the door can show.
+    /// An append reads as the lines it added to what stood there.
     #[test]
-    fn creating_a_file_by_redirect_reads_as_an_all_adds_diff() {
+    fn an_append_reads_as_the_lines_it_added() {
         let engine = fresh();
-        let dir = scratch_dir("cov-write-create");
-        let path = display_no_trailing_sep(&dir.path().join("fresh.txt"));
+        let (_dir, path) = scratch_file("append", "b", "one\n");
 
-        let (r, records) = run_capturing(&engine, &format!("to-string 'one\ntwo' > '{path}'"));
-        assert_eq!(r.exit, 0, "the write redirect must succeed");
-
-        let obs = observations(&records);
-        let card = crate::bus::card::observation_card(&obs[0]);
-        let Some((diffed, hunks)) = card.single_diff() else {
-            panic!("a created file's card is its diff, got {card:?}")
-        };
-        assert_eq!(diffed, path);
-        let rows: Vec<String> = hunks
-            .iter()
-            .flat_map(|h| &h.rows)
-            .map(|r| match r {
-                Row::Add(_) => format!("+{}", r.text()),
-                _ => format!("?{}", r.text()),
-            })
-            .collect();
-        assert_eq!(rows, ["+one", "+two"], "every line of a new file is an add");
+        let (r, records) = run_capturing(&engine, &format!("to-string \"two\\n\" >> '{path}'"));
+        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        let [change] = changes(&records).try_into().expect("one append, one change");
+        assert_eq!(unified(&change), [" one", "+two"]);
     }
 
-    /// Overwriting an *existing* file: the atomic recipe leaves the target
-    /// untouched until the rename, so core reads it for free and threads it
-    /// through as `old_bytes` alongside the committed `new_bytes`.
+    /// A file too large to read whole has no before-image, so a write over it
+    /// shows no diff rather than pass for a creation.
     #[test]
-    fn bare_write_redirect_over_existing_file_surfaces_old_and_new_bytes() {
-        use ral_core::syntax::ast::WriteMode;
-        use ral_core::types::WriteOutcome;
+    fn a_write_over_a_file_too_large_to_read_shows_no_diff() {
         let engine = fresh();
-        let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
-
-        let (r, records) = run_capturing(
-            &engine,
-            &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
-        );
-        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        assert_eq!(
-            r.exit,
-            0,
-            "the write redirect must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        assert_eq!(
-            wrote.as_deref(),
-            Some("hello\nfriend\n"),
-            "the write committed to disk"
-        );
-
-        let obs = observations(&records);
-        assert_eq!(
-            obs.len(),
-            1,
-            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
-        );
-        assert_eq!(
-            obs[0],
-            Observed::Write {
-                path,
-                mode: WriteMode::Write,
-                outcome: WriteOutcome::Committed,
-                new_bytes: Some(b"hello\nfriend\n".to_vec()),
-                // Read before the rename: the diff's "before" side.
-                old_bytes: Some(b"hello\nworld\n".to_vec()),
-            },
-            "old_bytes carries the pre-existing content, new_bytes the committed one"
-        );
-    }
-
-    /// Overwriting a file too large to read whole: the door withholds
-    /// `old_bytes` rather than carry a partial pre-image, and the card is
-    /// unaffected — it opens what landed, never what it replaced.
-    #[test]
-    fn bare_write_redirect_over_oversized_existing_file_still_opens_what_landed() {
-        use ral_core::types::WriteOutcome;
-        let engine = fresh();
-        // Comfortably past the 64KiB read cap.
-        let big = "x".repeat(70_000);
-        let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
+        let (_dir, path) = scratch_file("write-big", "b", &"x".repeat(70_000));
 
         let (r, records) = run_capturing(&engine, &format!("to-string 'short' > '{path}'"));
-        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        assert_eq!(
-            r.exit,
-            0,
-            "the write redirect must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        assert_eq!(
-            wrote.as_deref(),
-            Some("short"),
-            "the write committed to disk"
-        );
-
-        let obs = observations(&records);
-        assert_eq!(
-            obs.len(),
-            1,
-            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
-        );
-        match &obs[0] {
-            Observed::Write {
-                outcome, old_bytes, ..
-            } => {
-                assert_eq!(*outcome, WriteOutcome::Committed);
-                assert!(
-                    old_bytes.is_none(),
-                    "an oversized pre-existing file must not be diffed"
-                );
-            }
-            other => panic!("expected a Write observation, got {other:?}"),
-        }
-        let card = crate::bus::card::observation_card(&obs[0]);
-        let Some((_, hunks)) = card.single_diff() else {
-            panic!("a committed write opens what landed, got {card:?}")
-        };
-        let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
-        assert_eq!(
-            rows,
-            ["short"],
-            "the card shows the new content, needing no before-image to do it"
-        );
-    }
-
-    /// A write retains every diff row; disclosure is a renderer concern, not a
-    /// mutation of the card that also reaches the record and resumed sessions.
-    #[test]
-    fn a_long_write_retains_its_complete_diff() {
-        let engine = fresh();
-        let dir = scratch_dir("cov-write-long");
-        let path = display_no_trailing_sep(&dir.path().join("long.txt"));
-        let body = (1..=25)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let (r, records) = run_capturing(&engine, &format!("to-string '{body}' > '{path}'"));
-        assert_eq!(r.exit, 0, "the write redirect must succeed");
-
-        let obs = observations(&records);
-        let card = crate::bus::card::observation_card(&obs[0]);
-        let Some((_, hunks)) = card.single_diff() else {
-            panic!("a committed write opens what landed, got {card:?}")
-        };
-        let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
-        assert_eq!(
-            rows.len(),
-            25,
-            "the complete write must survive, got {rows:?}"
-        );
-        assert_eq!(rows.first().map(String::as_str), Some("line 1"));
-        assert_eq!(rows.last().map(String::as_str), Some("line 25"));
-        assert!(
-            !rows.iter().any(|row| row == "…"),
-            "no synthetic row belongs in the card"
-        );
+        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        let [change] = changes(&records).try_into().expect("one write, one change");
+        assert_eq!(change.outcome, WriteOutcome::Committed);
+        assert!(change.diff.is_none());
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`
@@ -2131,40 +1909,6 @@ return !{{length $hits}}"
                 error: None,
             },
             "then cat execs over that stdin"
-        );
-    }
-
-    /// A redirect's entries carry the redirect's own site, not whatever its
-    /// body dispatched last.
-    #[test]
-    fn block_redirect_write_is_stamped_at_the_redirect() {
-        let engine = fresh();
-        let dir = scratch_dir("cov-site");
-        let path = display_no_trailing_sep(&dir.path().join("out"));
-
-        let (r, records) = run_capturing(&engine, &format!("!{{ echo a; true }} > '{path}'"));
-        assert_eq!(
-            r.exit,
-            0,
-            "stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-
-        let write = records
-            .iter()
-            .filter_map(|r| match r {
-                crate::record::Record::Display(crate::record::Display::Observation { value }) => {
-                    Observation::from_wire(value)
-                }
-                _ => None,
-            })
-            .find(|o| matches!(o.what, Observed::Write { .. }))
-            .expect("the redirect settles one write");
-        let site = write.site.expect("the write carries a site");
-        assert_eq!(
-            (site.line, site.col),
-            (1, 1),
-            "the redirect's, not `true`'s"
         );
     }
 

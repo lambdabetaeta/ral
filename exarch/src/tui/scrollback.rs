@@ -22,7 +22,7 @@ use super::line::is_blank;
 use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
-use crate::bus::card::{self, Card, Landing, landing, observation_card};
+use crate::bus::card::{self, Card, Change, Landing, landing, observation_card};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
 use ral_core::types::{Observation, Observed};
@@ -148,6 +148,9 @@ enum Item {
     Member(Member),
     /// A barrier: its own block, ending whatever group stood at the tail.
     Barrier(BlockKind),
+    /// A file change: it joins the run of changes standing at the tail, or
+    /// opens one.
+    Change(Change),
 }
 
 /// The session's rendered transcript, `user.log`.
@@ -565,7 +568,7 @@ impl Scrollback {
         match item {
             // An effect belongs to the call that issued it, and a redirect
             // writes at the seam mid-call: so the walk passes whatever barrier
-            // landed since — the `▎ write` card above all — back to the
+            // landed since — the `▎` run of changes above all — back to the
             // nearest call.  `read a · write b · read c` is one run.
             Item::Member(mut member @ Member::Effect(_)) => {
                 for block in self.blocks.iter_mut().rev() {
@@ -587,28 +590,17 @@ impl Scrollback {
                     self.open(seq, member);
                 }
             }
-            // Consecutive edits to one file are one change: a surfaced diff
-            // still standing at the tail grows rather than stacking a second
-            // card.  A write is offered no such merge — two writes to one path
-            // are two facts.
-            Item::Barrier(BlockKind::Card {
-                card,
-                landing: Landing::Surfaced,
-                dial,
-            }) => {
+            // What the work between two calls wrote reads as one patch: a
+            // change joins the run standing at the tail, which effects pass
+            // over on their way back to their call.
+            Item::Change(change) => {
                 let spare = match self.blocks.last_mut() {
-                    Some(tail) => tail.merge_diff(card),
-                    None => Some(card),
+                    Some(tail) => tail.admit_change(change),
+                    None => Some(change),
                 };
-                if let Some(card) = spare {
-                    self.blocks.push(Block::new(
-                        BlockKind::Card {
-                            card,
-                            landing: Landing::Surfaced,
-                            dial,
-                        },
-                        Some(seq),
-                    ));
+                if let Some(change) = spare {
+                    self.blocks
+                        .push(Block::new(BlockKind::changes(change), Some(seq)));
                 }
             }
             Item::Barrier(kind) => self.blocks.push(Block::new(kind, Some(seq))),
@@ -1020,6 +1012,7 @@ impl Scrollback {
                 elapsed: Duration::from_millis(*elapsed_ms),
             })],
             K::Observation { value } => observation_items(value),
+            K::Change { change } => vec![Item::Change(change.clone())],
             K::Card { card } => vec![surfaced(card.clone())],
             // Not a card: a settled block is announced, not bounded — a line
             // on the rail, exactly as a subagent's answer arrives.  The shape
@@ -1065,10 +1058,6 @@ fn observed_items(what: &Observed) -> Vec<Item> {
     };
     match place {
         Landing::Effect => vec![Item::Member(Member::Effect(what.clone()))],
-        Landing::Write => vec![Item::Barrier(BlockKind::card(
-            observation_card(what),
-            Landing::Write,
-        ))],
         Landing::Surfaced => vec![surfaced(observation_card(what))],
         Landing::Announced => vec![Item::Barrier(BlockKind::Chrome(Chrome::Spawned(
             card::observation_spans(what),

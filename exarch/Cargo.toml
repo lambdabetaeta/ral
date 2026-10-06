@@ -60,10 +60,9 @@ tempfile   = "3.27"
 base64     = { workspace = true }
 sha2       = { workspace = true }
 getrandom  = "0.4"
-# Line-level structured diffing: `edit` computes one canonical whole-file
-# diff (original vs final) and emits a single grouped-hunk card. `inline`
-# and `unicode` are enabled and consumed by `whole_file_hunks`'
-# `iter_inline_changes`/`iter_strings_lossy` for the intra-line word diff.
+# Line-level structured diffing: every file change is one grouped-hunk diff,
+# taken by `Diff::between`. `inline` and `unicode` serve its intra-line word
+# diff (`iter_inline_changes_deadline`/`iter_strings_lossy`).
 similar    = { version = "3", features = ["inline", "unicode"] }
 # Calendar arithmetic for scheduled-wakeup cron evaluation (next occurrence
 # in the host-local timezone, DST-aware), and the instant a provider says an

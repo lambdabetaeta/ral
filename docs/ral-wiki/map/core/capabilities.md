@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b6b75996
-generated_at_date: 2026-10-05
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -43,7 +43,7 @@ Submodules:
   before either region is consulted. `Shell::locate` (`types/shell/checks.rs`)
   is the door every open takes: `path::walk` to the object, then
   `check_fs_exact` on `Located::real`; `GrantStack::admits_fs_exact` is the
-  quiet twin a write card asks before reading a before-image;
+  quiet twin a write asks before reading its before- and after-images;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder; exec is
   `ExecRules::kernel` of the `Admitted`'s own table, with the carriers of its
   allowed files and its program (`sandbox::carriers`), so the profile renders

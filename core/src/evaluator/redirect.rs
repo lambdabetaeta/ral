@@ -4,7 +4,7 @@
 //! [`with_redirects`] for a synchronous call; the targets themselves are
 //! closed in `machine::close_redirects`, over the machine's own `Env`.
 
-use super::audit::observe;
+use super::audit::{listening, observe};
 use crate::io::Sink;
 use crate::runtime::command;
 use crate::source::Span;
@@ -16,16 +16,18 @@ use crate::types::{Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 pub(crate) enum WriteFate {
     /// The body settled: rename each temp onto its target.
     Commit,
-    /// The body broke: leave every target exactly as it was.
+    /// The body broke: drop each staged write, leaving its target as it was.
     Abort,
 }
 
-/// An atomic `>` staged in the frame, held until settle so its outcome can
-/// be surfaced.  Every other target streams, and is observed at its open.
+/// A write target the frame opened, held until it settles so the write can
+/// be reported as what it did: the target before the body ran, and after.
 struct WriteIntent {
     path: String,
     mode: WriteMode,
-    commit: command::PendingWrite,
+    opened: command::OpenedWrite,
+    /// Taken at the open, before any byte lands, and only for an ear to hear it.
+    before: Option<Vec<u8>>,
 }
 
 /// The installed redirect state, owned — no borrow of `Shell` or
@@ -49,28 +51,8 @@ struct PriorSinks {
     stderr: Option<Sink>,
 }
 
-fn observe_write(
-    shell: &mut Shell,
-    mooring: &Mooring,
-    path: &str,
-    mode: WriteMode,
-    outcome: WriteOutcome,
-) {
-    observe(
-        shell,
-        mooring,
-        Observed::Write {
-            path: path.to_string(),
-            mode,
-            outcome,
-            new_bytes: None,
-            old_bytes: None,
-        },
-    );
-}
-
-/// Opens one fd-1/2 write target.  A streaming target is settled at the
-/// open; an atomic one is staged as an intent until the frame settles.
+/// Opens one fd-1/2 write target as an intent the frame settles.  An open
+/// that fails is reported here, the one write that never reaches settle.
 fn open_redirect_sink(
     path: &str,
     mode: WriteMode,
@@ -78,18 +60,76 @@ fn open_redirect_sink(
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Settled<Sink> {
-    let (file, commit) = command::open_write(path, mode, shell).inspect_err(|_| {
-        observe_write(shell, mooring, path, mode, WriteOutcome::Failed);
-    })?;
-    match commit {
-        Some(commit) => intents.push(WriteIntent {
+    let (file, opened) = command::open_write(path, mode, shell).inspect_err(|_| {
+        let what = Observed::Write {
             path: path.to_string(),
             mode,
-            commit,
-        }),
-        None => observe_write(shell, mooring, path, mode, WriteOutcome::Committed),
+            outcome: WriteOutcome::Failed,
+            new_bytes: None,
+            old_bytes: None,
+        };
+        observe(shell, mooring, what);
+    })?;
+    if let Some(opened) = opened {
+        let before = listening(shell, mooring)
+            .then(|| opened.before(shell))
+            .flatten();
+        intents.push(WriteIntent {
+            path: path.to_string(),
+            mode,
+            opened,
+            before,
+        });
     }
     Ok(Sink::File(std::sync::Arc::new(file)))
+}
+
+/// Reports one write per intent, committing or dropping each atomic one by
+/// `fate`; dropping is what unlinks its staging file.  Returns the first
+/// commit failure.
+fn settle(
+    intents: Vec<WriteIntent>,
+    fate: WriteFate,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<()> {
+    let heard = listening(shell, mooring);
+    let mut commit_err: Settled<()> = Ok(());
+    for WriteIntent {
+        path,
+        mode,
+        opened,
+        before,
+    } in intents
+    {
+        // Read before a commit renames the staged file away.
+        let after = heard.then(|| opened.after(shell)).flatten();
+        let (outcome, landed) = match (opened, fate) {
+            (command::OpenedWrite::Atomic(_), WriteFate::Abort) => (WriteOutcome::Aborted, false),
+            (command::OpenedWrite::Atomic(commit), WriteFate::Commit) => match commit.commit() {
+                Ok(()) => (WriteOutcome::Committed, true),
+                Err(e) => {
+                    if commit_err.is_ok() {
+                        commit_err = Err(command::atomic_write_error(&e));
+                    }
+                    (WriteOutcome::Failed, false)
+                }
+            },
+            // A stream committed each byte as it landed: it cannot abort.
+            (command::OpenedWrite::Stream(_), _) => (WriteOutcome::Committed, true),
+        };
+        // An atomic write that did not land left its target as it was.
+        let (old_bytes, new_bytes) = if landed { (before, after) } else { (None, None) };
+        let what = Observed::Write {
+            path,
+            mode,
+            outcome,
+            new_bytes,
+            old_bytes,
+        };
+        observe(shell, mooring, what);
+    }
+    commit_err
 }
 
 fn install_sink_redirects(
@@ -145,15 +185,8 @@ impl RedirectState {
         let prior = match install_sink_redirects(redirects, mooring, shell, &mut write_intents) {
             Ok(prior) => prior,
             Err(e) => {
-                for intent in write_intents {
-                    observe_write(
-                        shell,
-                        mooring,
-                        &intent.path,
-                        intent.mode,
-                        WriteOutcome::Failed,
-                    );
-                }
+                // An abort cannot fail to commit.
+                let _ = settle(write_intents, WriteFate::Abort, mooring, shell);
                 stdin_guard.restore(shell);
                 return Err(e);
             }
@@ -167,9 +200,10 @@ impl RedirectState {
         })
     }
 
-    /// Restores the sinks and stdin, then settles the staged writes: with the
+    /// Restores the sinks and stdin, then settles the writes: with the
     /// redirected handles dropped, each atomic commit fires on `Commit` and is
-    /// abandoned on `Abort`.  Returns the first commit failure.
+    /// abandoned on `Abort`, and every write is reported.  Returns the first
+    /// commit failure.
     pub(crate) fn leave(
         &mut self,
         fate: WriteFate,
@@ -178,55 +212,8 @@ impl RedirectState {
     ) -> Settled<()> {
         self.tear_down(shell);
         let span = self.span;
-        shell.at_site(span, |shell| self.settle_writes(fate, mooring, shell))
-    }
-
-    /// Surfaces one write observation per intent.  A failed body abandons
-    /// every intent's temp — dropped here, which is what unlinks its staging
-    /// file.
-    fn settle_writes(
-        &mut self,
-        fate: WriteFate,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<()> {
-        let mut commit_err: Settled<()> = Ok(());
-        for WriteIntent { path, mode, commit } in std::mem::take(&mut self.write_intents) {
-            let mut old_bytes = None;
-            let mut new_bytes = None;
-            let outcome = match fate {
-                WriteFate::Abort => WriteOutcome::Aborted,
-                WriteFate::Commit => {
-                    // Both reads must precede the rename, and cost two
-                    // whole-file reads: taken only for an ear to hear them.
-                    if super::audit::listening(shell, mooring) {
-                        old_bytes = commit.old_snapshot_for_diff(shell);
-                        new_bytes = commit.new_snapshot_for_diff();
-                    }
-                    match commit.commit() {
-                        Ok(()) => WriteOutcome::Committed,
-                        Err(e) => {
-                            if commit_err.is_ok() {
-                                commit_err = Err(command::atomic_write_error(&e));
-                            }
-                            WriteOutcome::Failed
-                        }
-                    }
-                }
-            };
-            observe(
-                shell,
-                mooring,
-                Observed::Write {
-                    path,
-                    mode,
-                    outcome,
-                    new_bytes,
-                    old_bytes,
-                },
-            );
-        }
-        commit_err
+        let intents = std::mem::take(&mut self.write_intents);
+        shell.at_site(span, |shell| settle(intents, fate, mooring, shell))
     }
 
     /// Flushes, then restores the sinks and stdin. Idempotent: a second call

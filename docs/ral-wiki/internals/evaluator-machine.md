@@ -97,7 +97,7 @@ resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 the one interpreter of a redirect list (stdin, stdout, stderr open in that order; a
-streaming write is observed at its open, an atomic `>` when the body settles),
+write is observed when the body settles, carrying its target before and after),
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Audit`
 closes its trail scope and restores the capture policy; `Try` holds only its

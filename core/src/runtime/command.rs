@@ -26,7 +26,7 @@ pub(crate) use detach::detach;
 pub(crate) use head::Head;
 pub(crate) use process::{build_launch, spawn_error};
 pub(crate) use redirect::{
-    PendingWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
+    OpenedWrite, StdinRedirectGuard, atomic_write, atomic_write_error, install_stdin_redirect,
     open_write,
 };
 pub(crate) use stdio::{ChildIo, TtyInputPermit, stdin_error, wire_stdio};

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7b4ee036
-generated_at_date: 2026-09-21
-covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
+covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/change.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -9,8 +9,7 @@ covers_paths: [exarch/src/record/fault.rs, exarch/src/bus/card.rs, exarch/src/bu
 The `exarch-surface` builtin carries a **render document** — a `` `card ``, an ordered
 stack of Bertin *marks* a kit composes entirely in ral. exarch decodes it once
 into a closed Rust model and draws it through one generic interpreter. The *set
-of cards* is open (compose marks, zero Rust per card — a surfaced file write, a
-build summary, a test matrix, anything); the *set of marks* stays closed and
+of cards* is open (compose marks, zero Rust per card — a build summary, a test matrix, anything); the *set of marks* stays closed and
 small, so the renderer is total and width-reflow, click-to-disclose, and patch
 aggregation all keep working. This is
 the [[decisions/260618_tui-transcript-as-graphic|transcript-as-graphic]]
@@ -167,7 +166,7 @@ placement, framing in its agent's hue at the register's own margin.
 ## Block — derived disclosure and aggregation
 
 `BlockKind::Card { card, landing, dial }` (`tui/block.rs`) carries the render
-document, a `Landing` (`Effect`/`Write`/`Surfaced`/`Announced`, shared with
+document, a `Landing` (`Effect`/`Surfaced`/`Announced`, shared with
 `bus/card`'s own `landing()`) telling the mirror whether the card is a
 foldable effect or a barrier, and its `Dial`, the rung it is read at.
 Disclosure is **derived**, not named: `BlockKind::card` gives a card a `Dial`
@@ -175,21 +174,26 @@ exactly when it holds a `diff` (`Card::has_diff()`), and such a card reads as
 its header alone at `Tally`, its first `DIFF_PEEK_ROWS` rows at `Summary` —
 the rung it opens at — or the complete diff at `Full`; a card of only
 `text`/`fields`/`measure`/`raw` is inert, rendered whole. The rail shape is `▎`
-for a file mutation — a diff card or a write card alike — and none for a framed
-surfaced card; an observation card folds onto the call above it in its group
-rather than carrying its own rail. `magnitude()` is the summed diff magnitude,
-feeding the rail's value-step; `lines_changed()` exposes the same diff total as
-the matrix's write footprint, distinct from prose volume.
+for a file mutation — a run of changes or a kit's diff card — and none for a
+framed surfaced card; an observation card folds onto the call above it in its
+group rather than carrying its own rail. `magnitude()` is the summed diff
+magnitude, feeding the rail's value-step; `lines_changed()` exposes the same
+total as the matrix's write footprint, distinct from prose volume.
 
-A single-`diff` card tail-merges in the mirror (`Card::single_diff` →
-`Block::merge_diff`): a surfaced diff arriving while a surfaced diff of the
-same path still stands at the tail extends its hunks, so one file reads as one
-`diff <path>` block, the way a unified diff presents one file. Every richer
-card is its own block: the scrollback reads a `Display::Card`'s card once, as
-the fold opens it, and pushes it as a barrier (`Scrollback::absorb`,
-`tui/scrollback.rs`); an observation effect is instead a `Member::Effect`
-folded onto the call that issued it, and a write card a barrier of its own —
-two writes to one path being two facts, never merged.
+A file change is not a card but a fact, `bus/card/change.rs`'s `Change { path,
+outcome, diff }` ([[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]),
+its `Diff` cut at the source by `Diff::between` (`bus/card/diff.rs`) to 2000
+rows with exact `added`/`removed` counts. The mirror holds a run of them as
+`BlockKind::Changes`: a change joins the run standing at the tail
+(`Block::admit_change`, `Scrollback::absorb`) or opens one, and
+`tui/diff.rs`'s `changes_body` draws it — each file once in first-touch order,
+its changes stacked under one header, every header at every rung, `Summary`
+sharing `DIFF_PEEK_ROWS` across the run and `Full` ending a source-cut diff in
+`⋮ N more changed lines`. Headless and synod draw one change at a time through
+`change_card`. Every other card is its own block: the scrollback reads a
+`Display::Card`'s card once, as the fold opens it, and pushes it as a barrier;
+an observation effect is instead a `Member::Effect` folded onto the call that
+issued it.
 
 ## Machine log
 
@@ -223,14 +227,11 @@ from what's pinned.
 The agent library has no surfacing constructors: `view-text`, `grep-files`,
 and `edit-hash`/`edit-replace` are Rust host builtins
 ([[map/exarch/io-surface|io-surface]]), their file I/O sunk below the redirect
-frame so each is one logical surface. An edit builds its own whole-file diff
-card (one canonical original-vs-final diff grouped into hunks by `similar`) at
-the edit, where both texts are already in hand; a committed `>` reads what
-landed against the empty side instead, an all-adds diff rather than a shape of
-its own. Both cards retain every hunk; disclosure belongs to the renderer, so
-`Tally` is the header, `Summary` its first ten rows, and `Full` the
-complete diff. The read
-redirect and exec cards are likewise composed from core's I/O events. `agent.ral` carries
+frame so each is one logical surface. An edit takes its own diff at the edit,
+where both texts are already in hand, and surfaces it as a `Change`; a redirect
+write becomes the same `Change` in exarch's decoder, diffed between core's two
+snapshots. Both are cut at the source and dialled at display. The read
+redirect and exec cards are composed from core's I/O events. `agent.ral` carries
 only the `-around` readers, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).
 

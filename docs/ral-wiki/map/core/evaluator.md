@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1776d222
-generated_at_date: 2026-09-30
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -153,7 +153,7 @@ Internals:
   by `with_redirects` for a base-frame native's synchronous call, and for a
   fused external, whose child then reads the installed sinks in
   [[map/core/runtime|runtime]]'s `command/stdio.rs`. Targets open stdin, stdout,
-  stderr; a streaming write is observed at its open, an atomic `>` at settle.
+  stderr; every write is observed at settle, carrying its target before and after.
 - `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
   CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
   forms its payload, `thunk M` builds `⟨M, ρ|occ(M)⟩` through `Closure::new`

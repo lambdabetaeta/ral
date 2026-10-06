@@ -6,7 +6,7 @@
 
 use ral_core::serial::FOValue;
 
-use super::diff::{Row, Seg};
+use super::diff::{Diff, Hunk, Row, Seg};
 use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 
 fn string(value: impl Into<String>) -> FOValue {
@@ -124,6 +124,34 @@ fn encode_row(row: &Row) -> FOValue {
     ])
 }
 
+fn encode_hunks(hunks: &[Hunk]) -> FOValue {
+    list(
+        hunks
+            .iter()
+            .map(|h| {
+                record(vec![
+                    ("start", count(h.start)),
+                    ("rows", list(h.rows.iter().map(encode_row).collect())),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// What an edit surfaces: the file it changed and the diff it took there,
+/// read back by [`value_to_edit`](super::decode::value_to_edit).
+pub(crate) fn encode_edit(path: &str, diff: &Diff) -> FOValue {
+    tagged(
+        "edit",
+        record(vec![
+            ("path", string(path)),
+            ("hunks", encode_hunks(&diff.hunks)),
+            ("added", count(diff.added)),
+            ("removed", count(diff.removed)),
+        ]),
+    )
+}
+
 fn encode_mark(mark: &Mark) -> FOValue {
     match mark {
         Mark::Text { spans } => tagged("text", encode_spans(spans)),
@@ -139,20 +167,7 @@ fn encode_mark(mark: &Mark) -> FOValue {
             "diff",
             record(vec![
                 ("path", string(path.clone())),
-                (
-                    "hunks",
-                    list(
-                        hunks
-                            .iter()
-                            .map(|h| {
-                                record(vec![
-                                    ("start", count(h.start)),
-                                    ("rows", list(h.rows.iter().map(encode_row).collect())),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
+                ("hunks", encode_hunks(hunks)),
             ]),
         ),
         Mark::Raw { bytes } => tagged(

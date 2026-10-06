@@ -1,8 +1,10 @@
 //! The diff mark's interior: a [`Hunk`] is a run of [`Row`]s, and a [`Row`] a
 //! run of [`Seg`]ments carrying the word-level emphasis `similar` picks out.
-//! [`whole_file_hunks`] is the one place a pair of texts becomes this shape.
+//! [`Diff::between`] is the one place a pair of texts becomes this shape.
 
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, DiffTag, InlineChange, TextDiff};
+use std::time::{Duration, Instant};
 
 /// Total changed lines across `hunks`, context counting for nothing — the
 /// magnitude `Card::magnitude` and `tui::line`'s size bar both read.
@@ -73,56 +75,95 @@ impl Row {
     }
 }
 
-/// The whole-file line diff of `old` vs `new`, grouped into hunks with ±2
-/// lines of context.
-///
-/// The one place a pair of texts becomes hunks: `write_preview` in the sibling
-/// `observation` module diffs a committed `>`'s two snapshots at render time,
-/// and `surface_edit` in `shell_eval::builtins` diffs an edit's two texts at
-/// the edit itself, where both are already resident.
-pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut hunks = Vec::new();
-    for group in diff.grouped_ops(2) {
-        let first = group.first().expect("grouped_ops yields non-empty groups");
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "diff line index cannot approach u32::MAX"
-        )]
-        let start = first.old_range().start as u32 + 1;
-        let mut rows = Vec::new();
-        for op in &group {
-            // An `Equal` op still yields one whole, unemphasised segment.
-            for change in diff.iter_inline_changes(op) {
-                let mut segs: Vec<Seg> = change
-                    .iter_strings_lossy()
-                    .map(|(emph, text)| Seg {
-                        emph,
-                        text: text.into_owned(),
-                    })
-                    .collect();
-                // `from_lines` keeps a trailing `\n` on each row's final
-                // segment; strip it so the row carries a bare line, and drop
-                // the segment outright if that leaves it empty.
-                if let Some(last) = segs.last_mut() {
-                    if let Some(bare) = last.text.strip_suffix('\n') {
-                        last.text = bare.to_string();
-                    }
-                    if last.text.is_empty() {
-                        segs.pop();
-                    }
-                }
-                rows.push(match change.tag() {
-                    ChangeTag::Equal => Row::Context(segs),
-                    ChangeTag::Delete => Row::Del(segs),
-                    ChangeTag::Insert => Row::Add(segs),
-                });
+/// A line diff cut at the source: hunks with two lines of context, keeping
+/// at most [`KEPT_ROWS`] rows, and every changed line counted, kept or not.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Diff {
+    pub hunks: Vec<Hunk>,
+    pub added: u32,
+    pub removed: u32,
+}
+
+/// Rows a diff keeps, context included: past them a change is counted, not
+/// carried.
+const KEPT_ROWS: usize = 2000;
+
+/// How long a diff may search for the smallest change before settling for a
+/// larger one.
+const PATIENCE: Duration = Duration::from_millis(250);
+
+impl Diff {
+    /// The diff of `old` against `new` — the one place two texts become hunks.
+    pub(crate) fn between(old: &str, new: &str) -> Self {
+        let deadline = Instant::now() + PATIENCE;
+        let diff = TextDiff::configure()
+            .deadline(deadline)
+            .diff_lines(old, new);
+        let (added, removed) = diff
+            .ops()
+            .iter()
+            .filter(|op| op.tag() != DiffTag::Equal)
+            .fold((0, 0), |(a, r), op| {
+                (a + op.new_range().len(), r + op.old_range().len())
+            });
+        let mut room = KEPT_ROWS;
+        let mut hunks = Vec::new();
+        for group in diff.grouped_ops(2) {
+            if room == 0 {
+                break;
             }
+            let rows: Vec<Row> = group
+                .iter()
+                .flat_map(|op| diff.iter_inline_changes_deadline(op, Some(deadline)))
+                .take(room)
+                .map(|change| row(&change))
+                .collect();
+            room -= rows.len();
+            hunks.push(Hunk {
+                start: saturating(group[0].old_range().start + 1),
+                rows,
+            });
         }
-        hunks.push(Hunk { start, rows });
+        Self {
+            hunks,
+            added: saturating(added),
+            removed: saturating(removed),
+        }
     }
-    hunks
+
+    /// Changed lines counted but not kept.
+    pub(crate) fn cut(&self) -> u32 {
+        (self.added + self.removed).saturating_sub(hunk_magnitude(&self.hunks))
+    }
+}
+
+fn saturating(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// One line of a diff as a row, its trailing newline dropped so the row
+/// carries the bare line.
+fn row(change: &InlineChange<'_, str>) -> Row {
+    let mut segs: Vec<Seg> = change
+        .iter_strings_lossy()
+        .map(|(emph, text)| Seg {
+            emph,
+            text: text.into_owned(),
+        })
+        .collect();
+    if let Some(last) = segs.last_mut()
+        && last.text.ends_with('\n')
+    {
+        last.text.pop();
+    }
+    if segs.last().is_some_and(|s| s.text.is_empty()) {
+        segs.pop();
+    }
+    match change.tag() {
+        ChangeTag::Equal => Row::Context(segs),
+        ChangeTag::Delete => Row::Del(segs),
+        ChangeTag::Insert => Row::Add(segs),
+    }
 }
 
 #[cfg(test)]
@@ -133,9 +174,9 @@ mod tests {
     /// line, newline stripped, carrying both an emphasised and an unemphasised
     /// run.  *Which* words `similar` flags is its business, not ours.
     #[test]
-    fn whole_file_hunks_threads_inline_segments() {
-        let hunks = whole_file_hunks("alpha\nthe quick brown fox\n", "alpha\nthe quick red fox\n");
-        let rows: Vec<&Row> = hunks.iter().flat_map(|h| h.rows.iter()).collect();
+    fn a_changed_line_threads_inline_segments() {
+        let diff = Diff::between("alpha\nthe quick brown fox\n", "alpha\nthe quick red fox\n");
+        let rows: Vec<&Row> = diff.hunks.iter().flat_map(|h| h.rows.iter()).collect();
         let find = |want: fn(&Row) -> bool| *rows.iter().find(|r| want(r)).expect("the row");
 
         let ctx = find(|r| matches!(r, Row::Context(_)));
@@ -151,5 +192,17 @@ mod tests {
             assert!(row.segs().iter().any(|s| s.emph), "an emphasised run");
             assert!(row.segs().iter().any(|s| !s.emph), "an unchanged run");
         }
+    }
+
+    /// However much was written, a diff keeps [`KEPT_ROWS`] rows and counts
+    /// every changed line.
+    #[test]
+    fn a_huge_change_is_cut_at_the_source_and_counted_whole() {
+        let lines = KEPT_ROWS + 500;
+        let diff = Diff::between("", &"x\n".repeat(lines));
+        let kept: usize = diff.hunks.iter().map(|h| h.rows.len()).sum();
+        assert_eq!(kept, KEPT_ROWS);
+        assert_eq!((diff.added, diff.removed), (saturating(lines), 0));
+        assert_eq!(diff.cut(), 500);
     }
 }

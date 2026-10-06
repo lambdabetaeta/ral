@@ -406,6 +406,11 @@ fn span_style(role: Option<Role>) -> Style {
     role.map_or_else(|| Style::default().fg(Color::White), role_style)
 }
 
+/// One card span in the ink its role binds.
+pub(super) fn card_span(cs: &CardSpan) -> Span<'static> {
+    Span::styled(cs.text.clone(), span_style(cs.role))
+}
+
 /// The columns every field row of one card shares: the widest label, and the
 /// widest measure readout.  Measured over the whole card rather than each mark,
 /// so two accounts' rations line up instead of each section starting afresh.

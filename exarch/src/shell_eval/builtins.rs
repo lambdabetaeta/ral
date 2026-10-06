@@ -2,7 +2,7 @@
 //! `ral-core` before any user or model source compiles — the resident agent
 //! surface core itself should not own.
 
-use crate::bus::card::{Card, Mark, encode_card, whole_file_hunks};
+use crate::bus::card::{Diff, encode_edit};
 use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
@@ -570,29 +570,17 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::Unit)
 }
 
-/// Raise the one card an edit surfaces: the whole-file diff of `old` against
-/// `new`, labelled by `path`.
+/// Surface what an edit changed: the diff of the two texts the builtin
+/// already holds, so no file is too large to read as the edit it was, and
+/// only the diff — cut at the source — crosses the surface.
 ///
-/// The diff is taken here, at the edit, rather than left to the card layer:
-/// the builtin already holds both texts — it read one and built the other — so
-/// hunks cost nothing to compute and are all that need cross the surface.  A
-/// committed `>` cannot do the same, since it never holds both sides; it
-/// surfaces its two snapshots and is diffed at render, under the read cap
-/// `old_snapshot_for_diff` applies.  An edit is under no such cap, and so
-/// reads as a diff whatever the file's size.
-///
-/// One logical surface per tool: the read sinks silently and `atomic_write`
-/// observes nothing, so this diff is the whole of what an edit says.  Nothing
-/// is raised when the rebuild changed no line — there is no edit to show.
+/// The read sinks silently and `atomic_write` observes nothing, so this is the
+/// whole of what an edit says, and nothing when it changed no line.
 fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
-    let hunks = whole_file_hunks(old, new);
-    if hunks.is_empty() {
-        return;
+    let diff = Diff::between(old, new);
+    if !diff.hunks.is_empty() {
+        mooring.surface_data(&encode_edit(path, &diff));
     }
-    mooring.surface_data(&encode_card(&Card(vec![Mark::Diff {
-        path: path.to_string(),
-        hunks,
-    }])));
 }
 
 /// The witness layer's shared read door, gating on the live grant as a `< path`

@@ -17,7 +17,8 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use exarch::bus::card::{
-    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, observation_display_card,
+    Card, Field, Hunk, Mark, Measure, Span, change_card, context_rows_card,
+    observation_display_card,
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::clock;
@@ -312,6 +313,9 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             failed: *failed,
         }),
         Display::Observation { value } => process_card(observation_display_card(value)),
+        Display::Change { change } => Some(SynodEvent::Card {
+            marks: marks_dto(change_card(change)),
+        }),
         Display::Card { card } => Some(SynodEvent::Card {
             marks: marks_dto(card.clone()),
         }),
@@ -345,6 +349,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
 fn project_display_helper(display: &Display) -> Option<SynodEvent> {
     match display {
         Display::Observation { value } => process_card(observation_display_card(value)),
+        Display::Change { change } => process_card(Some(change_card(change))),
         Display::Card { card } => process_card(Some(card.clone())),
         Display::Context { turns } => process_card(Some(context_rows_card(turns))),
         Display::Done { .. }

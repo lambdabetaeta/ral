@@ -1,6 +1,6 @@
 ---
-generated_at_commit: db591f00
-generated_at_date: 2026-10-02
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
@@ -59,16 +59,15 @@ application, which is no door at all.
 - **Redirects** open through `open_file` and `install_stdin_redirect`
   (`runtime/command/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
-  the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) surfaces **when
-  its outcome becomes knowable**, which is one of two moments:
-  - *A streaming target* — `>>`, `>~`, any `2>` (`2>` is always streaming) — has
-    no later commit step: `RedirectState` (`evaluator/redirect.rs`) observes it
-    `committed` **at the open**, whether the target is fused into an external or
-    carries a block, and whatever the body later does; a failed open is `failed`.
-  - *An atomic `>`* records a `WriteIntent` and surfaces when the frame settles,
-    with the outcome the site alone can know — `committed` (body ok, commit
-    succeeded), `aborted` (the body did not reach the commit), or `failed`
-    (commit failed). Only this target can be `aborted`.
+  the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as an
+  `OpenedWrite` — `Atomic`, staged beside a regular file, or `Stream` — that
+  `RedirectState` (`evaluator/redirect.rs`) holds as a `WriteIntent` and
+  reports when the frame settles (`settle`), with the outcome the site alone
+  can know: an atomic `>` is `committed` (body ok, commit succeeded),
+  `aborted` (the body did not reach the commit) or `failed` (commit failed);
+  a stream — `>>`, `>~`, any `2>` — committed each byte as it landed and is
+  `committed` whatever the body did. An open that fails is reported `failed`
+  there, the one write that never reaches settle.
   Every entry a redirect makes — read, write, refusal, settled write — carries
   the redirect's own site (`RedirectState` holds the node's span and runs each
   step under `Shell::at_site`), not what its body dispatched last.
@@ -77,11 +76,12 @@ application, which is no door at all.
   the trail reads the same for a block and an external.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
-  plus the content snapshots, each whole or `` `none `` and never a prefix,
-  read only within 64 KiB (`PREVIEW_CAP`) since the redirect holds neither side
-  in memory otherwise. `new_bytes` is what the card opens; `old_bytes` reaches
-  the [[design/audit|audit trail]] and no card, a redirect saying what now
-  stands in the file rather than what it replaced.
+  plus the content snapshots, each whole or `` `none `` and never a prefix:
+  `old_bytes` taken at the open, `new_bytes` at settle (the staged file for an
+  atomic `>`, the target for a stream), read only within 64 KiB
+  (`PREVIEW_CAP`), of a regular file, under a grant that admits the read. A
+  write that did not land carries neither. Exarch diffs the two into the
+  write's `Change`; the [[design/audit|audit trail]] keeps them whole.
 - **Commands** are hooked *after* resolution, at the completion sites, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every external or detached command is one
@@ -178,15 +178,11 @@ the same graceful degradation as before.
 `observation_card` composes from the existing marks ([[map/exarch/cards|cards]]).
 The operation is a *nominal category*, so it is carried by a word, not a
 mirror-orientation glyph: read is a `muted` `read` verb + a `path` span; write
-reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
-observation): `committed` uses the `ok` role, `aborted` uses `warn`, and
-`failed` uses `bad`
-— and a *committed* write previews its content below the heading
-(`write_preview`): a complete `diff` mark of what landed, read against the
-empty side so every row is an addition. The card retains every hunk and the
-TUI's disclosure ladder decides how much to show. No mark at all when the site
-could not read the staged side whole or it is not text, leaving the heading to report a write
-it cannot open; a command keeps the conventional `$` prompt, the program as
+is no card at all — `decode_surface` turns it into a `Change`, its diff taken
+between core's two snapshots, none unless both are known text
+([[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]),
+and a change with no diff reads `write <path> <outcome>`: `committed` uses the
+`ok` role, `aborted` uses `warn`, and `failed` uses `bad`; a command keeps the conventional `$` prompt, the program as
 `path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
 observation's own `status`; grep is the pattern as `code` `in` the cwd scope
 as `path`; a capability check reads `check <resource> <decision> <fields…>`,
@@ -199,8 +195,8 @@ inferred. `Role::Path` carries a real hue, so the subject of every row stands
 as figure against the muted label and the body prose.
 
 The record carries raw facts — one `Display::Observation` per observation,
-one `Display::Card` per edit — and the **grouping is the frontend's**, derived
-online by [[map/exarch/frontend|the mirror]] from four tail rules. Core
+one `Display::Change` per write or edit — and the **grouping is the frontend's**, derived
+online by [[map/exarch/frontend|the mirror]] from three tail rules. Core
 surfaces each effect as its own observation, so a burst would otherwise read
 as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules:
 
@@ -212,9 +208,9 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules
   barrier, where the run's tally could not count it. Walking back, every
   effect of one call reaches the mirror's picture of that call whatever landed
   between the two.
-- **A write stays a barrier.** Its diff is a mutation, not a foldable
-  observation, so it pushes its own always-visible `▎` card and *closes* the
-  group: the next call opens a new one.
+- **A change joins the run of changes.** A mutation, not a foldable
+  observation: it joins the always-visible `▎` run standing at the tail or
+  opens one, which *closes* the group, so the next call opens a new one.
 - **Dedupe and comma-join at render.** `group::Call` holds its effects as the
   facts themselves and drops a repeat — a read by path, an exec by argv, a
   grep by `(scope, pattern)` — then renders **one card per non-empty kind** in
@@ -222,8 +218,6 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules
   reader does not care how a burst interleaved. Cards and `Tally` read one
   partition of those facts (`Call::buckets`), so the tally is the three bucket
   lengths rather than a second sort that has to be kept in agreement.
-- **Diff hunks tail-merge.** Consecutive surfaced diffs of one path grow one
-  card (`Block::merge_diff`), so one file reads as one change.
 
 A capability check or worker birth joins no call — rare and high-signal enough
 to earn its own line. A denial stands as its own card; a **worker birth** is

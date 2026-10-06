@@ -41,7 +41,7 @@ disallowed-methods = [
     { path = "ral_core::host::user", reason = "Host-only USER read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through crate::path::user_name instead." },
     { path = "ignore::WalkBuilder::build", reason = "Use exarch::shell_eval::builtins::cancellable, the one sanctioned build() site: its walk polls ral_core::process::check per entry, so a long walk honours the tool-timeout / Esc cancel a bare ignore::Walk ignores." },
     { path = "std::fs::File::open", reason = "A model read is the redirect site that surfaces a read card; any other open is reasoned-silent." },
-    { path = "std::fs::File::create", reason = "A model write is the redirect site that surfaces a write card; any other create is reasoned-silent." },
+    { path = "std::fs::File::create", reason = "A model write is the redirect site that reports it; any other create is reasoned-silent." },
     { path = "std::fs::File::create_new", reason = "Exclusive create: #[allow] with a reason naming the surface or the silence." },
     { path = "std::fs::OpenOptions::open", reason = "The redirect sites build their own OpenOptions; any other one #[allow]s with a reason." },
     { path = "std::fs::read", reason = "grep and edit read surfacing in exarch::shell_eval::builtins; every other one-shot read is reasoned-silent." },

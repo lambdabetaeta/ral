@@ -1695,7 +1695,7 @@ For a regular file, `>` writes a temporary file beside the destination, flushes 
 
 This operation is failure-atomic, not a locking scheme: concurrent writers may still race. For non-regular destinations, `>` uses streaming behavior.
 
-Use `>~` when readers should observe output as it is produced, or when writing a device, named pipe, or similar destination. `2>` is also streaming so diagnostics are not delayed until a command finishes. A streaming write is observed `committed` when its file opens, even if the body later fails; only an atomic `>` can be `aborted`.
+Use `>~` when readers should observe output as it is produced, or when writing a device, named pipe, or similar destination. `2>` is also streaming so diagnostics are not delayed until a command finishes. A streaming write is `committed` byte by byte as it lands, so it is observed `committed` even if the body later fails; only an atomic `>` can be `aborted`.
 
 ### 7.5. Here strings
 
@@ -3406,8 +3406,8 @@ A `` `write `` observation records a `>` / `>>` / `>~` redirect settling:
 | `path` | `String` | the redirect's resolved target |
 | `mode` | `String` | `write`, `append`, or `stream` |
 | `outcome` | `String` | `committed`, `aborted`, or `failed` |
-| `new_bytes` | optional `Bytes` | the committed content, on a commit |
-| `old_bytes` | optional `Bytes` | the replaced content, on an atomic overwrite of existing content |
+| `new_bytes` | optional `Bytes` | the target's whole content after the write |
+| `old_bytes` | optional `Bytes` | the target's whole content before it, empty for a new file |
 
 An optional field is a variant, `` `just `` of the value or `` `none ``. Both
 byte fields are always present: an absent image is `` `none ``, never a missing
@@ -3415,7 +3415,7 @@ key, so a reader eliminates it with `case` rather than testing for a key, and
 "there was no before-image" stays a fact the trail states rather than one the
 reader infers from silence.
 
-A streaming write (`>>`, `>~`, `2>`) settles when its file opens and is `committed` whatever the body later does; only an atomic `>` settles with the body and can be `aborted`.
+A write is observed when its body settles — or, one whose target never opened, as `failed` there — carrying its target before and after: each image whole, or `` `none `` when it cannot be read whole, being past 64 KiB, not a regular file, or not readable under the live grant. A write that did not land carries neither. A streaming write (`>>`, `>~`, `2>`) is `committed` whatever the body did, since its bytes landed as they were written; only an atomic `>` can be `aborted`.
 
 A `` `read `` observation — a `< file` redirect opening — carries only `path`.
 A `` `grep `` observation carries the `scope` searched and the `pattern`

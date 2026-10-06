@@ -11,7 +11,7 @@
 use super::{BlockId, Display, Fold, Forensic, Recorded, Refusal, Seq, TurnRow};
 use crate::agent::log::{Cut, EditAuthority};
 use crate::agent::nudge::Spent;
-use crate::bus::card::Card;
+use crate::bus::card::{Card, Change};
 use crate::provider::{ProviderError, Usage};
 use ral_core::serial::FOValue;
 
@@ -52,6 +52,9 @@ pub enum BlockKind {
     },
     Observation {
         value: FOValue,
+    },
+    Change {
+        change: Change,
     },
     Card {
         card: Card,
@@ -310,6 +313,7 @@ impl Blocks {
                 },
             ),
             Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
+            Display::Change { change } => self.push(seq, BlockKind::Change { change }),
             Display::Card { card } => self.push(seq, BlockKind::Card { card }),
             Display::Done { cmd, outcome } => self.push(seq, BlockKind::Done { cmd, outcome }),
             Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),

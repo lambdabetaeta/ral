@@ -67,41 +67,56 @@ impl PendingWrite {
         Ok(())
     }
 
-    /// The whole staged file: what will land at the target if `commit`
-    /// succeeds.
-    ///
-    /// `None` past [`PREVIEW_CAP`], never a prefix. A card shows a write as the
-    /// change it made, and a change cannot be read off part of one side — a
-    /// truncated preview would describe a file that never existed. Past the cap
-    /// the write is reported and not shown.
-    pub(crate) fn new_snapshot_for_diff(&self) -> Option<Vec<u8>> {
+    /// The staged file whole: what lands at the target if `commit` succeeds.
+    fn staged(&self) -> Option<Vec<u8>> {
         let staged = self.0.as_ref()?;
         read_capped(staged.target.sibling_read(&staged.tmp).ok()?)
     }
+}
 
-    /// The target's content before the rename — untouched until `commit`, so
-    /// the write card can diff against it.
-    ///
-    /// A before-image is a *read*, and is taken only where the live grant
-    /// admits one: under a write-only grant the write still lands, and the
-    /// card simply has no old side.  `Some` means the before-image is
-    /// *known*, and a file that does not yet exist has a known before-image:
-    /// the empty one, against which the write reads as every line added.
-    /// `None` is reserved for a target that exists and cannot be read whole —
-    /// past [`PREVIEW_CAP`], on the same ground as
-    /// [`Self::new_snapshot_for_diff`], or not ours to read. Keeping the two
-    /// apart is what stops a card diffing an overwrite against nothing and
-    /// claiming the file was created.
-    pub(crate) fn old_snapshot_for_diff(&self, shell: &Shell) -> Option<Vec<u8>> {
-        let staged = self.0.as_ref()?;
-        if !shell.admits_fs_exact(&FsOp::Read, staged.target.real()) {
-            return None;
+/// A write redirect's target as opened, held until its frame settles so the
+/// frame can report what the write did to it.
+pub(crate) enum OpenedWrite {
+    /// `>` onto a regular file, staged beside it until commit.
+    Atomic(PendingWrite),
+    /// Every other shape: bytes land as they are written.
+    Stream(Located),
+}
+
+impl OpenedWrite {
+    /// What stands at the target now: [`snapshot`] of it.
+    pub(crate) fn before(&self, shell: &Shell) -> Option<Vec<u8>> {
+        match self {
+            Self::Atomic(p) => snapshot(&p.0.as_ref()?.target, shell),
+            Self::Stream(target) => snapshot(target, shell),
         }
-        match staged.target.stat().ok()? {
-            None => Some(Vec::new()),
-            Some(s) if s.len <= PREVIEW_CAP => read_capped(staged.target.read().ok()?),
-            Some(_) => None,
+    }
+
+    /// What the write leaves standing: the staged file for an atomic `>`,
+    /// read before its rename takes it away, the target itself for a stream.
+    pub(crate) fn after(&self, shell: &Shell) -> Option<Vec<u8>> {
+        match self {
+            Self::Atomic(p) => p.staged(),
+            Self::Stream(target) => snapshot(target, shell),
         }
+    }
+}
+
+/// A target's whole content, empty when it does not exist.
+///
+/// `None` where it cannot be read whole: past [`PREVIEW_CAP`], not a regular
+/// file, or not ours to read under the live grant.  Never a prefix — a card
+/// reads a write as the change it made, and half a side is not a change.
+fn snapshot(target: &Located, shell: &Shell) -> Option<Vec<u8>> {
+    if !shell.admits_fs_exact(&FsOp::Read, target.real()) {
+        return None;
+    }
+    match target.stat().ok()? {
+        None => Some(Vec::new()),
+        Some(s) if s.kind == Kind::File && s.len <= PREVIEW_CAP => {
+            read_capped(target.read().ok()?)
+        }
+        Some(_) => None,
     }
 }
 
@@ -149,8 +164,8 @@ impl Staged {
     }
 }
 
-/// Cap on the bytes read to seed a write card's preview, so a large write is
-/// never pulled into memory whole to show a head.
+/// Cap on the bytes a write's snapshot reads, so a large file is never pulled
+/// into memory whole to show a change.
 const PREVIEW_CAP: u64 = 64 * 1024;
 
 /// Stage an atomic `>` beside its located target.  `existing` is the
@@ -190,37 +205,34 @@ fn open_atomic(
     Ok((file, pending))
 }
 
-/// Open a write redirect's target.  `>` to a regular file returns a
-/// [`PendingWrite`] the caller must commit, or drop to abandon, once the writer
-/// finishes; every other shape streams.
+/// Open a write redirect's target.  `>` to a regular file is staged, to be
+/// committed or dropped once the writer finishes; every other shape streams.
+/// `None` is the discard device, which no write changes.
 /// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
 /// redirect lands right even from a native, where the host cwd never moves.
 pub(crate) fn open_write(
     path: &str,
     mode: WriteMode,
     shell: &mut Shell,
-) -> Settled<(File, Option<PendingWrite>)> {
+) -> Settled<(File, Option<OpenedWrite>)> {
+    let opened = |file: std::io::Result<File>| file.map_err(|e| io_error(path, &e));
     let rp = shell.resolve(path);
-    let stream =
-        |opened: std::io::Result<File>| opened.map(|f| (f, None)).map_err(|e| io_error(path, &e));
     if rp.is_discard() {
-        return stream(crate::path::walk::open_discard(&rp));
+        return opened(crate::path::walk::open_discard(&rp)).map(|f| (f, None));
     }
     let target = shell.locate(&rp, &FsOp::Write)?;
+    let stream = |file, target| opened(file).map(|f| (f, Some(OpenedWrite::Stream(target))));
     match mode {
-        WriteMode::Append => stream(target.append()),
-        WriteMode::Stream => stream(target.truncate()),
-        WriteMode::Write => {
-            let existing = target.stat().map_err(|e| io_error(path, &e))?;
+        WriteMode::Append => stream(target.append(), target),
+        WriteMode::Stream => stream(target.truncate(), target),
+        WriteMode::Write => match target.stat().map_err(|e| io_error(path, &e))? {
             // TTYs and named pipes stream: there is no inode to rename.
-            match existing {
-                Some(s) if s.kind != Kind::File => stream(target.truncate()),
-                existing => {
-                    let (file, commit) = open_atomic(path, target, existing.as_ref())?;
-                    Ok((file, Some(commit)))
-                }
+            Some(s) if s.kind != Kind::File => stream(target.truncate(), target),
+            existing => {
+                let (file, commit) = open_atomic(path, target, existing.as_ref())?;
+                Ok((file, Some(OpenedWrite::Atomic(commit))))
             }
-        }
+        },
     }
 }
 
@@ -241,11 +253,11 @@ fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
 /// temp-file write that drops the symlink, mode and fsync steps.
 pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     use std::io::Write as _;
-    let (mut file, commit) = open_write(path, WriteMode::Write, shell)?;
+    let (mut file, opened) = open_write(path, WriteMode::Write, shell)?;
     file.write_all(bytes).map_err(|e| io_error(path, &e))?;
-    match commit {
-        Some(commit) => commit.commit().map_err(|e| atomic_write_error(&e)),
-        None => Ok(()),
+    match opened {
+        Some(OpenedWrite::Atomic(commit)) => commit.commit().map_err(|e| atomic_write_error(&e)),
+        _ => Ok(()),
     }
 }
 

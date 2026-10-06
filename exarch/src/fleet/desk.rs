@@ -1067,9 +1067,10 @@ impl Host for SurfaceApplier {
 ///
 /// The record carries raw facts in arrival order: one
 /// [`crate::record::Display::Observation`] per observation, one
+/// [`crate::record::Display::Change`] per write or edit, one
 /// [`crate::record::Display::Card`] per card.  Grouping a call's effects and
-/// merging a file's consecutive hunks belong to the frontend, which derives
-/// them online and so needs no coalesced log to rebuild from.
+/// a run's changes belongs to the frontend, which derives them online and so
+/// needs no coalesced log to rebuild from.
 ///
 /// A pin publishes twice: [`crate::record::Forensic::Pin`]/`Unpin` is the
 /// durable breadcrumb a resume replays, [`crate::record::Transient::Pin`]/
@@ -1083,6 +1084,12 @@ pub(crate) fn absorb_surface(
         Surface::Observation(event) => {
             let value = event.to_wire();
             let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
+            Ok(())
+        }
+        Surface::Change(change) => {
+            let _recorded = recorder.emit(crate::record::Display::Change {
+                change: change.clone(),
+            })?;
             Ok(())
         }
         Surface::Card(card) => {

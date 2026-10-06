@@ -438,7 +438,7 @@ impl Located {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate — read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles — while exarch's readers speak their own card and its editors emit a write event over a silent read. The atomic write's before-image and grep's per-file read ride the card of the operation that asked for them."
+        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate — read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles — while exarch's readers speak their own card and its editors emit a write event over a silent read. A write's before- and after-images and grep's per-file read ride the card of the operation that asked for them."
     )]
     fn open_leaf(&self, opts: &mut OpenOptions) -> io::Result<File> {
         open(&self.dir, self.leaf.as_ref(), nofollow(opts))
@@ -477,7 +477,7 @@ impl Located {
     /// Any `stat` failure other than absence.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size the before-image; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write site's own card is its surface, and a predicate raises none."
+        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size a write's snapshots; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write site's own card is its surface, and a predicate raises none."
     )]
     pub(crate) fn stat(&self) -> io::Result<Option<Stat>> {
         match stat(&self.dir, self.leaf.as_ref(), FollowSymlinks::No) {
@@ -555,7 +555,7 @@ impl Located {
     /// The create's, other than `AlreadyExists`.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[surface:locate-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write site; the write card is the operation's surface."
+        reason = "[surface:locate-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write site; the reported write is the operation's surface."
     )]
     pub(crate) fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
         loop {
@@ -579,7 +579,7 @@ impl Located {
     /// The open's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[surface:locate-staged-read] Reads the staged temp back to seed the write card's new side, before the rename commits it. A sub-step of the write site, not a separate model read."
+        reason = "[surface:locate-staged-read] Reads the staged temp back as the write's after-image, before the rename commits it. A sub-step of the write site, not a separate model read."
     )]
     pub(crate) fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
         open(
@@ -620,7 +620,7 @@ impl Located {
     /// The unlink's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:locate-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
+        reason = "[silent:locate-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged temp for a write that will not land. The aborted write is the surface; this removal raises none of its own."
     )]
     pub(crate) fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
         remove_file(&self.dir, name.as_ref())

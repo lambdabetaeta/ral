@@ -108,7 +108,7 @@ This shape is forced, and it is what makes the witness trustworthy:
   is no slice to get wrong.
 - **Each tool is one logical surface.** The reads sink below the ral line;
   `view-hash` and `view-hash-around` raise exactly one `read` card, and
-  `edit-hash` raises exactly one diff card — never a separate read or write card. This is why `edit-hash`
+  `edit-hash` raises exactly one change — its diff — never a separate read or write. This is why `edit-hash`
   is a path builtin and not a `< file > file` stream filter: a filter's read and
   write would each ride the redirect frame and surface their own card, fracturing
   one conceptual edit into three rail surfaces, and `edit-hash` would lose the path it

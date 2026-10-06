@@ -298,8 +298,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    renders through `line::render_card_framed` as a box indented `CARD_INDENT`
    columns, its heading lifted into the top rule, no marginal rail glyph (the
    frame is its mark) — though it still wears the blank margin every row wears,
-   so its left edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
-   patch-shape change-bar `▎`; an observation card folds into its ral group.
+   so its left edge aligns with the rest of the transcript. A file mutation — a run of changes or a kit's diff card — wears
+   the patch-shape change-bar `▎`; an observation card folds into its ral group.
    A cancelled turn is `Chrome::Cancelled`: it wears the error rail `╳`
    while remaining distinct from `Chrome::Error`, so
    `Scrollback::last_is_error` — read off the fold, the failure being a fact of
@@ -519,7 +519,7 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
-        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s four tail rules (an effect walks back to its call, a write is a barrier, a surfaced diff tail-merges, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
+        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal

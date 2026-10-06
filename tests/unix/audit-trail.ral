@@ -144,6 +144,25 @@ echo !{io-facts !{audit {
     try { to-string x > "$io-dir/no-such-dir/out.txt" } { |_| return () }
 }}}
 echo !{exists "$io-dir/never.txt"}
+
+# A write is stamped at its redirect, never at the body's last command
+let write-cols = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `write:   { |_| case $o[site] [`just: { |s| return [...$acc, $s[col]] }, `none: { |_| return $acc }] },
+            `read:    { |_| return $acc },
+            `check:   { |_| return $acc },
+            `command: { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+let stamped = audit {
+    !{ echo a; true } > "$io-dir/site.txt"
+}
+echo !{write-cols $stamped}
 rm -rf $io-dir
 
 # A bundled tool is observed as an external command

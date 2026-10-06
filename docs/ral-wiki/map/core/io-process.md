@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8d868e18
-generated_at_date: 2026-09-30
+generated_at_commit: 3c8afbc3
+generated_at_date: 2026-10-06
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -73,9 +73,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
 
 Redirect reads and writes — `< file`, `> file` and friends — open through the
 `File` source/sink here, and the runtime emits a byte-level I/O door at each:
-the read fires eagerly when stdin is redirected, a streaming write at its open
-(`committed`), an atomic `>` at frame settle with its committed / aborted / failed
-outcome. The event shapes and their card
+the read fires eagerly when stdin is redirected, and every write at frame settle
+with its target before and after — a stream `committed` whatever its body did,
+an atomic `>` committed, aborted or failed. The event shapes and their card
 rendering belong to [[map/exarch/io-surface|io-surface]].
 
 ## Process — `core/src/process/`

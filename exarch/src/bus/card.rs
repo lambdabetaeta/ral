@@ -12,14 +12,16 @@
 //!
 //! [`decode`] reads a kit's `` `card `` value into this model; [`diff`] and
 //! [`value`] are the substrates every decoder shares; [`done`] and [`notice`]
-//! each decode one class of event core surfaces, and [`observation`] composes
+//! each decode one class of event core surfaces; [`observation`] composes
 //! cards from core's one observation vocabulary
-//! (`ral_core::types::Observed`), which core itself decodes.
+//! (`ral_core::types::Observed`), which core itself decodes; and [`change`]
+//! is what a write or an edit did to a file.
 
 use ral_core::serial::FOValue;
 use ral_core::types::Observation;
 use serde::{Deserialize, Serialize};
 
+mod change;
 mod decode;
 mod diff;
 mod done;
@@ -30,13 +32,15 @@ mod observation;
 pub(crate) mod testkit;
 mod value;
 
-pub use diff::{Hunk, Row, Seg};
+pub use change::{Change, change_card};
+pub use diff::{Diff, Hunk, Row, Seg};
 pub use notice::Notice;
 
-pub(crate) use decode::value_to_card;
-pub(crate) use diff::{hunk_magnitude, whole_file_hunks};
+pub(crate) use change::settled;
+pub(crate) use decode::{value_to_card, value_to_edit};
+pub(crate) use diff::hunk_magnitude;
 pub(crate) use done::value_to_done;
-pub(crate) use encode::encode_card;
+pub(crate) use encode::{encode_card, encode_edit};
 pub(crate) use notice::value_to_notice;
 pub(crate) use observation::{Landing, landing};
 /// The comma-joined bucket cards a run's effects render as; `pub(crate)`
@@ -224,16 +228,6 @@ impl Card {
             .sum();
         any.then_some(total)
     }
-
-    /// The `(path, hunks)` of a lone `diff` mark — the key consecutive
-    /// same-path diff cards merge on, so one file reads as one block the way a
-    /// unified diff presents it.  `None` for any richer card.
-    pub(crate) fn single_diff(&self) -> Option<(&str, &[Hunk])> {
-        match self.0.as_slice() {
-            [Mark::Diff { path, hunks }] => Some((path, hunks)),
-            _ => None,
-        }
-    }
 }
 
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
@@ -386,35 +380,5 @@ mod tests {
         assert_eq!(marks[1]["max"], 12);
         assert_eq!(marks[2]["mark"], "raw");
         assert_eq!(marks[2]["bytes"], serde_json::json!([255, 104]));
-    }
-
-    #[test]
-    fn single_diff_keys_aggregation() {
-        let one = Card(vec![Mark::Diff {
-            path: "a.rs".into(),
-            hunks: vec![Hunk {
-                start: 1,
-                rows: vec![
-                    Row::Del(vec![Seg::plain("x")]),
-                    Row::Add(vec![Seg::plain("y")]),
-                    Row::Add(vec![Seg::plain("z")]),
-                ],
-            }],
-        }]);
-        assert_eq!(one.single_diff().map(|(p, _)| p), Some("a.rs"));
-        assert_eq!(one.magnitude(), Some(3));
-        assert!(one.has_diff());
-        let rich = Card(vec![
-            Mark::Text { spans: vec![] },
-            Mark::Diff {
-                path: "a.rs".into(),
-                hunks: vec![],
-            },
-        ]);
-        assert!(rich.single_diff().is_none());
-        assert!(rich.has_diff());
-        let plain = Card(vec![Mark::Text { spans: vec![] }]);
-        assert_eq!(plain.magnitude(), None);
-        assert!(!plain.has_diff());
     }
 }

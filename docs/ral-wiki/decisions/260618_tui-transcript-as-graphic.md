@@ -262,6 +262,10 @@ event on the bus, while move 7 can deepen with one.
    > a short bar can never be misread as a stressed call. And this is a TUI
    > projection only — headless prints each call and its effects in arrival order,
    > unchanged.
+   >
+   > *Amended 2026-10-06 by [[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]:
+   > the barrier is a run of changes, not each write — a call's writes and edits
+   > read as one patch block, each file once, still never folded away.*
 
    > **Amended 2026-06-21 — graded reduction applies only where there is a real
    > summary to collapse to; prose is exempt and per-block L0 is retired.**

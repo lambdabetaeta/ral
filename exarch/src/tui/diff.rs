@@ -2,9 +2,10 @@
 //! numbered against one shared gutter, and elision rows where content is cut.
 
 use super::block::Detail;
-use super::line::{grain_run, hang, size_bar};
+use super::line::{card_span, grain_run, hang, size_bar};
 use super::palette::{Col, LIME_HOT, RED_HOT, SLATE};
-use crate::bus::card::{Hunk, Row as DiffRow, Seg};
+use crate::bus::card::{self, Change, Diff, Hunk, Row as DiffRow, Seg};
+use ral_core::types::WriteOutcome;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -25,39 +26,95 @@ pub(super) fn diff_body(
     width: usize,
     at: Detail,
 ) -> Vec<Line<'static>> {
+    let hunks: Vec<&Hunk> = hunks.iter().collect();
+    let counts = (
+        count_rows(&hunks, |r| matches!(r, DiffRow::Add(_))),
+        count_rows(&hunks, |r| matches!(r, DiffRow::Del(_))),
+    );
+    let mut ls = vec![header(path, Some(counts), None)];
     match at {
-        Detail::Tally => vec![patch_header(path, hunks)],
-        Detail::Summary => diff_capped(path, hunks, width, Some(DIFF_PEEK_ROWS)),
-        Detail::Full => diff_capped(path, hunks, width, None),
+        Detail::Tally => {}
+        Detail::Summary => ls.extend(hunk_rows(&hunks, width, DIFF_PEEK_ROWS, 0)),
+        Detail::Full => ls.extend(hunk_rows(&hunks, width, usize::MAX, 0)),
     }
+    ls
 }
 
-/// Rows across every hunk satisfying `pred` — the tallies the header's grain
-/// run reads.
-#[allow(clippy::cast_possible_truncation, reason = "diff row count")]
-fn count_rows(hunks: &[Hunk], pred: impl Fn(&DiffRow) -> bool) -> u32 {
-    hunks
-        .iter()
-        .flat_map(|h| h.rows.iter())
-        .filter(|r| pred(r))
-        .count() as u32
+/// A run of file changes at `width`: each file once, in the order it was first
+/// touched, its changes stacked under one header.  Every header shows at every
+/// rung, since a write is never folded away; `Summary` shares
+/// [`DIFF_PEEK_ROWS`] across the run, and `Full` shows every row the source
+/// kept.
+pub(super) fn changes_body(changes: &[Change], width: usize, at: Detail) -> Vec<Line<'static>> {
+    let mut room = match at {
+        Detail::Tally => 0,
+        Detail::Summary => DIFF_PEEK_ROWS,
+        Detail::Full => usize::MAX,
+    };
+    let mut ls = Vec::new();
+    for (path, file) in by_path(changes) {
+        let diffs: Vec<&Diff> = file.iter().filter_map(|c| c.diff.as_ref()).collect();
+        let worst = file.iter().map(|c| c.outcome).max();
+        let counts = (!diffs.is_empty()).then(|| {
+            diffs
+                .iter()
+                .fold((0, 0), |(a, r), d| (a + d.added, r + d.removed))
+        });
+        // How it settled is news when it did not commit, or all there is to say.
+        let settled = worst.filter(|w| *w != WriteOutcome::Committed || counts.is_none());
+        ls.push(header(path, counts, settled));
+        if at > Detail::Tally {
+            let hunks: Vec<&Hunk> = diffs.iter().flat_map(|d| &d.hunks).collect();
+            let cut = diffs.iter().map(|d| d.cut()).sum();
+            ls.extend(hunk_rows(&hunks, width, room, cut));
+            room = room.saturating_sub(hunks.iter().map(|h| h.rows.len()).sum());
+        }
+    }
+    ls
 }
 
-/// The `diff  <path>` header row, with its [`size_bar`] and addition-ratio
-/// [`grain_run`].  Shared by every rung, so the headers never drift.
-fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("diff", Style::default().fg(SLATE)),
+/// `changes` gathered per path, paths in the order first touched.
+fn by_path(changes: &[Change]) -> Vec<(&str, Vec<&Change>)> {
+    let mut files: Vec<(&str, Vec<&Change>)> = Vec::new();
+    for change in changes {
+        match files.iter_mut().find(|(path, _)| *path == change.path) {
+            Some((_, file)) => file.push(change),
+            None => files.push((&change.path, vec![change])),
+        }
+    }
+    files
+}
+
+/// Rows across every hunk satisfying `pred` — the tallies a kit diff's header
+/// reads, having no counts of its own.
+fn count_rows(hunks: &[&Hunk], pred: impl Fn(&DiffRow) -> bool) -> u32 {
+    let n = hunks.iter().flat_map(|h| h.rows.iter()).filter(|r| pred(r)).count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// A file's header row: `diff  <path>` with its [`size_bar`] and
+/// addition-ratio [`grain_run`] when there are `counts` to show, else
+/// `write  <path>`; and how it `settled`, when that is news.  Shared by every
+/// rung, so the headers never drift.
+fn header(path: &str, counts: Option<(u32, u32)>, settled: Option<WriteOutcome>) -> Line<'static> {
+    let verb = if counts.is_some() { "diff" } else { "write" };
+    let mut spans = vec![
+        Span::styled(verb, Style::default().fg(SLATE)),
         Span::raw("  "),
         Span::styled(path.to_string(), Style::default().fg(Color::White)),
-        Span::raw("  "),
-        size_bar(crate::bus::card::hunk_magnitude(hunks)),
-        Span::raw("  "),
-        grain_run(
-            count_rows(hunks, |r| matches!(r, DiffRow::Add(_))),
-            count_rows(hunks, |r| matches!(r, DiffRow::Del(_))),
-        ),
-    ])
+    ];
+    if let Some((added, removed)) = counts {
+        spans.extend([
+            Span::raw("  "),
+            size_bar(added + removed),
+            Span::raw("  "),
+            grain_run(added, removed),
+        ]);
+    }
+    if let Some(outcome) = settled {
+        spans.extend([Span::raw("  "), card_span(&card::settled(outcome))]);
+    }
+    Line::from(spans)
 }
 
 /// A diff block's columns: the line-number gutter, measured once for the whole
@@ -70,43 +127,46 @@ struct DiffCols {
     width: usize,
 }
 
-/// The header, then the first `cap` diff rows (all when `None`), the hunks
-/// elision-separated and numbered against one gutter sized for the whole
-/// block, so every row's text starts in the same column.  A diff cut short
-/// ends in the same elision a break between hunks wears.
-fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![patch_header(path, hunks)];
+/// The first `cap` rows of `hunks`, the hunks elision-separated and numbered
+/// against one gutter sized for them all, so every row's text starts in the
+/// same column.  Rows cut short by `cap` end in the elision a break between
+/// hunks wears; rows the source cut, `cut` changed lines of them, end in one
+/// that counts them.
+fn hunk_rows(hunks: &[&Hunk], width: usize, cap: usize, cut: u32) -> Vec<Line<'static>> {
     let total: usize = hunks.iter().map(|h| h.rows.len()).sum();
-    let mut left = cap.unwrap_or(total).min(total);
-    let cut = left < total;
-    let widest = hunks.iter().map(hunk_max_lineno).max().unwrap_or(0);
+    let mut left = cap.min(total);
+    let peeked = left < total;
+    let widest = hunks.iter().map(|h| hunk_max_lineno(h)).max().unwrap_or(0);
     let cols = DiffCols {
         // Three columns even for a two-digit file, so a short patch's gutter is
         // the one a long patch wears.
         gutter: Col::wide(3).seeing(&widest.to_string()),
         width,
     };
+    let mut ls = Vec::new();
     for (i, h) in hunks.iter().enumerate() {
         if left == 0 {
             break;
         }
         if i > 0 {
-            ls.push(elision_row(cols.gutter));
+            ls.push(elision_row(cols.gutter, ""));
         }
         left -= push_hunk(&mut ls, h, cols, left);
     }
-    if cut {
-        ls.push(elision_row(cols.gutter));
+    if peeked {
+        ls.push(elision_row(cols.gutter, ""));
+    } else if cut > 0 {
+        ls.push(elision_row(cols.gutter, &format!("{cut} more changed lines")));
     }
     ls
 }
 
-/// The "there is more below" row: a bare `⋮` right-aligned in `gutter`, drawn
-/// by [`diff_capped`] both between hunks and at its cap, so a break in the
-/// middle of a diff and a diff cut short read alike.
-fn elision_row(gutter: Col) -> Line<'static> {
+/// The "there is more below" row: a `⋮` right-aligned in `gutter`, drawn
+/// by [`hunk_rows`] both between hunks and where it stops, so a break in the
+/// middle of a diff and a diff cut short read alike; `note` says how much.
+fn elision_row(gutter: Col, note: &str) -> Line<'static> {
     Line::from(Span::styled(
-        format!("{} ", gutter.right("⋮")),
+        format!("{} {note}", gutter.right("⋮")),
         Style::default().fg(SLATE),
     ))
 }

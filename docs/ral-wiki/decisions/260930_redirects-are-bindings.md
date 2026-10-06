@@ -34,6 +34,10 @@ Two interpreters read one redirect list and disagreed: a compound block and a fu
   is `"err\nout"`. `2>` streams and is never atomic.
 - **A streaming write is `committed` at its open**, even if the body later
   fails; only an atomic `>` can be `aborted`.
+
+  > **Amended 2026-10-06** by [[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]:
+  > the stream is still `committed` whatever the body does, but it is reported
+  > when the frame settles, so the report can carry what landed.
 - **A pipeline stage with redirects is a thread stage** run through the same
   `RedirectState`; a direct stage has none, and `wire_stdio` wires its
   stage pipes without reading any redirect list.

@@ -5,8 +5,10 @@
 //! user-facing act.  `decode_surface` in `shell_eval.rs` calls in here.
 
 use ral_core::serial::FOValue;
+use ral_core::types::WriteOutcome;
 
-use super::diff::{Hunk, Row, Seg};
+use super::change::Change;
+use super::diff::{Diff, Hunk, Row, Seg};
 use super::value::{count_field, items, record, shown, str_field};
 use super::{Card, Field, FieldVal, Mark, Measure, Readout, Role, Span};
 
@@ -31,6 +33,31 @@ pub(crate) fn value_to_card(v: &FOValue) -> Option<Card> {
     } else {
         None
     }
+}
+
+/// Read back what [`encode_edit`](super::encode::encode_edit) surfaced: an
+/// edit is a change that committed, with the diff it took.
+pub(crate) fn value_to_edit(v: &FOValue) -> Option<Change> {
+    let FOValue::Variant { label, payload } = v else {
+        return None;
+    };
+    if label != "edit" {
+        return None;
+    }
+    let m = record(payload.as_deref()?)?;
+    Some(Change {
+        path: str_field(m, "path")?,
+        outcome: WriteOutcome::Committed,
+        diff: Some(Diff {
+            hunks: items(m, "hunks")
+                .iter()
+                .filter_map(record)
+                .map(decode_hunk)
+                .collect(),
+            added: count_field(m, "added")?,
+            removed: count_field(m, "removed")?,
+        }),
+    })
 }
 
 /// The mark labels a bare surface lifts into a one-mark card: [`decode_mark`]'s
@@ -149,8 +176,8 @@ fn decode_field(v: &FOValue) -> Field {
     Field { label, value }
 }
 
-/// Decode a kit-composed `diff` — by hand, the shape `whole_file_hunks` builds
-/// for the host's own write cards.  Only `path` is required.
+/// Decode a kit-composed `diff` — by hand, the shape `Diff::between` builds
+/// for the host's own changes.  Only `path` is required.
 fn decode_diff(m: &FOValue) -> Option<Mark> {
     let path = str_field(m, "path")?;
     let hunks = items(m, "hunks")

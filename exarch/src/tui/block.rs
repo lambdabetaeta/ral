@@ -18,7 +18,7 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::bus::card::{Card, Landing, Mark, Span as CardSpan};
+use crate::bus::card::{Card, Change, Landing, Span as CardSpan};
 use crate::provider::ProviderError;
 use crate::record::fault::Readout;
 use crate::record::{Seq, Verdict};
@@ -341,6 +341,12 @@ pub(super) enum BlockKind {
         error: Option<String>,
         elapsed: Duration,
     },
+    /// A run of file changes, read as one patch: whatever the work between
+    /// two calls wrote or edited.
+    Changes {
+        changes: Vec<Change>,
+        dial: Dial,
+    },
     /// A render document a kit surfaced — a stack of [`Card`] marks
     /// re-rendered from data at every width.  Its `dial` is `Some` exactly
     /// when it holds a `diff` mark.
@@ -375,6 +381,17 @@ impl BlockKind {
             dial: Dial {
                 at: Detail::Summary,
                 floor: Detail::Summary,
+            },
+        }
+    }
+
+    /// A run opening on its first change, at the rung a diff opens at.
+    pub(super) fn changes(change: Change) -> Self {
+        Self::Changes {
+            changes: vec![change],
+            dial: Dial {
+                at: Detail::Summary,
+                floor: Detail::Tally,
             },
         }
     }
@@ -552,30 +569,13 @@ impl Block {
         None
     }
 
-    /// Grow this block's lone diff with `card`'s hunks where both are surfaced
-    /// diffs of one file, so consecutive edits to it read as the one change;
-    /// `Some` hands back a card that does not fit.  The hunks carry the
-    /// magnitude, so the memo goes with them.
-    pub(super) fn merge_diff(&mut self, card: Card) -> Option<Card> {
-        let BlockKind::Card {
-            card: tail,
-            landing: Landing::Surfaced,
-            ..
-        } = &mut self.kind
-        else {
-            return Some(card);
+    /// Take `change` into this block's run of changes, or hand it back for a
+    /// run of its own.
+    pub(super) fn admit_change(&mut self, change: Change) -> Option<Change> {
+        let BlockKind::Changes { changes, .. } = &mut self.kind else {
+            return Some(change);
         };
-        match (tail.single_diff(), card.single_diff()) {
-            (Some((into, _)), Some((path, _))) if into == path => {}
-            _ => return Some(card),
-        }
-        let Card(mut marks) = card;
-        match (marks.pop(), tail.0.as_mut_slice()) {
-            (Some(Mark::Diff { hunks, .. }), [Mark::Diff { hunks: into, .. }]) => {
-                into.extend(hunks);
-            }
-            _ => unreachable!("both cards answered `single_diff`"),
-        }
+        changes.push(change);
         self.memo = None;
         None
     }
@@ -599,6 +599,7 @@ impl Block {
     /// else.  The matrix's "lines touched" is a write footprint, not a volume.
     pub(super) fn lines_changed(&self) -> Option<u32> {
         match &self.kind {
+            BlockKind::Changes { changes, .. } => Some(changes.iter().map(Change::lines).sum()),
             BlockKind::Card { card, .. } => card.magnitude(),
             _ => None,
         }
@@ -696,7 +697,9 @@ impl Block {
                 (!g.thinking.is_empty()).then_some(g.thinking.dial)
             }
             (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(g.run),
-            (BlockKind::Act { dial, .. }, Part::Run) => Some(*dial),
+            (BlockKind::Act { dial, .. } | BlockKind::Changes { dial, .. }, Part::Run) => {
+                Some(*dial)
+            }
             (BlockKind::Card { dial, .. }, Part::Run) => *dial,
             _ => None,
         }
@@ -708,7 +711,9 @@ impl Block {
                 (!g.thinking.is_empty()).then_some(&mut g.thinking.dial)
             }
             (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(&mut g.run),
-            (BlockKind::Act { dial, .. }, Part::Run) => Some(dial),
+            (BlockKind::Act { dial, .. } | BlockKind::Changes { dial, .. }, Part::Run) => {
+                Some(dial)
+            }
             (BlockKind::Card { dial, .. }, Part::Run) => dial.as_mut(),
             _ => None,
         }
@@ -873,7 +878,7 @@ impl Block {
     fn magnitude(&self) -> Option<u32> {
         match &self.kind {
             BlockKind::Prose { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Card { card, .. } => card.magnitude(),
+            BlockKind::Changes { .. } | BlockKind::Card { .. } => self.lines_changed(),
             _ => None,
         }
     }
@@ -916,6 +921,12 @@ impl Block {
                 error,
                 elapsed,
             } => line::subagent_header(name, error.as_deref(), *elapsed),
+            // Opens on the one blank an unframed card opens on.
+            BlockKind::Changes { changes, .. } => {
+                std::iter::once(Line::default())
+                    .chain(super::diff::changes_body(changes, width.into(), at))
+                    .collect()
+            }
             // A surfaced general card is a deliberate bounded artifact. Diffs
             // already carry the patch rail and gutters, and an effect card
             // that reached the mirror with no run to join belongs to none, so
@@ -968,12 +979,11 @@ impl Block {
             }),
             // The `↘` holds even on error; the failure reads in the header.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
-            // A diff and a write are both file mutations, so both wear `▎` and
-            // the body says which. A framed card's frame is its own mark, and
-            // an unowned effect folds into nothing, so neither wears a glyph.
-            BlockKind::Card { card, landing, .. } => {
-                (card.has_diff() || *landing == Landing::Write).then_some(RailKind::Patch)
-            }
+            // A file mutation wears `▎`, whether a run of changes or a kit's
+            // diff. A framed card's frame is its own mark, and an unowned
+            // effect folds into nothing, so neither wears a glyph.
+            BlockKind::Changes { .. } => Some(RailKind::Patch),
+            BlockKind::Card { card, .. } => card.has_diff().then_some(RailKind::Patch),
             BlockKind::Chrome(chrome) => chrome.rail(),
             BlockKind::Group(_) => None,
         }

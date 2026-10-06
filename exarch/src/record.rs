@@ -31,7 +31,7 @@ pub(crate) use log::FleetSink;
 use crate::agent::Agent;
 use crate::agent::log::{Cut, EditAuthority, ToolResult};
 use crate::agent::nudge::Spent;
-use crate::bus::card::Card;
+use crate::bus::card::{Card, Change};
 use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
 use crate::provider::{ProviderError, Usage};
@@ -165,7 +165,8 @@ pub enum Protocol {
 /// tree a `card` field renders (recomputed by the view fold), with two
 /// exceptions this parcel decided on the same rule — `Observation` and
 /// `Card` carry the whole fact because there is no other durable trace of it
-/// once the mark tree is drawn.
+/// once the mark tree is drawn.  A `Change` carries its diff already cut at
+/// the source, never the bytes it was taken from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Display {
@@ -221,6 +222,10 @@ pub enum Display {
     /// one display content the protocol records cannot supply.
     Observation {
         value: FOValue,
+    },
+    /// What a write or an edit did to one file.
+    Change {
+        change: Change,
     },
     /// A render document a ral kit composed for the `surface` builtin: the
     /// mark tree *is* the fact here, so unlike the other three commits in

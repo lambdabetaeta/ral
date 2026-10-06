@@ -1,36 +1,17 @@
 //! Card composition over core's one observation vocabulary
-//! (`ral_core::types::Observed`): a command settled, a write landed, a
-//! redirect read opened, a grep ran, a capability check was denied. Decoding
+//! (`ral_core::types::Observed`): a command settled, a redirect read opened,
+//! a grep ran, a capability check was denied.  A write lands as a
+//! [`Change`](super::Change) instead.  Decoding
 //! the surfaced value back into an [`Observation`] is core's own
 //! `Observation::from_surface`, called at `shell_eval.rs`'s `decode_surface`;
 //! this module only renders what core already decoded.
 
 use std::borrow::Cow;
 
-use ral_core::types::{Decision, LeaseClass, Observed, WorkerId, WriteOutcome};
+use ral_core::types::{Decision, LeaseClass, Observed, WorkerId};
 use std::collections::BTreeMap;
 
-use super::diff::whole_file_hunks;
 use super::{Card, Mark, Role, Span};
-
-/// `committed`/`aborted`/`failed`, styled `Role::Ok`/`Role::Warn`/`Role::Bad`
-/// in [`write_spans`]. Exarch's own labels: core's `WriteOutcome` names its
-/// wire tag privately, and the two vocabularies need not agree.
-fn write_outcome_label(outcome: WriteOutcome) -> &'static str {
-    match outcome {
-        WriteOutcome::Committed => "committed",
-        WriteOutcome::Aborted => "aborted",
-        WriteOutcome::Failed => "failed",
-    }
-}
-
-fn write_outcome_role(outcome: WriteOutcome) -> Role {
-    match outcome {
-        WriteOutcome::Committed => Role::Ok,
-        WriteOutcome::Aborted => Role::Warn,
-        WriteOutcome::Failed => Role::Bad,
-    }
-}
 
 /// Where an observation the rail draws lands, or `None` for one it does not
 /// draw: evaluation (a `builtin` command), or a capability check that was not
@@ -40,8 +21,6 @@ fn write_outcome_role(outcome: WriteOutcome) -> Role {
 pub(crate) enum Landing {
     /// Folds onto the call above it, which buckets the fact itself.
     Effect,
-    /// A file mutation: its own block under the `▎` rail.
-    Write,
     /// Its own bounded block — a denial, a surfaced kit card, a notice.
     Surfaced,
     /// A line on the rail rather than a card: a worker's birth.
@@ -51,7 +30,6 @@ pub(crate) enum Landing {
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
         Observed::Read { .. } | Observed::Grep { .. } | Observed::Command { .. } => Landing::Effect,
-        Observed::Write { .. } => Landing::Write,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {
             decision: Decision::Denied,
@@ -60,9 +38,12 @@ pub(crate) fn landing(what: &Observed) -> Option<Landing> {
         // A birth is the departure a settlement is the arrival of, and reads
         // as that mirror.
         Observed::Worker { .. } => Landing::Announced,
-        // A flagged check is the trail's alone; an `Act` is desk-fed and never
+        // A write lands as the change it made, decoded before it gets here; a
+        // flagged check is the trail's alone; an `Act` is desk-fed and never
         // reaches the rail from the engine seam.
-        Observed::Capability { .. } | Observed::Act { .. } => return None,
+        Observed::Write { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
+            return None;
+        }
     })
 }
 
@@ -75,7 +56,7 @@ pub(crate) fn landing(what: &Observed) -> Option<Landing> {
 pub fn observation_spans(what: &Observed) -> Vec<Span> {
     match what {
         Observed::Read { path } => read_spans(path),
-        Observed::Write { path, outcome, .. } => write_spans(path, *outcome),
+        Observed::Write { path, outcome, .. } => super::change::heading(path, *outcome),
         Observed::Command { argv, status, .. } => {
             let mut spans = vec![Span::plain("$ ")];
             spans.extend(exec_cmd_spans(argv));
@@ -101,43 +82,11 @@ pub fn observation_spans(what: &Observed) -> Vec<Span> {
     }
 }
 
-/// Compose an [`Observed`] into a [`Card`]: its [`observation_spans`] heading.
-/// A write is the one observation that carries a body, and so the one that
-/// departs — see [`write_card`].
+/// Compose an [`Observed`] into a [`Card`]: its [`observation_spans`] line.
 pub fn observation_card(what: &Observed) -> Card {
-    if let Observed::Write {
-        path,
-        outcome,
-        new_bytes,
-        ..
-    } = what
-    {
-        return write_card(path, *outcome, new_bytes.as_deref());
-    }
     Card(vec![Mark::Text {
         spans: observation_spans(what),
     }])
-}
-
-/// A write's card: its [`write_preview`] under a `write <path> <outcome>`
-/// heading — save when that preview is a diff, which names the file and shows
-/// the change itself.  A heading above it would only say the same twice, so the
-/// diff stands as the whole card and a `>` over an existing file reads as the
-/// change it made.
-fn write_card(path: &str, outcome: WriteOutcome, new: Option<&[u8]>) -> Card {
-    let body = if outcome == WriteOutcome::Committed {
-        write_preview(path, new)
-    } else {
-        Vec::new()
-    };
-    if let [Mark::Diff { .. }] = body.as_slice() {
-        return Card(body);
-    }
-    let mut marks = vec![Mark::Text {
-        spans: write_spans(path, outcome),
-    }];
-    marks.extend(body);
-    Card(marks)
 }
 
 /// An exec's command alone, without the `$ ` prompt or ` → status` tail, so
@@ -183,17 +132,6 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
 /// lone read and a grouped one share one shape.
 fn read_spans(path: &str) -> Vec<Span> {
     vec![Span::new(Role::Muted, "read "), Span::new(Role::Path, path)]
-}
-
-/// A write card's heading, `write <path> <outcome>` — the same line whatever the
-/// mode, which rides the observation only.
-fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
-    vec![
-        Span::new(Role::Muted, "write "),
-        Span::new(Role::Path, path),
-        Span::plain(" "),
-        Span::new(write_outcome_role(outcome), write_outcome_label(outcome)),
-    ]
 }
 
 /// A capability check's heading, `check <resource> <decision> <fields…>`. The
@@ -257,36 +195,11 @@ fn capability_fields(fields: &BTreeMap<String, String>) -> String {
         .join(" ")
 }
 
-/// What a committed write shows of itself: what landed, read as a complete
-/// change against the empty side.
-///
-/// A write is shown against nothing rather than against the file it replaced,
-/// because a redirect says what now stands there. Disclosure belongs to the
-/// renderer; the card and record retain every hunk.
-///
-/// Nothing at all when there is nothing to show: no bytes (a write past the
-/// door's read cap), empty bytes, or content that is not text.
-fn write_preview(path: &str, new: Option<&[u8]>) -> Vec<Mark> {
-    let Some(new) = new.filter(|b| !b.is_empty()) else {
-        return Vec::new();
-    };
-    let Ok(text) = std::str::from_utf8(new) else {
-        return Vec::new();
-    };
-    match whole_file_hunks("", text) {
-        hunks if hunks.is_empty() => Vec::new(),
-        hunks => vec![Mark::Diff {
-            path: path.to_string(),
-            hunks,
-        }],
-    }
-}
-
 // ── Observation groups: a call's effects of one kind → one card ─────────────
 //
 // Each reuses the exact `observation_card` span vocabulary, so a run of one
 // renders like its own card, modulo the deliberate exec departure below.
-// Writes and capability checks never reach here — each lands alone.
+// Capability checks never reach here: a denial lands alone.
 
 /// `read p1, read p2, …`
 pub(crate) fn reads_card(reads: &[&str]) -> Option<Card> {

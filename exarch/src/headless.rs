@@ -329,6 +329,7 @@ impl Headless<'_> {
             K::ProviderError { error } => self.print_readout(&record::fault::Readout::fatal(error)),
             K::Stalled { error } => self.print_readout(&record::fault::Readout::stall(error)),
             K::Observation { value } => self.print_observation(value),
+            K::Change { change } => self.print_card(&card::change_card(change)),
             K::Card { card } => self.print_card(card),
             K::Done { cmd, outcome } => {
                 let _ = writeln!(self.err, "{}", card::settled_text(cmd, outcome));
