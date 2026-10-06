@@ -384,8 +384,8 @@ re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
 --warrant`: `bwrap_options` is pure and returns bwrap's options alone, which bwrap
 takes from `--args`. The descriptors a confined launch hands down — bwrap's
 `--args`, the warrant, `--info-fd`, the seccomp programs, the Landlock admits —
-sit at fixed slots defined once, and one `inherit` places them all; the child
-closes the range once it is confined, so the program inherits none.
+sit at fixed slots defined once (`Slot`), and one `Handoff` places them all; the
+child sweeps everything from the first slot up once it is confined, so the program inherits none.
 `serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
 nothing ahead of its confinement. Nothing runs unconfined: a failure before
 the program starts exits 126, a missing program 127; an `execve` refusal takes

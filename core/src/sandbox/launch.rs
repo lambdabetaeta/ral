@@ -22,7 +22,7 @@ use super::reexec::Pinned;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::warrant::{Native, WARRANT_FD, Warrant};
+use super::warrant::{Handoff, Native, Slot, Warrant};
 use crate::capability::Admitted;
 use crate::types::{Break, Error, Settled, Shell};
 use std::ffi::OsString;
@@ -153,7 +153,7 @@ fn windows_sandboxed_command(
 }
 
 /// Issue the warrant for `admitted` under `confinement`, parcelled for
-/// [`WARRANT_FD`].  The one point both Unix backends pass on their way to
+/// [`Slot::Warrant`].  The one point both Unix backends pass on their way to
 /// re-exec `own` by its on-disk name, so the anti-swap guard belongs here: a
 /// build swapped in since boot (a mid-session `cargo install`) would
 /// otherwise run under our confinement.
@@ -218,14 +218,9 @@ pub(super) fn enveloped(
     let (exec_admits, admits) =
         super::linux::landlock::open_admits(projection, host.landlock).map_err(Break::Error)?;
     let warrant = issue(own, exec_admits, admitted)?;
-    let handoff: Vec<_> = std::iter::once((warrant.as_fd(), WARRANT_FD))
-        .chain(
-            admits
-                .iter()
-                .map(AsFd::as_fd)
-                .zip(super::warrant::ADMIT_FD_BASE..),
-        )
-        .collect();
+    let mut handoff = Handoff::default();
+    handoff.lend(Slot::Warrant, warrant.as_fd());
+    super::linux::landlock::lend(&admits, &mut handoff);
     let image = match admitted.program() {
         crate::capability::Program::File { path, .. } => {
             Some(faithful(path, "the program's path")?)
@@ -238,8 +233,8 @@ pub(super) fn enveloped(
             program,
             args: &[super::WARRANT_FLAG],
             image,
-            handoff: &handoff,
         },
+        handoff,
         projection,
         chdir,
         ownership,
@@ -261,16 +256,19 @@ fn macos_sandboxed_command(
     let warrant = issue(own, Seatbelt(profile), admitted)?;
     let mut cmd = own.command();
     cmd.arg(super::WARRANT_FLAG);
-    super::warrant::inherit(&mut cmd, &[(warrant.as_fd(), WARRANT_FD)], None).map_err(refused)?;
+    let mut handoff = Handoff::default();
+    handoff.lend(Slot::Warrant, warrant.as_fd());
+    handoff.install(&mut cmd).map_err(refused)?;
     Ok(cmd)
 }
 
 /// Serve `ral --warrant`, which takes no arguments: `extra` is what it was
 /// wrongly given.
 ///
-/// Take the warrant the launch left at [`WARRANT_FD`], enter its confinement
-/// — Seatbelt on macOS, the Landlock layer inside the bwrap envelope on Linux
-/// — close the rest of the handoff, and only then become its program.
+/// Take the warrant the launch left at [`Slot::Warrant`], enter its
+/// confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
+/// envelope on Linux — close the rest of the handoff, and only then become its
+/// program.
 ///
 /// Nothing runs unconfined: any failure before the program starts is 126, and
 /// so is a host program `execve` refuses for any reason but its absence, which
@@ -281,8 +279,9 @@ pub fn serve_warrant(extra: &[OsString]) -> u8 {
         Warrant::confine()
     } else {
         Err(format!(
-            "{} takes no arguments: its warrant arrives on fd {WARRANT_FD}",
-            super::WARRANT_FLAG
+            "{} takes no arguments: its warrant arrives on fd {}",
+            super::WARRANT_FLAG,
+            Slot::Warrant.fd()
         ))
     };
     match confined {
@@ -587,6 +586,7 @@ mod tests {
         }
         let own = super::super::reexec::own().expect("ral pins itself");
         let own = own.arg0().to_string_lossy().into_owned();
+        let slot = Slot::Args.fd().to_string();
         for program in [sh(), Program::Tool("ls".into())] {
             let (cmd, _info_fd) = linux_sandboxed_command(
                 &restrictive(),
@@ -606,7 +606,7 @@ mod tests {
                 argv(&cmd),
                 [
                     "--args",
-                    "98",
+                    slot.as_str(),
                     "--",
                     own.as_str(),
                     super::super::WARRANT_FLAG

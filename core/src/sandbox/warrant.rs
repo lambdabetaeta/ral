@@ -21,31 +21,66 @@ use libc::c_int;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "linux")]
+use std::os::{fd::AsFd, unix::net::UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The descriptors a confined launch hands its child, each at a fixed slot.
-/// Every one lies in `98..200` but the admits, which run on from its end: ral
-/// hands a confined child nothing else above stderr, so the range is the
-/// handoff's by construction, and [`close_handoff`] empties it before the
-/// program starts.
-const RESERVED: std::ops::Range<c_int> = 98..200;
-/// bwrap's `--args`.
-#[cfg(target_os = "linux")]
-pub(super) const ARGS_FD: c_int = 98;
-pub(super) const WARRANT_FD: c_int = 99;
-/// bwrap's `--info-fd`.
-#[cfg(target_os = "linux")]
-pub(super) const INFO_FD: c_int = 100;
-/// bwrap's `--add-seccomp-fd`s, one slot each.
-#[cfg(target_os = "linux")]
-pub(super) const SECCOMP_FD_BASE: c_int = 101;
-/// The Landlock exec admits, one slot each.
-#[cfg(target_os = "linux")]
-pub(super) const ADMIT_FD_BASE: c_int = RESERVED.end;
+/// Every descriptor a confined launch hands its child, at its fixed slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Slot {
+    /// bwrap's `--args`.
+    #[cfg(target_os = "linux")]
+    Args,
+    Warrant,
+    /// bwrap's `--info-fd`, `Kept` launches only.
+    #[cfg(target_os = "linux")]
+    Info,
+    /// bwrap's `--add-seccomp-fd`s, one per program.
+    #[cfg(target_os = "linux")]
+    Seccomp(u8),
+}
+
+impl Slot {
+    /// Everything from here up is the handoff's: ral hands a confined child
+    /// nothing else above stderr.
+    pub(super) const FIRST: c_int = 98;
+    #[cfg(target_os = "linux")]
+    const SECCOMP_SLOTS: u8 = 4;
+
+    /// 98, 99, 100, 103 + i.
+    pub(super) const fn fd(self) -> c_int {
+        Self::FIRST
+            + match self {
+                #[cfg(target_os = "linux")]
+                Self::Args => 0,
+                Self::Warrant => 1,
+                #[cfg(target_os = "linux")]
+                Self::Info => 2,
+                #[cfg(target_os = "linux")]
+                Self::Seccomp(i) => 5 + i as c_int,
+            }
+    }
+
+    /// The `i`th seccomp program's slot.
+    #[cfg(target_os = "linux")]
+    pub(super) fn seccomp(i: usize) -> Result<Self, String> {
+        u8::try_from(i)
+            .ok()
+            .filter(|&i| i < Self::SECCOMP_SLOTS)
+            .map(Self::Seccomp)
+            .ok_or_else(|| {
+                format!(
+                    "seccomp: program {i} overruns the {} slots reserved for the envelope's \
+                     programs",
+                    Self::SECCOMP_SLOTS
+                )
+            })
+    }
+}
 
 const MAGIC: &[u8] = b"ral-warrant/1";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
@@ -214,34 +249,35 @@ impl Warrant {
         }
     }
 
-    /// The warrant the launch left at [`WARRANT_FD`], its confinement
+    /// The warrant the launch left at [`Slot::Warrant`], its confinement
     /// entered and the handoff closed: the program, and nothing before it.
     pub(super) fn confine() -> Result<Confined, String> {
         let Self { confinement, run } = Self::receive()?;
         confinement.enter()?;
-        close_handoff();
+        close_handoff()?;
         Ok(Confined(run))
     }
 
-    /// This warrant, parcelled for [`WARRANT_FD`].
+    /// This warrant, parcelled for [`Slot::Warrant`].
     pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
         parcel("ral-warrant", &self.encode()?)
             .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
     }
 
-    /// The warrant the launch left at [`WARRANT_FD`], which this takes and
+    /// The warrant the launch left at [`Slot::Warrant`], which this takes and
     /// closes.
     fn receive() -> Result<Self, String> {
+        let at = Slot::Warrant.fd();
         // SAFETY: `F_GETFD` only asks whether the slot is open.
-        if unsafe { libc::fcntl(WARRANT_FD, libc::F_GETFD) } < 0 {
+        if unsafe { libc::fcntl(at, libc::F_GETFD) } < 0 {
             return Err(format!(
-                "no warrant at fd {WARRANT_FD}: `{}` is how ral starts its own confined \
+                "no warrant at fd {at}: `{}` is how ral starts its own confined \
                  children, never a command to run by hand",
                 super::WARRANT_FLAG
             ));
         }
         // SAFETY: open, and installed by the launch for this read alone.
-        Self::unparcel(unsafe { OwnedFd::from_raw_fd(WARRANT_FD) })
+        Self::unparcel(unsafe { OwnedFd::from_raw_fd(at) })
     }
 
     /// The warrant behind `fd`, once its channel proves unwritable.
@@ -436,64 +472,148 @@ fn unwritable(fd: &OwnedFd) -> Result<(), String> {
     }
 }
 
-/// Hand `cmd`'s child each source at its target slot, through one
-/// `pre_exec`.
-///
-/// Every source is first lifted above every target, so no `dup2` can land on
-/// a source not yet moved, in any order.  The hook owns the lent copies; the
-/// kept one's comes back instead — a peer whose last copy here closing is
-/// its reader's EOF, which only the caller can time.
-///
-/// # Errors
-/// A lift the descriptor limit refuses.
-pub(super) fn inherit(
-    cmd: &mut Command,
-    lent: &[(BorrowedFd<'_>, c_int)],
-    kept: Option<(BorrowedFd<'_>, c_int)>,
-) -> Result<Option<OwnedFd>, String> {
-    let above = lent
-        .iter()
-        .chain(&kept)
-        .map(|&(_, at)| at + 1)
-        .max()
-        .unwrap_or(0);
-    let lift = |&(fd, at): &(BorrowedFd<'_>, c_int)| {
-        rustix::io::fcntl_dupfd_cloexec(fd, above)
-            .map(|copy| (copy, at))
-            .map_err(|e| {
-                format!(
-                    "sandbox: cannot move a descriptor above {above} for the confined child: \
-                     {e}; is the open-file limit (`ulimit -n`) below that?"
-                )
-            })
-    };
-    let lent = lent.iter().map(lift).collect::<Result<Vec<_>, _>>()?;
-    let kept = kept.as_ref().map(lift).transpose()?;
-    let kept_raw = kept.as_ref().map(|(fd, at)| (fd.as_raw_fd(), *at));
-    // SAFETY: post-fork, `dup2` alone, which is async-signal-safe.  It clears
-    // `CLOEXEC` on the copy it makes; each lifted source keeps its own.
-    unsafe {
-        cmd.pre_exec(move || {
-            let lent = lent.iter().map(|(fd, at)| (fd.as_raw_fd(), *at));
-            for (fd, at) in lent.chain(kept_raw) {
-                if libc::dup2(fd, at) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
+/// What a confined launch lends its child: each source borrowed, at its
+/// target.
+#[derive(Default)]
+pub(super) struct Handoff<'a>(Vec<(c_int, BorrowedFd<'a>)>);
+
+impl<'a> Handoff<'a> {
+    /// Debug-asserts a slot is lent once; one source may be lent at two
+    /// slots, each lift being its own `dup`.
+    pub(super) fn lend(&mut self, slot: Slot, fd: BorrowedFd<'a>) -> &mut Self {
+        self.lend_at(slot.fd(), fd)
     }
-    Ok(kept.map(|(fd, _)| fd))
+
+    /// Lend at a bare descriptor: the Landlock exec admits' run, which lies
+    /// above every [`Slot`].
+    pub(super) fn lend_at(&mut self, at: c_int, fd: BorrowedFd<'a>) -> &mut Self {
+        debug_assert!(
+            self.0.iter().all(|&(lent, _)| lent != at),
+            "fd {at} lent twice"
+        );
+        self.0.push((at, fd));
+        self
+    }
+
+    /// The target descriptors, for the one caller that must keep a non-lent
+    /// fd off them.
+    #[cfg(target_os = "linux")]
+    pub(super) fn targets(&self) -> impl Iterator<Item = c_int> + '_ {
+        self.0.iter().map(|&(at, _)| at)
+    }
+
+    /// Hand `cmd`'s child each source at its target, through one `pre_exec`.
+    ///
+    /// # Errors
+    /// A lift the descriptor limit refuses.
+    pub(super) fn install(self, cmd: &mut Command) -> Result<(), String> {
+        let above = self.above();
+        self.place(cmd, above, None)
+    }
+
+    /// [`Self::install`], with a `Kept` launch's `--info-fd` writer lent at
+    /// [`Slot::Info`].  Back come the reader and the lifted writer, a peer
+    /// whose last copy here closing is its reader's EOF, which only the
+    /// caller can time.
+    ///
+    /// # Errors
+    /// As [`Self::install`].
+    #[cfg(target_os = "linux")]
+    pub(super) fn install_addressed(
+        self,
+        cmd: &mut Command,
+        (reader, writer): (UnixStream, OwnedFd),
+    ) -> Result<(UnixStream, OwnedFd), String> {
+        let at = Slot::Info.fd();
+        let above = self.above().max(at + 1);
+        let writer = lift(writer.as_fd(), above)?;
+        self.place(cmd, above, Some((writer.as_raw_fd(), at)))?;
+        Ok((reader, writer))
+    }
+
+    fn above(&self) -> c_int {
+        self.0.iter().map(|&(at, _)| at + 1).max().unwrap_or(0)
+    }
+
+    /// Every source lifted to `above` or higher, so no `dup2` can land on a
+    /// source not yet moved, in any order.  The hook owns the lifted copies;
+    /// `kept` is the caller's.
+    fn place(
+        self,
+        cmd: &mut Command,
+        above: c_int,
+        kept: Option<(RawFd, c_int)>,
+    ) -> Result<(), String> {
+        let lent = self
+            .0
+            .into_iter()
+            .map(|(at, fd)| lift(fd, above).map(|copy| (copy, at)))
+            .collect::<Result<Vec<_>, _>>()?;
+        // SAFETY: post-fork, `dup2` alone, which is async-signal-safe.  It
+        // clears `CLOEXEC` on the copy it makes; each lifted source keeps its
+        // own.
+        unsafe {
+            cmd.pre_exec(move || {
+                let lent = lent.iter().map(|(fd, at)| (fd.as_raw_fd(), *at));
+                for (fd, at) in lent.chain(kept) {
+                    if libc::dup2(fd, at) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
 }
 
-/// Close whatever the handoff left in [`RESERVED`], so the program inherits
-/// none of it.
-pub(super) fn close_handoff() {
-    for fd in RESERVED {
-        // SAFETY: nothing in this process owns a reserved slot; most are
-        // already closed, and `EBADF` is ignored.
-        unsafe { libc::close(fd) };
+fn lift(fd: BorrowedFd<'_>, above: c_int) -> Result<OwnedFd, String> {
+    rustix::io::fcntl_dupfd_cloexec(fd, above).map_err(|e| {
+        format!(
+            "sandbox: cannot move a descriptor above {above} for the confined child: {e}; is \
+             the open-file limit (`ulimit -n`) below that?"
+        )
+    })
+}
+
+/// Close every descriptor from [`Slot::FIRST`] up, so the program inherits
+/// none of the handoff.
+///
+/// # Errors
+/// A kernel that cannot sweep: an unswept `--info-fd` writer would hold the
+/// parent's read of it open for the program's whole life.
+#[cfg(target_os = "linux")]
+pub(super) fn close_handoff() -> Result<(), String> {
+    // SAFETY: nothing in this process owns a descriptor from the first slot up.
+    let swept = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            Slot::FIRST.unsigned_abs(),
+            libc::c_uint::MAX,
+            0 as libc::c_uint,
+        )
+    };
+    if swept == 0 {
+        return Ok(());
     }
+    let e = io::Error::last_os_error();
+    Err(if e.raw_os_error() == Some(libc::ENOSYS) {
+        "this kernel has no close_range(2) (Linux 5.9); the handoff cannot be swept, so the \
+         program would inherit it; refusing to run"
+            .to_string()
+    } else {
+        format!("cannot sweep the handoff: {e}; refusing to run")
+    })
+}
+
+/// macOS's one slot, the warrant's, is consumed by [`Warrant::receive`].
+#[cfg(target_os = "macos")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "one signature with Linux's sweep, which can fail"
+)]
+pub(super) fn close_handoff() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -614,6 +734,31 @@ mod tests {
             let bytes = framed(&[MAGIC, field.as_bytes(), b"tool", b"ls", b"0"]);
             assert_eq!(Warrant::decode(&bytes).is_ok(), ok, "{field:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_slots_are_the_fd_table_in_order() {
+        let seccomp = (0..4).map(|i| Slot::seccomp(i).expect("a seccomp slot"));
+        let fds: Vec<_> = [Slot::Args, Slot::Warrant, Slot::Info]
+            .into_iter()
+            .chain(seccomp)
+            .map(Slot::fd)
+            .collect();
+        assert_eq!(fds, [98, 99, 100, 103, 104, 105, 106]);
+        assert_eq!(fds[0], Slot::FIRST);
+        assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "lent twice")]
+    fn a_slot_lent_twice_is_refused() {
+        use std::os::fd::AsFd;
+        let stderr = io::stderr();
+        Handoff::default()
+            .lend(Slot::Warrant, stderr.as_fd())
+            .lend(Slot::Warrant, stderr.as_fd());
     }
 
     #[test]

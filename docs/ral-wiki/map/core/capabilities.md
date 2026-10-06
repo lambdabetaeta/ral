@@ -319,12 +319,12 @@ device for `net` to govern; the in-process guards apply unchanged
   never argv: a sealed memfd on Linux, checked again after sealing, and on macOS
   a prefilled socketpair whose writer closes before the child exists; the child
   refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
-  defined once in `warrant.rs`: 98 bwrap `--args`, 99 the warrant, 100
-  `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
-  `/proc`), 101.. the seccomp programs (sealed memfds), 200.. the Landlock
-  admits. One `inherit` lifts every source above every target and a single
-  `pre_exec` `dup2`s each home; the child closes 98..200 once confined, and
-  `landlock::enter` consumes the admits. `bwrap_command` refuses to launch if
+  defined once as `Slot` in `warrant.rs`: 98 bwrap `--args`, 99 the warrant,
+  100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
+  `/proc`), 103.. the seccomp programs (sealed memfds), and for now 200.. the
+  Landlock admits. One `Handoff` lifts every source above every target and a
+  single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
+  with `close_range` once confined, and `landlock::enter` consumes the admits. `bwrap_command` refuses to launch if
   bwrap's pin fd sits on one of these slots: the `dup2` would close it before
   the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`

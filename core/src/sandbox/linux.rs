@@ -23,13 +23,11 @@ pub(crate) use host::HostEnvelope;
 
 use super::launch::Ownership;
 use super::reexec::Pinned;
-use super::warrant::{
-    ADMIT_FD_BASE, ARGS_FD, INFO_FD, SECCOMP_FD_BASE, inherit, nul_terminated, parcel,
-};
+use super::warrant::{Handoff, Slot, nul_terminated, parcel};
 use crate::path::{PathShape, Rendered, render_paths, render_real};
 use crate::types::{ExecProjection, ExecRule, FsProjection, SandboxProjection};
 use std::ffi::{OsStr, OsString};
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
@@ -83,9 +81,6 @@ pub(crate) struct Payload<'a> {
     pub(crate) args: &'a [&'a str],
     /// A host binary the payload execs in turn, bound RO beside `program`.
     pub(crate) image: Option<&'a str>,
-    /// What the payload inherits past bwrap, each at its slot: the warrant
-    /// and the Landlock exec admits (`super::launch`).
-    pub(crate) handoff: &'a [(BorrowedFd<'a>, libc::c_int)],
 }
 
 /// bwrap's options as they are built: [`Command`]'s two appenders, and
@@ -109,15 +104,16 @@ impl Options {
 
 /// [`bwrap_options`] as the [`Command`] that runs it: `bwrap --args 98 --
 /// <payload>`, the options in a sealed parcel at their slot beside the seccomp
-/// programs, the `--info-fd` peer and the payload's handoff, every descriptor
-/// through one [`inherit`].  bwrap takes options alone from `--args`, so the
-/// payload rides its argv.
+/// programs, the `--info-fd` peer and the payload's `handoff` (its warrant
+/// and Landlock exec admits), every descriptor through one [`Handoff`].
+/// bwrap takes options alone from `--args`, so the payload rides its argv.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused where the envelope's pin sits on one of those slots.
 pub(crate) fn bwrap_command(
     envelope: &Pinned,
     payload: Payload,
+    handoff: Handoff<'_>,
     policy: &SandboxProjection,
     chdir: Option<&str>,
     ownership: Ownership,
@@ -136,22 +132,17 @@ pub(crate) fn bwrap_command(
         .into_iter()
         .map(|program| parcel("ral-seccomp", program))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut lent = vec![(args.as_fd(), ARGS_FD)];
-    lent.extend(
-        seccomp
-            .iter()
-            .map(AsFd::as_fd)
-            .zip(seccomp_fds(seccomp.len())?),
-    );
-    lent.extend_from_slice(payload.handoff);
-    let info = (ownership == Ownership::Kept)
-        .then(crate::process::cloexec_socketpair)
-        .transpose()
-        .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
-    let kept = info.as_ref().map(|(_, writer)| (writer.as_fd(), INFO_FD));
+    // Rebound, so it may borrow this frame's parcels.
+    let mut handoff = handoff;
+    handoff.lend(Slot::Args, args.as_fd());
+    for (i, program) in seccomp.iter().enumerate() {
+        handoff.lend(Slot::seccomp(i)?, program.as_fd());
+    }
+    let kept = ownership == Ownership::Kept;
     // ral's own pin needs no such check: bwrap execs the trampoline by name.
     let pin = envelope.raw_fd();
-    if lent.iter().chain(&kept).any(|&(_, at)| at == pin) {
+    let info = kept.then_some(Slot::Info.fd());
+    if handoff.targets().chain(info).any(|at| at == pin) {
         return Err(format!(
             "sandbox: ral's pinned bwrap sits on descriptor {pin}, a slot the confined \
              launch hands down; refusing rather than exec what lands there (was ral \
@@ -159,13 +150,17 @@ pub(crate) fn bwrap_command(
         ));
     }
     let mut c = envelope.command();
-    c.args(["--args", &ARGS_FD.to_string(), "--", payload.program])
+    let slot = Slot::Args.fd().to_string();
+    c.args(["--args", &slot, "--", payload.program])
         .args(payload.args);
-    let writer = inherit(&mut c, &lent, kept)?;
-    let info = info
-        .zip(writer)
-        .map(|((reader, _), writer)| InfoFd { reader, writer });
-    Ok((c, info))
+    if !kept {
+        handoff.install(&mut c)?;
+        return Ok((c, None));
+    }
+    let (reader, writer) = crate::process::cloexec_socketpair()
+        .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
+    let (reader, writer) = handoff.install_addressed(&mut c, (reader, writer.into()))?;
+    Ok((c, Some(InfoFd { reader, writer })))
 }
 
 /// The bwrap options that confine `payload` under `policy`: binds derived
@@ -266,7 +261,7 @@ pub(crate) fn bwrap_options(
     }
     if ownership == Ownership::Kept {
         c.arg("--die-with-parent");
-        c.args(["--info-fd", &INFO_FD.to_string()]);
+        c.args(["--info-fd", &Slot::Info.fd().to_string()]);
     }
     if !policy.net {
         c.arg("--unshare-net");
@@ -322,8 +317,8 @@ pub(crate) fn bwrap_options(
     for bind in &denied_binds {
         DenyMask::over(bind).render(&mut c);
     }
-    for at in seccomp_fds(seccomp.len())? {
-        c.args(["--add-seccomp-fd", &at.to_string()]);
+    for i in 0..seccomp.len() {
+        c.args(["--add-seccomp-fd", &Slot::seccomp(i)?.fd().to_string()]);
     }
     Ok(c.0)
 }
@@ -382,19 +377,6 @@ pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
     {
         Ok(Vec::new())
     }
-}
-
-/// The slots `n` seccomp programs land at, from [`SECCOMP_FD_BASE`] and
-/// short of the admits.
-fn seccomp_fds(n: usize) -> Result<std::iter::Take<std::ops::Range<libc::c_int>>, String> {
-    let slots = SECCOMP_FD_BASE..ADMIT_FD_BASE;
-    if n > slots.len() {
-        return Err(format!(
-            "seccomp: {n} programs overrun the {} slots reserved for them",
-            slots.len()
-        ));
-    }
-    Ok(slots.take(n))
 }
 
 /// The files a launch execs — the envelope, and the trampoline bwrap execs by
@@ -617,6 +599,7 @@ mod tests {
     use crate::capability::{Admitted, Program};
     use crate::path::RealPath;
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
+    use crate::sandbox::warrant::{Handoff, Slot};
     use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
@@ -669,7 +652,6 @@ mod tests {
         program: "/bin/true",
         args: &[],
         image: None,
-        handoff: &[],
     };
 
     fn options(
@@ -1578,6 +1560,7 @@ mod tests {
         let (cmd, _info_fd) = bwrap_command(
             &stand_in(),
             TRUE,
+            Handoff::default(),
             &unrestricted(),
             None,
             Ownership::Kept,
@@ -1590,7 +1573,8 @@ mod tests {
             "the envelope must be exec'd by pinned descriptor: {program}"
         );
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["--args", "98", "--", "/bin/true"], "{args:?}");
+        let slot = Slot::Args.fd().to_string();
+        assert_eq!(args, ["--args", &slot, "--", "/bin/true"], "{args:?}");
     }
 
     /// A pin on a handoff slot would be closed by the `dup2` before bwrap's
@@ -1600,13 +1584,17 @@ mod tests {
         use std::os::fd::AsFd;
         let pin = stand_in();
         let lent = std::fs::File::open("/dev/null").expect("open /dev/null");
-        let handoff = [(lent.as_fd(), pin.raw_fd())];
-        let payload = Payload {
-            handoff: &handoff,
-            ..TRUE
-        };
-        let Err(e) = bwrap_command(&pin, payload, &unrestricted(), None, Ownership::Kept, WHOLE)
-        else {
+        let mut handoff = Handoff::default();
+        handoff.lend_at(pin.raw_fd(), lent.as_fd());
+        let Err(e) = bwrap_command(
+            &pin,
+            TRUE,
+            handoff,
+            &unrestricted(),
+            None,
+            Ownership::Kept,
+            WHOLE,
+        ) else {
             panic!("a pin on a handoff slot must be refused");
         };
         assert!(e.contains(&format!("descriptor {}", pin.raw_fd())), "{e}");
@@ -1680,8 +1668,9 @@ mod tests {
             kept.contains(&"--die-with-parent".to_string()),
             "a child we keep must not outlive us: {kept:?}"
         );
+        let info = Slot::Info.fd().to_string();
         assert!(
-            kept.windows(2).any(|w| w == ["--info-fd", "100"]),
+            kept.windows(2).any(|w| w == ["--info-fd", info.as_str()]),
             "a kept launch must carry an `--info-fd` naming its payload's session: {kept:?}"
         );
         assert!(
@@ -1692,7 +1681,7 @@ mod tests {
             !surrendered.contains(&"--info-fd".to_string()),
             "a surrendered launch has no session left here to address: {surrendered:?}"
         );
-        let ownership_ties = ["--die-with-parent", "--info-fd", "100"];
+        let ownership_ties = ["--die-with-parent", "--info-fd", info.as_str()];
         assert_eq!(
             kept.iter()
                 .filter(|a| !ownership_ties.contains(&a.as_str()))

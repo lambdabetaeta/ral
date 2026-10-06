@@ -5,8 +5,7 @@
 //! domain handling any fs right forbids `mount(2)`, bwrap's first act.  Its
 //! admits are opened by the parent, in the host, never through a symlink
 //! ([`open_admits`]); the payload inherits them as fds from
-//! [`ADMIT_FD_BASE`](super::super::warrant::ADMIT_FD_BASE), its warrant
-//! counting them.
+//! [`ADMIT_FD_BASE`], its warrant counting them.
 //!
 //! Declared gap: Landlock is allow-list only and cannot remove part of an
 //! allowed directory, so denies and vetoes render nothing here — a deny
@@ -14,12 +13,12 @@
 //! directory holds only at the in-process guard on Linux, where Seatbelt
 //! would carry it into the kernel.
 
-use super::super::warrant::ExecAdmits;
+use super::super::warrant::{ExecAdmits, Handoff};
 use crate::path::{Rendered, render_paths, render_real};
 use crate::types::{ExecProjection, ExecRule, SandboxProjection};
 use std::fmt;
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::OnceLock;
 
 /// A Landlock ABI level, as `landlock_create_ruleset` reports it.
@@ -305,6 +304,16 @@ pub(crate) fn open_admits(
     Ok((exec, fds))
 }
 
+/// The admits' run, above every [`Slot`](super::super::warrant::Slot).
+const ADMIT_FD_BASE: libc::c_int = 200;
+
+/// Lend each admit [`open_admits`] opened at its slot, from [`ADMIT_FD_BASE`].
+pub(crate) fn lend<'a>(admits: &'a [OwnedFd], handoff: &mut Handoff<'a>) {
+    for (fd, at) in admits.iter().zip(ADMIT_FD_BASE..) {
+        handoff.lend_at(at, fd.as_fd());
+    }
+}
+
 /// The refusal for an exec-restricting grant on a kernel without Landlock,
 /// `None` for any other pairing.
 fn unenforceable(exec: &ExecProjection, landlock: Landlock) -> Option<String> {
@@ -324,7 +333,7 @@ fn inherited(n: usize) -> Result<Vec<OwnedFd>, String> {
         .map(|i| {
             let fd = libc::c_int::try_from(i)
                 .ok()
-                .and_then(|i| super::super::warrant::ADMIT_FD_BASE.checked_add(i))
+                .and_then(|i| ADMIT_FD_BASE.checked_add(i))
                 .ok_or("landlock: too many exec admits to inherit")?;
             // SAFETY: open, by F_GETFD, and owned by nothing else in this
             // process: the parent installed it for this call alone.
