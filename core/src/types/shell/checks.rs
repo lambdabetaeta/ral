@@ -88,13 +88,14 @@ impl Shell {
     /// followed.  Every write in ral comes through here.
     ///
     /// # Errors
-    /// The walk's I/O error, phrased with the name as written; or the
-    /// grant's refusal.
+    /// The walk's I/O error, phrased with the name as written; the grant's
+    /// refusal; or the refusal of a reserved device name.
     pub fn locate(
         &mut self,
         path: &crate::path::ResolvedPath,
         op: &FsOp,
     ) -> Settled<crate::path::Located> {
+        crate::capability::check_device_name(path)?;
         let located = crate::path::walk::walk(path, Leaf::Resolve).map_err(|e| {
             let name = path.display();
             let msg = match e.kind() {
@@ -122,13 +123,15 @@ impl Shell {
     /// not exist would leak the difference by reading as merely absent.
     ///
     /// # Errors
-    /// The grant's refusal, on the object or on the name.
+    /// The grant's refusal, on the object or on the name; or the refusal of a
+    /// reserved device name.
     pub(crate) fn locate_existing(
         &mut self,
         path: &crate::path::ResolvedPath,
         op: &FsOp,
         leaf: Leaf,
     ) -> Settled<Option<crate::path::Located>> {
+        crate::capability::check_device_name(path)?;
         let Ok(located) = crate::path::walk::walk(path, leaf) else {
             self.audit_call(|ctx, audit, site| {
                 crate::capability::check_fs_op(ctx, path, op, audit, site)

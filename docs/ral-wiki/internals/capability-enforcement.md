@@ -70,7 +70,14 @@ never letting the kernel follow a symlink, splicing each link it meets into
 the remaining name itself — a `..` is the kernel's, physical, climbing out
 of a link's target rather than its place, and on macOS each component is
 spelled as the directory stores it, so a case-variant name meets the deny
-frozen under its stored spelling — and
+frozen under its stored spelling, and on Windows a `~`-bearing name is
+renamed by the kernel through an attribute-only handle, so an 8.3 alias
+meets the deny frozen under its long one; stored spellings cover *existing*
+names, and the deny relation covers absent ones: a deny region
+(`PrefixSet<Deny>`) holds a path whose components agree with it under
+`lex::collision_key`, so a create spelled `.ENV` meets an absent
+`deny: [cwd:/.env]`, and the refusal says it was caught by another spelling
+([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]) — and
 judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
 canonical by construction). The `Located` then performs the open, stat,
 staging, rename and unlink relative to the directory handle with
@@ -80,7 +87,7 @@ followed. `check_fs_write` no longer exists — every write is a `locate`.
 
 **A command head is judged by the program it will run.** `Head::resolve`
 (`runtime/command/head.rs`) finds a `Program` once — a bundled `Tool`, or a
-host `File` with the path the launcher runs and its real path — and
+host `File` with its spelling and its real path — and
 `ExecRules::verdict` judges it, the one function that does
 ([[decisions/261004_exec-rules|exec-rules]]). A path key matches the real
 path by equality and a directory by containment, the deepest deciding; a bare
@@ -88,6 +95,16 @@ key is the file the host `PATH` finds, so a planted `/tmp/evil/rg` does not
 inherit `rg: allow`, and a bare deny also vetoes the name wherever it
 resolves, so it stops an absolute `/bin/bash` and a symlink to it alike. A
 head naming no file has no program: 127 or 126, never a denial.
+
+**ral runs the object it judged.** The launcher execs the `File`'s real path
+with the user's spelling as `argv[0]` (`Launch::arg0`; the warrant's `file`
+carries both), so a link retargeted between judgment and `execve` — by an
+earlier pipeline stage, say — cannot run another program. A renamed
+*ancestor* still can: closing that is a handle-based exec on Linux, which
+belongs to the envelope-by-handle plan
+(`dev/docs/plans/261005_linux-sandbox-by-handle.md`). A `#!` script reached
+through a link sees its real path as `$0`: the kernel hands the interpreter
+the exec path, not `argv[0]`.
 
 The limit is worth knowing rather than discovering: **a name veto is not a
 containment boundary.** A *copy* of a denied binary under another name is a
@@ -147,9 +164,14 @@ spawned process does on its own.**
   name within a rendered write name, so an alias's chain is pinned alongside
   its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
   One target is excused before either region is consulted: the *discard
-  device* — `/dev/null`, or `NUL` on Windows — which `ResolvedPath::is_discard`
-  names on either host, and which needs no authority because nothing reaches
-  the disk through it. `GrantStack::admits_fs` deliberately does not share the
+  device* — `/dev/null`, or `\\.\NUL` on Windows — which
+  `ResolvedPath::is_discard` names on either host, and which needs no
+  authority because nothing reaches the disk through it. Its Windows
+  neighbours are refused rather than excused: a path ending in a DOS reserved
+  device name (`C:\x\NUL`, `nul.txt`, `CON`, `COM1.log`) is no file ral will
+  open or judge, so the same door turns it away with an error before any
+  region is consulted (`check_device_name`). `GrantStack::admits_fs`
+  deliberately does not share the
   exemption: it decides *membership* in a region, and a device excused from an
   access is not thereby a member of anything. The same predicate settles
   whether the act is a fact at all ([[design/audit|audit]]). Its twin on the
@@ -220,14 +242,27 @@ deny that creates the very name it forbids
 ([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
 Under a read-only bind nothing is lost, creation being the only access an
 absent name has. Under a writable bind the deny falls to the in-process guard
-alone, which is a Linux seam and named as one: macOS's rules are negative and
-range over names, so Seatbelt enforces the same deny in full. The masks that do
-land refuse with `EACCES` against macOS's `EPERM`, so a cross-platform test
-should assert the bytes are unreachable rather than an errno — and because the
-failure modes here are a sandbox that never launches and a mount that lies,
-they are pinned by tests that spawn the envelope for real
+alone, which is a seam on Linux and Windows and named as one: macOS's rules are
+negative and range over names, so Seatbelt enforces the same deny in full. The
+masks that do land refuse with `EACCES` against macOS's `EPERM`, so a
+cross-platform test should assert the bytes are unreachable rather than an
+errno — and because the failure modes here are a sandbox that never launches
+and a mount that lies, they are pinned by tests that spawn the envelope for real
 (`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`,
 `::building_an_envelope_never_creates_a_denied_name_on_the_host`).
+
+**No mechanism holds an absent name under a writable prefix, and none was
+built.** Each way of refusing a child the creation of one name touches the
+host or refuses more than the name. A bwrap mask over an absent name makes its
+mountpoint on the host, and if the host later unlinks it the mask lazily
+unmounts; a tmpfs over the parent hides the rest of the directory; Landlock
+refuses creation per directory, never per name; fanotify permission events need
+privilege; seccomp cannot read a path argument; and a Windows ACE attaches to an
+object, of which the name has none. What remains is the stated residual: the
+in-process guard refuses ral's own creation, a child may make the name for that
+launch, and the next launch finds an object to mask or stamp
+(`docs/SPEC.md` §12.3); macOS's end of the pair is
+`capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix`.
 
 **Where the host refuses bwrap a mount, the envelope rebuilds what the mount
 would have provided.** A rootless container's mount layer will not hand bwrap a
@@ -237,13 +272,13 @@ fresh procfs a pid namespace needs. `HostEnvelope` learns both with one probe
 spawn each (`sandbox/linux/host.rs`): `render_dev` lays out `--dev`'s own shape
 by hand where it must — a tmpfs, the device nodes bound in, the `pts/ptmx`
 symlink, a fresh `/dev/shm` — and `--unshare-pid` is emitted only where the
-table can be hidden. What cannot be rebuilt is reported, not refused: neither
-is a restriction a grant names, so `RAL_DUMP_SANDBOX_PROFILE` prints the
-`HostEnvelope` naming each unheld invariant, its cause and the flag that lifts
-it, and the child sees what it would have seen unconfined — the container's
-own table, the host's `/dev/pts` ([[design/two-enforcers|two-enforcers]]). The
-render is a pure function of the probed `HostEnvelope`, so the argv tests
-assert both shapes from literals rather than from whichever host runs them.
+table can be hidden. What cannot be rebuilt is stated, not refused: neither
+is a restriction a grant names, so the launch runs and the child sees what it
+would have seen unconfined — the container's own table, the host's `/dev/pts`
+([[design/two-enforcers|two-enforcers]]); running the container `--privileged`
+lifts both. The render is a pure function of the probed `HostEnvelope`, so
+the argv tests assert both shapes from literals rather than from whichever
+host runs them.
 Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
 and `/etc/resolv.conf`, which remains open.
 
@@ -261,7 +296,7 @@ tree reads the root's limits, which are none. `render_cgroup` re-roots the tree
 on ral's own cgroup — the namespace's root, what a fresh cgroup2 mount inside it
 would show — on both projections, over the projection's binds; where the host
 builds no cgroup namespace (`HostEnvelope::private_cgroup`) the host's tree is
-the true one and is bound as it is, and the dump says so
+the true one and is bound as it is
 ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 Pinned by `sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
 and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
@@ -281,11 +316,12 @@ pinned inode — the one change a pin by descriptor cannot see — is closed on
 both sides of the dispatch boundary: for a confined child by the envelope
 itself, `bwrap_options` read-only binding the envelope's own file
 after the projection's binds, `/` wholesale under `Unrestricted` included, and
-before the masks, the Linux twin of macOS's `freeze_admitted_set`; for ral's
+before the masks, the Linux twin of the write-deny macOS lays on ral's own
+file in every profile (`build_profile`; [[internals/seatbelt-profile|seatbelt-profile]]); for ral's
 own writes by the `Guarded` verdict above. What stays open is another same-uid
 process, and any session after this one — a session cannot vet the enforcer it
-boots on — so where the pinned bwrap is writable by ral's uid the profile dump
-says so and names the remedy, a root-owned bwrap. A host with no bwrap to pin
+boots on — so where the pinned bwrap is writable by ral's uid a root-owned bwrap
+(the distro package) is the remedy. A host with no bwrap to pin
 is reported by `linux::envelope` at the first launch that needs it, through
 `confinement_unavailable`; `Launch::envelope` names the binary for a spawn
 failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
@@ -322,10 +358,10 @@ child:
   terminal, and a pipeline collector addresses each confined stage's envelope
   beside its own group ([[internals/pipeline-execution|pipeline execution]]);
 - *macOS* re-execs a tiny launcher, `ral --warrant`: the Seatbelt profile,
-  compiled in the parent, and the program to become — a host file, the absolute
-  path the guard judged, or a bundled tool — arrive in its warrant, and
-  `serve_warrant` enters Seatbelt from the profile alone and then `execve`s
-  exactly that path;
+  compiled in the parent, and the program to become — a host file, by the real
+  path the guard judged and under its spelling as `argv[0]`, or a bundled tool —
+  arrive in its warrant, and `serve_warrant` enters Seatbelt from the profile
+  alone and then `execve`s exactly that file;
 - *Windows* attaches the projection's AppContainer LowBox
   `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
   (`windows::session::confine`), so the parent's spawn is the confinement

@@ -12,6 +12,8 @@ pub(crate) use signature::{PreludeMap, Signature, lookup};
 pub use shell::repl::{PluginEntry, ReplScratch};
 
 mod capability;
+#[cfg(target_os = "macos")]
+pub(crate) use capability::WriteReach;
 pub(crate) use capability::meet_insert;
 pub use capability::{
     Capabilities, EditorPolicy, ExecGrant, ExecProjection, ExecRule, FsPolicy, FsProjection,

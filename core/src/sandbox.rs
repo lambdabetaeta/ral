@@ -17,6 +17,8 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod carriers;
 mod diag;
+#[cfg(target_os = "macos")]
+mod fork_brake;
 mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -41,6 +43,8 @@ use std::process::Command;
 pub(crate) use carriers::carriers;
 pub use launch::serve_warrant;
 pub(crate) use launch::{Ownership, sandboxed_command};
+#[cfg(target_os = "macos")]
+pub use macos::ALREADY_PROFILED;
 
 // Called by the command runners on a failure that ran under an active OS
 // sandbox, to attach a hint naming the denied path.
@@ -119,95 +123,15 @@ pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
 /// The confined re-exec's whole argv, its warrant arriving on a descriptor.
 pub(crate) const WARRANT_FLAG: &str = "--warrant";
 
-/// Debug switch: set to any value to make [`dump_profile`] print the
-/// OS-sandbox profile that would be installed.
-pub(crate) const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
-
-/// Print the OS-sandbox profile for `policy` to stderr when
-/// [`SANDBOX_DUMP_PROFILE_ENV`] is set.
-// A presence probe on a debug switch, not a basedir lookup.
-#[allow(clippy::disallowed_methods)]
-pub fn dump_profile(policy: &crate::types::SandboxProjection) {
-    if std::env::var_os(SANDBOX_DUMP_PROFILE_ENV).is_none() {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        match macos::build_profile(policy) {
-            Ok(profile) => {
-                eprintln!("--- seatbelt profile ---\n{profile}\n--- end seatbelt profile ---");
-            }
-            Err(e) => eprintln!("--- seatbelt profile error ---\n{e}"),
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let envelope = match linux::envelope() {
-            Ok(envelope) => envelope,
-            Err(why) => {
-                eprintln!("--- bwrap argv error ---\n{why}");
-                return;
-            }
-        };
-        let host = linux::HostEnvelope::probe(envelope);
-        let payload = linux::Payload {
-            program: "/bin/true",
-            args: &[],
-            image: None,
-            handoff: &[],
-        };
-        let options = linux::seccomp_programs().and_then(|seccomp| {
-            linux::bwrap_options(
-                envelope,
-                payload,
-                policy,
-                &seccomp,
-                None,
-                launch::Ownership::Kept,
-                host,
-            )
-        });
-        match options {
-            Ok(options) => {
-                let options: Vec<_> = options.iter().map(|arg| arg.to_string_lossy()).collect();
-                eprint!(
-                    "--- bwrap argv ---\n{} --args {} -- {}\n--- bwrap --args ---\n{}\n\
-                     --- host envelope ---\n{host}",
-                    envelope.arg0().display(),
-                    warrant::ARGS_FD,
-                    payload.program,
-                    options.join(" "),
-                );
-                if envelope.writable_by_us() {
-                    eprintln!(
-                        "envelope writable by this uid: {} — any process running as you can \
-                         rewrite it between launches; ral refuses its own writes and cannot \
-                         see another's.  Lifted by a root-owned bwrap (the distro package).",
-                        envelope.arg0().display()
-                    );
-                }
-                eprintln!("--- end bwrap argv ---");
-            }
-            Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
-        }
-        linux::landlock::dump(policy, host.landlock);
-        linux::seccomp::dump();
-    }
-    #[cfg(windows)]
-    {
-        let dump = windows::dump_profile_for_windows(policy);
-        eprintln!("--- appcontainer profile ---\n{dump}--- end appcontainer profile ---");
-    }
-}
-
-/// Live-process ceiling on a grant-confined child's Job Object: fork-bomb cap.
-#[cfg(windows)]
+/// How many live processes a grant-confined child may add: the fork-bomb cap.
+/// A Job Object limit on Windows; on macOS, headroom over the user's count at launch.
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 
 /// Assign OS-level resource limits to an already-spawned child.
 ///
 /// Windows only: a Job Object caps the tree at `ACTIVE_PROCESS_CAP` after the
-/// spawn.  On Unix `forbid_core_dumps` ran before exec, and this is a no-op.
+/// spawn.  On Unix `limit_resources` ran before exec, and this is a no-op.
 #[cfg_attr(
     not(windows),
     allow(
@@ -392,20 +316,38 @@ pub fn serve_pre_main(
     }
 }
 
-/// Forbid `cmd`'s child core dumps: a `pre_exec` hook zeroes `RLIMIT_CORE`.
-/// No process cap: `RLIMIT_NPROC` counts every task of the real UID, not the
-/// confined subtree, so any cap low enough to stop a fork bomb starves a busy
-/// desktop session of spawn slots (`EAGAIN`).
+/// Limit `cmd`'s child resources in one `pre_exec`: no core dumps and, on
+/// macOS, a fork brake.  Darwin counts processes per real UID but compares the
+/// count with the *forking* process's own `RLIMIT_NPROC`, so lowering it in the
+/// child refuses its descendants' forks and no other process of the user's.
+/// The budget is measured here, in the parent: the hook itself only calls
+/// `setrlimit`.
 #[cfg(unix)]
-pub(crate) fn forbid_core_dumps(cmd: &mut Command) {
+pub(crate) fn limit_resources(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
+    #[cfg(target_os = "macos")]
+    let nproc = fork_brake::limit()
+        .inspect_err(|e| {
+            crate::diagnostic::shell_warning(&format!(
+                "could not count your processes ({e}), so this command has no process budget"
+            ));
+        })
+        .ok();
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let zero = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
             libc::setrlimit(libc::RLIMIT_CORE, &raw const zero);
+            #[cfg(target_os = "macos")]
+            if let Some(limit) = nproc {
+                let cap = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                libc::setrlimit(libc::RLIMIT_NPROC, &raw const cap);
+            }
             Ok(())
         });
     }

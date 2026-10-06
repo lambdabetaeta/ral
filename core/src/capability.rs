@@ -18,10 +18,10 @@ mod sandbox;
 pub use decode::decode_capability_map;
 pub use deputy::deputy_prefixes;
 pub(crate) use enforce::{
-    Admitted, admits_head, check_editor_read, check_editor_tui, check_editor_write, check_exec,
-    check_fs_exact, check_fs_op, check_shell_chdir,
+    Admitted, admits_head, check_device_name, check_editor_read, check_editor_tui,
+    check_editor_write, check_exec, check_fs_exact, check_fs_op, check_shell_chdir, exec_respelled,
 };
-pub(crate) use exec::{Program, WINDOWS_EXEC_EXTENSIONS};
+pub(crate) use exec::Program;
 pub use fs::FsOp;
 pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};
 pub(crate) use sandbox::sandbox_projection;

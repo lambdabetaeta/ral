@@ -3,10 +3,10 @@
 //! Decode leaves each layer an authored [`ExecGrant`];
 //! [`ExecRules::compile`] turns it into rules over host files, bundled tools,
 //! directories and vetoed names, and [`ExecRules::verdict`] is the one
-//! function that judges a [`Program`].  A stack's authority is the pointwise
-//! meet of its layers' tables, compiled afresh on every question.
+//! function that judges a [`Program`].  A stack's authority is the meet of
+//! its layers' tables, compiled afresh on every question.
 
-use crate::path::{RealPath, SearchCwd};
+use crate::path::{Allow, Deny, RealPath, SearchCwd, command_name_key};
 use crate::types::{ExecGrant, ExecRule, GrantStack, Meet, Verdict, meet_insert};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,7 +17,8 @@ use std::path::PathBuf;
 pub(crate) enum Program {
     /// A bundled tool, run as ral itself.
     Tool(String),
-    /// A host file: `path` is what the launcher runs, `real` is `realpath(path)`.
+    /// A host file: `real` is `realpath(path)`, judged and run; `path` is the
+    /// spelling, which the program sees as `argv[0]`.
     File { path: PathBuf, real: RealPath },
 }
 
@@ -72,7 +73,7 @@ pub(crate) struct ExecRules {
     files: BTreeMap<RealPath, Verdict>,
     tools: BTreeMap<String, Verdict>,
     dirs: BTreeMap<RealPath, bool>,
-    /// The [`name_key`] of every bare deny.
+    /// The [`command_name_key`] of every bare deny.
     vetoes: BTreeSet<String>,
 }
 
@@ -84,7 +85,7 @@ impl Extend<Rule> for ExecRules {
                 Rule::Tool(name, v) => meet_insert(&mut self.tools, name, v),
                 Rule::Dir(real, v) => meet_insert(&mut self.dirs, real, v),
                 Rule::Veto(name) => {
-                    self.vetoes.insert(name_key(&name).into_owned());
+                    self.vetoes.insert(command_name_key(&name));
                 }
             }
         }
@@ -132,23 +133,60 @@ impl ExecRules {
 
     /// Every rule that speaks to `subject`, ranked.
     fn matching<'s>(&'s self, subject: Subject<'s>) -> impl Iterator<Item = (Rank, Verdict)> + 's {
-        let (name, exact, real) = match subject {
+        let (name, tool, real) = match subject {
             Subject::Tool(name) => (Cow::Borrowed(name), self.tools.get(name), None),
-            Subject::File(real) => (real.name(), self.files.get(real), Some(real)),
+            Subject::File(real) => (real.name(), None, Some(real)),
         };
-        let veto = self.vetoes.contains(name_key(&name).as_ref());
-        let dirs = real.into_iter().flat_map(move |real| self.covering(real));
+        let veto = self.vetoes.contains(&command_name_key(&name));
+        let paths = real.into_iter().flat_map(move |real| {
+            let exact = self.exact(real).map(|(_, v)| (Rank::Exact, v.clone()));
+            exact.chain(self.covering(real))
+        });
         veto.then_some((Rank::Veto, Verdict::Deny))
             .into_iter()
-            .chain(exact.map(|v| (Rank::Exact, v.clone())))
-            .chain(dirs)
+            .chain(tool.map(|v| (Rank::Exact, v.clone())))
+            .chain(paths)
+    }
+
+    /// The dir rules that hold `real`, as their polarity reads names.
+    fn dirs_over<'s>(&'s self, real: &'s RealPath) -> impl Iterator<Item = (&'s RealPath, bool)> {
+        (self.dirs.iter())
+            .filter(move |(dir, allow)| holds(**allow, real, dir))
+            .map(|(dir, allow)| (dir, *allow))
+    }
+
+    /// The file rules that name `real`, as their polarity reads names.
+    fn exact<'s>(
+        &'s self,
+        real: &'s RealPath,
+    ) -> impl Iterator<Item = (&'s RealPath, &'s Verdict)> {
+        (self.files.iter()).filter(move |(file, v)| names(!v.is_denied(), real, file))
     }
 
     fn covering<'s>(&'s self, real: &'s RealPath) -> impl Iterator<Item = (Rank, Verdict)> + 's {
-        self.dirs
-            .iter()
-            .filter(move |(dir, _)| real.within(dir))
-            .map(|(dir, allow)| (Rank::Dir(dir.depth()), Verdict::from(*allow)))
+        (self.dirs_over(real)).map(|(dir, allow)| (Rank::Dir(dir.depth()), Verdict::from(allow)))
+    }
+
+    /// A deny that holds `subject` under another spelling of its name, for a
+    /// refusal to name; none when a veto or a deny holds it as stored.
+    pub(crate) fn respelled<'s>(&'s self, subject: Subject<'s>) -> Option<&'s RealPath> {
+        let Subject::File(real) = subject else {
+            return None;
+        };
+        if self.vetoes.contains(&command_name_key(&real.name())) {
+            return None;
+        }
+        let files = (self.exact(real))
+            .filter(|(_, v)| v.is_denied())
+            .map(|(file, _)| (file, names(true, real, file)));
+        let dirs = (self.dirs_over(real))
+            .filter(|(_, allow)| !allow)
+            .map(|(dir, _)| (dir, holds(true, real, dir)));
+        (files.chain(dirs))
+            .try_fold(None, |found, (deny, stored)| {
+                (!stored).then(|| found.or(Some(deny)))
+            })
+            .flatten()
     }
 
     /// What the dirs alone say of `real` — a dir covers itself.
@@ -209,6 +247,21 @@ impl ExecRules {
     }
 }
 
+/// Whether `path` lies within `key` as a rule reads names: an allow as
+/// stored, a deny under every spelling.
+fn holds(admits: bool, path: &RealPath, key: &RealPath) -> bool {
+    if admits {
+        path.within::<Allow>(key)
+    } else {
+        path.within::<Deny>(key)
+    }
+}
+
+/// Whether `path` and `key` name one file as a rule reads names.
+fn names(admits: bool, path: &RealPath, key: &RealPath) -> bool {
+    holds(admits, path, key) && holds(admits, key, path)
+}
+
 /// The greatest rank decides; equal ranks meet.
 fn most_specific(candidates: impl IntoIterator<Item = (Rank, Verdict)>) -> Option<Verdict> {
     candidates
@@ -221,13 +274,22 @@ fn most_specific(candidates: impl IntoIterator<Item = (Rank, Verdict)>) -> Optio
         .map(|(_, v)| v)
 }
 
-/// The meet of two finite-support functions: the union of their supports,
-/// each point met.
-fn pointwise<'k, K: Ord + Clone + 'k, V>(
-    keys: impl Iterator<Item = &'k K>,
+/// Allows meet and denies join: every key of either side is met at its
+/// verdict, and a key met to Deny survives only where a layer wrote the deny.
+/// A deny holds every spelling of its name; a default must not be written as
+/// one.
+fn met<K: Ord + Clone, V: Clone>(
+    a: &BTreeMap<K, V>,
+    b: &BTreeMap<K, V>,
     at: impl Fn(&K) -> V,
+    denies: impl Fn(&V) -> bool,
 ) -> BTreeMap<K, V> {
-    keys.map(|k| (k.clone(), at(k))).collect()
+    (a.iter().chain(b))
+        .filter_map(|(k, written)| {
+            let v = at(k);
+            (!denies(&v) || denies(written)).then(|| (k.clone(), v))
+        })
+        .collect()
 }
 
 /// `verdict(a ∧ b, p) == verdict(a, p) ∧ verdict(b, p)` for every program `p`.
@@ -236,15 +298,24 @@ impl Meet for ExecRules {
         let (a, b) = (&self, &other);
         let at = |s: Subject<'_>| a.verdict(s).meet(b.verdict(s));
         Self {
-            files: pointwise(a.files.keys().chain(b.files.keys()), |k| {
-                at(Subject::File(k))
-            }),
-            tools: pointwise(a.tools.keys().chain(b.tools.keys()), |k| {
-                at(Subject::Tool(k))
-            }),
-            dirs: pointwise(a.dirs.keys().chain(b.dirs.keys()), |k| {
-                !a.dir_verdict(k).meet(b.dir_verdict(k)).is_denied()
-            }),
+            files: met(
+                &a.files,
+                &b.files,
+                |k| at(Subject::File(k)),
+                Verdict::is_denied,
+            ),
+            tools: met(
+                &a.tools,
+                &b.tools,
+                |k| at(Subject::Tool(k)),
+                Verdict::is_denied,
+            ),
+            dirs: met(
+                &a.dirs,
+                &b.dirs,
+                |k| !a.dir_verdict(k).meet(b.dir_verdict(k)).is_denied(),
+                |allow| !allow,
+            ),
             vetoes: &a.vetoes | &b.vetoes,
         }
     }
@@ -255,30 +326,6 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
     grants.exec().map(ExecRules::compile).reduce(Meet::meet)
 }
 
-/// The extensions Windows runs a bare name through.  `.bat` and `.cmd` belong
-/// here even though `process::launch` refuses to spawn them: that is a later
-/// refusal of the image, not of the name.
-pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
-
-/// A command name as the host identifies it.
-fn name_key(name: &str) -> Cow<'_, str> {
-    name_key_on(name, cfg!(windows))
-}
-
-/// Off Windows the name itself; on Windows ASCII lower-case, a trailing
-/// executable extension stripped.  `windows` is a parameter so the Windows
-/// rule is tested on every host.
-fn name_key_on(name: &str, windows: bool) -> Cow<'_, str> {
-    if !windows {
-        return Cow::Borrowed(name);
-    }
-    let lower = name.to_ascii_lowercase();
-    match lower.rsplit_once('.') {
-        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.contains(&ext) => Cow::Owned(stem.to_string()),
-        _ => Cow::Owned(lower),
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -287,38 +334,6 @@ fn name_key_on(name: &str, windows: bool) -> Cow<'_, str> {
 mod tests {
     use super::*;
     use crate::path::{Namespace, NormalizedPrefix};
-
-    /// `which.rs`'s `%PATHEXT%` fallback and the name-key strip list are twin
-    /// copies of one fact; they may only drift together.
-    #[cfg(windows)]
-    #[test]
-    fn name_key_extensions_agree_with_the_resolver_default_pathext() {
-        let from_pathext: Vec<String> = crate::path::which::DEFAULT_PATHEXT
-            .split(';')
-            .map(|e| e.trim_start_matches('.').to_lowercase())
-            .collect();
-        let from_name_key: Vec<String> = WINDOWS_EXEC_EXTENSIONS
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(from_pathext, from_name_key);
-    }
-
-    #[test]
-    fn name_key_off_windows_is_the_name() {
-        assert_eq!(name_key_on("Git.exe", false), "Git.exe");
-    }
-
-    #[test]
-    fn windows_name_key_folds_case_and_strips_an_executable_extension() {
-        for name in [
-            "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
-        ] {
-            assert_eq!(name_key_on(name, true), "git", "{name}");
-        }
-        assert_eq!(name_key_on("git.tool", true), "git.tool");
-        assert_eq!(name_key_on("gitk.exe", true), "gitk");
-    }
 
     #[test]
     fn rank_is_precedence() {
@@ -415,6 +430,126 @@ mod tests {
         assert_eq!(of_file(&a.meet(b), "/a/b/c/x"), Verdict::Deny);
     }
 
+    /// U1: a key one layer never mentioned is not written down as a deny,
+    /// which would hold every spelling of it.
+    #[test]
+    fn the_meet_writes_no_default_as_a_deny() {
+        let a: ExecRules = std::iter::once(dir("/a/B", true)).collect();
+        let b: ExecRules = [dir("/a/B", true), dir("/a/b", true)].into_iter().collect();
+        let met = a.meet(b);
+        assert_eq!(of_file(&met, "/a/B/x"), Verdict::Allow);
+        if cfg!(not(windows)) {
+            assert_eq!(of_file(&met, "/a/b/x"), Verdict::Deny);
+        }
+        let a: ExecRules = std::iter::once(file("/x/T", Verdict::Allow)).collect();
+        let b: ExecRules = [file("/x/T", Verdict::Allow), file("/x/t", Verdict::Allow)]
+            .into_iter()
+            .collect();
+        let met = a.meet(b);
+        assert_eq!(of_file(&met, "/x/T"), Verdict::Allow);
+        if cfg!(not(windows)) {
+            assert_eq!(of_file(&met, "/x/t"), Verdict::Deny);
+        }
+    }
+
+    fn speaks(rule: Rule, p: &str) -> bool {
+        let table: ExecRules = std::iter::once(rule).collect();
+        table.matching(Subject::File(&real(p))).next().is_some()
+    }
+
+    /// U2: a deny holds every spelling of its name, an allow its own.
+    #[test]
+    fn a_deny_holds_every_spelling_and_an_allow_its_own() {
+        let (nfc, nfd) = ("/x/caf\u{e9}", "/x/cafe\u{301}");
+        assert!(speaks(dir("/x/Evil", false), "/x/evil/t"));
+        assert!(!speaks(dir("/x/Evil", false), "/x/evilx/t"));
+        assert!(speaks(dir("/x/Evil", true), "/x/Evil/t"));
+        assert!(speaks(file("/x/Tool", Verdict::Deny), "/x/tool"));
+        assert!(speaks(file("/x/Tool", Verdict::Allow), "/x/Tool"));
+        assert!(speaks(dir(nfc, false), &format!("{nfd}/t")));
+        assert!(!speaks(dir(nfc, true), &format!("{nfd}/t")));
+        assert!(speaks(file(nfc, Verdict::Deny), nfd));
+        assert!(!speaks(file(nfc, Verdict::Allow), nfd));
+        if cfg!(not(windows)) {
+            assert!(!speaks(dir("/x/Evil", true), "/x/evil/t"));
+            assert!(!speaks(file("/x/Tool", Verdict::Allow), "/x/tool"));
+        }
+    }
+
+    /// U3: a folded match ranks as a stored one; ties meet, and the deeper
+    /// rule or an exact one still wins.
+    #[test]
+    fn a_folded_match_ranks_as_a_stored_one() {
+        let tools: ExecRules = [dir("/x/Tools", true), dir("/x/tools/evil", false)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&tools, "/x/Tools/evil/t"), Verdict::Deny);
+        assert_eq!(of_file(&tools, "/x/Tools/good/t"), Verdict::Allow);
+        assert_eq!(of_file(&tools, "/x/tools/evil/t"), Verdict::Deny);
+
+        let tie: ExecRules = [dir("/x/b", true), dir("/x/B", false)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&tie, "/x/b/t"), Verdict::Deny);
+
+        let exact: ExecRules = [dir("/x/B", false), file("/x/b/tool", Verdict::Allow)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&exact, "/x/b/tool"), Verdict::Allow);
+        assert_eq!(of_file(&exact, "/x/b/other"), Verdict::Deny);
+
+        let deeper: ExecRules = [dir("/x/B", false), dir("/x/b/sub", true)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&deeper, "/x/b/sub/t"), Verdict::Allow);
+
+        let files: ExecRules = [
+            file("/x/tool", Verdict::Allow),
+            file("/x/Tool", Verdict::Deny),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(of_file(&files, "/x/tool"), Verdict::Deny);
+
+        let a: ExecRules = [dir("/a", true), dir("/a/B", false)].into_iter().collect();
+        let b: ExecRules = [dir("/a/b", true), dir("/a/c", true)].into_iter().collect();
+        let met = a.meet(b);
+        assert_eq!(of_file(&met, "/a/b/x"), Verdict::Deny);
+        assert_eq!(of_file(&met, "/a/c/x"), Verdict::Allow);
+    }
+
+    /// A respelling is named only when no deny holds the program as stored,
+    /// though the deepest deny holds it only by a fold.
+    #[test]
+    fn a_respelling_is_named_only_when_no_deny_holds_the_stored_name() {
+        let program = real("/x/evil/t");
+        let folded: ExecRules = [dir("/", true), dir("/x/Evil", false)]
+            .into_iter()
+            .collect();
+        if cfg!(not(windows)) {
+            assert_eq!(
+                folded.respelled(Subject::File(&program)),
+                Some(&real("/x/Evil"))
+            );
+        }
+        let both: ExecRules = [dir("/", true), dir("/x", false), dir("/x/Evil", false)]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&both, "/x/evil/t"), Verdict::Deny);
+        assert_eq!(both.respelled(Subject::File(&program)), None);
+    }
+
+    /// U7: a veto holds every spelling of the name.
+    #[test]
+    fn a_veto_holds_every_spelling_of_the_name() {
+        let rules: ExecRules = [dir("/x", true), Rule::Veto("sh".into())]
+            .into_iter()
+            .collect();
+        assert_eq!(of_file(&rules, "/x/SH"), Verdict::Deny);
+        assert_eq!(of_file(&rules, "/x/\u{17f}h"), Verdict::Deny);
+        assert_eq!(of_file(&rules, "/x/shx"), Verdict::Allow);
+    }
+
     /// A tiny xorshift: deterministic and dependency-free.
     struct Rng(usize);
 
@@ -431,8 +566,10 @@ mod tests {
         }
     }
 
-    const DIRS: [&str; 4] = ["/a", "/a/b", "/a/b/c", "/z"];
-    const FILES: [&str; 7] = [
+    /// Case pairs and an NFC/NFD pair, so the universe holds names one
+    /// filesystem keeps apart and another merges.
+    const DIRS: [&str; 7] = ["/a", "/a/b", "/a/b/c", "/z", "/A", "/a/B", "/a/b/C"];
+    const FILES: [&str; 12] = [
         "/a/x",
         "/a/b/x",
         "/a/b/c/x",
@@ -440,9 +577,15 @@ mod tests {
         "/z/x",
         "/q/x",
         "/a/b/sh",
+        "/a/X",
+        "/a/B/x",
+        "/a/b/c/X",
+        "/a/caf\u{e9}",
+        "/a/cafe\u{301}",
     ];
+    const PROBES: [&str; 2] = ["/a/b/X", "/A/B/C/x"];
     const TOOLS: [&str; 2] = ["ls", "rm"];
-    const NAMES: [&str; 3] = ["x", "sh", "rm"];
+    const NAMES: [&str; 4] = ["x", "sh", "rm", "X"];
 
     fn verdicts() -> [Verdict; 4] {
         let only = |subs: &[&str]| Verdict::Only(subs.iter().map(ToString::to_string).collect());
@@ -483,7 +626,9 @@ mod tests {
     #[test]
     fn the_meet_of_two_tables_judges_as_the_meet_of_their_verdicts() {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        let files: Vec<RealPath> = FILES.iter().chain(&DIRS).map(|p| real(p)).collect();
+        let files: Vec<RealPath> = (FILES.iter().chain(&DIRS).chain(&PROBES))
+            .map(|p| real(p))
+            .collect();
         for _ in 0..2000 {
             let (a, b) = (table(&mut rng), table(&mut rng));
             let met = a.clone().meet(b.clone());
@@ -507,9 +652,9 @@ mod tests {
             .iter()
             .rev()
             .find_map(|rule| match rule {
-                ExecRule::Dir { path, allow } => real.within(path).then_some(*allow),
-                ExecRule::File { path, allow } => (real == path).then_some(*allow),
-                ExecRule::Veto(name) => (name_key(&real.name()) == name.as_str()).then_some(false),
+                ExecRule::Dir { path, allow } => holds(*allow, real, path).then_some(*allow),
+                ExecRule::File { path, allow } => names(*allow, real, path).then_some(*allow),
+                ExecRule::Veto(name) => (command_name_key(&real.name()) == *name).then_some(false),
             })
             .unwrap_or(false)
     }
@@ -517,7 +662,9 @@ mod tests {
     #[test]
     fn the_kernel_rules_judge_as_the_table_and_its_carriers() {
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
-        let files: Vec<RealPath> = FILES.iter().chain(&DIRS).map(|p| real(p)).collect();
+        let files: Vec<RealPath> = (FILES.iter().chain(&DIRS).chain(&PROBES))
+            .map(|p| real(p))
+            .collect();
         for _ in 0..2000 {
             let rules = table(&mut rng);
             let carriers: BTreeSet<RealPath> = files
@@ -527,9 +674,9 @@ mod tests {
                 .collect();
             let kernel = rules.kernel(&carriers);
             for f in &files {
-                let expected = if rules.vetoes.contains(name_key(&f.name()).as_ref()) {
+                let expected = if rules.vetoes.contains(&command_name_key(&f.name())) {
                     false
-                } else if rules.files.contains_key(f) {
+                } else if rules.exact(f).next().is_some() {
                     !rules.verdict(Subject::File(f)).is_denied()
                 } else {
                     carriers.contains(f) || !rules.dir_verdict(f).is_denied()

@@ -88,11 +88,14 @@ pub(crate) fn classify_command(
 fn refuse_head(shown: &str, program: &Program, mooring: &Mooring, shell: &mut Shell) -> Break {
     let fields = std::collections::BTreeMap::from([("name".to_string(), shown.to_string())]);
     audit::record_capability(shell, mooring, "exec", fields);
-    Error::new(
-        format!("command '{shown}' denied by active grant ({program})"),
-        1,
-    )
-    .with_hint("add the command to the grant exec map to allow it")
+    match crate::capability::exec_respelled(&shell.context, program) {
+        Some(why) => Error::new(why, 1),
+        None => Error::new(
+            format!("command '{shown}' denied by active grant ({program})"),
+            1,
+        )
+        .with_hint("add the command to the grant exec map to allow it"),
+    }
     .into()
 }
 

@@ -62,10 +62,11 @@
 ;; libdispatch, on first queue creation — a POSIX shm name, not Mach.
 (allow ipc-posix-shm (ipc-posix-name "apple.shm.notification_center"))
 
-;; Unfiltered, as in every macOS build sandbox: an ioctl acts on a
-;; descriptor already held, and the device nodes the dangerous ones need
-;; cannot be opened here.  The open-time gate is the boundary.
+;; Unfiltered: a full-screen child needs `tcsetattr`, which `file-ioctl`
+;; gates.  Keystroke injection is Seatbelt's `hid-control`, never allowed
+;; here; the deny keeps TIOCSTI refused should that gate move.
 (allow file-ioctl)
+(deny file-ioctl (ioctl-command TIOCSTI))
 
 ;; CoreFoundation and libdispatch, during framework init.
 (allow ipc-posix-shm)

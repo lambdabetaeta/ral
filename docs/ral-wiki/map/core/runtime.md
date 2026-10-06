@@ -51,7 +51,8 @@ closures, so the mutual recursion is irreducible; the evaluator reaches it at
     disagree and a missing command never reaches the in-process guard
     ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]). A path
     head is anchored at the launch cwd with only `.` folded, so the guard
-    judges the file the kernel will reach and the launcher runs that very path
+    judges the file the kernel will reach and the launcher runs that very file,
+    by its real path, under the spelling as `argv[0]`
     ([[decisions/261004_exec-rules|exec-rules]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument through `RefusedArg::of_value`

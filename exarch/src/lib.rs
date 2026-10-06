@@ -169,18 +169,6 @@ pub fn run() -> Result<(), String> {
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
-    // A throwaway shell carrying the same grants, only so
-    // `RAL_DUMP_SANDBOX_PROFILE` can print the profile an external child would
-    // be sandboxed under.
-    {
-        let mut probe = ral_core::Shell::new(ral_core::io::TerminalState::default());
-        for layer in &caps {
-            probe.push_session_capabilities(layer.clone());
-        }
-        if let Some(projection) = probe.sandbox_projection() {
-            ral_core::sandbox::dump_profile(&projection);
-        }
-    }
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );

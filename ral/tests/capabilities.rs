@@ -27,6 +27,32 @@ fn ral(args: &[&str]) -> common::Output {
     }
 }
 
+/// Whether `out` is the refusal a confined runner gives a launch that must
+/// enter Seatbelt: one profile per lineage, so the launch cannot run.  The
+/// refusal then stands in for the run, asserted exactly, so any other failure
+/// to enter still fails.
+#[cfg(target_os = "macos")]
+fn refused_by_a_confined_runner(out: &common::Output) -> bool {
+    use ral_core::sandbox::ALREADY_PROFILED;
+    const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
+    let Some(reason) = out
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
+    else {
+        return false;
+    };
+    assert_eq!(reason, ALREADY_PROFILED, "the refusal is not attributed");
+    assert_eq!(out.status, 126, "a refused launch exits 126");
+    eprintln!("skip: this runner is inside a Seatbelt profile; asserted the attributed refusal");
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refused_by_a_confined_runner(_: &common::Output) -> bool {
+    false
+}
+
 fn write_profile(suffix: &str, body: &str) -> std::path::PathBuf {
     let path = common::fresh_tmp_path(&format!("caps_{suffix}"), "ral");
     std::fs::write(&path, body).unwrap();
@@ -105,11 +131,13 @@ fn a_one_sided_allow_does_not_survive_the_meet() {
         format!("{},{}", b.display(), a.display()),
     ] {
         let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
-        assert_eq!(
-            out_ls.status, 0,
-            "both profiles allow ls, so the intersection must admit it; stderr:\n{}",
-            out_ls.stderr
-        );
+        if !refused_by_a_confined_runner(&out_ls) {
+            assert_eq!(
+                out_ls.status, 0,
+                "both profiles allow ls, so the intersection must admit it; stderr:\n{}",
+                out_ls.stderr
+            );
+        }
 
         let out_cat = ral(&["--capabilities", &arg, "-c", "cat Cargo.toml"]);
         assert_ne!(out_cat.status, 0, "cat is allowed by one profile only");
@@ -178,6 +206,9 @@ fn confined_ral_walks_to_a_granted_file() {
         ),
     ]);
     std::fs::remove_dir_all(&d).ok();
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
 
     assert_eq!(
         out.status, 0,
@@ -264,6 +295,10 @@ fn deny_pin_leaves_directory_entries_mutable() {
     };
 
     let out_create = ral(&["-c", &under_grant(format!("sh -c 'touch {created_s}'"))]);
+    if refused_by_a_confined_runner(&out_create) {
+        std::fs::remove_dir_all(&d).ok();
+        return;
+    }
     assert_eq!(
         out_create.status, 0,
         "creating a file inside the pinned directory must succeed; stderr:\n{}",
@@ -323,6 +358,44 @@ fn deny_pin_survives_write_prefix_root_rename() {
     assert!(refused, "the write-prefix root rename was not refused");
 }
 
+/// Seatbelt renders a deny whether or not its name exists, so a child cannot
+/// create it inside a write prefix.  Linux and Windows hold such a name in
+/// process alone until it exists (SPEC §12.3); only this backend pins it.
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_holds_an_absent_deny_inside_a_write_prefix() {
+    let d = scratch_dir("absent_deny");
+    let d_s = d.to_string_lossy().into_owned();
+
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: ['{d_s}'], write: ['{d_s}'], deny: ['{d_s}/.env']]] \
+             {{ /bin/sh -c 'echo x > {d_s}/.env && echo made-env; \
+             echo y > {d_s}/other && echo made-other' }}"
+        ),
+    ]);
+    let env_exists = d.join(".env").exists();
+    let other = std::fs::read_to_string(d.join("other"));
+    std::fs::remove_dir_all(&d).ok();
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+
+    assert_eq!(
+        other.as_deref().ok(),
+        Some("y\n"),
+        "the control write did not land; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("made-env"),
+        "the denied name was created; stdout:\n{}",
+        out.stdout
+    );
+    assert!(!env_exists, "the denied name exists on the host");
+}
+
 /// The grant schema leaves `exec`/`fs` policy values to the runtime
 /// decoder — they are key-shaped and heterogeneous, inexpressible as one
 /// homogeneous element type.  So `--check` waves an ill-shaped policy
@@ -350,4 +423,247 @@ fn undecodable_exec_policy_passes_the_checker_and_is_refused_at_run() {
         "the body must not run under an undecodable grant; stdout:\n{}",
         out.stdout
     );
+}
+
+/// A confined command forks as freely as a script needs, under a process
+/// limit set in the child alone and as a hard limit, so the command cannot
+/// raise it and the user's other processes never share it.
+#[cfg(target_os = "macos")]
+#[test]
+fn confined_forks_run_under_a_process_budget() {
+    let d = scratch_dir("brake");
+    let d_s = d.to_string_lossy().into_owned();
+    let out = common::run_with_timeout(
+        "brake",
+        &[],
+        &format!(
+            "grant [fs: [read: ['{d_s}']]] {{ sh -c 'echo $(ulimit -Su) $(ulimit -Hu); \
+             i=0; while [ $i -lt 50 ]; do /usr/bin/true & i=$((i+1)); done; wait; echo forked' }}"
+        ),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("the confined fork run hung");
+    std::fs::remove_dir_all(&d).ok();
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+
+    assert_eq!(
+        out.status, 0,
+        "fifty short children must fit the budget; stderr:\n{}",
+        out.stderr
+    );
+    let mut lines = out.stdout.lines();
+    let limits: Vec<u64> = lines
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|n| n.parse().expect("a numeric process limit"))
+        .collect();
+    assert_eq!(lines.next(), Some("forked"), "stdout:\n{}", out.stdout);
+
+    let free = Command::new("sh")
+        .args(["-c", "ulimit -Su"])
+        .output()
+        .unwrap();
+    let free: u64 = String::from_utf8(free.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        matches!(*limits, [soft, hard] if soft == hard && soft <= free),
+        "the confined limit must be one value no higher than the user's {free}: {limits:?}"
+    );
+}
+
+/// A canonical scratch directory holding `bin/good/x` and an executable
+/// stash script `x` outside `bin`, which a grant body copies in after the
+/// grant froze; removed on drop.
+#[cfg(unix)]
+struct ExecScratch(std::path::PathBuf);
+
+#[cfg(unix)]
+impl ExecScratch {
+    fn new(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = common::fresh_tmp_path(&format!("exec_spelling_{tag}"), "dir");
+        std::fs::create_dir_all(dir.join("bin/good")).unwrap();
+        let s = Self(std::fs::canonicalize(&dir).unwrap());
+        std::fs::write(s.stash(), "#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(s.stash(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::copy(s.stash(), s.bin().join("good/x")).unwrap();
+        s
+    }
+
+    fn bin(&self) -> std::path::PathBuf {
+        self.0.join("bin")
+    }
+
+    fn stash(&self) -> std::path::PathBuf {
+        self.0.join("x")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExecScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `body` under `grant [exec: [<bin>/: allow, /bin/: allow, <deny>: deny]]`,
+/// reading the scratch directory and writing `<bin>`.  The write is named at
+/// the admit, so the body may author there: under an unrestricted `fs` the
+/// deny would freeze the admitted set (`261006_a-veto-freezes-what-a-write-covers`).
+#[cfg(unix)]
+fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Output {
+    let (root, b) = (bin.parent().unwrap().display(), bin.display());
+    ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: ['{root}'], write: ['{b}']], \
+             exec: ['{b}/': 'allow', '/bin/': 'allow', '{b}/{deny}': 'deny']] {{ {body} }}"
+        ),
+    ])
+}
+
+#[cfg(unix)]
+const RESPELLED: &str =
+    "under another spelling (case or Unicode form); a deny holds under every spelling";
+
+/// E1: an exec deny frozen while its name is absent holds the program a
+/// later create makes under another spelling, and the refusal says why.
+/// Without `Evil` on disk the deny keeps its spelling; the body makes `evil`.
+#[cfg(unix)]
+#[test]
+fn an_absent_exec_deny_holds_a_case_variant() {
+    let scratch = ExecScratch::new("dir");
+    let (bin, stash) = (scratch.bin(), scratch.stash());
+    let (b, s) = (bin.display(), stash.display());
+    let out = under_exec_deny(
+        &bin,
+        "Evil/",
+        &format!("{b}/good/x; /bin/mkdir {b}/evil; /bin/cp {s} {b}/evil/x; {b}/evil/x"),
+    );
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+    assert!(
+        out.stdout.contains("ran"),
+        "`good/x` must run; stderr:\n{}",
+        out.stderr
+    );
+    assert_ne!(
+        out.status, 0,
+        "`evil/x` must be refused; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!("the denied {b}/Evil")) && out.stderr.contains(RESPELLED),
+        "the refusal must name the deny and say why; stderr:\n{}",
+        out.stderr
+    );
+
+    let scratch = ExecScratch::new("stored");
+    let bin = scratch.bin();
+    std::fs::create_dir(bin.join("Evil")).unwrap();
+    std::fs::copy(bin.join("good/x"), bin.join("Evil/x")).unwrap();
+    let b = bin.display();
+    let out = under_exec_deny(&bin, "Evil/", &format!("{b}/Evil/x"));
+    assert_ne!(
+        out.status, 0,
+        "`Evil/x` must be refused; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains(RESPELLED),
+        "a deny holding the name as stored must not claim a respelling; stderr:\n{}",
+        out.stderr
+    );
+}
+
+/// E1, for a path key: a deny on the absent `Tool` holds a created `tool`.
+#[cfg(unix)]
+#[test]
+fn an_absent_exec_path_deny_holds_a_case_variant() {
+    let scratch = ExecScratch::new("path");
+    let (bin, stash) = (scratch.bin(), scratch.stash());
+    let (b, s) = (bin.display(), stash.display());
+    let out = under_exec_deny(
+        &bin,
+        "Tool",
+        &format!("{b}/good/x; /bin/cp {s} {b}/tool; {b}/tool"),
+    );
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+    assert!(
+        out.stdout.contains("ran"),
+        "`good/x` must run; stderr:\n{}",
+        out.stderr
+    );
+    assert_ne!(
+        out.status, 0,
+        "`tool` must be refused; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!("the denied {b}/Tool")) && out.stderr.contains(RESPELLED),
+        "the refusal must name the deny and say why; stderr:\n{}",
+        out.stderr
+    );
+}
+
+/// E2: Seatbelt folds an exec deny as the guard does, so a child's exec of
+/// the case variant is refused and the stored sibling admitted.
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_refuses_a_case_variant_of_an_absent_exec_deny() {
+    let scratch = ExecScratch::new("seatbelt");
+    let (bin, stash) = (scratch.bin(), scratch.stash());
+    let b = bin.display();
+    // The grant freezes `Evil` before it exists; only then does `evil/x` appear.
+    let out = under_exec_deny(
+        &bin,
+        "Evil/",
+        &format!(
+            "/bin/mkdir {b}/evil; /bin/cp {} {b}/evil/x; /bin/sh -c '{b}/good/x; {b}/evil/x || echo refused'",
+            stash.display()
+        ),
+    );
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    assert_eq!(
+        out.stdout.lines().collect::<Vec<_>>(),
+        ["ran", "refused"],
+        "a child must run `good/x` and be refused `evil/x`; stderr:\n{}",
+        out.stderr
+    );
+}
+
+/// E3: a stack whose layers both allow `B` and one also `b` admits `B/x`: a
+/// key one layer never mentioned is not written down as a deny.
+#[cfg(unix)]
+#[test]
+fn a_stacked_one_sided_allow_denies_no_other_spelling() {
+    let scratch = ExecScratch::new("stack");
+    let bin = scratch.bin();
+    std::fs::create_dir(bin.join("B")).unwrap();
+    std::fs::copy(bin.join("good/x"), bin.join("B/x")).unwrap();
+    let b = bin.display();
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [exec: ['{b}/B/': 'allow', '/bin/': 'allow']] {{ \
+             grant [exec: ['{b}/B/': 'allow', '{b}/b/': 'allow', '/bin/': 'allow']] {{ {b}/B/x }} }}"
+        ),
+    ]);
+    if refused_by_a_confined_runner(&out) {
+        return;
+    }
+    assert_eq!(out.status, 0, "`B/x` must run; stderr:\n{}", out.stderr);
+    assert!(out.stdout.contains("ran"), "stdout:\n{}", out.stdout);
 }

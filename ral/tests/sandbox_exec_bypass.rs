@@ -21,12 +21,26 @@ const SENTINEL: &str = "ral-exec-pwned";
 /// Run `body` under a grant admitting `/bin/` and `dir`, vetoing the bare
 /// name `cat` wherever it resolves.
 fn under_exec_grant(dir: &Path, body: &str) -> common::Output {
-    let script = format!(
+    run_script(&format!(
         "grant [exec: ['/bin/': 'allow', '{}/': 'allow', cat: 'deny']] {{ {body} }}",
         dir.display()
-    );
+    ))
+}
+
+/// Run `body` under a grant writing under `write` and admitting `/bin/` and
+/// `admit`, with no veto anywhere.
+fn writing_beside_admit(write: &Path, admit: &Path, body: &str) -> common::Output {
+    run_script(&format!(
+        "grant [fs: [read: ['{w}'], write: ['{w}']], \
+         exec: ['/bin/': 'allow', '{}/': 'allow']] {{ {body} }}",
+        admit.display(),
+        w = write.display()
+    ))
+}
+
+fn run_script(script: &str) -> common::Output {
     let out = Command::new(common::ral_bin())
-        .args(["-c", &script])
+        .args(["-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -95,6 +109,50 @@ fn a_bare_name_deny_stops_a_grandchild_the_guard_never_sees() {
         elsewhere.stderr
     );
     assert_leaked_nothing(&elsewhere);
+}
+
+/// A write prefix that only covers an admitted dir would let the child author
+/// the binaries the dir runs, so the kernel freezes the dir; a grant that names
+/// the tree keeps it writable.  The veto-free grant shows the freeze needs no
+/// veto to fire.
+#[test]
+fn a_write_prefix_that_only_covers_an_admitted_dir_cannot_author_in_it() {
+    let td = tempfile::tempdir().unwrap();
+    let tools = td.path().join("tools");
+    let scratch = td.path().join("scratch");
+    std::fs::create_dir(&tools).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let plant = |dir: &Path| format!("/bin/sh -c 'echo x > {}/planted'", dir.display());
+
+    // Control: the covering prefix is live, so a later denial is the freeze
+    // and not a dead sandbox.
+    let beside = writing_beside_admit(td.path(), &tools, &plant(&scratch));
+    assert_eq!(
+        beside.status, 0,
+        "a write beside the admitted dir must land; stderr:\n{}",
+        beside.stderr
+    );
+    assert!(scratch.join("planted").exists());
+
+    // Control: naming the tree keeps it writable.
+    let named = writing_beside_admit(&tools, &tools, &plant(&tools));
+    assert_eq!(
+        named.status, 0,
+        "a grant naming the admitted dir must keep it writable; stderr:\n{}",
+        named.stderr
+    );
+    assert!(tools.join("planted").exists());
+    std::fs::remove_file(tools.join("planted")).unwrap();
+
+    let covered = writing_beside_admit(td.path(), &tools, &plant(&tools));
+    assert_ne!(
+        covered.status, 0,
+        "a write into a dir the prefix only covers must be refused"
+    );
+    assert!(
+        !tools.join("planted").exists(),
+        "the write landed in the admitted dir"
+    );
 }
 
 fn assert_leaked_nothing(out: &common::Output) {

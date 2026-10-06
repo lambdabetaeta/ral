@@ -16,9 +16,23 @@ consultation and offers containment on the resolved form alone:
   where it lands ([[decisions/260906_object-not-name|object-not-name]]).
 - **exec — `RealPath::frozen`**, the one door from a prefix to the exec
   table: path and dir keys enter `ExecRules` as their resolved forms, judged
-  against a head's `realpath(3)` by equality and by `RealPath::within`.
+  against a head's `realpath(3)` by `RealPath::within::<P>`, the rule's
+  polarity choosing the identity.
 - **composition — `evicts`**, which drops an allow dir a deny dir decides,
-  judges the same resolved forms the in-process guard does.
+  judges the same resolved forms the in-process guard does, under
+  `Collision` both ways.
+
+An object can answer to several names — case and Unicode normalisation on
+APFS, NTFS and Linux casefold directories — and an absent one has no stored
+spelling yet. So a **deny is judged by collision class and an allow by stored
+name** ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]):
+`PrefixSet<Deny>` asks `path_within` under `Identity::Collision`, keyed by
+`lex::collision_key`, and `PrefixSet<Allow>` under `Identity::Stored`. A deny
+then holds the create that would make its object under another spelling,
+where an allow never reaches a distinct name on a case-sensitive volume.
+Composition keeps the split: denies join, allows meet by stored name, and
+exec's meet writes a Deny only where a layer wrote one, since a default so
+written would hold every other spelling of its name.
 
 A resolved prefix means what the disk said at freeze: a granted `~/bin` that
 is a link to `/opt/x/bin` grants `/opt/x/bin`. That is no re-aiming of the
@@ -33,6 +47,8 @@ choice. Nothing outside `core/src/path/` is:
 - `lex::path_within` and `lex::path_within_str`, the form-blind kernel, are
   `pub(super)`, so no caller elsewhere re-derives a matcher over whichever
   form it holds, as exarch's skill check once did.
+- The identity is chosen by a set's polarity, a type parameter: a deny
+  region is a `PrefixSet<Deny>`, which has no exact question to ask.
 - `surface_path` is private to `resolved.rs`; outside `path`, the surface
   leaves the type only as a `String`, for rendering.
 

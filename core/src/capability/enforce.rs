@@ -12,7 +12,7 @@
 
 use super::exec::{ExecRules, Program, rules};
 use super::fs::{FsOp, allow_region, deny_region};
-use crate::path::Resolver;
+use crate::path::{NormalizedPrefix, Resolver};
 use crate::runtime::command::Head;
 use crate::types::{
     Audit, CallSite, Capabilities, Context, Decision, GrantStack, Observation, Observed, Settled,
@@ -58,14 +58,18 @@ pub(crate) fn check_exec(
     let verdict = rules
         .as_ref()
         .map_or(Verdict::Allow, |r| r.verdict(program.subject()));
-    let result: Settled<()> = match verdict {
-        Verdict::Allow => Ok(()),
-        Verdict::Deny => Err(sig_hint(
+    let respelled = (rules.as_ref())
+        .filter(|_| verdict.is_denied())
+        .and_then(|r| r.respelled(program.subject()));
+    let result: Settled<()> = match (verdict, respelled) {
+        (Verdict::Allow, _) => Ok(()),
+        (Verdict::Deny, Some(deny)) => Err(sig(respelled_refusal("exec", &program, deny))),
+        (Verdict::Deny, None) => Err(sig_hint(
             format!("command '{shown}' denied by active grant"),
             "add the command to the grant exec map \
              (or its directory, keyed with a trailing '/') to allow it",
         )),
-        Verdict::Only(allowed) => {
+        (Verdict::Only(allowed), _) => {
             let hint = || {
                 format!(
                     "allowed subcommands (matched against the command's first argument): {}",
@@ -94,6 +98,9 @@ pub(crate) fn check_exec(
             f.insert("name".into(), shown.into());
             f.insert("resolved".into(), program.to_string());
             f.insert("args".into(), args.join(" "));
+            if let Some(deny) = respelled {
+                f.insert("deny".into(), deny.to_string());
+            }
         });
     }
 
@@ -109,10 +116,13 @@ pub(crate) fn check_exec(
 /// opinion.  `Guarded` is the one verdict no grant decides: a write onto a
 /// binary the sandbox pinned at boot, refused before the stack is consulted
 /// — the twin of the discard device, which is admitted before it is.
+/// `Respelled` is a denial by a deny that holds the path only under another
+/// spelling of its name, so the refusal can say why.
 pub(super) enum FsVerdict {
     Unrestricted,
     Granted,
     Denied,
+    Respelled(NormalizedPrefix),
     Guarded(&'static str),
 }
 
@@ -141,8 +151,13 @@ pub(super) fn fs_verdict(
     let Some(allowed) = allow_region(grants, resolver, op) else {
         return FsVerdict::Unrestricted;
     };
-    if deny_region(grants, resolver).covering(resolved).is_some() {
-        return FsVerdict::Denied;
+    let denied = deny_region(grants, resolver);
+    if let Some(deny) = denied.covering(resolved) {
+        return if denied.holds_as_stored(resolved) {
+            FsVerdict::Denied
+        } else {
+            FsVerdict::Respelled(deny.clone())
+        };
     }
     match allowed.covering(resolved) {
         Some(_) => FsVerdict::Granted,
@@ -179,13 +194,21 @@ impl GrantStack {
     }
 }
 
+/// Refuse a name the host would read as a DOS device (Windows only).  No grant
+/// can admit it: it names no object to judge.
+pub(crate) fn check_device_name(path: &crate::path::ResolvedPath) -> Settled<()> {
+    path.reserved_device_refusal()
+        .map_or(Ok(()), |m| Err(sig(m)))
+}
+
 /// Decide an `op` on one resolved path, audit it, and mint the `Break` on
 /// denial.  The path is canonicalised leniently, so this is for the *reads
 /// by name* — predicates, listings, module loading — where nothing is
 /// written through the name.  A write goes through `Shell::locate`, which
 /// judges the located object with [`check_fs_exact`].
 /// A [discard device](crate::path::ResolvedPath::is_discard) is exempt from
-/// both regions — asked before canonicalisation, since the question is about
+/// both regions, and a [reserved device name](check_device_name) is refused
+/// before either — asked before canonicalisation, since the question is about
 /// the name, not about what is on the disk under it.
 pub(crate) fn check_fs_op(
     ctx: &Context,
@@ -197,6 +220,7 @@ pub(crate) fn check_fs_op(
     if path.is_discard() {
         return Ok(());
     }
+    check_device_name(path)?;
     check_fs_exact(ctx, &path.canonicalise_lenient(), op, audit, site)
 }
 
@@ -211,12 +235,18 @@ pub(crate) fn check_fs_exact(
 ) -> Settled<()> {
     let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), resolved, op);
 
-    if let FsVerdict::Denied | FsVerdict::Guarded(_) = verdict {
+    if let FsVerdict::Denied | FsVerdict::Respelled(_) | FsVerdict::Guarded(_) = verdict {
         emit_capability_denial(ctx, "fs", audit, site, |f| {
             f.insert("op".into(), op.label().into());
             f.insert("path".into(), resolved.display().to_string());
-            if let FsVerdict::Guarded(pinned) = verdict {
-                f.insert("pinned".into(), pinned.into());
+            match &verdict {
+                FsVerdict::Guarded(pinned) => {
+                    f.insert("pinned".into(), (*pinned).into());
+                }
+                FsVerdict::Respelled(deny) => {
+                    f.insert("deny".into(), deny.as_str().into());
+                }
+                _ => {}
             }
         });
     }
@@ -226,6 +256,11 @@ pub(crate) fn check_fs_exact(
             "fs {} denied by grant: {}",
             op.label(),
             resolved.display()
+        ))),
+        FsVerdict::Respelled(deny) => Err(sig(respelled_refusal(
+            format_args!("fs {}", op.label()),
+            resolved.display(),
+            deny.as_str(),
         ))),
         FsVerdict::Guarded(pinned) => Err(sig_hint(
             format!(
@@ -239,6 +274,27 @@ pub(crate) fn check_fs_exact(
         )),
         FsVerdict::Unrestricted | FsVerdict::Granted => Ok(()),
     }
+}
+
+/// The refusal of a denied `program` when a deny holds it only under another
+/// spelling of its name, for a refusal raised before [`check_exec`].
+pub(crate) fn exec_respelled(ctx: &Context, program: &Program) -> Option<String> {
+    let rules = rules(&ctx.grants)?;
+    let deny = rules.respelled(program.subject())?;
+    Some(respelled_refusal("exec", program, deny))
+}
+
+/// The refusal of `op` on `path` by a deny that holds it only under another
+/// spelling of its name; fs and exec say it alike.
+fn respelled_refusal(
+    op: impl std::fmt::Display,
+    path: impl std::fmt::Display,
+    deny: impl std::fmt::Display,
+) -> String {
+    format!(
+        "{op} denied by grant: {path} is the denied {deny} under another spelling \
+         (case or Unicode form); a deny holds under every spelling"
+    )
 }
 
 /// Head-only admission, before any argv is known: classification and the
@@ -445,6 +501,36 @@ mod tests {
             admits_read(&grants, &real.join("SKILL.md")),
             "the deny is the entry, not the whole read region"
         );
+    }
+
+    /// The refusal cites a respelling only when no deny holds the access as
+    /// stored, though the deepest deny holds it only by a fold.
+    #[test]
+    fn a_deny_holding_the_stored_name_refuses_plainly() {
+        use super::{FsVerdict, fs_verdict};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let under = |denies: &[&str]| {
+            stack(FsPolicy {
+                read_prefixes: vec![NormalizedPrefix::from_surface(&root)],
+                deny_paths: (denies.iter())
+                    .map(|d| NormalizedPrefix::from_surface(root.join(d)))
+                    .collect(),
+                ..FsPolicy::default()
+            })
+        };
+        let verdict = |grants: &GrantStack| {
+            let access = root.join("d/secrets/f");
+            fs_verdict(grants, &Resolver::shell_less(), &access, &FsOp::Read)
+        };
+        assert!(matches!(
+            verdict(&under(&["d/Secrets"])),
+            FsVerdict::Respelled(_)
+        ));
+        assert!(matches!(
+            verdict(&under(&["d", "d/Secrets"])),
+            FsVerdict::Denied
+        ));
     }
 
     /// Default APFS answers `SECRET` with `secret`: the walk must spell it as

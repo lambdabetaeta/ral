@@ -159,7 +159,7 @@ What builds up the trail is itself scoped:
 - `audit` collects the full trail its body produces.
 
 **A write that changed nothing in the world is not a fact.** A redirect onto
-the discard device — `/dev/null`, or `NUL` on Windows — records nothing: no
+the discard device — `/dev/null`, or `\\.\NUL` on Windows — records nothing: no
 card, no rail barrier, and no line in an agent's trail claiming it wrote a
 file. One predicate says so, `ResolvedPath::is_discard`
 (`core/src/path/resolved.rs`), asked at both doors that have an opinion: the

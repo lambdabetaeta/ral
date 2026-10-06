@@ -38,6 +38,7 @@ pub(crate) struct Envelope {
 #[cfg(windows)]
 pub(crate) struct Launch {
     program: OsString,
+    arg0: Option<OsString>,
     args: Vec<OsString>,
     env: std::collections::BTreeMap<EnvKey, EnvEdit>,
     cwd: Option<PathBuf>,
@@ -226,6 +227,14 @@ impl Launch {
         self
     }
 
+    /// `argv[0]`, which need not name the program run.
+    #[cfg(unix)]
+    pub(crate) fn arg0(&mut self, arg0: impl AsRef<OsStr>) -> &mut Self {
+        use std::os::unix::process::CommandExt;
+        self.cmd.arg0(arg0);
+        self
+    }
+
     pub(crate) fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -266,8 +275,8 @@ impl Launch {
     }
 
     #[cfg(unix)]
-    pub(crate) fn forbid_core_dumps(&mut self) {
-        crate::sandbox::forbid_core_dumps(&mut self.cmd);
+    pub(crate) fn limit_resources(&mut self) {
+        crate::sandbox::limit_resources(&mut self.cmd);
     }
 
     #[cfg(unix)]
@@ -363,6 +372,7 @@ impl Launch {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
             program: program.as_ref().to_os_string(),
+            arg0: None,
             args: Vec::new(),
             env: std::collections::BTreeMap::new(),
             cwd: None,
@@ -407,6 +417,12 @@ impl Launch {
 
     pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.args.push(arg.as_ref().to_os_string());
+        self
+    }
+
+    /// The command line's first token, which need not name the image.
+    pub(crate) fn arg0(&mut self, arg0: impl AsRef<OsStr>) -> &mut Self {
+        self.arg0 = Some(arg0.as_ref().to_os_string());
         self
     }
 
@@ -710,7 +726,10 @@ mod windows {
         inherited.sort();
         inherited.dedup();
 
-        let mut cmdline = windows_args::make_command_line(&launch.program, &launch.args)?;
+        let mut cmdline = windows_args::make_command_line(
+            launch.arg0.as_ref().unwrap_or(&launch.program),
+            &launch.args,
+        )?;
         let application = wide_null(&launch.program)?;
         let cwd = launch
             .cwd

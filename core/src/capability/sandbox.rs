@@ -14,7 +14,7 @@
 use super::enforce::Admitted;
 use super::exec::{ExecRules, rules};
 use super::fs::{FsOp, allow_region, deny_region};
-use crate::path::{NormalizedPrefix, PrefixSet, RealPath};
+use crate::path::{NormalizedPrefix, Polarity, PrefixSet, RealPath};
 use crate::types::{Context, ExecProjection, FsProjection, FsRules, SandboxProjection};
 use std::collections::BTreeSet;
 
@@ -114,9 +114,83 @@ fn carriers(_: &ExecRules, _: Option<&Admitted>) -> BTreeSet<RealPath> {
 /// The fs projection is lexical: `resolved`/`namespace` have no reader below
 /// this fold, so each prefix flattens to its surface spelling here, once, and
 /// every backend widens that into its own name class at render time.
-fn surface_strings(set: &PrefixSet) -> Vec<String> {
+fn surface_strings<P: Polarity>(set: &PrefixSet<P>) -> Vec<String> {
     set.surface()
         .into_iter()
         .map(NormalizedPrefix::into_string)
         .collect()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use crate::path::{NormalizedPrefix, render_real};
+    use crate::types::{
+        Capabilities, ExecGrant, ExecProjection, ExecRule, FsPolicy, Shell, WriteReach,
+    };
+
+    /// A layer with an opinion on writes, on exec, or both.
+    fn layer(write: Option<&str>, admit: Option<&str>) -> Capabilities {
+        let prefix = NormalizedPrefix::from_surface;
+        Capabilities {
+            fs: write.map(|w| FsPolicy {
+                read_prefixes: vec![prefix(w)],
+                write_prefixes: vec![prefix(w)],
+                deny_paths: Vec::new(),
+            }),
+            exec: admit.map(|dir| ExecGrant {
+                dirs: [(prefix(dir), true)].into(),
+                ..ExecGrant::default()
+            }),
+            ..Capabilities::root()
+        }
+    }
+
+    /// The reach of the write region the stack folds to over the one dir it
+    /// admits.
+    fn folded_reach(base: Capabilities, inner: Capabilities) -> WriteReach {
+        let projection = Shell::default().with_capabilities(base, |sh| {
+            sh.with_capabilities(inner, |sh| sh.sandbox_projection().expect("restricted"))
+        });
+        let rendered = projection.rendered().expect("ASCII paths render");
+        let fs = rendered.fs.rules().expect("a layer restricted fs");
+        let ExecProjection::Restricted(rules) = &rendered.exec else {
+            panic!("a layer restricted exec");
+        };
+        let dirs: Vec<_> = rules
+            .iter()
+            .filter_map(|rule| match rule {
+                ExecRule::Dir { path, allow: true } => Some(render_real(path)),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("ASCII paths render")
+            .concat();
+        fs.write_reach(
+            dirs.first().expect("the admitted dir reaches the rules"),
+            &dirs,
+        )
+    }
+
+    /// The base layer's prefix survives the fold when no inner layer says
+    /// anything about writes, so the admit an inner layer adds is covered by a
+    /// grant it never wrote.
+    #[test]
+    fn a_shallower_base_layer_covers_what_an_inner_layer_admits() {
+        let reach = folded_reach(
+            layer(Some("/ral-test/w"), None),
+            layer(None, Some("/ral-test/w/bin")),
+        );
+        assert_eq!(reach, WriteReach::Covered);
+    }
+
+    /// The control: an inner layer naming the admit as a write prefix too
+    /// meets to the deeper prefix, which is the admit itself.
+    #[test]
+    fn an_inner_layer_that_names_the_admit_as_writable_trusts_it() {
+        let reach = folded_reach(
+            layer(Some("/ral-test/w"), None),
+            layer(Some("/ral-test/w/bin"), Some("/ral-test/w/bin")),
+        );
+        assert_eq!(reach, WriteReach::Trusted);
+    }
 }

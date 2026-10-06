@@ -74,7 +74,7 @@ impl ResolvedPath {
     }
 
     /// True iff this path names the host's discard device — `/dev/null` on
-    /// Unix, `NUL` on Windows ([`super::lex::is_discard_device`] holds both
+    /// Unix, `\\.\NUL` on Windows ([`super::lex::is_discard_device`] holds both
     /// tables).
     ///
     /// The one question two doors ask about such a write: the in-process
@@ -84,6 +84,14 @@ impl ResolvedPath {
     /// reported.
     pub(crate) fn is_discard(&self) -> bool {
         super::lex::is_discard_device(&self.0.to_string_lossy(), cfg!(windows))
+    }
+
+    /// The refusal owed this path if, on Windows, its last component is a DOS
+    /// reserved device name ([`super::lex::reserved_device_refusal`]); `None`
+    /// everywhere else.  The fs doors ask it of every name they are about to
+    /// act on, as they ask [`is_discard`](Self::is_discard).
+    pub(crate) fn reserved_device_refusal(&self) -> Option<String> {
+        super::lex::reserved_device_refusal(&self.0.to_string_lossy(), cfg!(windows))
     }
 
     /// Strict `realpath(3)`.  The input is already absolute and folded, so
@@ -261,17 +269,18 @@ impl NormalizedPrefix {
 
     /// True iff the in-process exec guard would let this deny decide everything the allow
     /// `other` covers, so composition may drop the allow: the two resolved
-    /// forms contain each other, in one namespace.
+    /// forms contain each other under the deny's identity, in one namespace.
+    /// Mutual containment is one rank, where the guard's tie denies.
     ///
     /// Not byte equality: containment folds macOS firmlink aliases (`/tmp` ↔
-    /// `/private/tmp`) and, under Windows identity, case, separator spelling
-    /// and a `\\?\`-verbatim prefix, so the derived `Eq`/`Ord` cannot answer
-    /// this.
+    /// `/private/tmp`) and every spelling some filesystem takes for a name,
+    /// so the derived `Eq`/`Ord` cannot answer this.
     pub(crate) fn evicts(&self, other: &Self) -> bool {
         use super::lex::path_within_str;
+        use super::{Deny, Polarity};
         self.namespace == other.namespace
-            && path_within_str(&other.resolved, &self.resolved)
-            && path_within_str(&self.resolved, &other.resolved)
+            && path_within_str(&other.resolved, &self.resolved, Deny::IDENTITY)
+            && path_within_str(&self.resolved, &other.resolved, Deny::IDENTITY)
     }
 
     /// Consume into the owned surface `String`, for the wire and render
@@ -362,7 +371,7 @@ mod tests {
         assert_eq!(
             NormalizedPrefix::from_guest("/work/./letters/../letters").as_str(),
             "/work/letters",
-            "the folding is still done — it is only done in the right namespace"
+            "the folding is still done, only in the right namespace"
         );
     }
 }

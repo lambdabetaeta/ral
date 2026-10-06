@@ -115,15 +115,6 @@ impl Pinned {
         }
     }
 
-    /// Whether this uid may rewrite the pinned bytes in place: the one change
-    /// a pin by fd or inode cannot see.  Gated as its one caller is — the
-    /// bwrap envelope dump — since a unix that is not Linux launches no
-    /// envelope to ask about.
-    #[cfg(target_os = "linux")]
-    pub(super) fn writable_by_us(&self) -> bool {
-        rustix::fs::access(self.exec_path(), rustix::fs::Access::WRITE_OK).is_ok()
-    }
-
     /// Refuse to spawn a foreign build: `sandbox::launch` calls this wherever
     /// it issues a warrant, to catch an executable swapped on disk since it
     /// was pinned.

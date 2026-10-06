@@ -26,19 +26,18 @@ is gVisor's answer to the question ral assigns to a VM, not to bwrap.
 
 ## What this change takes from it
 
-- **Typed syscall rules with a printer.** `runsc`'s filter config
+- **Typed syscall rules.** `runsc`'s filter config
   (`runsc/boot/filter`, `runsc/fsgofer/filter`) is Go structs naming a
   syscall and its allowed argument shapes, compiled to BPF at startup — the
   same shape [[decisions/260906_seccomp-is-a-typed-deny-set|our own deny-set]]
   now takes, one level removed: theirs is the only program: an allow-list
   each of these two processes owns outright; ours is a deny-set stacked over
   whatever `exec` admits.
-- **Weakenings reported as first-class output.** `config.Warnings` computes
-  what a chosen configuration gives up and returns it as data, not a log
-  line, for the caller to print. `HostEnvelope` is ral's own version: a
-  probed value naming which invariant this host cannot hold, printed by
-  `RAL_DUMP_SANDBOX_PROFILE` rather than discovered by a confined command
-  failing silently.
+- **Weakenings as first-class data.** `config.Warnings` computes what a
+  chosen configuration gives up and returns it as data, not a log line, for
+  the caller to print. `HostEnvelope` is ral's own version: a probed value
+  naming which invariant this host cannot hold, so the render is pure in it
+  rather than a gap a confined command discovers by failing silently.
 - **Confining the confiner.** The Gofer runs under its own, tighter
   seccomp-BPF program — a process trusted with real filesystem access still
   gets the narrowest surface its own job needs, not the Sentry's. ral's

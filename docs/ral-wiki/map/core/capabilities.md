@@ -39,9 +39,10 @@ Submodules:
   (`sandbox::pinned_binary`, by inode), before any grant is folded —
   `check_fs_exact` audits it and mints the `Break` for a symlink-free path,
   and `check_fs_op` is the read-by-name layer over it that canonicalises
-  leniently and excuses the discard device (`ResolvedPath::is_discard`)
-  before either region is consulted. `Shell::locate` (`types/shell/checks.rs`)
-  is the door every open takes: `path::walk` to the object, then
+  leniently, excuses the discard device (`ResolvedPath::is_discard`) and
+  refuses a reserved device name (`check_device_name`) before either region is
+  consulted. `Shell::locate` (`types/shell/checks.rs`) is the door every open
+  takes: the same name refusal, `path::walk` to the object, then
   `check_fs_exact` on `Located::real`; `GrantStack::admits_fs_exact` is the
   quiet twin a write asks before reading its before- and after-images;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder; exec is
@@ -62,10 +63,12 @@ Submodules:
   `ExecGrant` to a table over real paths, tools, dirs and vetoes, a bare key
   resolved on the host `PATH`; `ExecRules::verdict`, the only verdict, by
   `Rank` (`Dir(depth) < Carrier < Exact < Veto`, the greatest deciding, equal
-  ranks meeting); `Meet for ExecRules`, pointwise; `rules`, the stack's
-  table, compiled per question; `ExecRules::kernel`, the same rules in `Rank`
-  order for last-match-wins. `name_key` folds case and strips
-  `.com`/`.exe`/`.bat`/`.cmd` on Windows, for bare names only;
+  ranks meeting), each rule reading names by its polarity through `holds`;
+  `Meet for ExecRules` through `met`, allows meeting and denies joining;
+  `respelled`, the deny a refusal names when it holds the program only under
+  another spelling; `rules`, the stack's table, compiled per question;
+  `ExecRules::kernel`, the same rules in `Rank` order for last-match-wins.
+  Vetoes key on `path::command_name_key`;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` key —
@@ -116,15 +119,28 @@ plus `which.rs` for PATH search.
   logical fold); names are spelled as the disk stores them on macOS
   (`getattrlistat`), so case-variant names meet their deny; the splice count
   is bounded by `MAX_HOPS`, which `carriers::trusted_real` shares;
-- match — `lex::path_within`, the form-blind containment kernel, which folds
-  `starts_with_identity` over the alias pairs; under Windows path semantics that comparison unifies case,
-  `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
-  prefix-set matchers all inherit one notion of path identity;
+- match — `lex::path_within`, the form-blind containment kernel, which takes
+  an `Identity` and folds it over the alias pairs. `Stored` is bytes, or under
+  Windows path semantics `starts_with_identity`, unifying ASCII case, `/` vs
+  `\`, and `\\?\`-verbatim spellings; `Collision` compares components by
+  `lex::collision_key`, canonical caseless matching of the uppercase image
+  (ICU4X), the coarsest identity any filesystem gives a name. A
+  `PrefixSet<Allow>` judges `Stored` and a `PrefixSet<Deny>` `Collision`
+  ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]);
+  on Windows `walk::dealias` names a `~`-bearing leaf by its long name, and
+  refuses one it cannot name;
 - name a device — `lex::is_discard_device`, behind
-  `ResolvedPath::is_discard`: `/dev/null`, or on Windows a *last component*
-  named `NUL` (the reserved name answers from any directory, in any case,
-  behind an extension, and under `\\.\`). Like the identity rules above it
-  takes `windows` as a parameter rather than reading `cfg!`, so neither
+  `ResolvedPath::is_discard`: `/dev/null`, or on Windows exactly the
+  device-namespace spelling `\\.\NUL` (either slash, any case), and no other
+  path. Every other Windows path whose last component is a DOS reserved device
+  name — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, any case,
+  any extension, trailing dots and blanks trimmed — is *refused*, not
+  excused: `lex::reserved_device_refusal` phrases the error (for `NUL`, as the
+  question "did you mean `\\.\NUL`?"), and `capability::check_device_name`
+  asks it at the three fs doors, `check_fs_op`, `Shell::locate` and
+  `Shell::locate_existing`, ahead of any grant. A resolved path keeps its last
+  component, so the check needs no raw spelling. Like the identity rules above
+  both take `windows` as a parameter rather than reading `cfg!`, so neither
   table is dark on the other host.
 
 `resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
@@ -267,7 +283,8 @@ device for `net` to govern; the in-process guards apply unchanged
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
-  by the absolute path the guard judged, or a `Program::Tool`. macOS
+  by the real path the guard judged, its spelling as `argv[0]`, or a
+  `Program::Tool`. macOS
   and Linux share one trampoline: the pinned ral itself, whose whole argv is
   `ral --warrant` (`WARRANT_FLAG`). The confinement to enter and the program to
   run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
@@ -284,8 +301,10 @@ device for `net` to govern; the in-process guards apply unchanged
   failure before the program starts exits 126, and an `execve` refusal takes its
   code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
   program.
-  The encoding is NUL-terminated fields behind a `ral-warrant/1` magic,
-  canonical (decode re-encodes and compares) and at most 8 MiB. It rides fd 99,
+  The encoding is NUL-terminated fields behind a `ral-warrant/1` magic — a
+  `file` is its real path, then its `argv[0]` spelling, then its argv; a `tool`
+  its name, then its argv — canonical (decode re-encodes and compares) and at
+  most 8 MiB. It rides fd 99,
   never argv: a sealed memfd on Linux, checked again after sealing, and on macOS
   a prefilled socketpair whose writer closes before the child exists; the child
   refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
@@ -301,8 +320,7 @@ device for `net` to govern; the in-process guards apply unchanged
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. The real argv is `bwrap --args 98 -- <ral>
   --warrant`: `bwrap_options` is pure and returns bwrap's options alone, which
-  bwrap takes from `--args`, and the profile dump prints both. The order is
-  forced rather than chosen: a Landlock
+  bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
   Linux's confinement names no path: inside the envelope every
@@ -343,15 +361,16 @@ device for `net` to govern; the in-process guards apply unchanged
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`; `Profile`, a record whose
   field order is the rule precedence, and in every profile ral's own file is
-  write-denied and its ancestors unlink-denied), `linux.rs` (bwrap: the
+  write-denied and its ancestors unlink-denied), `fork_brake.rs` (macOS's
+  process budget: the confined child's `RLIMIT_NPROC`, the user's count at
+  launch plus 512), `linux.rs` (bwrap: the
   `Pinned` envelope, exec'd by descriptor and never by name, its own file
   read-only bound inside every envelope after the projection's binds; the
   argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
   pid one, `--proc` on both projections, the seccomp deny-set
   (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`); `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
-  the probed host facts the render is pure in, printed by the profile dump),
-  and
+  the probed host facts the render is pure in), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
   AppContainer backend in three submodules — `appcontainer.rs`, the profile
   lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`, the

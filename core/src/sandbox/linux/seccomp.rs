@@ -1,7 +1,7 @@
 //! The seccomp deny-set the payload runs under inside the bwrap envelope, on
-//! x86-64 and aarch64: a value that renders to BPF for bwrap, to text for the
-//! profile dump, and *names* a denied syscall number for `diag` — the same
-//! data enforces and explains, so the two cannot drift.
+//! x86-64 and aarch64: a value that renders to BPF for bwrap and *names* a
+//! denied syscall number for `diag` — the same data enforces and explains, so
+//! the two cannot drift.
 //!
 //! It is a deny-set, not an allow-list ([`design/two-enforcers`] in the wiki):
 //! an envelope runs whatever `exec` admits, and an allow-list would turn every
@@ -179,41 +179,19 @@ const IOCTL: Syscall = Syscall {
     name: "ioctl",
 };
 
-/// A kernel constant paired with its name, as [`Syscall`] pairs a number.
-#[derive(Clone, Copy, Debug)]
-struct Named {
-    value: u32,
-    name: &'static str,
-}
-
 #[allow(clippy::cast_sign_loss, reason = "a single positive flag bit")]
-const CLONE_NEWUSER: Named = Named {
-    value: libc::CLONE_NEWUSER as u32,
-    name: "CLONE_NEWUSER",
-};
+const CLONE_NEWUSER: u32 = libc::CLONE_NEWUSER as u32;
 /// `0x5412` on both x86-64 and aarch64.
 #[allow(clippy::cast_possible_truncation, reason = "0x5412 fits a u32")]
-const TIOCSTI: Named = Named {
-    value: libc::TIOCSTI as u32,
-    name: "TIOCSTI",
-};
+const TIOCSTI: u32 = libc::TIOCSTI as u32;
 
 /// A condition on one raw syscall argument, compared as a `Dword`: every
 /// value a rule below needs fits 32 bits, with the high half zero.
 enum Cond {
     /// `arg & mask != 0`
-    FlagSet { arg: u8, mask: Named },
+    FlagSet { arg: u8, mask: u32 },
     /// `arg == value`
-    ArgEq { arg: u8, value: Named },
-}
-
-impl fmt::Display for Cond {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::FlagSet { arg, mask } => write!(f, "arg{arg} & {}", mask.name),
-            Self::ArgEq { arg, value } => write!(f, "arg{arg} == {}", value.name),
-        }
-    }
+    ArgEq { arg: u8, value: u32 },
 }
 
 /// What a rule does to the syscalls it names. `Errno` holds a `libc::E*`
@@ -234,7 +212,7 @@ fn errno_name(code: i32) -> &'static str {
 }
 
 /// One deny-set entry: every syscall in `calls`, under `when` if present, gets
-/// `verdict` — and `why`, repeated verbatim by `Display` and by `diag`.
+/// `verdict` — and `why`, repeated verbatim by `diag`.
 struct Rule {
     calls: &'static [Syscall],
     when: Option<Cond>,
@@ -242,7 +220,7 @@ struct Rule {
     why: &'static str,
 }
 
-/// The envelope's deny-set: a value, so it can be rendered, printed and
+/// The envelope's deny-set: a value, so it can be rendered and
 /// consulted without touching the kernel.
 pub(crate) struct Filter(&'static [Rule]);
 
@@ -363,32 +341,6 @@ impl Filter {
     }
 }
 
-impl fmt::Display for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for rule in self.0 {
-            let calls = rule
-                .calls
-                .iter()
-                .map(|call| call.name)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let verdict = match rule.verdict {
-                Verdict::Kill => "SIGSYS",
-                Verdict::Errno(code) => errno_name(code),
-            };
-            match &rule.when {
-                Some(cond) => writeln!(f, "{calls} ({cond}) → {verdict}: {}", rule.why)?,
-                None => writeln!(f, "{calls} → {verdict}: {}", rule.why)?,
-            }
-        }
-        #[cfg(target_arch = "x86_64")]
-        writeln!(f, "x32 ABI: killed outright (x86-64 only)")?;
-        #[cfg(not(target_arch = "x86_64"))]
-        writeln!(f, "no foreign ABI shares this arch's audit value")?;
-        Ok(())
-    }
-}
-
 /// What the filter says about one denied syscall: its name, the verdict, and
 /// the rule's own reason, repeated verbatim by `diag`.
 pub(crate) struct Denied<'a> {
@@ -464,11 +416,11 @@ impl Cond {
             Self::FlagSet { arg, mask } => SeccompCondition::new(
                 arg,
                 Dword,
-                SeccompCmpOp::MaskedEq(u64::from(mask.value)),
-                u64::from(mask.value),
+                SeccompCmpOp::MaskedEq(u64::from(mask)),
+                u64::from(mask),
             ),
             Self::ArgEq { arg, value } => {
-                SeccompCondition::new(arg, Dword, SeccompCmpOp::Eq, u64::from(value.value))
+                SeccompCondition::new(arg, Dword, SeccompCmpOp::Eq, u64::from(value))
             }
         }
         .map_err(Error::Compile)
@@ -639,14 +591,6 @@ fn x32_guard_program() -> [seccompiler::sock_filter; 7] {
     ]
 }
 
-/// Print the deny-set for `RAL_DUMP_SANDBOX_PROFILE`.
-pub(crate) fn dump() {
-    eprintln!(
-        "--- seccomp deny-set ---\n{}--- end seccomp deny-set ---",
-        Filter::ENVELOPE
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,38 +631,6 @@ mod tests {
         assert_eq!(clone3.verdict, Verdict::Errno(libc::ENOSYS));
 
         assert!(Filter::ENVELOPE.explain(libc::SYS_read).is_none());
-    }
-
-    #[test]
-    fn display_of_a_two_rule_filter_matches_a_literal() {
-        const RULES: &[Rule] = &[
-            Rule {
-                calls: &[PTRACE],
-                when: None,
-                verdict: Verdict::Kill,
-                why: "reads another process",
-            },
-            Rule {
-                calls: &[UNSHARE, CLONE],
-                when: Some(Cond::FlagSet {
-                    arg: 0,
-                    mask: CLONE_NEWUSER,
-                }),
-                verdict: Verdict::Errno(libc::EPERM),
-                why: "a container inside the grant",
-            },
-        ];
-        let filter = Filter(RULES);
-        #[cfg(target_arch = "x86_64")]
-        const ABI_LINE: &str = "x32 ABI: killed outright (x86-64 only)\n";
-        #[cfg(not(target_arch = "x86_64"))]
-        const ABI_LINE: &str = "no foreign ABI shares this arch's audit value\n";
-        let expected = format!(
-            "ptrace → SIGSYS: reads another process\n\
-             unshare, clone (arg0 & CLONE_NEWUSER) → EPERM: a container inside the grant\n\
-             {ABI_LINE}"
-        );
-        assert_eq!(filter.to_string(), expected);
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

@@ -10,7 +10,7 @@
 //! A pointer no git directory claims is a [`PolicyError`], never a wider grant.
 
 use crate::path::canon::canonicalise_lenient;
-use crate::path::lex::{fold_dots, parent_or_cwd, path_within};
+use crate::path::lex::{Identity, fold_dots, parent_or_cwd, path_within};
 use crate::types::PolicyError;
 use std::path::{Path, PathBuf};
 
@@ -101,7 +101,7 @@ fn against(base: &Path, path: &str) -> PathBuf {
 /// [`path_within`] in both directions.
 fn same_path(a: &Path, b: &Path) -> bool {
     let (a, b) = (canonicalise_lenient(a), canonicalise_lenient(b));
-    path_within(&a, &b) && path_within(&b, &a)
+    path_within(&a, &b, Identity::Stored) && path_within(&b, &a, Identity::Stored)
 }
 
 #[allow(

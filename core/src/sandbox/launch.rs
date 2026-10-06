@@ -124,10 +124,11 @@ fn windows_sandboxed_command(
     // mirroring the Linux backend binding the program path into the bwrap argv.
     let (mut launch, image): (crate::process::Launch, Option<std::path::PathBuf>) =
         match admitted.program() {
-            Program::File { path, .. } => {
-                let mut launch = crate::process::Launch::new(path);
+            Program::File { path, real } => {
+                let mut launch = crate::process::Launch::new(real.as_path());
+                launch.arg0(path);
                 launch.args(args);
-                (launch, Some(path.clone()))
+                (launch, Some(real.as_path().to_path_buf()))
             }
             Program::Tool(tool) => {
                 use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
@@ -462,6 +463,73 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_file(&denied);
+    }
+
+    /// An executable that writes its name into the file it is given.
+    #[cfg(target_os = "macos")]
+    fn plant(dir: &std::path::Path, who: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(who);
+        std::fs::write(&path, format!("#!/bin/sh\necho {who} > \"$1\"\n")).expect("write script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    /// `build` was judged a link to `a`, and is a link to `b` by the time the
+    /// confined child starts: the child runs `a`, the file the warrant judged.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_launch_runs_the_file_judged_not_what_its_link_names_later() {
+        let work = unique_workdir("retarget");
+        let (a, b) = (plant(&work, "a"), plant(&work, "b"));
+        let link = work.join("build");
+        std::os::unix::fs::symlink(&a, &link).expect("link to a");
+        let judged = Program::file(link.clone()).expect("the link names a program");
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(&b, &link).expect("retarget to b");
+
+        let mark = work.join("who");
+        let cmd = macos_sandboxed_command(
+            &write_confined_to(&work.to_string_lossy()),
+            &admitted(judged, &[mark.to_string_lossy().into_owned()]),
+        )
+        .expect("build host command");
+        assert!(run_confined(cmd), "the judged file must run");
+        assert_eq!(
+            std::fs::read_to_string(&mark).expect("the program wrote its name"),
+            "a\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// The program runs by its real path and is told the spelling it was
+    /// named by: `sh` prints its `argv[0]` as `$0` when given no other name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_program_sees_the_spelling_it_was_named_by_as_argv0() {
+        let work = unique_workdir("argv0");
+        let link = work.join("build");
+        std::os::unix::fs::symlink("/bin/sh", &link).expect("link to sh");
+        let mark = work.join("argv0");
+        let cmd = macos_sandboxed_command(
+            &write_confined_to(&work.to_string_lossy()),
+            &admitted(
+                Program::file(link.clone()).expect("the link names a program"),
+                &[
+                    "-c".into(),
+                    format!("printf %s \"$0\" > {}", mark.display()),
+                ],
+            ),
+        )
+        .expect("build host command");
+        assert!(run_confined(cmd), "the program must run");
+        assert_eq!(
+            std::fs::read_to_string(&mark).expect("the program wrote its name"),
+            link.to_string_lossy()
+        );
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// The same proof through the bundled-tool seam.

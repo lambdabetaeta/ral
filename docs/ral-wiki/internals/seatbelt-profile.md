@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1eee86cd
 verified_at_date: 2026-10-05
-anchors: [build_profile, Profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Sbpl, emit_ancestor_metadata, existing_system_paths, system_paths, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -14,6 +14,15 @@ cost of saying the second in the first:
 - **Two spellings per path.** `/tmp` is a firmlink to `/private/tmp`, and the
   kernel presents a lookup under whichever spelling the process used, so every
   rendered name (`render_paths`) carries both — denies included.
+- **No case or normalisation spellings.** Measured (macOS 26.5), `literal`,
+  `subpath` and `regex` all match modulo canonical caseless equivalence, for
+  absent names as for existing ones, on case-insensitive and case-sensitive
+  APFS alike: a deny on `Secrets` refuses `mkdir secrets`, and an NFC deny an
+  NFD create. That is the guard's deny relation less {ı ≡ i}
+  ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]),
+  so a deny is rendered once. The residual is on the allow side: on a
+  case-sensitive volume an allow on `Work` also admits the distinct `work` to
+  a child, which the guard refuses; SBPL has no exact match to say otherwise.
 - **Ancestor chains.** `(allow file-read* (subpath P))` does not make `P`
   reachable: Seatbelt gates each directory lookup on the way, so every proper
   ancestor of every granted name gets `(allow file-read-metadata (literal …))`
@@ -69,7 +78,9 @@ An operand-less form is an unconditional allow, so an empty base emits nothing. 
 `Rank` order, becomes one `Sbpl` form: an allowing dir or file
 `(allow file-read* process-exec (subpath|literal …))`, a denying one
 `(deny process-exec …)`, a veto `(deny process-exec (regex #"/name$"))`,
-the name wherever it resolves. Last-match-wins over that order is the
+the name wherever it resolves. Seatbelt matches each form caselessly, as the
+guard reads a deny; the stack's meet writes no default as a deny, so no form
+refuses a child a spelling the guard admits. Last-match-wins over that order is the
 in-process guard's precedence, carriers included
 ([[decisions/261004_exec-carriers|exec-carriers]]). **Exec denies deny no
 reads**: reading is fs's to decide, and a veto would otherwise hide every
@@ -87,10 +98,12 @@ fresh name into an admitted directory and run it from there.
 Freezing contradicts no layer, none having asked to write there, and restores
 the premise `capability::deputy` reasons from: that an unrestricted `fs` is
 not "everything writable" — true of the folded grant, false of this backend
-until here. A grant that *restricts* fs is never frozen, even where its write
-set overlaps the admits, because there the overlap is a stance someone took
-(`reasonable` admits `cwd:/` for exactly the scripts it lets the agent write),
-and a name veto has never been more than a narrowing of the allow set.
+until here. A grant that *restricts* fs freezes, veto or none, only the admitted
+directories its write prefixes cover without naming (`write: ~` over
+`~/.cargo/bin`), and not those they name, nor those nested under an admit they
+name: the overlap there is a stance someone took (`reasonable` admits `cwd:/`
+for exactly the scripts it lets the agent write), and a bare-name veto under it
+is no more than a narrowing of the allow set ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
 only `net: true` appends `macos-net.sbpl` — the wholesale `(allow network*)`,
@@ -155,19 +168,36 @@ admits being variable-length.
 - **`ipc-posix-shm`**, and the notification center by its POSIX shared-memory
   name rather than a Mach one: CoreFoundation and libdispatch use both during
   framework init.
-- **`(allow file-ioctl)`** unfiltered, as in Xcode's, Bazel's and Chromium's
-  build sandboxes: an ioctl acts on a descriptor already held and grants no new
-  open; the dangerous ones (format, eject, raw-socket reconfiguration) need a
-  device node this profile never lets one open. The open-time gate is the
-  boundary. It is also the known hole `/dev/tty` sits in: the projection
-  carries fs, net and exec but not terminal-loan state, so the profile cannot
-  deny tty ioctls to an ordinary Denied-terminal child while admitting them to
-  a full-screen one.
+- **`(allow file-ioctl)`**, unfiltered as in Xcode's, Bazel's and Chromium's
+  build sandboxes, then **`(deny file-ioctl (ioctl-command TIOCSTI))`**. The
+  allow is there for `tcsetattr`: without it a full-screen child cannot raise
+  raw mode (`tcgetattr` and `TIOCGWINSZ` pass either way). It is also the
+  known hole `/dev/tty` sits in: the projection carries fs, net and exec but
+  not terminal-loan state, so the profile cannot deny tty ioctls to an
+  ordinary Denied-terminal child while admitting them to a full-screen one.
+  The open-time gate does not cover it, since an inherited terminal needs no
+  open, and `ioctl(fd, TIOCSTI, …)` would type into the unconfined parent's
+  input. Measured on macOS 26, Seatbelt refuses that under `hid-control`, not
+  `file-ioctl`: a `(deny default)` profile that never allows `hid-control`
+  returns `EPERM` whatever it says about `file-ioctl`, and allowing
+  `hid-control` alone lifts it. The base never does; the explicit deny, after
+  the unfiltered allow, makes the refusal ours should that gate move.
+  `ioctl-command` takes a symbol (hex is an unbound variable) and, given a
+  number, matches only its low 16 bits — group and number, not direction or
+  size — so write the name. A `NewSession` launch has no controlling terminal,
+  and unconfined XNU refuses TIOCSTI itself (`EACCES`, `isctty` in `tty.c`);
+  confined, Seatbelt answers first. The foreground launch keeps the terminal,
+  so there the profile is the only wall.
 
 ## Diagnosis
 
-`RAL_DUMP_SANDBOX_PROFILE` prints the rendered profile. `sandbox::diag` turns a
-kernel denial into a hint per operand class — a path to `read`, `write` or
-`exec`, a network operand to the `net:` bit, a Mach or IPC operand to nothing,
-since a door is the base's to decide and no grant widens one
+`sandbox::diag` turns a kernel denial into a hint per operand class — a path
+to `read`, `write` or `exec`, a network operand to the `net:` bit, a Mach or IPC
+operand to nothing, since a door is the base's to decide and no grant widens one
 ([[map/core/capabilities|capabilities]]).
+
+Entry has one diagnosis of its own. A lineage already inside a profile —
+a per-command child of a confined runner — gets `EPERM` from `sandbox_init`,
+since profiles do not stack, and `apply_profile` reports it as such: the launch
+is refused rather than run under the wider profile
+([[design/two-enforcers|two-enforcers]]).

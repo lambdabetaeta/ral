@@ -369,10 +369,10 @@ mod tests {
 
     use super::*;
     use crate::bus::card::Row;
-    use ral_core::types::WriteOutcome;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::protocol::IdentityTransport;
+    use ral_core::types::WriteOutcome;
     use ral_core::types::{CallSite, Capabilities, Observed};
 
     /// Render a path without a trailing separator.  Some hosts return
@@ -1290,11 +1290,26 @@ keep-bottom
         );
         let elapsed = t0.elapsed();
         let stderr = String::from_utf8_lossy(&r.stderr);
-        if r.exit != 124
-            && (stderr.contains("sandbox eval")
-                || stderr.contains("failed to enter sandbox")
-                || stderr.contains("bwrap"))
+        #[cfg(target_os = "macos")]
         {
+            const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
+            if let Some(reason) = stderr
+                .lines()
+                .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
+            {
+                assert_eq!(
+                    reason,
+                    ral_core::sandbox::ALREADY_PROFILED,
+                    "the refusal is not attributed"
+                );
+                assert_eq!(r.exit, 126, "a refused launch exits 126");
+                eprintln!(
+                    "skip: this runner is inside a Seatbelt profile; asserted the attributed refusal"
+                );
+                return;
+            }
+        }
+        if r.exit != 124 && (stderr.contains("sandbox eval") || stderr.contains("bwrap")) {
             eprintln!("skip: OS sandbox unavailable on this host: {stderr}");
             return;
         }
@@ -1537,8 +1552,16 @@ return !{{length $hits}}"
         let (_dir, path) = scratch_file("edit", "big.txt", &format!("HEAD\n{tail}"));
 
         let (r, records) = run_capturing(&engine, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
-        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
-        assert!(observations(&records).is_empty(), "no write beside the change");
+        assert_eq!(
+            r.exit,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(
+            observations(&records).is_empty(),
+            "no write beside the change"
+        );
         let [change] = changes(&records).try_into().expect("one edit, one change");
         assert_eq!(change.path, path);
         assert_eq!(unified(&change)[..2], ["-HEAD", "+TAIL"]);
@@ -1763,11 +1786,21 @@ return !{{length $hits}}"
         let engine = fresh();
         let (_dir, path) = scratch_file("write", "b", "hello\nworld\n");
 
-        let (r, records) =
-            run_capturing(&engine, &format!("to-string \"hello\\nfriend\\n\" > '{path}'"));
-        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        let (r, records) = run_capturing(
+            &engine,
+            &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
+        );
+        assert_eq!(
+            r.exit,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let [change] = changes(&records).try_into().expect("one write, one change");
-        assert_eq!((change.path.as_str(), change.outcome), (path.as_str(), WriteOutcome::Committed));
+        assert_eq!(
+            (change.path.as_str(), change.outcome),
+            (path.as_str(), WriteOutcome::Committed)
+        );
         assert_eq!(unified(&change), [" hello", "-world", "+friend"]);
     }
 
@@ -1778,8 +1811,15 @@ return !{{length $hits}}"
         let (_dir, path) = scratch_file("append", "b", "one\n");
 
         let (r, records) = run_capturing(&engine, &format!("to-string \"two\\n\" >> '{path}'"));
-        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
-        let [change] = changes(&records).try_into().expect("one append, one change");
+        assert_eq!(
+            r.exit,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let [change] = changes(&records)
+            .try_into()
+            .expect("one append, one change");
         assert_eq!(unified(&change), [" one", "+two"]);
     }
 
@@ -1791,7 +1831,12 @@ return !{{length $hits}}"
         let (_dir, path) = scratch_file("write-big", "b", &"x".repeat(70_000));
 
         let (r, records) = run_capturing(&engine, &format!("to-string 'short' > '{path}'"));
-        assert_eq!(r.exit, 0, "stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+        assert_eq!(
+            r.exit,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let [change] = changes(&records).try_into().expect("one write, one change");
         assert_eq!(change.outcome, WriteOutcome::Committed);
         assert!(change.diff.is_none());

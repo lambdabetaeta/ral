@@ -458,6 +458,25 @@ fn exec_widen_drops_allow_clashing_with_deny_on_firmlink_alias() {
     );
 }
 
+/// U6: a deny holds every spelling of its name, so it evicts an allow on
+/// another spelling of its directory, and not one on its parent.
+#[test]
+fn exec_widen_drops_allow_on_another_spelling_of_a_deny() {
+    let p = |s: &str| crate::path::NormalizedPrefix::from_surface(s);
+    let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B")));
+    assert!(
+        allow_dirs(&composed).is_empty(),
+        "a deny on `/a/B` must evict the allow on `/a/b`, got {:?}",
+        composed.dirs
+    );
+    let composed = exec_of(&p("/a/b")).widen(exec_deny_of(&p("/a/B/c")));
+    assert_eq!(
+        allow_dirs(&composed).len(),
+        1,
+        "a deny on `/a/B/c` must not evict the allow on `/a/b`"
+    );
+}
+
 /// The prefix universe folded through an allow-only and a deny-only grant
 /// alike, so the laws below reach deny-overrides — the dimension `exec_of` on
 /// its own never enters.

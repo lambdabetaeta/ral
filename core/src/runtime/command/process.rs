@@ -35,8 +35,9 @@ pub(crate) fn build_launch(
         crate::sandbox::sandboxed_command(&projection, admitted, ownership, shell, cancel)?
     } else {
         match admitted.program() {
-            Program::File { path, .. } => {
-                let mut cmd = crate::process::Launch::new(path);
+            Program::File { path, real } => {
+                let mut cmd = crate::process::Launch::new(real.as_path());
+                cmd.arg0(path);
                 cmd.args(admitted.args());
                 cmd
             }
@@ -54,7 +55,7 @@ pub(crate) fn build_launch(
     apply_env(&mut cmd, shell);
     #[cfg(unix)]
     if shell.has_active_capabilities() {
-        cmd.forbid_core_dumps();
+        cmd.limit_resources();
     }
     #[cfg(target_os = "linux")]
     if let Some(jail) = jail {
@@ -196,5 +197,119 @@ mod tests {
             "{}",
             message(&confined)
         );
+    }
+}
+
+/// What runs is the file that was judged, by its real path and under the
+/// spelling the user wrote, however the spelling moves in between.
+#[cfg(all(test, unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test fs/process scaffolding"
+)]
+mod judged_program {
+    use super::super::{
+        head::Head,
+        vet::{SpawnPlan, vet},
+    };
+    use super::build_launch;
+    use crate::ir::CommandName;
+    use crate::path::RealPath;
+    use crate::process::{CancelScope, PgidPolicy, StdioSpec};
+    use crate::types::{Shell, Value};
+    use std::io::Read;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+
+    /// A scratch directory holding `tools/`, as the shell's cwd.
+    fn workdir() -> (tempfile::TempDir, Shell) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("tools")).unwrap();
+        let mut shell = Shell::default();
+        shell.seed_cwd(tmp.path().to_path_buf());
+        (tmp, shell)
+    }
+
+    /// An executable that prints `who`.
+    fn plant(dir: &Path, who: &str) -> PathBuf {
+        let path = dir.join(who);
+        std::fs::write(&path, format!("#!/bin/sh\necho {who}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `tools/build`, made to point at `target`.
+    fn point_build_at(dir: &Path, target: &Path) -> PathBuf {
+        let link = dir.join("tools/build");
+        let _ = std::fs::remove_file(&link);
+        symlink(target, &link).unwrap();
+        link
+    }
+
+    fn judge(shell: &mut Shell, args: &[&str]) -> SpawnPlan {
+        let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
+        let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
+        vet(&head, &args, shell).expect("an unrestricted shell admits the file")
+    }
+
+    fn stdout_of(plan: &SpawnPlan, shell: &Shell) -> String {
+        let mut cmd = build_launch(
+            plan,
+            crate::sandbox::Ownership::Kept,
+            shell,
+            &CancelScope::default(),
+        )
+        .expect("the launch builds");
+        cmd.stdout(StdioSpec::piped());
+        let (mut child, ..) = cmd.spawn(PgidPolicy::Inherit).expect("the file runs");
+        let mut out = String::new();
+        child
+            .take_stdout()
+            .expect("stdout was piped")
+            .read_to_string(&mut out)
+            .unwrap();
+        child.reap().expect("reaps");
+        out
+    }
+
+    /// The control: the harness tells `a` from `b`, so the next test cannot
+    /// pass by the two being alike.
+    #[test]
+    fn a_judged_link_runs_its_target() {
+        for who in ["a", "b"] {
+            let (tmp, mut shell) = workdir();
+            point_build_at(tmp.path(), &plant(tmp.path(), who));
+            assert_eq!(
+                stdout_of(&judge(&mut shell, &[]), &shell),
+                format!("{who}\n")
+            );
+        }
+    }
+
+    /// A pipeline's earlier stage may retarget a later one's link after the
+    /// head is resolved and before it launches: the judged `a` still runs.
+    #[test]
+    fn a_link_retargeted_after_judgment_runs_the_file_judged() {
+        let (tmp, mut shell) = workdir();
+        let (a, b) = (plant(tmp.path(), "a"), plant(tmp.path(), "b"));
+        let link = point_build_at(tmp.path(), &a);
+
+        let plan = judge(&mut shell, &[]);
+        point_build_at(tmp.path(), &b);
+        assert_eq!(
+            RealPath::of(&link).unwrap(),
+            RealPath::of(&b).unwrap(),
+            "the link moved"
+        );
+        assert_eq!(stdout_of(&plan, &shell), "a\n");
+    }
+
+    #[test]
+    fn a_program_sees_the_spelling_it_was_named_by_as_argv0() {
+        let (tmp, mut shell) = workdir();
+        let link = point_build_at(tmp.path(), Path::new("/bin/sh"));
+
+        let plan = judge(&mut shell, &["-c", r#"printf %s "$0""#]);
+        assert_eq!(stdout_of(&plan, &shell), link.to_string_lossy());
     }
 }

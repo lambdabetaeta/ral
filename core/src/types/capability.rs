@@ -16,6 +16,8 @@
 
 use crate::path::{NormalizedPrefix, RealPath, Rendered, render_paths, rendered_pins};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Lattice traits ────────────────────────────────────────────────────────
@@ -193,6 +195,50 @@ impl<N> Default for FsRules<N> {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
             pinned_dirs: Vec::new(),
+        }
+    }
+}
+
+/// How the write region stands to one admitted exec directory.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteReach {
+    /// A write prefix that reaches it lies within an admit that holds it: the
+    /// writes were named at or below an admit at or above this one, so
+    /// authoring binaries here is the grant's intent.
+    Trusted,
+    /// A write prefix covers it and none was named so, so the child could
+    /// author binaries the admit runs without the grant having said so.
+    Covered,
+    Apart,
+}
+
+#[cfg(target_os = "macos")]
+impl FsRules<Rendered> {
+    /// The reach of the write prefixes over `admit`, itself among `admitted`.
+    /// Trusted when some write prefix `w` that covers `admit` or lies inside it
+    /// lies within (or is) an admitted dir that holds `admit`; covered when
+    /// some `w` covers it and none qualifies; apart otherwise.  Everything is
+    /// rendered names, so the comparison is the plain prefix test on spellings.
+    pub(crate) fn write_reach(
+        &self,
+        admit: &Rendered,
+        admitted: &[impl Borrow<Rendered>],
+    ) -> WriteReach {
+        let writes = &self.write_prefixes;
+        let named = writes.iter().any(|w| {
+            (w.holds(admit.as_str()) || admit.holds(w.as_str()))
+                && admitted.iter().any(|t| {
+                    let t = t.borrow();
+                    t.holds(admit.as_str()) && t.holds(w.as_str())
+                })
+        });
+        if named {
+            WriteReach::Trusted
+        } else if writes.iter().any(|w| w.holds(admit.as_str())) {
+            WriteReach::Covered
+        } else {
+            WriteReach::Apart
         }
     }
 }
@@ -812,6 +858,154 @@ mod rendered_tests {
         assert!(
             !dirs.iter().any(|d| d.contains("somewhere")),
             "a carried pin survived rendering: {dirs:?}"
+        );
+    }
+
+    /// The reach of `write` over the admit `dir`, itself one of `admits`,
+    /// through the real renderers: every spelling of the admit must agree, or
+    /// the freeze would split one directory.
+    #[cfg(target_os = "macos")]
+    fn reach(write: &[&str], admits: &[&str], dir: &str) -> WriteReach {
+        let projection = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                write_prefixes: write.iter().copied().map(str::to_string).collect(),
+                ..FsRules::default()
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let rendered = projection.rendered().expect("ASCII paths render");
+        let fs = rendered.fs.rules().expect("restricted in, restricted out");
+        let names = |path: &str| {
+            crate::path::render_real(&RealPath::assumed(path)).expect("ASCII path renders")
+        };
+        let admitted: Vec<Rendered> = admits.iter().flat_map(|admit| names(admit)).collect();
+        let spellings = names(dir);
+        let first = fs.write_reach(&spellings[0], &admitted);
+        assert!(
+            spellings
+                .iter()
+                .all(|spelling| fs.write_reach(spelling, &admitted) == first),
+            "{dir} split across its spellings: {spellings:?}"
+        );
+        first
+    }
+
+    /// [`reach`] over `dir` as the only admit.
+    #[cfg(target_os = "macos")]
+    fn reach_alone(write: &[&str], dir: &str) -> WriteReach {
+        reach(write, &[dir], dir)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_write_prefix_identical_to_the_admit_is_trusted() {
+        assert_eq!(
+            reach_alone(&["/ral-test/w"], "/ral-test/w"),
+            WriteReach::Trusted
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_write_prefix_inside_the_admit_is_trusted() {
+        assert_eq!(
+            reach_alone(&["/ral-test/w/out"], "/ral-test/w"),
+            WriteReach::Trusted
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shallower_write_prefix_covers_the_admit() {
+        assert_eq!(
+            reach_alone(&["/ral-test"], "/ral-test/w/bin"),
+            WriteReach::Covered
+        );
+        assert_eq!(reach_alone(&["/"], "/ral-test/w/bin"), WriteReach::Covered);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_disjoint_write_prefix_leaves_the_admit_apart() {
+        assert_eq!(
+            reach_alone(&["/ral-test/other"], "/ral-test/w"),
+            WriteReach::Apart
+        );
+        assert_eq!(reach_alone(&[], "/ral-test/w"), WriteReach::Apart);
+    }
+
+    /// Containment is by component: `/ral-test/w2` is no part of `/ral-test/w`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_sibling_that_shares_a_name_prefix_is_apart() {
+        assert_eq!(
+            reach_alone(&["/ral-test/w2"], "/ral-test/w"),
+            WriteReach::Apart
+        );
+    }
+
+    /// Naming the tree outranks a shallower prefix that also reaches it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_named_tree_stays_trusted_beside_a_covering_prefix() {
+        assert_eq!(
+            reach_alone(&["/ral-test", "/ral-test/w/bin"], "/ral-test/w/bin"),
+            WriteReach::Trusted
+        );
+    }
+
+    /// `write: cwd` with `cwd/` admitted: an admit nested under it, such as a
+    /// `$PATH` entry inside the project, is written at or below an admit above
+    /// it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_admit_nested_in_a_trusted_admit_is_trusted() {
+        let admits = ["/ral-test/proj", "/ral-test/proj/node_modules/.bin"];
+        for dir in admits {
+            assert_eq!(
+                reach(&["/ral-test/proj"], &admits, dir),
+                WriteReach::Trusted,
+                "{dir}"
+            );
+        }
+    }
+
+    /// No admit holds both `~` and `~/.cargo/bin`, so a broad prefix over a
+    /// lone admit stays covered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_broad_prefix_over_a_lone_admit_stays_covered() {
+        assert_eq!(
+            reach_alone(&["/ral-test/home"], "/ral-test/home/.cargo/bin"),
+            WriteReach::Covered
+        );
+    }
+
+    /// Trust does not leak sideways: the carve-out `~/.cargo/registry` lies in
+    /// `~/.cargo/`, which holds it, but does not reach `~/.cargo/bin`, and `~`
+    /// lies within no admit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trust_does_not_leak_to_a_sibling_admit() {
+        let write = ["/ral-test/home", "/ral-test/home/.cargo/registry"];
+        let admits = ["/ral-test/home/.cargo", "/ral-test/home/.cargo/bin"];
+        assert_eq!(reach(&write, &admits, admits[0]), WriteReach::Trusted);
+        assert_eq!(reach(&write, &admits, admits[1]), WriteReach::Covered);
+    }
+
+    /// `/tmp` and `/private/tmp` are one directory, so a prefix spelled one
+    /// way reaches an admit spelled the other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn firmlink_spellings_classify_alike() {
+        assert_eq!(
+            reach_alone(&["/tmp/ral-test"], "/private/tmp/ral-test/bin"),
+            WriteReach::Covered
+        );
+        assert_eq!(
+            reach_alone(&["/private/tmp/ral-test/bin"], "/tmp/ral-test/bin"),
+            WriteReach::Trusted
         );
     }
 }

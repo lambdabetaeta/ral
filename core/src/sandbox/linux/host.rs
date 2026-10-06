@@ -2,11 +2,11 @@
 //! masks `/proc` (crun, runc, Docker) makes the kernel refuse a fresh procfs
 //! in a user namespace, and refuses bwrap a fresh devpts; neither is a promise
 //! a grant makes, so each is an invariant held where the host allows and
-//! reported where not.  Probed once, so the argv render stays pure in it.
+//! stated, not refused, where not.  Probed once, so the argv render stays
+//! pure in it.
 
-use super::landlock::{Abi, Landlock};
+use super::landlock::Landlock;
 use crate::sandbox::reexec::Pinned;
-use std::fmt;
 use std::process::Stdio;
 use std::sync::OnceLock;
 
@@ -33,74 +33,6 @@ impl HostEnvelope {
             private_cgroup: bwrap_builds(envelope, &["--unshare-cgroup"]),
             landlock: Landlock::probe(),
         })
-    }
-}
-
-/// One line per invariant; an unheld one names its cause and the flag that lifts it.
-impl fmt::Display for HostEnvelope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let held = |held: bool| if held { "held" } else { "unheld" };
-        writeln!(f, "host process table hidden: {}", held(self.private_pids))?;
-        if !self.private_pids {
-            writeln!(
-                f,
-                "  the container runtime masks /proc, so the kernel refuses a fresh procfs \
-                 inside the pid namespace; a confined child sees the container's own \
-                 table.  Lifted by running the container --privileged."
-            )?;
-        }
-        writeln!(f, "private ptys: {}", held(self.virtual_dev))?;
-        if !self.virtual_dev {
-            writeln!(
-                f,
-                "  the container refuses a fresh devpts, so /dev is built by hand over the \
-                 host's /dev/pts.  Lifted by running the container --privileged."
-            )?;
-        }
-        writeln!(f, "host cgroup tree hidden: {}", held(self.private_cgroup))?;
-        if !self.private_cgroup {
-            writeln!(
-                f,
-                "  this kernel builds no cgroup namespace, so a confined child's \
-                 /sys/fs/cgroup is the host's whole tree — its own limits are still \
-                 the ones its /proc/self/cgroup names."
-            )?;
-        }
-        let exec = self.landlock.abi().is_some_and(|abi| abi >= Abi::EXEC);
-        writeln!(f, "kernel exec confinement: {}", held(exec))?;
-        match self.landlock {
-            unprobed @ Landlock::Unprobed(_) => {
-                writeln!(f, "  {unprobed}; a confined launch refuses.")?;
-            }
-            absent @ Landlock::Absent => writeln!(
-                f,
-                "  {absent}; a confined child's own re-execs (`sh -c`, `find -exec`) are \
-                 gated by nothing: ral's dispatch sees only what it launches itself."
-            )?,
-            Landlock::At(_) => {}
-        }
-        let scoped = self
-            .landlock
-            .abi()
-            .is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
-        writeln!(f, "signals scoped to the envelope: {}", held(scoped))?;
-        if !scoped {
-            if let at @ (Landlock::At(_) | Landlock::Absent) = self.landlock {
-                writeln!(
-                    f,
-                    "  {at}; the signal scope needs ABI {} (Linux 6.12).",
-                    Abi::SIGNAL_SCOPE
-                )?;
-            }
-            if !self.private_pids {
-                writeln!(
-                    f,
-                    "  the pid namespace is unheld too, so a confined child can signal \
-                     same-uid host processes."
-                )?;
-            }
-        }
-        Ok(())
     }
 }
 

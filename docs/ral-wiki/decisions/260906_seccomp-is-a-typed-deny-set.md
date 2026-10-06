@@ -11,11 +11,10 @@ copied; what it shows is that our one un-typed enforcer was the seccomp
 program: eight `libc::SYS_*` numbers hand-packed into `sock_filter` bytes
 (`linux.rs::build_seccomp_filter`, `BpfProg`, `apply_seccomp`). Every other
 layer of the envelope — the bwrap argv, the Landlock `Layer`, `HostEnvelope`
-— is a value with a `Display`, tested from literals, printed by
-`RAL_DUMP_SANDBOX_PROFILE`. Replaced by `sandbox/linux/seccomp.rs`: a value,
-`seccomp::Filter`, that renders to BPF for bwrap, to text for the profile
-dump, and *names* a denied syscall for `diag` — the same data enforces and
-explains, so the two cannot drift.
+— is a value, tested from literals. Replaced by `sandbox/linux/seccomp.rs`: a
+value, `seccomp::Filter`, that renders to BPF for bwrap and *names* a denied
+syscall for `diag` — the same data enforces and explains, so the two cannot
+drift.
 
 That un-typed state had a user-visible cost: `diag/linux.rs` read a
 `type=1326` record, extracted `syscall=101`, and `diag.rs::build_hint`'s
@@ -49,9 +48,8 @@ unnamed.
    they print their own error, and `diag` says the refusal was the
    envelope's, not the grant's.
 
-4. **One value, three readers.** `seccomp::Filter` renders to BPF for
-   bwrap, to text for the profile dump, and names a denied syscall number
-   for `diag`.
+4. **One value, two readers.** `seccomp::Filter` renders to BPF for
+   bwrap and names a denied syscall number for `diag`.
 
 5. **`seccompiler` compiles the BPF.** rust-vmm's crate, 0.5.0 (Apache-2.0 OR
    BSD-3), x86_64 and aarch64, arch-validation prologue built in, argument
@@ -74,7 +72,7 @@ Criterion for `Kill`: *no unprivileged program has a legitimate use for it
 inside a confined command, and its kernel surface is historically
 exploitable.* Criterion for `Errno`: *a legitimate tool may attempt it, and
 should be told no in its own words.* Each rule carries a one-line `why` that
-`Display` prints and `diag` repeats verbatim.
+`diag` repeats verbatim.
 
 | syscalls | condition | verdict | why |
 |---|---|---|---|

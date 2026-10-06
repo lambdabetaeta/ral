@@ -17,7 +17,7 @@
 //! world.  The guard folds afresh on every check; the projection folds once,
 //! at spawn, because that is when the OS profile is written.
 
-use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
+use crate::path::{Allow, Deny, NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{FsPolicy, GrantStack, Meet};
 
 /// Which fs region a check consults: the read or the write prefix set.
@@ -50,7 +50,7 @@ pub(super) fn allow_region(
     grants: &GrantStack,
     resolver: &Resolver,
     op: &FsOp,
-) -> Option<PrefixSet> {
+) -> Option<PrefixSet<Allow>> {
     grants.fs().fold(None, |acc, fs| {
         acc.meet(Some(PrefixSet::resolve(resolver, op.prefixes(fs))))
     })
@@ -59,7 +59,7 @@ pub(super) fn allow_region(
 /// Accumulate every layer's deny region: a deny is sticky, and one deny
 /// region per layer covers both reads and writes.  Empty — covering
 /// nothing — when no layer denies.
-pub(super) fn deny_region(grants: &GrantStack, resolver: &Resolver) -> PrefixSet {
+pub(super) fn deny_region(grants: &GrantStack, resolver: &Resolver) -> PrefixSet<Deny> {
     grants.fs().fold(PrefixSet::default(), |acc, fs| {
         acc.union(PrefixSet::resolve(resolver, &fs.deny_paths))
     })

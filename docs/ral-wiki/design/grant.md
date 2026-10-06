@@ -128,6 +128,10 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   is therefore not merely tolerable but *required* — `cargo build &&
   ./target/debug/app` is exactly this shape, and every bake-in profile makes
   `cwd:`, `/tmp`, and `tempdir:` both writable and exec-admitted on purpose.
+  What is required is the overlap a grant *names*: an admit that a write prefix
+  only covers from above (`write: ~` over `~/.cargo/bin`) is frozen against
+  writes, and a bare-name veto is advisory only under an admit the write region
+  names or nests beneath one it names ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
   `capability::deputy_prefixes` accordingly reports and never denies, and *no
   prefix is both* is not an invariant this design wants.
 

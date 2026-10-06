@@ -76,17 +76,16 @@ never ran.
   invisible — the frame that cannot name it to widen it cannot name it to kill
   it. A `Kept` payload's orphans die with the envelope: `spawn`, `service` and
   `detach` are the verbs for outliving a command.
-- **A host that cannot build the namespace is reported, not refused.** A grant
+- **A host that cannot build the namespace is not refused.** A grant
   promises what it names — `fs`, `net`, `exec` — and nothing in it names
   process reach; the namespace is an invariant of being under an envelope, like
   `--die-with-parent` and the seccomp blocklist, applied where the host allows.
   Container runtimes that mask `/proc` (crun, runc, Docker) leave locked mounts
   the kernel will not let a fresh procfs cover in a user namespace; there the
-  payload sees the container's own table, and `RAL_DUMP_SANDBOX_PROFILE` prints
-  the `HostEnvelope` naming the unheld invariant, its cause, and `--privileged`
-  as the flag measured to lift it (`unmask=ALL` does not, on rootless podman).
-  Where `--dev` is refused, `/dev` is built by hand over the host's `/dev/pts`
-  and reported the same way.
+  payload sees the container's own table, and `--privileged` is the flag
+  measured to lift it (`unmask=ALL` does not, on rootless podman); SPEC §12
+  states the gap. Where `--dev` is refused, `/dev` is built by hand over the
+  host's `/dev/pts`, likewise stated and not refused.
 - **The datum is the host's, not the launch's.** One probed value per process,
   read where host facts are read; no mark per launch, since a constant carries
   no information.

@@ -55,7 +55,7 @@ nothing, and the trampoline's `EACCES` hint names the interpreter to grant.
 **Program behaviour is not forwarding.** `cc → cc1`, `clang → ld` and git's
 helpers are execs a program chooses, which no header names. Toolchains are
 grant data: the `system:` sigil carries each platform's tool and helper roots,
-visible in the grant and its dump.
+visible in the grant.
 
 **Renderers.** Seatbelt emits one form per rule in order: an allow admits
 `file-read* process-exec`, a deny or veto `process-exec` only — exec denies do

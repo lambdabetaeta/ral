@@ -5,7 +5,13 @@
 //! here too.  The firmlink table both sides share lives in [`super::canon`],
 //! so matcher and canonicaliser can never see different aliases.
 
+use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+
+use icu_casemap::CaseMapper;
+use icu_locale_core::LanguageIdentifier;
+use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::process_cwd;
 
@@ -21,38 +27,98 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Which spellings of a name count as one name.  An allow is judged under
+/// [`Stored`](Self::Stored), a deny under [`Collision`](Self::Collision): the
+/// polarity of a [`PrefixSet`](super::PrefixSet) picks, never a caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The name as stored: bytes off Windows, ASCII case on Windows, where
+    /// the walk does not spell stored names.
+    Stored,
+    /// Every name some filesystem takes for the same: [`collision_key`] per
+    /// component.
+    Collision,
+}
+
+/// The name a filesystem may take `name` for: canonical caseless matching
+/// (Unicode D145) of its uppercase image.  A name that is not UTF-8 is its
+/// own key; no filesystem folds one.
+///
+/// Coarser than or equal to every identity in play — case-insensitive APFS
+/// and Seatbelt, NTFS `$UpCase`, Linux casefold — and so fail-closed where a
+/// volume is finer.  The uppercase image adds exactly {ı, i, I} to D145,
+/// which `$UpCase` merges.
+pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
+    let Some(s) = name.to_str() else {
+        return Cow::Borrowed(name);
+    };
+    if s.is_ascii() {
+        return Cow::Owned(s.to_ascii_lowercase().into());
+    }
+    let nfd = DecomposingNormalizerBorrowed::new_nfd();
+    let case = CaseMapper::new();
+    let upper = case.uppercase_to_string(s, &LanguageIdentifier::UNKNOWN);
+    let decomposed = nfd.normalize(&upper);
+    let folded = case.fold_string(&decomposed);
+    Cow::Owned(nfd.normalize(&folded).into_owned().into())
+}
+
 /// True iff some alias of `path` starts with some alias of `prefix`: `path`
-/// lies inside `prefix` modulo firmlinks and, on Windows, modulo the path
-/// identity [`starts_with_identity`] applies.
+/// lies inside `prefix` modulo firmlinks and `identity` — on Windows, the
+/// path identity [`starts_with_identity`] applies, at the least.
 ///
 /// The in-process guard (`capability::enforce`) and the prefix intersector
 /// (`super::prefix_set`) both decide containment through it.
 ///
 /// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
-/// forms a containment question is asked of is settled inside `path` — by
-/// [`super::prefix_set::covers`] for fs and
+/// forms a containment question is asked of, under which identity, is
+/// settled inside `path` — by [`super::prefix_set::covers`] and
+/// [`PrefixSet`](super::PrefixSet)'s polarity for fs and
 /// [`RealPath::within`](super::RealPath::within) for exec — and never by a
 /// caller holding two bare paths.
-pub(super) fn path_within(path: &Path, prefix: &Path) -> bool {
+pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
-    if cfg!(windows) {
-        // The identity fold is defined on strings, so this branch necessarily
-        // accepts the lossy form: two distinct non-UTF-8 paths that decode
-        // alike compare equal here.  `NormalizedPrefix` already freezes to
-        // `to_string_lossy` strings, so nothing is closed by fixing only the
-        // matcher — and failing closed here would make a *deny* prefix fail
-        // open.
-        ps.iter().any(|p| {
-            qs.iter()
-                .any(|q| starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true))
+    ps.iter().any(|p| {
+        qs.iter().any(|q| match identity {
+            // The identity fold is defined on strings, so this arm
+            // necessarily accepts the lossy form: two distinct non-UTF-8
+            // paths that decode alike compare equal here.  `NormalizedPrefix`
+            // already freezes to `to_string_lossy` strings, so nothing is
+            // closed by fixing only the matcher — and failing closed here
+            // would make a *deny* prefix fail open.
+            Identity::Stored if cfg!(windows) => {
+                starts_with_identity(&p.to_string_lossy(), &q.to_string_lossy(), true)
+            }
+            // Compare the `&Path`s, not their `to_string_lossy` forms: two
+            // distinct non-UTF-8 paths can decode to the same
+            // replacement-character string, and the matcher would call them
+            // one.
+            Identity::Stored => p.starts_with(q),
+            Identity::Collision => starts_with_collision(p, q, cfg!(windows)),
         })
-    } else {
-        // Compare the `&Path`s, not their `to_string_lossy` forms: two
-        // distinct non-UTF-8 paths can decode to the same
-        // replacement-character string, and the matcher would call them one.
-        ps.iter().any(|p| qs.iter().any(|q| p.starts_with(q)))
-    }
+    })
+}
+
+/// Component-wise prefix test under [`collision_key`]: split as
+/// [`starts_with_identity`] splits under `windows`, by [`Path::components`]
+/// otherwise, then compared key by key, so no fold crosses a component
+/// boundary (`/w/secretsx` is not within `/w/Secrets`).  `windows` is a
+/// parameter for the reason [`starts_with_identity`]'s is.
+fn starts_with_collision(path: &Path, prefix: &Path, windows: bool) -> bool {
+    let keys = |p: &Path| -> Vec<OsString> {
+        if windows {
+            windows_components(&p.to_string_lossy(), |c| {
+                collision_key(OsStr::new(c)).into_owned()
+            })
+        } else {
+            p.components()
+                .map(|c| collision_key(c.as_os_str()).into_owned())
+                .collect()
+        }
+    };
+    let (path, prefix) = (keys(path), keys(prefix));
+    path.len() >= prefix.len() && path[..prefix.len()] == prefix[..]
 }
 
 /// Component-wise prefix test: byte-exact off Windows (via
@@ -86,14 +152,21 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> b
 /// internal normalisation, and folding `//?/C:/work` differently from
 /// `\\?\C:\work` would leave a deny that a differently-spelled access slips
 /// past.  The case fold is ASCII-only, matching
-/// `capability::exec`'s `name_key` so paths and command names fold alike, and
+/// `which`'s `name_key_on` so paths and command names fold alike, and
 /// erring below the real NTFS `$UpCase` table rather than above it — missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
 pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
+    windows_components(p, str::to_ascii_lowercase)
+}
+
+/// A path string's components under Windows path identity, each through
+/// `key`: the one split [`windows_identity_components`] and
+/// [`starts_with_collision`] share.
+fn windows_components<T>(p: &str, key: impl Fn(&str) -> T) -> Vec<T> {
     windows_head(p)
         .split(['/', '\\'])
         .filter(|c| !c.is_empty())
-        .map(str::to_ascii_lowercase)
+        .map(key)
         .collect()
 }
 
@@ -114,12 +187,16 @@ pub(crate) fn windows_head(p: &str) -> String {
 /// either slash spelling and the mixed forms between.
 fn strip_verbatim_prefix(p: &str) -> &str {
     let b = p.as_bytes();
-    let is_sep = |c: u8| c == b'/' || c == b'\\';
     if b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3]) {
         &p[4..]
     } else {
         p
     }
+}
+
+/// A path separator under Windows path identity: `/` and `\` alike.
+fn is_sep(c: u8) -> bool {
+    matches!(c, b'/' | b'\\')
 }
 
 /// True iff `path` is absolute under Windows rules: a drive-letter prefix or
@@ -149,16 +226,10 @@ pub(crate) fn is_foreign_rooted(path: &str, windows: bool) -> bool {
 }
 
 /// True iff `path` names the discard device: the sink that swallows every
-/// byte and keeps none.  `/dev/null` under POSIX rules; under Windows' the
-/// reserved name `NUL`, which the object manager answers to from *any*
-/// directory, in any case, behind any extension (`nul.txt`, `nul.tar.gz`),
-/// with the trailing blanks Win32 trims, and under the `\\.\` device
-/// namespace — hence a last-component test rather than a whole-path one.
-///
-/// The Windows table is deliberately shy of the DOS corners it does not
-/// cover (`C:nul`, `nul:`): a missed device merely reports a write that
-/// changed nothing, where a false claim of device-hood would silence a real
-/// one.
+/// byte and keeps none.  `/dev/null` under POSIX rules; under Windows', the
+/// device-namespace spelling `\\.\NUL`, in either slash spelling and any case,
+/// and nothing else — every other path ending in a reserved name is turned
+/// away by [`reserved_device_refusal`].
 ///
 /// `windows` is a parameter rather than a `cfg!` read, as in
 /// [`starts_with_identity`], so both tables are pinned on every host; the
@@ -168,12 +239,61 @@ pub(crate) fn is_discard_device(path: &str, windows: bool) -> bool {
     if !windows {
         return path == "/dev/null";
     }
-    path.rsplit(['/', '\\'])
-        .find(|c| !c.is_empty())
-        .is_some_and(|last| {
-            let stem = last.split('.').next().unwrap_or(last);
-            stem.trim_end_matches(' ').eq_ignore_ascii_case("nul")
-        })
+    match path.as_bytes() {
+        [a, b, b'.', c, name @ ..] => {
+            [a, b, c].into_iter().all(|&s| is_sep(s)) && name.eq_ignore_ascii_case(b"nul")
+        }
+        _ => false,
+    }
+}
+
+/// The refusal owed `path` under Windows rules when its last component is a
+/// DOS reserved device name — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`,
+/// `LPT1`–`LPT9`, in any case, with or without an extension, trailing dots and
+/// blanks as Win32 trims them — and `None` for every other path, the discard
+/// device's own spelling included.
+///
+/// Such a name is no file: most Windows tools read it as the device, so a file
+/// made under it is unusable to them, and ral does not take the device meaning
+/// either — the one discard it offers is [`is_discard_device`]'s.
+///
+/// `windows` is a parameter for the reason [`is_discard_device`]'s is; the
+/// gate is
+/// [`ResolvedPath::reserved_device_refusal`](super::ResolvedPath::reserved_device_refusal).
+pub(crate) fn reserved_device_refusal(path: &str, windows: bool) -> Option<String> {
+    if !windows || is_discard_device(path, true) {
+        return None;
+    }
+    let last = path.rsplit(['/', '\\']).find(|c| !c.is_empty())?;
+    let stem = last
+        .trim_end_matches(['.', ' '])
+        .split('.')
+        .next()?
+        .trim_end_matches(' ');
+    if !is_reserved_device_stem(stem) {
+        return None;
+    }
+    Some(if stem.eq_ignore_ascii_case("nul") {
+        format!(
+            "`{last}` is a DOS device name, which ral does not treat as a device. \
+             Did you mean `\\\\.\\NUL`? \
+             (A file named `{last}` would be unusable from most Windows tools.)"
+        )
+    } else {
+        format!(
+            "`{last}` is a reserved DOS device name, \
+             and ral refuses reserved device names as file names"
+        )
+    })
+}
+
+fn is_reserved_device_stem(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "NUL" | "CON" | "PRN" | "AUX")
+        || upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
 }
 
 /// Resolve `path` against `cwd`, or against the process cwd when `cwd` is
@@ -283,8 +403,8 @@ pub fn resolve_str(cwd: Option<&str>, path: &str) -> PathBuf {
 
 /// [`path_within`] on strings, and `pub(super)` for the same reason.
 #[allow(clippy::disallowed_methods)]
-pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
-    path_within(Path::new(path), Path::new(prefix))
+pub(super) fn path_within_str(path: &str, prefix: &str, identity: Identity) -> bool {
+    path_within(Path::new(path), Path::new(prefix), identity)
 }
 
 /// Depth of `dir` in components, folded through the same identity
@@ -570,23 +690,43 @@ mod tests {
 
     #[test]
     fn path_within_self() {
-        assert!(path_within(Path::new("/a/b"), Path::new("/a/b")));
+        assert!(path_within(
+            Path::new("/a/b"),
+            Path::new("/a/b"),
+            Identity::Stored
+        ));
     }
 
     #[test]
     fn path_within_strict_descendant() {
-        assert!(path_within(Path::new("/a/b/c"), Path::new("/a/b")));
+        assert!(path_within(
+            Path::new("/a/b/c"),
+            Path::new("/a/b"),
+            Identity::Stored
+        ));
     }
 
     #[test]
     fn path_within_not_a_descendant() {
-        assert!(!path_within(Path::new("/a/b"), Path::new("/a/c")));
-        assert!(!path_within(Path::new("/a"), Path::new("/a/b")));
+        assert!(!path_within(
+            Path::new("/a/b"),
+            Path::new("/a/c"),
+            Identity::Stored
+        ));
+        assert!(!path_within(
+            Path::new("/a"),
+            Path::new("/a/b"),
+            Identity::Stored
+        ));
     }
 
     #[test]
     fn path_within_no_substring_pseudomatch() {
-        assert!(!path_within(Path::new("/tmpx"), Path::new("/tmp")));
+        assert!(!path_within(
+            Path::new("/tmpx"),
+            Path::new("/tmp"),
+            Identity::Stored
+        ));
     }
 
     /// Security regression: two distinct non-UTF-8 byte sequences can decode
@@ -613,7 +753,7 @@ mod tests {
         let prefix = Path::new(OsStr::from_bytes(prefix_bytes));
         let candidate_path = PathBuf::from(OsStr::from_bytes(candidate_bytes)).join("file");
         assert!(
-            !path_within(&candidate_path, prefix),
+            !path_within(&candidate_path, prefix, Identity::Stored),
             "distinct non-UTF-8 paths must not collide via lossy string comparison"
         );
     }
@@ -623,12 +763,74 @@ mod tests {
     fn path_within_via_alias() {
         assert!(path_within(
             Path::new("/tmp/foo"),
-            Path::new("/private/tmp")
+            Path::new("/private/tmp"),
+            Identity::Stored
         ));
         assert!(path_within(
             Path::new("/private/tmp/foo"),
-            Path::new("/tmp")
+            Path::new("/tmp"),
+            Identity::Stored
         ));
+    }
+
+    /// T1: the key merges every pair some filesystem merges, and nothing
+    /// finer.
+    #[test]
+    fn collision_key_merges_what_some_filesystem_merges() {
+        let key = |s: &str| collision_key(OsStr::new(s)).into_owned();
+        for (a, b) in [
+            ("Secrets", "secrets"),
+            ("caf\u{e9}", "cafe\u{301}"),
+            ("stra\u{df}e", "strasse"),
+            ("\u{df}", "\u{1e9e}"),
+            ("\u{fb01}le", "file"),
+            ("\u{212a}ey", "key"),
+            ("\u{3c3}", "\u{3c2}"),
+            ("\u{130}", "i\u{307}"),
+            ("f\u{131}le", "file"),
+            ("f\u{131}le", "FILE"),
+        ] {
+            assert_eq!(key(a), key(b), "{a:?} and {b:?} must collide");
+        }
+        for (a, b) in [("\u{ff21}", "a"), ("abc", "abd"), ("secret", "secrets")] {
+            assert_ne!(key(a), key(b), "{a:?} and {b:?} must stay distinct");
+        }
+    }
+
+    /// T1: no filesystem folds a name that is not UTF-8, so the key is the
+    /// name, byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn collision_key_leaves_a_non_utf8_name_its_own() {
+        use std::os::unix::ffi::OsStrExt;
+        let (ff, fe) = (OsStr::from_bytes(b"\xFF"), OsStr::from_bytes(b"\xFE"));
+        assert_eq!(collision_key(ff), ff);
+        assert_ne!(collision_key(ff), collision_key(fe));
+    }
+
+    /// T2: a deny's relation folds within a component and never across one;
+    /// an allow's does not fold at all.
+    #[test]
+    fn collision_folds_components_and_stored_does_not() {
+        let within = |p: &str, q: &str, identity| path_within(Path::new(p), Path::new(q), identity);
+        assert!(within("/w/secrets/t", "/w/Secrets", Identity::Collision));
+        assert!(within("/w/SECRETS", "/w/Secrets", Identity::Collision));
+        assert!(!within("/w/secretsx", "/w/Secrets", Identity::Collision));
+        assert!(!within("/w/other/t", "/w/Secrets", Identity::Collision));
+        if cfg!(not(windows)) {
+            assert!(!within("/w/secrets/t", "/w/Secrets", Identity::Stored));
+        }
+    }
+
+    /// T2 under the Windows split, pinned on every host: heads and
+    /// separators fold as [`starts_with_identity`] folds them, and non-ASCII
+    /// case, which the stored identity misses, collides.
+    #[test]
+    fn windows_collision_folds_non_ascii_case() {
+        let within = |p: &str, q: &str| starts_with_collision(Path::new(p), Path::new(q), true);
+        assert!(within(r"\\?\C:\w\éclair\x", "c:/W/ÉCLAIR"));
+        assert!(!within(r"C:\w\eclair", r"C:\w\Éclair"));
+        assert!(!starts_with_identity(r"C:\w\éclair", r"C:\w\Éclair", true));
     }
 
     // The Windows rules below pass `windows: true` directly rather than
@@ -715,5 +917,107 @@ mod tests {
         assert_eq!(identity_depth(r"C:\work\sub", true), 3);
         assert_eq!(identity_depth(r"c:/WORK/SUB", true), 3);
         assert_eq!(identity_depth(r"\\?\C:\work\sub", true), 3);
+    }
+
+    // Only the device-namespace spelling is the discard under Windows rules;
+    // `windows` is passed directly, so both tables are pinned on every host.
+    #[test]
+    fn discard_device_table() {
+        for p in [r"\\.\NUL", r"\\.\nul", "//./NUL", r"\/.\Nul"] {
+            assert!(is_discard_device(p, true), "{p}");
+        }
+        for p in [
+            "NUL",
+            "nul",
+            "nul.txt",
+            "NULL",
+            r"C:\denied\nul.txt",
+            r"\\?\C:\denied\nul.txt",
+            r"C:\x\NUL",
+            r"\\?\C:\x\nul",
+            r"\\?\NUL",
+            r"\\.\NUL\x",
+            r"\\.\NUL.txt",
+            "/dev/null",
+        ] {
+            assert!(!is_discard_device(p, true), "{p}");
+        }
+        assert!(is_discard_device("/dev/null", false));
+        for p in ["/dev/null/x", "/tmp/nul", "NUL", r"\\.\NUL"] {
+            assert!(!is_discard_device(p, false), "{p}");
+        }
+    }
+
+    #[test]
+    fn reserved_device_names_are_refused_under_windows_rules() {
+        for p in [
+            "NUL",
+            "nul",
+            "NUL.txt",
+            "con",
+            "COM1.log",
+            "LPT9",
+            "prn.",
+            "AUX ",
+            r"C:\x\NUL",
+            r"C:\x\nul .txt",
+            "C:/x/aux",
+            r"\\?\C:\denied\nul.txt",
+        ] {
+            assert!(reserved_device_refusal(p, true).is_some(), "{p}");
+        }
+    }
+
+    #[test]
+    fn ordinary_names_and_the_discard_are_not_refused() {
+        for p in [
+            r"\\.\NUL",
+            "//./nul",
+            "null",
+            "nullable.txt",
+            "CONFIG",
+            "COM10",
+            "COM0",
+            "LPTA",
+            r"C:\x\nul\file",
+            r"\\.\NUL\test-agent",
+            r"C:\",
+            "...",
+            "",
+        ] {
+            assert_eq!(reserved_device_refusal(p, true), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_refused_off_windows() {
+        for p in ["NUL", "con", "/tmp/aux.c"] {
+            assert_eq!(reserved_device_refusal(p, false), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn nul_refusal_names_the_component_and_the_discard() {
+        assert_eq!(
+            reserved_device_refusal(r"C:\x\NUL", true).as_deref(),
+            Some(
+                r"`NUL` is a DOS device name, which ral does not treat as a device. Did you mean `\\.\NUL`? (A file named `NUL` would be unusable from most Windows tools.)"
+            )
+        );
+        let verbatim = reserved_device_refusal(r"\\?\C:\denied\nul.txt", true).unwrap();
+        assert!(
+            verbatim.starts_with("`nul.txt` is a DOS device name"),
+            "{verbatim}"
+        );
+    }
+
+    #[test]
+    fn other_reserved_names_suggest_no_discard() {
+        assert_eq!(
+            reserved_device_refusal("COM1.log", true).as_deref(),
+            Some(
+                "`COM1.log` is a reserved DOS device name, and ral refuses reserved device names as file names"
+            )
+        );
     }
 }

@@ -8,17 +8,27 @@
 //! [`PrefixSet::surface`], both of which re-freeze through
 //! [`NormalizedPrefix::from_surface`] — and that is rendering for the
 //! sandbox projection, not composition.
+//!
+//! A set's [`Polarity`] is its relation: an allow holds a name as stored, a
+//! deny every name some filesystem takes for it
+//! ([`Identity`]).  So a deny can never be asked the exact question.
 
-use super::lex::{path_within, path_within_str};
+use super::lex::{Identity, path_within, path_within_str};
 use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
+use std::marker::PhantomData;
 use std::path::Path;
 
 /// The one containment judgment: does `a` cover `b`?  Same namespace, `b`'s
-/// resolved form within `a`'s — never the surface spelling.
+/// resolved form within `a`'s — never the surface spelling — and the name as
+/// stored: allow against allow.
 pub(crate) fn covers(a: &NormalizedPrefix, b: &NormalizedPrefix) -> bool {
-    a.namespace() == b.namespace() && path_within_str(b.resolved(), a.resolved())
+    covers_under(a, b, Identity::Stored)
+}
+
+fn covers_under(a: &NormalizedPrefix, b: &NormalizedPrefix, identity: Identity) -> bool {
+    a.namespace() == b.namespace() && path_within_str(b.resolved(), a.resolved(), identity)
 }
 
 /// Intersect two prefix lists: the deeper prefix of each overlapping pair
@@ -36,60 +46,75 @@ pub(crate) fn meet_prefixes(
         .collect()
 }
 
-/// A sorted, deduplicated set of [`NormalizedPrefix`]es.  `Default` is the
-/// empty set, the identity for [`union`](PrefixSet::union).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PrefixSet(Vec<NormalizedPrefix>);
+/// Which way a [`PrefixSet`] speaks, and so which [`Identity`] it judges
+/// names under.
+pub(crate) trait Polarity {
+    const IDENTITY: Identity;
+}
 
-impl PrefixSet {
+/// Allow regions: they meet across layers, and hold a name as stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Allow {}
+
+/// Deny regions: they join across layers, and hold every spelling of a name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Deny {}
+
+impl Polarity for Allow {
+    const IDENTITY: Identity = Identity::Stored;
+}
+
+impl Polarity for Deny {
+    const IDENTITY: Identity = Identity::Collision;
+}
+
+/// A sorted, deduplicated set of [`NormalizedPrefix`]es of polarity `P`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PrefixSet<P: Polarity>(Vec<NormalizedPrefix>, PhantomData<P>);
+
+/// The empty set: the identity for a deny [`union`](PrefixSet::union).
+impl<P: Polarity> Default for PrefixSet<P> {
+    fn default() -> Self {
+        Self(Vec::new(), PhantomData)
+    }
+}
+
+impl<P: Polarity> PrefixSet<P> {
+    fn of(mut set: Vec<NormalizedPrefix>) -> Self {
+        set.sort();
+        set.dedup();
+        Self(set, PhantomData)
+    }
+
     /// Freeze each prefix afresh against the live filesystem — sigil/`~`
     /// expansion, `.`/`..` folding, then symlink-following.  Takes the
     /// surface spelling, so an already-frozen [`NormalizedPrefix`] passes
     /// through unchanged but for a re-resolution of its symlinks.
     pub fn resolve<S: AsRef<str>>(resolver: &Resolver, prefixes: &[S]) -> Self {
-        let mut set: Vec<NormalizedPrefix> = prefixes
-            .iter()
-            .map(|prefix| {
-                // The root is minted, never resolved.  `Resolver::resolve`
-                // anchors a driveless path to a cwd — the *process's* own
-                // under a shell-less resolver — so a re-freeze turned the
-                // ceiling into the root of whichever drive happened to be
-                // current, which is how an already-universal prefix came
-                // back naming one volume.
-                let surface = prefix.as_ref();
-                if super::lex::is_bare_root(surface) {
-                    return NormalizedPrefix::root();
-                }
-                NormalizedPrefix::from_surface(resolver.resolve(surface).as_path())
-            })
-            .collect();
-        set.sort();
-        set.dedup();
-        Self(set)
-    }
-
-    /// Accumulate without intersecting — what a deny region wants, since
-    /// denies are sticky across layers.
-    pub(crate) fn union(mut self, other: Self) -> Self {
-        self.0.extend(other.0);
-        self.0.sort();
-        self.0.dedup();
-        self
-    }
-
-    /// Every prefix `deny` does not [`cover`](covers) — deny-wins on the
-    /// projection itself, so an allow beneath a deny never reaches a
-    /// backend, including one whose own primitive would order an explicit
-    /// allow before an inherited deny (Windows ACLs).
-    pub(crate) fn outside(mut self, deny: &Self) -> Self {
-        self.0.retain(|p| !deny.0.iter().any(|d| covers(d, p)));
-        self
+        Self::of(
+            prefixes
+                .iter()
+                .map(|prefix| {
+                    // The root is minted, never resolved.  `Resolver::resolve`
+                    // anchors a driveless path to a cwd — the *process's* own
+                    // under a shell-less resolver — so a re-freeze turned the
+                    // ceiling into the root of whichever drive happened to be
+                    // current, which is how an already-universal prefix came
+                    // back naming one volume.
+                    let surface = prefix.as_ref();
+                    if super::lex::is_bare_root(surface) {
+                        return NormalizedPrefix::root();
+                    }
+                    NormalizedPrefix::from_surface(resolver.resolve(surface).as_path())
+                })
+                .collect(),
+        )
     }
 
     /// The deepest prefix whose region contains `path`, if any — the
     /// containment question the in-process guard asks, decided against the same
     /// `resolved` forms [`covers`] keys on and through the same alias-aware
-    /// [`path_within`].
+    /// [`path_within`], under `P`'s [`Identity`].
     ///
     /// Deepest by [`identity_depth`](super::lex::identity_depth), as
     /// `capability::exec` ranks directories: the answer
@@ -99,7 +124,7 @@ impl PrefixSet {
     pub(crate) fn covering(&self, path: &Path) -> Option<&NormalizedPrefix> {
         self.0
             .iter()
-            .filter(|prefix| path_within(path, prefix.resolved_path()))
+            .filter(|prefix| path_within(path, prefix.resolved_path(), P::IDENTITY))
             .max_by_key(|prefix| super::lex::identity_depth(prefix.resolved(), cfg!(windows)))
     }
 
@@ -116,20 +141,46 @@ impl PrefixSet {
     }
 }
 
+impl PrefixSet<Allow> {
+    /// Every prefix `deny` does not cover under its own relation — deny-wins
+    /// on the projection itself, so an allow beneath a deny, in any spelling,
+    /// never reaches a backend, including one whose own primitive would
+    /// order an explicit allow before an inherited deny (Windows ACLs).
+    pub(crate) fn outside(mut self, deny: &PrefixSet<Deny>) -> Self {
+        self.0
+            .retain(|p| !deny.0.iter().any(|d| covers_under(d, p, Deny::IDENTITY)));
+        self
+    }
+}
+
+impl PrefixSet<Deny> {
+    /// Whether some deny holds `path` as stored.  A set that covers `path`
+    /// but not so caught it only under another spelling, and its denial says
+    /// so.
+    pub(crate) fn holds_as_stored(&self, path: &Path) -> bool {
+        (self.0.iter()).any(|d| path_within(path, d.resolved_path(), Allow::IDENTITY))
+    }
+
+    /// Accumulate without intersecting: denies are sticky across layers, and
+    /// never meet.
+    pub(crate) fn union(mut self, other: Self) -> Self {
+        self.0.extend(other.0);
+        Self::of(self.0)
+    }
+}
+
 /// Intersection, via [`meet_prefixes`].
-impl Meet for PrefixSet {
+impl Meet for PrefixSet<Allow> {
     fn meet(self, other: Self) -> Self {
-        let mut out = meet_prefixes(&self.0, &other.0);
-        out.sort();
-        out.dedup();
+        let out = Self::of(meet_prefixes(&self.0, &other.0));
         crate::dbg_trace!(
             "grant-prefix",
             "meet: {:?} ∩ {:?} = {:?}",
             self.0,
             other.0,
-            out
+            out.0
         );
-        Self(out)
+        out
     }
 }
 
@@ -153,11 +204,15 @@ mod tests {
         p(s, s)
     }
 
-    fn set(ps: &[NormalizedPrefix]) -> PrefixSet {
-        PrefixSet(ps.to_vec())
+    fn allow(ps: &[NormalizedPrefix]) -> PrefixSet<Allow> {
+        PrefixSet::of(ps.to_vec())
     }
 
-    fn surface(set: &PrefixSet) -> Vec<String> {
+    fn deny(ps: &[NormalizedPrefix]) -> PrefixSet<Deny> {
+        PrefixSet::of(ps.to_vec())
+    }
+
+    fn surface<P: Polarity>(set: &PrefixSet<P>) -> Vec<String> {
         set.surface()
             .into_iter()
             .map(NormalizedPrefix::into_string)
@@ -174,14 +229,14 @@ mod tests {
     #[test]
     fn meet_keeps_the_deeper_prefix_of_each_overlapping_pair() {
         assert_eq!(
-            surface(&set(&[lit("/a"), lit("/b")]).meet(set(&[lit("/a/x"), lit("/c")]))),
+            surface(&allow(&[lit("/a"), lit("/b")]).meet(allow(&[lit("/a/x"), lit("/c")]))),
             vec![np("/a/x")]
         );
     }
 
     #[test]
     fn meet_is_idempotent() {
-        let a = set(&[lit("/a"), lit("/a/b"), lit("/c")]);
+        let a = allow(&[lit("/a"), lit("/a/b"), lit("/c")]);
         assert_eq!(a.clone().meet(a.clone()), a);
     }
 
@@ -190,12 +245,12 @@ mod tests {
     /// host ceiling could narrow the guest grants `synod`'s `grant.rs` mints.
     #[test]
     fn meet_keeps_cross_namespace_prefixes_from_overlapping() {
-        let host = set(&[NormalizedPrefix::for_test(
+        let host = allow(&[NormalizedPrefix::for_test(
             "/work",
             "/work",
             Namespace::Host,
         )]);
-        let guest = set(&[NormalizedPrefix::for_test(
+        let guest = allow(&[NormalizedPrefix::for_test(
             "/work",
             "/work",
             Namespace::Guest,
@@ -208,16 +263,16 @@ mod tests {
 
     #[test]
     fn meet_is_commutative() {
-        let a = set(&[lit("/a"), lit("/b/c")]);
-        let b = set(&[lit("/a/x"), lit("/b")]);
+        let a = allow(&[lit("/a"), lit("/b/c")]);
+        let b = allow(&[lit("/a/x"), lit("/b")]);
         assert_eq!(a.clone().meet(b.clone()), b.meet(a));
     }
 
     #[test]
     fn outside_drops_an_allow_a_deny_covers() {
         assert!(
-            set(&[lit("/d/f")])
-                .outside(&set(&[lit("/d")]))
+            allow(&[lit("/d/f")])
+                .outside(&deny(&[lit("/d")]))
                 .surface()
                 .is_empty(),
             "a read/write region beneath a deny must not reach the projection"
@@ -227,7 +282,7 @@ mod tests {
     #[test]
     fn outside_keeps_an_allow_the_deny_does_not_cover() {
         assert_eq!(
-            surface(&set(&[lit("/d")]).outside(&set(&[lit("/d/f")]))),
+            surface(&allow(&[lit("/d")]).outside(&deny(&[lit("/d/f")]))),
             vec![np("/d")],
             "a deny narrower than the allow must not drop the whole region"
         );
@@ -236,7 +291,7 @@ mod tests {
     #[test]
     fn union_accumulates_and_dedups() {
         assert_eq!(
-            surface(&set(&[lit("/a"), lit("/b")]).union(set(&[lit("/b"), lit("/c")]))),
+            surface(&deny(&[lit("/a"), lit("/b")]).union(deny(&[lit("/b"), lit("/c")]))),
             vec![np("/a"), np("/b"), np("/c")]
         );
     }
@@ -249,8 +304,8 @@ mod tests {
     /// resolved form is what closes this.
     #[test]
     fn symlinked_grant_cannot_escape_a_shallower_ceiling() {
-        let base = set(&[lit("/a")]);
-        let inner = set(&[p("/a/link", "/x")]);
+        let base = allow(&[lit("/a")]);
+        let inner = allow(&[p("/a/link", "/x")]);
         assert!(
             base.meet(inner).surface().is_empty(),
             "a symlinked grant escaping the ceiling must collapse to the empty (fail-closed) meet"
@@ -262,8 +317,8 @@ mod tests {
     /// an always-empty intersection.
     #[test]
     fn legitimate_nesting_survives_the_meet() {
-        let base = set(&[lit("/a")]);
-        let inner = set(&[lit("/a/sub")]);
+        let base = allow(&[lit("/a")]);
+        let inner = allow(&[lit("/a/sub")]);
         assert_eq!(
             surface(&base.meet(inner)),
             vec![np("/a/sub")],
@@ -276,12 +331,44 @@ mod tests {
     /// access path but resolves elsewhere covers nothing.
     #[test]
     fn covering_matches_the_resolved_form_not_the_surface() {
-        let s = set(&[p("/a", "/elsewhere")]);
+        let s = allow(&[p("/a", "/elsewhere")]);
         assert!(s.covering(Path::new("/a/file")).is_none());
         assert_eq!(
-            set(&[p("/link", "/a")]).covering(Path::new("/a/file")),
+            allow(&[p("/link", "/a")]).covering(Path::new("/a/file")),
             Some(&p("/link", "/a")),
             "a prefix resolving onto the access path covers it whatever it spells"
+        );
+    }
+
+    /// T3: the deny relation folds a spelling the allow relation keeps
+    /// apart, so a deny holds `/d/secrets` and an allow on `/d/Secrets` does
+    /// not.
+    #[test]
+    fn a_deny_covers_every_spelling_and_an_allow_only_its_own() {
+        let access = Path::new("/d/secrets/f");
+        assert_eq!(
+            deny(&[lit("/d/Secrets")]).covering(access),
+            Some(&lit("/d/Secrets"))
+        );
+        assert_eq!(
+            deny(&[lit("/d/Secrets")]).covering(Path::new("/d/other")),
+            None
+        );
+        if cfg!(not(windows)) {
+            assert_eq!(allow(&[lit("/d/Secrets")]).covering(access), None);
+        }
+    }
+
+    /// T3: the projection drops an allow a deny holds in another spelling,
+    /// and keeps one it does not.
+    #[test]
+    fn outside_drops_an_allow_under_a_differently_spelled_deny() {
+        assert_eq!(
+            surface(
+                &allow(&[lit("/d/secrets/f"), lit("/d/other")])
+                    .outside(&deny(&[lit("/d/Secrets")]))
+            ),
+            vec![np("/d/other")]
         );
     }
 
@@ -289,7 +376,7 @@ mod tests {
     /// path fell under, which is what the guard's audit record reports.
     #[test]
     fn covering_returns_the_deepest_match() {
-        let s = set(&[lit("/a"), lit("/a/b"), lit("/a/b/c"), lit("/other")]);
+        let s = allow(&[lit("/a"), lit("/a/b"), lit("/a/b/c"), lit("/other")]);
         assert_eq!(s.covering(Path::new("/a/b/x")), Some(&lit("/a/b")));
         assert_eq!(s.covering(Path::new("/a/y")), Some(&lit("/a")));
         assert_eq!(s.covering(Path::new("/z")), None);
@@ -299,7 +386,10 @@ mod tests {
     /// this is what turns a collapsed intersection into a guard denial.
     #[test]
     fn the_empty_set_covers_nothing() {
-        assert_eq!(PrefixSet::default().covering(Path::new("/a")), None);
+        assert_eq!(
+            PrefixSet::<Allow>::default().covering(Path::new("/a")),
+            None
+        );
     }
 
     /// Depth is counted in components of the alias-folded form, as
@@ -309,7 +399,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn covering_ranks_depth_by_components_not_characters() {
-        let s = set(&[lit("/private/tmp"), lit("/tmp/a")]);
+        let s = allow(&[lit("/private/tmp"), lit("/tmp/a")]);
         assert_eq!(s.covering(Path::new("/tmp/a/f")), Some(&lit("/tmp/a")));
     }
 
@@ -320,7 +410,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn meet_admits_windows_case_and_separator_variant() {
-        let result = set(&[lit(r"C:\work")]).meet(set(&[lit("c:/WORK/sub")]));
+        let result = allow(&[lit(r"C:\work")]).meet(allow(&[lit("c:/WORK/sub")]));
         assert!(
             !result.surface().is_empty(),
             "a grant on C:\\work must admit c:/WORK/sub through the composed meet"
@@ -333,7 +423,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn meet_admits_windows_verbatim_prefix_variant() {
-        let result = set(&[lit(r"C:\work")]).meet(set(&[lit(r"\\?\C:\work\sub")]));
+        let result = allow(&[lit(r"C:\work")]).meet(allow(&[lit(r"\\?\C:\work\sub")]));
         assert!(
             !result.surface().is_empty(),
             "a grant on C:\\work must admit \\\\?\\C:\\work\\sub through the composed meet"
@@ -353,7 +443,7 @@ mod tests {
     /// reproduces.
     #[test]
     fn the_root_survives_a_re_freeze_as_the_universal_prefix() {
-        let set = PrefixSet::resolve(&Resolver::shell_less(), &["/"]);
+        let set = PrefixSet::<Allow>::resolve(&Resolver::shell_less(), &["/"]);
         let root = set.0.first().expect("the root freezes to one prefix");
         assert_eq!(root.resolved(), "/", "got {root:?}");
         // A drive spelling is a path only on Windows; on a Unix host it is

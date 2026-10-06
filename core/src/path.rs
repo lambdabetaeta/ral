@@ -44,7 +44,7 @@ pub use lex::{
     PathShape, basename, exists, is_absolute, is_dir, resolve_path, resolve_relative_to_script,
     resolve_str, shape,
 };
-pub(crate) use prefix_set::{PrefixSet, covers, meet_prefixes};
+pub(crate) use prefix_set::{Allow, Deny, Polarity, PrefixSet, covers, meet_prefixes};
 pub(crate) use real::RealPath;
 #[cfg(unix)]
 pub(crate) use render::render_real;
@@ -58,6 +58,7 @@ pub use walk::Located;
 pub(crate) use which::is_executable_file;
 pub(crate) use which::{PathSearch, search};
 pub use which::{SearchCwd, forget_located_commands, locate, resolve_in_path};
+pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key};
 
 /// Process working directory, for callers with no shell to ask; shells go
 /// through `Shell::cwd`, which honours a `within` override or a prior `cd`.

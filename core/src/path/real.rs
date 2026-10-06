@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use super::NormalizedPrefix;
+use super::{NormalizedPrefix, Polarity};
 
 /// A path with no symlink, `.` or `..`, as `realpath(3)` gives it.
 ///
@@ -30,10 +30,10 @@ impl RealPath {
         Self(path.into())
     }
 
-    /// Whether this path lies inside `dir`, modulo firmlink aliases and the
-    /// host's path identity.
-    pub(crate) fn within(&self, dir: &Self) -> bool {
-        super::lex::path_within(&self.0, &dir.0)
+    /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
+    /// rule of polarity `P` reads names.
+    pub(crate) fn within<P: Polarity>(&self, dir: &Self) -> bool {
+        super::lex::path_within(&self.0, &dir.0, P::IDENTITY)
     }
 
     /// Depth in components of the alias-folded form, so a firmlink spelling
@@ -42,7 +42,6 @@ impl RealPath {
         super::lex::identity_depth(&self.0.to_string_lossy(), cfg!(windows))
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }

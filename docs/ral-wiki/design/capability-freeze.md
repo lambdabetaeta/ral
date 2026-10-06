@@ -181,6 +181,9 @@ namespace the child will match in*.
 
 See also [[design/grant|grant]] (the calculus this resolves into),
 [[design/two-enforcers|two-enforcers]],
+[[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]
+(the other freeze: what a write region may not author in an admitted
+directory),
 [[decisions/260605_capability-stage-collapse|capability-stage-collapse]] (the
 decision to collapse to one always-frozen type),
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]],

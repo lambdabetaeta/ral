@@ -11,11 +11,19 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use crate::path::{Rendered, render_paths, render_real, rendered_ancestors};
-use crate::types::{ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection};
+use crate::types::{
+    ExecProjection, ExecRule, FsProjection, FsRules, SandboxProjection, WriteReach,
+};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Write};
 use std::os::raw::{c_char, c_int};
+
+/// Seatbelt profiles do not stack: a process already inside one gets EPERM
+/// entering another, and a launch promising more than that profile is refused.
+pub const ALREADY_PROFILED: &str = "this process is already inside a macOS sandbox profile and macOS \
+     will not let it enter a second, so the launch is refused rather than run under that wider \
+     profile; is ral itself running confined?";
 
 /// Apply `profile` to the current process.  Seatbelt entry cannot be undone.
 pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
@@ -41,6 +49,9 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
         )
     };
     if rc != 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+            return Err(std::io::Error::other(ALREADY_PROFILED));
+        }
         let message = if errorbuf.is_null() {
             "sandbox_init_with_parameters failed".to_string()
         } else {
@@ -73,8 +84,9 @@ struct Profile {
     exec_rules: Vec<String>,
     /// The lookups the exec admits need through their ancestors.
     exec_ancestors: Vec<String>,
-    /// Writes denied under the admitted set, when a veto meets an
-    /// unrestricted fs.
+    /// Writes denied under the admitted set: each dir a restricted fs's write
+    /// prefixes cover without naming, or, under an unrestricted fs, the whole
+    /// set when a veto asks.
     exec_freeze: Vec<String>,
     /// What the fs grant carves out of its allows.
     fs_denies: Vec<String>,
@@ -135,11 +147,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.
     let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
-    // A veto under an fs nobody restricted is hollow unless the allow-set is
-    // frozen — see `emit_exec_rules`.
-    let freeze_admitted_set =
-        matches!(rendered.fs, FsProjection::Unrestricted) && rendered.exec.carries_veto();
-    emit_exec_rules(&mut profile, &rendered.exec, &own, freeze_admitted_set)?;
+    emit_exec_rules(&mut profile, &rendered.exec, &own, &rendered.fs)?;
 
     // `subpath` so a denied directory covers everything under it; `file-link`
     // (Seatbelt has no `file-link*`) blocks `link(2)` against the source,
@@ -225,10 +233,13 @@ pub(crate) const RENDERS_EXEC: bool = true;
 /// loader base and `own`, ral's binary, first, then renders each rule in
 /// order, one [`Sbpl`] form each: Seatbelt is last-match-wins, the order the
 /// rules already carry.  Exec denies deny no reads: those are fs's.
-/// `freeze_admitted_set` denies writes under everything the grant admits,
-/// without which `(allow file-write*)` makes every veto hollow; `own` is
-/// frozen by [`build_profile`] whatever the grant.  Rule by rule:
-/// `docs/ral-wiki/internals/seatbelt-profile.md`.
+/// Writes under an admitted dir are denied wherever the fs grant would
+/// otherwise let a child author what the dir runs, and a veto is hollow
+/// without it: for each dir a restricted `fs`'s write prefixes cover without
+/// naming ([`WriteReach::Covered`]), and under an unrestricted `fs`, where
+/// `(allow file-write*)` covers everything, for the whole admitted set when
+/// a veto asks.  `own` is frozen by [`build_profile`] whatever the grant.
+/// Rule by rule: `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
 /// `Err` when the platform base's own name-class expansion is not valid
 /// UTF-8, which [`render_paths`] refuses.
@@ -236,7 +247,7 @@ fn emit_exec_rules(
     profile: &mut Profile,
     exec: &ExecProjection,
     own: &[Rendered],
-    freeze_admitted_set: bool,
+    fs: &FsProjection<Rendered>,
 ) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
         profile.exec_rules.push("(allow process-exec)".to_string());
@@ -290,18 +301,30 @@ fn emit_exec_rules(
             .chain(granted_files.iter().copied())
             .chain(granted_dirs.iter().copied()),
     );
-    if freeze_admitted_set {
-        for dir in system_dirs.iter().chain(granted_dirs) {
-            profile.exec_freeze.push(format!(
-                "(deny file-write* (subpath \"{}\"))",
-                escape_path(dir)
-            ));
+    let deny_writes = |filter: &str, path: &Rendered| {
+        format!("(deny file-write* ({filter} \"{}\"))", escape_path(path))
+    };
+    let admitted_dirs: Vec<&Rendered> = system_dirs.iter().chain(granted_dirs).collect();
+    match fs {
+        FsProjection::Unrestricted if exec.carries_veto() => {
+            profile.exec_freeze.extend(
+                admitted_dirs
+                    .into_iter()
+                    .map(|dir| deny_writes("subpath", dir)),
+            );
+            profile.exec_freeze.extend(
+                granted_files
+                    .into_iter()
+                    .map(|file| deny_writes("literal", file)),
+            );
         }
-        for path in granted_files {
-            profile.exec_freeze.push(format!(
-                "(deny file-write* (literal \"{}\"))",
-                escape_path(path)
-            ));
+        FsProjection::Unrestricted => {}
+        FsProjection::Restricted(writes) => {
+            for &dir in &admitted_dirs {
+                if writes.write_reach(dir, &admitted_dirs) == WriteReach::Covered {
+                    profile.exec_freeze.push(deny_writes("subpath", dir));
+                }
+            }
         }
     }
     Ok(())
@@ -508,6 +531,14 @@ mod tests {
         }
     }
 
+    /// A restricted fs writing under `prefixes` and nothing else.
+    fn writing(prefixes: &[&str]) -> FsProjection {
+        FsProjection::Restricted(FsRules {
+            write_prefixes: prefixes.iter().copied().map(String::from).collect(),
+            ..FsRules::default()
+        })
+    }
+
     /// The index of `form` in `profile`, which must hold it.
     fn at(profile: &str, form: &str) -> usize {
         profile
@@ -640,6 +671,108 @@ mod tests {
                 .contains("(deny file-write* (subpath"),
             "a veto-free grant had its admitted set frozen"
         );
+    }
+
+    /// Under a restricted fs the write prefixes author what an admitted dir runs,
+    /// so a dir they cover without naming is frozen — veto or none, and after
+    /// the write allow it overrides.
+    #[test]
+    fn mac_profile_freezes_an_admitted_dir_a_shallower_write_prefix_covers() {
+        let policy = restricted(
+            writing(&["/ral-test/w"]),
+            vec![dir("/ral-test/w/bin", true)],
+        );
+        let profile = build_profile(&policy).unwrap();
+        let write = at(&profile, "(allow file-write* (subpath \"/ral-test/w\"))");
+        let freeze = at(&profile, "(deny file-write* (subpath \"/ral-test/w/bin\"))");
+        assert!(
+            write < freeze,
+            "the freeze must follow the write it overrides:\n{profile}"
+        );
+    }
+
+    /// The grant that names the tree, whole or in part, keeps it writable: the
+    /// control for the freeze above, which differs only in what the prefix is.
+    #[test]
+    fn mac_profile_leaves_a_dir_the_write_prefixes_name_writable() {
+        for prefix in ["/ral-test/w/bin", "/ral-test/w/bin/out"] {
+            let policy = restricted(writing(&[prefix]), vec![dir("/ral-test/w/bin", true)]);
+            let profile = build_profile(&policy).unwrap();
+            at(
+                &profile,
+                &format!("(allow file-write* (subpath \"{prefix}\"))"),
+            );
+            assert!(
+                !profile.contains("(deny file-write* (subpath \"/ral-test/w/bin\"))"),
+                "{prefix} names the admit and it was frozen:\n{profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn mac_profile_leaves_a_dir_no_write_prefix_reaches_alone() {
+        let policy = restricted(
+            writing(&["/ral-test/other"]),
+            vec![dir("/ral-test/w/bin", true)],
+        );
+        let profile = build_profile(&policy).unwrap();
+        assert!(
+            !profile.contains("(deny file-write* (subpath"),
+            "a dir no write prefix reaches was frozen:\n{profile}"
+        );
+    }
+
+    /// The writes a grant names at or below an admit stand for every admit
+    /// beneath it, and for none beside it: a `$PATH` entry inside the project
+    /// stays writable, the sibling of a carve-out does not.
+    #[test]
+    fn mac_profile_trusts_a_nested_admit_and_freezes_a_sibling_the_carve_out_misses() {
+        let nested = restricted(
+            writing(&["/ral-test/proj"]),
+            vec![
+                dir("/ral-test/proj", true),
+                dir("/ral-test/proj/node_modules/.bin", true),
+            ],
+        );
+        let profile = build_profile(&nested).unwrap();
+        assert!(
+            !profile.contains("(deny file-write* (subpath"),
+            "an admit nested in a named one was frozen:\n{profile}"
+        );
+
+        let sibling = restricted(
+            writing(&["/ral-test/home", "/ral-test/home/.cargo/registry"]),
+            vec![
+                dir("/ral-test/home/.cargo", true),
+                dir("/ral-test/home/.cargo/bin", true),
+            ],
+        );
+        let profile = build_profile(&sibling).unwrap();
+        at(
+            &profile,
+            "(deny file-write* (subpath \"/ral-test/home/.cargo/bin\"))",
+        );
+        assert!(
+            !profile.contains("(deny file-write* (subpath \"/ral-test/home/.cargo\"))"),
+            "the admit holding the carve-out was frozen:\n{profile}"
+        );
+    }
+
+    /// `/tmp` and `/private/tmp` are one directory: the freeze names both
+    /// spellings, as every other rule on a firmlinked path does.
+    #[test]
+    fn mac_profile_freezes_a_covered_dir_under_every_firmlink_spelling() {
+        let policy = restricted(
+            writing(&["/tmp/ral-test"]),
+            vec![dir("/tmp/ral-test/bin", true)],
+        );
+        let profile = build_profile(&policy).unwrap();
+        for form in ["/tmp/ral-test/bin", "/private/tmp/ral-test/bin"] {
+            at(
+                &profile,
+                &format!("(deny file-write* (subpath \"{form}\"))"),
+            );
+        }
     }
 
     /// The kernel exec set is the rules and the loader base: `/usr`, the

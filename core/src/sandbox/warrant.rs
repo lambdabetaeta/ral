@@ -7,7 +7,8 @@
 //! fields, with no length anywhere:
 //!
 //! ```text
-//! ral-warrant/1  <confinement>  file|tool  <program>  <argc>  <arg>…
+//! ral-warrant/1  <confinement>  file  <real>  <argv0>  <argc>  <arg>…
+//! ral-warrant/1  <confinement>  tool  <name>           <argc>  <arg>…
 //! ```
 //!
 //! The decoder accepts only what the encoder emits, byte for byte, so the
@@ -128,11 +129,15 @@ pub(super) struct Warrant {
 }
 
 /// The program the re-exec becomes inside its confinement: a host file it
-/// `execve`s, by the path the in-process guard judged, or a bundled tool it
-/// runs in-process.
+/// `execve`s, by the real path the in-process guard judged and under the
+/// spelling the user wrote, or a bundled tool it runs in-process.
 #[derive(Debug, PartialEq, Eq)]
 enum Run {
-    File(PathBuf, Vec<OsString>),
+    File {
+        real: PathBuf,
+        arg0: PathBuf,
+        args: Vec<OsString>,
+    },
     Tool(String, Vec<OsString>),
 }
 
@@ -140,7 +145,11 @@ impl From<&Admitted> for Run {
     fn from(admitted: &Admitted) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { path, .. } => Self::File(path.clone(), args),
+            Program::File { path, real } => Self::File {
+                real: real.as_path().to_path_buf(),
+                arg0: path.clone(),
+                args,
+            },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
         }
     }
@@ -156,20 +165,21 @@ impl Confined {
     /// runs here.
     pub(super) fn run(self) -> u8 {
         match self.0 {
-            Run::File(path, args) => exec(&path, args),
+            Run::File { real, arg0, args } => exec(&real, &arg0, args),
             Run::Tool(tool, args) => crate::runtime::pipeline::helper::run_bundled(&tool, args),
         }
     }
 }
 
-/// Become the host program at `path`; returns only when `execve` refuses.
-fn exec(path: &std::path::Path, args: Vec<OsString>) -> u8 {
+/// Become the host program at `real`, which sees `arg0` as its own name;
+/// returns only when `execve` refuses.
+fn exec(real: &std::path::Path, arg0: &std::path::Path, args: Vec<OsString>) -> u8 {
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
     )]
-    let mut cmd = Command::new(path);
-    cmd.args(args);
+    let mut cmd = Command::new(real);
+    cmd.arg0(arg0).args(args);
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:respawn-exec] sandbox respawn handoff: `exec` replaces this process image with the confined target; the surface card fired before this handoff, so the exec itself raises no card."
@@ -178,7 +188,7 @@ fn exec(path: &std::path::Path, args: Vec<OsString>) -> u8 {
     // A kernel refusal of a script is most often its interpreter's, which a
     // script the user can edit cannot carry in with it.
     let hint = (err.kind() == io::ErrorKind::PermissionDenied)
-        .then(|| super::carriers::shebang(path))
+        .then(|| super::carriers::shebang(real))
         .flatten()
         .map(|interp| {
             let interp = interp.display();
@@ -190,7 +200,7 @@ fn exec(path: &std::path::Path, args: Vec<OsString>) -> u8 {
         });
     crate::diagnostic::cmd_error(
         "ral",
-        &format!("{}: {err}{}", path.display(), hint.unwrap_or_default()),
+        &format!("{}: {err}{}", real.display(), hint.unwrap_or_default()),
     );
     let failure = SpawnFailure::from(&err);
     u8::try_from(Status::Process(CommandFailure::Spawn(failure)).code()).unwrap_or(u8::MAX)
@@ -246,20 +256,22 @@ impl Warrant {
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, program, args): (&[u8], &[u8], _) = match &self.run {
-            Run::File(path, args) => (b"file", path.as_os_str().as_bytes(), args),
-            Run::Tool(tool, args) => (b"tool", tool.as_bytes(), args),
+        let (kind, program, arg0, args): (&[u8], &[u8], Option<&[u8]>, _) = match &self.run {
+            Run::File { real, arg0, args } => (
+                b"file",
+                real.as_os_str().as_bytes(),
+                Some(arg0.as_os_str().as_bytes()),
+                args,
+            ),
+            Run::Tool(tool, args) => (b"tool", tool.as_bytes(), None, args),
         };
         let confinement = self.confinement.spell();
         let argc = args.len().to_string();
-        let head = [
-            MAGIC,
-            confinement.as_bytes(),
-            kind,
-            program,
-            argc.as_bytes(),
-        ];
-        let bytes = nul_terminated(head.into_iter().chain(args.iter().map(|a| a.as_bytes())))?;
+        let head = [MAGIC, confinement.as_bytes(), kind, program]
+            .into_iter()
+            .chain(arg0)
+            .chain([argc.as_bytes()]);
+        let bytes = nul_terminated(head.chain(args.iter().map(|a| a.as_bytes())))?;
         if bytes.len() > CAP {
             return Err(format!(
                 "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
@@ -285,6 +297,7 @@ impl Warrant {
         let confinement = Native::parse(text(next("confinement")?)?)?;
         let kind = next("kind")?;
         let program = next("program")?;
+        let arg0 = (kind == b"file").then(|| next("argv[0]")).transpose()?;
         let argc: usize = text(next("argument count")?)?
             .parse()
             .map_err(|e| format!("the warrant's argument count: {e}"))?;
@@ -295,10 +308,14 @@ impl Warrant {
                 args.len()
             ));
         }
-        let run = match kind {
-            b"file" => Run::File(OsStr::from_bytes(program).into(), args),
-            b"tool" => Run::Tool(text(program)?.to_owned(), args),
-            other => {
+        let run = match (kind, arg0) {
+            (b"file", Some(arg0)) => Run::File {
+                real: OsStr::from_bytes(program).into(),
+                arg0: OsStr::from_bytes(arg0).into(),
+                args,
+            },
+            (b"tool", None) => Run::Tool(text(program)?.to_owned(), args),
+            (other, _) => {
                 return Err(format!(
                     "the warrant names an unknown kind of program, {:?}",
                     String::from_utf8_lossy(other)
@@ -497,11 +514,15 @@ mod tests {
         Native::parse(CONFINEMENT).expect("a valid confinement")
     }
 
-    fn file(path: &[u8], args: &[&[u8]]) -> Warrant {
+    fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant {
         let args = args.iter().map(|a| OsStr::from_bytes(a).into()).collect();
         Warrant {
             confinement: confinement(),
-            run: Run::File(OsStr::from_bytes(path).into(), args),
+            run: Run::File {
+                real: OsStr::from_bytes(real).into(),
+                arg0: OsStr::from_bytes(arg0).into(),
+                args,
+            },
         }
     }
 
@@ -514,6 +535,7 @@ mod tests {
         for warrant in [
             file(
                 b"/opt/\xffbin/tool",
+                b"tools/\xfeb",
                 &[b"-c", b"echo a  b\nc", b"", b"\xfe\xff"],
             ),
             Warrant {
@@ -532,13 +554,13 @@ mod tests {
         let conf = confinement().spell().into_owned();
         let conf = conf.as_bytes();
         let big = vec![b'a'; CAP];
-        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x"]);
+        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]);
         assert!(Warrant::decode(&control).is_ok(), "the control must decode");
         for (case, bytes) in [
             ("empty", Vec::new()),
             (
                 "another version",
-                framed(&[b"ral-warrant/2", conf, b"file", b"/bin/sh", b"0"]),
+                framed(&[b"ral-warrant/2", conf, b"file", b"/bin/sh", b"sh", b"0"]),
             ),
             ("cut short", control[..control.len() - 1].to_vec()),
             (
@@ -547,23 +569,31 @@ mod tests {
             ),
             (
                 "an argument too many",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x", b"y"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x", b"y"]),
             ),
             (
                 "an argument too few",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"2", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"2", b"x"]),
             ),
             (
                 "a signed count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"+1", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"+1", b"x"]),
             ),
             (
                 "a padded count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"01", b"x"]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"01", b"x"]),
             ),
             (
                 "over the cap",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", &big]),
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", &big]),
+            ),
+            (
+                "a file without its argv[0]",
+                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"1", b"x"]),
+            ),
+            (
+                "a tool with an argv[0]",
+                framed(&[MAGIC, conf, b"tool", b"ls", b"ls", b"0"]),
             ),
         ] {
             assert!(Warrant::decode(&bytes).is_err(), "{case} must be refused");
@@ -588,13 +618,14 @@ mod tests {
 
     #[test]
     fn an_interior_nul_is_refused_never_truncated() {
-        assert!(file(b"/bin/sh", &[b"a\0b"]).encode().is_err());
-        assert!(file(b"/bin/\0sh", &[]).encode().is_err());
+        assert!(file(b"/bin/sh", b"sh", &[b"a\0b"]).encode().is_err());
+        assert!(file(b"/bin/\0sh", b"sh", &[]).encode().is_err());
+        assert!(file(b"/bin/sh", b"s\0h", &[]).encode().is_err());
     }
 
     #[test]
     fn a_parcel_reads_back_whole_through_the_childs_check() {
-        let warrant = file(b"/bin/sh", &[b"-c", b"true"]);
+        let warrant = file(b"/bin/sh", b"sh", &[b"-c", b"true"]);
         let fd = warrant.parcel().expect("parcels");
         assert_eq!(Warrant::unparcel(fd).expect("reads back"), warrant);
     }

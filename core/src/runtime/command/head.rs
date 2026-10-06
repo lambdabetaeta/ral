@@ -57,7 +57,8 @@ impl Head {
 }
 
 impl Program {
-    /// The file `path` names, which the launcher will run as spelled.
+    /// The file `path` names, which the launcher will run by its real path,
+    /// seen as `path` by the program.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
         let real = RealPath::of(&path).map_err(|e| match e.kind() {
             ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound,
@@ -101,7 +102,7 @@ fn suffixed(shown: &str, ctx: &Context) -> Option<String> {
     if !cfg!(windows) || !shown.contains(['/', '\\']) {
         return None;
     }
-    crate::capability::WINDOWS_EXEC_EXTENSIONS
+    crate::path::WINDOWS_EXEC_EXTENSIONS
         .iter()
         .map(|ext| format!("{shown}.{ext}"))
         .find(|candidate| ctx.resolver().resolve(candidate).as_path().exists())

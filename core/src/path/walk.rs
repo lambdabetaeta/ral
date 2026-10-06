@@ -214,7 +214,7 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     }
     real.push(spelled(&dir, &leaf));
     #[cfg(windows)]
-    let real = dealias(&dir, &leaf, real);
+    let real = dealias(&dir, &leaf, real)?;
     Ok(Step::Object(Located { dir, leaf, real }))
 }
 
@@ -328,21 +328,49 @@ fn stored_name(dir: &File, name: &OsStr) -> Option<OsString> {
 ///
 /// `~` is the one character an 8.3 alias always carries, so the guard costs
 /// an ordinary walk nothing and a name that merely contains a `~` one
-/// handle query that returns it unchanged.  A leaf that is not a directory
-/// keeps the spelling it came with: opening a file to read its name would be
-/// an access nothing has authorised yet, and what that leaves is a long
-/// grant failing to match a short access — a denial, never an admission.
+/// handle query that returns it unchanged.  The leaf, file or directory, is
+/// opened for its attributes alone — no data, so nothing a grant has yet to
+/// authorise.  A short spelling left standing would slip a long-named deny,
+/// so a name that cannot be learned refuses the access.  An absent leaf
+/// aliases nothing and keeps its spelling under its directory's long name.
 #[cfg(windows)]
-fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> PathBuf {
+fn dealias(dir: &File, leaf: &OsStr, real: PathBuf) -> io::Result<PathBuf> {
     if !real.as_os_str().to_string_lossy().contains('~') {
-        return real;
+        return Ok(real);
     }
-    if let Ok(leaf_dir) = open_search_dir(dir, leaf)
-        && let Some(canonical) = final_path(&leaf_dir)
-    {
-        return canonical;
-    }
-    final_path(dir).map_or(real, |base| base.join(leaf))
+    let named = match open_attributes(dir, leaf) {
+        Ok(object) => final_path(&object),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            final_path(dir).map(|base| base.join(leaf))
+        }
+        Err(e) => return Err(e),
+    };
+    named.ok_or_else(|| {
+        io::Error::other(format!(
+            "cannot learn the long name of {}, which may be an 8.3 short alias; \
+             ral refuses a name it cannot judge under every spelling",
+            real.display()
+        ))
+    })
+}
+
+/// A handle on `name` in `dir` with attribute access alone, a directory as
+/// readily as a file, never following a final link.
+#[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:walk-dealias] Opens the leaf with FILE_READ_ATTRIBUTES alone to ask the kernel its long name. Path resolution, not the model's data I/O."
+)]
+fn open_attributes(dir: &File, name: &OsStr) -> io::Result<File> {
+    use cap_primitives::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+    };
+    let mut opts = OpenOptions::new();
+    opts.access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .follow(FollowSymlinks::No);
+    open(dir, name.as_ref(), &opts)
 }
 
 /// The canonical path of the object behind `f`, verbatim head stripped so it
@@ -639,9 +667,9 @@ impl Located {
 /// The discard device, opened by name.
 ///
 /// The one object this module opens without walking to it: exempt from the
-/// walk and from the grant alike, since there is nothing to locate, and on
-/// Windows `NUL` is a name the Win32 layer resolves anywhere rather than an
-/// entry in any directory.
+/// walk and from the grant alike, since there is nothing to locate — on
+/// Windows it is the device-namespace name `\\.\NUL`, no entry in any
+/// directory.
 ///
 /// # Errors
 /// The open's.
@@ -810,5 +838,51 @@ mod tests {
             panic!("the kernel gives ENOENT");
         };
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+}
+
+#[cfg(all(test, windows))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] fixtures build the file whose short alias the walk is asked about"
+)]
+mod windows_tests {
+    use super::*;
+    use crate::path::Resolver;
+
+    /// The 8.3 alias Windows keeps for `path`, if this volume keeps one.
+    fn short_name(path: &Path) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` holds the 1024 units
+        // the call is told of.
+        let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
+        buf.truncate(usize::try_from(len).ok().filter(|&n| n > 0 && n < 1024)?);
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)))
+    }
+
+    /// M4b: a *file* reached by its short alias locates at its long name, so
+    /// a deny frozen on the long name meets it.
+    #[test]
+    fn a_file_reached_by_its_short_alias_locates_at_its_long_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = tmp.path().join("secretfile-with-a-long-name.txt");
+        std::fs::write(&long, "x").unwrap();
+        let Some(short) = short_name(&long).filter(|s| s.file_name() != long.file_name()) else {
+            eprintln!("skip: this volume keeps no 8.3 names, so there is no alias to walk");
+            return;
+        };
+        let resolver = Resolver {
+            home: None,
+            cwd: None,
+        };
+        let located = walk(&resolver.resolve(&short.to_string_lossy()), Leaf::Resolve).unwrap();
+        assert_eq!(
+            located.real().file_name(),
+            long.file_name(),
+            "the walk kept the short alias {short:?}"
+        );
     }
 }

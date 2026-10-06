@@ -50,7 +50,7 @@ handle. Authority is preserved through execution because the handle *is* the
 authority ([[decisions/260906_object-not-name|object-not-name]]). The exec
 door judges the object too: a head's program is the file that will execute,
 judged by its real path through the one function `ExecRules::verdict`, and
-the launcher runs exactly the path judged
+the launcher runs that real path, under the user's spelling as `argv[0]`
 ([[decisions/261004_exec-rules|exec-rules]]).
 
 **Why the guard cannot be the only enforcer.**
@@ -72,14 +72,16 @@ the launcher runs exactly the path judged
   kernel admits is one law on every platform — the guard's own rules, ordered
   so last-match-wins is its most-specific-wins precedence
   ([[related/access-control-algebra|access-control-algebra]]), plus their carriers, the platform's
-  loader and ral ([[decisions/261004_exec-carriers|exec-carriers]]).
+  loader and ral ([[decisions/261004_exec-carriers|exec-carriers]]). Those
+  rules carry only the denies a layer wrote: a stack's meet keeps no default
+  as a deny, which Seatbelt's caseless match would turn on every spelling of
+  the name.
 
 **What a grant's guarantee means on Linux, row by row.** Rows above the rule
 are *promises*: a grant names them, and a host that cannot hold one refuses
 the launch. Rows below are *invariants* of being under an envelope at all —
-applied wherever the host can build them, reported where it cannot
-(`HostEnvelope`, printed by `RAL_DUMP_SANDBOX_PROFILE`), never a reason to
-refuse: nothing in a grant names them, and the in-process half of process
+applied where the host can build them and stated (in SPEC and here) where it
+cannot, never a reason to refuse: nothing in a grant names them, and the in-process half of process
 reach is already total, a ral body reaching processes only through what ral
 serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 
@@ -88,16 +90,46 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | `fs` read/write prefixes, `deny` masks | bwrap mounts | refuse: `confinement_unavailable` |
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which path may be `execve`d (not which code runs) | Landlock `Execute` ruleset | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
-| `exec` — which subcommand, and a deny inside an allowed directory | in-process guard | the guard stands alone |
+| `exec` — which subcommand, a deny inside an allowed directory, and a veto under an admitted directory a write prefix covers without naming (frozen on macOS: [[decisions/261006_a-veto-freezes-what-a-write-covers]]) | in-process guard | the guard stands alone; Linux does not yet freeze the covered admits |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
-| `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | reported: the tree is the host's |
-| no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |
-| private ptys | `--dev` | reported: `/dev` by hand over the host's `/dev/pts` |
+| `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |
+| no signalling the host; host process table hidden | pid namespace + fresh `/proc` | the table is the container's own |
+| private ptys | `--dev` | `/dev` by hand over the host's `/dev/pts` |
 
 The first row has one exception: a `deny` naming a path *absent* on the host
-under a *writable* prefix is held by the in-process guard alone, no mount being
-able to mask a name that does not exist without first creating it there.
+under a *writable* prefix is held by the in-process guard alone on Linux and
+Windows, no mount or ACE being able to attach to a name that does not exist
+without first creating it there; a child can make the name in that launch, and
+the next launch finds it and the kernel holds it. macOS holds it from the
+start, Seatbelt's rules being negative over names.
+
+The two agree on what a deny means: every spelling some filesystem takes for
+its name. The guard keys a deny by `lex::collision_key`; Seatbelt matches the
+same class; a bwrap mask and a Windows ACE hang on whatever object the
+volume's own lookup finds, which on an existing path is the same thing. On a
+case-sensitive volume the guard therefore over-denies relative to the Linux
+and Windows kernels — a distinct `secrets` beside a denied `Secrets` is
+refused in process and not to a child — an over-approximation, stated in the
+refusal ([[decisions/261006_denies-hold-under-every-spelling|denies-hold-under-every-spelling]]).
+
+**macOS has no stacking.** Landlock layers inside the envelope; Seatbelt
+profiles do not stack. A process already inside one gets `EPERM` entering a
+second, so a confined runner's per-command child cannot host a launch under a
+restricting grant: ral cannot know the entry profile holds what the grant
+promises, and a host that cannot hold a promise refuses. The launch is refused
+with attribution — this lineage is already profiled — never run under the wider
+profile it already has.
+
+**macOS's process row is a budget.** There is no pid namespace to hide the
+host's table; a confined child instead launches with `RLIMIT_NPROC` at the
+user's process count at launch plus 512, soft and hard (`sandbox::fork_brake`;
+reported as a warning when the count cannot be taken, never a refusal). Darwin
+counts processes per real UID but compares each `fork`/`posix_spawn` with the
+*forking* process's own limit, so only the confined subtree's forks are refused
+and every other process of the user keeps its own. The threshold is absolute:
+if the user's session grows past it, the confined command's forks fail first,
+never the desktop's. It refuses forks; it does not kill.
 
 **Neither enforcer is the body's to rewrite.** Every launcher pinned at boot —
 on Linux both bwrap and ral's own trampoline, and ral itself wherever else it
@@ -111,8 +143,7 @@ not carry it, never being reached under an open stack; a sealed-memfd copy
 would lose a setuid bwrap its bit and Ubuntu's AppArmor userns profile, which
 attaches to the exec'd file's path; a content digest detects the change, not
 the poison, and the restart it demands pins the poisoned bytes. What stays open
-— another same-uid process, a later session — the profile dump names, with its
-remedy: a root-owned bwrap
+— another same-uid process, a later session — a root-owned bwrap lifts
 ([[internals/capability-enforcement|capability-enforcement]]).
 
 The discipline this draws: **the in-process guard is authority over dispatch, not

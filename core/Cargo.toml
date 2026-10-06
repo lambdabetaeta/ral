@@ -66,6 +66,9 @@ postcard      = { version = "1", features = ["alloc"] }
 anstyle-query = "1"
 ariadne       = "0.6"
 nucleo-matcher = { workspace = true }
+icu_normalizer  = "2.3.0"
+icu_casemap     = "2.3.0"
+icu_locale_core = "2.3.0"
 ral-ripgrep-core = { path = "../vendor/ripgrep-core", optional = true }
 uucore        = { version = "0.12", optional = true }
 uu_ls         = { version = "0.12", optional = true }

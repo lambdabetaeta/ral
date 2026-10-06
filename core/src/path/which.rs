@@ -170,9 +170,8 @@ thread_local! {
     /// nothing survives a run boundary, which is fresher than bash's `hash`
     /// table.  Within a run a `None` older than [`NEGATIVE_TTL`] is re-probed
     /// while positives ride the generation alone, because a stale miss is a
-    /// wrong answer where a stale hit is a spawn that fails with the OS's own
-    /// ENOENT, and whose miss sends [`search`] on to its uncached presence
-    /// half to choose between 126 and 127.
+    /// wrong answer where a stale hit is a deleted file, which `Program::file`
+    /// reports as `Missing::NotFound` (127) without resuming the walk.
     static LOCATED: RefCell<LocateCache> = RefCell::new(LocateCache {
         generation: GENERATION.load(Ordering::Relaxed),
         entries: HashMap::new(),
@@ -308,11 +307,11 @@ pub(crate) enum PathSearch {
 /// The executable half is [`locate`], memo and TTL unchanged.  The
 /// presence half runs only when that misses — the error path, and bundled
 /// names whose `PATH` holds no host twin — and stays uncached, for the reason
-/// [`LOCATED`] gives: a stale *hit* costs a spawn that fails with the OS's own
-/// ENOENT, but a stale answer here is the difference between two exit codes a
-/// user reads as different diagnoses.  It walks the same [`path_dirs`] list as
-/// the executable half, so no empty entry, no anchor and no suffix rule can
-/// differ between them.
+/// [`LOCATED`] gives: a stale *hit* is caught at `Program::file`, which finds
+/// the file gone and answers 127, but a stale answer here is the difference
+/// between two exit codes a user reads as different diagnoses.  It walks the
+/// same [`path_dirs`] list as the executable half, so no empty entry, no
+/// anchor and no suffix rule can differ between them.
 ///
 /// A separator-bearing name is [`PathSearch::Missing`] outright, as in
 /// [`resolve_in_path`]: it is a path, not `PATH`'s business, and the kernel
@@ -338,10 +337,40 @@ pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -
         .map_or(PathSearch::Missing, PathSearch::FoundNotExecutable)
 }
 
-/// The resolver's fallback when `%PATHEXT%` is unset; `capability::exec`
-/// keeps the stripped twin, and the agreement is pinned by its tests.
+/// The resolver's fallback when `%PATHEXT%` is unset;
+/// [`WINDOWS_EXEC_EXTENSIONS`] is its stripped twin, the agreement pinned
+/// below.
 #[cfg(windows)]
 pub(crate) const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// The extensions Windows runs a bare name through.  `.bat` and `.cmd` belong
+/// here even though `process::launch` refuses to spawn them: that is a later
+/// refusal of the image, not of the name.
+pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
+
+/// A command name as a deny holds it: the host's name for it, under every
+/// spelling some filesystem takes for that.
+pub(crate) fn command_name_key(name: &str) -> String {
+    let name = name_key_on(name, cfg!(windows));
+    super::lex::collision_key(std::ffi::OsStr::new(name.as_ref()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Off Windows the name itself; on Windows ASCII lower-case, a trailing
+/// executable extension stripped.  `windows` is a parameter so the Windows
+/// rule is tested on every host.
+fn name_key_on(name: &str, windows: bool) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !windows {
+        return Cow::Borrowed(name);
+    }
+    let lower = name.to_ascii_lowercase();
+    match lower.rsplit_once('.') {
+        Some((stem, ext)) if WINDOWS_EXEC_EXTENSIONS.contains(&ext) => Cow::Owned(stem.to_string()),
+        _ => Cow::Owned(lower),
+    }
+}
 
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
 /// the resolver's own default when the variable is unset.
@@ -663,6 +692,17 @@ mod memo_tests {
 mod windows_tests {
     use super::*;
 
+    /// `%PATHEXT%`'s fallback and the name-key strip list are twin copies of
+    /// one fact; they may only drift together.
+    #[test]
+    fn name_key_extensions_agree_with_the_resolver_default_pathext() {
+        let from_pathext: Vec<String> = DEFAULT_PATHEXT
+            .split(';')
+            .map(|e| e.trim_start_matches('.').to_lowercase())
+            .collect();
+        assert_eq!(from_pathext, WINDOWS_EXEC_EXTENSIONS);
+    }
+
     #[test]
     fn pathext_appends_never_replaces() {
         let suffixes = ["EXE".to_owned(), "BAT".to_owned()];
@@ -697,6 +737,38 @@ mod windows_tests {
             forget_located_commands();
             assert!(locate("build", Some(&path_value), SearchCwd::nowhere()).is_some());
         });
+    }
+}
+
+#[cfg(test)]
+mod name_key_tests {
+    use super::*;
+
+    #[test]
+    fn name_key_off_windows_is_the_name() {
+        assert_eq!(name_key_on("Git.exe", false), "Git.exe");
+    }
+
+    #[test]
+    fn windows_name_key_folds_case_and_strips_an_executable_extension() {
+        for name in [
+            "git", "GIT", "git.exe", "Git.EXE", "git.cmd", "git.com", "git.bat",
+        ] {
+            assert_eq!(name_key_on(name, true), "git", "{name}");
+        }
+        assert_eq!(name_key_on("git.tool", true), "git.tool");
+        assert_eq!(name_key_on("gitk.exe", true), "gitk");
+    }
+
+    /// A deny holds a command name under every spelling, as it holds a path.
+    #[test]
+    fn the_command_name_key_folds_case_and_normalisation() {
+        assert_eq!(command_name_key("SH"), command_name_key("sh"));
+        assert_eq!(
+            command_name_key("caf\u{e9}"),
+            command_name_key("cafe\u{301}")
+        );
+        assert_ne!(command_name_key("shx"), command_name_key("sh"));
     }
 }
 

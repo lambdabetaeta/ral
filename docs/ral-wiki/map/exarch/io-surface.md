@@ -288,8 +288,9 @@ recipe but contains no open, and `builtins/fs.rs`, `builtins/modules.rs` and
 exarch's readers, editors and grep all reach the filesystem through a
 `Located` rather than by re-walking a string the in-process guard already judged. The one
 exception is the discard device, which has no object to locate — on Windows
-`NUL` is a name the Win32 layer resolves anywhere rather than an entry in any
-directory.
+it is the device-namespace name `\\.\NUL`, no entry in any directory. Any
+other path ending in a DOS reserved device name is refused at the door rather
+than opened.
 
 Three entry points, differing only in how they answer a refusal, because the
 callers genuinely need different answers:

@@ -28,6 +28,7 @@ pub(crate) struct Abi(u32);
 
 impl Abi {
     /// `LANDLOCK_ACCESS_FS_EXECUTE`, Linux 5.13.
+    #[cfg(test)]
     pub(crate) const EXEC: Self = Self(1);
     /// `LANDLOCK_ACCESS_FS_REFER`, Linux 5.19.
     pub(crate) const REFER: Self = Self(2);
@@ -72,13 +73,6 @@ impl Landlock {
             classify(level, errno)
         })
     }
-
-    pub(crate) fn abi(self) -> Option<Abi> {
-        match self {
-            Self::At(abi) => Some(abi),
-            _ => None,
-        }
-    }
 }
 
 fn classify(level: libc::c_long, errno: i32) -> Landlock {
@@ -111,8 +105,8 @@ impl fmt::Display for Landlock {
 pub(crate) const RENDERS_EXEC: bool = true;
 
 /// The ruleset as a value, admits named by `A`: [`Admit`]s in the parent, so
-/// it can be tested on any host and printed in the profile dump, and the
-/// inherited fds in the payload, which enters it.
+/// it can be tested on any host, and the inherited fds in the payload, which
+/// enters it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layer<A> {
     /// `Some` renders `ExecProjection::Restricted`.
@@ -183,13 +177,6 @@ impl Admit {
             }
         }
         Ok(Some(fd))
-    }
-}
-
-impl Layer<Admit> {
-    /// The layer `exec` asks of a kernel at `abi`.
-    fn render(exec: &ExecProjection, abi: Abi) -> Result<Option<Self>, String> {
-        Ok(Self::at(admits(exec)?, abi))
     }
 }
 
@@ -351,57 +338,12 @@ fn inherited(n: usize) -> Result<Vec<OwnedFd>, String> {
         .collect()
 }
 
-/// `statfs.f_type` of a 9P mount, whose server implements no Landlock hook.
-const V9FS_MAGIC: u64 = 0x0102_1997;
-
-impl fmt::Display for Layer<Admit> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.exec {
-            None => writeln!(f, "landlock: exec unconfined (projection unrestricted)")?,
-            Some(exec) => {
-                writeln!(f, "landlock: exec confined to {} paths:", exec.admits.len())?;
-                for admit in &exec.admits {
-                    let name = admit.name().as_str();
-                    let note = if on_9p(name) {
-                        " (inert: 9P implements no Landlock hooks)"
-                    } else {
-                        ""
-                    };
-                    let slash = match admit {
-                        Admit::File(_) => "",
-                        Admit::Hierarchy(_) => "/",
-                    };
-                    writeln!(f, "  {name}{slash}{note}")?;
-                }
-                writeln!(
-                    f,
-                    "cross-directory rename freed (Refer on /): {}",
-                    if exec.frees_refer {
-                        "yes"
-                    } else {
-                        "no (ABI 1)"
-                    }
-                )?;
-            }
-        }
-        writeln!(
-            f,
-            "signals scoped to the envelope: {}",
-            if self.scope_signals { "yes" } else { "no" }
-        )
-    }
-}
-
 /// Landlock attaches to the inode a path reaches, so only a path that is its
 /// own real path may be admitted.
 #[allow(clippy::disallowed_methods)]
 fn is_real(path: &str) -> bool {
     crate::path::canon::canonicalise_strict(std::path::Path::new(path))
         .is_ok_and(|real| real == std::path::Path::new(path))
-}
-
-fn on_9p(path: &str) -> bool {
-    rustix::fs::statfs(path).is_ok_and(|s| u64::try_from(s.f_type).is_ok_and(|t| t == V9FS_MAGIC))
 }
 
 /// Never through a symlink: a rule attaches to the inode the open reaches.
@@ -549,30 +491,6 @@ pub(crate) fn enter(exec_admits: &ExecAdmits) -> Result<(), String> {
     }
 }
 
-/// The layer the trampoline would enter on this kernel, for the profile dump:
-/// entered by a trampoline, it is otherwise invisible in the bwrap argv.
-pub(crate) fn dump(policy: &SandboxProjection, landlock: Landlock) {
-    let abi = match landlock {
-        Landlock::Absent => {
-            match unenforceable(&policy.exec, landlock) {
-                Some(why) => eprintln!("--- landlock layer error ---\n{why}"),
-                None => eprintln!("landlock layer: none (no Landlock on this kernel)"),
-            }
-            return;
-        }
-        unprobed @ Landlock::Unprobed(_) => {
-            eprintln!("landlock layer: unknown — {unprobed}; a confined launch refuses");
-            return;
-        }
-        Landlock::At(abi) => abi,
-    };
-    match Layer::render(&policy.exec, abi) {
-        Ok(Some(layer)) => eprintln!("--- landlock layer ---\n{layer}--- end landlock layer ---"),
-        Ok(None) => eprintln!("landlock layer: none (nothing to enter)"),
-        Err(e) => eprintln!("--- landlock layer error ---\n{e}"),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
@@ -604,7 +522,7 @@ mod tests {
     }
 
     fn layer(exec: &ExecProjection, abi: Abi) -> Option<Layer<Admit>> {
-        Layer::render(exec, abi).expect("ASCII paths render")
+        Layer::at(admits(exec).expect("ASCII paths render"), abi)
     }
 
     #[test]

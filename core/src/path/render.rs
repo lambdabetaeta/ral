@@ -29,9 +29,9 @@ impl Rendered {
     }
 
     /// Whether `spelled`, taken as written, is this name or lies under it.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn holds(&self, spelled: &str) -> bool {
-        super::lex::path_within_str(spelled, &self.0)
+        super::lex::path_within_str(spelled, &self.0, super::lex::Identity::Stored)
     }
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn rendered_pins(deny: &[Rendered], write: &[Rendered]) -> Vec<Render
         .filter(|dir| {
             write
                 .iter()
-                .any(|w| super::lex::path_within_str(dir, w.as_str()))
+                .any(|w| super::lex::path_within_str(dir, w.as_str(), super::lex::Identity::Stored))
         })
         .map(Rendered)
         .collect()

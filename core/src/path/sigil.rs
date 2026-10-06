@@ -18,7 +18,7 @@
 
 use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::canon::canonicalise_lenient;
-use crate::path::lex::{fold_dots, path_within};
+use crate::path::lex::{Identity, fold_dots, path_within};
 use crate::path::resolved::NormalizedPrefix;
 use crate::path::tilde::TildePath;
 use crate::types::PolicyError;
@@ -225,13 +225,13 @@ fn resolve_xdg_safe(
     };
     let resolved = join_sub(base, sub);
     let canonical_home = canonicalise_lenient(&fold_dots(Path::new(home)));
-    if path_within(resolved.resolved_path(), &canonical_home) {
+    if path_within(resolved.resolved_path(), &canonical_home, Identity::Stored) {
         return Ok(resolved);
     }
     let val = std::env::var(kind.env_var()).unwrap_or_default();
     let env_clause = if val.is_empty() {
         format!(
-            "{var} is unset, so the default ({}) was used — is HOME ({home}) \
+            "{var} is unset, so the default ({}) was used. Is HOME ({home}) \
              set correctly?",
             resolved.as_str(),
             var = kind.env_var(),
@@ -239,7 +239,7 @@ fn resolve_xdg_safe(
         )
     } else {
         format!(
-            "{var}={val} — set it to a subpath of HOME ({home}), unset it to \
+            "{var}={val}: set it to a subpath of HOME ({home}), unset it to \
              use the default, or replace xdg:{name} in the policy with an \
              explicit path.",
             var = kind.env_var(),
@@ -257,7 +257,7 @@ fn resolve_xdg_safe(
         )
     };
     Err(PolicyError::new(format!(
-        "xdg:{name} resolves to '{path}'{via}, outside HOME — refusing to \
+        "xdg:{name} resolves to '{path}'{via}, outside HOME; refusing to \
          widen the grant.  {clause}",
         name = kind.token_name(),
         path = resolved.resolved(),
@@ -267,7 +267,7 @@ fn resolve_xdg_safe(
 
 fn unknown_xdg_message(entry: &str) -> String {
     format!(
-        "unknown xdg token '{entry}' — known kinds are: {}. \
+        "unknown xdg token '{entry}'; known kinds are: {}. \
          Did you mean one of those? (Token form is `xdg:NAME` or \
          `xdg:NAME/sub/path`.)",
         XdgKind::all().join(", "),
@@ -280,7 +280,7 @@ fn unknown_xdg_message(entry: &str) -> String {
 /// Feeds [`unix_tool_roots`] or [`windows_tool_roots`] the live filesystem and
 /// environment.  Both stay public and parameterised over those inputs so each
 /// platform's list is unit-testable on every host, not only the one compiling
-/// it — the pattern `capability::exec`'s `name_key` follows too.
+/// it — the pattern `which`'s `name_key_on` follows too.
 pub fn system_tool_roots() -> Vec<String> {
     #[cfg(windows)]
     {

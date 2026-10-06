@@ -188,7 +188,7 @@ pub(crate) fn bwrap_command(
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
-/// logical cwd; the profile dump, which spawns nothing, passes `None`.
+/// logical cwd; a launch with none to carry passes `None`.
 ///
 /// `ownership` decides two ties between the session and the envelope:
 /// death (`--die-with-parent`) and address (`--info-fd`).  A surrendered
@@ -1929,7 +1929,7 @@ mod tests {
 
     /// The command directories, plus whatever a test adds, by their real
     /// paths as a grant freezes them.  The loader and ral's own binary need
-    /// no naming: `Layer::render` folds them in.
+    /// no naming: `landlock::admits` folds them in.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
         let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
         let dirs = ["/bin", "/usr/bin"]

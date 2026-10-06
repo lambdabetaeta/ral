@@ -44,9 +44,11 @@ lifetime.
   papered over: the deny of a not-yet-existing name is held by ral's in-process
   gate alone — complete for what ral dispatches, blind to what a spawned child
   does on its own ([[design/two-enforcers|two enforcers]]). It joins
-  [[decisions/260530_linux-exec-confinement|linux-exec-confinement]] as a Linux
-  seam, not a solved case. macOS Seatbelt, whose rules are genuinely negative
-  and range over names rather than inodes, enforces it in full.
+  [[decisions/260530_linux-exec-confinement|linux-exec-confinement]] as a seam,
+  not a solved case, and not Linux's alone: a Windows ACE needs an object as a
+  mount needs a mountpoint, so there too an absent name under a read-write grant
+  is held in process until it exists. macOS Seatbelt, whose rules are genuinely
+  negative and range over names rather than inodes, enforces it in full.
 
 ## Where the directory mask stops
 
