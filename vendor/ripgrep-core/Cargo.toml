@@ -25,7 +25,7 @@ termcolor = "1.1.0"
 textwrap = { version = "0.16.0", default-features = false }
 
 [target.'cfg(all(target_env = "musl", target_pointer_width = "64"))'.dependencies]
-tikv-jemallocator = "0.6.0"
+tikv-jemallocator = "0.7.0"
 
 # Vendored ripgrep fork: kept upstream-diffable, so we don't apply the
 # workspace clippy lints here.
