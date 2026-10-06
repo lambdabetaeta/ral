@@ -131,6 +131,28 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     head_from_quoted && any_string_arg && any_non_string_arg
 }
 
+/// A scalar literal as written, the target [`TypeErrorKind::IndexOnLiteral`]
+/// refuses; `None` for anything an index may read.
+fn spell_literal(v: &Val) -> Option<String> {
+    match v {
+        Val::String(s) => Some(format!("'{s}'")),
+        Val::Int(n) => Some(n.to_string()),
+        Val::Float(f) => Some(f.to_string()),
+        Val::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// An index key as written between the brackets.
+fn spell_key(v: &Val) -> String {
+    match v {
+        Val::String(s) => s.to_string(),
+        Val::Int(n) => n.to_string(),
+        Val::Variable(x) if !is_gensym(x) => format!("${x}"),
+        _ => "…".into(),
+    }
+}
+
 /// The redirect binding standard input at a stage's own root, if it has one.
 ///
 /// The root is where a feed answers the stage's reads for its whole run: an
@@ -1602,6 +1624,16 @@ impl Inferencer<'_> {
     }
 
     fn infer_index(&mut self, target: &Val, keys: &[crate::source::Spanned<Val>]) -> CompTy {
+        if let (Some(literal), Some(first)) = (spell_literal(target), keys.first()) {
+            for key in keys {
+                self.infer_val(&key.item);
+            }
+            self.ctx.diagnose(TypeErrorKind::IndexOnLiteral {
+                literal,
+                key: spell_key(&first.item),
+            });
+            return CompTy::pure(self.ctx.unifier.fresh_ty());
+        }
         let mut current_ty = self.infer_val(target);
         for (step, key) in keys.iter().enumerate() {
             let names = match (step, target, &key.item) {

@@ -306,6 +306,12 @@ pub enum TypeErrorKind {
         label: String,
         ty: Ty,
     },
+    /// An index on a literal, `'x'[f]`: it binds to that word alone, so this
+    /// is `cmd 'x'[f]` meant as `!{cmd 'x'}[f]`.  Both spelled as written.
+    IndexOnLiteral {
+        literal: String,
+        key: String,
+    },
     /// A computed index (`$v[$k]`) on a value that accepts no key at all.
     DynamicIndexOnScalar {
         ty: Ty,
@@ -356,6 +362,7 @@ impl TypeErrorKind {
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",
+            Self::IndexOnLiteral { .. } => "T0063",
             Self::DeadPipeEdge { .. } => "T0070",
             Self::UnboundVariable { .. } => "T0071",
             Self::HeadBoundToValue { .. } => "T0072",

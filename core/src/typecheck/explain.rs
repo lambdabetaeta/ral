@@ -176,6 +176,9 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
+            Self::IndexOnLiteral { literal, key } => format!(
+                "`[{key}]` reads from {literal} itself: an index attaches to the one word right before it"
+            ),
             Self::DynamicIndexOnScalar { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -254,6 +257,9 @@ impl TypeErrorKind {
             | Self::FieldOnNonRecord { .. }
             | Self::DynamicIndexOnScalar { .. } => "here".into(),
             Self::UnboundVariable { .. } => "not defined".into(),
+            Self::IndexOnLiteral { literal, .. } => {
+                format!("this index belongs to {literal} alone")
+            }
             Self::IndexContainerUnknown { .. } => "a list or a map?".into(),
             Self::HeadBoundToValue { ty, .. } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -790,6 +796,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                     .to_string(),
             )
         }
+        TypeErrorKind::IndexOnLiteral { literal, key } => Some(format!(
+            "did you mean to index what a command returns? Force the command first, \
+             then index its result: `!{{… {literal}}}[{key}]`"
+        )),
         TypeErrorKind::DynamicIndexOnScalar { .. } => Some(
             "only lists (key: Integer) and maps (key: String) \
              accept a key computed at runtime — for a record \
