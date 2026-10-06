@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 90479dea
+verified_at_commit: e524fe51
 verified_at_date: 2026-10-06
-anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, inherit, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
+anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_options, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, pin_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -139,11 +139,11 @@ spawned process does on its own.**
   program and its argv *before* the spawn and returns `Admitted`, the token
   `build_launch` launches from. On macOS the Seatbelt profile additionally
   renders the rules as `process-exec` forms, catching re-execs the in-process
-  guard never sees (`sh -c`, `find -exec`); on Linux a Landlock domain entered
-  inside the bwrap envelope carries their allows into the kernel, Landlock
-  being unable to subtract inside an allowed directory, so on Linux an exec
-  deny or veto under an allowed directory is not yet enforced by the kernel
-  layer ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
+  guard never sees (`sh -c`, `find -exec`); on Linux a Landlock ruleset the
+  parent builds and the payload enters inside the bwrap envelope carries their
+  allows into the kernel, Landlock being unable to subtract inside an
+  allowed directory, so on Linux an exec deny or veto under an allowed
+  directory is not yet enforced by the kernel layer ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
   AppContainer on Windows has no path-exec filter, so there the in-process
   guard stands alone and check-to-exec timing stays open. The kernel's list is
   `ExecRules::kernel` of the very table in the `Admitted`, ordered by `Rank`
@@ -383,7 +383,7 @@ unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
 re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
 --warrant`: `bwrap_options` is pure and returns bwrap's options alone, which bwrap
 takes from `--args`. The descriptors a confined launch hands down — bwrap's
-`--args`, the warrant, `--info-fd`, the seccomp programs, the Landlock admits —
+`--args`, the warrant, `--info-fd`, the Landlock ruleset, the seccomp programs —
 sit at fixed slots defined once (`Slot`), and one `Handoff` places them all; the
 child sweeps everything from the first slot up once it is confined, so the program inherits none.
 `serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
@@ -392,16 +392,23 @@ the program starts exits 126, a missing program 127; an `execve` refusal takes
 its code from the same `SpawnFailure` the in-process spawn uses.
 
 *Failing closed is the handoff's whole stance.* The warrant's `Confinement`
-(`Seatbelt(profile)` on macOS, `ExecAdmits` on Linux) is the one thing the child
+(`Seatbelt(profile)` on macOS; on Linux `unconfined`, `landlock` or
+`landlock+refer`, a `Landlocked` promise or none) is the one thing the child
 enters, and `Warrant::confine` is the only road to the program — after the
 confinement is entered and the handoff closed — so no code path runs a program
-unconfined. On Linux the parent's `open_admits` refuses every launch whose
-Landlock probe failed and a restricting exec grant where Landlock is absent, a
-file admit that has become a directory is dropped rather than widened to a
-hierarchy, and the child's `enter` refuses if its own probe fails, or if the
-warrant promised exec rules and finds no Landlock. A sandboxed launch needs
-ral's own pin (`reexec::own`) and re-verifies it (`Pinned::verify`) before
-issuing a warrant; unpinned, it refuses.
+unconfined. On Linux the parent probes Landlock once and `landlock::build`
+decides everything: it refuses every launch whose probe failed and a
+restricting exec grant where Landlock is absent, creates the ruleset with the
+exact handled set the kernel accepts, and admits each rule by a handle opened
+without following symlinks, a file admit that has become a directory being
+dropped rather than widened to a hierarchy and one now reached through a symlink
+refusing the launch as a race. The child probes nothing: it takes the ruleset
+at its slot, adds `Refer` on its own root when promised (the root exists only
+inside), and enters it; a promised ruleset that never arrived, or a descriptor
+that is not one, refuses the launch. A sandboxed launch needs ral's own pin
+(`reexec::own`) and re-verifies it (`Pinned::verify`) before issuing a
+warrant; unpinned, it refuses. Its self admit is that pin's descriptor, the
+boot inode, never a name.
 
 On Windows filesystem authority is *path*-keyed, and the token selects. Each
 `(canonical path, kind)` grant derives a deterministic capability SID from a

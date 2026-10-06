@@ -85,12 +85,33 @@ impl Pinned {
         std::fs::read_link(self.exec_path())
     }
 
+    /// The pinned inode's open descriptor.
+    #[cfg(target_os = "linux")]
+    pub(super) fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        let Pin::Fd { fd, .. } = &self.pin;
+        fd.as_fd()
+    }
+
     /// The descriptor `exec_path` names.
     #[cfg(target_os = "linux")]
     pub(super) fn raw_fd(&self) -> std::ffi::c_int {
         use std::os::fd::AsRawFd;
-        let Pin::Fd { fd, .. } = &self.pin;
-        fd.as_raw_fd()
+        self.fd().as_raw_fd()
+    }
+
+    /// This pin again, at the lowest free descriptor from `from`: how a test
+    /// puts one on a handoff slot.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn lifted(&self, from: std::ffi::c_int) -> Self {
+        use std::os::fd::AsRawFd;
+        let Pin::Fd { dev, ino, .. } = self.pin;
+        let fd = rustix::io::fcntl_dupfd_cloexec(self.fd(), from).expect("a free descriptor");
+        Self {
+            exec_path: crate::path::proc_fd_path(fd.as_raw_fd()),
+            pin: Pin::Fd { fd, dev, ino },
+            arg0: self.arg0.clone(),
+        }
     }
 
     /// Whether `meta` is the pinned inode, under whatever name — a hard link

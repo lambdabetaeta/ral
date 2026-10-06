@@ -1,7 +1,7 @@
 ---
 status: active
 generated_at_commit: 7f61632a
-verified_at_commit: 90479dea
+verified_at_commit: e524fe51
 anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecScope, ExecRule, allowed_files, emit_exec_rules, Sbpl]
 ---
 
@@ -74,8 +74,8 @@ carry `RealPath`s to the backends, and `render_real`, the one way from one to
 a kernel spelling, adds only the firmlink twin and never reads the disk, so a
 frozen grant cannot widen to a symlink's new target. Landlock judges inside
 the bwrap envelope, whose names bwrap minted by following host symlinks, so
-the parent opens each admit in the host with `RESOLVE_NO_SYMLINKS` and the
-payload builds its ruleset from the inherited fds.
+the parent opens each admit in the host with `RESOLVE_NO_SYMLINKS` and builds
+the ruleset itself; the payload only enters it.
 
 ## Declared limits
 

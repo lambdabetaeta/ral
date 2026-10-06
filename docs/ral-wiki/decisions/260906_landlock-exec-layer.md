@@ -4,6 +4,22 @@ status: active
 
 # Kernel exec confinement on Linux is a Landlock layer inside the envelope
 
+> **Amended 2026-10-06.** The parent builds the ruleset, by raw syscalls in
+> place of the `landlock` crate, which can neither hand a ruleset over nor
+> adopt one, and lends it to the payload at a fixed descriptor; the payload
+> probes nothing and enters what it is given. ral's own binary is admitted by
+> its boot-pinned descriptor, the inode, never by name. Finding 2 stands with
+> one change of hands: `Refer` on `/` is the one rule the payload adds before
+> entering, because the envelope's root exists only inside, and granting
+> `Refer` on every mounted handle instead would leave `/tmp`, `/dev/shm` and
+> the cwd stand-in, tmpfs the parent never sees, under `EXDEV`. The floor
+> fails closed: a grant that limits which programs may run is refused on a
+> kernel without Landlock, and a payload promised a ruleset that never arrived
+> refuses to run; only an unrestricted exec projection launches with nothing
+> to enter. The rename test reads the inode, not `mv`'s exit: uutils `mv`
+> (Fedora 42 and later) hides `EXDEV` by copying and unlinking, so a refused
+> rename passes any test that asks only whether the file moved.
+
 Closes [[decisions/260530_linux-exec-confinement|linux-exec-confinement]]. A
 confined payload now enters a Landlock domain of its own
 (`core/src/sandbox/linux/landlock.rs`) rendering `ExecProjection::Restricted`,

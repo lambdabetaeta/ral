@@ -143,7 +143,6 @@ uu_test      = { version = "0.12", optional = true }
 uu_tac       = { version = "0.12", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
 seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]

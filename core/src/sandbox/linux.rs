@@ -11,9 +11,9 @@
 //! whole — so `SandboxProjection::net` is a bit, not a list.
 //!
 //! The payload is always ral's own trampoline (`super::launch`), which enters
-//! the [`landlock`] layer over the exec admits it inherits and only then
-//! becomes the target: that order is forced, a Landlock domain handling any fs right
-//! forbidding the `mount(2)` bwrap opens with.
+//! the [`landlock`] ruleset it inherits and only then becomes the target:
+//! that order is forced, a Landlock domain handling any fs right forbidding
+//! the `mount(2)` bwrap opens with.
 
 mod host;
 pub(crate) mod landlock;
@@ -105,7 +105,7 @@ impl Options {
 /// [`bwrap_options`] as the [`Command`] that runs it: `bwrap --args 98 --
 /// <payload>`, the options in a sealed parcel at their slot beside the seccomp
 /// programs, the `--info-fd` peer and the payload's `handoff` (its warrant
-/// and Landlock exec admits), every descriptor through one [`Handoff`].
+/// and Landlock ruleset), every descriptor through one [`Handoff`].
 /// bwrap takes options alone from `--args`, so the payload rides its argv.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
@@ -172,8 +172,8 @@ pub(crate) fn bwrap_command(
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
 /// twin names.  `policy.exec` has no counterpart in the options: bwrap filters
-/// mounts and syscalls, not exec by path, so [`landlock`] opens its admits
-/// in the host, and the payload enters them *inside* this envelope.
+/// mounts and syscalls, not exec by path, so [`landlock`] builds its ruleset
+/// in the host, and the payload enters it *inside* this envelope.
 ///
 /// The image is bound by its real name alone, so where the name it was
 /// spelled by — a link, or under one — lies outside every bind, a `--symlink`
@@ -1582,10 +1582,15 @@ mod tests {
     #[test]
     fn a_pin_on_a_handoff_slot_is_refused() {
         use std::os::fd::AsFd;
-        let pin = stand_in();
+        let pin = stand_in().lifted(Slot::Warrant.fd());
+        let at = pin.raw_fd();
+        if at > Slot::Info.fd() {
+            eprintln!("skipping: descriptors up to {} are all busy", Slot::Info.fd());
+            return;
+        }
         let lent = std::fs::File::open("/dev/null").expect("open /dev/null");
         let mut handoff = Handoff::default();
-        handoff.lend_at(pin.raw_fd(), lent.as_fd());
+        handoff.lend(Slot::Warrant, lent.as_fd());
         let Err(e) = bwrap_command(
             &pin,
             TRUE,
@@ -1597,7 +1602,7 @@ mod tests {
         ) else {
             panic!("a pin on a handoff slot must be refused");
         };
-        assert!(e.contains(&format!("descriptor {}", pin.raw_fd())), "{e}");
+        assert!(e.contains(&format!("descriptor {at}")), "{e}");
     }
 
     /// Whatever the projection bound, both files a launch execs go read-only
@@ -1918,7 +1923,7 @@ mod tests {
 
     /// The command directories, plus whatever a test adds, by their real
     /// paths as a grant freezes them.  The loader and ral's own binary need
-    /// no naming: `landlock::admits` folds them in.
+    /// no naming: `landlock::build` admits them.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
         let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
         let dirs = ["/bin", "/usr/bin"]
@@ -2235,6 +2240,99 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ral re-execs itself inside, so the grant need not name it; the admit
+    /// is the pinned inode, so a byte-identical copy beside it stays denied.
+    #[test]
+    fn ral_runs_unnamed_by_the_grant_and_a_copy_of_it_does_not() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let own = crate::sandbox::reexec::own().expect("ral pins itself");
+        let dir = workdir("exec-self");
+        let copy = dir.join("ral-copy");
+        std::fs::copy(own.arg0(), &copy).expect("copy ral");
+        let policy = exec_policy(admitting(&[], &[]));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             '{own}' --list >/dev/null && echo SELF-RAN\n\
+             '{copy}' --list >/dev/null && echo COPY-RAN\n",
+            own = own.arg0().display(),
+            copy = copy.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            emitted(&stdout, "SELF-RAN"),
+            "ral's own binary did not run inside: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !emitted(&stdout, "COPY-RAN"),
+            "a copy of ral ran, so the admit is not its inode: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Refused while building, before bwrap is ever spawned: the stand-in
+    /// envelope would run this test binary if it were.
+    #[test]
+    fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
+        let host = HostEnvelope {
+            landlock: super::landlock::Landlock::Absent,
+            ..WHOLE
+        };
+        let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
+        let launch = enveloped(
+            &stand_in(),
+            host,
+            &exec_policy(admitting(&[], &[])),
+            &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
+            None,
+            Ownership::Kept,
+        );
+        let Err(crate::types::Break::Error(e)) = launch else {
+            panic!("a restricted exec grant needs Landlock");
+        };
+        assert!(e.message.contains("Landlock"), "{}", e.message);
+    }
+
+    /// A warrant promising a ruleset is the trampoline's whole word on it, so
+    /// one that never arrived is a launch it refuses, not one it runs open.
+    #[test]
+    fn a_promised_ruleset_that_never_arrived_runs_nothing() {
+        use crate::sandbox::warrant::Warrant;
+        use std::os::fd::AsFd;
+        let own = crate::sandbox::reexec::own().expect("ral pins itself");
+        let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
+        let promise = Some(super::landlock::Landlocked { refer_root: false });
+        let warrant = Warrant::new(
+            promise,
+            &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
+        )
+        .parcel()
+        .expect("parcels");
+        let mut cmd = own.command();
+        cmd.arg(crate::sandbox::WARRANT_FLAG)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut handoff = Handoff::default();
+        handoff.lend(Slot::Warrant, warrant.as_fd());
+        handoff.install(&mut cmd).expect("installs");
+        let out = cmd.output().expect("spawn the trampoline");
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(out.status.code(), Some(126), "{stdout} {stderr}");
+        assert!(!emitted(&stdout, "RAN"), "the program ran unconfined");
+        let at = format!("fd {}", Slot::Ruleset.fd());
+        assert!(stderr.contains(&at), "{stderr}");
     }
 
     // ── The seccomp deny-set ──────────────────────────────────────────────

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 90479dea
+generated_at_commit: e524fe51
 generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -301,11 +301,11 @@ device for `net` to govern; the in-process guards apply unchanged
   run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
   the parent. The confinement is the `Confinement` trait — `spell`, `parse`,
   `enter` — implemented on macOS by `Seatbelt(String)`, the profile
-  `macos::build_profile` compiled, and on Linux by `ExecAdmits`, the count of
-  Landlock exec admits the parent opened in the host or `Unconfined`;
+  `macos::build_profile` compiled, and on Linux by `Option<Landlocked>`, spelled
+  `unconfined`, `landlock` or `landlock+refer`;
   the program is a `Run`, `File(path, args)` or `Tool(tool, args)`.
   `Warrant::confine` is the only way to the program: receive and verify the
-  warrant, enter the confinement (`macos::apply_profile`, `landlock::enter`),
+  warrant, enter the confinement (`macos::apply_profile`, `Landlocked::enter`),
   close the handoff range, and yield a `Confined`, whose `run` `execve`s the
   host program or runs the bundled tool in-process (`run_bundled`, shared with
   the `--ral-bundled-tool` multicall). `serve_warrant` serves the child: a
@@ -321,10 +321,10 @@ device for `net` to govern; the in-process guards apply unchanged
   refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
   defined once as `Slot` in `warrant.rs`: 98 bwrap `--args`, 99 the warrant,
   100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
-  `/proc`), 103.. the seccomp programs (sealed memfds), and for now 200.. the
-  Landlock admits. One `Handoff` lifts every source above every target and a
+  `/proc`), 101 the Landlock ruleset, 103.. the seccomp programs (sealed
+  memfds). One `Handoff` lifts every source above every target and a
   single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
-  with `close_range` once confined, and `landlock::enter` consumes the admits. `bwrap_command` refuses to launch if
+  with `close_range` once confined, and `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
   bwrap's pin fd sits on one of these slots: the `dup2` would close it before
   the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
@@ -336,15 +336,16 @@ device for `net` to govern; the in-process guards apply unchanged
   layer can only be entered *inside* the envelope bwrap has already built.
   Linux's confinement names no path: inside the envelope every
   name is one bwrap minted by following host symlinks, so none can be trusted
-  to reach the file a grant froze. `landlock::open_admits` instead opens each exec
-  admit — an `Admit`, `File` or `Hierarchy` — in the parent, in the host, with
-  `RESOLVE_NO_SYMLINKS`, and the warrant only counts them; a file admit whose
-  path has since become a directory is dropped, not admitted as a hierarchy, and
-  `open_admits` refuses a restricting exec projection where Landlock is unavailable.
-  The payload builds its
-  ruleset from the inherited fds, adding only `Refer` on its own root, which
-  exists nowhere else, and fails closed if a warrant promising admits finds no
-  Landlock. `bwrap_command` takes a `Payload { program, args, image,
+  to reach the file a grant froze. `landlock::build` instead plans the
+  handled set from the parent's one probe (`plan`), creates the `Ruleset` by raw
+  syscall, and admits ral's pin fd, the loader base and each allowing rule, a
+  dir as a hierarchy and a file as itself, each opened in the host with
+  `RESOLVE_NO_SYMLINKS`; an absent admit is dropped, a file admit whose path has
+  since become a directory is dropped, not admitted as a hierarchy, a symlink
+  since planted refuses the launch as a race, and a restricting exec projection
+  is refused where Landlock is unavailable. The payload probes nothing: it takes
+  the ruleset at its slot, adds only `Refer` on its own root, which exists
+  nowhere else, and fails closed if a promised ruleset never arrived. `bwrap_command` takes a `Payload { program, args, image,
   handoff }` — `program` is the trampoline, `args` its `--warrant`, `image` the
   host binary it will exec in turn, `handoff` the `(fd, slot)` pairs the payload
   inherits past bwrap — and `bwrap_options` binds both executables read-only where

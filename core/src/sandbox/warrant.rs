@@ -14,6 +14,8 @@
 //! The decoder accepts only what the encoder emits, byte for byte, so the
 //! encoding is canonical and injective.
 
+#[cfg(target_os = "linux")]
+use super::linux::landlock::Landlocked;
 use crate::capability::{Admitted, Program};
 use crate::process::{CommandFailure, SpawnFailure};
 use crate::types::Status;
@@ -39,6 +41,9 @@ pub(super) enum Slot {
     /// bwrap's `--info-fd`, `Kept` launches only.
     #[cfg(target_os = "linux")]
     Info,
+    /// The Landlock ruleset, when the warrant promises one.
+    #[cfg(target_os = "linux")]
+    Ruleset,
     /// bwrap's `--add-seccomp-fd`s, one per program.
     #[cfg(target_os = "linux")]
     Seccomp(u8),
@@ -51,7 +56,7 @@ impl Slot {
     #[cfg(target_os = "linux")]
     const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 103 + i.
+    /// 98, 99, 100, 101, 103 + i.
     pub(super) const fn fd(self) -> c_int {
         Self::FIRST
             + match self {
@@ -60,6 +65,8 @@ impl Slot {
                 Self::Warrant => 1,
                 #[cfg(target_os = "linux")]
                 Self::Info => 2,
+                #[cfg(target_os = "linux")]
+                Self::Ruleset => 3,
                 #[cfg(target_os = "linux")]
                 Self::Seccomp(i) => 5 + i as c_int,
             }
@@ -115,39 +122,33 @@ impl Confinement for Seatbelt {
     }
 }
 
-/// Linux: how many Landlock exec admits the re-exec inherits from
-/// `ADMIT_FD_BASE`, or that exec stays unconfined.
+/// Linux: the Landlock ruleset the launch promised at [`Slot::Ruleset`], or
+/// none.
 #[cfg(target_os = "linux")]
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum ExecAdmits {
-    Unconfined,
-    Inherited(usize),
-}
-
-#[cfg(target_os = "linux")]
-const UNCONFINED: &str = "unconfined";
-
-#[cfg(target_os = "linux")]
-impl Confinement for ExecAdmits {
+impl Confinement for Option<Landlocked> {
     fn spell(&self) -> Cow<'_, str> {
         match self {
-            Self::Unconfined => UNCONFINED.into(),
-            Self::Inherited(n) => n.to_string().into(),
+            None => "unconfined",
+            Some(Landlocked { refer_root: false }) => "landlock",
+            Some(Landlocked { refer_root: true }) => "landlock+refer",
         }
+        .into()
     }
 
     fn parse(field: &str) -> Result<Self, String> {
-        if field == UNCONFINED {
-            return Ok(Self::Unconfined);
+        match field {
+            "unconfined" => Ok(None),
+            "landlock" => Ok(Some(Landlocked { refer_root: false })),
+            "landlock+refer" => Ok(Some(Landlocked { refer_root: true })),
+            _ => Err(format!(
+                "the warrant's confinement {field:?} is not unconfined, landlock or \
+                 landlock+refer"
+            )),
         }
-        field
-            .parse()
-            .map(Self::Inherited)
-            .map_err(|e| format!("the warrant's admit count {field:?}: {e}"))
     }
 
     fn enter(&self) -> Result<(), String> {
-        super::linux::landlock::enter(self)
+        self.as_ref().map_or(Ok(()), Landlocked::enter)
     }
 }
 
@@ -155,7 +156,7 @@ impl Confinement for ExecAdmits {
 #[cfg(target_os = "macos")]
 pub(super) type Native = Seatbelt;
 #[cfg(target_os = "linux")]
-pub(super) type Native = ExecAdmits;
+pub(super) type Native = Option<Landlocked>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Warrant {
@@ -475,23 +476,17 @@ fn unwritable(fd: &OwnedFd) -> Result<(), String> {
 /// What a confined launch lends its child: each source borrowed, at its
 /// target.
 #[derive(Default)]
-pub(super) struct Handoff<'a>(Vec<(c_int, BorrowedFd<'a>)>);
+pub(super) struct Handoff<'a>(Vec<(Slot, BorrowedFd<'a>)>);
 
 impl<'a> Handoff<'a> {
     /// Debug-asserts a slot is lent once; one source may be lent at two
     /// slots, each lift being its own `dup`.
     pub(super) fn lend(&mut self, slot: Slot, fd: BorrowedFd<'a>) -> &mut Self {
-        self.lend_at(slot.fd(), fd)
-    }
-
-    /// Lend at a bare descriptor: the Landlock exec admits' run, which lies
-    /// above every [`Slot`].
-    pub(super) fn lend_at(&mut self, at: c_int, fd: BorrowedFd<'a>) -> &mut Self {
         debug_assert!(
-            self.0.iter().all(|&(lent, _)| lent != at),
-            "fd {at} lent twice"
+            self.0.iter().all(|&(lent, _)| lent != slot),
+            "{slot:?} lent twice"
         );
-        self.0.push((at, fd));
+        self.0.push((slot, fd));
         self
     }
 
@@ -499,7 +494,7 @@ impl<'a> Handoff<'a> {
     /// fd off them.
     #[cfg(target_os = "linux")]
     pub(super) fn targets(&self) -> impl Iterator<Item = c_int> + '_ {
-        self.0.iter().map(|&(at, _)| at)
+        self.0.iter().map(|&(slot, _)| slot.fd())
     }
 
     /// Hand `cmd`'s child each source at its target, through one `pre_exec`.
@@ -532,7 +527,7 @@ impl<'a> Handoff<'a> {
     }
 
     fn above(&self) -> c_int {
-        self.0.iter().map(|&(at, _)| at + 1).max().unwrap_or(0)
+        self.0.iter().map(|&(slot, _)| slot.fd() + 1).max().unwrap_or(0)
     }
 
     /// Every source lifted to `above` or higher, so no `dup2` can land on a
@@ -547,7 +542,7 @@ impl<'a> Handoff<'a> {
         let lent = self
             .0
             .into_iter()
-            .map(|(at, fd)| lift(fd, above).map(|copy| (copy, at)))
+            .map(|(slot, fd)| lift(fd, above).map(|copy| (copy, slot.fd())))
             .collect::<Result<Vec<_>, _>>()?;
         // SAFETY: post-fork, `dup2` alone, which is async-signal-safe.  It
         // clears `CLOEXEC` on the copy it makes; each lifted source keeps its
@@ -623,12 +618,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     const CONFINEMENT: &str = "(version 1)\n(deny default)";
     #[cfg(target_os = "linux")]
-    const CONFINEMENT: &str = "3";
+    const CONFINEMENT: &str = "landlock";
 
     #[cfg(target_os = "macos")]
     const NO_CONFINEMENT: &str = "";
     #[cfg(target_os = "linux")]
-    const NO_CONFINEMENT: &str = UNCONFINED;
+    const NO_CONFINEMENT: &str = "unconfined";
 
     fn confinement() -> Native {
         Native::parse(CONFINEMENT).expect("a valid confinement")
@@ -722,13 +717,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_admit_count_is_canonical_decimal_or_unconfined() {
+    fn a_linux_confinement_has_three_spellings() {
         for (field, ok) in [
             ("unconfined", true),
-            ("0", true),
-            ("12", true),
-            ("012", false),
-            ("+1", false),
+            ("landlock", true),
+            ("landlock+refer", true),
+            ("landlock+refer+x", false),
+            ("Landlock", false),
+            ("3", false),
             ("", false),
         ] {
             let bytes = framed(&[MAGIC, field.as_bytes(), b"tool", b"ls", b"0"]);
@@ -740,12 +736,12 @@ mod tests {
     #[test]
     fn the_slots_are_the_fd_table_in_order() {
         let seccomp = (0..4).map(|i| Slot::seccomp(i).expect("a seccomp slot"));
-        let fds: Vec<_> = [Slot::Args, Slot::Warrant, Slot::Info]
+        let fds: Vec<_> = [Slot::Args, Slot::Warrant, Slot::Info, Slot::Ruleset]
             .into_iter()
             .chain(seccomp)
             .map(Slot::fd)
             .collect();
-        assert_eq!(fds, [98, 99, 100, 103, 104, 105, 106]);
+        assert_eq!(fds, [98, 99, 100, 101, 103, 104, 105, 106]);
         assert_eq!(fds[0], Slot::FIRST);
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }

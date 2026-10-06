@@ -9,8 +9,8 @@
 //!
 //! macOS and Linux share one trampoline: the payload is *ral*, as `ral
 //! --warrant`, and the warrant it reads off a descriptor names both the
-//! confinement — macOS's Seatbelt profile, compiled here; Linux's count of the
-//! Landlock exec admits opened here in the host, which the payload inherits —
+//! confinement — macOS's Seatbelt profile, compiled here; Linux's promise of
+//! the Landlock ruleset built here in the host, which the payload inherits —
 //! and the program it becomes once inside ([`serve_warrant`]).  On Linux the
 //! trampoline runs inside the bwrap envelope, which is what makes the Landlock
 //! layer possible at all: a domain handling any fs right forbids `mount(2)`,
@@ -201,9 +201,9 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
 }
 
 /// The trampoline under `envelope`, handed its warrant and the Landlock
-/// admits.  It re-execs *us* through the on-disk `arg0`, not the fd-pinned
-/// `/proc/self/fd/N` exec path: bwrap mounts a fresh `/proc`, where that
-/// target would neither bind nor resolve.
+/// ruleset built here.  It re-execs *us* through the on-disk `arg0`, not the
+/// fd-pinned `/proc/self/fd/N` exec path: bwrap mounts a fresh `/proc`, where
+/// that target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
     envelope: &Pinned,
@@ -215,12 +215,15 @@ pub(super) fn enveloped(
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
     let own = super::reexec::own().map_err(refused)?;
     let program = faithful(own.arg0(), "ral's own path")?;
-    let (exec_admits, admits) =
-        super::linux::landlock::open_admits(projection, host.landlock).map_err(Break::Error)?;
-    let warrant = issue(own, exec_admits, admitted)?;
+    let (ruleset, confinement) = super::linux::landlock::build(&projection.exec, host.landlock)
+        .map_err(Break::Error)?
+        .unzip();
+    let warrant = issue(own, confinement, admitted)?;
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());
-    super::linux::landlock::lend(&admits, &mut handoff);
+    if let Some(ruleset) = &ruleset {
+        handoff.lend(Slot::Ruleset, ruleset.as_fd());
+    }
     let image = match admitted.program() {
         crate::capability::Program::File { path, .. } => {
             Some(faithful(path, "the program's path")?)

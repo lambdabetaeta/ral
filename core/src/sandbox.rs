@@ -65,7 +65,7 @@ const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", wi
 // own `RENDERS_EXEC` beside the code that renders it, so a backend gaining
 // exec rendering switches the trigger on there, rather than in a second list
 // here that can be forgotten.  Landlock absent from a running kernel leaves
-// the trigger on: `linux::landlock::open_admits` refuses a restricting exec
+// the trigger on: `linux::landlock::build` refuses a restricting exec
 // grant there, and only an unrestricted exec projection launches with nothing
 // to enter.
 #[cfg(target_os = "linux")]
