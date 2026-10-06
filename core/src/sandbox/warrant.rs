@@ -44,6 +44,9 @@ pub(super) enum Slot {
     /// The Landlock ruleset, when the warrant promises one.
     #[cfg(target_os = "linux")]
     Ruleset,
+    /// ral's own pin, which bwrap execs as `/proc/self/fd/<this>`.
+    #[cfg(target_os = "linux")]
+    Trampoline,
     /// bwrap's `--add-seccomp-fd`s, one per program.
     #[cfg(target_os = "linux")]
     Seccomp(u8),
@@ -59,7 +62,7 @@ impl Slot {
     #[cfg(target_os = "linux")]
     const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 101, 103 + i, 107 + i.
+    /// 98, 99, 100, 101, 102, 103 + i, 107 + i.
     pub(super) const fn fd(self) -> c_int {
         Self::FIRST
             + match self {
@@ -70,6 +73,8 @@ impl Slot {
                 Self::Info => 2,
                 #[cfg(target_os = "linux")]
                 Self::Ruleset => 3,
+                #[cfg(target_os = "linux")]
+                Self::Trampoline => 4,
                 #[cfg(target_os = "linux")]
                 Self::Seccomp(i) => 5 + i as c_int,
                 #[cfg(target_os = "linux")]
@@ -745,13 +750,20 @@ mod tests {
     #[test]
     fn the_slots_are_the_fd_table_in_order() {
         let seccomp = (0..4).map(|i| Slot::seccomp(i).expect("a seccomp slot"));
-        let fds: Vec<_> = [Slot::Args, Slot::Warrant, Slot::Info, Slot::Ruleset]
+        let fixed = [
+            Slot::Args,
+            Slot::Warrant,
+            Slot::Info,
+            Slot::Ruleset,
+            Slot::Trampoline,
+        ];
+        let fds: Vec<_> = fixed
             .into_iter()
             .chain(seccomp)
             .chain([Slot::Mount(0), Slot::Mount(1)])
             .map(Slot::fd)
             .collect();
-        assert_eq!(fds, [98, 99, 100, 101, 103, 104, 105, 106, 107, 108]);
+        assert_eq!(fds, [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]);
         assert_eq!(fds[0], Slot::FIRST);
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }

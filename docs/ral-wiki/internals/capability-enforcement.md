@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 13b47f27
+verified_at_commit: 78d13526
 verified_at_date: 2026-10-06
 anchors: [check_exec, Admitted, ExecRules, Head, carriers, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, region, Region, Table, live, GrantStack, sandboxed_command, build_launch, projection_enforceable, serve_warrant, Warrant, Slot, Handoff, Landlocked, bwrap_argv, Binds, render_objects, SessionSandbox, fs_capability_name, ensure_fs_grant, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, cgroup_tree, default_ro_binds, Pinned, pin_envelope]
 ---
@@ -122,16 +122,18 @@ writable" — but it reports rather than denies, and the overlap is not itself a
 escalation ([[design/grant|grant]] §Concessions,
 [[decisions/261004_exec-rules|exec-rules]]).
 
-That premise is true of the folded grant but was false of the macOS backend,
-which renders an unrestricted `fs` as `(allow file-write*)`: a grant that
-vetoed a command while holding no fs opinion could have its veto answered with
-a copy dropped into an admitted directory. So `build_profile` freezes the exec allow-set (no writes to a
-directory whose contents the profile will run) exactly when a veto meets an
-unrestricted `fs`, which contradicts no layer, since none asked to write there.
-Where `fs` *is* restricted the overlap stays a stance somebody took, reported
-and not denied: `reasonable` admits `cwd:/` for the very scripts it lets the
-agent write, while `edit-only` and `read-only` admit no directory they can
-write, which is what lets their `git`/`bash` denies mean something.
+That premise is true of the folded grant but was false of the backends, which
+render an unrestricted `fs` as every write allowed and a broad write prefix as
+writes into every admitted directory it covers: a veto could be answered with
+a copy authored there. So both kernels freeze what a write reaches without
+naming it ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]):
+under an unrestricted `fs` the whole exec allow-set when a veto is in force,
+under a restricted one each admitted directory a write prefix *covers*. An
+overlap the grant names, a write at or below an admit at or above the
+directory, stays writable and reported: `reasonable` admits `cwd:/` for the
+very scripts it lets the agent write, while `edit-only` and `read-only` admit
+no directory they can write, which is what lets their `git`/`bash` denies mean
+something.
 
 **The in-process guard covers what ral dispatches; the OS sandbox covers what a
 spawned process does on its own.**
@@ -338,18 +340,23 @@ and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
 replace-by-rename at the pinned path reaches it. In-place rewriting of the
 pinned inode — the one change a pin by descriptor cannot see — is closed on
 both sides of the dispatch boundary: for a confined child by the envelope
-itself, `bwrap_argv` read-only binding the envelope's own file
-after the projection's binds, `/` wholesale under `Unrestricted` included, and
-before the masks, the Linux twin of the write-deny macOS lays on ral's own
-file in every profile (`build_profile`; [[internals/seatbelt-profile|seatbelt-profile]]); for ral's
-own writes by the `Guarded` verdict above. What stays open is another same-uid
+itself, `Binds::open` lending both pins, bwrap's and ral's, as `Over` binds,
+each read-only by its own descriptor at the name its inode holds now
+(`Pinned::names`), after the projection's binds, `/` wholesale under
+`Unrestricted` included, and before the masks: a write is `EROFS`, a hard link
+`EXDEV`, a rename or unlink of the mountpoint `EBUSY`. It is the Linux twin of
+the write-deny macOS lays on ral's own file in every profile (`build_profile`;
+[[internals/seatbelt-profile|seatbelt-profile]]); for ral's own writes, the
+`Guarded` verdict above. An unlinked pin, a replace-by-rename having taken
+its name, has no name to lock and gets no bind. What stays open is another same-uid
 process, and any session after this one — a session cannot vet the enforcer it
 boots on — so where the pinned bwrap is writable by ral's uid a root-owned bwrap
 (the distro package) is the remedy. A host with no bwrap to pin
 is reported by `linux::envelope` at the first launch that needs it, through
 `confinement_unavailable`; `Launch::envelope` names the binary for a spawn
 failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
-`::the_envelope_binary_is_read_only_inside_every_envelope` and
+`::the_envelope_binary_is_read_only_inside_every_envelope`,
+`::a_pinned_binary_inside_a_writable_prefix_is_locked` and
 `capability::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
 
 **The sandbox is applied per external command, not by re-execing the grant
@@ -400,10 +407,10 @@ descriptor through `/proc` and a sealed copy is as read-only as ours, read back
 and checked once sealed; on macOS, which has no `/proc`, the read end of a
 socketpair whose writer closes before the child exists. The child refuses an
 unsealed memfd, a non-socket, and a warrant not in canonical form: decoding
-re-encodes and compares. On Linux the real argv is `bwrap --args 98 -- <ral>
---warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which bwrap
-takes from `--args`. The descriptors a confined launch hands down — bwrap's
-`--args`, the warrant, `--info-fd`, the Landlock ruleset, the seccomp programs, the mount handles —
+re-encodes and compares. On Linux the real argv is `bwrap --args 98 --
+/proc/self/fd/102 --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which bwrap
+takes from `--args`, and the trampoline is ral's pin, lent at fd 102. The descriptors a confined launch hands down — bwrap's
+`--args`, the warrant, `--info-fd`, the Landlock ruleset, ral's pin, the seccomp programs, the mount handles —
 sit at slots defined once (`Slot`, the mounts an open-ended run last), and one `Handoff` places them all; the
 child sweeps everything from the first slot up once it is confined, so the program inherits none.
 `serve_warrant` runs before `sandbox::boot`, so the trampoline pins and opens
@@ -426,9 +433,13 @@ refusing the launch as a race. The child probes nothing: it takes the ruleset
 at its slot, adds `Refer` on its own root when promised (the root exists only
 inside), and enters it; a promised ruleset that never arrived, or a descriptor
 that is not one, refuses the launch. A sandboxed launch needs ral's own pin
-(`reexec::own`) and re-verifies it (`Pinned::verify`) before issuing a
-warrant; unpinned, it refuses. Its self admit is that pin's descriptor, the
-boot inode, never a name.
+(`reexec::own`); unpinned, it refuses. On Linux bwrap execs that pin by
+descriptor, so the trampoline is the boot inode whatever now holds its name,
+and nothing re-stats the name: a build swapped in mid-session runs under the
+parent that pinned the old one, consistently, and a filesystem that cannot
+exec an unlinked file (virtiofs) fails the launch instead. macOS execs it by
+name, so re-verifies it first (`Pinned::verify`). Its self admit is that pin's
+descriptor, the boot inode, never a name.
 
 On Windows filesystem authority is *path*-keyed, and the token selects. Each
 `(canonical path, kind)` grant derives a deterministic capability SID from a

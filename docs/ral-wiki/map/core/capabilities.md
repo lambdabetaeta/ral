@@ -269,7 +269,9 @@ device for `net` to govern; the in-process guards apply unchanged
   (`OWN`), so a confined re-exec runs the same binary even under an
   on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). Its
   methods are `arg0` (the on-disk path, `argv[0]` of every exec), `exec_path`
-  (what `execve` is handed) and `verify`; `reexec::own()` is ral's own pin as a
+  (what `execve` is handed), on Linux `fd` (the pinned descriptor) and `names`
+  (the inode's current name, `None` once unlinked), and on macOS `verify`;
+  `reexec::own()` is ral's own pin as a
   `Result`, so a sandboxed launch refuses when ral could not pin itself. The `Pin`
   variants say where a swap is even askable: `Fd` on Linux (the retained
   descriptor, so `/proc/self/fd/N` resolves to the boot inode), `Stat` on
@@ -279,9 +281,9 @@ device for `net` to govern; the in-process guards apply unchanged
   the AppContainer token the *parent* attaches at `CreateProcessW`, so a child
   asking to confine itself (`--warrant`) is refused with 126, and the pinned
   self serves to grant the container read on the bundled-tool re-exec image.
-  `Pinned::verify`, the parent-side swap guard, runs wherever a warrant is
-  issued, on both Unix backends: each execs the trampoline by name, so the
-  Linux fd pin protects nothing there.
+  `Pinned::verify`, the parent-side swap guard, is macOS's alone, which execs
+  the trampoline by name; Linux execs it from ral's pin lent at
+  `Slot::Trampoline`, so there is no name to verify.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -321,7 +323,8 @@ device for `net` to govern; the in-process guards apply unchanged
   refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
   defined once as `Slot` in `warrant.rs`: 98 bwrap `--args`, 99 the warrant,
   100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
-  `/proc`), 101 the Landlock ruleset, 103.. the seccomp programs (sealed
+  `/proc`), 101 the Landlock ruleset, 102 ral's pin, the trampoline bwrap
+  execs, 103.. the seccomp programs (sealed
   memfds), 107.. one mount handle per bind, open-ended and last. One `Handoff` lifts every source above every target and a
   single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
   with `close_range` once confined, and `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
@@ -329,8 +332,8 @@ device for `net` to govern; the in-process guards apply unchanged
   the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
-  → Landlock → `execve`**. The real argv is `bwrap --args 98 -- <ral>
-  --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which
+  → Landlock → `execve`**. The real argv is `bwrap --args 98 --
+  /proc/self/fd/102 --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which
   bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
@@ -358,9 +361,11 @@ device for `net` to govern; the in-process guards apply unchanged
   lent per bind at `Slot::Mount(i)`. A read-only bind within another bind is
   dropped, a writable one only within a writable one; an absent object drops
   its binds, a name now reaching outside what was rendered refuses the launch
-  as a race. `bwrap_argv` emits `--ro-bind-fd`/`--bind-fd` from the same
-  vector, `Shown` before `/proc` and `/dev`, `Over` after; the pinned
-  binaries are still bound read-only by name after them. `--chdir` refuses
+  as a race. The two pins join the `Over` layer by copies of their own
+  descriptors, read-only at the names their inodes hold now (`pinned`, over
+  `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
+  `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown` before `/proc` and
+  `/dev`, `Over` after. `--chdir` refuses
   non-UTF-8, and so does every rendered name, rather than go lossy into
   bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its

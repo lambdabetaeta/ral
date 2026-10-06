@@ -1,7 +1,8 @@
 ---
 status: active
 generated_at_commit: 13b47f27
-anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_admit]
+verified_at_commit: 78d13526
+anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_admit, Pinned]
 ---
 
 # The envelope mounts by handle
@@ -48,7 +49,7 @@ table, and its signature holds no descriptor.
   prefixes, the program's image (`Program::File`'s real path, the file the
   trampoline execs; nothing at the spelling, which nothing inside looks up),
   every allowed file of the exec table and every live allowed directory, as on
-  macOS. Over everything, the cgroup tree.
+  macOS. Over everything, the cgroup tree and the two pinned binaries.
 - **What is frozen.** Between the shown binds and `/proc`, read-only, each
   live allowed directory a write prefix covers without naming, so the writable
   prefix around it still takes writes and a veto carried into it cannot be
@@ -70,9 +71,30 @@ table, and its signature holds no descriptor.
   a second renderer to keep in agreement.
 
 Still by name, with no source to open: the tmpfs mounts, `--proc`, `--dev`
-and its by-hand fallback, `--dev-bind / /` under `fs: Unrestricted`, the deny
-masks (whose only source is `/dev/null`), and the pinned binaries' read-only
-binds, which move onto their own descriptors with the trampoline.
+and its by-hand fallback, `--dev-bind / /` under `fs: Unrestricted`, and the
+deny masks, whose only source is `/dev/null`.
+
+### The trampoline by descriptor, and the locked files
+
+bwrap's payload is `/proc/self/fd/102 --warrant`: ral's boot pin is lent at
+`Slot::Trampoline`, and the kernel execs the inode behind it in every envelope
+shape, under a tmpfs root and under `--dev-bind / /`, with or without a pid
+namespace. A private path for the trampoline was the alternative, and dies
+under `--dev-bind / /`, its parents `mkdir`ed on the host root. So the
+trampoline is the boot inode by construction, and Linux no longer re-stats the
+name before a launch (`Pinned::verify` is macOS's alone, where the exec is by
+name): after a replace-by-rename it runs unlinked, under the parent that pinned
+it, which is the consistent outcome.
+
+The same pins lock the files. `Binds::open` lends each pin, bwrap's and
+ral's, as a read-only `Over` bind by its own descriptor (a copy, one fd
+serving one mount) at the name its inode holds now (`Pinned::names`, a
+`readlink` of the pin), so a write there is `EROFS`, a hard link `EXDEV`, and a
+rename or unlink of the mountpoint `EBUSY`; renaming an ancestor carries the
+mount along. Both enforcers are frozen the same way, and no ancestor lock is
+needed: nothing on the warrant path execs ral by name. An unlinked pin has no
+name to lock, ` (deleted)` being no destination, so it gets no bind, and runs
+by descriptor all the same.
 
 ## Consequences
 
@@ -90,6 +112,19 @@ binds, which move onto their own descriptors with the trampoline.
   narrows from judge→`execve` to judge→open; closing it wants `Program` to
   carry a handle from `Head::resolve`.
 - An exec-allowed directory outside every `fs:` prefix is readable inside.
+- **The locked-file residual.** A second hard link to a pinned inode
+  elsewhere on the host, or another mount of its filesystem, is a writable
+  name the bind does not cover. It is stated rather than warned about per
+  launch.
+- **An unlinked trampoline needs a filesystem that serves it.** On virtiofs
+  the exec of an unlinked pin fails, so after a swap the launch dies in
+  bwrap's `execve` rather than asking for a restart. bwrap cannot mount an
+  unlinked file at all, so a filesystem that hides an `unlink(2)` from an open
+  descriptor's link count (FUSE, as rootless podman's fuse-overlayfs) gets the
+  bind and a dead launch ("Can't find source path"); a replace-by-rename is
+  seen there, and runs.
+- The child must never `stat` `current_exe()`: inside, it reads the host
+  spelling of the pin, ` (deleted)` after a swap.
 - A host whose locked `/etc/hosts` refuses a read-only rebind (a rootless
   container) refuses it by descriptor too: no `Restricted` envelope launches
   there, as before.

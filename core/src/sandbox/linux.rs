@@ -104,12 +104,13 @@ impl Options {
 }
 
 /// The [`Command`] that runs `own`'s trampoline confined under `policy`:
-/// `bwrap --args 98 -- <own> --warrant`, the options in a sealed parcel at
-/// their slot beside the seccomp programs, every bind's handle, the
-/// `--info-fd` peer and the caller's `handoff` (the warrant and Landlock
-/// ruleset), every descriptor through one [`Handoff`].  bwrap takes options
-/// alone from `--args`, so the payload rides its argv.  `image` is the host
-/// file the trampoline execs in turn, shown read-only.
+/// `bwrap --args 98 -- /proc/self/fd/102 --warrant`, the options in a sealed
+/// parcel at their slot beside `own`'s pin, the seccomp programs, every
+/// bind's handle, the `--info-fd` peer and the caller's `handoff` (the
+/// warrant and Landlock ruleset), every descriptor through one [`Handoff`].
+/// bwrap takes options alone from `--args`, so the payload rides its argv,
+/// and runs the pinned inode whatever now holds its name.  `image` is the
+/// host file the trampoline execs in turn, shown read-only.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused under a bwrap that cannot mount by descriptor, and
@@ -136,17 +137,9 @@ pub(crate) fn bwrap_command(
         ))
         .message);
     }
-    let binds = Binds::open(image, policy, host)?;
+    let binds = Binds::open(envelope, own, image, policy, host)?;
     let programs = seccomp_programs()?;
-    let options = bwrap_argv(
-        envelope,
-        policy,
-        chdir,
-        ownership,
-        host,
-        &binds,
-        programs.len(),
-    )?;
+    let options = bwrap_argv(policy, chdir, ownership, host, &binds, programs.len())?;
     let parcel = |name: &str, bytes: &[u8]| {
         parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))
     };
@@ -160,13 +153,15 @@ pub(crate) fn bwrap_command(
         .collect::<Result<Vec<_>, _>>()?;
     // Rebound, so it may borrow this frame's parcels and handles.
     let mut handoff = handoff;
-    handoff.lend(Slot::Args, args.as_fd());
+    handoff
+        .lend(Slot::Args, args.as_fd())
+        .lend(Slot::Trampoline, own.fd());
     for (i, program) in seccomp.iter().enumerate() {
         handoff.lend(Slot::seccomp(i)?, program.as_fd());
     }
     binds.lend(&mut handoff);
     let kept = ownership == Ownership::Kept;
-    // ral's own pin needs no such check: bwrap execs the trampoline by name.
+    // ral's own pin needs no such check: it is lent, so lifted before any `dup2`.
     let pin = envelope.raw_fd();
     let info = kept.then_some(Slot::Info.fd());
     if handoff.targets().chain(info).any(|at| at == pin) {
@@ -179,7 +174,7 @@ pub(crate) fn bwrap_command(
     let mut c = envelope.command();
     let slot = Slot::Args.fd().to_string();
     c.args(["--args", &slot, "--"])
-        .arg(own.arg0())
+        .arg(crate::path::proc_fd_path(Slot::Trampoline.fd()))
         .arg(super::WARRANT_FLAG);
     if !kept {
         handoff.install(&mut c)?;
@@ -218,7 +213,6 @@ pub(crate) fn bwrap_command(
 /// The render is pure in `host` and in descriptors, so a test can assert
 /// options for a host it is not running on.
 pub(crate) fn bwrap_argv(
-    envelope: &Pinned,
     policy: &SandboxProjection<Rendered>,
     chdir: Option<&str>,
     ownership: Ownership,
@@ -271,9 +265,6 @@ pub(crate) fn bwrap_argv(
         }
     }
     binds.render(&mut c, Layer::Over);
-    for own in pinned_binaries(envelope)? {
-        c.arg("--ro-bind").arg(&own).arg(&own);
-    }
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
@@ -300,7 +291,7 @@ enum Access {
 /// Where a bind goes in bwrap's order.  `Shown`: the projection's view,
 /// before the envelope's own `/proc` and `/dev`.  `Frozen`: read-only over
 /// `Shown`, the admits a write would otherwise let a child author.  `Over`:
-/// over everything, the cgroup tree.
+/// over everything, the cgroup tree and the pinned binaries.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Layer {
     Shown,
@@ -323,10 +314,13 @@ pub(crate) struct Binds {
 }
 
 impl Binds {
-    /// Plan and open: the one place a launch opens what it mounts.  Each
-    /// object is opened once, and each bind lends its own copy, bwrap
-    /// closing a descriptor after the one mount it serves.
+    /// Plan and open: the one place a launch opens what it mounts, the two
+    /// pins aside, which are open already.  Each object is opened once, and
+    /// each bind lends its own copy, bwrap closing a descriptor after the
+    /// one mount it serves.
     fn open(
+        envelope: &Pinned,
+        own: &Pinned,
         image: Option<&RealPath>,
         policy: &SandboxProjection<Rendered>,
         host: HostEnvelope,
@@ -349,13 +343,6 @@ impl Binds {
             };
             planned.push((object, bind));
         }
-        let slots = usize::from(u16::MAX) + 1;
-        if planned.len() > slots {
-            return Err(format!(
-                "sandbox: the grant asks for {} mounts, more than the {slots} a launch can lend",
-                planned.len()
-            ));
-        }
         let mut opened = BTreeMap::new();
         for (object, _) in &planned {
             if !opened.contains_key(object) {
@@ -374,6 +361,22 @@ impl Binds {
                 })?);
                 binds.push(bind);
             }
+        }
+        for (dest, handle) in pinned([envelope, own])? {
+            let bind = Bind {
+                dest,
+                access: Access::ReadOnly,
+                layer: Layer::Over,
+            };
+            binds.push(bind);
+            handles.push(handle);
+        }
+        let slots = usize::from(u16::MAX) + 1;
+        if binds.len() > slots {
+            return Err(format!(
+                "sandbox: the grant asks for {} mounts, more than the {slots} a launch can lend",
+                binds.len()
+            ));
         }
         Ok(Self { binds, handles })
     }
@@ -575,25 +578,34 @@ pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
     }
 }
 
-/// The files a launch execs — the envelope, and the trampoline bwrap execs by
-/// its on-disk name — bound read-only over whatever the projection bound, so
-/// no confined child rewrites a pinned inode in place, nor moves it: a
-/// mountpoint cannot be renamed.
-fn pinned_binaries(envelope: &Pinned) -> Result<Vec<std::path::PathBuf>, String> {
-    let mut paths = vec![
-        envelope
-            .current_path()
-            .map_err(|e| format!("bwrap: the pinned envelope has no path any more: {e}"))?,
-    ];
-    if let Some(own) = super::reexec::OWN.get() {
-        paths.push(
-            own.current_path()
-                .map_err(|e| format!("ral: the pinned trampoline has no path any more: {e}"))?,
-        );
+/// The files a launch execs, the envelope and the trampoline, each by its own
+/// descriptor at its current name, to go read-only over whatever the
+/// projection bound: no confined child rewrites a pinned inode in place, nor
+/// moves it, a mountpoint being unrenamable.  An unlinked pin has no name to
+/// lock, and runs by descriptor all the same.
+fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
+    let mut locked: Vec<(Rendered, OwnedFd)> = Vec::new();
+    for pin in pins {
+        let what = pin.arg0().display();
+        let names = pin
+            .names()
+            .map_err(|e| format!("sandbox: cannot find where the pinned {what} lives now: {e}"))?;
+        let Some(name) = names else { continue };
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "sandbox: the pinned {what} now lives at {}, which is not valid UTF-8, \
+                 and bwrap cannot be given it faithfully",
+                name.display()
+            )
+        })?;
+        let Some(dest) = object(name)? else { continue };
+        if locked.iter().all(|(at, _)| *at != dest) {
+            let handle = (pin.fd().try_clone_to_owned())
+                .map_err(|e| format!("sandbox: cannot copy the pin on {what}: {e}"))?;
+            locked.push((dest, handle));
+        }
     }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
+    Ok(locked)
 }
 
 /// The envelope's `/dev`: bwrap's `--dev`, or its shape by hand where the
@@ -840,17 +852,25 @@ mod tests {
         }
     }
 
-    /// This test binary stands in for bwrap where only the options are read:
-    /// the render tests need no bwrap on the host, and no payload shares its
-    /// name.
+    /// This test binary stands in for bwrap and the trampoline where only the
+    /// options are read: the render tests need no bwrap on the host, and no
+    /// payload shares its name.
     fn stand_in() -> Pinned {
         Pinned::open(std::env::current_exe().expect("own path")).expect("own binary pins")
+    }
+
+    /// Where the stand-in's pin is locked: its current name.
+    fn pin_name() -> std::path::PathBuf {
+        (stand_in().names())
+            .expect("read the pin")
+            .expect("the stand-in has a name")
     }
 
     /// `policy`'s binds, opened over this host's tree.
     fn binds(image: Option<&RealPath>, policy: &SandboxProjection, host: HostEnvelope) -> Binds {
         let rendered = policy.rendered().expect("ASCII paths render");
-        Binds::open(image, &rendered, host).expect("the binds open")
+        let pin = stand_in();
+        Binds::open(&pin, &pin, image, &rendered, host).expect("the binds open")
     }
 
     fn options(
@@ -862,20 +882,12 @@ mod tests {
     ) -> Vec<String> {
         let seccomp = seccomp_programs().expect("seccomp programs compile");
         let rendered = policy.rendered().expect("ASCII paths render");
-        let binds = Binds::open(image, &rendered, host).expect("the binds open");
-        bwrap_argv(
-            &stand_in(),
-            &rendered,
-            chdir,
-            ownership,
-            host,
-            &binds,
-            seccomp.len(),
-        )
-        .expect("ASCII paths render")
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect()
+        let binds = binds(image, policy, host);
+        bwrap_argv(&rendered, chdir, ownership, host, &binds, seccomp.len())
+            .expect("ASCII paths render")
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     fn options_on(
@@ -1295,7 +1307,8 @@ mod tests {
             .expect("ASCII paths render");
         std::fs::rename(&parent, dir.join("moved")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &parent).unwrap();
-        let Err(why) = Binds::open(None, &rendered, WHOLE) else {
+        let pin = stand_in();
+        let Err(why) = Binds::open(&pin, &pin, None, &rendered, WHOLE) else {
             panic!("a symlinked component would show its target");
         };
         assert!(why.contains("a race"), "{why}");
@@ -1304,10 +1317,10 @@ mod tests {
 
     /// Every handle by its slot, in layer order: the projection's view, the
     /// admits frozen over the writes that cover them, the envelope's own
-    /// `/proc` and `/dev`, what goes over everything, then the masks; under an
+    /// `/proc` and `/dev`, what goes over everything (the cgroup tree, then
+    /// the pins at their current names), then the masks; under an
     /// unrestricted fs the frozen admits go over the root.  No source is a
-    /// name bwrap resolves but the pins' (by name until they mount by their
-    /// own descriptors) and `/dev/null`.
+    /// name bwrap resolves but `/dev/null`.
     #[test]
     fn every_bind_is_a_handle_by_slot_in_layer_order() {
         let dir = workdir("argv-order");
@@ -1343,6 +1356,7 @@ mod tests {
             at(&args, &["--proc", "/proc"]),
             at(&args, &["--dev", "/dev"]),
             by_handle(&args, "--ro-bind-fd", std::path::Path::new(CGROUP)),
+            by_handle(&args, "--ro-bind-fd", &pin_name()),
             at(
                 &args,
                 &["--ro-bind", "/dev/null", &secret.to_string_lossy()],
@@ -1368,13 +1382,8 @@ mod tests {
             .map(|i| Slot::Mount(i).fd().to_string())
             .collect();
         assert_eq!(slots, expected, "one slot per bind, in order");
-        let pins = super::pinned_binaries(&stand_in()).expect("the pins have names");
-        for w in args.windows(3).filter(|w| w[0] == "--ro-bind") {
-            assert!(
-                w[1] == "/dev/null"
-                    || (w[1] == w[2] && pins.iter().any(|p| p.as_os_str() == w[1].as_str())),
-                "a source bwrap would resolve by name: {w:?}"
-            );
+        for w in args.windows(2).filter(|w| w[0] == "--ro-bind") {
+            assert_eq!(w[1], "/dev/null", "a source bwrap would resolve by name");
         }
         assert!(
             !args.iter().any(|a| a == "--bind" || a == "--symlink"),
@@ -2062,7 +2071,8 @@ mod tests {
 
     /// The launcher is the file pinned at boot, named by descriptor: no
     /// `PATH` — the shell's override included — has any say in what runs.
-    /// Its own argv is the slot its options arrive on, then the trampoline.
+    /// Its own argv is the slot its options arrive on, then the trampoline,
+    /// named by descriptor too: the slot ral's pin is lent at.
     #[test]
     fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         let (envelope, own) = (stand_in(), stand_in());
@@ -2086,9 +2096,9 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let slot = Slot::Args.fd().to_string();
-        let own = own.arg0().to_string_lossy();
         let flag = crate::sandbox::WARRANT_FLAG;
-        assert_eq!(args, ["--args", &slot, "--", &own, flag], "{args:?}");
+        let trampoline = "/proc/self/fd/102";
+        assert_eq!(args, ["--args", &slot, "--", trampoline, flag], "{args:?}");
     }
 
     /// A pin on a handoff slot would be closed by the `dup2` before bwrap's
@@ -2124,19 +2134,13 @@ mod tests {
     }
 
     /// Whatever the projection bound, both files a launch execs go read-only
-    /// over it, before the masks.  The two names coincide here, the stand-in
-    /// envelope being this test binary.
+    /// over it by their own descriptors at their current names, before the
+    /// masks.  The two names coincide here, the stand-in envelope and
+    /// trampoline both being this test binary, so one bind locks both.
     #[test]
     fn the_envelope_binary_is_read_only_inside_every_envelope() {
-        crate::sandbox::reexec::pin_self();
-        let own = std::fs::canonicalize(stand_in().arg0()).expect("resolve the stand-in");
-        let own = own.to_string_lossy().into_owned();
-        let trampoline = crate::sandbox::reexec::OWN
-            .get()
-            .expect("ral pins itself")
-            .current_path()
-            .expect("the pinned trampoline still has a path");
-        let trampoline = trampoline.to_string_lossy().into_owned();
+        let pin = pin_name();
+        let pin = pin.to_string_lossy();
         let dir = workdir("envelope-ro");
         let dir_s = dir.to_string_lossy();
         let denied = dir.join("secret");
@@ -2147,24 +2151,18 @@ mod tests {
             ("restricted", deny_within(&dir, &[&denied])),
         ] {
             let args = options_for(&policy);
-            let bound = position_of(&args, &["--dev-bind", "/", "/"])
+            let bound_at = position_of(&args, &["--dev-bind", "/", "/"])
                 .or_else(|| bound(&args, "--bind-fd", &dir_s))
                 .expect("the projection's bind");
-            let mask = position_of(
+            let ro = bound(&args, "--ro-bind-fd", &pin)
+                .unwrap_or_else(|| panic!("{label}: no read-only bind of the pins: {args:?}"));
+            assert!(bound_at < ro, "{label}: the pins' bind must win: {args:?}");
+            assert_eq!(args.iter().filter(|a| **a == *pin).count(), 1, "{label}");
+            if let Some(mask) = position_of(
                 &args,
                 &["--ro-bind", "/dev/null", &denied.to_string_lossy()],
-            );
-            for (what, path) in [
-                ("envelope", own.as_str()),
-                ("trampoline", trampoline.as_str()),
-            ] {
-                let ro = position_of(&args, &["--ro-bind", path, path]).unwrap_or_else(|| {
-                    panic!("{label}: no read-only bind of the {what}: {args:?}")
-                });
-                assert!(bound < ro, "{label}: the {what}'s bind must win: {args:?}");
-                if let Some(mask) = mask {
-                    assert!(ro < mask, "{label}: masks go on last: {args:?}");
-                }
+            ) {
+                assert!(ro < mask, "{label}: masks go on last: {args:?}");
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -3150,6 +3148,204 @@ mod tests {
         assert!(!emitted(&stdout, "RAN"), "the program ran unconfined");
         let at = format!("fd {}", Slot::Ruleset.fd());
         assert!(stderr.contains(&at), "{stderr}");
+    }
+
+    // ── The trampoline by descriptor ──────────────────────────────────────
+
+    /// The bind table of a launch whose trampoline is `own`.
+    fn over(own: &Pinned) -> Vec<String> {
+        let rendered = unrestricted().rendered().expect("renders");
+        let binds = Binds::open(&stand_in(), own, None, &rendered, WHOLE).expect("the binds open");
+        (binds.layer(Layer::Over))
+            .map(|(_, bind)| bind.dest.as_str().to_string())
+            .collect()
+    }
+
+    /// Whether `pin`, unlinked, says so through its descriptor: FUSE (rootless
+    /// podman's fuse-overlayfs) keeps the link count it cached, so a pin there
+    /// never loses its name and an unlink cannot be tested on it.
+    fn unlinked(pin: &Pinned) -> bool {
+        let unlinked = pin.names().expect("read the pin").is_none();
+        if !unlinked {
+            eprintln!(
+                "skipping: the filesystem under {} hides an unlink from an open descriptor",
+                std::env::temp_dir().display()
+            );
+        }
+        unlinked
+    }
+
+    /// A pin is locked at the name its inode holds now, never the one it was
+    /// pinned at; unlinked, it has none, and nothing is bound for it.
+    #[test]
+    fn a_pin_is_locked_at_its_current_name_and_nowhere_once_unlinked() {
+        let dir = workdir("pin-names");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (pinned_at, moved) = (dir.join("pinned"), dir.join("moved"));
+        std::fs::write(&pinned_at, "x").unwrap();
+        let pin = Pinned::open(pinned_at.clone()).expect("the file pins");
+        std::fs::rename(&pinned_at, &moved).unwrap();
+        assert_eq!(pin.names().expect("read the pin"), Some(moved.clone()));
+        let locked = over(&pin);
+        let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        assert!(locked.contains(&name(&moved)), "{locked:?}");
+        assert!(!locked.contains(&name(&pinned_at)), "{locked:?}");
+        std::fs::remove_file(&moved).unwrap();
+        if unlinked(&pin) {
+            assert_eq!(
+                over(&pin),
+                over(&stand_in()),
+                "an unlinked pin binds nothing"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A copy of this test binary in `dir`, pinned as a trampoline.
+    fn pinned_copy(dir: &std::path::Path) -> (std::path::PathBuf, Pinned) {
+        let copy = dir.join("ral");
+        std::fs::copy(std::env::current_exe().expect("own path"), &copy).expect("copy ral");
+        let pin = Pinned::open(copy.clone()).expect("the copy pins");
+        (copy, pin)
+    }
+
+    /// [`pinned_copy`], swapped as an atomic `cargo install` swaps it: an
+    /// impostor renamed over its name, the pinned inode left with none.
+    fn swapped_trampoline(dir: &std::path::Path) -> (std::path::PathBuf, Pinned) {
+        use std::os::unix::fs::PermissionsExt;
+        let (copy, pin) = pinned_copy(dir);
+        let impostor = dir.join("impostor");
+        std::fs::write(&impostor, "#!/bin/sh\necho IMPOSTOR\n").unwrap();
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&impostor, &copy).unwrap();
+        (copy, pin)
+    }
+
+    /// [`run_admitted`] with `own` as the trampoline in place of ral's own
+    /// pin; the exec projection must be unrestricted, as nothing admits
+    /// `own`.
+    fn run_trampoline(
+        envelope: &Pinned,
+        own: &Pinned,
+        policy: &SandboxProjection,
+        admitted: &Admitted,
+    ) -> Option<std::process::Output> {
+        use crate::sandbox::warrant::Warrant;
+        use std::os::fd::AsFd;
+        let warrant = Warrant::new(None, admitted).parcel().expect("parcels");
+        let mut handoff = Handoff::default();
+        handoff.lend(Slot::Warrant, warrant.as_fd());
+        let image = match admitted.program() {
+            Program::File { real, .. } => Some(real),
+            Program::Tool(_) => None,
+        };
+        let rendered = policy.rendered().expect("renders");
+        let host = HostEnvelope::probe(envelope);
+        let (mut cmd, info_fd) = bwrap_command(
+            envelope,
+            own,
+            image,
+            handoff,
+            &rendered,
+            None,
+            Ownership::Kept,
+            host,
+        )
+        .expect("the launch builds");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().ok();
+        drop(info_fd);
+        out
+    }
+
+    /// Swapped on disk after its pin, the trampoline still runs the pinned
+    /// bytes, with no name left to lock: bwrap execs the inode by descriptor,
+    /// and nothing on Linux re-stats the name to refuse the launch first.
+    /// Needs a filesystem that execs an unlinked file (M16: not virtiofs).
+    #[test]
+    fn a_trampoline_swapped_by_rename_still_runs_the_pinned_bytes() {
+        let policy = unrestricted();
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let dir = workdir("trampoline-swap");
+        let (_, own) = swapped_trampoline(&dir);
+        if unlinked(&own) {
+            let out = run_trampoline(envelope, &own, &policy, &sh_c("echo READY")).expect("spawn");
+            let (stdout, stderr) = (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert!(emitted(&stdout, "READY"), "{stdout} {stderr}");
+            assert!(!stdout.contains("IMPOSTOR"), "the name ran: {stdout}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Inside, the trampoline's `/proc/self/exe` is the pinned inode, which
+    /// after the swap has no name but the one it lost: a bundled tool runs in
+    /// the trampoline itself.
+    #[cfg(feature = "coreutils")]
+    #[test]
+    fn the_trampoline_inside_is_the_pinned_inode() {
+        let policy = unrestricted();
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let dir = workdir("trampoline-exe");
+        let (copy, own) = swapped_trampoline(&dir);
+        if unlinked(&own) {
+            let readlink = admitted(
+                Program::Tool("readlink".into()),
+                &["/proc/self/exe".to_string()],
+            );
+            let out = run_trampoline(envelope, &own, &policy, &readlink).expect("spawn");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim_end(),
+                format!("{} (deleted)", copy.display()),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Inside a writable prefix holding it, the trampoline's file is the one
+    /// name a confined child can neither write, link, rename nor unlink, and
+    /// the host's bytes are intact after; a sibling stays writable.
+    #[test]
+    fn a_pinned_binary_inside_a_writable_prefix_is_locked() {
+        let dir = workdir("pin-locked");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let policy = deny_within(&dir, &[]);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let (ral, own) = pinned_copy(&dir);
+        let script = format!(
+            "cd '{dir}'\n\
+             printf x > ral && echo WRITE-DONE\n\
+             ln ral linked && echo LINK-DONE\n\
+             mv ral moved && echo RENAME-DONE\n\
+             rm -f ral && echo UNLINK-DONE\n\
+             touch sibling && echo SIBLING-DONE\n",
+            dir = dir.display()
+        );
+        let out = run_trampoline(envelope, &own, &policy, &sh_c(&script)).expect("spawn");
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(emitted(&stdout, "SIBLING-DONE"), "{stdout} {stderr}");
+        for refused in ["WRITE-DONE", "LINK-DONE", "RENAME-DONE", "UNLINK-DONE"] {
+            assert!(!emitted(&stdout, refused), "{refused}: {stdout} {stderr}");
+        }
+        let exe = std::env::current_exe().expect("own path");
+        assert!(
+            std::fs::read(&ral).expect("still there") == std::fs::read(exe).expect("read self"),
+            "the pinned bytes changed on the host"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── The seccomp deny-set ──────────────────────────────────────────────

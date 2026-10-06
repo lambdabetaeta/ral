@@ -4,20 +4,20 @@
 //! the session's behalf — ral itself everywhere, and on Linux the bwrap
 //! envelope — so a launch runs the file we booted with and not whatever a
 //! mid-session `cargo install`, a PATH override, or a confined child's write
-//! left at the name.  Linux pins by fd and execs `/proc/self/fd/<N>`; macOS
-//! cannot — `execve` is refused on a devfs entry, which carries no X bit.
-//! The confined trampoline is exec'd by its on-disk name on both — bwrap
-//! resolves it inside a namespace with a fresh `/proc` — so both re-stat
-//! `(dev, ino)` before each such spawn, catching the inode flip an
-//! atomic-rename swap leaves behind; Windows, confining at the parent's
-//! spawn, has no self re-exec to guard.
+//! left at the name.  Linux pins by fd and execs `/proc/self/fd/<N>`, the
+//! confined trampoline included: bwrap is lent ral's pin and execs it by its
+//! slot, its fresh `/proc` resolving that as any other.  macOS cannot —
+//! `execve` is refused on a devfs entry, which carries no X bit — so it execs
+//! the trampoline by name and re-stats `(dev, ino)` before each such spawn,
+//! catching the inode flip an atomic-rename swap leaves behind; Windows,
+//! confining at the parent's spawn, has no self re-exec to guard.
 //!
 //! `argv[0]` is always the on-disk path, whichever mechanism carried it.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use crate::types::Error;
 
 // ── Pinned ───────────────────────────────────────────────────────────────
@@ -45,9 +45,7 @@ impl Pinned {
         })
     }
 
-    /// The on-disk path the pin was taken from: `argv[0]` of every exec, and
-    /// what bwrap execs the trampoline by, its fresh `/proc` binding no
-    /// `/proc/self/fd` target.
+    /// The on-disk path the pin was taken from: `argv[0]` of every exec.
     #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn arg0(&self) -> &Path {
         &self.arg0
@@ -75,14 +73,17 @@ impl Pinned {
 
     /// Where the pinned inode lives *now*, after any rename since boot, so a
     /// mount meant for the file we exec lands on that file and not on
-    /// whatever has since taken its name.
+    /// whatever has since taken its name; `None` once it has no name.
     #[cfg(target_os = "linux")]
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
     )]
-    pub(super) fn current_path(&self) -> std::io::Result<PathBuf> {
-        std::fs::read_link(self.exec_path())
+    pub(super) fn names(&self) -> std::io::Result<Option<PathBuf>> {
+        let name = std::fs::read_link(self.exec_path())?;
+        // Counted after the read, so an unlink in between reads as none,
+        // never as ` (deleted)`.
+        Ok((rustix::fs::fstat(self.fd())?.st_nlink > 0).then_some(name))
     }
 
     /// The pinned inode's open descriptor.
@@ -136,13 +137,10 @@ impl Pinned {
         }
     }
 
-    /// Refuse to spawn a foreign build: `sandbox::launch` calls this wherever
-    /// it issues a warrant, to catch an executable swapped on disk since it
-    /// was pinned.
-    ///
-    /// Every Unix: the trampoline is exec'd by name on both, so the Linux fd
-    /// pin is no protection here.  Windows never re-execs itself.
-    #[cfg(unix)]
+    /// Refuse to spawn a foreign build: macOS execs the trampoline by name,
+    /// so `sandbox::launch` calls this before each, to catch an executable
+    /// swapped on disk since it was pinned.  Linux execs the pin itself.
+    #[cfg(target_os = "macos")]
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."

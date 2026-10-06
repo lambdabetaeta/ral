@@ -67,9 +67,9 @@ pub fn process_cwd() -> Option<std::path::PathBuf> {
     std::env::current_dir().ok()
 }
 
-/// `/proc/self/fd/<raw>` as a `PathBuf`: what the parent execs a binary
-/// `sandbox::reexec` pinned by fd (ral, bwrap) through.  The confined child
-/// is exec'd by its on-disk name, bwrap's fresh `/proc` resolving no such path.
+/// `/proc/self/fd/<raw>` as a `PathBuf`: how a binary `sandbox::reexec`
+/// pinned by fd (ral, bwrap) is exec'd, by the parent from the pin and by
+/// bwrap from the slot the pin was lent at.
 #[cfg(target_os = "linux")]
 pub(crate) fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))

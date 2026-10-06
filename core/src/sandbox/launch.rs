@@ -17,7 +17,7 @@
 //! bwrap's first act.  Windows has no trampoline — its `LowBox` token is
 //! applied at the parent's spawn.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use super::reexec::Pinned;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
@@ -153,13 +153,9 @@ fn windows_sandboxed_command(
 }
 
 /// Issue the warrant for `admitted` under `confinement`, parcelled for
-/// [`Slot::Warrant`].  The one point both Unix backends pass on their way to
-/// re-exec `own` by its on-disk name, so the anti-swap guard belongs here: a
-/// build swapped in since boot (a mid-session `cargo install`) would
-/// otherwise run under our confinement.
+/// [`Slot::Warrant`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn issue(own: &Pinned, confinement: Native, admitted: &Admitted) -> Settled<OwnedFd> {
-    own.verify().map_err(Break::Error)?;
+fn issue(confinement: Native, admitted: &Admitted) -> Settled<OwnedFd> {
     Warrant::new(confinement, admitted)
         .parcel()
         .map_err(refused)
@@ -202,7 +198,7 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
 
 /// The trampoline under `envelope`, handed its warrant and the Landlock
 /// ruleset built here, the program's image shown read-only beside it.  It
-/// re-execs *us* through the on-disk `arg0`.
+/// is *us*: our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
     envelope: &Pinned,
@@ -218,7 +214,7 @@ pub(super) fn enveloped(
         super::linux::landlock::build(&projection.exec, &rendered.fs, host.landlock)
             .map_err(Break::Error)?
             .unzip();
-    let warrant = issue(own, confinement, admitted)?;
+    let warrant = issue(confinement, admitted)?;
     let mut handoff = Handoff::default();
     handoff.lend(Slot::Warrant, warrant.as_fd());
     if let Some(ruleset) = &ruleset {
@@ -234,17 +230,20 @@ pub(super) fn enveloped(
     .map_err(refused)
 }
 
-/// macOS: re-exec the pinned ral `issue` verified, with the compiled profile
-/// in its warrant, so the child enters Seatbelt and only then becomes the
-/// target.
+/// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
+/// so the child enters Seatbelt and only then becomes the target.  The
+/// re-exec is by name, so the pin is verified first: a build swapped in
+/// since boot (a mid-session `cargo install`) would otherwise run under our
+/// confinement.
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     admitted: &Admitted,
 ) -> Settled<Command> {
     let own = super::reexec::own().map_err(refused)?;
+    own.verify().map_err(Break::Error)?;
     let profile = super::macos::build_profile(projection).map_err(refused)?;
-    let warrant = issue(own, Seatbelt(profile), admitted)?;
+    let warrant = issue(Seatbelt(profile), admitted)?;
     let mut cmd = own.command();
     cmd.arg(super::WARRANT_FLAG);
     let mut handoff = Handoff::default();
@@ -567,9 +566,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&denied);
     }
 
-    /// `ps` shows the envelope taking its options from a slot and the
-    /// trampoline asking for its warrant, for a host program and a bundled
-    /// tool alike: what either is to run crosses on descriptors.
+    /// `ps` shows the envelope taking its options from a slot and running
+    /// the trampoline from another, asking for its warrant, for a host
+    /// program and a bundled tool alike: what either is to run crosses on
+    /// descriptors.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_launch_is_the_pinned_envelope_running_the_warrant_trampoline() {
@@ -578,8 +578,6 @@ mod tests {
             eprintln!("skipping: this host has no bwrap to pin");
             return;
         }
-        let own = super::super::reexec::own().expect("ral pins itself");
-        let own = own.arg0().to_string_lossy().into_owned();
         let slot = Slot::Args.fd().to_string();
         for program in [sh(), Program::Tool("ls".into())] {
             let (cmd, _info_fd) = linux_sandboxed_command(
@@ -602,7 +600,7 @@ mod tests {
                     "--args",
                     slot.as_str(),
                     "--",
-                    own.as_str(),
+                    "/proc/self/fd/102",
                     super::super::WARRANT_FLAG
                 ]
             );
