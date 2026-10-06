@@ -126,7 +126,9 @@ That premise is true of the folded grant but was false of the backends, which
 render an unrestricted `fs` as every write allowed and a broad write prefix as
 writes into every admitted directory it covers: a veto could be answered with
 a copy authored there. So both kernels freeze what a write reaches without
-naming it ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]):
+naming it, Linux at every name a writable bind shows the admit, since a prefix
+written through a symlink is two binds of one handle and a mount laid in one
+does not show at the other ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]):
 under an unrestricted `fs` the whole exec allow-set when a veto is in force,
 under a restricted one each admitted directory a write prefix *covers*. An
 overlap the grant names, a write at or below an admit at or above the
@@ -280,14 +282,18 @@ a symlink, and lends a copy per bind at `Slot::Mount(i)`; `bwrap_argv` emits
 and the spellings that reach it (`render_objects`): `/bin` shows `/usr/bin`'s
 handle, except within another bind, where the host's own link already stands.
 A read-only bind within another bind adds nothing and a writable one is dropped
-only within a writable one. An absent object drops its binds at the open; a
-name now reaching outside what was rendered, or an open through a symlink,
-refuses the launch as a race; a bwrap without `--ro-bind-fd` refuses every
-confined launch
+only within a writable one. An absent object drops its binds at the open, and
+so does a system default this user may not reach; a name now reaching another
+object, or an open through a symlink, refuses the launch, saying which. Each
+deny is masked at every name a bind shows it, and a deny hiding `/proc`, which
+bwrap execs the trampoline through, is refused. A bwrap that builds no envelope
+refuses every confined launch in its own words, and one without
+`--ro-bind-fd` naming its version
 ([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
 Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
-`::every_bind_is_a_handle_by_slot_in_layer_order` and, spawning,
+`::every_bind_is_a_handle_by_slot_in_layer_order`,
+`::a_write_through_a_link_is_frozen_and_masked_at_both_its_names` and, spawning,
 `::a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened`.
 
 **Where the host refuses bwrap a mount, the envelope rebuilds what the mount
@@ -429,7 +435,7 @@ restricting exec grant where Landlock is absent, creates the ruleset with the
 exact handled set the kernel accepts, and admits each rule by a handle opened
 without following symlinks, a file admit that has become a directory being
 dropped rather than widened to a hierarchy and one now reached through a symlink
-refusing the launch as a race. The child probes nothing: it takes the ruleset
+refusing the launch. The child probes nothing: it takes the ruleset
 at its slot, adds `Refer` on its own root when promised (the root exists only
 inside), and enters it; a promised ruleset that never arrived, or a descriptor
 that is not one, refuses the launch. A sandboxed launch needs ral's own pin
@@ -438,8 +444,8 @@ descriptor, so the trampoline is the boot inode whatever now holds its name,
 and nothing re-stats the name: a build swapped in mid-session runs under the
 parent that pinned the old one, consistently, and a filesystem that cannot
 exec an unlinked file (virtiofs) fails the launch instead. macOS execs it by
-name, so re-verifies it first (`Pinned::verify`). Its self admit is that pin's
-descriptor, the boot inode, never a name.
+name, so re-verifies it first (`Pinned::verify`). On Linux its self admit is
+that pin's descriptor, the boot inode, never a name.
 
 On Windows filesystem authority is *path*-keyed, and the token selects. Each
 `(canonical path, kind)` grant derives a deterministic capability SID from a

@@ -82,6 +82,16 @@ impl Slot {
             }
     }
 
+    /// The descriptor the launch left here, now the caller's; `None` where
+    /// nothing arrived.
+    pub(super) fn take(self) -> Option<OwnedFd> {
+        let at = self.fd();
+        // SAFETY: `F_GETFD` only asks whether the slot is open.
+        (unsafe { libc::fcntl(at, libc::F_GETFD) } >= 0)
+            // SAFETY: open, and lent by the launch to this one taker.
+            .then(|| unsafe { OwnedFd::from_raw_fd(at) })
+    }
+
     /// The `i`th seccomp program's slot.
     #[cfg(target_os = "linux")]
     pub(super) fn seccomp(i: usize) -> Result<Self, String> {
@@ -278,17 +288,15 @@ impl Warrant {
     /// The warrant the launch left at [`Slot::Warrant`], which this takes and
     /// closes.
     fn receive() -> Result<Self, String> {
-        let at = Slot::Warrant.fd();
-        // SAFETY: `F_GETFD` only asks whether the slot is open.
-        if unsafe { libc::fcntl(at, libc::F_GETFD) } < 0 {
-            return Err(format!(
-                "no warrant at fd {at}: `{}` is how ral starts its own confined \
-                 children, never a command to run by hand",
+        let fd = Slot::Warrant.take().ok_or_else(|| {
+            format!(
+                "no warrant at fd {}: `{}` is how ral starts its own confined children, \
+                 never a command to run by hand",
+                Slot::Warrant.fd(),
                 super::WARRANT_FLAG
-            ));
-        }
-        // SAFETY: open, and installed by the launch for this read alone.
-        Self::unparcel(unsafe { OwnedFd::from_raw_fd(at) })
+            )
+        })?;
+        Self::unparcel(fd)
     }
 
     /// The warrant behind `fd`, once its channel proves unwritable.
@@ -489,10 +497,10 @@ fn unwritable(fd: &OwnedFd) -> Result<(), String> {
 pub(super) struct Handoff<'a>(Vec<(Slot, BorrowedFd<'a>)>);
 
 impl<'a> Handoff<'a> {
-    /// Debug-asserts a slot is lent once; one source may be lent at two
+    /// Asserts a slot is lent once; one source may be lent at two
     /// slots, each lift being its own `dup`.
     pub(super) fn lend(&mut self, slot: Slot, fd: BorrowedFd<'a>) -> &mut Self {
-        debug_assert!(
+        assert!(
             self.0.iter().all(|&(lent, _)| lent != slot),
             "{slot:?} lent twice"
         );
@@ -768,7 +776,6 @@ mod tests {
         assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
     }
 
-    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "lent twice")]
     fn a_slot_lent_twice_is_refused() {

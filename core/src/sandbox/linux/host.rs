@@ -5,9 +5,11 @@
 //! stated, not refused, where not.  Probed once, so the argv render stays
 //! pure in it.
 
-use super::landlock::{Landlock, open_nosym};
+use super::landlock::Landlock;
+use crate::runtime::pipeline::helper::ANCHOR_FLAG;
 use crate::sandbox::reexec::Pinned;
 use crate::sandbox::warrant::{Handoff, Slot};
+use rustix::fs::OFlags;
 use std::os::fd::AsFd;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -27,55 +29,93 @@ pub(crate) struct HostEnvelope {
     pub(crate) private_cgroup: bool,
     /// What the kernel's Landlock version probe answered.
     pub(crate) landlock: Landlock,
-    /// `--ro-bind-fd` mounts a lent descriptor (bubblewrap 0.8.0): the only
-    /// way the envelope mounts anything.
-    pub(crate) binds_by_fd: bool,
+    pub(crate) builds: Builds,
+}
+
+/// What the pinned bwrap builds on this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Builds {
+    /// Envelopes mounting lent descriptors (`--ro-bind-fd`, bubblewrap
+    /// 0.8.0): the only way the envelope mounts anything.
+    ByFd,
+    /// Envelopes, but none mounting a descriptor.
+    ByName,
+    /// No envelope at all, for the reason bwrap gave.
+    Nothing(&'static str),
 }
 
 impl HostEnvelope {
     /// 2–4 ms a spawn, and no answer changes under a running ral.
-    pub(crate) fn probe(envelope: &Pinned) -> Self {
+    pub(crate) fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
         static PROBED: OnceLock<HostEnvelope> = OnceLock::new();
-        *PROBED.get_or_init(|| Self {
-            private_pids: bwrap_builds(
-                envelope,
-                &["--unshare-pid", "--proc", "/proc"],
-                Handoff::default(),
-            ),
-            virtual_dev: bwrap_builds(envelope, &["--dev", "/dev"], Handoff::default()),
-            private_cgroup: bwrap_builds(envelope, &["--unshare-cgroup"], Handoff::default()),
-            landlock: Landlock::probe(),
-            binds_by_fd: binds_by_fd(envelope),
+        *PROBED.get_or_init(|| {
+            let builds = |pieces: &[&str]| {
+                bwrap_builds(bwrap, trampoline, pieces, Handoff::default()).is_ok()
+            };
+            Self {
+                private_pids: builds(&["--unshare-pid", "--proc", "/proc"]),
+                virtual_dev: builds(&["--dev", "/dev"]),
+                private_cgroup: builds(&["--unshare-cgroup"]),
+                landlock: Landlock::probe(),
+                builds: Builds::probe(bwrap, trampoline),
+            }
         })
     }
 }
 
-/// Whether the pinned bwrap mounts `/` from a descriptor lent at the first
-/// mount slot, as every launch's binds are.
-fn binds_by_fd(envelope: &Pinned) -> bool {
-    let Ok(root) = open_nosym("/".as_ref(), rustix::fs::OFlags::empty()) else {
-        return false;
-    };
-    let mut handoff = Handoff::default();
-    handoff.lend(Slot::Mount(0), root.as_fd());
-    let at = Slot::Mount(0).fd().to_string();
-    bwrap_builds(envelope, &["--ro-bind-fd", &at, "/"], handoff)
+impl Builds {
+    /// A bare envelope first, so a bwrap that builds none is never blamed
+    /// on its version; then `/` mounted from a descriptor lent at the first
+    /// mount slot, as every launch's binds are.
+    fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
+        if let Err(why) = bwrap_builds(bwrap, trampoline, &[], Handoff::default()) {
+            // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
+            return Self::Nothing(why.leak());
+        }
+        let Ok(Some(root)) = super::open_real("/".as_ref(), OFlags::empty()) else {
+            return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
+        };
+        let mut handoff = Handoff::default();
+        handoff.lend(Slot::Mount(0), root.as_fd());
+        let at = Slot::Mount(0).fd().to_string();
+        match bwrap_builds(bwrap, trampoline, &["--ro-bind-fd", &at, "/"], handoff) {
+            Ok(()) => Self::ByFd,
+            Err(_) => Self::ByName,
+        }
+    }
 }
 
 /// Whether the pinned bwrap builds an envelope carrying `pieces`, handed
-/// `handoff`, and reaches its payload.  Streams are discarded: a refusal is
-/// our datum, not a message to the user.
+/// `handoff`, and execs `trampoline` in it by descriptor, as a launch does;
+/// as a pipeline anchor, it reads its empty stdin and exits.  bwrap's own
+/// words where not, for the one probe that reports them.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:bwrap-host-probe] setup-time host capability probe against /bin/true, not a model exec image"
+    reason = "[silent:bwrap-host-probe] setup-time host capability probe running ral's own pin as an anchor, not a model exec image"
 )]
-fn bwrap_builds(envelope: &Pinned, pieces: &[&str], handoff: Handoff<'_>) -> bool {
-    let mut cmd = envelope.command();
+fn bwrap_builds<'a>(
+    bwrap: &Pinned,
+    trampoline: &'a Pinned,
+    pieces: &[&str],
+    mut handoff: Handoff<'a>,
+) -> Result<(), String> {
+    handoff.lend(Slot::Trampoline, trampoline.fd());
+    let mut cmd = bwrap.command();
     cmd.args(["--ro-bind", "/", "/"])
         .args(pieces)
-        .args(["--", "/bin/true"])
+        .arg("--")
+        .arg(crate::path::proc_fd_path(Slot::Trampoline.fd()))
+        .arg(ANCHOR_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    handoff.install(&mut cmd).is_ok() && cmd.status().is_ok_and(|status| status.success())
+        .stderr(Stdio::piped());
+    handoff.install(&mut cmd)?;
+    let out = cmd.output().map_err(|e| format!("it did not start: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(match String::from_utf8_lossy(&out.stderr).trim() {
+        "" => format!("it exited with {}", out.status),
+        said => said.to_owned(),
+    })
 }

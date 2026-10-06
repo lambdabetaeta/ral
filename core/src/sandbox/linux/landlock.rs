@@ -14,6 +14,7 @@
 
 use super::super::confinement_unavailable;
 use super::super::warrant::Slot;
+use super::{OpenError, open_real};
 use crate::capability::{ExecRules, ExecScope, Subject};
 use crate::path::{Deny, RealPath, Rendered, render_real};
 use crate::types::{ExecProjection, FsProjection, WriteReach};
@@ -207,17 +208,6 @@ impl Ruleset {
         }
     }
 
-    /// The payload's side: the ruleset the launch left at `slot`.
-    fn take(slot: Slot) -> Result<Self, Error> {
-        let at = slot.fd();
-        // SAFETY: `F_GETFD` only asks whether the slot is open.
-        if unsafe { libc::fcntl(at, libc::F_GETFD) } < 0 {
-            return Err(Error::Missing(at));
-        }
-        // SAFETY: open, and lent by the launch for this call alone.
-        Ok(Self(unsafe { OwnedFd::from_raw_fd(at) }))
-    }
-
     /// Confine this process and everything it execs; the descriptor closes.
     fn restrict_self(self) -> Result<(), Error> {
         let off = 0 as libc::c_ulong;
@@ -257,11 +247,12 @@ impl Landlocked {
     /// to, and the kernel accepted the exact handled set when the parent
     /// created it.
     pub(crate) fn enter(&self) -> Result<(), String> {
-        let ruleset = Ruleset::take(Slot::Ruleset)?;
+        let at = Slot::Ruleset;
+        let ruleset = Ruleset(at.take().ok_or_else(|| Error::Missing(at.fd()))?);
         if self.refer_root {
-            open_nosym("/".as_ref(), OFlags::empty())
-                .and_then(|root| ruleset.admit(root.as_fd(), Access::REFER))
-                .map_err(|source| Error::admit("/", source))?;
+            let root = open_real("/".as_ref(), OFlags::empty())?
+                .ok_or("landlock: the envelope has no root to admit")?;
+            (ruleset.admit(root.as_fd(), Access::REFER)).map_err(|e| Error::admit("/", e))?;
         }
         Ok(ruleset.restrict_self()?)
     }
@@ -355,7 +346,7 @@ fn admit_exec(
     let base = platform_base();
     let files = table.allowed_files().map(RealPath::as_path);
     for name in base.iter().map(PathBuf::as_path).chain(files) {
-        let Some(fd) = open_admit(name, OFlags::empty())? else {
+        let Some(fd) = open_real(name, OFlags::empty())? else {
             continue;
         };
         // A file admit names that file alone, never what a directory since
@@ -421,17 +412,12 @@ fn vetoes_walk<'a>(
     })
 }
 
-/// One object [`expand`] admits; `whole` when it stands for its hierarchy,
-/// which only a recording sink reads: Landlock's rule on a file is the file.
+/// One object [`expand`] admits: a directory with its hierarchy, a file as
+/// itself.
 #[derive(Clone, Copy)]
 struct Admit<'a> {
     path: &'a RealPath,
     fd: BorrowedFd<'a>,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "read by the recording sink alone")
-    )]
-    whole: bool,
 }
 
 /// What `table` admits of this host's tree, into `sink`: a live directory
@@ -448,9 +434,10 @@ fn expand(
         table,
         walks: vetoes_walk,
         sink,
+        spine: Vec::new(),
     };
     for root in table.allowed_dirs() {
-        if let Some(fd) = open_admit(root.as_path(), OFlags::DIRECTORY)? {
+        if let Some(fd) = open_real(root.as_path(), OFlags::DIRECTORY)? {
             walk.dir(root, fd.as_fd())?;
         }
     }
@@ -475,18 +462,30 @@ struct Walk<'w> {
     table: &'w ExecRules,
     walks: &'w dyn Fn(&RealPath) -> bool,
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+    /// The `(dev, ino)` of each directory being listed, so a bind mount
+    /// looping back onto one ends the descent there.
+    spine: Vec<(u64, u64)>,
 }
 
 impl Walk<'_> {
     fn dir(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
-        use rustix::fs::{RawDir, openat};
         if !listed(self.table, d, (self.walks)(d)) {
-            return self.admit(Admit {
-                path: d,
-                fd,
-                whole: true,
-            });
+            return self.admit(Admit { path: d, fd });
         }
+        let stat = rustix::fs::fstat(fd).map_err(|errno| Error::admit(d, errno))?;
+        let at = (stat.st_dev, stat.st_ino);
+        if self.spine.contains(&at) {
+            return Ok(());
+        }
+        self.spine.push(at);
+        self.list(d, fd)?;
+        self.spine.pop();
+        Ok(())
+    }
+
+    /// `d`'s entries, each judged by the table.
+    fn list(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
+        use rustix::fs::{RawDir, openat};
         let read = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
         let Some(listing) = reached(openat(fd, c".", read, Mode::empty()), d)? else {
             return Ok(());
@@ -520,7 +519,6 @@ impl Walk<'_> {
                     self.admit(Admit {
                         path: &e,
                         fd: object.as_fd(),
-                        whole: false,
                     })?;
                 }
                 _ => {}
@@ -543,31 +541,6 @@ fn reached<T>(opened: rustix::io::Result<T>, at: &RealPath) -> Result<Option<T>,
         Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::ACCESS) => Ok(None),
         Err(errno) => Err(Error::admit(at, errno)),
     }
-}
-
-/// `name`, opened here in the host never through a symlink; `None` where it
-/// names nothing, or not the shape `flags` asks for.
-pub(super) fn open_admit(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, Error> {
-    match open_nosym(name, flags) {
-        Ok(fd) => Ok(Some(fd)),
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => Ok(None),
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(Error::Race {
-            name: name.display().to_string(),
-        }),
-        Err(source) => Err(Error::admit(name.display(), source)),
-    }
-}
-
-/// Never through a symlink: a rule attaches to the inode the open reaches.
-pub(super) fn open_nosym(path: &Path, flags: OFlags) -> io::Result<OwnedFd> {
-    use rustix::fs::{CWD, ResolveFlags, openat2};
-    Ok(openat2(
-        CWD,
-        path,
-        OFlags::PATH | OFlags::CLOEXEC | flags,
-        Mode::empty(),
-        ResolveFlags::NO_SYMLINKS,
-    )?)
 }
 
 fn shape(fd: &OwnedFd) -> rustix::io::Result<FileType> {
@@ -612,7 +585,7 @@ fn platform_base() -> Vec<PathBuf> {
 pub(super) enum Error {
     Create(io::Error),
     Admit { name: String, source: io::Error },
-    Race { name: String },
+    Open(OpenError),
     Restrict(io::Error),
     Missing(c_int),
 }
@@ -622,11 +595,7 @@ impl fmt::Display for Error {
         match self {
             Self::Create(e) => write!(f, "landlock: this kernel refused the ruleset: {e}"),
             Self::Admit { name, source } => write!(f, "landlock: cannot admit {name}: {source}"),
-            Self::Race { name } => write!(
-                f,
-                "sandbox: {name} was a real path when the grant was rendered and now \
-                 resolves through a symlink: a race, not a policy error"
-            ),
+            Self::Open(e) => e.fmt(f),
             Self::Restrict(e) => write!(
                 f,
                 "landlock: cannot enter the ruleset: {e}; refusing to run unconfined"
@@ -646,6 +615,12 @@ impl Error {
             name: name.to_string(),
             source: source.into(),
         }
+    }
+}
+
+impl From<OpenError> for Error {
+    fn from(e: OpenError) -> Self {
+        Self::Open(e)
     }
 }
 
@@ -820,7 +795,7 @@ mod tests {
         ) else {
             panic!("a symlink would admit its target");
         };
-        assert!(why.message.contains("a race"), "{}", why.message);
+        assert!(why.message.contains("symbolic link"), "{}", why.message);
     }
 
     #[test]
@@ -871,20 +846,22 @@ mod tests {
         (tmp, d)
     }
 
-    /// What [`expand`] hands its sink, each handle checked against its name.
+    /// What [`expand`] hands its sink, each handle checked against its name,
+    /// and whether it stands for a hierarchy.
     fn expanded(rules: &[ExecRule], walks: bool) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
         use std::os::unix::fs::MetadataExt;
         let mut seen = BTreeSet::new();
         expand(&ExecRules::from_kernel(rules), &|_| walks, &mut |admit| {
             let path = admit.path.as_path();
-            let opened = rustix::fs::fstat(admit.fd)?.st_ino;
+            let opened = rustix::fs::fstat(admit.fd)?;
             assert_eq!(
-                opened,
+                opened.st_ino,
                 std::fs::symlink_metadata(path)?.ino(),
                 "{}",
                 admit.path
             );
-            seen.insert((path.to_path_buf(), admit.whole));
+            let whole = FileType::from_raw_mode(opened.st_mode) == FileType::Directory;
+            seen.insert((path.to_path_buf(), whole));
             Ok(())
         })?;
         Ok(seen)
@@ -996,14 +973,17 @@ mod tests {
     }
 
     /// A grant renders real paths, so a root that is a symlink now was
-    /// planted since: a race, which refuses rather than admit its target.
+    /// planted since, which refuses rather than admit its target.
     #[test]
     fn a_root_now_a_symlink_refuses_the_expansion() {
         let (_tmp, d) = tree();
         let link = d.join("link");
         std::os::unix::fs::symlink(d.join("sub"), &link).expect("symlink");
         let refused = expanded(&[allow(&link, true)], true);
-        assert!(matches!(refused, Err(Error::Race { .. })), "{refused:?}");
+        assert!(
+            matches!(refused, Err(Error::Open(OpenError::Linked(_)))),
+            "{refused:?}"
+        );
     }
 
     /// A veto walks the hierarchies the envelope keeps unwritable, frozen or

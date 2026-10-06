@@ -95,8 +95,9 @@ Four findings shape it.
 Two floors, both probed by the syscall rather than read off `uname`: ABI 1 for
 exec confinement — where a confined payload also loses cross-directory rename
 and link, `Refer` being ungrantable there — and ABI 6 for the scope. A kernel
-with no Landlock at all (`ENOSYS`, `EOPNOTSUPP`) enters nothing and
-`HostEnvelope` records each invariant as unheld; any other errno from the probe
+with no Landlock at all (`ENOSYS`, `EOPNOTSUPP`) enters nothing when exec is
+unrestricted, `HostEnvelope` recording each invariant as unheld, and refuses a
+grant that limits which programs may run (`plan`); any other errno from the probe
 is a host that cannot be read rather than one without the feature, and refuses
 the launch with `confinement_unavailable`.
 

@@ -33,6 +33,22 @@ impl Rendered {
     pub(crate) fn holds(&self, spelled: &str) -> bool {
         super::lex::path_within_str(spelled, &self.0, super::lex::Identity::Stored)
     }
+
+    /// This name as a mount of `from` shows it at `onto`; `None` where `from`
+    /// does not hold it.
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "lexical: rebases one rendered name onto another"
+    )]
+    pub(crate) fn rebased(&self, from: &Self, onto: &Self) -> Option<Self> {
+        let beneath = std::path::Path::new(&self.0).strip_prefix(&from.0).ok()?;
+        if beneath.as_os_str().is_empty() {
+            return Some(onto.clone());
+        }
+        let name = std::path::Path::new(&onto.0).join(beneath);
+        name.to_str().map(|name| Self(name.to_owned()))
+    }
 }
 
 impl AsRef<str> for Rendered {
@@ -78,7 +94,10 @@ pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, 
 ///
 /// As [`render_paths`].
 #[cfg(target_os = "linux")]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "lifts each grant string to a path to canonicalise it"
+)]
 pub(crate) fn render_objects<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, BTreeSet<Rendered>>::new();

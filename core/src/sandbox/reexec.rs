@@ -12,7 +12,8 @@
 //! catching the inode flip an atomic-rename swap leaves behind; Windows,
 //! confining at the parent's spawn, has no self re-exec to guard.
 //!
-//! `argv[0]` is always the on-disk path, whichever mechanism carried it.
+//! [`Pinned::command`] hands every exec it builds the on-disk path as
+//! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -45,7 +46,8 @@ impl Pinned {
         })
     }
 
-    /// The on-disk path the pin was taken from: `argv[0]` of every exec.
+    /// The on-disk path the pin was taken from: `argv[0]` of every exec
+    /// [`Self::command`] builds.
     #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn arg0(&self) -> &Path {
         &self.arg0
@@ -92,13 +94,6 @@ impl Pinned {
         use std::os::fd::AsFd;
         let Pin::Fd { fd, .. } = &self.pin;
         fd.as_fd()
-    }
-
-    /// The descriptor `exec_path` names.
-    #[cfg(target_os = "linux")]
-    pub(super) fn raw_fd(&self) -> std::ffi::c_int {
-        use std::os::fd::AsRawFd;
-        self.fd().as_raw_fd()
     }
 
     /// This pin again, at the lowest free descriptor from `from`: how a test

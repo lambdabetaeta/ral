@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 13b47f27
+generated_at_commit: 9bdbb945
 generated_at_date: 2026-10-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -337,35 +337,45 @@ device for `net` to govern; the in-process guards apply unchanged
   bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
-  Linux's confinement names no path: inside the envelope every
-  name is one bwrap minted by following host symlinks, so none can be trusted
-  to reach the file a grant froze. `landlock::build` instead plans the
+  Linux's confinement names no path: the parent opens every admit by handle,
+  never through a symlink, so each rule reaches the file a grant froze.
+  `landlock::build` plans the
   handled set from the parent's one probe (`plan`), creates the `Ruleset` by raw
-  syscall, and admits ral's pin fd, the loader base and each allowing rule, a
-  dir as a hierarchy and a file as itself, each opened in the host with
-  `RESOLVE_NO_SYMLINKS`; an absent admit is dropped, a file admit whose path has
-  since become a directory is dropped, not admitted as a hierarchy, a symlink
-  since planted refuses the launch as a race, and a restricting exec projection
+  syscall, and admits ral's pin fd, the loader base, each allowed file as
+  itself and each live allowed directory as its hierarchy less what the table
+  blocks beneath it (`expand`, which stops where a bind mount loops back onto
+  a directory it is listing), each opened in the host by `open_real`
+  (`RESOLVE_NO_SYMLINKS`); an absent admit is dropped, a file admit whose path
+  has since become a directory is dropped, not admitted as a hierarchy, a
+  symlink since planted refuses the launch, and a restricting exec projection
   is refused where Landlock is unavailable. The payload probes nothing: it takes
   the ruleset at its slot, adds only `Refer` on its own root, which exists
   nowhere else, and fails closed if a promised ruleset never arrived.
-  `bwrap_command` takes the envelope and ral's pins, the image
-  (`Program::File`'s real path, the file the trampoline execs in turn), the
-  handoff so far and the rendered projection, and refuses outright under a bwrap
-  without `--ro-bind-fd` (`HostEnvelope::binds_by_fd`). `Binds::open` is the one
+  `bwrap_command` takes the `Envelope` (bwrap's pin, the trampoline's, and
+  the `HostEnvelope` probed once by running that trampoline as a pipeline
+  anchor), the image (`Program::File`'s real path, the file the trampoline
+  execs in turn), the handoff so far and the rendered projection, and refuses
+  outright under a bwrap that builds no envelope, in bwrap's own words, or one
+  without `--ro-bind-fd` (`HostEnvelope::builds`). `Binds::open` is the one
   place a launch opens what it mounts: the read-only defaults, the read and
   write prefixes, the image, each allowed file and live allowed directory of
   `ExecRules::from_kernel`, and the cgroup tree in the `Over` layer, each object
   (`render_objects`: a path's canonical spelling, its other spellings mounted
-  too unless within another bind) opened once with `RESOLVE_NO_SYMLINKS` and
-  lent per bind at `Slot::Mount(i)`. A read-only bind within another bind is
-  dropped, a writable one only within a writable one; an absent object drops
-  its binds, a name now reaching outside what was rendered refuses the launch
-  as a race. The two pins join the `Over` layer by copies of their own
+  too unless within another bind) opened once by `open_real` and lent per
+  bind at `Slot::Mount(i)`. A read-only bind within another bind is dropped, a
+  writable one only within a writable one; an absent object drops its binds,
+  and so does a system default this user may not reach, while a name now
+  reaching outside what was rendered refuses the launch. `Frozen` binds lay
+  each covered admit read-only wherever a writable bind shows it, and each
+  deny mask goes on wherever a `Shown` bind shows the denied path
+  (`Binds::names`): a mount laid inside one bind of an object does not show
+  at another, so a prefix written through a symlink, two binds of one
+  handle, is frozen and masked at both. A deny hiding `/proc` is refused,
+  the envelope starting its trampoline through it. The two pins join the `Over` layer by copies of their own
   descriptors, read-only at the names their inodes hold now (`pinned`, over
   `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
-  `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown` before `/proc` and
-  `/dev`, `Over` after. `--chdir` refuses
+  `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`, then `Frozen`,
+  before `/proc` and `/dev`, `Over` after. `--chdir` refuses
   non-UTF-8, and so does every rendered name, rather than go lossy into
   bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
@@ -447,7 +457,8 @@ backend pays to express an object policy in Seatbelt's name language — in
 [[internals/seatbelt-profile|seatbelt-profile]].
 
 Path-scoped *exec* confinement on Linux is a Landlock layer the payload enters
-inside the envelope; a deny inside an allowed directory stays with the
+inside the envelope; a deny inside an allowed directory is subtracted over
+the tree at launch, and only a veto under a trusted admit stays with the
 in-process guard —
 [[decisions/260906_landlock-exec-layer|landlock-exec-layer]].
 

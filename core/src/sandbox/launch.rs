@@ -18,7 +18,7 @@
 //! applied at the parent's spawn.
 
 #[cfg(target_os = "linux")]
-use super::reexec::Pinned;
+use super::linux::Envelope;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -176,12 +176,13 @@ fn linux_sandboxed_command(
     ownership: Ownership,
     shell: &Shell,
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
-    let envelope = super::linux::envelope()
+    let bwrap = super::linux::envelope()
         .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
-    let host = super::linux::HostEnvelope::probe(envelope);
+    let own = super::reexec::own().map_err(refused)?;
     let cwd = shell.cwd();
     let cwd = faithful(&cwd, "the working directory")?;
-    enveloped(envelope, host, projection, admitted, Some(cwd), ownership)
+    let env = Envelope::probe(bwrap, own);
+    enveloped(&env, projection, admitted, Some(cwd), ownership)
 }
 
 /// `path` as bwrap's argv can carry it: every other name there is a
@@ -196,22 +197,20 @@ fn faithful<'a>(path: &'a std::path::Path, what: &str) -> Settled<&'a str> {
     })
 }
 
-/// The trampoline under `envelope`, handed its warrant and the Landlock
-/// ruleset built here, the program's image shown read-only beside it.  It
-/// is *us*: our boot pin, which bwrap execs by descriptor.
+/// `env`'s trampoline, handed its warrant and the Landlock ruleset built
+/// here, the program's image shown read-only beside it.  The trampoline is
+/// *us*: our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
-    envelope: &Pinned,
-    host: super::linux::HostEnvelope,
+    env: &Envelope<'_>,
     projection: &crate::types::SandboxProjection,
     admitted: &Admitted,
     chdir: Option<&str>,
     ownership: Ownership,
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
-    let own = super::reexec::own().map_err(refused)?;
     let rendered = projection.rendered().map_err(refused)?;
     let (ruleset, confinement) =
-        super::linux::landlock::build(&projection.exec, &rendered.fs, host.landlock)
+        super::linux::landlock::build(&rendered.exec, &rendered.fs, env.host.landlock)
             .map_err(Break::Error)?
             .unzip();
     let warrant = issue(confinement, admitted)?;
@@ -224,10 +223,7 @@ pub(super) fn enveloped(
         crate::capability::Program::File { real, .. } => Some(real),
         crate::capability::Program::Tool(_) => None,
     };
-    super::linux::bwrap_command(
-        envelope, own, image, handoff, &rendered, chdir, ownership, host,
-    )
-    .map_err(refused)
+    super::linux::bwrap_command(env, image, handoff, &rendered, chdir, ownership).map_err(refused)
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,

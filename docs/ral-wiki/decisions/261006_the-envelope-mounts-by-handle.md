@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: 13b47f27
+generated_at_commit: 9bdbb945
 verified_at_commit: 78d13526
-anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_admit, Pinned]
+anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_real, Pinned]
 ---
 
 # The envelope mounts by handle
@@ -56,23 +56,37 @@ table, and its signature holds no descriptor.
   authored around; under `fs: Unrestricted` with a veto, the whole admitted
   set, files included, over `--dev-bind / /`
   ([[decisions/261006_a-veto-freezes-what-a-write-covers|a-veto-freezes-what-a-write-covers]]).
-  The freeze and the Landlock walk read one classification,
-  `landlock::write_reach`.
+  Each is frozen wherever a writable bind shows it: a prefix written
+  through a symlink (`write: ['/home/u']` with `/home -> /var/home`) is two
+  binds of one handle, and a mount laid inside one does not show at the
+  other, so a freeze laid only at the canonical name would leave the admit
+  writable through the spelling. The freeze and the Landlock walk read one
+  classification, `landlock::write_reach`.
 - **Absent and raced.** `ENOENT` and `ENOTDIR` drop a bind: the open decides,
-  with no window between a check and the mount. A name that now reaches an
-  object outside what was rendered, or an open that meets a symlink, refuses
-  the launch: "was a real path when the grant was rendered and now resolves
-  through a symlink: a race, not a policy error".
-- **Fail closed on an old bwrap.** `HostEnvelope::binds_by_fd` probes the
-  mechanism itself, lending `/` at `Slot::Mount(0)` through the real
-  `Handoff`; a bwrap without `--ro-bind-fd` (before 0.8.0) refuses every
-  confined launch, naming its path. There is no by-name fallback: it would
+  with no window between a check and the mount. `EACCES` drops a system
+  default no grant names (`/home/linuxbrew` owned by another user), and
+  refuses a prefix the grant names. A name that now reaches another object
+  refuses the launch ("`X` now reaches `Y`, not what the grant rendered"), and
+  so does an open that meets a symlink (`open_real`: "`X` now goes through a
+  symbolic link that ral will not follow; reload the grant or restart ral if
+  you made that change"), exec paths having been frozen when the grant was
+  decoded, possibly long before.
+- **Fail closed on an old bwrap.** `HostEnvelope::builds` probes the
+  mechanism itself: a bare envelope first, then one lending `/` at
+  `Slot::Mount(0)` through the real `Handoff`, each running ral's own pin by
+  descriptor as a pipeline anchor, never a host binary that may be absent. A
+  bwrap that builds no envelope refuses every confined launch in its own
+  words; one without `--ro-bind-fd` (before 0.8.0) refuses it naming its path
+  and the version. There is no by-name fallback: it would
   keep the race alive on exactly the hosts least likely to be updated, and be
   a second renderer to keep in agreement.
 
 Still by name, with no source to open: the tmpfs mounts, `--proc`, `--dev`
 and its by-hand fallback, `--dev-bind / /` under `fs: Unrestricted`, and the
-deny masks, whose only source is `/dev/null`.
+deny masks, whose only source is `/dev/null`. A mask goes on at every name a
+shown bind gives the denied path, for the same reason the freeze does. A deny
+that hides `/proc` is refused when the argv is rendered: masks go on after
+`--proc`, and bwrap execs the trampoline through it.
 
 ### The trampoline by descriptor, and the locked files
 
@@ -116,6 +130,15 @@ by descriptor all the same.
   elsewhere on the host, or another mount of its filesystem, is a writable
   name the bind does not cover. It is stated rather than warned about per
   launch.
+- **The pins are the one open that follows symlinks.** Every object a
+  launch mounts or admits is opened `O_PATH` without following a symlink; the
+  pins are `O_RDONLY` and follow them, being taken at boot from `current_exe()`
+  and the `PATH` ral started with, before any shell or grant exists, so what
+  they follow is the host's install and never a child's write.
+- **The bind-mount residual.** The Landlock walk judges what it reaches by
+  inode, as with hard links: a host bind mount of a denied directory beneath
+  an allowed one is admitted there. One looping back onto a directory being
+  listed ends the walk at the repeat (`(dev, ino)` along the spine).
 - **An unlinked trampoline needs a filesystem that serves it.** On virtiofs
   the exec of an unlinked pin fails, so after a swap the launch dies in
   bwrap's `execve` rather than asking for a restart. bwrap cannot mount an

@@ -169,15 +169,14 @@ pub fn restricted_envelope_launches() -> bool {
         };
         reexec::pin_self();
         linux::pin_envelope();
-        let Ok(envelope) = linux::envelope() else {
+        let (Ok(bwrap), Ok(own)) = (linux::envelope(), reexec::own()) else {
             return false;
         };
         let Ok(program) = crate::capability::Program::file("/bin/true".into()) else {
             return false;
         };
         launch::enveloped(
-            envelope,
-            linux::HostEnvelope::probe(envelope),
+            &linux::Envelope::probe(bwrap, own),
             &projection,
             &launch::admitted(program, &[]),
             None,
